@@ -10,23 +10,26 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::header::CACHE_CONTROL;
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use axum::Json;
+use axum::response::{IntoResponse, Response};
 use futures_util::{stream, StreamExt};
-use plurx_core::cluster::membership::{ActivityPeer, ActivityPeerAuth, MembershipError};
+use plurx_core::cluster::membership::ActivityPeer;
 use serde::{Deserialize, Serialize};
 
-use super::peer_transport::{
-    deadline_after, PeerAuthMode, PeerTransport, PeerTransportError, NODE_HEADER, SIGNATURE_HEADER,
-    TARGET_HEADER, TIMESTAMP_HEADER,
-};
+use super::peer_transport::{deadline_after, PeerAuthMode, PeerTransport, PeerTransportError};
+#[cfg(test)]
+use super::peer_transport::{NODE_HEADER, SIGNATURE_HEADER, TARGET_HEADER, TIMESTAMP_HEADER};
+use crate::cluster::{ClusterError, Directory, Purpose};
 use crate::state::AppState;
 
 pub const PATH: &str = "/_internal/v1/activity-snapshot";
+pub const SOURCE_STOP_PATH: &str = "/_internal/v1/activity-source-processed-stop";
 #[allow(dead_code)] // aggregation child #326 calls the pre-wired client
 pub const TIMEOUT: Duration = Duration::from_secs(2);
+const SOURCE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const ACTIVITY_SNAPSHOT_REUSE: Duration = Duration::from_secs(1);
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 // Four rows, including worst-case six-byte JSON escapes for every bounded
@@ -40,6 +43,8 @@ const WORKER_RESPONSE_RESERVE_BYTES: usize = 64 * 1024;
 const ANALYSIS_RESPONSE_RESERVE_BYTES: usize = MAX_RESPONSE_BYTES / 4;
 const MAX_DELIVERIES: usize = 512;
 const MAX_ANALYSIS_PROGRESS: usize = 64;
+const MAX_SOURCE_PROCESSED: usize = 64;
+const SOURCE_RESPONSE_RESERVE_BYTES: usize = 32 * 1024;
 const MAX_NODE_ID_BYTES: usize = 256;
 const MAX_USER_BYTES: usize = 256;
 const MAX_TITLE_BYTES: usize = 2 * 1024;
@@ -52,6 +57,10 @@ pub struct ActivitySnapshot {
     pub workers: Option<Box<ActivityWorkers>>,
     pub deliveries: Vec<ActivityDelivery>,
     #[serde(default)]
+    pub source_processed: Vec<SourceProcessedRow>,
+    #[serde(default)]
+    pub receiver_processed: Vec<ReceiverProcessedRow>,
+    #[serde(default)]
     pub analysis: Vec<crate::state::AnalysisProgress>,
     #[serde(default)]
     pub(crate) live_tv: Vec<crate::live_tv::LiveTvActivity>,
@@ -59,6 +68,110 @@ pub struct ActivitySnapshot {
     /// empty snapshot means the peer supports them and currently owns no sink.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) dvr: Option<crate::live_tv::dvr::DvrObservationSnapshot>,
+}
+
+/// Source-owned hardware work, including the trial before a VOD session exists.
+/// These ids are one-way diagnostics, never a playback capability.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceProcessedRow {
+    pub stop_id: String,
+    pub session_id: Option<String>,
+    pub node_id: String,
+    pub title: String,
+    pub viewer: String,
+    pub grant: String,
+    pub file_id: i64,
+    pub item_id: i64,
+    pub started_unix: i64,
+    pub reason: String,
+}
+
+/// B's retained processed successor. Source server is the work location;
+/// receiver_node_id is where the exact B retirement owner lives.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReceiverProcessedRow {
+    pub stop_id: String,
+    pub receiver_node_id: String,
+    pub source_server_id: String,
+    pub source_name: String,
+    pub title: String,
+    pub viewer: String,
+    pub reason: String,
+}
+
+fn valid_receiver_stop_id(id: &str) -> bool {
+    id.strip_prefix("receiver-s-").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+pub(super) async fn local_receiver_processed(state: &AppState) -> Vec<ReceiverProcessedRow> {
+    let activities = state.sharing.receiver_starts.processed_activities();
+    if activities.is_empty() {
+        return Vec::new();
+    }
+    let imports = state.store.sharing_imports().await.unwrap_or_default();
+    activities
+        .into_iter()
+        .filter(|row| valid_receiver_stop_id(&row.stop_id))
+        .map(|row| {
+            let source_name = imports
+                .iter()
+                .find(|import| {
+                    import.id == row.import_id
+                        && import.source_server_id == row.source_server_id
+                        && import.catalogue_epoch == row.catalogue_epoch
+                        && import.state == "active"
+                })
+                .map(|import| bounded_text(import.source_name.clone(), MAX_USER_BYTES))
+                .unwrap_or_else(|| row.source_server_id.to_string());
+            ReceiverProcessedRow {
+                stop_id: row.stop_id,
+                receiver_node_id: state.node_id.clone(),
+                source_server_id: row.source_server_id.to_string(),
+                source_name,
+                title: bounded_text(format!("Shared item {}", row.item_id), MAX_TITLE_BYTES),
+                viewer: format!("User #{}", row.viewer_id),
+                reason: "Processed Dolby Vision upgrade runs on Source".to_owned(),
+            }
+        })
+        .collect()
+}
+
+fn valid_source_stop_id(id: &str) -> bool {
+    id.strip_prefix("source-s-").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+pub(super) async fn local_source_processed(state: &AppState) -> Vec<SourceProcessedRow> {
+    let mut activities = state.transcode.source_processed_activities();
+    activities.sort_by_key(|row| std::cmp::Reverse(row.started_unix));
+    activities.truncate(MAX_SOURCE_PROCESSED);
+    if activities.is_empty() {
+        return Vec::new();
+    }
+    let ids = activities.iter().map(|row| row.item_id).collect::<Vec<_>>();
+    let titles = state.store.item_titles(&ids).await.unwrap_or_default();
+    activities
+        .into_iter()
+        .filter(|row| valid_source_stop_id(&row.stop_id))
+        .map(|row| SourceProcessedRow {
+            stop_id: row.stop_id,
+            session_id: row.session_id,
+            node_id: state.node_id.clone(),
+            title: bounded_text(
+                titles.get(&row.item_id).cloned().unwrap_or(row.title),
+                MAX_TITLE_BYTES,
+            ),
+            viewer: bounded_text(row.viewer, MAX_USER_BYTES),
+            grant: bounded_text(row.grant, 64),
+            file_id: row.file_id,
+            item_id: row.item_id,
+            started_unix: row.started_unix,
+            reason: bounded_text(row.reason, 256),
+        })
+        .collect()
 }
 
 /// Bounded physical observations, not a promise that a particular job can run.
@@ -122,7 +235,8 @@ pub(super) async fn local_worker_capacity(state: &AppState) -> ActivityWorkers {
 
 async fn local_workers_with_details(state: &AppState, detailed: bool) -> ActivityWorkers {
     let runtime = state.transcode.media_node_runtime().await;
-    let accepting_work = state.serving.is_ready() && !state.membership.local_maintenance_active();
+    let accepting_work = state.cluster.authority().state().ready
+        && state.cluster.role().admission != crate::cluster::Admission::Maintenance;
     let children = plurx_core::process::priority::running();
     let heavy_in_use = usize::from(state.transcode.background_worker_in_use());
     ActivityWorkers {
@@ -174,6 +288,8 @@ pub struct ActivityDelivery {
     pub file_id: i64,
     pub item_id: i64,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub started_unix: i64,
     pub idle_seconds: u64,
     pub delivered_bytes: Option<i64>,
@@ -183,7 +299,7 @@ pub struct ActivityDelivery {
 #[allow(dead_code)] // consumed by #326 once this dependency merges
 #[derive(Clone, Debug, PartialEq)]
 pub enum PeerActivityOutcome {
-    Answered(ActivitySnapshot),
+    Answered(Box<ActivitySnapshot>),
     Unhealthy,
     Unsupported,
     Unreachable,
@@ -313,36 +429,57 @@ pub fn prometheus_cluster_activity() -> String {
 #[allow(dead_code)] // wired now so #326 does not need state/main territory
 #[derive(Clone)]
 pub struct PeerActivityClient {
-    membership: plurx_core::cluster::membership::MembershipManager,
+    directory: Directory,
     transport: PeerTransport,
     reads: Arc<tokio::sync::Mutex<PeerActivityReadGate>>,
     owner_reads:
         Arc<tokio::sync::Mutex<HashMap<String, (tokio::time::Instant, PeerActivityOutcome)>>>,
 }
 
+#[derive(Debug)]
+pub(crate) enum PeerActivityStopError {
+    Directory(ClusterError),
+    Transport(PeerTransportError),
+}
+
+impl std::fmt::Display for PeerActivityStopError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Directory(error) => write!(formatter, "{error}"),
+            Self::Transport(error) => write!(formatter, "peer transport: {error:?}"),
+        }
+    }
+}
+
+impl std::error::Error for PeerActivityStopError {}
+
 #[allow(dead_code)]
 impl PeerActivityClient {
     #[must_use]
-    pub fn new(membership: plurx_core::cluster::membership::MembershipManager) -> Self {
+    pub(crate) fn new(
+        membership: plurx_core::cluster::membership::MembershipManager,
+        directory: Directory,
+    ) -> Self {
         Self {
-            transport: PeerTransport::new(membership.clone()),
-            membership,
+            transport: PeerTransport::new(membership),
+            directory,
             reads: Arc::new(tokio::sync::Mutex::new(PeerActivityReadGate::default())),
             owner_reads: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
-    pub async fn snapshots(&self) -> Result<SharedPeerActivity, MembershipError> {
+    pub(crate) async fn snapshots(&self) -> Result<SharedPeerActivity, ClusterError> {
         let directory = self.clone();
         let fetcher = self.clone();
         shared_peer_activity(
             &self.reads,
             move || async move {
                 directory
-                    .membership
-                    .activity_peers()
+                    .directory
+                    .peers(Purpose::Operations)
                     .await
                     .inspect_err(|_| record_aggregation(2))
+                    .map(|peers| peers.all().to_vec())
             },
             move |peers| async move {
                 record_aggregation(0);
@@ -365,10 +502,10 @@ impl PeerActivityClient {
     /// and the held async lock make concurrent overview requests one physical
     /// peer read without turning the lightweight DVR poll into an all-node
     /// Activity fan-out.
-    pub async fn owner_snapshot(
+    pub(crate) async fn owner_snapshot(
         &self,
         owner_node_id: &str,
-    ) -> Result<PeerActivityOutcome, MembershipError> {
+    ) -> Result<PeerActivityOutcome, ClusterError> {
         let mut gate = self.owner_reads.lock().await;
         if let Some((completed_at, outcome)) = gate.get(owner_node_id) {
             if completed_at.elapsed() <= ACTIVITY_SNAPSHOT_REUSE {
@@ -378,16 +515,15 @@ impl PeerActivityClient {
                 ));
             }
         }
-        let peer = self
-            .membership
-            .activity_peers()
-            .await?
-            .into_iter()
+        let peers = self.directory.peers(Purpose::Operations).await?;
+        let peer = peers
+            .all()
+            .iter()
             .find(|peer| peer.node_id == owner_node_id);
         let outcome = match peer {
             Some(peer) => {
                 let deadline = deadline_after(TIMEOUT);
-                fetch_peer_activity(self.clone(), peer, deadline).await
+                fetch_peer_activity(self.clone(), peer.clone(), deadline).await
             }
             None => PeerActivityOutcome::Unsupported,
         };
@@ -408,21 +544,84 @@ impl PeerActivityClient {
     ) -> PeerActivityOutcome {
         match self
             .transport
-            .request_stream(
+            .request(
                 expected_node_id,
                 base,
                 reqwest::Method::GET,
                 PATH,
                 Vec::new(),
                 deadline,
-                PeerAuthMode::LegacyActivity,
+                MAX_RESPONSE_BYTES,
+                PeerAuthMode::ExactRequestAndMemberResponse,
             )
             .await
         {
-            Ok(response) => read_snapshot_response(response, deadline, expected_node_id).await,
+            Ok(response) => {
+                classify_snapshot_response(response.status, &response.body, expected_node_id)
+            }
             Err(PeerTransportError::TimedOut) => PeerActivityOutcome::TimedOut,
             Err(PeerTransportError::InvalidResponse) => PeerActivityOutcome::InvalidResponse,
             Err(PeerTransportError::Unreachable) => PeerActivityOutcome::Unreachable,
+        }
+    }
+
+    /// Route one admin Stop only to the committed member named by a fresh
+    /// Activity row. Membership supplies the address; the signed body binds
+    /// both that node and the exact opaque Source operation id.
+    pub(crate) async fn stop_processed_on(
+        &self,
+        owner_node_id: &str,
+        stop_id: &str,
+    ) -> Result<StatusCode, PeerActivityStopError> {
+        if !valid_source_stop_id(stop_id) && !valid_receiver_stop_id(stop_id) {
+            return Err(PeerActivityStopError::Transport(
+                PeerTransportError::InvalidResponse,
+            ));
+        }
+        let (_, base) = self
+            .directory
+            .peers(Purpose::Operations)
+            .await
+            .map_err(PeerActivityStopError::Directory)?
+            .find(owner_node_id)
+            .ok_or(PeerActivityStopError::Transport(
+                PeerTransportError::Unreachable,
+            ))?;
+        let body = serde_json::to_vec(&SourceStopRequest {
+            node_id: owner_node_id.to_owned(),
+            stop_id: stop_id.to_owned(),
+        })
+        .map_err(|_| PeerActivityStopError::Transport(PeerTransportError::InvalidResponse))?;
+        let response = self
+            .transport
+            .request(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                SOURCE_STOP_PATH,
+                body,
+                deadline_after(if valid_receiver_stop_id(stop_id) {
+                    Duration::from_secs(40)
+                } else {
+                    SOURCE_STOP_TIMEOUT
+                }),
+                1_024,
+                PeerAuthMode::ExactRequestAndMemberResponse,
+            )
+            .await
+            .map_err(PeerActivityStopError::Transport)?;
+        match response.status {
+            reqwest::StatusCode::NO_CONTENT
+            | reqwest::StatusCode::NOT_FOUND
+            | reqwest::StatusCode::SERVICE_UNAVAILABLE
+                if response.body.is_empty() =>
+            {
+                Ok(StatusCode::from_u16(response.status.as_u16())
+                    .expect("known Source stop status"))
+            }
+            _ => Err(PeerActivityStopError::Transport(
+                PeerTransportError::InvalidResponse,
+            )),
         }
     }
 }
@@ -447,10 +646,10 @@ async fn shared_peer_activity<R, RFut, T, F, Fut>(
     gate: &tokio::sync::Mutex<PeerActivityReadGate>,
     resolve: R,
     fetch: F,
-) -> Result<SharedPeerActivity, MembershipError>
+) -> Result<SharedPeerActivity, ClusterError>
 where
     R: FnOnce() -> RFut,
-    RFut: Future<Output = Result<T, MembershipError>>,
+    RFut: Future<Output = Result<T, ClusterError>>,
     F: FnOnce(T) -> Fut,
     Fut: Future<Output = Vec<(String, PeerActivityOutcome)>>,
 {
@@ -491,6 +690,7 @@ where
     Ok(snapshot)
 }
 
+#[cfg(test)]
 async fn read_snapshot_response(
     response: reqwest::Response,
     deadline: tokio::time::Instant,
@@ -553,35 +753,106 @@ where
 pub async fn snapshot(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<(HeaderMap, Json<ActivitySnapshot>), StatusCode> {
-    let auth = peer_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+) -> Result<Response, StatusCode> {
+    let auth =
+        super::peer_transport::exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !state
-        .membership
-        .authorize_activity_request(&auth)
+        .cluster
+        .verify_member_read_request(&auth, "GET", PATH, &[])
         .await
         .unwrap_or(false)
     {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    Ok((
-        snapshot_response_headers(),
-        Json(local_snapshot(&state).await),
-    ))
+    let body = serde_json::to_vec(&local_snapshot(&state).await)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if body.len() > MAX_RESPONSE_BYTES {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    signed_activity_response(&state, &auth, PATH, StatusCode::OK, body)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceStopRequest {
+    node_id: String,
+    stop_id: String,
+}
+
+pub async fn stop_source_processed(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    if body.len() > 256 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let auth =
+        super::peer_transport::exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    if !state
+        .cluster
+        .verify_member_request(&auth, "POST", SOURCE_STOP_PATH, &body)
+        .await
+        .unwrap_or(false)
+    {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let request: SourceStopRequest =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if request.node_id != state.node_id
+        || (!valid_source_stop_id(&request.stop_id) && !valid_receiver_stop_id(&request.stop_id))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let stopped = if valid_receiver_stop_id(&request.stop_id) {
+        state
+            .sharing
+            .receiver_starts
+            .stop_processed_activity(std::sync::Arc::new(state.clone()), &request.stop_id)
+            .await
+    } else {
+        state
+            .transcode
+            .stop_source_processed_session(&request.stop_id)
+            .await
+            .map_err(|_| ())
+    };
+    let status = match stopped {
+        Ok(true) => StatusCode::NO_CONTENT,
+        Ok(false) => StatusCode::NOT_FOUND,
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    signed_activity_response(&state, &auth, SOURCE_STOP_PATH, status, Vec::new())
+}
+
+fn signed_activity_response(
+    state: &AppState,
+    auth: &plurx_core::cluster::membership::InternalPeerAuth,
+    path: &str,
+    status: StatusCode,
+    body: Vec<u8>,
+) -> Result<Response, StatusCode> {
+    let payload = super::peer_transport::signed_response_payload(status.as_u16(), &body);
+    let signature = state
+        .cluster
+        .sign_member_response(&auth.node_id, &auth.nonce, path, &payload)
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let mut response = (status, body).into_response();
+    response.headers_mut().extend(snapshot_response_headers());
+    response.headers_mut().insert(
+        super::peer_transport::RESPONSE_SIGNATURE_HEADER,
+        HeaderValue::from_str(&signature).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+    );
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    Ok(response)
 }
 
 fn snapshot_response_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
     headers
-}
-
-fn peer_auth_from_headers(headers: &HeaderMap) -> Option<ActivityPeerAuth> {
-    Some(ActivityPeerAuth {
-        node_id: headers.get(NODE_HEADER)?.to_str().ok()?.to_owned(),
-        target_node_id: headers.get(TARGET_HEADER)?.to_str().ok()?.to_owned(),
-        timestamp_ms: headers.get(TIMESTAMP_HEADER)?.to_str().ok()?.parse().ok()?,
-        signature: headers.get(SIGNATURE_HEADER)?.to_str().ok()?.to_owned(),
-    })
 }
 
 #[cfg(test)]
@@ -596,7 +867,7 @@ fn decode_snapshot(body: &[u8], expected_node_id: &str) -> PeerActivityOutcome {
     if !snapshot_is_bounded(&snapshot, expected_node_id) {
         return PeerActivityOutcome::InvalidResponse;
     }
-    PeerActivityOutcome::Answered(snapshot)
+    PeerActivityOutcome::Answered(Box::new(snapshot))
 }
 
 fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> bool {
@@ -608,6 +879,8 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
             .as_ref()
             .is_none_or(|workers| workers.bounded(expected_node_id))
         && snapshot.deliveries.len() <= MAX_DELIVERIES
+        && snapshot.source_processed.len() <= MAX_SOURCE_PROCESSED
+        && snapshot.receiver_processed.len() <= MAX_SOURCE_PROCESSED
         && snapshot.analysis.len() <= MAX_ANALYSIS_PROGRESS
         && snapshot.live_tv.len() <= 4
         && snapshot.dvr.as_ref().is_none_or(|dvr| {
@@ -645,10 +918,37 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
             delivery.method.len() <= 32
                 && delivery.user.len() <= MAX_USER_BYTES
                 && delivery.title.len() <= MAX_TITLE_BYTES
+                && delivery.session_id.as_ref().is_none_or(|id| {
+                    id.strip_prefix("s-").is_some_and(|digest| {
+                        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                })
                 && delivery
                     .vod_observation
                     .as_ref()
                     .is_none_or(|facts| facts.bounded())
+        })
+        && snapshot.source_processed.iter().all(|row| {
+            row.node_id == snapshot.node_id
+                && valid_source_stop_id(&row.stop_id)
+                && row.session_id.as_ref().is_none_or(|id| {
+                    id.strip_prefix("s-").is_some_and(|digest| {
+                        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                })
+                && row.title.len() <= MAX_TITLE_BYTES
+                && row.viewer.len() <= MAX_USER_BYTES
+                && row.grant.len() <= 64
+                && row.reason.len() <= 256
+        })
+        && snapshot.receiver_processed.iter().all(|row| {
+            row.receiver_node_id == snapshot.node_id
+                && valid_receiver_stop_id(&row.stop_id)
+                && row.source_server_id.len() == 36
+                && row.source_name.len() <= MAX_USER_BYTES
+                && row.title.len() <= MAX_TITLE_BYTES
+                && row.viewer.len() <= MAX_USER_BYTES
+                && row.reason.len() <= 256
         })
         && snapshot.analysis.iter().all(|progress| {
             !progress.job_id.is_empty()
@@ -731,6 +1031,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                     file_id: session.file_id,
                     item_id: session.item_id,
                     title: bounded_text(session.item_title, MAX_TITLE_BYTES),
+                    session_id: Some(crate::transcode::session_log_id(&session.id)),
                     started_unix: session.started_unix,
                     idle_seconds: session.idle_seconds,
                     delivered_bytes: Some(session.delivered_bytes),
@@ -747,6 +1048,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                     file_id: session.file_id,
                     item_id: session.item_id,
                     title: bounded_text(session.item_title, MAX_TITLE_BYTES),
+                    session_id: Some(crate::transcode::session_log_id(&session.id)),
                     started_unix: session.started_unix,
                     idle_seconds: session.idle_seconds,
                     delivered_bytes: Some(session.delivered_bytes),
@@ -765,6 +1067,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                         titles.get(&stream.item_id).cloned().unwrap_or_default(),
                         MAX_TITLE_BYTES,
                     ),
+                    session_id: None,
                     started_unix: stream.started_unix,
                     idle_seconds: (stream.delivered_idle_ms.max(0) / 1_000) as u64,
                     delivered_bytes: Some(stream.delivered_bytes),
@@ -783,6 +1086,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                         titles.get(&play.item_id).cloned().unwrap_or_default(),
                         MAX_TITLE_BYTES,
                     ),
+                    session_id: None,
                     started_unix: play.started_unix,
                     idle_seconds: play.idle_seconds,
                     delivered_bytes: None,
@@ -815,6 +1119,8 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
         }
     }
     let mut snapshot = bounded_snapshot(state.node_id.clone(), deliveries, analysis);
+    attach_source_processed(&mut snapshot, local_source_processed(state).await);
+    attach_receiver_processed(&mut snapshot, local_receiver_processed(state).await);
     snapshot.workers = Some(Box::new(local_workers(state).await));
     snapshot.live_tv = state.live_tv.activities().into_iter().take(4).collect();
     attach_dvr_snapshot(&mut snapshot, state.live_tv.capture_observation_snapshot());
@@ -907,6 +1213,8 @@ fn bounded_snapshot(
         workers: None,
         node_id,
         deliveries: Vec::new(),
+        source_processed: Vec::new(),
+        receiver_processed: Vec::new(),
         analysis: Vec::new(),
         live_tv: Vec::new(),
         dvr: None,
@@ -919,12 +1227,14 @@ fn bounded_snapshot(
             - LIVE_TV_RESPONSE_RESERVE_BYTES
             - DVR_RESPONSE_RESERVE_BYTES
             - WORKER_RESPONSE_RESERVE_BYTES
+            - SOURCE_RESPONSE_RESERVE_BYTES
     } else {
         MAX_RESPONSE_BYTES.saturating_sub(
             ANALYSIS_RESPONSE_RESERVE_BYTES
                 + LIVE_TV_RESPONSE_RESERVE_BYTES
                 + DVR_RESPONSE_RESERVE_BYTES
-                + WORKER_RESPONSE_RESERVE_BYTES,
+                + WORKER_RESPONSE_RESERVE_BYTES
+                + SOURCE_RESPONSE_RESERVE_BYTES,
         )
     };
     for delivery in deliveries.into_iter().take(MAX_DELIVERIES) {
@@ -950,6 +1260,7 @@ fn bounded_snapshot(
                 - LIVE_TV_RESPONSE_RESERVE_BYTES
                 - DVR_RESPONSE_RESERVE_BYTES
                 - WORKER_RESPONSE_RESERVE_BYTES
+                - SOURCE_RESPONSE_RESERVE_BYTES
         {
             continue;
         }
@@ -957,6 +1268,42 @@ fn bounded_snapshot(
         snapshot.analysis.push(progress);
     }
     snapshot
+}
+
+fn attach_source_processed(snapshot: &mut ActivitySnapshot, rows: Vec<SourceProcessedRow>) {
+    let mut bytes = serde_json::to_vec(snapshot).map_or(MAX_RESPONSE_BYTES, |wire| wire.len());
+    let limit = bytes
+        .saturating_add(SOURCE_RESPONSE_RESERVE_BYTES / 2)
+        .min(MAX_RESPONSE_BYTES);
+    for row in rows.into_iter().take(MAX_SOURCE_PROCESSED) {
+        let Ok(wire) = serde_json::to_vec(&row) else {
+            continue;
+        };
+        let added = wire.len() + usize::from(!snapshot.source_processed.is_empty());
+        if bytes.saturating_add(added) > limit {
+            break;
+        }
+        bytes += added;
+        snapshot.source_processed.push(row);
+    }
+}
+
+fn attach_receiver_processed(snapshot: &mut ActivitySnapshot, rows: Vec<ReceiverProcessedRow>) {
+    let mut bytes = serde_json::to_vec(snapshot).map_or(MAX_RESPONSE_BYTES, |wire| wire.len());
+    let limit = bytes
+        .saturating_add(SOURCE_RESPONSE_RESERVE_BYTES / 2)
+        .min(MAX_RESPONSE_BYTES);
+    for row in rows.into_iter().take(MAX_SOURCE_PROCESSED) {
+        let Ok(wire) = serde_json::to_vec(&row) else {
+            continue;
+        };
+        let added = wire.len() + usize::from(!snapshot.receiver_processed.is_empty());
+        if bytes.saturating_add(added) > limit {
+            break;
+        }
+        bytes += added;
+        snapshot.receiver_processed.push(row);
+    }
 }
 
 fn attach_dvr_snapshot(
@@ -1104,6 +1451,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn source_processed_snapshot_preserves_grant_and_rejects_wrong_node_or_id() {
+        let row = SourceProcessedRow {
+            stop_id: format!("source-s-{}", "a".repeat(64)),
+            session_id: Some(format!("s-{}", "b".repeat(64))),
+            node_id: "source-node".into(),
+            title: "The film".into(),
+            viewer: "share:grant-a:viewer-a".into(),
+            grant: "grant-a".into(),
+            file_id: 7,
+            item_id: 9,
+            started_unix: 100,
+            reason: "processed Dolby Vision upgrade: Profile81; Source DV_FEL_REENCODE".into(),
+        };
+        let mut snapshot = bounded_snapshot("source-node".into(), Vec::new(), Vec::new());
+        attach_source_processed(&mut snapshot, vec![row.clone()]);
+        let wire = serde_json::to_vec(&snapshot).expect("bounded Source snapshot");
+        assert!(wire.len() <= MAX_RESPONSE_BYTES);
+        let PeerActivityOutcome::Answered(decoded) = decode_snapshot(&wire, "source-node") else {
+            panic!("same-node Source activity must decode")
+        };
+        assert_eq!(decoded.source_processed[0].grant, "grant-a");
+        assert_eq!(decoded.source_processed[0].viewer, "share:grant-a:viewer-a");
+        snapshot.source_processed[0].node_id = "another-node".into();
+        assert!(!snapshot_is_bounded(&snapshot, "source-node"));
+        snapshot.source_processed[0] = row;
+        snapshot.source_processed[0].stop_id = "source-other".into();
+        assert!(!snapshot_is_bounded(&snapshot, "source-node"));
+    }
+
+    #[test]
+    fn receiver_processed_snapshot_binds_retirement_owner_and_opaque_id() {
+        let row = ReceiverProcessedRow {
+            stop_id: format!("receiver-s-{}", "a".repeat(64)),
+            receiver_node_id: "receiver-node".into(),
+            source_server_id: uuid::Uuid::new_v4().to_string(),
+            source_name: "Source".into(),
+            title: "Shared item 100".into(),
+            viewer: "User #7".into(),
+            reason: "Processed Dolby Vision upgrade runs on Source".into(),
+        };
+        let mut snapshot = bounded_snapshot("receiver-node".into(), Vec::new(), Vec::new());
+        attach_receiver_processed(&mut snapshot, vec![row.clone()]);
+        let wire = serde_json::to_vec(&snapshot).expect("bounded receiver snapshot");
+        assert!(matches!(
+            decode_snapshot(&wire, "receiver-node"),
+            PeerActivityOutcome::Answered(_)
+        ));
+        snapshot.receiver_processed[0].receiver_node_id = "other-node".into();
+        assert!(!snapshot_is_bounded(&snapshot, "receiver-node"));
+        snapshot.receiver_processed[0] = row;
+        snapshot.receiver_processed[0].stop_id = "receiver-secret".into();
+        assert!(!snapshot_is_bounded(&snapshot, "receiver-node"));
+    }
+
+    #[tokio::test]
+    async fn source_processed_stop_rejects_household_bearer() {
+        let (_, state) = crate::http::tests::test_app_with_state();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "Bearer household-token".parse().expect("header"),
+        );
+        let body = Bytes::from_static(b"{\"node_id\":\"source-node\",\"stop_id\":\"source-s-0\"}");
+        assert_eq!(
+            stop_source_processed(State(state), headers, body)
+                .await
+                .expect_err("household bearer cannot stop Source work"),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
     #[tokio::test]
     async fn sqlite_peer_directory_is_local_only() {
         let (_, state) = crate::http::tests::test_app_with_state();
@@ -1117,9 +1536,8 @@ mod tests {
 
     #[tokio::test]
     async fn reachable_peer_without_activity_origin_is_unsupported_not_unreachable() {
-        let client = PeerActivityClient::new(
-            plurx_core::cluster::membership::MembershipManager::unavailable(),
-        );
+        let membership = plurx_core::cluster::membership::MembershipManager::unavailable();
+        let client = PeerActivityClient::new(membership.clone(), Directory::new(membership));
         let outcome = fetch_peer_activity(
             client,
             ActivityPeer {
@@ -1156,6 +1574,8 @@ mod tests {
             workers: None,
             node_id: "node-b".to_owned(),
             deliveries: Vec::new(),
+            source_processed: Vec::new(),
+            receiver_processed: Vec::new(),
             analysis: Vec::new(),
             live_tv: Vec::new(),
             dvr: None,
@@ -1171,6 +1591,8 @@ mod tests {
             workers: None,
             node_id: "node".into(),
             deliveries: vec![],
+            source_processed: vec![],
+            receiver_processed: vec![],
             analysis: vec![row.clone()],
             live_tv: vec![],
             dvr: None,
@@ -1200,6 +1622,8 @@ mod tests {
             workers: None,
             node_id: "node-b".to_owned(),
             deliveries: Vec::new(),
+            source_processed: Vec::new(),
+            receiver_processed: Vec::new(),
             analysis: Vec::new(),
             live_tv: Vec::new(),
             dvr: Some(crate::live_tv::dvr::DvrObservationSnapshot {
@@ -1288,7 +1712,7 @@ mod tests {
             ));
         }
         let aged = age_dvr_observations(
-            PeerActivityOutcome::Answered(snapshot),
+            PeerActivityOutcome::Answered(Box::new(snapshot)),
             Duration::from_secs(1),
         );
         let PeerActivityOutcome::Answered(aged) = aged else {
@@ -1314,6 +1738,7 @@ mod tests {
             file_id: i64::MAX,
             item_id: i64::MAX,
             title: "\0".repeat(MAX_TITLE_BYTES),
+            session_id: None,
             started_unix: i64::MAX,
             idle_seconds: u64::MAX,
             delivered_bytes: Some(i64::MAX),
@@ -1353,6 +1778,7 @@ mod tests {
             file_id: 1,
             item_id: 1,
             title: "\0".repeat(MAX_TITLE_BYTES),
+            session_id: None,
             started_unix: 0,
             idle_seconds: 0,
             delivered_bytes: None,
@@ -1381,6 +1807,7 @@ mod tests {
             file_id: i64::MAX,
             item_id: i64::MAX,
             title: "\0".repeat(MAX_TITLE_BYTES),
+            session_id: None,
             started_unix: i64::MAX,
             idle_seconds: u64::MAX,
             delivered_bytes: Some(i64::MAX),
@@ -1512,6 +1939,8 @@ mod tests {
             workers: None,
             node_id: "node-b".to_owned(),
             deliveries: Vec::new(),
+            source_processed: Vec::new(),
+            receiver_processed: Vec::new(),
             analysis: Vec::new(),
             live_tv: Vec::new(),
             dvr: None,

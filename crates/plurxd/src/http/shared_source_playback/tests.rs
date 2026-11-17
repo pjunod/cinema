@@ -1,5 +1,23 @@
 use super::*;
 use serde_json::json;
+
+/// The Source actor emits this worker result only for a validated pending
+/// title qualification. Its public reply has a closed retry contract.
+#[tokio::test]
+async fn sharing_source_http_pending_verdict_maps_to_typed_not_yet() {
+    use axum::response::IntoResponse;
+    let response =
+        SourceStartFailure::from(crate::transcode::source_actor::SourceWorkerError::NotYet)
+            .response()
+            .into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[axum::http::header::RETRY_AFTER], "1");
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .expect("bounded pending-verdict body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("typed pending body");
+    assert_eq!(body["code"], "sharing_source_not_prepared");
+}
 pub(super) async fn actual_resource_request(
     address: std::net::SocketAddr,
     h2: bool,
@@ -913,10 +931,187 @@ async fn sharing_source_http_hdr10_preserved_h1_h2_and_confirmed_end() {
     Box::pin(actual_source_resource_delivery(SourceFixtureMode::Hdr10)).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn sharing_source_http_dolby_vision_refusal_precedes_the_claim_and_owns_no_cleanup() {
+async fn sharing_source_http_dolby_vision_preserved_h1_h2_and_confirmed_end() {
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionPreserved,
+    ))
+    .await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_dolby_vision_unaffirmed_receiver_gets_the_hdr10_base_h1_h2_and_confirmed_end(
+) {
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionUnaffirmed,
+    ))
+    .await;
+}
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_offers_a_processed_upgrade_only_to_an_affirming_receiver() {
+    use super::receiver_presentation::{
+        PROCESSED_UPGRADE_RECEIVER_HEADER, PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
+    };
+
+    let fixture =
+        real_source_start_fixture_with(SourceFixtureMode::DolbyVisionUnaffirmed, None).await;
+    fixture
+        .state
+        .store
+        .put_setting(plurx_core::store::keys::DV_HDR_PROCESSING, "true")
+        .await
+        .expect("enable Source HDR processing");
+
+    let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("DV8 recipe");
+    recipe["session"]["preserve_dolby_vision"] = json!(false);
+    recipe["session"]["caps"] = json!({
+        "v": 2,
+        "video": [
+            {"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr","pq"]},
+            {"codec":"h264","max_height":2160,"present":["sdr"]}
+        ],
+        "audio":["aac"],
+        "containers":["mp4"],
+        "transports":["hls","progressive"],
+        "hls_hevc_sample_entries":["hvc1"],
+        "display":{"hdr":true}
+    });
+    assert!(recipe["session"].get("processed_upgrade").is_none());
+
+    let mut ordinary = recipe.clone();
+    ordinary["session"]["request_id"] = json!(Uuid::new_v4());
+    ordinary["session"]["playback_id"] = json!("ordinary-processed-upgrade-ask");
+    let ordinary = fixture_start(
+        axum::extract::State((*fixture.state).clone()),
+        fixture.headers.clone(),
+        axum::extract::Path((
+            fixture.reference.item_id.as_str().to_owned(),
+            fixture.reference.file_id.as_str().to_owned(),
+        )),
+        axum::body::Body::from(serde_json::to_vec(&ordinary).expect("ordinary recipe")),
+    )
+    .await
+    .expect("ordinary Source Start");
+    assert_eq!(ordinary.status(), StatusCode::OK);
+    let ordinary_bytes = axum::body::to_bytes(ordinary.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("ordinary Start body");
+    let ordinary = super::super::decode_source_start_response(&ordinary_bytes, &fixture.reference)
+        .expect("ordinary Start DTO");
+    assert_eq!(ordinary.response().processed_upgrade, None);
+    assert_eq!(
+        ordinary.response().delivered_dynamic_range.as_deref(),
+        Some("hdr10"),
+        "the ordinary source output remains its compatible HDR10 base"
+    );
+    assert_eq!(ordinary.response().delivered_dolby_vision_profile, None);
+
+    let mut affirmed_headers = fixture.headers.clone();
+    affirmed_headers.insert(
+        PROCESSED_UPGRADE_RECEIVER_HEADER,
+        PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE
+            .parse()
+            .expect("processed-upgrade affirmation header"),
+    );
+    let mut affirmed = recipe;
+    affirmed["session"]["request_id"] = json!(Uuid::new_v4());
+    affirmed["session"]["playback_id"] = json!("affirmed-processed-upgrade-ask");
+    let response = fixture_start(
+        axum::extract::State((*fixture.state).clone()),
+        affirmed_headers,
+        axum::extract::Path((
+            fixture.reference.item_id.as_str().to_owned(),
+            fixture.reference.file_id.as_str().to_owned(),
+        )),
+        axum::body::Body::from(serde_json::to_vec(&affirmed).expect("affirmed recipe")),
+    )
+    .await
+    .expect("affirmed Source Start");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("affirmed Start body");
+    let affirmed = super::super::decode_source_start_response(&bytes, &fixture.reference)
+        .expect("affirmed Start DTO");
+    assert_eq!(
+        affirmed.response().processed_upgrade.as_deref(),
+        Some("offered"),
+        "the exact authenticated header offers a successor without changing this Start"
+    );
+    assert_eq!(
+        affirmed.response().delivered_dynamic_range.as_deref(),
+        Some("hdr10")
+    );
+    assert_eq!(affirmed.response().delivered_dolby_vision_profile, None);
+
+    fixture.shutdown().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_dolby_vision_stripped_h1_h2_and_confirmed_end() {
+    if !crate::ffmpeg::has_dovi_rpu().await {
+        eprintln!("SKIP: this FFmpeg has no dovi_rpu bitstream filter to strip with");
+        return;
+    }
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionStripped,
+    ))
+    .await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_dolby_vision_converted_h1_h2_and_confirmed_end() {
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionConverted,
+    ))
+    .await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_native_hdr10_copy_h1_h2_vtt_and_held_body_end() {
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::NativeHdr10Copy,
+    ))
+    .await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_dolby_vision_base_encoded_to_sdr_h1_h2_and_confirmed_end() {
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionCompatibleEncoded,
+    ))
+    .await;
+}
+/// A Profile 5 encode over sharing, delivered as local delivers it: on the
+/// committed real Profile 5 control, the Source's own two pixel-proof
+/// children prove that the RPU changes pixels, the verdict is recorded, and
+/// the planner tone-maps through the RPU renderer without a second proof.
+/// The renderer is jellyfin-ffmpeg's `tonemapx`; a build without it SKIPs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_profile5_encoded_to_sdr_h1_h2_and_confirmed_end() {
+    if !crate::ffmpeg::has_dovi_reshape().await {
+        eprintln!(
+            "SKIP: this ffmpeg has no Dolby-aware tonemapx renderer to encode Profile 5 with"
+        );
+        return;
+    }
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionProfile5Encoded,
+    ))
+    .await;
+}
+/// A refuted Profile 5 proof is a verdict: the Source records it, the
+/// planner then answers exactly what it answers locally (the build cannot
+/// render this source) as a definite refusal, and a later start reads the
+/// remembered verdict instead of proving again. No probe runs in the planner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn source_profile5_refuted_proof_plans_like_local_and_spawns_no_second_probe() {
     use axum::response::IntoResponse;
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::DolbyVisionEncoded, None).await;
-    let start = || {
+    use std::sync::atomic::Ordering;
+    let fixture =
+        real_source_start_fixture_with(SourceFixtureMode::DolbyVisionProfile5Encoded, None).await;
+    let hooks = fixture.state.transcode.test_hooks();
+    hooks
+        .dovi_pixel_proof_script
+        .lock()
+        .expect("script")
+        .push_back(crate::ffmpeg::DoviPixelProof::Refuted);
+    let start = |request: Vec<u8>| {
         fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
@@ -924,7 +1119,7 @@ async fn sharing_source_http_dolby_vision_refusal_precedes_the_claim_and_owns_no
                 fixture.reference.item_id.as_str().to_owned(),
                 fixture.reference.file_id.as_str().to_owned(),
             )),
-            axum::body::Body::from(fixture.request.clone()),
+            axum::body::Body::from(request),
         )
     };
     let refused = |error: ApiError| async move {
@@ -934,62 +1129,44 @@ async fn sharing_source_http_dolby_vision_refusal_precedes_the_claim_and_owns_no
             .await
             .expect("typed refusal");
         let body: Value = serde_json::from_slice(&bytes).expect("JSON refusal");
-        assert_eq!(body["code"], SHARING_START_DOLBY_VISION_UNSUPPORTED);
+        assert_eq!(body["code"], "sharing_start_unsupported");
     };
     refused(
-        start()
+        start(fixture.request.clone())
             .await
-            .expect_err("DV encode has no Source-owned RPU preparation"),
+            .expect_err("a refuted Profile 5 source has no renderer route"),
     )
     .await;
-    let entries = fixture
+    let file = fixture
         .state
-        .transcode
-        .source_http_starts
-        .entries
-        .lock()
-        .expect("registry")
-        .clone();
-    assert_eq!(entries.len(), 1, "the exact refused invocation is retained");
-    // Pure planning precedes owner designation (1ef67c7de): the refusal is
-    // decided from the prepared request before any claim, so the entry
-    // never acquired a binding, owns no durable or physical obligation and
-    // leaves admission capacity at once, with nothing for an End to clean.
-    assert!(
-        matches!(
-            *entries[0].task.stage.lock().expect("stage"),
-            SourceStartTaskStage::IntentReady { .. }
-        ),
-        "the refusal is decided before the claim"
+        .store
+        .get_file(1)
+        .await
+        .expect("file")
+        .expect("file");
+    assert_eq!(
+        fixture.state.transcode.dovi_proof_verdict(&file),
+        Some(false),
+        "the Source's refuted proof is a remembered verdict"
     );
-    assert!(
-        entries[0]
-            .task
-            .cleanup
-            .lock()
-            .expect("uninvoked Source custody")
-            .is_none(),
-        "no claimed invocation is left to fence"
+    assert_eq!(
+        hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst),
+        1,
+        "one proof, the Source's; the planner read its verdict"
     );
-    assert!(
-        entries[0].actual_finished(),
-        "a pre-claim refusal releases its slot without a cleanup receipt"
+    let mut again: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    again["session"]["request_id"] = json!(Uuid::new_v4());
+    refused(
+        start(serde_json::to_vec(&again).expect("second recipe"))
+            .await
+            .expect_err("the remembered verdict refuses again"),
+    )
+    .await;
+    assert_eq!(
+        hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst),
+        1,
+        "a remembered verdict runs no second proof"
     );
-    assert_eq!(fixture.state.transcode.source_http_starts.live_entries(), 0);
-    for _ in 0..3 {
-        refused(start().await.expect_err("exact refusal retry")).await;
-        let registry = &fixture.state.transcode.source_http_starts;
-        assert!(
-            registry.entries.lock().expect("registry").is_empty(),
-            "a retry opens no second invocation"
-        );
-        let settled = registry.settled.lock().expect("settled receipts").clone();
-        assert_eq!(settled.len(), 1);
-        assert!(
-            std::sync::Arc::ptr_eq(&settled[0], &entries[0]),
-            "a retry replays the exact retained refusal"
-        );
-    }
     fixture.shutdown().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1120,13 +1297,66 @@ async fn sharing_source_bound_invocation_projects_the_complete_start_response() 
         .is_err());
     fixture.shutdown().await;
 }
+/// Every video sample of one delivered media segment, as the Dolby Vision
+/// RPU NAL units (HEVC type 62) its length-prefixed sample carries.
+fn delivered_rpus(init: &[u8], segment: &[u8]) -> Vec<Vec<Vec<u8>>> {
+    use plurx_core::fmp4::{FragmentReader, Unit};
+    let mut reader = FragmentReader::new();
+    reader.push(init);
+    reader.push(segment);
+    let Some(Unit::Init(init)) = reader.next_unit().expect("delivered init") else {
+        panic!("a delivered init");
+    };
+    let video = init.video().expect("delivered video track");
+    let (track, length_size) = (video.id, usize::from(video.nal_length_size));
+    let mut samples = Vec::new();
+    while let Some(unit) = reader.next_unit().expect("delivered media") {
+        let Unit::Fragment(fragment) = unit else {
+            continue;
+        };
+        for (_, data) in fragment.samples_with_bytes(track) {
+            let data = data.expect("sample inside its mdat");
+            let mut rpus = Vec::new();
+            let mut at = 0;
+            while at < data.len() {
+                let header = data
+                    .get(at..at + length_size)
+                    .expect("complete NAL length prefix");
+                let len = header
+                    .iter()
+                    .fold(0usize, |len, byte| (len << 8) | usize::from(*byte));
+                let nal = data
+                    .get(at + length_size..at + length_size + len)
+                    .expect("NAL unit inside its sample");
+                if nal.first().is_some_and(|byte| (byte >> 1) & 0x3f == 62) {
+                    rpus.push(nal.to_vec());
+                }
+                at += length_size + len;
+            }
+            samples.push(rpus);
+        }
+    }
+    samples
+}
 async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
     use std::time::{Duration, Instant};
     let fixture = real_source_start_fixture_with(mode, None).await;
     let native = matches!(
         mode,
-        SourceFixtureMode::NativeCopy | SourceFixtureMode::NativeEncoded
+        SourceFixtureMode::NativeCopy
+            | SourceFixtureMode::NativeEncoded
+            | SourceFixtureMode::NativeHdr10Copy
     );
+    let dolby_vision = matches!(
+        mode,
+        SourceFixtureMode::DolbyVisionPreserved | SourceFixtureMode::DolbyVisionConverted
+    );
+    // A Profile 8.1 copy delivered as its HDR10 base.
+    let base_copy = matches!(
+        mode,
+        SourceFixtureMode::DolbyVisionUnaffirmed | SourceFixtureMode::DolbyVisionStripped
+    );
+    let mut delivered_init: Option<Vec<u8>> = None;
     let mut unsupported: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     unsupported["session"]["previous_session_id"] = json!(Uuid::new_v4());
     unsupported["session"]["request_id"] = json!(Uuid::new_v4());
@@ -1170,16 +1400,106 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
         .await
         .expect("full DTO");
     let decoded = super::super::decode_source_start_response(&bytes, &fixture.reference)
-        .expect("strict actual Start");
-    if matches!(mode, SourceFixtureMode::Hdr10 | SourceFixtureMode::Hdr10Sdr) {
+        .unwrap_or_else(|error| {
+            panic!(
+                "strict actual Start: {error:?}: {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        });
+    if matches!(mode, SourceFixtureMode::DolbyVisionProfile5Encoded) {
+        // The Source's own proof reached the verdict the planner then read.
+        let file = fixture
+            .state
+            .store
+            .get_file(1)
+            .await
+            .expect("file")
+            .expect("file");
+        assert_eq!(
+            fixture.state.transcode.dovi_proof_verdict(&file),
+            Some(true),
+            "the real Profile 5 RPU changes pixels through the renderer"
+        );
+    }
+    let expected_range = match mode {
+        SourceFixtureMode::Hdr10
+        | SourceFixtureMode::NativeHdr10Copy
+        | SourceFixtureMode::DolbyVisionUnaffirmed
+        | SourceFixtureMode::DolbyVisionStripped => Some("hdr10"),
+        SourceFixtureMode::Hdr10Sdr
+        | SourceFixtureMode::DolbyVisionCompatibleEncoded
+        | SourceFixtureMode::DolbyVisionProfile5Encoded => Some("sdr"),
+        SourceFixtureMode::DolbyVisionPreserved | SourceFixtureMode::DolbyVisionConverted => {
+            Some("dolby_vision")
+        }
+        _ => None,
+    };
+    if let Some(range) = expected_range {
         assert_eq!(
             decoded.response().delivered_dynamic_range.as_deref(),
-            Some(if matches!(mode, SourceFixtureMode::Hdr10) {
-                "hdr10"
-            } else {
-                "sdr"
-            })
+            Some(range)
         );
+        // The Start B relays: its own decoder and presentability check admit
+        // exactly what the Source delivered for the caps it forwarded.
+        let session = serde_json::to_string(
+            &serde_json::from_slice::<Value>(&fixture.request).expect("recipe")["session"],
+        )
+        .expect("session JSON");
+        assert!(
+            super::super::sharing_start_decode::delivered_range_presentable(
+                &session,
+                decoded.response()
+            ),
+            "B must present the {range} Start the Source planned for these caps"
+        );
+    }
+    // The Source says why a Dolby Vision viewer got the base, and only then.
+    assert_eq!(
+        decoded
+            .response()
+            .plan_notes
+            .iter()
+            .any(|note| note == receiver_presentation::DOLBY_VISION_WITHHELD_NOTE),
+        matches!(mode, SourceFixtureMode::DolbyVisionUnaffirmed),
+        "plan notes: {:?}",
+        decoded.response().plan_notes
+    );
+    if dolby_vision {
+        // Profile 8.1 preserved, and Profile 7 converted to 8.1.
+        assert_eq!(decoded.response().delivered_dolby_vision_profile, Some(8));
+        // The FEL / RPU / DYN rows local playback shows: computed by the
+        // Source, decoded by B's closed Start decoder, and carried unchanged
+        // into the Start B answers its own client with.
+        let enhancement = decoded
+            .response()
+            .enhancement
+            .clone()
+            .expect("a Dolby Vision Start carries its enhancement rows");
+        assert!(enhancement.is_well_formed());
+        assert!(!enhancement.details.is_empty(), "{enhancement:?}");
+        let source_session =
+            Uuid::parse_str(&decoded.response().session_id).expect("Source session");
+        let client = super::super::sharing_playback_wire::project_shared_start_with_receiver(
+            decoded.response().clone(),
+            source_session,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            3,
+            true,
+        )
+        .expect("B's client Start");
+        assert_eq!(client.enhancement, Some(enhancement.clone()));
+        assert_eq!(
+            serde_json::to_value(&client).expect("client Start")["enhancement"],
+            serde_json::to_value(&enhancement).expect("rows")
+        );
+    } else {
+        assert_eq!(decoded.response().delivered_dolby_vision_profile, None);
+    }
+    if matches!(mode, SourceFixtureMode::DolbyVisionUnaffirmed) {
+        // A receiver that never affirmed relay may be one whose decoder
+        // refuses the rows: it is sent none.
+        assert!(decoded.response().enhancement.is_none());
     }
     let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     let request = recipe["session"]["request_id"]
@@ -1214,7 +1534,36 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
         fixture.reference.item_id.as_str(),
         fixture.reference.file_id.as_str()
     );
+    // An HDR or Dolby Vision session opens on the master even without a
+    // selected subtitle: only the master can say VIDEO-RANGE and
+    // SUPPLEMENTAL-CODECS.
+    let ranged_without_subtitles =
+        !native && matches!(expected_range, Some("hdr10" | "hlg" | "dolby_vision"));
+    if ranged_without_subtitles {
+        assert_eq!(
+            decoded.response().playlist_url,
+            format!("/api/v1/hls/{}/master.m3u8", decoded.response().session_id),
+            "{mode:?} opens on the master"
+        );
+    } else if !native {
+        assert_eq!(
+            decoded.response().playlist_url,
+            format!("/api/v1/hls/{}/index.m3u8", decoded.response().session_id),
+            "{mode:?} keeps the media playlist"
+        );
+    }
     for h2 in [false, true] {
+        if ranged_without_subtitles {
+            actual_master_declares_the_range_without_subtitles(
+                address,
+                h2,
+                &url,
+                &fixture,
+                &mut recipe,
+                mode,
+            )
+            .await;
+        }
         recipe["resource"] = json!(if native { "video.m3u8" } else { "index.m3u8" });
         let response = actual_resource_request(
             address,
@@ -1307,6 +1656,60 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
                 .expect("actual streamed file bytes");
             assert_eq!(bytes.len(), len);
             assert!(bytes.len() > 8);
+            if (dolby_vision || base_copy) && resource == "init.mp4" {
+                delivered_init = Some(bytes.to_vec());
+            }
+            if base_copy && resource == "init.mp4" {
+                assert!(
+                    !bytes
+                        .windows(4)
+                        .any(|part| part == b"dvvC" || part == b"dvcC" || part == b"dby1"),
+                    "{mode:?} delivers the HDR10 base with no Dolby Vision record"
+                );
+            }
+            if (dolby_vision || base_copy) && resource != "init.mp4" {
+                // Walk every video sample's length-prefixed NAL units: a Dolby
+                // Vision copy carries exactly one RPU per sample, and it says
+                // Profile 8 (for the conversion, the rewritten Profile 7 RPU);
+                // the base carries none.
+                let init = delivered_init.as_ref().expect("init precedes media");
+                let rpus_per_sample = delivered_rpus(init, &bytes);
+                assert!(!rpus_per_sample.is_empty(), "{mode:?} segment has samples");
+                for rpus in &rpus_per_sample {
+                    if dolby_vision {
+                        assert_eq!(rpus.len(), 1, "{mode:?}: one RPU per sample");
+                        let rpu =
+                            dolby_vision::rpu::dovi_rpu::DoviRpu::parse_unspec62_nalu(&rpus[0])
+                                .expect("a parseable delivered RPU");
+                        assert_eq!(rpu.dovi_profile, 8, "{mode:?} delivers Profile 8 RPUs");
+                        assert!(
+                            rpu.el_type.is_none(),
+                            "Profile 8.1 has no enhancement layer"
+                        );
+                    } else {
+                        assert!(rpus.is_empty(), "{mode:?}: the base carries no RPU");
+                    }
+                }
+            }
+            if dolby_vision && resource == "init.mp4" {
+                let mut reader = plurx_core::fmp4::FragmentReader::new();
+                reader.push(&bytes);
+                let Some(plurx_core::fmp4::Unit::Init(init)) =
+                    reader.next_unit().expect("delivered init")
+                else {
+                    panic!("a delivered init");
+                };
+                let record = plurx_core::fmp4::dolby_vision_record(&init)
+                    .expect("readable Dolby Vision record")
+                    .expect("the delivered init declares Dolby Vision");
+                assert_eq!(record.profile, 8, "{mode:?} delivers Profile 8");
+                assert_eq!(record.bl_signal_compatibility_id, 1);
+                assert!(!record.el_present);
+                assert!(
+                    bytes.windows(4).any(|part| part == b"dvvC"),
+                    "Profile 8 is declared in dvvC"
+                );
+            }
             assert!(
                 bytes.windows(4).any(|part| part
                     == if resource == "init.mp4" {
@@ -1361,6 +1764,14 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
                                 .contains("subs/1/index.m3u8"),
                             "wrong selected track exists and is actually advertised"
                         );
+                        if matches!(mode, SourceFixtureMode::NativeHdr10Copy) {
+                            assert!(
+                                std::str::from_utf8(&bytes)
+                                    .expect("actual master")
+                                    .contains("VIDEO-RANGE=PQ"),
+                                "an HDR10 copy beside native subtitles declares its range"
+                            );
+                        }
                     }
                     assert_eq!(mime, "application/vnd.apple.mpegurl");
                     plurx_core::sharing_resources::validate_sharing_playlist(
@@ -1431,6 +1842,67 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
     server.await.expect("server").expect("shutdown");
     drop(owned);
     fixture.shutdown().await;
+}
+/// `sharing_source_http_dolby_vision_master_declares_supplemental_codecs_without_subtitles`
+/// (T2.2), run inside the HDR10 encode and Dolby Vision copy fixtures: the master a
+/// subtitle-less session opens on admits no subtitle group and declares the
+/// delivered range and, for Dolby Vision, the enhanced codec.
+async fn actual_master_declares_the_range_without_subtitles(
+    address: std::net::SocketAddr,
+    h2: bool,
+    url: &str,
+    fixture: &RealSourceStartFixture,
+    recipe: &mut Value,
+    mode: SourceFixtureMode,
+) {
+    recipe["resource"] = json!("master.m3u8");
+    let response = actual_resource_request(
+        address,
+        h2,
+        url,
+        fixture.headers.clone(),
+        serde_json::to_vec(&recipe).expect("master request"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "{mode:?} master h2={h2}");
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/vnd.apple.mpegurl"
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("actual master bytes");
+    plurx_core::sharing_resources::validate_sharing_playlist(
+        &plurx_core::sharing_resources::SharingHlsResource::parse("master.m3u8")
+            .expect("master path"),
+        &bytes,
+    )
+    .expect("closed actual master");
+    let master = std::str::from_utf8(&bytes).expect("master text");
+    assert!(master.contains("VIDEO-RANGE=PQ"), "{mode:?}: {master}");
+    assert!(
+        !master.contains("TYPE=SUBTITLES") && !master.contains("SUBTITLES=\"subs\""),
+        "{mode:?} admits no subtitle group: {master}"
+    );
+    assert!(master.ends_with("index.m3u8\n"), "{mode:?}: {master}");
+    if matches!(
+        mode,
+        SourceFixtureMode::DolbyVisionPreserved | SourceFixtureMode::DolbyVisionConverted
+    ) {
+        assert!(
+            master.starts_with("#EXTM3U\n#EXT-X-VERSION:10\n"),
+            "{master}"
+        );
+        assert!(
+            master.contains("SUPPLEMENTAL-CODECS=\"dvh1.08."),
+            "{mode:?} declares Profile 8 Dolby Vision: {master}"
+        );
+    } else {
+        assert!(
+            !master.contains("SUPPLEMENTAL-CODECS"),
+            "{mode:?}: {master}"
+        );
+    }
 }
 async fn actual_vtt_writer_end(
     fixture: &RealSourceStartFixture,
