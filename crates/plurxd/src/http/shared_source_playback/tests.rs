@@ -72,6 +72,115 @@ pub(super) async fn actual_resource_request(
     let _ = driver.await;
     axum::response::Response::from_parts(parts, axum::body::Body::from(bytes))
 }
+/// Planning may wait on actual filesystem/Store work longer than the five-
+/// second member-proof lifetime. This ages the old placement of that proof,
+/// not the intent or the actual singleton's continuously running heartbeat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_direct_claim_observes_members_after_slow_preparation() {
+    use std::time::{Duration, Instant};
+    let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    let pause = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .preparation_finished_pause
+        .arm("Source preparation finished before claim observation");
+    let state = (*fixture.state).clone();
+    let headers = fixture.headers.clone();
+    let reference = fixture.reference.clone();
+    let request = fixture.request.clone();
+    let starting = tokio::spawn(async move {
+        fixture_start(
+            axum::extract::State(state),
+            headers,
+            axum::extract::Path((
+                reference.item_id.as_str().to_owned(),
+                reference.file_id.as_str().to_owned(),
+            )),
+            axum::body::Body::from(request),
+        )
+        .await
+    });
+    let held = pause.reached().await;
+    // The old observation necessarily precedes this rendezvous. Wait for the
+    // actual Store wall clock to exceed its 5,000ms limit; virtual Tokio time
+    // cannot expire that proof. Every sleep is derived from this wall target.
+    let expired_after_ms = crate::state::clock_ms() + 5_000;
+    loop {
+        let remaining_ms = expired_after_ms.saturating_sub(crate::state::clock_ms());
+        if remaining_ms < 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis((remaining_ms + 1) as u64)).await;
+    }
+    held.release();
+    let response = starting
+        .await
+        .expect("actual Direct Start task")
+        .expect("claim uses a member observation made after preparation");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("actual Direct Start body");
+    let decoded = crate::http::sharing_direct_wire::DecodedSourceDirectStart::parse(
+        &bytes,
+        &fixture.reference,
+    )
+    .expect("exact actual Direct Start lineage");
+    let input = parse_start_request(
+        &fixture.request,
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str(),
+    )
+    .expect("original exact request");
+    let entry = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .entries
+        .lock()
+        .expect("actual retained Source task")
+        .iter()
+        .find(|entry| entry.identity.request_id == input.request_id)
+        .cloned()
+        .expect("the exact Start retained its actual factory owner");
+    let owned = entry
+        .wait(Instant::now() + Duration::from_secs(1))
+        .await
+        .expect("actual Direct factory");
+    let binding = owned.assignment.binding();
+    assert_eq!(binding.incarnation_id(), decoded.incarnation_id());
+    assert_eq!(binding.request_id(), input.request_id.to_string());
+    assert_eq!(binding.playback_id(), input.session.playback_id);
+    let source_headers: SourceHeaders = fixture.headers.clone().into();
+    let viewer = viewer_hash(&source_headers).expect("actual authenticated viewer");
+    assert_eq!(
+        binding.principal(),
+        &plurx_core::playback_principal::PlaybackPrincipal::sharing(fixture.grant, &viewer)
+            .expect("actual grant principal")
+    );
+    assert_eq!(binding.source_server_id(), fixture.reference.server_id);
+    assert_eq!(binding.catalogue_epoch(), fixture.reference.catalogue_epoch);
+    assert_eq!(binding.library_id(), &fixture.reference.library_id);
+    assert_eq!(binding.item_id(), &fixture.reference.item_id);
+    assert_eq!(binding.file_id(), &fixture.reference.file_id);
+    assert_eq!(binding.file_revision(), &fixture.reference.revision);
+    assert!(owned.actor.is_direct());
+    let (direct, guard) = owned
+        .actor
+        .open_direct_start(Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("actual factory retains its held unchanged source file");
+    assert_eq!(direct.session_id, decoded.direct().session_id);
+    assert!(direct.length > 0);
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(15), owned.actor.retire())
+        .await
+        .expect("actual Direct factory joins")
+        .expect("actual source custody settles");
+    drop(owned);
+    fixture.shutdown().await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_http_initialization_overlapping_real_h2_registration_starts_and_ends() {
     actual_source_initialization_interleave(InitializationAssertionCase::CurrentAuthority).await;
@@ -3868,6 +3977,18 @@ async fn actual_source_budgeted_start() {
         .transcode
         .test_hold_source_software_capacity()
         .expect("actual occupied software capacity");
+    // Hold pure preparation through the viewer-clock checks. Only after the
+    // NotYet rejoin do we let this real worker enter its unchanged queue.
+    let preparation = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .preparation_finished_pause
+        .arm("budgeted_start_preparation");
+    let index_pause = fixture
+        .state
+        .transcode
+        .pause_source_index_after_spawn(crate::seam_hooks::ASYNC_PAUSE_BOUND);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("private fixture listener");
@@ -4026,12 +4147,24 @@ async fn actual_source_budgeted_start() {
         "local fall-through preserves the ingress clock"
     );
     // Past the viewer's whole window (2 s plus the re-post grace) the
-    // entry is still working on its own budget: the clock bounded the
-    // answer, not the work.
+    // entry is still retained in pure preparation on its own budget. After
+    // this viewer window, release it into the real queue and rejoin only
+    // once its actual owned index child is held after spawn.
     tokio::time::sleep_until(tokio::time::Instant::from_std(
         began + Duration::from_millis(4_600),
     ))
     .await;
+    let held_preparation = preparation.reached().await;
+    let viewer_elapsed_before_release = began.elapsed();
+    let preparation_released_at = Instant::now();
+    held_preparation.release();
+    // Free capacity before the actual queue's five-second limit. The next
+    // observation is the real owned index child, with permit/fence/authority.
+    drop(hold);
+    let held_index = index_pause.reached().await;
+    let index_after_preparation_release = preparation_released_at.elapsed();
+    // Rejoin while the actual owned index child is held, rather than
+    // inferring a live cold-index operation from a planned incarnation.
     let (status, _, bytes) = post(body(abandoned), Some(300)).await;
     assert_eq!(
         (status, typed(&bytes[..])),
@@ -4039,7 +4172,7 @@ async fn actual_source_budgeted_start() {
             StatusCode::SERVICE_UNAVAILABLE,
             "startup_timeout".to_owned()
         ),
-        "the viewer's window does not end owned preparation: {}",
+        "the viewer's window does not end owned preparation: {}; viewer_elapsed={viewer_elapsed_before_release:?}, index_after_preparation_release={index_after_preparation_release:?}",
         String::from_utf8_lossy(&bytes)
     );
     let entry = entry_of(abandoned).expect("the abandoned start's entry");
@@ -4050,10 +4183,9 @@ async fn actual_source_budgeted_start() {
         .expect("stage")
         .incarnation()
         .expect("the entry owns its claim");
-    // The viewer leaves: B sends the End while preparation waits on the
-    // held capacity. The capacity then frees inside the 5 s queue, the cold
-    // index runs to completion and persists, and only then does the start
-    // end at its next stage boundary and settle.
+    // Deliver End while this exact owned index child is held after spawn.
+    // Its stage cannot complete or its queue expire before End ownership.
+    // Releasing the existing seam lets the real index persist and settle.
     let end_url = format!("{path}/{abandoned}/end");
     // End must arrive on a fresh driver: the Start driver's retained
     // ingress custody cannot be settled while that same driver awaits End.
@@ -4087,7 +4219,19 @@ async fn actual_source_budgeted_start() {
     })
     .await
     .expect("the End is owned");
-    drop(hold);
+    assert!(
+        held_index.is_held(),
+        "owned index hold expired before End observation"
+    );
+    assert!(
+        !indexed().await,
+        "the actual index is still unpersisted at owned End"
+    );
+    assert!(
+        held_index.is_held(),
+        "owned index hold expired during the index observation"
+    );
+    held_index.release();
     let receipt = tokio::time::timeout(Duration::from_secs(40), end)
         .await
         .expect("the abandoned start settles after its preparation")
