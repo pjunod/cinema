@@ -161,7 +161,25 @@ function queuePlaybackControlAcknowledgement(p,actionId,state,extra){
   // goes first: a settlement nobody has managed to send in four preparations
   // is one the server's deadline has already reaped.
   while(queue.length>PREPARED_ACK_QUEUE_MAX) queue.shift();
-  notifyPlaybackControl();
+  const reporter=p.controlReporter;
+  if(state==="committed"&&p.preparedControlPending?.actionId===actionId
+    &&typeof reporter?.finish==="function"){
+    // Capture before decoder retirement. Later transport events may neither
+    // replace this commit nor author ordinary predecessor observations.
+    const observed=reporter.capture();
+    if(observed){
+      // A terminal predecessor may still owe older settlements before this
+      // commit. Publish the commit before end, even when it is not queue head.
+      const snapshot=observed.snapshot.demand==="end"
+        ?Object.assign({},observed.snapshot,{demand:"active",
+          playback_rate:Math.max(0.25,observed.snapshot.playback_rate||0)})
+        :observed.snapshot;
+      const captured=PlurxPlaybackControl.capture(snapshot,observed.intentGeneration,observed.owner);
+      p.preparedControlPending.controlSnapshot=captured.snapshot;
+      p.preparedControlPending.intentGeneration=captured.intentGeneration;
+      reporter.finish(captured);
+    }
+  }else notifyPlaybackControl();
   return ack;
 }
 
@@ -185,6 +203,9 @@ function settlePlaybackControlAcknowledgement(p,request){
     const pending=p.preparedControlPending;
     if(sent.state==="committed"&&pending&&pending.actionId===sent.action_id){
       p.preparedControlPending=null;
+      // The old reporter must not publish another ordinary capture while the
+      // successor reporter waits for its next event-loop turn.
+      if(p.controlReporter){p.controlReporter.stop();p.controlReporter=null;}
       // Only B's acceptance of the commit makes a Shared successor the
       // player's session: progress, status and any later reopen now name its
       // bound context. The predecessor is not released here; B supersedes it
@@ -203,17 +224,26 @@ function settlePlaybackControlAcknowledgement(p,request){
       }
     }
   }
+  const pending=p.preparedControlPending,reporter=p.controlReporter;
+  // An older staging may still owe an abort/progress ACK ahead of this
+  // commit. Chain only explicit settlements, all on the frozen media turn.
+  // An in-flight earlier ACK can already have spent the queue entry before
+  // its final replay arrives, so this is intentionally outside `at !== -1`.
+  if(pending?.controlSnapshot&&reporter?.finalAccepted&&queue.length){
+    const snapshot=Object.assign({},pending.controlSnapshot,{acknowledgement:queue[0]});
+    reporter.finish(PlurxPlaybackControl.capture(snapshot,pending.intentGeneration,p.controlOwner));
+  }
 }
 
-// A visible Shared switch whose commit is refused or lost has two possible
-// server owners. Reopen under the accepted predecessor context and then end
-// both old sessions; the fresh Start owns the viewer's current selection.
+// A definitively refused visible commit has two possible server owners.
+// Reopen through the authoritative Start path, then end both old sessions.
+// Transport ambiguity keeps retrying the exact commit instead of reopening.
 function recoverSharedCommittedReplacement(p,pending){
   if(PLAYER!==p||p.preparedControlPending!==pending) return false;
   p.preparedControlPending=null;
   stopPlaybackControl(p);
   const accountToken=TOKEN;
-  const predecessor=p.fileContext?.session_id;
+  const predecessor=pending.predecessorSessionId||p.fileContext?.session_id;
   const successor=pending.sessionId;
   const position=positionForPlaybackIntent(document.getElementById("video"),p);
   const reopening=play(p.fileId,p.title||"",Math.round(position*1000),p.knownDur||0,p.meta);
@@ -1353,6 +1383,16 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     presentationAdvancedAt:p.presentationAdvancedAt,
     muted:intent.muted,volume:intent.volume,playbackRate:intent.playbackRate,
     defaultPlaybackRate:intent.defaultPlaybackRate};
+  // Only source-owned observation fields are retained. This is not a second
+  // player: current viewer intent, selection and ACK queue remain on p.
+  const context={};
+  for(const key of ["sessionId","offset","hls","started","waitAt","controlSeek",
+    "_seekPreview","controlPositionHintSec","bookOffset","durMs","knownDur",
+    "controlRenderOverride","controlObservationOverride"])
+    context[key]=p[key];
+  context.controlSeek=p.controlSeek?{...p.controlSeek}:null;
+  context.mediaAttachment={nativePositionPending:!!p.mediaAttachment?.nativePositionPending};
+  state.predecessor.controlObservation={element:retired,context};
   // Authoritative before visible, so anything that reads PLAYER.hls during the
   // swap reads the instance that owns the picture.
   clearEffectiveProcessing(p);
@@ -1456,12 +1496,13 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
       p.directedChange.committedActionId=state.actionId;
     p.preparedControlPending={actionId:state.actionId,sessionId:state.sessionId,
       predecessorSessionId:state.predecessor?.sessionId||null,
-      bootstrap:state.controlBootstrap,sharedContext:state.sharedContext};
+      bootstrap:state.controlBootstrap,sharedContext:state.sharedContext,
+      controlObservation:state.predecessor?.controlObservation};
     settleDirectedChange(p,p.directedChange,"committed",
       Math.round(performance.now()-((p.directedChange&&p.directedChange.tappedAt)||performance.now())));
-    deferPreparedPredecessorRetirement(p,state,spare);
     queuePlaybackControlAcknowledgement(p,state.actionId,"committed",
       {first_frame_unix_ms:unixMs,committed_media_origin_ms:state.offeredOriginMs});
+    deferPreparedPredecessorRetirement(p,state,spare);
     reportPreparedSeamAfterWindow(p,state,"committed");
     const committedAtMs=performance.now();
     clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"committed",
