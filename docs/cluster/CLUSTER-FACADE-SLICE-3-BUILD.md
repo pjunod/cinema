@@ -2,6 +2,7 @@
 
 **Status:** open — slice 3 implemented and independently reviewed; main promotion waits for the remaining facade effort. Track effort qualification in the task PR checks.
 **Owner:** Codex. **Prepared:** 2026-11-16.
+**Task PR:** [#1747](http://forge.lan:3000/noirr/plurx/pulls/1747) into `effort/cluster-facade`.
 
 Companion to [the facade contract](CLUSTER-FACADE-BUILD.md),
 [the cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md) and
