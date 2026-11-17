@@ -1896,6 +1896,180 @@ async fn sharing_source_replay_conflict_does_not_bypass_revoked_current_authorit
     assert_eq!(count(&store, "sharing_source_session_bindings").await, 1);
 }
 
+// Reuse the candidate Store/member fixture. This is a published SQL route,
+// not evidence of physical producer admission or native playback readiness.
+async fn renewal_snapshot_published_fixture(
+    store: &SqliteStore,
+    name: &str,
+) -> (SourceDispatchAssignment, CredentialKey) {
+    let (grant, key) = setup(store).await;
+    let request = intent(store, grant, &key, name).await;
+    let SourceClaimOutcome::Acquired(binding) = store
+        .claim_source_media_session(&request, &proof())
+        .await
+        .expect("claim")
+    else {
+        panic!("Source reservation")
+    };
+    let assignment = store
+        .assign_source_dispatch(&binding, &key, &proof())
+        .await
+        .expect("assignment")
+        .expect("actual local worker");
+    let SourceWriteAuthorityRead::Ready(authority) = store
+        .prepare_source_activation_authority(&assignment, &key, &proof())
+        .await
+        .expect("authority")
+    else {
+        panic!("current private witness")
+    };
+    let now = now_ms().expect("clock");
+    let activation = crate::domain::MediaSessionActivation {
+        incarnation_id: binding.incarnation_id.to_string(),
+        session_id: Uuid::new_v4().to_string(),
+        principal: binding.principal.clone(),
+        playback_id: binding.playback_id.clone(),
+        recovery_epoch: String::new(),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: true,
+        request_id: Some(binding.request_id.clone()),
+        request_fingerprint: binding.request_fingerprint.clone(),
+        owner_node_id: "voter".into(),
+        recipe_json: "{}".into(),
+        response_json: "{}".into(),
+        publication_ready_at_ms: crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms: 0,
+        now_ms: now,
+        lease_expires_at_ms: now + 60000,
+        expected_desired_revision: None,
+    };
+    store
+        .activate_source_media_session(&authority, &activation)
+        .await
+        .expect("guarded activation")
+        .expect("Source route");
+    store.sharing_txn(vec![("UPDATE media_sessions SET publication_ready_at_ms=0,produced_playable_through_ms=1600,fetched_through_ms=600,media_sequence=3 WHERE incarnation_id=$1".into(),vec![binding.incarnation_id.into()]),("UPDATE media_session_requests SET state='resolved',response_json='{}' WHERE incarnation_id=$1".into(),vec![binding.incarnation_id.into()]),("UPDATE sharing_source_session_bindings SET start_resolved_at_ms=$2 WHERE incarnation_id=$1".into(),vec![binding.incarnation_id.into(),now.into()])]).await.expect("fixture-only published route with actual stored frontiers");
+    (assignment, key)
+}
+
+async fn renewal_snapshot_state(
+    store: &SqliteStore,
+    assignment: &SourceDispatchAssignment,
+) -> String {
+    let rows=store.sharing_read("SELECT json_object('incarnation',s.incarnation_id,'epoch',s.owner_epoch,'lease',s.lease_expires_at_ms,'revision',j.revision,'produced',s.produced_playable_through_ms,'fetched',s.fetched_through_ms,'sequence',s.media_sequence) AS payload FROM media_sessions s JOIN job_leases j ON j.resource='session:'||s.incarnation_id AND j.owner_node_id=s.owner_node_id AND j.fence=s.owner_epoch WHERE s.incarnation_id=$1",vec![assignment.binding().incarnation_id().to_string().into()]).await.expect("exact route/lease state");
+    assert_eq!(rows.len(), 1);
+    rows[0].clone()
+}
+
+#[tokio::test]
+async fn sharing_source_owned_renewal_snapshot_preserves_progress_revision_and_cross_binding() {
+    let dir = tempfile::tempdir().expect("fixture directory");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory"),
+        SqliteStore::open(&dir.path().join("renewal-snapshot.db")).expect("pool"),
+    ] {
+        let other = SqliteStore::open_in_memory().expect("other actual Store");
+        let (assignment, key) = renewal_snapshot_published_fixture(&store, "snapshot-a").await;
+        let (other_assignment, _) = renewal_snapshot_published_fixture(&other, "snapshot-b").await;
+        let SourceOwnedRouteAuthorityRead::Ready(owned) = store
+            .prepare_source_owned_route_authority(&assignment, &key, &proof())
+            .await
+            .expect("owned observation")
+        else {
+            panic!("current owned route")
+        };
+        let state_a = renewal_snapshot_state(&store, &assignment).await;
+        let state_b = renewal_snapshot_state(&other, &other_assignment).await;
+        assert!(owned.renewal_snapshot_for(&other_assignment).is_none());
+        let mut mismatched = owned
+            .renewal_snapshot_for(&assignment)
+            .expect("matching dispatch");
+        mismatched.incarnation_id = other_assignment.binding().incarnation_id().to_string();
+        assert!(store
+            .renew_source_media_session(
+                &owned,
+                &mismatched,
+                now_ms().expect("clock"),
+                owned.lease_expires_at_ms + 60000,
+            )
+            .await
+            .expect("Core cross-binding refusal")
+            .is_none());
+        assert_eq!(renewal_snapshot_state(&store, &assignment).await, state_a);
+        assert_eq!(
+            renewal_snapshot_state(&other, &other_assignment).await,
+            state_b
+        );
+
+        let SourceOwnedRouteAuthorityRead::Ready(observed) = store
+            .prepare_source_owned_route_authority(&assignment, &key, &proof())
+            .await
+            .expect("fresh snapshot")
+        else {
+            panic!("owned snapshot")
+        };
+        let snapshot = observed
+            .renewal_snapshot_for(&assignment)
+            .expect("same dispatch");
+        assert_eq!(snapshot.owner_epoch, 1);
+        assert_eq!(snapshot.produced_playable_through_ms, 1600);
+        assert_eq!(snapshot.fetched_through_ms, 600);
+        assert_eq!(snapshot.media_sequence, 3);
+        // A producer observation advances progress after this snapshot, without
+        // replacing its exact lease. Renewal must retain every larger frontier.
+        store.sharing_txn(vec![("UPDATE media_sessions SET produced_playable_through_ms=2400,fetched_through_ms=900,media_sequence=5 WHERE incarnation_id=$1".into(),vec![assignment.binding().incarnation_id().into()])]).await.expect("concurrent stored progress");
+        let expiry = observed.lease_expires_at_ms + 60000;
+        let renewed = store
+            .renew_source_media_session(&observed, &snapshot, now_ms().expect("clock"), expiry)
+            .await
+            .expect("snapshot renewal")
+            .expect("live same owner");
+        assert_eq!(renewed.produced_playable_through_ms, 2400);
+        assert_eq!(renewed.fetched_through_ms, 900);
+        assert_eq!(renewed.media_sequence, 5);
+        let SourceOwnedRouteAuthorityRead::Ready(fresh) = store
+            .prepare_source_owned_route_authority(&assignment, &key, &proof())
+            .await
+            .expect("advanced lease observation")
+        else {
+            panic!("renewed owned route")
+        };
+        assert!(observed.renewed_by_same_owner(&fresh));
+        assert_eq!(fresh.lease_revision, observed.lease_revision + 1);
+        let state_after_competing_renewal = renewal_snapshot_state(&store, &assignment).await;
+        assert!(store
+            .renew_source_media_session(
+                &observed,
+                &snapshot,
+                now_ms().expect("clock"),
+                expiry + 60000
+            )
+            .await
+            .expect("old revision refuses")
+            .is_none());
+        assert_eq!(
+            renewal_snapshot_state(&store, &assignment).await,
+            state_after_competing_renewal
+        );
+        let fresh_snapshot = fresh
+            .renewal_snapshot_for(&assignment)
+            .expect("same owner, newer lease");
+        let retried = store
+            .renew_source_media_session(
+                &fresh,
+                &fresh_snapshot,
+                now_ms().expect("clock"),
+                expiry + 60000,
+            )
+            .await
+            .expect("legitimate same-owner revision retry")
+            .expect("new revision renews");
+        assert_eq!(retried.produced_playable_through_ms, 2400);
+        assert_eq!(retried.fetched_through_ms, 900);
+        assert_eq!(retried.media_sequence, 5);
+    }
+}
+
 #[tokio::test]
 async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
     let dir = tempfile::tempdir().expect("fixture directory");

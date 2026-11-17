@@ -361,8 +361,24 @@ pub struct SourceOwnedRouteAuthority {
     pub(crate) session_id: String,
     pub(crate) lease_expires_at_ms: i64,
     pub(crate) lease_revision: i64,
+    pub(crate) renewal: crate::domain::MediaSessionRenewal,
 }
 impl SourceOwnedRouteAuthority {
+    /// Copy the observed renewal tuple only for this exact dispatch lineage.
+    /// A snapshot does not refresh its authority; the Store still checks freshness.
+    pub fn renewal_snapshot_for(
+        &self,
+        assignment: &SourceDispatchAssignment,
+    ) -> Option<crate::domain::MediaSessionRenewal> {
+        if !self.assignment.same_identity(assignment) {
+            return None;
+        }
+        let mut renewal = self.renewal.clone();
+        // Preserve the caller-assignment boundary checked again by the Store.
+        renewal.incarnation_id = assignment.binding.incarnation_id.to_string();
+        Some(renewal)
+    }
+
     pub fn validate_observation_freshness(&self, now_ms: i64) -> Result<(), SourceAdmissionError> {
         self.assignment.validate_observation_freshness(now_ms)
     }

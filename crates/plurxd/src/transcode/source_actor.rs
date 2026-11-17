@@ -213,7 +213,7 @@ pub(crate) mod direct;
 
 use plurx_core::{
     domain::{
-        MediaSessionActivation, MediaSessionEnd, MediaSessionRenewal, MediaSessionRoute,
+        MediaSessionActivation, MediaSessionEnd, MediaSessionRoute,
         MEDIA_SESSION_PUBLICATION_BLOCKED,
     },
     sharing_resources::{SharingHlsResource, SharingHlsResourceKind},
@@ -1116,24 +1116,16 @@ impl SourceProducerAuthority {
         assignment: &SourceDispatchAssignment,
         proof: &plurx_core::sharing_source_sessions::SourceOwnedRouteAuthority,
     ) -> Result<Option<MediaSessionRoute>, SourceWorkerError> {
-        let incarnation = assignment.binding().incarnation_id().to_string();
-        let route = self
-            .store
-            .media_session_route_by_incarnation(&incarnation)
-            .await
-            .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_owner.route", error_class = "store", "Source admission refused"); SourceWorkerError::Unresolved })?
-            .ok_or_else(|| { tracing::warn!(target: "plurxd::transcode", stage = "source_owner.route", error_class = "absent", "Source admission refused"); SourceWorkerError::Unavailable })?;
+        // The owned observation already captured the exact renewal tuple. A second
+        // route read here could consume its five-second member-proof lifetime.
+        let renewal = proof
+            .renewal_snapshot_for(assignment)
+            .ok_or(SourceWorkerError::Unavailable)?;
         let now = crate::fragment_index_cluster::unix_ms();
         self.store
             .renew_source_media_session(
                 proof,
-                &MediaSessionRenewal {
-                    incarnation_id: incarnation,
-                    owner_epoch: route.owner_epoch,
-                    produced_playable_through_ms: route.produced_playable_through_ms,
-                    fetched_through_ms: route.fetched_through_ms,
-                    media_sequence: route.media_sequence,
-                },
+                &renewal,
                 now,
                 now.saturating_add(60_000),
             )
