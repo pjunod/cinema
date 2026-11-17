@@ -66,7 +66,18 @@ impl StreamFormat {
                 encoder: Some(encoding.delivered_output_encoder()),
                 pipeline: Some(pipeline.name()),
                 pipeline_label: Some(pipeline_label),
-                dynamic_range: Some(contract.output_dynamic_range().to_owned()),
+                // The frozen encoder contract describes the PQ base. A
+                // permitted processing plan may additionally author P81 in
+                // that same HEVC carrier; report the attached result, just as
+                // its start response and native HLS master do.
+                dynamic_range: Some(
+                    if encoding.preserves_processed_dv() {
+                        "dolby_vision"
+                    } else {
+                        contract.output_dynamic_range()
+                    }
+                    .to_owned(),
+                ),
                 ffmpeg_build: Some(encoding.ffmpeg_build.clone()),
             });
         }
