@@ -218,8 +218,10 @@ class Playback:
             self.notice = "Image subtitles are not available in plurx Player yet"
 
     def create_session(self, start_ms):
+        # Every session opened by this controller is consumed by the selected mpv.
         body = {"playback_id": self.playback_id, "request_id": str(uuid.uuid4()), "caps": self.caps,
-                "start": round(max(0, start_ms) / 1000, 3), "presentation": "vod"}
+                "start": round(max(0, start_ms) / 1000, 3), "presentation": "vod",
+                "transport": "mpv"}
         if self.requested_audio is not None:
             body["audio"] = self.requested_audio
         if self.mode == "remux":

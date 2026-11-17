@@ -136,7 +136,8 @@ pub(super) struct ServedPlaylistSnapshot {
 
 /// First publication is separate from steady reserve. Native HLS must admit
 /// its fixed advertised target before attachment; the audited hls.js path can
-/// replenish a shorter first reload window. This contract is frozen at create,
+/// replenish a shorter first reload window, and MPV can attach to the first
+/// complete cut. This contract is frozen at create,
 /// so a retry or producer replacement cannot shorten native admission.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum RollingStartupPolicy {
@@ -145,7 +146,6 @@ pub(super) enum RollingStartupPolicy {
     #[default]
     NativePresentationWindow,
     FirstReloadWindow,
-    #[cfg(test)]
     FirstCompleteSegment,
     #[cfg(test)]
     WebFixedHlsV1,
@@ -158,7 +158,6 @@ impl RollingStartupPolicy {
             Self::Conservative => false,
             Self::NativePresentationWindow => false,
             Self::FirstReloadWindow => true,
-            #[cfg(test)]
             Self::FirstCompleteSegment => true,
             #[cfg(test)]
             Self::WebFixedHlsV1 => true,
@@ -176,7 +175,6 @@ impl RollingStartupPolicy {
                     ROLLING_RESERVE_MAX_MS,
                 )
             }
-            #[cfg(test)]
             Self::FirstCompleteSegment => {
                 ((f64::from(plurx_core::transcode::SEGMENT_SECONDS) * 1_000.0 * rate).ceil() as i64)
                     .clamp(2_000, ROLLING_RESERVE_MAX_MS)
@@ -238,13 +236,14 @@ impl RollingPublicationClock {
     pub(super) fn bind_startup_transport(&mut self, transport: Option<&str>) {
         // A ready playlist is not native decoder admission. Safari can fetch
         // every object in a short target-16 window yet stay at HAVE_METADATA
-        // until startup expires. Only the audited hls.js path has evidence for
-        // the short reload window; native, omitted and future transports need
+        // until startup expires. MPV consumes complete cuts without Safari
+        // admission; hls.js uses its own reload window. Other transports need
         // a window derived from that same fixed presentation target. Keep the
         // producer's paid steady reserve and all media validation unchanged.
         if !self.startup_policy_bound && self.served.is_none() {
             self.startup_policy = match transport {
                 Some("hlsjs") => RollingStartupPolicy::FirstReloadWindow,
+                Some("mpv") => RollingStartupPolicy::FirstCompleteSegment,
                 _ => RollingStartupPolicy::NativePresentationWindow,
             };
             self.startup_policy_bound = true;

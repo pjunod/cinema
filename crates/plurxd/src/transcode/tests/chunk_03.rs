@@ -552,20 +552,25 @@
     }
 
     #[test]
-    fn rolling_bootstrap_is_bound_to_the_native_presentation_contract() {
-        for transport in [None, Some("native"), Some("hlsjs"), Some("unknown")] {
+    fn rolling_bootstrap_is_bound_to_the_consumer_contract() {
+        for transport in [None, Some("native"), Some("hlsjs"), Some("mpv"), Some("unknown")] {
             let mut clock = RollingPublicationClock::default();
             clock.bind_startup_transport(transport);
             let hlsjs = transport == Some("hlsjs");
-            let policy = if hlsjs {
+            let mpv = transport == Some("mpv");
+            let policy = if mpv {
+                RollingStartupPolicy::FirstCompleteSegment
+            } else if hlsjs {
                 RollingStartupPolicy::FirstReloadWindow
             } else {
                 RollingStartupPolicy::NativePresentationWindow
             };
             assert_eq!(clock.startup_policy, policy);
-            assert_eq!(clock.startup_policy.uses_small_bootstrap(), hlsjs);
+            assert_eq!(clock.startup_policy.uses_small_bootstrap(), hlsjs || mpv);
             for rate in [0.25, 1.0, 4.0] {
-                let expected = if hlsjs {
+                let expected = if mpv {
+                    ((2_000.0_f64 * rate).ceil() as i64).clamp(2_000, ROLLING_RESERVE_MAX_MS)
+                } else if hlsjs {
                     ((16_000.0_f64 * rate).ceil() as i64).clamp(16_000, ROLLING_RESERVE_MAX_MS)
                 } else {
                     rolling_initial_runway_ms(rate)
@@ -580,48 +585,43 @@
         }
     }
 
+    /// Replay the measured MPV seek: the writer committed a 2.795s cut
+    /// immediately, but native admission withheld it for another 22.281s.
+    /// A short first snapshot must replenish without changing steady reserve.
     #[tokio::test]
-    async fn rolling_first_complete_cut_is_published_and_replenished_before_steady_cadence() {
-        for transport in ["native", "hlsjs"] {
-            let directory = crate::test_tempdir().expect("short bootstrap");
-            let session = test_session(directory.path().to_path_buf());
-            session.publication.lock().await.bind_startup_candidate_for_test(RollingStartupPolicy::FirstCompleteSegment);
-            let _ = transport; // Same controlled short-arm proof for each transport label.
-            accept_rolling_publication_demand(
-                &session, 1, 0, 1.0,
-                crate::playback_control::PlaybackDemand::Active,
-                crate::playback_control::RenderState::Starting,
-            ).await;
-            tokio::fs::write(directory.path().join("index.m3u8"), rolling_playlist(&[2.002], false)).await.expect("first cut");
-            session.publication_cycle("short-bootstrap").await.expect("first publication");
-            {
-                let clock = session.publication.lock().await;
-                assert_eq!(clock.served.as_ref().expect("first snapshot").end_ms, 2_002);
-                assert_ne!(clock.reserve_phase, RollingReservePhase::Steady);
+    async fn rolling_mpv_first_cut_is_published_and_replenished() {
+        for explicit in [false, true] {
+            let directory = crate::test_tempdir().expect("MPV bootstrap");
+            let mut session = test_session(directory.path().to_path_buf());
+            session.start_seconds = 5_853.872;
+            session.media_origin_seconds = 5_853.639;
+            session.publication.lock().await.bind_startup_transport(Some("mpv"));
+            if explicit {
+                accept_rolling_publication_demand(
+                    &session, 1, 5_853_872, 1.0,
+                    crate::playback_control::PlaybackDemand::Active,
+                    crate::playback_control::RenderState::Starting,
+                ).await;
             }
-            tokio::fs::write(directory.path().join("index.m3u8"), rolling_playlist(&[2.002; 3], false)).await.expect("next cuts");
-            // Use the policy clock to exercise a replenishment before the 16s
-            // steady cycle. No sleep and no altered producer/capacity budget.
-            let due = session
-                .publication
-                .lock()
-                .await
-                .served
-                .as_ref()
-                .expect("first short cut is served before refill")
-                .available_at
-                + Duration::from_secs(2);
-            session.publication_cycle_at("short-bootstrap-refill", due).await.expect("replenishment");
+            tokio::fs::write(directory.path().join("index.m3u8"), rolling_playlist(&[2.795], false)).await.expect("first complete cut");
+            session.publication_cycle("mpv-bootstrap").await.expect("first publication");
+            let available_at = {
+                let clock = session.publication.lock().await;
+                let served = clock.served.as_ref().expect("MPV admits the measured first cut");
+                assert_eq!(served.end_ms, 2_795);
+                assert_ne!(clock.reserve_phase, RollingReservePhase::Steady);
+                served.available_at
+            };
+            // Variable GOP lengths retain complete-object selection. The
+            // low-reserve path replenishes before the steady 16s cadence.
+            tokio::fs::write(directory.path().join("index.m3u8"), rolling_playlist(&[2.795, 8.100, 4.200], false)).await.expect("next complete cuts");
+            session.publication_cycle_at("mpv-refill", available_at + Duration::from_secs(2)).await.expect("replenishment");
             let clock = session.publication.lock().await;
-            assert_eq!(clock.served.as_ref().expect("replenished").end_ms, 6_006);
-            assert!(
-                clock
-                    .served
-                    .as_ref()
-                    .expect("replenished short cut remains served")
-                    .end_ms
-                    < 48_000
-            );
+            let served = clock.served.as_ref().expect("replenished MPV snapshot");
+            assert_eq!(served.end_ms, 15_095);
+            assert_ne!(clock.reserve_phase, RollingReservePhase::Steady);
+            assert!(served.end_ms < ROLLING_INITIAL_RUNWAY_MS);
+            assert_eq!(clock.startup_policy.bootstrap_ms(1.0), 2_000);
         }
     }
 

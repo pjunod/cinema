@@ -1946,6 +1946,10 @@ rest, in the groups that matter:
   claim about the grade cannot authorize anything),
   `audio_offset_ms` (±15 000, never written back to the file).
 - **Position** — `start` in seconds, negatives clamped to 0.
+- **Consumer transport** — optional `transport` identifies the selected HLS consumer.
+  `"mpv"` admits a complete first cut and replenishes low reserve; `"hlsjs"`
+  uses its reload window. Native, omitted and unknown consumers retain the
+  native presentation window. MPV retirement remains conservative.
 - **Source service** — optional `source_telemetry: "film-v1"` declares film-demand
   reporting separately from `transport`. A capable client receives startup/refill
   priority before its first control exchange. Omission uses finite transfer
