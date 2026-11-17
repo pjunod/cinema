@@ -1379,7 +1379,7 @@ mod tests {
                 selected.identity.node_id.clone(),
                 selected.identity.cluster_id.clone(),
                 Arc::clone(&selected.credential_key),
-                selected.local_client(),
+                selected.local_client().map(crate::cluster::backup_source),
                 selected.replication_monitor(),
                 selected.membership_manager(),
                 selected.catalogue_reader(),
