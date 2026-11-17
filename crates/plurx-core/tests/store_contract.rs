@@ -25447,7 +25447,12 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
         );
 
         // Keep this subscenario after the preceding reader's expiry/grace.
-        // A different worker still shares the same root-wide capacity.
+        // The three fenced attempts below may retain physical readers during
+        // grace; this subscenario checks retry/publication fences, not capacity.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "3")
+            .await
+            .expect("capacity for three fenced semantic attempts");
         let semantic_start = current_reader_deadline + 60_001;
         let semantic_request_id = uuid::Uuid::new_v4().to_string();
         let semantic_request = NewAnalysisRequest {
