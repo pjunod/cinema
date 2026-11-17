@@ -1,6 +1,6 @@
 # Source leases and root capacity — as built
 
-**Status:** root-capacity continuation WIP in [PR #1728](http://forge.lan:3000/noirr/plurx/pulls/1728); review and focused qualification pending · **Plan:** [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) · **Updated:** 2026-11-16
+**Status:** built; root-capacity continuation WIP in [PR #1728](http://forge.lan:3000/noirr/plurx/pulls/1728); review and focused qualification pending · **Plan:** [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) · **Updated:** 2026-11-16
 
 
 Built on `claude/source-lease-steps-2-4` (stacked on PR #1597) by Claude Opus
