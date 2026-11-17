@@ -883,12 +883,83 @@ async fn staged_processing_delivery_round_trip(profile81: bool, verified: bool) 
     let dir = crate::test_tempdir().expect("state dir");
     let playback = unique_playback_id("staged-processing-delivery");
     let (fixture, session, route) = staging_fixture_for_playback(dir.path(), &playback).await;
-    let mut source = staged_source_file();
-    source.video_codec = Some("hevc".into());
-    source.bit_depth = Some(10);
-    source.hdr = Some("smpte2084".into());
-    source.dolby_vision.profile = Some(7);
-    source.dolby_vision.el_present = Some(true);
+    let old = fixture
+        .store
+        .get_file(fixture.file_id())
+        .await
+        .expect("source read")
+        .expect("fixture source");
+    let mut dv = dolby_vision_p7_file().dolby_vision;
+    dv.el_present = Some(true);
+    dv.rpu_present = Some(true);
+    fixture
+        .store
+        .upsert_file(
+            old.item_id,
+            old.path.to_str().expect("source path"),
+            old.size,
+            old.mtime,
+            &plurx_core::domain::ProbeResult {
+                duration_ms: old.duration_ms,
+                container: Some("mkv".into()),
+                video_codec: Some("hevc".into()),
+                video_profile: Some("Main 10".into()),
+                width: Some(3840),
+                height: Some(2160),
+                bit_depth: Some(10),
+                hdr: Some("dolby_vision".into()),
+                dolby_vision: dv,
+                audio_streams: vec![plurx_core::domain::AudioStream {
+                    index: 2,
+                    codec: "eac3".into(),
+                    channels: Some(6),
+                    sample_rate: Some(48_000),
+                    channel_layout: Some("5.1".into()),
+                    language: None,
+                    title: None,
+                    default: true,
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("source DV metadata");
+    fixture
+        .store
+        .put_setting(plurx_core::store::keys::DV_HDR_PROCESSING, "1")
+        .await
+        .expect("processing enabled");
+    fixture
+        .store
+        .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
+        .await
+        .expect("route-v1 owner enabled before planning snapshot");
+    let snapshot = fixture
+        .store
+        .playback_planning_snapshot(fixture.file_id(), &crate::transcode::QUALITY_PLANNING_KEYS)
+        .await
+        .expect("planning read")
+        .expect("planning snapshot");
+    let source = &snapshot.file;
+    assert_eq!(
+        source.dolby_vision.profile,
+        Some(7),
+        "typed source DV facts survived the store round trip"
+    );
+    let caps = caps_v2(
+        r#"{"v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["sdr","pq"],"max_width":3840,"max_height":2160,"max_frame_rate":{"numerator":24,"denominator":1}}],
+        "containers":["mkv","mp4"],"transports":["hls"],"dv_transport":"hls","hls_hevc_sample_entries":["hvc1"],"audio":["aac","eac3"],
+        "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
+            {"codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}]}"#,
+    );
+    let body = CreateSession {
+        playback_id: playback.clone(),
+        copy: Some(true),
+        audio: Some(2),
+        caps: Some(caps.clone()),
+        ..bare_create()
+    };
+    let query = body.selection_catalog_request(source, &caps, body.reviewed_copy_scope(None));
     let candidate = QualityCandidate {
         id: CandidateId::for_recipe_digest([0x8a; 32]),
         recipe_digest: [0x8a; 32],
@@ -906,19 +977,44 @@ async fn staged_processing_delivery_round_trip(profile81: bool, verified: bool) 
         complete_cache: false,
         sustainable: true,
     };
+    let mut context = crate::transcode::TranscodeManager::candidate_context(&candidate);
+    context.catalog_query = Some(query);
+    context.canonical_caps = Some(caps.clone());
+    context.planning_binding = Some(crate::media_pool::PlanningBinding::from_snapshot(&snapshot));
+    context.planning_snapshot = Some(Arc::new(snapshot.clone()));
+    let claim = plurx_core::playback::audio::AudioClaim::from_caps(&caps)
+        .expect("audio caps")
+        .expect("audio claim");
+    let audio = plurx_core::playback::audio::resolve_audio(
+        source.audio_streams.first(),
+        &claim.profile(),
+        plurx_core::playback::audio::AudioRoute::EncodedVod,
+        0,
+    );
     let processed = crate::transcode::SessionRequest {
+        file_id: source.id,
         playback_id: playback.clone(),
+        kind: crate::transcode::SessionKind::Transcode { height: 2160 },
+        audio_index: Some(2),
+        audio_claim: Some(claim),
+        audio_delivery: Some(audio),
         hdr10: true,
         dv_processing_destination: Some(if profile81 {
             DvDestination::Profile81
         } else {
             DvDestination::Hdr10
         }),
-        candidate_context: Some(Box::new(
-            crate::transcode::TranscodeManager::candidate_context(&candidate),
-        )),
+        candidate_context: Some(Box::new(context)),
         ..staged_candidate_request()
     };
+    fixture
+        .state
+        .transcode
+        .remember_processed_candidate(&processed);
+    let decoder = crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1)
+        .expect("decoder snapshot");
+    let mut predecessor = staged_predecessor_recipe(&route);
+    predecessor.decoder_caps = Some(decoder.clone());
     let ids = StagedSuccessorIds::mint();
     let incarnation = ids.incarnation_id.clone();
     let successor_session = ids.session_id.clone();
@@ -926,9 +1022,9 @@ async fn staged_processing_delivery_round_trip(profile81: bool, verified: bool) 
         &fixture.state,
         &session,
         &route,
-        &staged_predecessor_recipe(&route),
+        &predecessor,
         &processed,
-        Some(&source),
+        Some(source),
         &fixture.state.node_id,
         PreparationPurpose::SelectionChange,
         AcceptedAsk {
@@ -955,6 +1051,17 @@ async fn staged_processing_delivery_round_trip(profile81: bool, verified: bool) 
         .expect("route read")
         .expect("the exact minted successor was reserved");
     assert_eq!(successor.session_id, successor_session);
+    let serialized: RemoteStartRequest =
+        serde_json::from_str(&successor.recipe_json).expect("durable route-v1 recipe");
+    assert!(
+        serialized.is_valid(),
+        "the actual announcement requires a valid negotiated recipe"
+    );
+    assert_eq!(serialized.request.file_id, fixture.file_id());
+    assert!(matches!(
+        serialized.request.kind,
+        crate::transcode::SessionKind::Transcode { height: 2160 }
+    ));
     let start: StartResponse =
         serde_json::from_str(&successor.response_json).expect("durable StartResponse");
     let delivered = if profile81 && verified {
@@ -965,7 +1072,15 @@ async fn staged_processing_delivery_round_trip(profile81: bool, verified: bool) 
     let expected_profile = (profile81 && verified).then_some(8);
     assert_eq!(start.delivered_dynamic_range.as_deref(), Some(delivered));
     assert_eq!(start.delivered_dolby_vision_profile, expected_profile);
-    let enhancement = start.enhancement.as_ref().expect("DV source enhancement");
+    assert!(
+        start.enhancement.is_none(),
+        "general StartResponse replay must not deserialize persisted enhancement authority"
+    );
+    let stored: serde_json::Value =
+        serde_json::from_str(&successor.response_json).expect("raw durable StartResponse");
+    let enhancement: plurx_core::playback::enhancement::PlaybackEnhancement =
+        serde_json::from_value(stored["enhancement"].clone())
+            .expect("persisted DV enhancement metadata");
     assert_eq!(
         enhancement
             .active
@@ -981,6 +1096,15 @@ async fn staged_processing_delivery_round_trip(profile81: bool, verified: bool) 
     request.supported_actions = Some(vec![
         crate::playback_control::PREPARE_REPLACEMENT_ACTION.to_owned(),
     ]);
+    let capabilities = request.capabilities.as_mut().expect("dynamic capabilities");
+    capabilities.decoder_caps = Some(decoder);
+    capabilities.max_height = 2160;
+    capabilities.codecs = vec![crate::playback_control::CodecPolicy::Hevc];
+    capabilities.dynamic_ranges = vec![
+        crate::playback_control::DynamicRangePolicy::Hdr10,
+        crate::playback_control::DynamicRangePolicy::DolbyVision,
+    ];
+    capabilities.dual_player_preparation = true;
     let (status, offer) = control_body(
         control_local_inner(
             &fixture.state,
@@ -1004,9 +1128,9 @@ async fn staged_processing_delivery_round_trip(profile81: bool, verified: bool) 
             .and_then(serde_json::Value::as_u64),
         expected_profile.map(u64::from)
     );
-    assert_eq!(
-        offer["action"]["enhancement"],
-        serde_json::to_value(enhancement).expect("enhancement wire")
+    assert!(
+        offer["action"]["enhancement"].is_null(),
+        "unprimed staging has no attached successor owner and cannot revive persisted enhancement metadata"
     );
 
     // The served-window report must bind to the staged generation AND its
@@ -1033,7 +1157,10 @@ async fn staged_processing_delivery_round_trip(profile81: bool, verified: bool) 
         "a current HDR10 owner receipt is valid without an earlier root marker; a P81 receipt still needs its DV carrier"
     );
     if !verified {
-        assert!(enhancement.details.is_empty(), "pending metadata cannot contradict a later owner receipt");
+        assert!(
+            enhancement.details.is_empty(),
+            "pending metadata cannot contradict a later owner receipt"
+        );
         assert!(
             enhancement.active.is_empty(),
             "without a verified root, no processing badge is active before its owner receipt"

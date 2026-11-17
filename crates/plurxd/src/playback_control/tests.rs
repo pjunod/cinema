@@ -17928,13 +17928,14 @@ fn committed_timeline_origin_is_signed_without_widening_buffer_positions() {
 
 #[test]
 fn prepared_delivery_profile_survives_wire_and_legacy_absence() {
+    let session = uuid::Uuid::new_v4().to_string();
     let mut selection = prepared_selection();
     selection.dynamic_range = Some("dolby_vision".to_owned());
     let action = PreparedSuccessorAction {
         staged_incarnation_id: uuid::Uuid::new_v4().to_string(),
         deadline_ms: i64::MAX,
-        session_id: "profile81-successor".to_owned(),
-        playlist_url: "/api/v1/hls/profile81-successor/index.m3u8".to_owned(),
+        session_id: session.clone(),
+        playlist_url: format!("/api/v1/hls/{session}/index.m3u8"),
         control: None,
         media_origin_ms: 0,
         effective_selection: selection,
