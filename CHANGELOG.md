@@ -33,6 +33,24 @@ bump may break compatibility and a **patch** bump never does.
   outputs cannot authorize promotion; a selected but skipped Rust stage also
   blocks the main gate. Compatible passes remain reusable case by case.
 
+- Web prepared upgrades keep predecessor control observations on their own
+  media source through exposure, so a transient successor wait cannot cancel
+  its own preparation. The first visible frame freezes the final commit;
+  retries and close preserve that exact settlement before changing reporters.
+
+- Auto playback keeps foreground admission through VOD creation, so a cold
+  start can ask background work to yield; prepared successors retain their
+  separate speculative purpose even when they share a cached rendition.
+- Reattaching to a cached VOD rendition no longer sends source telemetry to
+  its retired input owner. The next live input receives pending telemetry.
+- Preserve measured CM29 dark-chroma mapping for qualified P3 display targets with black from zero through 0.005 nits, while retaining each target's tone curve.
+- Clocked Source copies and Analysis gap fills preserve the first video
+  sample's duration when AAC begins earlier. The MP4 muxer previously
+  stretched only the AV companion's first sample, so strict comparison with
+  the video-only observation refused the generation as `copy_sync_unverified`.
+  The clocked mux policy now preserves both sample timing and the A/V start
+  offset without edit lists; companion and seek verification remain strict.
+
 - Dolby Vision titles the server reconstructs from the base layer alone no
   longer have their black level raised: Profile 5, Profile 8, and Profile 7
   when it is processed without its enhancement layer. The reconstruction pass
