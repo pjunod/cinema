@@ -306,3 +306,16 @@ The current landed-mark base `6c95fed4c` has passed its isolated daemon
 all-target check, 35 focused 7b regressions and all ten census cases. The 7c
 plan changes documentation only, so this establishes its source compiler
 baseline before implementation.
+
+Administrative preflight needs its own core observation service: fresh
+topology and uncached operation targets from the existing query, distinct
+from both job placement and the stamped directory. Do not route mutation
+preflight through a cached directory or relabel it as artifact work. This
+service supplies observations, while the separate active-voter confirmation
+and existing operation claims/deadlines retain authorization ownership.
+
+7c also owns exact API migrations in actual daemon startup/test fixtures
+that directly call one of the now-private methods. Preserve their original
+assertions and runtime prerequisites; the compiler identifies those consumers
+with the actual integration feature enabled. No fixture may replace a proved
+clock roster with an applied hint to avoid an API error.
