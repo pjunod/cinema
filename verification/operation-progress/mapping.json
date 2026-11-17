@@ -345,7 +345,7 @@
         "table": "recovery dependency outside model: immutable physical custody lookup",
         "source": "crates/plurx-core/src/store/background_jobs_resources.rs",
         "anchor": "pub(super) async fn resolve_background_custody<T: QueueSql>(",
-        "sha256": "264dd193405233a6a3785a144a908a8f7bce4cfc128db5afa23445423189442d"
+        "sha256": "5d5133705a5278a025e9f01be7465a2d957ad5df468c8f1b16c69bc55a1e8d25"
       },
       {
         "table": "source lease root identity outside model",

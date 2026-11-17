@@ -242,7 +242,7 @@ async fn root_override_keeps_existing_holders_and_does_not_lower_sibling_root() 
     assert_eq!(
         sql(
             &store,
-            "SELECT count(*) FROM source_leases WHERE owner_kind='job' AND phase!='paused'"
+            "SELECT CAST(count(*) AS TEXT) FROM source_leases WHERE owner_kind='job' AND phase!='paused'"
         )
         .await,
         vec!["2"],

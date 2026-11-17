@@ -3286,7 +3286,7 @@ async fn claim_background_service_inner<T: QueueSql>(
           OR EXISTS(SELECT 1 FROM source_lease_receipt_resources scope,
             resource_set,json_each(resource_set.resources) required
             WHERE scope.receipt_id=grant_row.receipt_id AND
-              (scope.resource_key=required.value OR scope.resource_key='source_io' OR required.value='source_io'))),0) AS allocated,
+              (scope.resource_key=required.value OR scope.resource_key='source_io' OR required.value='source_io')))),0) AS allocated,
         COALESCE((SELECT allocated_bytes FROM prior),0) AS owned),
       allowance AS (SELECT CASE WHEN finite=1 THEN CASE WHEN owned>0 THEN
           CASE WHEN allocated>quota THEN 0 ELSE MIN(owned,quota/readers) END

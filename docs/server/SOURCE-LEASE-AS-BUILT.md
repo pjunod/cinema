@@ -14,6 +14,15 @@ reason. Section numbers (§) are the plan's.
 > source history, not qualification of this root-capacity delta. PR #1728 is
 > WIP; review and focused checks against the current tree remain. No deployment.
 
+The expanded catalog is forward-only. The origin/main binary at 32fa
+rejects its rewritten pause/resume SQL at the exact source_arbitration_shape
+check; its managed-v6 and dispatch validators also reject the new resource
+views. Existing v1 writers remain bridged while already running, but restart
+or rejoin after expand requires the new binary. Keep quorum during the binary
+roll and do not downgrade the expanded catalog. M1's note that ordinary
+startup does not reinstall the old claim trigger does not establish that the
+old executable can restart against this catalog.
+
 1. **The expand reinstalls the claim effects, on both backends.** The
    trigger moved to `background_job_claim_effects.sql`, which the base job
    schema includes and the expand (`source_leases::EXPAND`, one text for
@@ -137,8 +146,9 @@ reason. Section numbers (§) are the plan's.
     `replicated_v1_source_store_expands_carries_holders_and_contracts_when_every_node_is_ready`
     is the upgrade test: v1 store with a live job reader → expand carries it
     → restart waits for node-b's capability → contract → restart is a no-op →
-    three `source_io` readers on three nodes. The fresh-vs-chain schema
-    comparison runs the chain's contract first. Main integration includes
+    three `source_io` readers on three nodes. This fixture applies the v1 catalog using the current binary; it does not
+    start an old executable on the expanded catalog or qualify a downgrade.
+    The fresh-vs-chain schema comparison runs the chain's contract first. Main integration includes
     A1 (#1625): claim, local verdict and admissible candidate listing all
     share the lease admission groups. The provider-slot refusal belongs to
     the holder group too; a full provider pair is refused before proposing.
