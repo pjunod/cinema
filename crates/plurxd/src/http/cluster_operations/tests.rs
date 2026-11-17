@@ -1148,7 +1148,28 @@ async fn mutation_preflight_refreshes_roster_directory_and_bounded_peer_observat
     assert!(current_collector.contains("operations_for_directory"));
     assert!(current_collector.contains(".fresh_targets()"));
     let capability = include_str!("../../cluster.rs");
-    assert!(capability.contains("self.cluster.membership.operations_peers().await"));
+    let fresh_targets = capability
+        .split_once("pub(crate) async fn fresh_targets(")
+        .expect("fresh administrative target capability")
+        .1
+        .split_once("pub(crate) async fn revocation_capable(")
+        .expect("fresh administrative target capability end")
+        .0;
+    assert!(fresh_targets.contains("self.cluster.access.administrative().targets().await"));
+    let core_capability = include_str!("../../../../plurx-core/src/cluster/membership/access.rs");
+    let administrative = core_capability
+        .split_once("impl AdministrativeObservation {")
+        .expect("core administrative observation service")
+        .1
+        .split_once("#[cfg(test)]")
+        .expect("core administrative observation service end")
+        .0;
+    let targets = administrative
+        .split_once("pub fn targets(")
+        .expect("fresh core target observation")
+        .1;
+    assert!(targets.contains("self.manager.operations_peers()"));
+    assert!(!targets.contains("snapshot("));
     assert!(current_collector.contains("state.cluster.calls()"));
     assert!(current_collector.contains("collect_peer_statuses("));
     let restart = source
