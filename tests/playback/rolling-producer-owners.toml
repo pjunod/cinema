@@ -715,6 +715,17 @@
 # HTTP `Response::status()` assertion is a protocol observation. No matcher,
 # source scope, or ownership allowance changed.
 
+# Final-review source-shape recount (2026-11-16), after authenticated
+# Activity/Stop route hardening. Structural recount only; not test, runtime,
+# or subprocess qualification. The full-router learner fixture owns one
+# `tokio::spawn` gateway task and aborts/awaits its handle during teardown,
+# adding one joined task shape. Its three `.status()` reads inspect in-process
+# HTTP responses (including signed absent-owner behavior), not child processes.
+# The Source Stop fixture still uses the actual ProducerSlot and joins reader
+# and Stop tasks through physical settlement. Exact-count rows below are
+# refreshed from the pure inventory scanner. No matcher, source scope,
+# forbidden-zero rule, or ownership allowance changed.
+
 version = 1
 source = "crates/plurxd/src/transcode.rs"
 module_roots = [
@@ -4033,7 +4044,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # token: live_tv/tests.rs spawns dvr_loop twice and reminder_loop once;
 # sharing.rs's idle-loop test spawns run and claim_loop. No production
 # task owner is added.
-expected_occurrences = 1171
+expected_occurrences = 1172
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -7248,7 +7259,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # it reads listener state and launches nothing.
 # +1 with #1629: the sharing idle-loop test reads SharingManager::status()
 # to observe the listener state; it launches nothing.
-expected_occurrences = 945
+expected_occurrences = 948
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

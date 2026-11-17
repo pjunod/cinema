@@ -1,6 +1,6 @@
 # Shared DV/HDR — final review and owner disposition
 
-**Status:** one P1 corrected; compilation and runtime qualification pending.
+**Status:** one P1 corrected and compiled; runtime qualification pending.
 **Owner:** GPT/Codex · **Promotion:** [#1732](http://forge.lan:3000/noirr/plurx/pulls/1732)
 **Reviewed candidate:** `efe5400d4faf5dec7a4a8fbf63e93b1a4991e1fa`
 **Main base:** `32fa105eed4194d85f3cbc97794b6864fb99d2ad`
@@ -36,7 +36,8 @@ Coverage is deliberately split:
   separately owns the actual Source operation, child and reader barrier and
   checks that Stop waits for physical settlement.
 
-Both tests are authored; execution results belong to final qualification.
+Both tests are authored and their targets compile; execution results belong
+to final qualification.
 No second adversarial pass or independent approval of later edits is claimed.
 
 ## Independent review scope and remaining acceptance
