@@ -342,6 +342,10 @@ async fn playback_info_stream_format_is_the_attached_frozen_recipe() {
     let mut rendition = synthetic_rendition(base.path()).await;
     let live = Arc::get_mut(&mut rendition).expect("unshared rendition");
     live.recipe.file = file;
+    // Source tags cannot turn an ordinary frozen SDR encoding into DV. Only
+    // its own admitted processing plan may describe a processed DV carrier.
+    live.recipe.file.hdr = Some("dolby_vision".into());
+    live.recipe.file.dolby_vision.profile = Some(7);
     live.recipe.encoding = Some(Arc::clone(&encoding));
     let touched = Instant::now();
     insert_control_session(&serve, "attached-a", rendition.clone(), touched).await;

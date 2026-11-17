@@ -127,6 +127,8 @@
       && boundedInteger(action.media_origin_ms, -MAX_MEDIA_MS, MAX_MEDIA_MS)
       && (action.control == null || (validBootstrap(action.control)
         && action.control.url === `/api/v1/hls/${action.session_id}/control`))
+      && (action.delivered_dolby_vision_profile == null
+        || boundedInteger(action.delivered_dolby_vision_profile, 0, 255))
       && validEffectiveSelection(action.effective_selection);
   }
 
