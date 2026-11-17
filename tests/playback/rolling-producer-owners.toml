@@ -7259,10 +7259,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # it reads listener state and launches nothing.
 # +1 with #1629: the sharing idle-loop test reads SharingManager::status()
 # to observe the listener state; it launches nothing.
-# Main #1736 adds one `VodSessionStore::status()` read in
-# `processed_reuse_tests.rs::processed_stream_format_reports_the_attached_carrier_not_its_pq_base`.
-# It inspects the attached playback status for HDR10 base vs DV carrier and is
-# not an OS process launch.
+# Prepared delivery (#1736, baseline repair #1752): +1 test-only
+# `.vod.status()` observation in
+# processed_reuse_tests.rs::processed_stream_format_reports_the_attached_carrier_not_its_pq_base.
+# It reads the existing VOD owner's status_publication snapshot: no child
+# launch, lease renewal, or ownership transfer. Together with this effort's
+# twelve additional shapes above, the final count is 949. Matcher unchanged.
 expected_occurrences = 949
 
 [[module_structures]]
