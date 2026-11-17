@@ -17,7 +17,7 @@ use axum::Json;
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::membership::{
     ActivityPeer, ClusterNodeRecord, ClusterOperationCleanupOutcome, ClusterOperationLease,
-    MembershipError, MembershipManager, MembershipStatus, NodeRole, MAX_OPERATIONS_PEERS,
+    MembershipError, MembershipStatus, NodeRole, MAX_OPERATIONS_PEERS,
 };
 use plurx_core::cluster::migration::status::{
     DbSnapshotMetricsSnapshot, SnapshotTransportPhase, SnapshotTransportStatus, WalRuntimeState,
@@ -35,6 +35,7 @@ use super::peer_transport::{
     deadline_after, exact_auth_from_headers, PeerAuthMode, PeerTransport, PeerTransportError,
 };
 use super::{ReadinessEvaluation, ReadinessFailure};
+use crate::cluster::Operations;
 use crate::redact::redact_operator_text;
 use crate::serving_fence::PlannedOutageFenceToken;
 use crate::state::AppState;
@@ -365,28 +366,28 @@ pub(crate) async fn collect_current_aggregate(
     state: &AppState,
 ) -> Result<ClusterOperationsAggregate, ApiError> {
     let deadline = deadline_after(AGGREGATE_TIMEOUT);
-    let membership_for_status = state.membership.clone();
-    let membership_for_directory = state.membership.clone();
+    let operations_for_status = state.cluster.operations();
+    let operations_for_directory = state.cluster.operations();
     let transport = PeerTransport::new(state.membership.clone());
-    let replication = state.replication.clone();
+    let observations = state.cluster.observations();
     collect_current_aggregate_with_sources(
         &state.node_id,
         deadline,
         move || async move {
-            membership_for_status
-                .status()
+            operations_for_status
+                .topology()
                 .await
                 .map_err(|error| error.to_string())
         },
         move || async move {
-            membership_for_directory
-                .operations_peers()
+            operations_for_directory
+                .fresh_targets()
                 .await
                 .map_err(|error| error.to_string())
         },
         || local_snapshot(state),
         move |peers, deadline| async move {
-            collect_peer_statuses(peers, transport, replication, deadline).await
+            collect_peer_statuses(peers, transport, observations, deadline).await
         },
     )
     .await
@@ -403,8 +404,7 @@ pub(crate) enum PlannedOutageOperation {
 /// successful restart preparation or maintenance commit disarms it.
 pub(crate) struct PlannedOutageLeaseGuard {
     lease: Option<ClusterOperationLease>,
-    membership: MembershipManager,
-    serving: crate::serving_fence::ServingFence,
+    operations: Operations,
     local_fence: Option<PlannedOutageFenceToken>,
     shutdown: tokio_util::sync::CancellationToken,
     release_runtime: tokio::runtime::Handle,
@@ -413,14 +413,12 @@ pub(crate) struct PlannedOutageLeaseGuard {
 impl PlannedOutageLeaseGuard {
     fn new(
         lease: ClusterOperationLease,
-        membership: MembershipManager,
-        serving: crate::serving_fence::ServingFence,
+        operations: Operations,
         shutdown: tokio_util::sync::CancellationToken,
     ) -> Self {
         Self {
             lease: Some(lease),
-            membership,
-            serving,
+            operations,
             local_fence: None,
             shutdown,
             release_runtime: tokio::runtime::Handle::current(),
@@ -434,8 +432,7 @@ impl PlannedOutageLeaseGuard {
     ) -> Self {
         Self {
             lease: None,
-            membership: MembershipManager::unavailable(),
-            serving,
+            operations: Operations::for_local_fence_test(serving),
             local_fence: Some(local_fence),
             shutdown: tokio_util::sync::CancellationToken::new(),
             release_runtime: tokio::runtime::Handle::current(),
@@ -452,15 +449,14 @@ impl PlannedOutageLeaseGuard {
 
     fn retain_local_fence(&self) {
         if let Some(token) = self.local_fence {
-            self.serving
-                .retain_planned_outage_preparation_until_cancelled(token);
+            self.operations.retain_outage_fence(token);
         }
     }
 
     async fn cancel_local_fence(&self, active_sessions: usize) {
         if let Some(token) = self.local_fence {
-            self.serving
-                .cancel_planned_outage_preparation(token, active_sessions)
+            self.operations
+                .cancel_outage_fence(token, active_sessions)
                 .await;
         }
     }
@@ -479,12 +475,12 @@ impl PlannedOutageLeaseGuard {
             // across an ambiguous response and the original lease deadline.
             self.retain_local_fence();
         }
-        release_exact_claim_with_retry(&self.membership, lease, &self.shutdown).await?;
+        release_exact_claim_with_retry(&self.operations, lease, &self.shutdown).await?;
         if let Some(token) = self.local_fence {
             // The exact replicated response is now definitive. Keep the timed
             // fence for maintenance reconciliation, but remove only this
             // attempt's ambiguity latch.
-            self.serving.resolve_planned_outage_release(token);
+            self.operations.resolve_outage_release(token);
         }
         self.lease.take();
         Ok(())
@@ -504,7 +500,7 @@ impl PlannedOutageLeaseGuard {
                 // the ambiguity latch but retain the bounded timed fence; the
                 // replicated lease expires through heartbeat ownership.
                 if let Some(token) = self.local_fence {
-                    self.serving.resolve_planned_outage_release(token);
+                    self.operations.resolve_outage_release(token);
                 }
             }
             self.local_fence = None;
@@ -533,8 +529,7 @@ impl Drop for PlannedOutageLeaseGuard {
         if let Some(token) = local_fence {
             // Latch synchronously: the configured deadline could expire
             // before the async Drop cleanup first runs.
-            self.serving
-                .retain_planned_outage_preparation_until_cancelled(token);
+            self.operations.retain_outage_fence(token);
         }
         if self.shutdown.is_cancelled() {
             // The process is already draining. Leave any local latch closed;
@@ -542,14 +537,13 @@ impl Drop for PlannedOutageLeaseGuard {
             // the replicated outcome safer.
             return;
         }
-        let membership = self.membership.clone();
-        let serving = self.serving.clone();
+        let operations = self.operations.clone();
         let shutdown = self.shutdown.clone();
         self.release_runtime.spawn(async move {
-            let _operation_guard = serving.planned_outage_cleanup_guard().await;
+            let _operation_guard = operations.claim_outage_cleanup().await;
             if let Some(lease) = lease {
                 if let Err(error) =
-                    release_exact_claim_with_retry(&membership, &lease, &shutdown).await
+                    release_exact_claim_with_retry(&operations, &lease, &shutdown).await
                 {
                     tracing::warn!(
                         ?error,
@@ -557,15 +551,15 @@ impl Drop for PlannedOutageLeaseGuard {
                     );
                     if !shutdown.is_cancelled() {
                         if let Some(token) = local_fence {
-                            serving.resolve_planned_outage_release(token);
+                            operations.resolve_outage_release(token);
                         }
                     }
                     return;
                 }
             }
             if let Some(token) = local_fence {
-                serving.resolve_planned_outage_release(token);
-                serving.cancel_planned_outage_preparation(token, 0).await;
+                operations.resolve_outage_release(token);
+                operations.cancel_outage_fence(token, 0).await;
             }
         });
     }
@@ -595,14 +589,14 @@ async fn wait_for_planned_outage_cleanup_retry(
 }
 
 async fn release_exact_claim_with_retry(
-    membership: &MembershipManager,
+    operations: &Operations,
     lease: &ClusterOperationLease,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> Result<(), ApiError> {
     let mut delay = PLANNED_OUTAGE_CLEANUP_RETRY_INITIAL;
     loop {
-        match membership
-            .release_cluster_operation_lease(lease)
+        match operations
+            .release_outage_claim(lease)
             .await
             .map_err(api_error)?
         {
@@ -616,14 +610,14 @@ async fn release_exact_claim_with_retry(
 }
 
 async fn release_current_restart_with_retry(
-    membership: &MembershipManager,
+    operations: &Operations,
     node_id: &str,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> Result<(), ApiError> {
     let mut delay = PLANNED_OUTAGE_CLEANUP_RETRY_INITIAL;
     loop {
-        match membership
-            .release_restart_preparation(node_id)
+        match operations
+            .release_restart_claim(node_id)
             .await
             .map_err(api_error)?
         {
@@ -663,14 +657,14 @@ where
 /// Tokio mutex queue; once work starts, its gate survives the HTTP waiter until
 /// every replicated and local outcome is definitive.
 pub(crate) async fn run_serialized_planned_outage_task<T, Work>(
-    serving: &crate::serving_fence::ServingFence,
+    operations: &Operations,
     work: Work,
 ) -> Result<T, ApiError>
 where
     T: Send + 'static,
     Work: std::future::Future<Output = Result<T, ApiError>> + Send + 'static,
 {
-    let operation_guard = serving.try_planned_outage_operation_guard().map_err(|_| {
+    let operation_guard = operations.claim_outage_operation().map_err(|_| {
         ApiError::typed(
             StatusCode::CONFLICT,
             "planned_outage_operation_pending",
@@ -695,12 +689,14 @@ pub(crate) async fn acquire_planned_outage_preflight(
     operation: PlannedOutageOperation,
 ) -> Result<(PlannedOutageLeaseGuard, ClusterOperationsAggregate), ApiError> {
     let prepared_lease = match operation {
-        PlannedOutageOperation::Restart => {
-            MembershipManager::prepare_restart_preparation_claim(node_id, duration)
-        }
-        PlannedOutageOperation::Maintenance => {
-            MembershipManager::prepare_maintenance_preparation_claim(node_id, duration)
-        }
+        PlannedOutageOperation::Restart => state
+            .cluster
+            .operations()
+            .prepare_restart_claim(node_id, duration),
+        PlannedOutageOperation::Maintenance => state
+            .cluster
+            .operations()
+            .prepare_maintenance_claim(node_id, duration),
     }
     .map_err(api_error)?;
     // Own the exact intended claim before the replicated write is first
@@ -708,16 +704,12 @@ pub(crate) async fn acquire_planned_outage_preflight(
     // the commit attempt before this guard can perform an exact release.
     let lease = PlannedOutageLeaseGuard::new(
         prepared_lease,
-        state.membership.clone(),
-        state.serving.clone(),
+        state.cluster.operations(),
         state.shutdown.clone(),
     );
-    let membership = state.membership.clone();
+    let operations = state.cluster.operations();
     let lease = run_planned_outage_task(async move {
-        match membership
-            .commit_cluster_operation_lease(lease.claim())
-            .await
-        {
+        match operations.commit_outage_claim(lease.claim()).await {
             Ok(()) => Ok(lease),
             Err(error @ MembershipError::ClusterOperationPending) => {
                 // A definitive zero-row compare-and-swap never submitted this
@@ -1087,8 +1079,8 @@ pub(crate) async fn prepare_restart(
             "restart preparation must be sent directly to the node named in the route",
         ));
     }
-    let serving = state.serving.clone();
-    run_serialized_planned_outage_task(&serving, async move {
+    let operations = state.cluster.operations();
+    run_serialized_planned_outage_task(&operations, async move {
         let duration =
             Duration::from_secs(request.expires_in_seconds.unwrap_or(900).clamp(60, 3_600));
         let (mut lease, preflight) = acquire_planned_outage_preflight(
@@ -1116,9 +1108,7 @@ pub(crate) async fn prepare_restart(
         }
         let local_expiry = lease.claim().preparation_expiry_unix_ms(duration);
         let local_fence = if let Some(local_expiry) = local_expiry {
-            state
-                .serving
-                .begin_restart_preparation_until(local_expiry)
+            state.cluster.operations().prepare_restart_fence(local_expiry)
                 .await
         } else {
             None
@@ -1132,9 +1122,7 @@ pub(crate) async fn prepare_restart(
             ));
         };
         lease.arm_local_fence(local_fence);
-        if !state
-            .serving
-            .wait_for_restart_admissions_until(local_fence, &state.shutdown)
+        if !state.cluster.operations().settle_outage_admissions(local_fence, &state.shutdown)
             .await
         {
             lease.release().await;
@@ -1145,7 +1133,7 @@ pub(crate) async fn prepare_restart(
             ));
         }
         let active_sessions = local_owned_media_sessions(&state).await;
-        let drain = state.serving.restart_drain_status(active_sessions).await;
+        let drain = state.cluster.operations().drain_status(active_sessions).await;
         if !drain.new_admissions_blocked {
             lease.release().await;
             return Err(ApiError::typed(
@@ -1176,24 +1164,32 @@ pub(crate) async fn cancel_restart(
             "restart preparation cancellation must be sent directly to the node named in the route",
         ));
     }
-    let serving = state.serving.clone();
-    run_serialized_planned_outage_task(&serving, async move {
+    let operations = state.cluster.operations();
+    run_serialized_planned_outage_task(&operations, async move {
         // This attempt has its own latch. Exact preparation guards use their
         // own generations, so overlapping cleanup cannot overwrite or erase
         // either owner.
-        let cancellation = state.serving.retain_restart_cancellation();
-        if let Err(error) =
-            release_current_restart_with_retry(&state.membership, &node_id, &state.shutdown).await
+        let cancellation = state.cluster.operations().retain_restart_cancel();
+        if let Err(error) = release_current_restart_with_retry(
+            &state.cluster.operations(),
+            &node_id,
+            &state.shutdown,
+        )
+        .await
         {
             if !state.shutdown.is_cancelled() {
-                state.serving.resolve_planned_outage_release(cancellation);
+                state
+                    .cluster
+                    .operations()
+                    .resolve_outage_release(cancellation);
             }
             return Err(error);
         }
         let active_sessions = local_owned_media_sessions(&state).await;
         let drain = state
-            .serving
-            .cancel_current_restart_preparation(cancellation, active_sessions)
+            .cluster
+            .operations()
+            .cancel_restart_fence(cancellation, active_sessions)
             .await;
         Ok(Json(restart_preparation_response(
             &state.node_id,
@@ -1231,15 +1227,19 @@ fn bundle_error(error: impl std::fmt::Display) -> ApiError {
 
 async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
     let observed_at_unix_ms = unix_ms();
-    let view = state.replication.metrics_handle().snapshot();
+    let view = state.cluster.observations().raft();
     let sample = view.sample;
     let valid_sample = view.valid.then_some(sample).flatten();
     let valid_watermark = view.watermark_valid.then_some(view.watermark).flatten();
     let mut snapshot = SnapshotStatus::from(view.snapshot_metrics);
     snapshot.db_bytes = view.state_machine_bytes.map(|bytes| bytes.db);
     let active_sessions = local_owned_media_sessions(state).await;
-    let drain = state.serving.restart_drain_status(active_sessions).await;
-    let mut wal_snapshot = state.replication.wal_status_snapshot();
+    let drain = state
+        .cluster
+        .operations()
+        .drain_status(active_sessions)
+        .await;
+    let mut wal_snapshot = state.cluster.observations().live_wal();
     if let Some(error) = wal_snapshot
         .as_mut()
         .and_then(|snapshot| snapshot.last_error.as_mut())
@@ -1281,7 +1281,7 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
             snapshot: wal_snapshot,
         },
         snapshot,
-        transport: state.replication.transport_status_snapshot(),
+        transport: state.cluster.observations().local_transport(),
         media: media_drain_status(active_sessions, drain),
         workers: state.peer_status_cache.cached_local_workers().map(Box::new),
     }
@@ -1294,19 +1294,19 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
 /// so it reports unavailable rather than turning an operations request into a
 /// Store ping.
 pub(super) fn operations_readiness(state: &AppState) -> ReadinessEvaluation {
-    if state.membership.local_maintenance_active() {
+    if state.cluster.maintenance_active() {
         return ReadinessEvaluation {
             ready: false,
             reason: Some(ReadinessFailure::Maintenance),
         };
     }
-    if !state.serving.is_quorum_managed() {
+    if !state.cluster.quorum_managed() {
         return ReadinessEvaluation {
             ready: false,
             reason: Some(ReadinessFailure::StoreUnavailable),
         };
     }
-    if state.serving.is_ready() {
+    if state.cluster.ready() {
         super::clock_readiness_failure(state).unwrap_or(ReadinessEvaluation {
             ready: true,
             reason: None,
@@ -1712,20 +1712,20 @@ pub(crate) async fn membership_status_cache_loop(
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
-    if !state.membership.is_replicated() {
+    if !state.cluster.operations().clustered() {
         return;
     }
     loop {
         let refresh_started = tokio::time::Instant::now();
-        let status_membership = state.membership.clone();
-        let capability_membership = state.membership.clone();
+        let status_operations = state.cluster.operations();
+        let capability_operations = state.cluster.operations();
         let (status_result, capability_result) = tokio::join!(
             refresh_membership_status_cache_with(
                 &state.membership_status_cache,
                 refresh_started,
                 move || async move {
-                    status_membership
-                        .status()
+                    status_operations
+                        .topology()
                         .await
                         .map_err(|error| error.to_string())
                 },
@@ -1734,8 +1734,8 @@ pub(crate) async fn membership_status_cache_loop(
                 &state.cache_only_admin_proofs,
                 refresh_started,
                 move || async move {
-                    capability_membership
-                        .cache_admin_revocation_ready()
+                    capability_operations
+                        .revocation_capable()
                         .await
                         .map_err(|error| error.to_string())
                 },
@@ -1783,20 +1783,20 @@ pub(crate) async fn peer_status_cache_loop(
 ) {
     loop {
         let refresh_started = tokio::time::Instant::now();
-        let membership = state.membership.clone();
+        let operations = state.cluster.operations();
         let transport = PeerTransport::new(state.membership.clone());
-        let replication = state.replication.clone();
+        let observations = state.cluster.observations();
         if let Err(error) = refresh_peer_status_cache_with(
             &state.peer_status_cache,
             refresh_started,
             move || async move {
-                membership
-                    .operations_peers()
+                operations
+                    .fresh_targets()
                     .await
                     .map_err(|error| error.to_string())
             },
             move |peers, deadline| async move {
-                collect_peer_statuses(peers, transport, replication, deadline).await
+                collect_peer_statuses(peers, transport, observations, deadline).await
             },
         )
         .await
@@ -1813,7 +1813,7 @@ pub(crate) async fn peer_status_cache_loop(
 async fn collect_peer_statuses(
     peers: Vec<ActivityPeer>,
     transport: PeerTransport,
-    replication: plurx_core::cluster::migration::status::ReplicationMonitor,
+    observations: crate::cluster::Observations,
     deadline: tokio::time::Instant,
 ) -> BTreeMap<String, PeerStatusOutcome> {
     let public = move |peer: ActivityPeer, peer_deadline| {
@@ -1840,8 +1840,8 @@ async fn collect_peer_statuses(
         }
     };
     let private = move |peer_node_id| {
-        let replication = replication.clone();
-        async move { replication.peer_transport_status(peer_node_id).await }
+        let observations = observations.clone();
+        async move { observations.private_transport(peer_node_id).await }
     };
     collect_peer_statuses_with_sources(peers, deadline, public, private).await
 }
@@ -2185,7 +2185,7 @@ pub(crate) async fn recheck_desktop_preparation(
     token: crate::serving_fence::PlannedOutageFenceToken,
 ) -> Result<ClusterOperationsAggregate, ApiError> {
     let mut aggregate = collect_current_aggregate(state).await?;
-    if !state.serving.planned_outage_is_current(token).await {
+    if !state.cluster.operations().outage_is_current(token).await {
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "restart_preparation_expired",

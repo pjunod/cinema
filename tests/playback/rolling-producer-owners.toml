@@ -7210,7 +7210,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # reader also moves into one delegate, with no net shape change. These are
 # state observations; no task or process ownership changes. The broad matcher
 # remains unchanged so future process-capable shapes still require review.
-expected_occurrences = 935
+# Facade slice 4: -8 passive MembershipManager status() spellings: five
+# cluster HTTP reads, two operations readers, and one desktop topology read
+# now enter the existing Cluster::membership_status delegate. No task, timer,
+# child launch, admission, or cleanup owner changes; the matcher is unchanged.
+expected_occurrences = 927
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

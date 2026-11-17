@@ -61,7 +61,7 @@ mod causal_tests {
         axum::Router::new()
             .route(PATH, axum::routing::get(observation_snapshot))
             .with_state(ObservationContext {
-                membership: manager,
+                clock: crate::cluster::startup_clock(manager),
                 node_id: node,
                 observer,
             })
@@ -688,8 +688,8 @@ pub(crate) async fn snapshot(
     State(state): State<AppState>,
     request: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
-    snapshot_for_membership(
-        &state.membership,
+    snapshot_for_clock(
+        &state.cluster.operations().clock(),
         &state.clock_observer,
         &state.node_id,
         request,
@@ -701,7 +701,7 @@ pub(crate) async fn snapshot(
 /// normal service. This context deliberately owns no application services.
 #[derive(Clone)]
 pub(crate) struct ObservationContext {
-    pub(crate) membership: plurx_core::cluster::membership::MembershipManager,
+    pub(crate) clock: crate::cluster::ClockOperations,
     pub(crate) node_id: String,
     pub(crate) observer: crate::clock_offset::ClockObserver,
 }
@@ -710,11 +710,11 @@ pub(crate) async fn observation_snapshot(
     State(state): State<ObservationContext>,
     request: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
-    snapshot_for_membership(&state.membership, &state.observer, &state.node_id, request).await
+    snapshot_for_clock(&state.clock, &state.observer, &state.node_id, request).await
 }
 
-async fn snapshot_for_membership(
-    membership: &plurx_core::cluster::membership::MembershipManager,
+async fn snapshot_for_clock(
+    clock: &crate::cluster::ClockOperations,
     observer: &crate::clock_offset::ClockObserver,
     node_id: &str,
     request: Request<Body>,
@@ -723,7 +723,7 @@ async fn snapshot_for_membership(
     #[cfg(all(test, feature = "cluster-integration-tests"))]
     let received_unix_ms = received_unix_ms + observer.test_response_skew_ms();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    let guard = membership.clock_guard();
+    let guard = clock.guard();
     let clock_generation = guard.ticket().clock_generation;
     let auth = super::peer_transport::exact_auth_from_headers(request.headers())
         .ok_or(StatusCode::UNAUTHORIZED)?;
@@ -734,7 +734,7 @@ async fn snapshot_for_membership(
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     if !tokio::time::timeout_at(
         deadline,
-        membership.authorize_internal_peer_request(&auth, "GET", PATH, &[]),
+        clock.authorize_clock_request(&auth, "GET", PATH, &[]),
     )
     .await
     .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
@@ -742,7 +742,7 @@ async fn snapshot_for_membership(
     {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    if !observer.belongs_to(membership) {
+    if !observer.belongs_to(clock) {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     let barrier = tokio::time::timeout_at(deadline, observer.learner_barrier(&auth.node_id))
@@ -766,9 +766,7 @@ async fn snapshot_for_membership(
     // t2/t3 and is subtracted from RTT by the unchanged four-stamp arithmetic.
     if tokio::time::Instant::now() >= deadline
         || guard.ticket().clock_generation != clock_generation
-        || !membership
-            .authenticated_clock_request_still_fresh(&auth)
-            .unwrap_or(false)
+        || !clock.request_still_fresh(&auth).unwrap_or(false)
     {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -782,8 +780,8 @@ async fn snapshot_for_membership(
     })
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let payload = super::peer_transport::signed_response_payload(StatusCode::OK.as_u16(), &body);
-    let signature = membership
-        .sign_internal_peer_response(&auth.node_id, &auth.nonce, PATH, &payload)
+    let signature = clock
+        .sign_clock_reply(&auth.node_id, &auth.nonce, PATH, &payload)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Response::builder()
         .status(StatusCode::OK)

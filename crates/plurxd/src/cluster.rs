@@ -59,6 +59,491 @@ use crate::serving_fence::{ServingAuthority, ServingFence};
 
 #[cfg(test)]
 mod census;
+mod operations {
+    //! Typed administrative capabilities of the cluster facade.
+    //!
+    //! These delegates keep the existing mutation, refusal and freshness rules.
+    //! Request-specific ownership and admission ordering stays with its current
+    //! caller until the complete operation migration is qualified.
+
+    use crate::serving_fence::{PlannedOutageFenceToken, RestartDrainStatus};
+    use plurx_core::cluster::membership::{ClusterOperationCleanupOutcome, ClusterOperationLease};
+    use std::time::Duration;
+
+    use plurx_core::cluster::membership::{
+        FinalizeJoinRequest, IssuedJoinToken, MembershipError, MembershipStatus, ProtocolChange,
+        RedeemJoinRequest,
+    };
+
+    /// A control capability over the same mechanisms as the parent facade.
+    /// Only the facade constructs it; callers receive explicit typed operations.
+    #[derive(Clone)]
+    pub(crate) struct Operations {
+        cluster: super::Cluster,
+    }
+
+    impl Operations {
+        pub(super) fn new(cluster: super::Cluster) -> Self {
+            Self { cluster }
+        }
+
+        pub(crate) fn clock(&self) -> ClockOperations {
+            ClockOperations::new(self.cluster.membership.clone())
+        }
+
+        pub(crate) fn revocation(&self) -> RevocationOperations {
+            RevocationOperations {
+                manager: self.cluster.membership.clone(),
+            }
+        }
+
+        pub(crate) async fn issue_voter_token(
+            &self,
+            ttl: Duration,
+        ) -> Result<IssuedJoinToken, MembershipError> {
+            self.cluster.membership.issue_token(ttl).await
+        }
+        pub(crate) async fn issue_learner_join(
+            &self,
+            ttl: Duration,
+        ) -> Result<IssuedJoinToken, MembershipError> {
+            self.cluster.membership.issue_learner_token(ttl).await
+        }
+        pub(crate) async fn enable_learner_protocol(
+            &self,
+        ) -> Result<ProtocolChange, MembershipError> {
+            self.cluster.membership.activate_learner_protocol().await
+        }
+        pub(crate) async fn disable_learner_protocol(
+            &self,
+        ) -> Result<ProtocolChange, MembershipError> {
+            self.cluster.membership.deactivate_learner_protocol().await
+        }
+        pub(crate) async fn remove_member(
+            &self,
+            node_id: &str,
+        ) -> Result<MembershipStatus, MembershipError> {
+            self.cluster.membership.remove_node(node_id).await
+        }
+        pub(crate) async fn promote_member(
+            &self,
+            node_id: &str,
+        ) -> Result<MembershipStatus, MembershipError> {
+            self.cluster.membership.promote_learner(node_id).await
+        }
+        pub(crate) async fn resume_member(
+            &self,
+            node_id: &str,
+        ) -> Result<MembershipStatus, MembershipError> {
+            self.cluster.membership.exit_maintenance(node_id).await
+        }
+        pub(crate) async fn elect_member(&self) -> Result<MembershipStatus, MembershipError> {
+            self.cluster.membership.force_election().await
+        }
+        pub(crate) async fn leave_member(&self) -> Result<(), MembershipError> {
+            self.cluster.membership.leave_node().await
+        }
+        pub(crate) async fn redeem_voter(
+            &self,
+            request: &RedeemJoinRequest,
+        ) -> Result<(), MembershipError> {
+            self.cluster.membership.redeem(request).await
+        }
+        pub(crate) async fn redeem_learner_join(
+            &self,
+            request: &RedeemJoinRequest,
+        ) -> Result<(), MembershipError> {
+            self.cluster.membership.redeem_learner(request).await
+        }
+        pub(crate) async fn finalize_voter(
+            &self,
+            request: &FinalizeJoinRequest,
+        ) -> Result<(), MembershipError> {
+            self.cluster.membership.finalize(request).await
+        }
+        pub(crate) async fn finalize_learner_join(
+            &self,
+            request: &FinalizeJoinRequest,
+        ) -> Result<(), MembershipError> {
+            self.cluster.membership.finalize_learner(request).await
+        }
+
+        /// Signed-in client failover uses the original artwork endpoint rule,
+        /// with its caller's separate output bound. This is a routing hint,
+        /// never mutation or peer-authentication authority.
+        pub(crate) async fn ingress_targets(&self) -> Result<Vec<String>, MembershipError> {
+            self.cluster.artwork().targets().await
+        }
+    }
+
+    /// Clock authority also exists during startup, before the full application.
+    /// A clone retains the original clock guard and membership identity.
+    #[derive(Clone)]
+    pub(crate) struct ClockOperations {
+        manager: plurx_core::cluster::membership::MembershipManager,
+    }
+
+    impl ClockOperations {
+        pub(super) fn new(manager: plurx_core::cluster::membership::MembershipManager) -> Self {
+            Self { manager }
+        }
+
+        pub(crate) fn guard(
+            &self,
+        ) -> std::sync::Arc<plurx_core::cluster::clock::ClusterClockGuard> {
+            self.manager.clock_guard()
+        }
+
+        pub(crate) fn same_source(&self, other: &Self) -> bool {
+            std::sync::Arc::ptr_eq(&self.guard(), &other.guard())
+        }
+
+        pub(crate) fn leadership(
+            &self,
+        ) -> Option<plurx_core::cluster::membership::ClockLeadershipIdentity> {
+            self.manager.clock_leadership_identity()
+        }
+
+        pub(crate) fn clustered(&self) -> bool {
+            self.manager.is_replicated()
+        }
+
+        pub(crate) fn change_source(&self) -> crate::settings_changes::SettingsChangeSource {
+            match self.manager.local_db_raft_metrics() {
+                Some(applied) => crate::settings_changes::SettingsChangeSource::Applied(applied),
+                None => crate::settings_changes::SettingsChangeSource::LocalOnly,
+            }
+        }
+
+        pub(crate) async fn roster(
+            &self,
+        ) -> Result<plurx_core::cluster::membership::ClockPeerRoster, MembershipError> {
+            self.manager.clock_peers().await
+        }
+
+        pub(crate) async fn roster_hint(
+            &self,
+        ) -> Result<plurx_core::cluster::membership::ClockPeerRoster, MembershipError> {
+            self.manager.clock_peers_hint().await
+        }
+
+        pub(crate) async fn roster_after_auth(
+            &self,
+            auth: &plurx_core::cluster::membership::InternalPeerAuth,
+        ) -> Result<plurx_core::cluster::membership::ClockPeerRoster, MembershipError> {
+            self.manager
+                .clock_peers_after_authenticated_request(auth)
+                .await
+        }
+
+        pub(crate) async fn authorize_clock_request(
+            &self,
+            auth: &plurx_core::cluster::membership::InternalPeerAuth,
+            method: &str,
+            path: &str,
+            body: &[u8],
+        ) -> Result<bool, MembershipError> {
+            self.manager
+                .authorize_internal_peer_request(auth, method, path, body)
+                .await
+        }
+
+        pub(crate) fn request_still_fresh(
+            &self,
+            auth: &plurx_core::cluster::membership::InternalPeerAuth,
+        ) -> Result<bool, MembershipError> {
+            self.manager.authenticated_clock_request_still_fresh(auth)
+        }
+
+        pub(crate) fn sign_clock_reply(
+            &self,
+            target: &str,
+            nonce: &str,
+            path: &str,
+            response: &[u8],
+        ) -> Result<String, MembershipError> {
+            self.manager
+                .sign_internal_peer_response(target, nonce, path, response)
+        }
+    }
+
+    /// Exact claim-bound revocation authority; never a cached directory roster.
+    #[derive(Clone)]
+    pub(crate) struct RevocationOperations {
+        manager: plurx_core::cluster::membership::MembershipManager,
+    }
+
+    impl RevocationOperations {
+        pub(crate) fn clustered(&self) -> bool {
+            self.manager.is_replicated()
+        }
+
+        pub(crate) fn prepare_exclusion(
+            &self,
+            node_id: &str,
+            duration: Duration,
+        ) -> Result<plurx_core::cluster::membership::CacheAdminRevocationLease, MembershipError>
+        {
+            plurx_core::cluster::membership::MembershipManager::prepare_cache_admin_revocation_claim(
+                node_id, duration,
+            )
+        }
+
+        pub(crate) async fn admit_exclusion(
+            &self,
+            lease: &mut plurx_core::cluster::membership::CacheAdminRevocationLease,
+            deadline: tokio::time::Instant,
+        ) -> Result<plurx_core::cluster::membership::CacheAdminExclusionAdmission, MembershipError>
+        {
+            self.manager
+                .admit_cache_admin_revocation_lease(lease, deadline)
+                .await
+        }
+
+        pub(crate) async fn release_exclusion(
+            &self,
+            lease: &plurx_core::cluster::membership::CacheAdminRevocationLease,
+        ) -> Result<
+            plurx_core::cluster::membership::CacheAdminRevocationCleanupOutcome,
+            MembershipError,
+        > {
+            self.manager
+                .release_cache_admin_revocation_lease(lease)
+                .await
+        }
+
+        pub(crate) async fn claim_roster(
+            &self,
+            claim_id: &str,
+        ) -> Result<Vec<plurx_core::cluster::membership::ActivityPeer>, MembershipError> {
+            self.manager.cache_admin_revocation_peers(claim_id).await
+        }
+
+        pub(crate) async fn blockers(&self) -> Result<Vec<String>, MembershipError> {
+            self.manager.cache_admin_exclusion_blockers().await
+        }
+
+        pub(crate) async fn activation_ready(&self) -> Result<bool, MembershipError> {
+            self.manager.cache_admin_revocation_activation_ready().await
+        }
+
+        pub(crate) async fn activated_locally(&self) -> Result<bool, MembershipError> {
+            self.manager
+                .cache_admin_revocation_activated_locally()
+                .await
+        }
+
+        pub(crate) async fn claim_applied(&self, claim_id: &str) -> Result<bool, MembershipError> {
+            self.manager
+                .cache_admin_revocation_claim_applied(claim_id)
+                .await
+        }
+    }
+
+    impl Operations {
+        pub(crate) fn claim_outage_operation(
+            &self,
+        ) -> Result<tokio::sync::OwnedMutexGuard<()>, &'static str> {
+            self.cluster.fence.try_planned_outage_operation_guard()
+        }
+        pub(crate) async fn claim_outage_cleanup(&self) -> tokio::sync::OwnedMutexGuard<()> {
+            self.cluster.fence.planned_outage_cleanup_guard().await
+        }
+        pub(crate) async fn prepare_restart_fence(
+            &self,
+            expires_at_unix_ms: u64,
+        ) -> Option<PlannedOutageFenceToken> {
+            self.cluster
+                .fence
+                .begin_restart_preparation_until(expires_at_unix_ms)
+                .await
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        pub(crate) async fn prepare_desktop_fence(
+            &self,
+            expires_at_unix_ms: u64,
+        ) -> Option<PlannedOutageFenceToken> {
+            self.cluster
+                .fence
+                .begin_desktop_preparation_until(expires_at_unix_ms)
+                .await
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        pub(crate) async fn commit_desktop_fence(
+            &self,
+            token: PlannedOutageFenceToken,
+            active_sessions: usize,
+        ) -> bool {
+            self.cluster
+                .fence
+                .commit_desktop_shutdown(token, active_sessions)
+                .await
+        }
+        pub(crate) async fn prepare_maintenance_fence(
+            &self,
+            expires_at_unix_ms: u64,
+        ) -> Option<PlannedOutageFenceToken> {
+            self.cluster
+                .fence
+                .begin_maintenance_preparation_until(expires_at_unix_ms)
+                .await
+        }
+        pub(crate) fn retain_outage_fence(&self, token: PlannedOutageFenceToken) {
+            self.cluster
+                .fence
+                .retain_planned_outage_preparation_until_cancelled(token)
+        }
+        pub(crate) fn resolve_outage_release(&self, token: PlannedOutageFenceToken) {
+            self.cluster.fence.resolve_planned_outage_release(token)
+        }
+        pub(crate) async fn settle_outage_admissions(
+            &self,
+            token: PlannedOutageFenceToken,
+            shutdown: &tokio_util::sync::CancellationToken,
+        ) -> bool {
+            self.cluster
+                .fence
+                .wait_for_restart_admissions_until(token, shutdown)
+                .await
+        }
+        pub(crate) async fn cancel_outage_fence(
+            &self,
+            token: PlannedOutageFenceToken,
+            active_sessions: usize,
+        ) -> RestartDrainStatus {
+            self.cluster
+                .fence
+                .cancel_planned_outage_preparation(token, active_sessions)
+                .await
+        }
+        pub(crate) async fn cancel_restart_fence(
+            &self,
+            cancellation: PlannedOutageFenceToken,
+            active_sessions: usize,
+        ) -> RestartDrainStatus {
+            self.cluster
+                .fence
+                .cancel_current_restart_preparation(cancellation, active_sessions)
+                .await
+        }
+        pub(crate) async fn cancel_maintenance_fence(
+            &self,
+            active_sessions: usize,
+        ) -> RestartDrainStatus {
+            self.cluster
+                .fence
+                .cancel_current_maintenance_preparation(active_sessions)
+                .await
+        }
+        pub(crate) async fn drain_status(&self, active_sessions: usize) -> RestartDrainStatus {
+            self.cluster
+                .fence
+                .restart_drain_status(active_sessions)
+                .await
+        }
+        pub(crate) fn retain_restart_cancel(&self) -> PlannedOutageFenceToken {
+            self.cluster.fence.retain_restart_cancellation()
+        }
+        pub(crate) async fn outage_is_current(&self, token: PlannedOutageFenceToken) -> bool {
+            self.cluster.fence.planned_outage_is_current(token).await
+        }
+        pub(crate) async fn commit_outage_claim(
+            &self,
+            lease: &ClusterOperationLease,
+        ) -> Result<(), MembershipError> {
+            self.cluster
+                .membership
+                .commit_cluster_operation_lease(lease)
+                .await
+        }
+        pub(crate) async fn release_outage_claim(
+            &self,
+            lease: &ClusterOperationLease,
+        ) -> Result<ClusterOperationCleanupOutcome, MembershipError> {
+            self.cluster
+                .membership
+                .release_cluster_operation_lease(lease)
+                .await
+        }
+        pub(crate) async fn release_restart_claim(
+            &self,
+            node_id: &str,
+        ) -> Result<ClusterOperationCleanupOutcome, MembershipError> {
+            self.cluster
+                .membership
+                .release_restart_preparation(node_id)
+                .await
+        }
+        pub(crate) async fn commit_maintenance(
+            &self,
+            node_id: &str,
+            lease: &ClusterOperationLease,
+        ) -> Result<MembershipStatus, MembershipError> {
+            self.cluster
+                .membership
+                .enter_maintenance(node_id, lease)
+                .await
+        }
+        pub(crate) async fn reconcile_maintenance(&self) -> Result<bool, MembershipError> {
+            self.cluster
+                .membership
+                .reconcile_local_maintenance_commit()
+                .await
+        }
+
+        pub(crate) fn prepare_restart_claim(
+            &self,
+            node_id: &str,
+            duration: Duration,
+        ) -> Result<ClusterOperationLease, MembershipError> {
+            plurx_core::cluster::membership::MembershipManager::prepare_restart_preparation_claim(
+                node_id, duration,
+            )
+        }
+        pub(crate) fn prepare_maintenance_claim(
+            &self,
+            node_id: &str,
+            duration: Duration,
+        ) -> Result<ClusterOperationLease, MembershipError> {
+            plurx_core::cluster::membership::MembershipManager::prepare_maintenance_preparation_claim(
+            node_id, duration,
+        )
+        }
+        pub(crate) fn ready(&self) -> bool {
+            self.cluster.ready()
+        }
+        pub(crate) fn clustered(&self) -> bool {
+            self.cluster.membership.is_replicated()
+        }
+        pub(crate) async fn topology(&self) -> Result<MembershipStatus, MembershipError> {
+            self.cluster.membership_status().await
+        }
+        /// Always fresh: mutation preflight must not use the cached directory.
+        pub(crate) async fn fresh_targets(
+            &self,
+        ) -> Result<Vec<plurx_core::cluster::membership::ActivityPeer>, MembershipError> {
+            self.cluster.membership.operations_peers().await
+        }
+        pub(crate) async fn revocation_capable(&self) -> Result<bool, MembershipError> {
+            self.cluster.revocation_ready().await
+        }
+        #[cfg(test)]
+        pub(crate) fn for_local_fence_test(fence: crate::serving_fence::ServingFence) -> Self {
+            Self::new(super::Cluster::new(
+                fence,
+                plurx_core::cluster::membership::MembershipManager::unavailable(),
+                plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
+                None,
+            ))
+        }
+    }
+}
+pub(crate) use operations::{ClockOperations, Operations, RevocationOperations};
+
+/// Pre-AppState clock authority shares the original manager's guard identity.
+pub(crate) fn startup_clock(membership: MembershipManager) -> ClockOperations {
+    ClockOperations::new(membership)
+}
 
 /// The facade. Cheap to clone; clones share one peer directory.
 #[derive(Clone)]
@@ -236,6 +721,7 @@ impl Cluster {
     }
     pub(crate) fn observations(&self) -> Observations {
         Observations {
+            monitor: self.replication.clone(),
             raft: self.replication.metrics_handle(),
             members: self.membership.metrics_handle(),
         }
@@ -244,6 +730,11 @@ impl Cluster {
     /// Who can help, for `purpose`; see [`Directory::peers`].
     pub(crate) async fn peers(&self, purpose: Purpose) -> Result<Peers, ClusterError> {
         self.directory.peers(purpose).await
+    }
+
+    /// Typed control over this facade's existing mechanisms.
+    pub(crate) fn operations(&self) -> Operations {
+        Operations::new(self.clone())
     }
 
     /// The shared directory, for a subsystem that keeps its own handle.
@@ -298,14 +789,84 @@ impl Artwork {
     }
 }
 
+/// Plain histogram values, paired with the exact producer bucket bounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReadPoolWait {
+    pub(crate) count: u64,
+    pub(crate) sum_nanos: u64,
+    pub(crate) buckets: [(u64, u64); hiqlite::DB_READ_POOL_WAIT_BOUNDS_NANOS.len()],
+}
+impl From<hiqlite::DbReadPoolWait> for ReadPoolWait {
+    fn from(wait: hiqlite::DbReadPoolWait) -> Self {
+        Self {
+            count: wait.count,
+            sum_nanos: wait.sum_nanos,
+            buckets: std::array::from_fn(|i| {
+                (
+                    hiqlite::DB_READ_POOL_WAIT_BOUNDS_NANOS[i],
+                    wait.cumulative_buckets[i],
+                )
+            }),
+        }
+    }
+}
+
+/// An already-observed writer reply outcome, with the producer's fixed label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WriterReplyObservation {
+    pub(crate) request: &'static str,
+    pub(crate) ok: u64,
+    pub(crate) error: u64,
+}
+impl From<hiqlite::DbWriterAbandonedReplies> for WriterReplyObservation {
+    fn from(row: hiqlite::DbWriterAbandonedReplies) -> Self {
+        Self {
+            request: row.request,
+            ok: row.ok,
+            error: row.error,
+        }
+    }
+}
+
 /// Canonical passive samples without exposing the raw metrics handles to
 /// HTTP composition or request attribution.
 #[derive(Clone)]
 pub(crate) struct Observations {
+    monitor: plurx_core::cluster::migration::status::ReplicationMonitor,
     raft: plurx_core::cluster::migration::status::PassiveRaftMetrics,
     members: plurx_core::cluster::membership::PassiveMembershipMetrics,
 }
 impl Observations {
+    /// Process-wide atomics copied at scrape time, with no Store query.
+    pub(crate) fn read_pool_wait(&self) -> ReadPoolWait {
+        hiqlite::db_read_pool_wait().into()
+    }
+
+    /// Fixed-label writer counters; the underlying fixed array stays on stack.
+    pub(crate) fn writer_replies(&self) -> impl ExactSizeIterator<Item = WriterReplyObservation> {
+        hiqlite::db_writer_abandoned_replies()
+            .map(WriterReplyObservation::from)
+            .into_iter()
+    }
+
+    pub(crate) fn live_wal(
+        &self,
+    ) -> Option<plurx_core::cluster::migration::status::WalStatusSnapshot> {
+        self.monitor.wal_status_snapshot()
+    }
+    pub(crate) fn local_transport(
+        &self,
+    ) -> Option<plurx_core::cluster::migration::status::SnapshotTransportStatus> {
+        self.monitor.transport_status_snapshot()
+    }
+    pub(crate) async fn private_transport(
+        &self,
+        raft_id: u64,
+    ) -> Result<Option<plurx_core::cluster::migration::status::SnapshotTransportStatus>, String>
+    {
+        self.monitor.peer_transport_status(raft_id).await
+    }
+
     pub(crate) fn raft(&self) -> plurx_core::cluster::migration::status::PassiveRaftMetricsView {
         self.raft.snapshot()
     }

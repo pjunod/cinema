@@ -236,7 +236,7 @@ async fn actual_nonowner_forwarding(
                     axum::routing::get(crate::http::internal_clock::observation_snapshot),
                 )
                 .with_state(crate::http::internal_clock::ObservationContext {
-                    membership: ingress.membership.clone(),
+                    clock: ingress.cluster.operations().clock(),
                     node_id: ingress.node_id.clone(),
                     observer: ingress.clock_observer.clone(),
                 }),

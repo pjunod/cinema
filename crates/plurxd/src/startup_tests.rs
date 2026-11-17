@@ -417,7 +417,7 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
             axum::routing::get(http::internal_clock::observation_snapshot),
         )
         .with_state(http::internal_clock::ObservationContext {
-            membership: manager.clone(),
+            clock: cluster::startup_clock(manager.clone()),
             node_id: source.identity.node_id.clone(),
             observer: source_owner.observer().await.expect("source clock owner"),
         });

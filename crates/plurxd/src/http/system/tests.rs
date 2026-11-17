@@ -1893,13 +1893,13 @@ fn a_prepared_seam_counts_toward_graduation_only_when_clean_and_fully_measured()
 /// request and outcome.
 #[test]
 fn writer_abandoned_replies_render_by_request_and_outcome() {
-    let rendered = render_writer_abandoned_replies(&[
-        hiqlite::DbWriterAbandonedReplies {
+    let rendered = render_writer_abandoned_replies([
+        crate::cluster::WriterReplyObservation {
             request: "transaction",
             ok: 2,
             error: 1,
         },
-        hiqlite::DbWriterAbandonedReplies {
+        crate::cluster::WriterReplyObservation {
             request: "shutdown",
             ok: 0,
             error: 0,
@@ -1924,11 +1924,11 @@ fn applied_view_metrics_render_reads_reloads_mark_and_pool_wait() {
     let store: Arc<dyn plurx_core::store::Store> =
         Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
     let standalone = plurx_core::store::AppliedView::authority(store).observation();
-    let wait = hiqlite::DbReadPoolWait {
+    let wait = crate::cluster::ReadPoolWait::from(hiqlite::DbReadPoolWait {
         count: 3,
         sum_nanos: 1_500_000,
         cumulative_buckets: [1, 2, 2, 3, 3, 3, 3, 3],
-    };
+    });
     let rendered = render_applied_view_metrics(&standalone, &wait);
     for line in [
         "# TYPE plurx_applied_view_reads_total counter\n",

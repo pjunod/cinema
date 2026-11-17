@@ -1,5 +1,8 @@
 // Production children go through `process_control::spawn_job_owned`; see
 // clippy.toml.
+// Typed cluster capabilities deepen the existing source-worker Send proof.
+// Keep the proof enforced; allow the compiler to traverse the full type graph.
+#![recursion_limit = "256"]
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 #![cfg_attr(plurx_dv_segment_probe, allow(dead_code))]
 
@@ -2309,7 +2312,7 @@ impl StartupClockObserver for StartupObservationHttp {
                 )
                 .route("/readyz", axum::routing::get(startup_pending_readyz))
                 .with_state(http::internal_clock::ObservationContext {
-                    membership: membership.clone(),
+                    clock: cluster::startup_clock(membership.clone()),
                     node_id,
                     observer: observer.clone(),
                 })
@@ -2471,7 +2474,7 @@ async fn boot_observing(
             anyhow::anyhow!("startup observation owner disappeared before activation")
         })?;
         anyhow::ensure!(
-            observer.belongs_to(&state.membership),
+            observer.belongs_to(&state.cluster.operations().clock()),
             "foreign startup clock owner"
         );
         state.clock_observer = observer;

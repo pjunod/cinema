@@ -123,6 +123,16 @@ these tests on a protected filesystem before final acceptance.
 
 ## Evidence and remaining acceptance
 
+The strict census and two telemetry-output fixtures now pass all 12 selected
+checks. The ceiling is 430, reduced by 196 from the effort's 626. All five raw
+system telemetry sites moved behind plain observations, resolving the old
+two-site baseline discrepancy without raising its three-site pin. The real
+signed learner-clock causal integration case passed (21 seconds). The
+ratchet and process inventory each pass seven tests; the two changed formal
+source anchors remain unique and their surrounding statements unchanged,
+and all three source mappings report zero drift. These are preparatory
+source checks and behavioral results, not final integrated qualification.
+
 Preparation only. C7 is separately qualifying on main; no slice-4 review,
 regression, gate, source landing or deployment is claimed. The implementation
 will record exact removals and actual qualification here and in its task PR.
