@@ -527,7 +527,7 @@ async fn collect(
         .cloned()
         .collect::<BTreeSet<_>>();
     let omitted = nodes.len() > 8;
-    let peers = state.membership.activity_peers().await.unwrap_or_default();
+    let peers = state.cluster.voter_targets().await.unwrap_or_default();
     let transport = PeerTransport::new(state.membership.clone());
     let requests: Vec<_> = remote
         .iter()
@@ -624,7 +624,7 @@ async fn collect(
         facts.insert("app_version".into(), crate::version::SEMVER.into());
         facts.insert("build".into(), crate::version::BUILD.into());
         facts.insert("phase".into(), "readiness".into());
-        facts.insert("observed".into(), state.serving.is_ready().into());
+        facts.insert("observed".into(), state.cluster.ready().into());
         result.events.push(Event {
             run_id: recorder.run.clone(),
             sequence: recorder

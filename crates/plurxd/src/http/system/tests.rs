@@ -528,7 +528,7 @@ fn a_roster_read_costs_the_page_its_labels_and_never_the_page() {
     // A household member is refused before the roster is touched at all.
     let refused = reader.find("if !permitted {").expect("the admin gate");
     let read = reader
-        .find("state.membership.node_hostnames().await")
+        .find("state.cluster.node_names().await")
         .expect("the roster read");
     assert!(refused < read);
     // No `?`: a roster that will not answer must not turn the page into an

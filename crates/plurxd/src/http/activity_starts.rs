@@ -312,7 +312,7 @@ async fn peer_reports(
     before_ms: Option<i64>,
     limit: i64,
 ) -> Result<Vec<NodeReport>, ()> {
-    let peers = state.membership.operations_peers().await.map_err(|_| ())?;
+    let peers = state.cluster.operation_targets().await.map_err(|_| ())?;
     let transport = PeerTransport::new(state.membership.clone());
     let body = serde_json::to_vec(&PeerRequest { limit, before_ms }).map_err(|_| ())?;
     let deadline = deadline_after(PEER_TIMEOUT);
@@ -390,7 +390,7 @@ pub async fn starts(
         unavailable: None,
         rows: local_page(&state.store, &state.node_id, before_ms, limit, now_ms).await?,
     };
-    let clustered = state.cluster_advertisement && state.membership.is_replicated();
+    let clustered = state.cluster_advertisement && state.cluster.role().is_clustered();
     let (mut reports, directory_unavailable) = if clustered {
         match peer_reports(&state, before_ms, limit).await {
             Ok(reports) => (reports, false),

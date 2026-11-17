@@ -1,6 +1,6 @@
 # Cluster facade slice 3 — role, admission and artwork answers
 
-**Status:** open — planned on `effort/cluster-facade` after slice 2; implementation, independent review and qualification remain.
+**Status:** open — slice 3 implemented and independently reviewed; main promotion waits for the remaining facade effort. Track effort qualification in the task PR checks.
 **Owner:** Codex. **Prepared:** 2026-11-16.
 
 Companion to [the facade contract](CLUSTER-FACADE-BUILD.md),
@@ -53,6 +53,7 @@ Hostname answers retain their existing query and error behavior.
 | `crates/plurxd/src/http/mod.rs`, `remote.rs`, `activity_starts.rs`, `internal_activity.rs` | Route existing admission, role and voter-roster readers through the facade; retain peer transport dependencies honestly. |
 | `crates/plurxd/src/http/system.rs`, `developer.rs`, `crates/plurxd/src/diagnostics.rs` | Existing system, Developer, hostname and diagnostic answers through the facade; preserve settings and admission policy. |
 | `crates/plurxd/src/http/images.rs`, `images_worker.rs` | Artwork roster and authority observation, existing authentication and repair operations through the facade. |
+| `tests/playback/rolling-producer-owners.toml` | Account for two Developer status readers sharing one facade delegate; no process owner or matcher changes. |
 | `crates/plurxd/src/cluster/census.rs` | Exact reductions only; keep transport and legitimate local state pins. |
 | `verification/*/mapping.json` | Review affected source anchors and repin unchanged statements; no semantic acceptance inferred from hashes. |
 | This plan, cluster index, facade contract, project backlog and `validation/points.toml` | Ownership, scope, delivery and qualification evidence in the same change. |
@@ -83,7 +84,24 @@ main train; this task does not depend on its unlanded source.
 
 ## Evidence and remaining acceptance
 
-Implementation and qualification are pending. The effort base has known
-Clippy unused-item failures and a census discrepancy in `http/system.rs`
-(two writer metrics added after slice 1). Preserve evidence and do not raise
-a pin to absorb unrelated main changes. This source work deploys nothing.
+The local all-target daemon check passed on pinned Rust 1.97.1. The focused
+daemon batch passed 92 tests; all seven replicated-store directory tests
+passed, including the new artwork SQL differential and uncapped ordering case.
+The finalized census has nine passing checks and only the known system
+Hiqlite discrepancy (actual 5, pin 3). Its exact ceiling is 626, down by 118
+from 744. The census ratchet and the process ownership inventory each pass
+seven tests. The latter lowers its broad lexical status-call count by one
+because two Developer readers share one delegate; no process owner changes.
+
+One independent adversarial whole-diff review approved the implementation
+with no actionable findings. The same reviewer verified the narrow ownership
+inventory correction afterward; this was not another whole-code review.
+All three formal source mappings pass after reviewing seven unique unchanged
+anchor regions. These are source checks, not new model runs.
+
+Clippy with `-D warnings` remains red on the existing unused import/items:
+`claim_skipped`, `demand_renewed`, trial-admission `claim`/`record_needed`,
+`TrialClaim::mark_admitted`, and `subscribe_playback_qualification_waiters`.
+No warning was suppressed and no census pin was raised to absorb the two
+writer metrics added after slice 1. The effort gate and main promotion remain
+separate qualification steps. This source work deploys nothing.

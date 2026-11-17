@@ -98,8 +98,8 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         node_id: state.node_id.clone(),
         cluster_advertisement: state.cluster_advertisement,
         cluster_enabled: state
-            .membership
-            .cluster_enabled(state.cluster_advertisement),
+            .cluster
+            .deployment_enabled(state.cluster_advertisement),
         uptime_seconds: state.started_at.elapsed().as_secs(),
         setup_required,
         android_app,
@@ -414,7 +414,7 @@ pub async fn system_info(
     let last = requests.last();
     let (by_trigger, notifications) = state.jobs.metrics().snapshot();
     let (hw_in_use, hw_max) = state.transcode.hardware_slots().await;
-    let replication = state.replication.status().await;
+    let replication = state.cluster.replication_status().await;
     let hwaccel_requested = state
         .applied
         .setting(&crate::state::node_hwaccel_key(&state.node_id))
@@ -4701,7 +4701,7 @@ pub async fn update_settings(
         // Apply on this node now; every other node picks the replicated value
         // up on its next enforcement look after it applies the save
         // (`clock_offset::follow_stored_enforcement`).
-        state.membership.clock_guard().set_enforced(enabled);
+        state.cluster.clock().set_enforced(enabled);
     }
     if let Some(mode) = &req.sub_mode {
         // Normalize through the parser so only valid modes are stored.
@@ -5014,7 +5014,7 @@ pub(super) async fn node_hostnames(state: &AppState, permitted: bool) -> BTreeMa
     if !permitted {
         return BTreeMap::new();
     }
-    match state.membership.node_hostnames().await {
+    match state.cluster.node_names().await {
         Ok(hostnames) => hostnames,
         Err(error) => {
             tracing::warn!(?error, "roster machine names unavailable");
@@ -5027,7 +5027,7 @@ async fn peer_activity(state: &AppState) -> PeerActivityRead {
     // `advertise_host` is the explicit first step toward peer membership.
     // Keeping this guard outside `snapshots()` means the overwhelmingly common
     // SQLite and never-joined paths do not even read the peer directory.
-    if !state.cluster_advertisement || !state.membership.is_replicated() {
+    if !state.cluster_advertisement || !state.cluster.role().is_clustered() {
         return PeerActivityRead::LocalOnly;
     }
     match state.peer_activity.snapshots().await {
@@ -5311,7 +5311,7 @@ pub async fn activity(
     _user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Activity>>, ApiError> {
-    if !state.cluster_advertisement || !state.membership.is_replicated() {
+    if !state.cluster_advertisement || !state.cluster.role().is_clustered() {
         return Ok(Json(local_activity(&state).await?));
     }
 
@@ -5742,7 +5742,7 @@ pub async fn activity_detail(
     // The roster's machine names ride in the same wave rather than following
     // it. This page polls every few seconds; a name read that waits for the
     // peer fan-out to finish would add its latency to every poll for nothing.
-    let replicated = state.cluster_advertisement && state.membership.is_replicated();
+    let replicated = state.cluster_advertisement && state.cluster.role().is_clustered();
     let ((sessions, deliveries), peers, hostnames) = if replicated {
         let (local, peers, hostnames) = tokio::join!(
             deliveries(&state),
@@ -6048,8 +6048,7 @@ pub(crate) struct MetricsState {
     analysis: Arc<crate::state::AnalysisRuntimeMetrics>,
     node_id: String,
     store_metrics: StoreMetricsCache,
-    passive_raft: plurx_core::cluster::migration::status::PassiveRaftMetrics,
-    passive_membership: plurx_core::cluster::membership::PassiveMembershipMetrics,
+    cluster_observations: crate::cluster::Observations,
     blocked_gets: Arc<crate::waitpool::BlockedGetMetrics>,
     live_tv: Arc<crate::live_tv::LiveTvMetrics>,
     live_tv_peers: Arc<crate::http::live_tv::LiveTvPeerMetrics>,
@@ -6064,7 +6063,7 @@ pub(crate) struct MetricsState {
 impl FromRef<AppState> for MetricsState {
     fn from_ref(state: &AppState) -> Self {
         Self {
-            clock: state.membership.clock_guard(),
+            clock: state.cluster.clock(),
             started_at: state.started_at,
             transcode: state.transcode.metrics_handle(),
             integration: state.jobs.metrics_handle(),
@@ -6072,8 +6071,7 @@ impl FromRef<AppState> for MetricsState {
             analysis: state.jobs.analysis_metrics_handle(),
             node_id: state.node_id.clone(),
             store_metrics: state.store_metrics.clone(),
-            passive_raft: state.replication.metrics_handle(),
-            passive_membership: state.membership.metrics_handle(),
+            cluster_observations: state.cluster.observations(),
             // Taken per request, which `FromRef` is, so it addresses the pool
             // this node is actually serving from.
             blocked_gets: state.transcode.blocked_get_metrics_handle(),
@@ -6668,11 +6666,12 @@ pub(crate) async fn metrics(
     let (sessions, active_cache_entries) = state.transcode.snapshot();
     let decode_fact_metrics = state.transcode.decode_facts_prometheus();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
-    let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot())
+    let raft_metrics = render_passive_raft_metrics(state.cluster_observations.raft())
         + &render_applied_view_metrics(&state.applied.observation(), &hiqlite::db_read_pool_wait())
         + &render_writer_abandoned_replies(&hiqlite::db_writer_abandoned_replies())
         + &render_cluster_directory_metrics(state.cluster_directory.reads());
-    let membership_metrics = render_passive_membership_metrics(state.passive_membership.snapshot());
+    let membership_metrics =
+        render_passive_membership_metrics(state.cluster_observations.members());
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\

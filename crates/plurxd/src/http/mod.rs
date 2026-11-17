@@ -787,11 +787,11 @@ async fn http_store_attribution(
         .extensions()
         .get::<MatchedPath>()
         .map_or(8, |path| http_route_group(path.as_str()));
-    let raft = state.replication.metrics_handle().snapshot();
+    let raft = state.cluster.observations().raft();
     let role = http_node_role(
         raft.local_source,
         raft.watermark_source,
-        state.membership.local_serving_role().await.map_err(|_| ()),
+        state.cluster.admission_role().await.map_err(|_| ()),
     );
     let counts = plurx_core::store::HttpStoreOperationCounts::default();
     // The by-method split is folded when the last holder of these counts is
@@ -3038,13 +3038,13 @@ async fn cluster_capacity_gate(
     next: Next,
 ) -> Response {
     if let Some(refusal) = capacity_maintenance_refusal(
-        state.membership.local_maintenance_active(),
+        state.cluster.maintenance_active(),
         request.method(),
         request.uri().path(),
     ) {
         return refusal;
     }
-    let role = state.membership.local_serving_role().await.ok();
+    let role = state.cluster.admission_role().await.ok();
     if let Some(refusal) = capacity_role_refusal(role, request.method(), request.uri().path()) {
         return refusal;
     }
@@ -3127,7 +3127,7 @@ pub(crate) struct ReadinessEvaluation {
 /// skewed node would take every node's `/readyz` down. The measurement stays
 /// visible in the Developer readiness rows and the clock metrics either way.
 fn clock_readiness_failure(state: &AppState) -> Option<ReadinessEvaluation> {
-    let guard = state.membership.clock_guard();
+    let guard = state.cluster.clock();
     (guard.is_enforced() && guard.snapshot().readiness.is_unbounded()).then_some(
         ReadinessEvaluation {
             ready: false,
@@ -3141,7 +3141,7 @@ fn clock_readiness_failure(state: &AppState) -> Option<ReadinessEvaluation> {
 /// Replicated nodes use only the passive serving fence. A local SQLite node
 /// retains its existing bounded Store ping because it has no quorum proof.
 pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation {
-    if state.membership.local_maintenance_active() {
+    if state.cluster.maintenance_active() {
         return ReadinessEvaluation {
             ready: false,
             reason: Some(ReadinessFailure::Maintenance),
@@ -3150,8 +3150,8 @@ pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation 
     // A fresh quorum watermark is already a recent replicated-store proof.
     // Do not turn readiness into another multi-second Store request exactly
     // when an isolated node needs to self-fence promptly.
-    if state.serving.is_quorum_managed() {
-        return if state.serving.is_ready() {
+    if state.cluster.quorum_managed() {
+        return if state.cluster.ready() {
             clock_readiness_failure(state).unwrap_or(ReadinessEvaluation {
                 ready: true,
                 reason: None,
@@ -3225,7 +3225,7 @@ async fn desktop_http_admission_gate(
     if control_plane {
         return next.run(request).await;
     }
-    let Some(admission) = state.serving.try_desktop_http_admission().await else {
+    let Some(admission) = state.cluster.desktop_admission().await else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [
@@ -3326,7 +3326,7 @@ async fn serving_gate(
         request.uri().path(),
     );
     let restart_admission = if starts_media {
-        match state.serving.try_restart_admission().await {
+        match state.cluster.try_restart_admission().await {
             Some(admission) => Some(admission),
             None => {
                 let mut response = (
@@ -3347,7 +3347,7 @@ async fn serving_gate(
     } else {
         None
     };
-    let Some(policy) = state.serving.http_policy(request.uri().path()) else {
+    let Some(policy) = state.cluster.http_refusal(request.uri().path()) else {
         let response = next.run(request).await;
         return response
             .map(|body| axum::body::Body::new(RestartAdmissionBody::new(body, restart_admission)));
