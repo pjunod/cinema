@@ -29,10 +29,9 @@
 use super::*;
 
 /// The tables the roster reads. When each has a slot in the applied mark the
-/// stamp tracks them table by table; the production mark has no room for
-/// them yet (its sixteen slots hold the applied views and the sharing
-/// watches), so the stamp falls back to the applied index, which moves on
-/// every applied entry.
+/// stamp tracks them table by table. Production registers all four; an
+/// older or custom mark missing a slot falls back to the applied index,
+/// which moves on every applied entry.
 pub const ROSTER_TABLES: [&str; 4] = [
     "cluster_nodes",
     "cluster_node_http",
