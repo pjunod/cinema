@@ -360,7 +360,9 @@ impl VodServe {
                 authority.before_acceptance().await;
                 if authority.validate().is_err()
                     || session.supersession_user
-                        != authority.assignment().binding().principal().owner_key()
+                        != crate::transcode::principal_supersession_scope(
+                            authority.assignment().binding().principal(),
+                        )
                     || !control_rendition
                         .source_owners
                         .contains_live_assignment(authority.assignment())

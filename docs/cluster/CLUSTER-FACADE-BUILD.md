@@ -11,6 +11,14 @@ compiled or run. Every `file:line` below is **re-verify at build time**.
 Short paths: `mem.rs` = `crates/plurx-core/src/cluster/membership.rs`;
 `d/` = `crates/plurxd/src/`; `ltv.rs` = `d/http/live_tv.rs`.
 
+Shared DV/HDR integration adds `Purpose::Operations` for Activity's committed
+member roster, including learners and stale rows. Activity uses the shared
+directory and facade role/authority answers; member read/write authorization
+and response signing remain fresh proofs through the facade, never cached
+roster evidence. Its legacy transport construction remains counted until
+`call` lands. This extension lowers the census ceiling from 765 to 754;
+final qualification is pending.
+
 ## 1. Goal
 
 Feature code asks the cluster six questions through one type,

@@ -272,6 +272,10 @@ pub(super) async fn receiver_effective_body(
     let current = current_reference(state, headers, &input.reference).await;
     // Header interpretation follows the existing exact current grant check.
     let ready = current.is_ok() && receiver_presentation::authenticated_receiver_ready(headers);
+    let dolby_vision =
+        current.is_ok() && receiver_presentation::authenticated_receiver_dolby_vision(headers);
+    let processed_upgrade =
+        current.is_ok() && receiver_presentation::authenticated_receiver_processed_upgrade(headers);
     let route = state
         .store
         .lookup_source_ingress_route(
@@ -307,7 +311,12 @@ pub(super) async fn receiver_effective_body(
         if !cleanup {
             current?;
         }
-        receiver_presentation::normalize_wire(&input.canonical_recipe, ready)?
+        receiver_presentation::normalize_wire_with_upgrade(
+            &input.canonical_recipe,
+            ready,
+            dolby_vision,
+            processed_upgrade,
+        )?
     };
     if !cleanup && receiver_presentation::internal_range(&selected)? && !ready {
         return Err(receiver_presentation::unavailable());

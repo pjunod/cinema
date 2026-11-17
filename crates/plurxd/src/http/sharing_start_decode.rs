@@ -40,8 +40,13 @@ impl DecodedSourceHlsStart {
         let value = super::sharing_decision_decode::bounded_decision_value(&mut json)
             .map_err(|_| SharingResourceUnsupported)?;
         json.end().map_err(|_| SharingResourceUnsupported)?;
-        let envelope: Envelope =
+        let mut envelope: Envelope =
             serde_json::from_value(value.clone()).map_err(|_| SharingResourceUnsupported)?;
+        // `StartResponse` never deserializes the local FEL / RPU / DYN rows (a
+        // local replay recomputes them). A Source Start carries the ones its
+        // own planner computed; B decodes them with the same type, holds them
+        // to the shape the planner builds, and relays them unchanged.
+        envelope.response.enhancement = relayed_enhancement(&value)?;
         if &envelope.reference != expected
             || expected.server_id.is_nil()
             || expected.catalogue_epoch.is_nil()
@@ -122,8 +127,10 @@ pub(crate) fn decode_source_start_response(
 
 /// B's own check of a decoded Source Start against the request it retained:
 /// an HDR range is accepted only when the player's own caps document — the
-/// one B forwarded, unchanged — presents HDR. B never re-derives a decision;
-/// it only refuses a delivery its viewer did not say it can show.
+/// one B forwarded, unchanged — presents HDR, and a Dolby Vision range only
+/// when some video entry enumerates the delivered profile. B never
+/// re-derives a decision; it only refuses a delivery its viewer did not say
+/// it can show.
 pub(crate) fn delivered_range_presentable(request_json: &str, response: &StartResponse) -> bool {
     let Some(caps) = serde_json::from_str::<serde_json::Value>(request_json)
         .ok()
@@ -147,10 +154,33 @@ pub(crate) fn delivered_range_presentable(request_json: &str, response: &StartRe
                     .values()
                     .any(|claimed| claimed.contains(&transfer))
         }
+        Some("dolby_vision") => response
+            .delivered_dolby_vision_profile
+            .is_some_and(|delivered| {
+                caps.video
+                    .iter()
+                    .any(|video| video.dv_profiles.contains(&delivered))
+            }),
         Some(_) => false,
     }
 }
 
+fn relayed_enhancement(
+    value: &serde_json::Value,
+) -> Result<Option<plurx_core::playback::enhancement::PlaybackEnhancement>> {
+    let Some(raw) = value
+        .get("response")
+        .and_then(|response| response.get("enhancement"))
+    else {
+        return Ok(None);
+    };
+    let enhancement: plurx_core::playback::enhancement::PlaybackEnhancement =
+        serde_json::from_value(raw.clone()).map_err(|_| SharingResourceUnsupported)?;
+    if !enhancement.is_well_formed() {
+        return Err(SharingResourceUnsupported);
+    }
+    Ok(Some(enhancement))
+}
 fn v4(id: Uuid) -> bool {
     id.get_version_num() == 4 && id.get_variant() == Variant::RFC4122 && !id.is_nil()
 }
@@ -166,6 +196,10 @@ fn validate_response(response: &StartResponse, incarnation: Uuid) -> Result<()> 
         || response
             .media_origin_ms
             .is_some_and(|n| !(-MAX_SAFE..=MAX_SAFE).contains(&n))
+        || response
+            .processed_upgrade
+            .as_deref()
+            .is_some_and(|value| value != "offered")
         || response.ladder.len() > 64
         || response.plan_notes.len() > 64
         || response
@@ -205,14 +239,16 @@ fn validate_response(response: &StartResponse, incarnation: Uuid) -> Result<()> 
     {
         return Err(SharingResourceUnsupported);
     }
-    // Closed dynamic-range vocabulary. A shared Start never carries Dolby
-    // Vision: the Source refuses every Dolby Vision delivery before a claim,
-    // so a profile or a `dolby_vision` range here is a protocol violation.
+    // Closed dynamic-range vocabulary. A Dolby Vision delivery names the
+    // profile its bytes carry (8 for the Profile 7 conversion), and only a
+    // Dolby Vision delivery carries a profile.
     if !matches!(
-        response.delivered_dynamic_range.as_deref(),
-        None | Some("sdr" | "hdr10" | "hlg")
-    ) || response.delivered_dolby_vision_profile.is_some()
-    {
+        (
+            response.delivered_dynamic_range.as_deref(),
+            response.delivered_dolby_vision_profile,
+        ),
+        (None | Some("sdr" | "hdr10" | "hlg"), None) | (Some("dolby_vision"), Some(5 | 7 | 8))
+    ) {
         return Err(SharingResourceUnsupported);
     }
     if let Some(status) = &response.quality_catalog_status {
@@ -287,7 +323,101 @@ mod tests {
         );
     }
     #[test]
-    fn sharing_start_decoder_closes_dynamic_range_and_refuses_dolby_vision() {
+    fn sharing_start_decoder_accepts_only_the_processed_offer_literal() {
+        let (expected, good) = fixture();
+        assert!(decode(&good, &expected).is_ok(), "absence is legacy wire");
+        let mut offered = good.clone();
+        offered["response"]["processed_upgrade"] = json!("offered");
+        assert!(decode(&offered, &expected).is_ok());
+        for bad in [
+            json!(null),
+            json!("ready"),
+            json!("processing"),
+            json!(true),
+            json!(false),
+        ] {
+            let mut start = good.clone();
+            start["response"]["processed_upgrade"] = bad;
+            assert!(decode(&start, &expected).is_err());
+        }
+    }
+    #[test]
+    fn sharing_start_decoder_relays_the_enhancement_rows_it_can_hold_to_the_planner_shape() {
+        let (expected, good) = fixture();
+        let rows = json!({
+            "active":["RPU","DYN"],
+            "details":[
+                {"badge":"FEL","active":false,"text":"No full enhancement layer in this source."},
+                {"badge":"RPU","active":true,"text":"Reshaping is applied by the display."},
+                {"badge":"DYN","active":true,"text":"Dynamic metadata reaches the display."}
+            ],
+            "requires_effective_processing":true
+        });
+        let mut carried = good.clone();
+        carried["response"]["delivered_dynamic_range"] = json!("dolby_vision");
+        carried["response"]["delivered_dolby_vision_profile"] = json!(8);
+        carried["response"]["enhancement"] = rows.clone();
+        let decoded = decode(&carried, &expected).expect("a Start with enhancement rows");
+        let relayed = decoded
+            .response()
+            .enhancement
+            .clone()
+            .expect("relayed enhancement");
+        assert_eq!(serde_json::to_value(&relayed).expect("rows"), rows);
+        assert_eq!(
+            serde_json::to_value(decoded.response()).expect("whole response"),
+            carried["response"],
+            "the rows round-trip unchanged"
+        );
+        let mut empty = carried.clone();
+        empty["response"]["enhancement"] = json!({"active":[],"details":[]});
+        assert!(decode(&empty, &expected).is_ok());
+        // Absent stays absent.
+        assert!(decode(&good, &expected)
+            .expect("plain Start")
+            .response()
+            .enhancement
+            .is_none());
+        let mut bad = Vec::new();
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["active"] = json!(["FEL", "RPU", "DYN"]);
+        bad.push(("active names an inactive detail", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["active"] = json!(["DYN", "RPU"]);
+        bad.push(("active out of display order", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["details"][0]["badge"] = json!("RPU");
+        bad.push(("duplicate badge", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["details"][0]["badge"] = json!("HDR");
+        bad.push(("unknown badge", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["details"][0]["text"] = json!("x".repeat(1025));
+        bad.push(("overlong text", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["details"][0]["text"] = json!("  ");
+        bad.push(("blank text", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["details"][0]["text"] = json!("line\nbreak");
+        bad.push(("control character", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["details"][0]["extra"] = json!(1);
+        bad.push(("unknown detail field", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["requires_effective_processing"] = json!(false);
+        bad.push(("non-canonical false flag", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"] = json!(null);
+        bad.push(("null rows", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"] = json!("RPU");
+        bad.push(("not an object", v));
+        for (why, value) in bad {
+            assert!(decode(&value, &expected).is_err(), "{why}");
+        }
+    }
+    #[test]
+    fn sharing_start_decoder_closes_dynamic_range_and_binds_the_dolby_vision_profile() {
         let (expected, good) = fixture();
         for range in ["sdr", "hdr10", "hlg"] {
             let mut v = good.clone();
@@ -300,15 +430,52 @@ mod tests {
             .expect("response")
             .remove("delivered_dynamic_range");
         assert!(decode(&absent, &expected).is_ok());
-        for range in ["dolby_vision", "HDR10", "pq", ""] {
+        for range in ["HDR10", "pq", "", "dolby-vision"] {
             let mut v = good.clone();
             v["response"]["delivered_dynamic_range"] = json!(range);
             assert!(decode(&v, &expected).is_err(), "{range}");
         }
+        // A Dolby Vision delivery names a profile the bytes can carry.
         for profile in [5, 7, 8] {
             let mut v = good.clone();
+            v["response"]["delivered_dynamic_range"] = json!("dolby_vision");
+            v["response"]["delivered_dolby_vision_profile"] = json!(profile);
+            let decoded = decode(&v, &expected).expect("a Dolby Vision Start");
+            assert_eq!(
+                decoded.response().delivered_dynamic_range.as_deref(),
+                Some("dolby_vision")
+            );
+            assert_eq!(
+                decoded.response().delivered_dolby_vision_profile,
+                Some(profile)
+            );
+        }
+        for profile in [0, 4, 6, 9, 10, 255] {
+            let mut v = good.clone();
+            v["response"]["delivered_dynamic_range"] = json!("dolby_vision");
             v["response"]["delivered_dolby_vision_profile"] = json!(profile);
             assert!(decode(&v, &expected).is_err(), "profile {profile}");
+        }
+        let mut unnamed = good.clone();
+        unnamed["response"]["delivered_dynamic_range"] = json!("dolby_vision");
+        assert!(
+            decode(&unnamed, &expected).is_err(),
+            "a Dolby Vision range must name its profile"
+        );
+        // Only a Dolby Vision delivery carries a profile.
+        for range in [Some("sdr"), Some("hdr10"), Some("hlg"), None] {
+            let mut v = good.clone();
+            match range {
+                Some(range) => v["response"]["delivered_dynamic_range"] = json!(range),
+                None => {
+                    v["response"]
+                        .as_object_mut()
+                        .expect("response")
+                        .remove("delivered_dynamic_range");
+                }
+            }
+            v["response"]["delivered_dolby_vision_profile"] = json!(8);
+            assert!(decode(&v, &expected).is_err(), "{range:?} with a profile");
         }
     }
     #[test]
@@ -368,11 +535,52 @@ mod tests {
         ));
         let mut dv = response.clone();
         dv.delivered_dynamic_range = Some("dolby_vision".into());
+        dv.delivered_dolby_vision_profile = Some(8);
         assert!(!delivered_range_presentable(
             &request(json!(["sdr", "pq"]), None),
             &dv
         ));
+        // Caps that enumerate the delivered profile present it.
+        let enumerating = |profiles: Value| {
+            let mut caps = json!({"v":2,"video":[{"codec":"hevc","profiles":["main10"],"max_height":2160,"present":["sdr","pq"],"dv_profiles":profiles}],"audio":["aac"],"containers":["mp4"],"transports":["hls"]});
+            caps["dv_transport"] = json!("hls");
+            json!({"caps":caps}).to_string()
+        };
+        assert!(delivered_range_presentable(&enumerating(json!([8])), &dv));
+        assert!(delivered_range_presentable(
+            &enumerating(json!([5, 8])),
+            &dv
+        ));
         assert!(!delivered_range_presentable("{}", &sdr));
+    }
+    #[test]
+    fn sharing_start_receiver_refuses_dolby_vision_the_retained_caps_do_not_enumerate() {
+        let (_, good) = fixture();
+        let mut dv: StartResponse =
+            serde_json::from_value(good["response"].clone()).expect("fixture response");
+        dv.delivered_dynamic_range = Some("dolby_vision".into());
+        let caps = |profiles: Value| {
+            json!({"caps":{"v":2,"video":[{"codec":"hevc","profiles":["main10"],"max_height":2160,"present":["sdr","pq"],"dv_profiles":profiles}],"audio":["aac"],"containers":["mp4"],"transports":["hls"],"dv_transport":"hls"}}).to_string()
+        };
+        for (delivered, profiles) in [
+            (Some(8), json!([])),
+            (Some(8), json!([5, 7])),
+            (Some(5), json!([8])),
+            (Some(7), json!([8])),
+            (None, json!([5, 7, 8])),
+        ] {
+            dv.delivered_dolby_vision_profile = delivered;
+            assert!(
+                !delivered_range_presentable(&caps(profiles.clone()), &dv),
+                "{delivered:?} for {profiles}"
+            );
+        }
+        // The profile claim is per decoder entry; an H264 entry has none.
+        dv.delivered_dolby_vision_profile = Some(8);
+        assert!(!delivered_range_presentable(
+            &json!({"caps":{"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls"]}}).to_string(),
+            &dv
+        ));
     }
     #[test]
     fn sharing_start_decoder_refuses_whole_dto_field_drift_and_wrong_shapes() {

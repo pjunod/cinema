@@ -156,6 +156,7 @@ fn successor_of(
         selection,
         61_250,
         Uuid::new_v4(),
+        false,
     )
     .expect("expressible ask");
     let (entry, _) = registry
@@ -188,6 +189,7 @@ fn offered_pair(
         &ReceiverStartActor(successor.clone()),
         ask.desired().digest(),
         deadline,
+        false,
     ));
     let session = publish_hls(&successor);
     let offer = request(&generation(&predecessor), 5, ask);
@@ -215,9 +217,10 @@ fn sharing_receiver_successor_request_carries_the_ask_at_the_sampled_position() 
         mode: SubtitleMode::Native,
         track: Some(3),
     };
-    let built: Value =
-        serde_json::from_str(&successor_request(&original, &ask, 61_250, id).expect("manual"))
-            .expect("JSON");
+    let built: Value = serde_json::from_str(
+        &successor_request(&original, &ask, 61_250, id, false).expect("manual"),
+    )
+    .expect("JSON");
     assert_eq!(built["request_id"], id.to_string());
     assert_eq!(
         built["playback_id"], "player",
@@ -251,9 +254,10 @@ fn sharing_receiver_successor_request_carries_the_ask_at_the_sampled_position() 
         &built.to_string()
     ));
 
-    let built: Value =
-        serde_json::from_str(&successor_request(&original, &selection(), 0, id).expect("auto"))
-            .expect("JSON");
+    let built: Value = serde_json::from_str(
+        &successor_request(&original, &selection(), 0, id, false).expect("auto"),
+    )
+    .expect("JSON");
     assert_eq!(built["quality_auto"], true);
     assert!(
         built.get("copy").is_none() && built.get("height").is_none(),
@@ -270,7 +274,7 @@ fn sharing_receiver_successor_request_carries_the_ask_at_the_sampled_position() 
         ..selection()
     };
     let built: Value = serde_json::from_str(
-        &successor_request(&original, &original_ask, 0, id).expect("original"),
+        &successor_request(&original, &original_ask, 0, id, false).expect("original"),
     )
     .expect("JSON");
     assert_eq!(
@@ -297,21 +301,21 @@ fn sharing_receiver_successor_request_carries_the_ask_at_the_sampled_position() 
         ..selection()
     };
     let built: Value =
-        serde_json::from_str(&successor_request(&original, &burn, 0, id).expect("burn"))
+        serde_json::from_str(&successor_request(&original, &burn, 0, id, false).expect("burn"))
             .expect("burn JSON");
     assert_eq!(built["subtitle_burn"], 1);
     assert_eq!(built["copy"], false);
     assert!(built.get("native_subtitles").is_none());
     assert!(built.get("subtitle").is_none());
     for refused in [codec, grade] {
-        assert!(successor_request(&original, &refused, 0, id).is_none());
+        assert!(successor_request(&original, &refused, 0, id, false).is_none());
     }
     let direct =
         serde_json::json!({"playback_id":"player","request_id":"r","presentation":"direct"});
     let reopened =
         serde_json::json!({"playback_id":"player","request_id":"r","reopen_reason":"stall"});
     for refused in [direct, reopened] {
-        assert!(successor_request(&refused.to_string(), &selection(), 0, id).is_none());
+        assert!(successor_request(&refused.to_string(), &selection(), 0, id, false).is_none());
     }
 }
 
@@ -520,7 +524,8 @@ async fn sharing_receiver_prepare_offered_only_after_successor_publication() {
     assert!(actor.install_successor(
         &ReceiverStartActor(successor.clone()),
         ask.desired().digest(),
-        deadline
+        deadline,
+        false,
     ));
     let compose = |request: &ControlRequestV1, action: ControlAction| {
         let mut answer = response(request);
@@ -657,49 +662,97 @@ async fn sharing_receiver_observe_ask_dispatches_once_and_withdraws_a_left_ask()
     let actor = ReceiverStartActor(predecessor.clone());
     let at = |sequence, ask: ClientSelection| request(&generation(&predecessor), sequence, ask);
     assert_eq!(
-        actor.observe_ask(&state, &at(1, selection()), true),
+        actor
+            .observe_ask(&state, &at(1, selection()), true)
+            .map(|dispatch| dispatch.digest),
         None,
         "the created ask"
     );
-    assert_eq!(actor.observe_ask(&state, &at(2, selection()), true), None);
+    assert_eq!(
+        actor
+            .observe_ask(&state, &at(2, selection()), true)
+            .map(|dispatch| dispatch.digest),
+        None
+    );
     // Gates: the switch, a dual-player client and the action vocabulary.
-    assert_eq!(actor.observe_ask(&state, &at(3, manual(480)), false), None);
+    assert_eq!(
+        actor
+            .observe_ask(&state, &at(3, manual(480)), false)
+            .map(|dispatch| dispatch.digest),
+        None
+    );
     let mut single = at(3, manual(480));
     single
         .capabilities
         .as_mut()
         .expect("caps")
         .dual_player_preparation = false;
-    assert_eq!(actor.observe_ask(&state, &single, true), None);
+    assert_eq!(
+        actor
+            .observe_ask(&state, &single, true)
+            .map(|dispatch| dispatch.digest),
+        None
+    );
     let mut passive = at(3, manual(480));
     passive.capabilities = None; // the last declaration (false) stands
-    assert_eq!(actor.observe_ask(&state, &passive, true), None);
+    assert_eq!(
+        actor
+            .observe_ask(&state, &passive, true)
+            .map(|dispatch| dispatch.digest),
+        None
+    );
     let mut no_prepare = at(3, manual(480));
     no_prepare.supported_actions = Some(vec!["hold".to_owned()]);
-    assert_eq!(actor.observe_ask(&state, &no_prepare, true), None);
+    assert_eq!(
+        actor
+            .observe_ask(&state, &no_prepare, true)
+            .map(|dispatch| dispatch.digest),
+        None
+    );
     let mut local_only = at(3, manual(480));
     local_only.supported_actions = Some(vec![PREPARE_REPLACEMENT_ACTION.to_owned()]);
-    assert_eq!(actor.observe_ask(&state, &local_only, true), None);
+    assert_eq!(
+        actor
+            .observe_ask(&state, &local_only, true)
+            .map(|dispatch| dispatch.digest),
+        None
+    );
     let digest = manual(480).desired().digest();
     assert_eq!(
-        actor.observe_ask(&state, &at(4, manual(480)), true),
+        actor
+            .observe_ask(&state, &at(4, manual(480)), true)
+            .map(|dispatch| dispatch.digest),
         Some(digest.clone())
     );
     assert_eq!(
-        actor.observe_ask(&state, &at(5, manual(480)), true),
+        actor
+            .observe_ask(&state, &at(5, manual(480)), true)
+            .map(|dispatch| dispatch.digest),
         None,
         "dispatched once"
     );
     let deadline = clock_ms() + SUCCESSOR_DEADLINE_MS;
     let successor = successor_of(&registry, &predecessor, &manual(480), deadline);
-    assert!(actor.install_successor(&ReceiverStartActor(successor.clone()), digest, deadline));
+    assert!(actor.install_successor(
+        &ReceiverStartActor(successor.clone()),
+        digest,
+        deadline,
+        false
+    ));
     // The viewer moved on: the staged successor is withdrawn and the new ask
     // waits until it has retired and freed its slots.
-    assert_eq!(actor.observe_ask(&state, &at(6, manual(720)), true), None);
+    assert_eq!(
+        actor
+            .observe_ask(&state, &at(6, manual(720)), true)
+            .map(|dispatch| dispatch.digest),
+        None
+    );
     assert!(superseding(&successor));
     assert!(retired_within(&ReceiverStartActor(successor), Duration::from_secs(5)).await);
     assert_eq!(
-        actor.observe_ask(&state, &at(7, manual(720)), true),
+        actor
+            .observe_ask(&state, &at(7, manual(720)), true)
+            .map(|dispatch| dispatch.digest),
         Some(manual(720).desired().digest())
     );
 }
@@ -720,7 +773,9 @@ async fn sharing_receiver_successor_deadline_and_progress_follow_the_commit() {
     let uncommitted = ReceiverStartActor(successor.clone());
     for exchange in [&first, &changed] {
         assert_eq!(
-            uncommitted.observe_ask(&state, exchange, true),
+            uncommitted
+                .observe_ask(&state, exchange, true)
+                .map(|dispatch| dispatch.digest),
             None,
             "an uncommitted successor stages nothing of its own"
         );
@@ -756,6 +811,7 @@ async fn sharing_receiver_viewer_cap_declines_typed() {
         &ask,
         0,
         Uuid::new_v4(),
+        false,
     )
     .expect("ask");
     assert!(matches!(
@@ -919,10 +975,17 @@ async fn sharing_receiver_cancelled_change_never_restages_the_sessions_own_ask()
     publish_hls(&predecessor);
     let actor = ReceiverStartActor(predecessor.clone());
     let at = |sequence, ask: ClientSelection| request(&generation(&predecessor), sequence, ask);
-    assert_eq!(actor.observe_ask(&state, &at(1, selection()), true), None);
+    assert_eq!(
+        actor
+            .observe_ask(&state, &at(1, selection()), true)
+            .map(|dispatch| dispatch.digest),
+        None
+    );
     let changed = manual(480).desired().digest();
     assert_eq!(
-        actor.observe_ask(&state, &at(2, manual(480)), true),
+        actor
+            .observe_ask(&state, &at(2, manual(480)), true)
+            .map(|dispatch| dispatch.digest),
         Some(changed.clone())
     );
     let deadline = clock_ms() + SUCCESSOR_DEADLINE_MS;
@@ -930,24 +993,34 @@ async fn sharing_receiver_cancelled_change_never_restages_the_sessions_own_ask()
     assert!(actor.install_successor(
         &ReceiverStartActor(successor.clone()),
         changed.clone(),
-        deadline
+        deadline,
+        false,
     ));
     // Cancelled: the client's ask returns to what this session delivers. The
     // staged successor is withdrawn, and nothing is staged for the session's
     // own rendition, before or after the withdrawn one has retired.
-    assert_eq!(actor.observe_ask(&state, &at(3, selection()), true), None);
+    assert_eq!(
+        actor
+            .observe_ask(&state, &at(3, selection()), true)
+            .map(|dispatch| dispatch.digest),
+        None
+    );
     assert!(superseding(&successor));
     assert!(retired_within(&ReceiverStartActor(successor), Duration::from_secs(5)).await);
     for sequence in 4..7 {
         assert_eq!(
-            actor.observe_ask(&state, &at(sequence, selection()), true),
+            actor
+                .observe_ask(&state, &at(sequence, selection()), true)
+                .map(|dispatch| dispatch.digest),
             None,
             "never a successor for the session's own ask"
         );
     }
     // A renewed change stages again.
     assert_eq!(
-        actor.observe_ask(&state, &at(7, manual(480)), true),
+        actor
+            .observe_ask(&state, &at(7, manual(480)), true)
+            .map(|dispatch| dispatch.digest),
         Some(changed.clone())
     );
     // The same after an aborted offer.
@@ -962,9 +1035,189 @@ async fn sharing_receiver_cancelled_change_never_restages_the_sessions_own_ask()
     assert!(retired_within(&ReceiverStartActor(successor), Duration::from_secs(5)).await);
     for sequence in 1..4 {
         assert_eq!(
-            actor.observe_ask(&state, &at(sequence, selection()), true),
+            actor
+                .observe_ask(&state, &at(sequence, selection()), true)
+                .map(|dispatch| dispatch.digest),
             None,
             "an aborted change never restages the session's own ask"
         );
+    }
+}
+
+#[test]
+fn shared_processed_offer_waits_for_first_frame_and_is_one_shot() {
+    let registry = ReceiverStartRegistry::default();
+    let state = Arc::new(crate::http::source_actor_test_state());
+    let predecessor = registered(&registry, "predecessor", "player", 1);
+    publish_hls(&predecessor);
+    if let Some(Ok(ReceiverPublished::Hls(start))) =
+        predecessor.state.lock().expect("owner").start.as_mut()
+    {
+        start.processed_upgrade = Some("offered".to_owned());
+    }
+    let actor = ReceiverStartActor(predecessor.clone());
+    let mut starting = request(&generation(&predecessor), 1, selection());
+    starting.render_state = pc::RenderState::Starting;
+    assert_eq!(
+        actor
+            .observe_ask(&state, &starting, true)
+            .map(|dispatch| dispatch.digest),
+        None
+    );
+    let rendering = request(&generation(&predecessor), 2, selection());
+    let digest = selection().desired().digest();
+    assert_eq!(
+        actor
+            .observe_ask(&state, &rendering, true)
+            .map(|dispatch| dispatch.digest),
+        Some(digest.clone())
+    );
+    let built: Value = serde_json::from_str(
+        &successor_request(
+            &predecessor.intent.recipe.request_json,
+            &selection(),
+            61_250,
+            Uuid::new_v4(),
+            true,
+        )
+        .expect("processed successor"),
+    )
+    .expect("JSON");
+    assert_eq!(built["processed_upgrade"], true);
+    assert_eq!(
+        actor
+            .observe_ask(&state, &rendering, true)
+            .map(|dispatch| dispatch.digest),
+        None,
+        "a refused Source Start cannot dispatch the offer again"
+    );
+    let changed = request(&generation(&predecessor), 3, manual(480));
+    assert_eq!(
+        actor
+            .observe_ask(&state, &changed, true)
+            .map(|dispatch| dispatch.digest),
+        Some(manual(480).desired().digest()),
+        "explicit viewer ask still dispatches"
+    );
+}
+
+#[test]
+fn shared_processed_offer_is_spent_by_viewer_change_before_first_frame() {
+    let registry = ReceiverStartRegistry::default();
+    let state = Arc::new(crate::http::source_actor_test_state());
+    let predecessor = registered(&registry, "predecessor", "player", 1);
+    publish_hls(&predecessor);
+    if let Some(Ok(ReceiverPublished::Hls(start))) =
+        predecessor.state.lock().expect("owner").start.as_mut()
+    {
+        start.processed_upgrade = Some("offered".to_owned());
+    }
+    let actor = ReceiverStartActor(predecessor.clone());
+    let mut starting = request(&generation(&predecessor), 1, selection());
+    starting.render_state = pc::RenderState::Starting;
+    assert_eq!(
+        actor
+            .observe_ask(&state, &starting, true)
+            .map(|dispatch| dispatch.digest),
+        None
+    );
+    let changed = request(&generation(&predecessor), 2, manual(480));
+    assert_eq!(
+        actor
+            .observe_ask(&state, &changed, true)
+            .map(|dispatch| dispatch.digest),
+        Some(manual(480).desired().digest())
+    );
+    let original = request(&generation(&predecessor), 3, selection());
+    assert_eq!(
+        actor
+            .observe_ask(&state, &original, true)
+            .map(|dispatch| dispatch.digest),
+        None,
+        "returning to the original ask does not revive the offer"
+    );
+}
+
+#[test]
+fn processed_successor_decline_reports_only_on_its_live_b_generation() {
+    for (failure, expected_reason) in [
+        (ReceiverStartError::Deadline, "did not complete in time"),
+        (
+            ReceiverStartError::NotYet(crate::sharing_client::StartRetry {
+                code: crate::sharing_client::StartRetryCode::StartupTimeout,
+                retry_after_secs: 1,
+            }),
+            "Source has not prepared",
+        ),
+        (
+            ReceiverStartError::NotYet(crate::sharing_client::StartRetry {
+                code: crate::sharing_client::StartRetryCode::SourceNotPrepared,
+                retry_after_secs: 1,
+            }),
+            "Source has not prepared",
+        ),
+        (
+            ReceiverStartError::NotYet(crate::sharing_client::StartRetry {
+                code: crate::sharing_client::StartRetryCode::Overloaded,
+                retry_after_secs: 1,
+            }),
+            "Source is busy",
+        ),
+    ] {
+        let registry = ReceiverStartRegistry::default();
+        let state = Arc::new(crate::http::source_actor_test_state());
+        let predecessor = registered(&registry, "predecessor", "player", 1);
+        publish_hls(&predecessor);
+        let actor = ReceiverStartActor(predecessor.clone());
+        let digest = selection().desired().digest();
+        let deadline = clock_ms() + SUCCESSOR_DEADLINE_MS;
+        let request_json = successor_request(
+            &predecessor.intent.recipe.request_json,
+            &selection(),
+            61_250,
+            Uuid::new_v4(),
+            true,
+        )
+        .expect("same-selection processed successor");
+        let (successor, _) = registry
+            .register_successor(&actor, request_json, &digest, deadline)
+            .expect("B-owned prepared successor");
+        assert!(actor.install_successor(
+            &ReceiverStartActor(successor.clone()),
+            digest,
+            deadline,
+            true,
+        ));
+        successor.state.lock().expect("successor owner").start = Some(Err(failure));
+        let generation = generation(&predecessor);
+        assert!(actor
+            .processed_upgrade_skip(&Uuid::new_v4().to_string())
+            .is_none());
+        let report = actor
+            .processed_upgrade_skip(&generation)
+            .expect("retained decline");
+        assert!(report.reason.contains(expected_reason), "{}", report.reason);
+        let header = report.owner_header().expect("bounded owner wire");
+        assert!(
+            crate::http::hls::processed_upgrade::ProcessingSkip::from_owner_wire(
+                header.as_bytes(),
+                &generation,
+            )
+            .is_some()
+        );
+        assert!(
+            crate::http::hls::processed_upgrade::ProcessingSkip::from_owner_wire(
+                header.as_bytes(),
+                &Uuid::new_v4().to_string(),
+            )
+            .is_none()
+        );
+        let exchange = request(&generation, 1, selection());
+        assert!(actor.observe_ask(&state, &exchange, true).is_none());
+        assert!(
+            actor.processed_upgrade_skip(&generation).is_some(),
+            "the reason survives clearing the failed slot"
+        );
+        assert!(!superseding(&predecessor), "ordinary session remains live");
     }
 }

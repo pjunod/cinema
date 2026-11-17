@@ -2290,6 +2290,26 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
         if source.hdr.as_deref() == Some("dolby_vision") && options.preserve_dolby_vision {
             args.push("-strict".into());
             args.push("unofficial".into());
+            // FFmpeg 8 drops dvcC/dvvC when the muxer's colour tags conflict
+            // with the record's compatible base. The scanned compatibility
+            // id defines that base even when container colour tags are absent
+            // or wrong. Freeze the same output tags in every copy recipe so
+            // cold/indexed/local/shared copies and their identities agree.
+            let transfer = match source.dolby_vision.bl_compat_id {
+                Some(1 | 6) => Some("smpte2084"),
+                Some(4) => Some("arib-std-b67"),
+                _ => None,
+            };
+            if let Some(transfer) = transfer {
+                args.extend([
+                    "-color_primaries".into(),
+                    "bt2020".into(),
+                    "-color_trc".into(),
+                    transfer.into(),
+                    "-colorspace".into(),
+                    "bt2020nc".into(),
+                ]);
+            }
         }
         // A non-backward-compatible Dolby Vision stream is tagged `dvh1`, so
         // its VPS/SPS/PPS must be present in hvcC before AVPlayer opens the

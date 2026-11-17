@@ -4109,6 +4109,12 @@ fn dovi_reshape_probe_args(encoder: Encoder) -> Vec<String> {
     args
 }
 
+/// The boot capability probe of one Dolby Vision reshape graph (software or
+/// one hardware encoder). It runs only from the boot measurement, never from
+/// a session start.
+pub(crate) const DOVI_RESHAPE_CAPABILITY_PROBE: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::background("Dolby Vision reshape capability probe");
+
 async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     command
@@ -4116,10 +4122,7 @@ async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
         .kill_on_drop(true);
     tokio::time::timeout(
         Duration::from_secs(20),
-        crate::process_control::status_job_owned(
-            &mut command,
-            crate::process_control::ChildWork::background("Dolby Vision reshape capability probe"),
-        ),
+        crate::process_control::status_job_owned(&mut command, DOVI_RESHAPE_CAPABILITY_PROBE),
     )
     .await
     .is_ok_and(|result| result.is_ok_and(|status| status.success()))
@@ -4139,7 +4142,9 @@ async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
 ///
 /// Nothing is assumed: each pairing is probed once, exactly like the software
 /// route, and an unproved pairing falls back to software rather than failing a
-/// session in front of a viewer.
+/// session in front of a viewer. Every pairing this node's encoders offer is
+/// probed at boot ([`measure_dovi_reshape_hardware`]); a session reads that
+/// boot record and never starts this probe itself.
 pub async fn has_dovi_reshape_with(encoder: plurx_core::transcode::Encoder) -> bool {
     if encoder == Encoder::Software {
         return has_dovi_reshape().await;
@@ -4171,6 +4176,27 @@ pub async fn has_dovi_reshape_with(encoder: plurx_core::transcode::Encoder) -> b
     }
     memo.insert(key, passed);
     passed
+}
+
+/// The hardware encoders this node's Dolby Vision reshape is proved with:
+/// every hardware encoder `encoders` detected, each probed once. Measured at
+/// boot beside the software pairing (`dovi_reshape`), so no session start
+/// ever spawns a capability probe.
+pub async fn measure_dovi_reshape_hardware(
+    encoders: &plurx_core::transcode::EncoderCaps,
+) -> Vec<Encoder> {
+    let mut proved = Vec::new();
+    for (available, encoder) in [
+        (encoders.nvenc, Encoder::Nvenc),
+        (encoders.qsv, Encoder::Qsv),
+        (encoders.vaapi, Encoder::Vaapi),
+        (encoders.videotoolbox, Encoder::VideoToolbox),
+    ] {
+        if available && has_dovi_reshape_with(encoder).await {
+            proved.push(encoder);
+        }
+    }
+    proved
 }
 
 /// The message `tonemapx` prints when its HDR passthrough mode is asked for
@@ -4618,12 +4644,11 @@ pub async fn has_dovi_passthrough_with(encoder: Encoder) -> bool {
         .await
 }
 
-async fn dovi_probe_output(
-    file: &MediaFile,
-    apply: bool,
-    class: crate::process_control::ChildClass,
-    source: &std::fs::File,
-) -> Result<Vec<String>, String> {
+/// The seek point and filter graph of one Dolby Vision pixel probe run: three
+/// frames a fifth of the way in, through the production renderer with RPU
+/// application on or off. Shared by the local proof and the Source's owned
+/// proof, so both measure exactly the same thing.
+fn dovi_pixel_probe_graph(file: &MediaFile, apply: bool) -> Result<(String, String), String> {
     let seek = file
         .duration_ms
         .map(|duration| (duration / 5).saturating_sub(1_000) as f64 / 1_000.0)
@@ -4635,16 +4660,71 @@ async fn dovi_probe_output(
         .filters(Some(width), height, Some("dolby_vision"))
         .ok_or_else(|| "Dolby Vision renderer produced no filter graph".to_owned())?
         .replace("apply_dovi=1", &format!("apply_dovi={}", u8::from(apply)));
+    Ok((format!("{seek:.3}"), filter))
+}
+
+fn dovi_pixel_probe_args(
+    command: &mut tokio::process::Command,
+    seek: &str,
+    input: &str,
+    filter: String,
+) {
+    command
+        .args(["-hide_banner", "-loglevel", "error"])
+        .args(["-ss", seek, "-i", input])
+        .args(["-map", "0:v:0", "-frames:v", "3", "-an", "-vf"])
+        .arg(filter)
+        .args(["-f", "framemd5", "-"]);
+}
+
+/// The frame hashes one pixel probe run printed.
+pub(crate) fn dovi_pixel_probe_frames(stdout: &[u8]) -> Result<Vec<String>, String> {
+    let frames: Vec<String> = String::from_utf8_lossy(stdout)
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect();
+    (!frames.is_empty())
+        .then_some(frames)
+        .ok_or_else(|| "Dolby Vision pixel probe produced no frame hashes".to_owned())
+}
+
+/// One run of the per-source Dolby Vision pixel proof, reading the Source's
+/// held descriptor as fd 3, for the Source to run as its own child under its
+/// copy permit, file fence, deadline and cancellation. No path is reopened.
+pub(crate) fn source_dovi_pixel_probe_command(
+    source: &std::fs::File,
+    file: &MediaFile,
+    apply: bool,
+) -> Result<tokio::process::Command, String> {
+    let (seek, filter) = dovi_pixel_probe_graph(file, apply)?;
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    #[cfg(unix)]
+    {
+        inherit_file_descriptors(&mut command, &[(source, 3)]);
+        dovi_pixel_probe_args(&mut command, &seek, "/dev/fd/3", filter);
+    }
+    #[cfg(windows)]
+    {
+        let path = windows_source_path(source)?;
+        verify_windows_source_path(source, &path)?;
+        dovi_pixel_probe_args(&mut command, &seek, &path.to_string_lossy(), filter);
+    }
+    Ok(command)
+}
+
+async fn dovi_probe_output(
+    file: &MediaFile,
+    apply: bool,
+    class: crate::process_control::ChildClass,
+    source: &std::fs::File,
+) -> Result<Vec<String>, String> {
+    let (seek, filter) = dovi_pixel_probe_graph(file, apply)?;
     let input = crate::source_input::SourceInput::open_current_held(source, "dovi-pixel-probe")
         .await?
         .ok_or("Dolby Vision pixel probe has no original source read owner")?;
     let mut command = tokio::process::Command::new(ffmpeg_bin());
-    command
-        .args(["-hide_banner", "-loglevel", "error"])
-        .args(["-ss", &format!("{seek:.3}"), "-i", input.url()])
-        .args(["-map", "0:v:0", "-frames:v", "3", "-an", "-vf"])
-        .arg(filter)
-        .args(["-f", "framemd5", "-"]);
+    dovi_pixel_probe_args(&mut command, &seek, input.url(), filter);
     let child = BoundedDiagnosticChild::spawn_piped_output(
         &mut command,
         crate::process_control::ChildWork::new(class, "Dolby Vision pixel probe"),
@@ -4673,14 +4753,7 @@ async fn dovi_probe_output(
             stderr.trim()
         ));
     }
-    let frames: Vec<String> = String::from_utf8_lossy(&stdout)
-        .lines()
-        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
-        .map(str::to_owned)
-        .collect();
-    (!frames.is_empty())
-        .then_some(frames)
-        .ok_or_else(|| "Dolby Vision pixel probe produced no frame hashes".to_owned())
+    dovi_pixel_probe_frames(&stdout)
 }
 
 /// Prove, on the requested Profile 5 source, that the decoder exports RPU side

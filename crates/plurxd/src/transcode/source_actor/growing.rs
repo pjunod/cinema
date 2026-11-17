@@ -217,8 +217,13 @@ impl SourceViewerActor {
             SharingHlsResourceKind::Master
             | SharingHlsResourceKind::SubtitlePlaylist { .. }
             | SharingHlsResourceKind::SubtitleSegment { .. } => {
-                let tracks = native.as_ref().ok_or(SourceWorkerError::Unsupported)?;
-                if !tracks.matches(&self.0.assignment, &backing.file) {
+                // The master needs no prepared subtitle tracks: without them
+                // it admits none and still declares the session's range.
+                let tracks = native.as_ref();
+                if kind != SharingHlsResourceKind::Master && tracks.is_none() {
+                    return Err(SourceWorkerError::Unsupported);
+                }
+                if tracks.is_some_and(|tracks| !tracks.matches(&self.0.assignment, &backing.file)) {
                     return Err(SourceWorkerError::Unavailable);
                 }
                 let manager = self
@@ -226,7 +231,13 @@ impl SourceViewerActor {
                     .manager
                     .upgrade()
                     .ok_or(SourceWorkerError::Unavailable)?;
-                let probe = tracks.presentation_probe();
+                let probe = self
+                    .0
+                    .state
+                    .lock()
+                    .expect("Source copy presentation")
+                    .presentation_probe
+                    .clone();
                 let files = backing.production.files.lock().await;
                 let video = files.playlist();
                 let origin = files
@@ -234,8 +245,8 @@ impl SourceViewerActor {
                     .ok_or(SourceWorkerError::Unavailable)? as f64
                     / 1000.0;
                 drop(files);
-                match kind {
-                    SharingHlsResourceKind::Master => {
+                match (kind, tracks) {
+                    (SharingHlsResourceKind::Master, tracks) => {
                         let SessionKind::Copy {
                             aac,
                             preserve_dolby_vision,
@@ -272,12 +283,12 @@ impl SourceViewerActor {
                         };
                         SourceResourcePayload::Playlist(crate::http::hls::source_native_master(
                             &backing.file,
-                            tracks.selected(),
+                            tracks.and_then(|tracks| tracks.selected()),
                             &context,
-                            &tracks.indexes(),
+                            &tracks.map(|tracks| tracks.indexes()).unwrap_or_default(),
                         ))
                     }
-                    SharingHlsResourceKind::SubtitlePlaylist { index } => {
+                    (SharingHlsResourceKind::SubtitlePlaylist { index }, Some(tracks)) => {
                         if !tracks.has_track(index) {
                             return Err(SourceWorkerError::Unsupported);
                         }
@@ -285,7 +296,7 @@ impl SourceViewerActor {
                             &video,
                         ))
                     }
-                    SharingHlsResourceKind::SubtitleSegment { index } => {
+                    (SharingHlsResourceKind::SubtitleSegment { index }, Some(tracks)) => {
                         if !tracks.has_track(index) {
                             return Err(SourceWorkerError::Unsupported);
                         }
@@ -384,7 +395,6 @@ impl TranscodeManager {
             run_source_census, spawn_source_generation, CopyGenerationOwner, CopyRangeFiles,
             ObservedCopyMux,
         };
-        use plurx_core::transcode::CopyVideoOptions;
         let SessionKind::Copy {
             aac,
             preserve_dolby_vision,
@@ -406,23 +416,19 @@ impl TranscodeManager {
         {
             return Err(SourceWorkerError::Unsupported);
         }
-        // The native master presents the same probe this copy was planned from.
-        if let Some(tracks) = owner
+        // The master presents the same probe this copy was planned from.
+        owner
             .state
             .lock()
             .expect("Source copy presentation")
-            .native
-            .as_ref()
-        {
-            tracks.set_presentation_probe(probe.as_deref());
-        }
-        let video = CopyVideoOptions::from_probe(
+            .presentation_probe
+            .clone_from(&probe);
+        let video = self.source_copy_video_options(
             prepared.file(),
             probe.as_deref(),
-            false,
             preserve_dolby_vision,
-        )
-        .with_dolby_vision_conversion(convert_dolby_vision);
+            convert_dolby_vision,
+        );
         let permit = self.admit_source_copy(deadline).await?;
         let owners = Arc::new(SourceRenditionOwners::default());
         let source_owner = owners
