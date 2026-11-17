@@ -132,6 +132,24 @@ impl Cluster {
     }
 }
 
+/// Process-local writer observations projected through the raw cluster owner.
+/// These fixed-label counters need neither a Store nor serving authority.
+pub(crate) struct WriterAbandonedReply {
+    pub(crate) request: &'static str,
+    pub(crate) ok: u64,
+    pub(crate) error: u64,
+}
+pub(crate) fn writer_abandoned_replies() -> Vec<WriterAbandonedReply> {
+    hiqlite::db_writer_abandoned_replies()
+        .into_iter()
+        .map(|row| WriterAbandonedReply {
+            request: row.request,
+            ok: row.ok,
+            error: row.error,
+        })
+        .collect()
+}
+
 /// This node's place in the cluster.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LocalRole {
