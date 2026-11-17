@@ -1287,6 +1287,7 @@ pub(crate) fn managed_fixture_shape(version: i64) -> Vec<(String, String)> {
 /// Canonical live managed objects after the current SQLite bootstrap, including
 /// the source-lease root overlay on background_job_required_resources. Frozen
 /// published generations continue to use managed_fixture_shape(version).
+#[cfg(feature = "hiqlite-contract-tests")]
 pub(crate) fn current_managed_fixture_shape() -> Vec<(String, String)> {
     let directory = tempfile::tempdir().expect("current managed fixture witness");
     let path = directory.path().join("current.db");
