@@ -46,8 +46,8 @@ Preparatory source checkpoints do not establish landing or qualification.
 |---|---|---|
 | 7a — incoming authentication and admission | `cluster.rs`; `diagnostics.rs`; HTTP `activity_starts`, `internal_activity`, `internal_auth_revocation`, `internal_live_tv`, `internal_media`, `internal_media_sessions`, `remote`, `cluster_operations`, `mod`, `stream`; HLS `control`, `create`, `fence`, `preparation`, `response`; `offline.rs`, `state.rs`, associated fixtures | Reuse PeerAuthentication; preserve distinct legacy/read/voter/exact algorithms. Inject owned restart admission into OfflineManager. HLS response observation retains the same authority source and arrival/answer sampling. Route classification stays stateless and exact. |
 | 7b — job, backup and applied-change services | `cluster.rs`, `background_jobs.rs`, `background_jobs/analysis_reconcile.rs`, `cache_preparation.rs`, `state.rs`, `subtitle_models/mod.rs`, small remaining role callers, `backup.rs`, `settings_changes.rs`; backup-only Boot/AppStateConfig wiring in `main.rs` and corresponding `startup_tests.rs` literals | Owned ClusterJobAuthority with fresh learner authority, typed reconciliation that preserves unreadable refusal, exact backup apply/anchor/apply/snapshot deadline sequence, typed applied-index/liveness/change source with unchanged settings proof. |
-| 7c — bootstrap and core boundary | `cluster.rs`, `main.rs`, `state.rs`; scoped core membership/access APIs, SelectedBackend factory; cluster-check and external startup observer fixture | Cluster-owned composition from selected mechanisms, typed Boot/AppStateConfig, high-level core bridge and private raw role/roster methods. Coordinate the small SelectedBackend addition after the active listener owner's integration; no competing vendor/startup/listener repair. Preserve C7 on its actual landed base. |
-| 7d — privacy and semantic census | `cluster.rs`, `state.rs`, `cluster/census.rs`, ratchet/ownership tests and fixtures, final plan/audit/backlog ledger | Remove last raw fields/reach-arounds, exact non-raw receiver classification, strengthened negative controls, compiler probes, empty measured pins and zero ceiling. |
+| 7c — core boundary | `cluster.rs`; scoped core membership/access APIs; cluster-check and external startup observer fixture; census declaration check and exact source assertions | High-level core services and private raw role/roster methods, constructed through the existing manager at composition without changing SelectedBackend/listener ownership. Preserve C7 on its actual landed base. |
+| 7d — runtime ownership, privacy and semantic census | `cluster.rs`, `main.rs`, `state.rs`, last media-pool fence/media-session clock consumers, `cluster/census.rs`, ratchet/ownership tests and fixtures, final plan/audit/backlog ledger | Typed Boot/AppConfig and lifecycle composition, remove last raw fields/reach-arounds without a raw-parts getter, exact non-raw receiver classification, strengthened negative controls, compiler probes, empty measured pins and zero ceiling. |
 
 Associated formal source mappings and ownership inventory are updated only
 after reviewing actual modeled statements/owners. Matcher sentinels and
@@ -294,3 +294,15 @@ proof/identity, revocation exclusion, directory ordering/filtering, learner
 job and daemon protocol regressions; strict Clippy, formatting, census,
 ownership/ratchet, source mapping and paperwork remain required. Record
 inherited debt and acceptance limits rather than weakening a guard.
+
+7c compiler privacy evidence must have a positive control using the public
+services and a negative external-crate control covering all 18 raw methods.
+Accept only the expected private-method diagnostics for each named method;
+an unrelated compile failure is not a privacy pass. Keep probes/receipts in
+owned external task storage, compile against the exact normalized archive
+under its workflow lock, and verify archive blobs before and after.
+
+The current landed-mark base `6c95fed4c` has passed its isolated daemon
+all-target check, 35 focused 7b regressions and all ten census cases. The 7c
+plan changes documentation only, so this establishes its source compiler
+baseline before implementation.
