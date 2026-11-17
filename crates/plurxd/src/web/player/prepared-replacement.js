@@ -928,8 +928,10 @@ function commitPreparedReplacement(p,state){
 //
 // Chase deliberately aims ahead. Native HLS must retain that decoded position:
 // seeking backward can restart Safari's decoder and spend both seek bounds.
-// Hold the muted successor until the incumbent reaches it instead. Other
-// corrective seeks retain their two-attempt bound and post-seek buffer check.
+// Hold the muted successor until the incumbent reaches it instead. If native
+// playback is behind despite covering the incumbent in its buffer, first seek
+// forward to a buffered fixed point: seeking to the moving clock always leaves
+// seek latency behind. MSE keeps its two corrective seeks and buffer checks.
 async function alignPreparedReplacement(p,state,v,spare){
   const live=()=>PLAYER===p&&preparedState(p)===state
     &&document.getElementById("video")===v&&preparedVideoElement()===spare
@@ -938,8 +940,47 @@ async function alignPreparedReplacement(p,state,v,spare){
   // Native readiness chooses WHEN to resume, never whether to seek backward.
   // Incumbent-relative buffer_ready can leave less than a second past the
   // successor itself (the Safari replay had only 496ms). Pause and warm it.
-  if(!state.hls&&(spare.currentTime-target)*1000>preparedClockAlignmentSlackMs(p)){
-    if(!await holdPreparedNativeSuccessor(p,state,v,spare)||!live()) return false;
+  if(!state.hls){
+    let deadlineAtMs=Infinity;
+    if((target-spare.currentTime)*1000>preparedClockAlignmentSlackMs(p)){
+      const rate=Number(v.playbackRate),startedAt=performance.now();
+      if(!live()) return false;
+      if(v.paused||v.seeking||p.wantsPlayback===false||!Number.isFinite(rate)||!(rate>0)){
+        failPreparedReplacement(p,state,"native forward alignment: viewer-intent");return false;
+      }
+      // Only the range containing the incumbent can supply this aim. Keep
+      // the existing post-seek runway through the advancing-frame proof,
+      // plus landing/poll tolerance. Those frames consume media time at every
+      // playback rate; a later disjoint range is not buffered evidence here.
+      const reserve=(PREPARED_BUFFER_LEAD_MS/2
+        +(PREPARED_MONOTONIC_FRAME_STEPS+2)*preparedClockAlignmentSlackMs(p))/1000;
+      let wanted=null;
+      try{
+        for(let i=0;i<spare.buffered.length;i++){
+          if(spare.buffered.start(i)<=target&&spare.buffered.end(i)>=target){
+            const lead=Math.min(PREPARED_CHASE_LEAD_MS/1000,spare.buffered.end(i)-target-reserve);
+            if(lead*1000>preparedClockAlignmentSlackMs(p)) wanted=target+lead;
+            break;
+          }
+        }
+      }catch(e){}
+      if(wanted==null){
+        failPreparedReplacement(p,state,"native forward alignment has insufficient contiguous buffer");return false;
+      }
+      deadlineAtMs=startedAt+(wanted-target)*1000/rate+PREPARED_ALIGN_SEEK_MS;
+      try{ spare.pause(); }catch(e){ failPreparedReplacement(p,state,"could not pause native successor");return false; }
+      const landed=await preparedAlignSeek(spare,wanted);
+      if(!live()) return false;
+      if(v.paused||v.seeking||p.wantsPlayback===false||Number(v.playbackRate)!==rate){
+        failPreparedReplacement(p,state,"native forward alignment: viewer-intent");return false;
+      }
+      clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"align_forward",
+        message:`prepared ${state.sessionId} native forward alignment seeked=${landed} `+
+          `elapsed_ms=${Math.round(performance.now()-startedAt)} wanted_ms=${Math.round(wanted*1000)} `+
+          `landed_ms=${Math.round(spare.currentTime*1000)} seeking=${spare.seeking} ready_state=${spare.readyState}`},playbackContext()));
+      if(!landed){ failPreparedReplacement(p,state,"native forward alignment seek timed out");return false; }
+    }
+    if(!await holdPreparedNativeSuccessor(p,state,v,spare,deadlineAtMs)||!live()) return false;
     try{
       spare.playbackRate=v.playbackRate;
       const started=spare.play();
@@ -988,7 +1029,7 @@ async function alignPreparedReplacement(p,state,v,spare){
 // A bounded rendezvous, driven by the incumbent rather than the paused spare.
 // Reuse the exposure timer/listener ownership so supersede and teardown cancel
 // the wait. No seek, element swap, or audio transfer occurs during the hold.
-function holdPreparedNativeSuccessor(p,state,v,spare){
+function holdPreparedNativeSuccessor(p,state,v,spare,deadlineAtMs=Infinity){
   return new Promise((resolve)=>{
     const live=()=>PLAYER===p&&preparedState(p)===state
       &&document.getElementById("video")===v&&preparedVideoElement()===spare
@@ -1012,7 +1053,9 @@ function holdPreparedNativeSuccessor(p,state,v,spare){
     if(!Number.isFinite(requested)||bufferRunway(v)*1000<aheadMs+PREPARED_BUFFER_LEAD_MS){
       finish(false,"insufficient incumbent runway");return;
     }
-    const budgetMs=Math.min(aheadMs,PREPARED_CHASE_LEAD_MS*2**(PREPARED_CHASE_ATTEMPTS-1))/rate+PREPARED_ALIGN_SEEK_MS;
+    const budgetMs=Math.min(
+      Math.min(aheadMs,PREPARED_CHASE_LEAD_MS*2**(PREPARED_CHASE_ATTEMPTS-1))/rate+PREPARED_ALIGN_SEEK_MS,
+      deadlineAtMs-startedAt);
     let held=null, warmed=false;
     state.overlapPhase="native-align-hold";
     const through=preparedBufferedThroughMs(state,spare);
