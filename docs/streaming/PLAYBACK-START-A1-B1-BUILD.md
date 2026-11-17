@@ -218,9 +218,23 @@ Use one FFmpeg input for a range. Fan its selected video stream into the
 production AV output, a canonical video-only MP4 measurement output and a
 bounded `framecrc` packet-clock output; audio exists only in AV output.
 The packet-clock output uses source timestamps (`-copyts`, disabled negative
-clock shifting and the demux time base); the MP4 outputs retain their required
-zero-based mux timelines. Exact signed packet DTS/PTS, durations and pre-conversion
-sizes associate canonical fragments with source time by ordered samples.
+clock shifting and the demux time base). Clocked MP4 outputs use
+`make_non_negative` and an initial `frag_discont`, with edit lists disabled:
+negative timestamps shift as one group, while `tfdt` retains each track's
+start offset against a common origin. `make_zero` with no edit list stretches
+a later track's first sample; an AAC lead can therefore change the AV
+video's duration while the video-only canonical sample stays unchanged.
+The clocked recipe preserves those samples instead of relaxing companion
+verification. Legacy copy/index mux policies remain unchanged. This follows
+the pinned Jellyfin FFmpeg 8.1.3-1 implementation
+([`movenc.c` 6606–6628](https://github.com/jellyfin/jellyfin-ffmpeg/blob/253db2a7b0a8045c54ce68ce33d7f601229b1822/libavformat/movenc.c#L6606-L6628),
+[`movenc.c` 6707–6710](https://github.com/jellyfin/jellyfin-ffmpeg/blob/253db2a7b0a8045c54ce68ce33d7f601229b1822/libavformat/movenc.c#L6707-L6710),
+[`mux.c` 589–639](https://github.com/jellyfin/jellyfin-ffmpeg/blob/253db2a7b0a8045c54ce68ce33d7f601229b1822/libavformat/mux.c#L589-L639)). The real
+[gap-fill regression](../../crates/plurxd/src/copy_analysis/gap_fill_tests.rs)
+compares sample tuples and payloads and checks the initial video/AAC offset
+against the same input's rational source clock.
+Exact signed packet DTS/PTS, durations and pre-conversion sizes associate
+canonical fragments with source time by ordered samples.
 FFmpeg's supported side-data columns remain metadata, never another source
 reader. The parser and argv exist; real seeked-row equality remains unqualified.
 The pipeline must establish this mapping under the held source generation before
