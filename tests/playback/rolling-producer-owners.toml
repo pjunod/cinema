@@ -1,3 +1,8 @@
+# Static raw-retirement fixture follow-up (2026-11-17): one controlled worker
+# thread and one scoped controller thread are both joined. The controller's
+# five-second acknowledgement bound fails observation only; raw custody remains
+# held until actual worker join. Production accounting adds no task, process or timer.
+
 # HDR source-lifetime/admission and capture-boundary fixture audit (2026-11-16).
 # Authored static comparison of f83484653 with fbe197ed9, using the unchanged
 # rust_structural_source extractor and module_roots; not runtime qualification.
@@ -4034,7 +4039,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # token: live_tv/tests.rs spawns dvr_loop twice and reminder_loop once;
 # sharing.rs's idle-loop test spawns run and claim_loop. No production
 # task owner is added.
-expected_occurrences = 1170
+expected_occurrences = 1171
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4289,7 +4294,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
-expected_occurrences = 101
+expected_occurrences = 102
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7241,7 +7246,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # processed_stream_format_reports_the_attached_carrier_not_its_pq_base.
 # It reads the existing VOD owner's status_publication snapshot: no child
 # launch, lease renewal, or ownership transfer. The broad matcher is unchanged.
-expected_occurrences = 939
+expected_occurrences = 940
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
