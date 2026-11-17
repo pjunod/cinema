@@ -76,3 +76,19 @@ reviewer recommended one bounded compiler limit of 256, preserving ownership,
 and exact-candidate all-target Clippy; a further overflow requires investigation
 rather than another automatic increase. No runtime stack or ownership rule
 changes with this compiler setting.
+
+## Focused runtime-repair closure
+
+A focused review of the runtime repair delta found no additional concrete code
+blocker. This closes the new edits without repeating the whole-effort review.
+The Activity allocator charges actual serialized ancillary bytes rather than
+reserving maximum space for absent families. It preserves the 256 KiB ceiling,
+existing family bounds and Stop identities, reserves a fitting delivery before
+analysis, then fills the remaining wire budget. The saturated regression keeps
+maximum JSON-escaped titles and checks all families together.
+
+Fixture and structural-inventory repairs retain production admission and privacy
+checks. The Source offer case still requires overlapping ordinary and affirmed
+Starts; failure-stage diagnostics do not waive its unresolved 503. These repairs
+have not yet compiled or passed their failed-only runtime checks. Main promotion,
+deployment and real-title/device acceptance remain outstanding.

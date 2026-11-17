@@ -32,14 +32,13 @@ pub const TIMEOUT: Duration = Duration::from_secs(2);
 const SOURCE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const ACTIVITY_SNAPSHOT_REUSE: Duration = Duration::from_secs(1);
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
-// Four rows, including worst-case six-byte JSON escapes for every bounded
-// string, fit this reservation even when deliveries saturate the response.
+// Ancillary family maxima. The allocator charges actual serialized rows
+// before admitting analysis and deliveries; unused capacity is shared.
 const LIVE_TV_RESPONSE_RESERVE_BYTES: usize = 24 * 1024;
 const DVR_RESPONSE_RESERVE_BYTES: usize = 64 * 1024;
 const WORKER_RESPONSE_RESERVE_BYTES: usize = 64 * 1024;
-// A saturated delivery list must not erase every analysis row from a peer's
-// Activity snapshot. Reserve one quarter of the shared wire budget whenever
-// progress exists; unused space remains available when it does not.
+// Analysis may use at most a quarter of the wire; a first delivery is held
+// aside before analysis takes any of the remaining space.
 const ANALYSIS_RESPONSE_RESERVE_BYTES: usize = MAX_RESPONSE_BYTES / 4;
 const MAX_DELIVERIES: usize = 512;
 const MAX_ANALYSIS_PROGRESS: usize = 64;
@@ -1118,12 +1117,15 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
             progress.title = bounded_text(title.clone(), MAX_TITLE_BYTES);
         }
     }
-    let mut snapshot = bounded_snapshot(state.node_id.clone(), deliveries, analysis);
+    // Charge the ancillary families before the two variable-length lists.
+    // Their unused reservations are then available to real delivery rows.
+    let mut snapshot = empty_snapshot(state.node_id.clone());
     attach_source_processed(&mut snapshot, local_source_processed(state).await);
     attach_receiver_processed(&mut snapshot, local_receiver_processed(state).await);
-    snapshot.workers = Some(Box::new(local_workers(state).await));
-    snapshot.live_tv = state.live_tv.activities().into_iter().take(4).collect();
+    attach_workers(&mut snapshot, local_workers(state).await);
+    attach_live_tv(&mut snapshot, state.live_tv.activities());
     attach_dvr_snapshot(&mut snapshot, state.live_tv.capture_observation_snapshot());
+    fill_snapshot(&mut snapshot, deliveries, analysis);
     snapshot
 }
 
@@ -1200,73 +1202,76 @@ where
     fetch(ids).await
 }
 
-/// Keep the producer and consumer on the same exact wire budget. Serializing
-/// each candidate accounts for JSON escaping without repeatedly encoding the
-/// whole response, and preserves the newest-first ordering above.
-fn bounded_snapshot(
-    node_id: String,
-    deliveries: Vec<ActivityDelivery>,
-    analysis: Vec<crate::state::AnalysisProgress>,
-) -> ActivitySnapshot {
-    let node_id = bounded_text(node_id, MAX_NODE_ID_BYTES);
-    let mut snapshot = ActivitySnapshot {
+fn empty_snapshot(node_id: String) -> ActivitySnapshot {
+    ActivitySnapshot {
         workers: None,
-        node_id,
+        node_id: bounded_text(node_id, MAX_NODE_ID_BYTES),
         deliveries: Vec::new(),
         source_processed: Vec::new(),
         receiver_processed: Vec::new(),
         analysis: Vec::new(),
         live_tv: Vec::new(),
         dvr: None,
-    };
-    let mut encoded_bytes = serde_json::to_vec(&snapshot)
+    }
+}
+
+/// Keep the producer and consumer on the same exact wire budget. Ancillary
+/// families have already spent only their actual serialized bytes. Reserve
+/// the first delivery before filling analysis, then keep both lists in their
+/// original order; JSON escaping is charged for every admitted row.
+fn fill_snapshot(
+    snapshot: &mut ActivitySnapshot,
+    deliveries: Vec<ActivityDelivery>,
+    analysis: Vec<crate::state::AnalysisProgress>,
+) {
+    let mut encoded_bytes = serde_json::to_vec(snapshot)
         .map(|encoded| encoded.len())
         .unwrap_or(MAX_RESPONSE_BYTES);
-    let delivery_budget = if analysis.is_empty() {
-        MAX_RESPONSE_BYTES
-            - LIVE_TV_RESPONSE_RESERVE_BYTES
-            - DVR_RESPONSE_RESERVE_BYTES
-            - WORKER_RESPONSE_RESERVE_BYTES
-            - SOURCE_RESPONSE_RESERVE_BYTES
-    } else {
-        MAX_RESPONSE_BYTES.saturating_sub(
-            ANALYSIS_RESPONSE_RESERVE_BYTES
-                + LIVE_TV_RESPONSE_RESERVE_BYTES
-                + DVR_RESPONSE_RESERVE_BYTES
-                + WORKER_RESPONSE_RESERVE_BYTES
-                + SOURCE_RESPONSE_RESERVE_BYTES,
-        )
-    };
-    for delivery in deliveries.into_iter().take(MAX_DELIVERIES) {
-        let Ok(encoded) = serde_json::to_vec(&delivery) else {
-            continue;
-        };
-        let separator = usize::from(!snapshot.deliveries.is_empty());
-        let added = encoded.len().saturating_add(separator);
-        if encoded_bytes.saturating_add(added) > delivery_budget {
-            continue;
-        }
-        encoded_bytes += added;
-        snapshot.deliveries.push(delivery);
-    }
+    let first_delivery_bytes = deliveries
+        .iter()
+        .take(MAX_DELIVERIES)
+        .filter_map(|delivery| serde_json::to_vec(delivery).ok().map(|wire| wire.len()))
+        .find(|bytes| encoded_bytes.saturating_add(*bytes) <= MAX_RESPONSE_BYTES)
+        .unwrap_or(0);
+    let mut analysis_bytes: usize = 0;
     for progress in analysis.into_iter().take(MAX_ANALYSIS_PROGRESS) {
         let Ok(encoded) = serde_json::to_vec(&progress) else {
             continue;
         };
         let separator = usize::from(!snapshot.analysis.is_empty());
         let added = encoded.len().saturating_add(separator);
-        if encoded_bytes.saturating_add(added)
-            > MAX_RESPONSE_BYTES
-                - LIVE_TV_RESPONSE_RESERVE_BYTES
-                - DVR_RESPONSE_RESERVE_BYTES
-                - WORKER_RESPONSE_RESERVE_BYTES
-                - SOURCE_RESPONSE_RESERVE_BYTES
+        if analysis_bytes.saturating_add(added) > ANALYSIS_RESPONSE_RESERVE_BYTES
+            || encoded_bytes.saturating_add(added)
+                > MAX_RESPONSE_BYTES.saturating_sub(first_delivery_bytes)
         {
             continue;
         }
         encoded_bytes += added;
+        analysis_bytes += added;
         snapshot.analysis.push(progress);
     }
+    for delivery in deliveries.into_iter().take(MAX_DELIVERIES) {
+        let Ok(encoded) = serde_json::to_vec(&delivery) else {
+            continue;
+        };
+        let separator = usize::from(!snapshot.deliveries.is_empty());
+        let added = encoded.len().saturating_add(separator);
+        if encoded_bytes.saturating_add(added) > MAX_RESPONSE_BYTES {
+            continue;
+        }
+        encoded_bytes += added;
+        snapshot.deliveries.push(delivery);
+    }
+}
+
+#[cfg(test)]
+fn bounded_snapshot(
+    node_id: String,
+    deliveries: Vec<ActivityDelivery>,
+    analysis: Vec<crate::state::AnalysisProgress>,
+) -> ActivitySnapshot {
+    let mut snapshot = empty_snapshot(node_id);
+    fill_snapshot(&mut snapshot, deliveries, analysis);
     snapshot
 }
 
@@ -1303,6 +1308,43 @@ fn attach_receiver_processed(snapshot: &mut ActivitySnapshot, rows: Vec<Receiver
         }
         bytes += added;
         snapshot.receiver_processed.push(row);
+    }
+}
+
+fn attach_workers(snapshot: &mut ActivitySnapshot, workers: ActivityWorkers) {
+    let before = serde_json::to_vec(&*snapshot)
+        .map(|wire| wire.len())
+        .unwrap_or(MAX_RESPONSE_BYTES);
+    snapshot.workers = Some(Box::new(workers));
+    let added = serde_json::to_vec(&*snapshot)
+        .map(|wire| wire.len().saturating_sub(before))
+        .unwrap_or(MAX_RESPONSE_BYTES);
+    if added > WORKER_RESPONSE_RESERVE_BYTES {
+        let workers = snapshot.workers.take().expect("worker snapshot");
+        snapshot.workers = Some(Box::new((*workers).capacity_only()));
+    }
+}
+
+fn attach_live_tv(
+    snapshot: &mut ActivitySnapshot,
+    rows: impl IntoIterator<Item = crate::live_tv::LiveTvActivity>,
+) {
+    let mut bytes = serde_json::to_vec(&*snapshot)
+        .map(|wire| wire.len())
+        .unwrap_or(MAX_RESPONSE_BYTES);
+    let limit = bytes
+        .saturating_add(LIVE_TV_RESPONSE_RESERVE_BYTES)
+        .min(MAX_RESPONSE_BYTES);
+    for row in rows.into_iter().take(4) {
+        let Ok(wire) = serde_json::to_vec(&row) else {
+            continue;
+        };
+        let added = wire.len() + usize::from(!snapshot.live_tv.is_empty());
+        if bytes.saturating_add(added) > limit {
+            continue;
+        }
+        bytes += added;
+        snapshot.live_tv.push(row);
     }
 }
 
@@ -1784,9 +1826,9 @@ mod tests {
             delivered_bytes: None,
             delivered_bps: None,
         };
-        let mut snapshot =
-            bounded_snapshot(node_id.clone(), vec![delivery; MAX_DELIVERIES], Vec::new());
-        snapshot.live_tv = vec![row; 4];
+        let mut snapshot = empty_snapshot(node_id.clone());
+        attach_live_tv(&mut snapshot, vec![row; 4]);
+        fill_snapshot(&mut snapshot, vec![delivery; MAX_DELIVERIES], Vec::new());
         let encoded = serde_json::to_vec(&snapshot).expect("snapshot JSON");
         assert!(encoded.len() <= MAX_RESPONSE_BYTES);
         assert!(snapshot_is_bounded(&snapshot, &node_id));
@@ -1823,7 +1865,148 @@ mod tests {
         let encoded = serde_json::to_vec(&snapshot).expect("bounded snapshot serializes");
         assert!(encoded.len() <= MAX_RESPONSE_BYTES);
         assert!(!snapshot.deliveries.is_empty());
+        assert!(snapshot.deliveries.len() < MAX_DELIVERIES);
         assert_eq!(snapshot.analysis.len(), 1);
+        assert!(snapshot_is_bounded(&snapshot, "node-b"));
+    }
+
+    #[test]
+    fn saturated_ancillary_activity_keeps_stop_rows_analysis_and_a_delivery() {
+        let mut snapshot = empty_snapshot("node-b".to_owned());
+        let source_stop = format!("source-s-{}", "a".repeat(64));
+        let receiver_stop = format!("receiver-s-{}", "b".repeat(64));
+        attach_source_processed(
+            &mut snapshot,
+            vec![SourceProcessedRow {
+                stop_id: source_stop.clone(),
+                session_id: None,
+                node_id: "node-b".into(),
+                title: "\0".repeat(MAX_TITLE_BYTES),
+                viewer: "\0".repeat(MAX_USER_BYTES),
+                grant: "grant-a".into(),
+                file_id: 7,
+                item_id: 9,
+                started_unix: 1,
+                reason: "processed upgrade".into(),
+            }],
+        );
+        attach_receiver_processed(
+            &mut snapshot,
+            vec![ReceiverProcessedRow {
+                stop_id: receiver_stop.clone(),
+                receiver_node_id: "node-b".into(),
+                source_server_id: uuid::Uuid::new_v4().to_string(),
+                source_name: "\0".repeat(MAX_USER_BYTES),
+                title: "\0".repeat(MAX_TITLE_BYTES),
+                viewer: "viewer".into(),
+                reason: "processed upgrade".into(),
+            }],
+        );
+        attach_workers(
+            &mut snapshot,
+            ActivityWorkers {
+                subtitles: None,
+                analysis_engine: None,
+                observed_at_ms: 1,
+                heavy_limit: 1,
+                probe_batch_limit: Some(1),
+                heavy_in_use: 0,
+                heavy_available: 1,
+                accepting_work: true,
+                hardware_used: 0,
+                hardware_limit: 1,
+                software_used: 0,
+                software_limit: 1,
+                children: vec!["\0".repeat(256); 32],
+                child_count: 32,
+            },
+        );
+        attach_live_tv(
+            &mut snapshot,
+            vec![
+                crate::live_tv::LiveTvActivity {
+                    channel_number: "\0".repeat(32),
+                    channel_name: "\0".repeat(256),
+                    user: "\0".repeat(MAX_USER_BYTES),
+                    owner_node_id: "node-b".into(),
+                    encoder: "\0".repeat(32),
+                    age_seconds: u64::MAX,
+                    output_height: 1080,
+                    state: "\0".repeat(32),
+                    delivery: None,
+                    programme_title: Some("\0".repeat(256)),
+                };
+                4
+            ],
+        );
+        attach_dvr_snapshot(
+            &mut snapshot,
+            crate::live_tv::dvr::DvrObservationSnapshot {
+                observed_sink_count: 64,
+                truncated: false,
+                observations: vec![
+                    crate::live_tv::dvr::DvrCaptureObservation {
+                        recording_id: "\0".repeat(128),
+                        channel_id: "\0".repeat(256),
+                        airing_start: 1,
+                        owner_node_id: "node-b".into(),
+                        config_generation: 0,
+                        serving_generation: 0,
+                        attempt: 1,
+                        phase: "writing".into(),
+                        observation_age_ms: 0,
+                        last_write_age_ms: None,
+                        first_write_at_ms: None,
+                        attempt_bytes_written: 0,
+                        prior_attempt_bytes: None,
+                        write_bps: None,
+                        reason_code: None,
+                    };
+                    64
+                ],
+                recording_transports: 1,
+                storage_free_bytes: None,
+            },
+        );
+        fill_snapshot(
+            &mut snapshot,
+            vec![
+                ActivityDelivery {
+                    vod_observation: None,
+                    method: "x".repeat(32),
+                    presentation: Some("live-recovery".into()),
+                    user: "\0".repeat(MAX_USER_BYTES),
+                    file_id: i64::MAX,
+                    item_id: i64::MAX,
+                    title: "\0".repeat(MAX_TITLE_BYTES),
+                    session_id: None,
+                    started_unix: i64::MAX,
+                    idle_seconds: u64::MAX,
+                    delivered_bytes: Some(i64::MAX),
+                    delivered_bps: Some(i64::MAX),
+                };
+                MAX_DELIVERIES
+            ],
+            vec![crate::state::AnalysisProgress::test_row(
+                "shared-cache",
+                &"\0".repeat(MAX_TITLE_BYTES),
+            )],
+        );
+        assert_eq!(snapshot.source_processed[0].stop_id, source_stop);
+        assert_eq!(snapshot.receiver_processed[0].stop_id, receiver_stop);
+        assert!(snapshot
+            .workers
+            .as_ref()
+            .is_some_and(|workers| !workers.children.is_empty()));
+        assert!(!snapshot.live_tv.is_empty());
+        assert!(snapshot
+            .dvr
+            .as_ref()
+            .is_some_and(|dvr| !dvr.observations.is_empty()));
+        assert_eq!(snapshot.analysis.len(), 1);
+        assert!(!snapshot.deliveries.is_empty());
+        assert!(snapshot.deliveries.len() < MAX_DELIVERIES);
+        assert!(serde_json::to_vec(&snapshot).expect("activity wire").len() <= MAX_RESPONSE_BYTES);
         assert!(snapshot_is_bounded(&snapshot, "node-b"));
     }
 
