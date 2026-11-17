@@ -4,13 +4,9 @@
 <!-- status: insert new efforts below this line -->
 
 - **2026-11-16 · Native prepared forward rendezvous:** owner GPT. New Moon's
-  native successor covered the incumbent in its buffer but still played
-  behind. Both alignment seeks landed 90–97 ms behind the moving clock and
-  the frame guard refused exposure. Actual-source reproduction and Astra
-  root/proposal review confirm the race. Bounded forward aim plus existing
-  hold is implemented; Astra review and 103 focused regressions pass.
-  Safari acceptance, the small visible seam and deadline follow-up remain open.
-
+  native seeks trailed 90–97 ms; buffered forward aim+existing hold preserves the guard.
+  Astra review and 103 focused tests pass; Safari acceptance, seam and deadline
+  follow-up remain open ([build plan](docs/streaming/PLAYBACK-START-BUILD.md)).
 
 - **2026-11-17 · Web prepared-switch ownership:** owner GPT. New Moon's exposed
   successor could report Waiting under its predecessor's control generation,
