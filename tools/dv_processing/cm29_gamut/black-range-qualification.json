@@ -1600,5 +1600,327 @@
     "holdout_paired_positions": 834943,
     "mixed_scalar_positions": 1451244,
     "licensed_reference_cases": 48
+  },
+  "gpu_helper_qualification": {
+    "source_commit": "0f3cfd1dac8119aacc196d54f48f3bfb4669e1e7",
+    "binary_sha256": "40095abfda7f982abe47c64973324dea215fa55e58099415bf07b6eb0d52d301",
+    "scope": "Isolated source-pinned helper executable override in the current application runtime, real coded frame inputs, GPU RGB48 output. Does not prove served application deployment, physical display output, or every scene/target.",
+    "devices": {
+      "Intel": {
+        "capture_time_utc": "2026-11-16T23:45:10.754630+00:00",
+        "application_runtime": {
+          "architecture": "x86_64",
+          "application_sha": "32fa105eed4194d85f3cbc97794b6864fb99d2ad",
+          "runtime_image_digest": "sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67",
+          "package_manifest_sha256": "16971dacdd535976c0eb8b9b170a6b8e5506d5687984a72c17644e642200ffac",
+          "engine_digest": "85e6fa5e7614ad2165fdf2e83d96542ada3f18f28fadb04d2a960f9cbf4938ab",
+          "engine_current": true
+        },
+        "baseline_helper_identity": {
+          "backend_digest": "9692215a4db0f0e8885f50988900d784f3d29ed8e885988a43b9ed91d01300ef",
+          "source_sha256": "898b6d89983e0567e0b27cfb7f7a1839129886b5d636cc04026eaa2cf224aeea"
+        },
+        "candidate_capture_identity_sha256": "ce1e0d8eb21b34bcf7a70d4762091776054b7227caf7ac872e1cb47a4657b4d1",
+        "candidate_verification_sha256": "5d1ef392e01aadbcffeb3e314c9e4bdcbcdfa2afd162e1d39405d3a70499e18c",
+        "baseline_capture_identity_sha256": "43a5b6a51351ffb43e4d931157624d293667be073dbdc72fc07ba5a453c4e564",
+        "baseline_verification_sha256": "fd2d47426d78dc95c2807be03de8f1cc381ed4931524e47346b0c648c69f9031",
+        "candidate_transfer_archive_sha256": "e43a2e3497261040606bab77328faf63520e609eafb2a7f92f5498e0ab350418",
+        "candidate_files_hash_verified": 62,
+        "score_summary_sha256": "a11c141c9f713806464b16a1d534e4da0796d0f6fa4465e3354a40952ae56f82",
+        "expected_coded_inputs_sha256": "7bd86bb9fadf14fb03b1c2ab0fcc414d23c2490ece79ddeede7f129fab017c82",
+        "frames": {
+          "dumbmoney-31386": {
+            "capture_target": {
+              "peak_nits": 600.0,
+              "black_nits": 0.0001,
+              "source_master_peak_nits": 1000.0
+            },
+            "coded_input": {
+              "kind": "coded_window_input",
+              "pts_ticks": 5756,
+              "duration_ticks": 41,
+              "packet_sha256": "4e3e48dfda9684ae6247d12c6e01bc2af29d7db711e03f2122d24c8b69001022",
+              "rpu_sha256": "b9de6a6fe187a4b28f76f228fdecacf7ae1437440312c0b4e9038a9e578e4150"
+            },
+            "same_device_baseline_coded_input_matches": true,
+            "candidate_rgb48_sha256": "efe4ca94b0a13409b0415eddeea655cbe8a3aa50cfd390c6fc9ea1457fe45d9e",
+            "baseline_rgb48_sha256": "e191a520bf2a4ad92fcd29706085fb7eb2b20bf9ad757c48bf7706068e33d770",
+            "licensed_float_reference_sha256": "716ba71d7954d331d03632c6dfd31a2111204c6c1c6b078607f9c4f2837ab676",
+            "score_json_sha256": "e0ad2516213ddf9adcb9c66908c9b9390654f7190f15d9ecbc1a73d937e91473",
+            "score": {
+              "arms": {
+                "deployed": {
+                  "max_de": 0.26899621480254937,
+                  "mean_de": 0.006897242995027381,
+                  "over_0.05": 22,
+                  "max_at": [
+                    2617,
+                    1076
+                  ]
+                },
+                "candidate": {
+                  "max_de": 0.049450522663461796,
+                  "mean_de": 0.0064267437959240874,
+                  "over_0.05": 0,
+                  "max_at": [
+                    2609,
+                    1425
+                  ]
+                }
+              },
+              "comparisons": {
+                "candidate vs deployed": {
+                  "worse": 611712,
+                  "equal": 4158536,
+                  "better": 1396792,
+                  "max_de_of_worse": 0.049450522663461796,
+                  "worse_over_0.05": 0,
+                  "max_increase": 0.029534830442954213,
+                  "worse_coords_npz": "worse/candidate__vs__deployed.npz",
+                  "worse_coords_sha256": "5b85a45a544891333682b9f848facaeceb2c34639013657a69764eddead4e3fe"
+                }
+              },
+              "mapping_byte_identical_to_before": false,
+              "within_0_05": true
+            }
+          },
+          "lastbreath-98208": {
+            "capture_target": {
+              "peak_nits": 2000.0,
+              "black_nits": 0.005,
+              "source_master_peak_nits": 4000.0
+            },
+            "coded_input": {
+              "kind": "coded_window_input",
+              "pts_ticks": 6006,
+              "duration_ticks": 41,
+              "packet_sha256": "0779a0b3bc36e0a219da59918638ba40754f6ad7baebc20331e3d939b14455ff",
+              "rpu_sha256": "ad35a0f7778fe89c3a1280c08a342ebc46768a5f8aeccd68fc8691b0a7e98de1"
+            },
+            "same_device_baseline_coded_input_matches": true,
+            "candidate_rgb48_sha256": "2a55eddceec325b796e32bf2babeea4fdd77c36451e1f73688564e881259bc3f",
+            "baseline_rgb48_sha256": "2a55eddceec325b796e32bf2babeea4fdd77c36451e1f73688564e881259bc3f",
+            "licensed_float_reference_sha256": "3c646d68e841b4e68cd7847defadbd52ffaa1e70fb0dbbecefbda0dc861598a4",
+            "score_json_sha256": "2f1e63b1668fbf3faba59aebfb90b8daaff590ddb18abc307746384cae26660b",
+            "score": {
+              "arms": {
+                "deployed": {
+                  "max_de": 0.03674540175312381,
+                  "mean_de": 0.00571085956576402,
+                  "over_0.05": 0,
+                  "max_at": [
+                    1443,
+                    1102
+                  ]
+                },
+                "candidate": {
+                  "max_de": 0.03674540175312381,
+                  "mean_de": 0.00571085956576402,
+                  "over_0.05": 0,
+                  "max_at": [
+                    1443,
+                    1102
+                  ]
+                }
+              },
+              "comparisons": {
+                "candidate vs deployed": {
+                  "worse": 0,
+                  "equal": 8294400,
+                  "better": 0,
+                  "max_de_of_worse": 0.0,
+                  "worse_over_0.05": 0,
+                  "max_increase": 0.0,
+                  "worse_coords_npz": "worse/candidate__vs__deployed.npz",
+                  "worse_coords_sha256": "ff49982a88cd4dfa464be9d82089508d9892fe7cf8c683bfc7db6b9a375cda0b"
+                }
+              },
+              "mapping_byte_identical_to_before": true,
+              "within_0_05": true
+            }
+          }
+        },
+        "capture_time": "2026-11-16T23:45:10.754630+00:00",
+        "candidate_runtime_identity": {
+          "architecture": "x86_64",
+          "application_sha": "32fa105eed4194d85f3cbc97794b6864fb99d2ad",
+          "runtime_image_digest": "sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67",
+          "package_manifest_sha256": "16971dacdd535976c0eb8b9b170a6b8e5506d5687984a72c17644e642200ffac",
+          "engine_digest": "85e6fa5e7614ad2165fdf2e83d96542ada3f18f28fadb04d2a960f9cbf4938ab",
+          "engine_current": true
+        },
+        "baseline_runtime_identity": {
+          "architecture": "x86_64",
+          "application_sha": "314b155908aa44ae4bb3e9fd6f7f57e2c4f8270a",
+          "runtime_image_digest": "sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67",
+          "package_manifest_sha256": "16971dacdd535976c0eb8b9b170a6b8e5506d5687984a72c17644e642200ffac",
+          "engine_digest": "85e6fa5e7614ad2165fdf2e83d96542ada3f18f28fadb04d2a960f9cbf4938ab",
+          "engine_current": true
+        },
+        "runtime_identity_differences": {
+          "application_sha": {
+            "baseline": "314b155908aa44ae4bb3e9fd6f7f57e2c4f8270a",
+            "candidate": "32fa105eed4194d85f3cbc97794b6864fb99d2ad"
+          }
+        },
+        "same_runtime_image_package_manifest_engine": true
+      },
+      "AMD": {
+        "capture_time_utc": "2026-11-16T23:53:09.780779+00:00",
+        "application_runtime": {
+          "architecture": "x86_64",
+          "application_sha": "32fa105eed4194d85f3cbc97794b6864fb99d2ad",
+          "runtime_image_digest": "sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67",
+          "package_manifest_sha256": "16971dacdd535976c0eb8b9b170a6b8e5506d5687984a72c17644e642200ffac",
+          "engine_digest": "85e6fa5e7614ad2165fdf2e83d96542ada3f18f28fadb04d2a960f9cbf4938ab",
+          "engine_current": true
+        },
+        "baseline_helper_identity": {
+          "backend_digest": "9692215a4db0f0e8885f50988900d784f3d29ed8e885988a43b9ed91d01300ef",
+          "source_sha256": "898b6d89983e0567e0b27cfb7f7a1839129886b5d636cc04026eaa2cf224aeea"
+        },
+        "candidate_capture_identity_sha256": "2a2e9ec56421d03706368da0860b0e7a578f91dbc21d7edda053fc0ec780f4f3",
+        "candidate_verification_sha256": "8ac797576f8f04963b36d486eb4d1882a4c7af8996eff25587e214745a538b8f",
+        "baseline_capture_identity_sha256": "67df8166bbc41ba68120df7ee55c957a6971da202448049c07d5c7661a16c0c0",
+        "baseline_verification_sha256": "4d57c0928b3106d21b230a43dad6b6471f9191b1415261ab93e681b4aafc0414",
+        "candidate_transfer_archive_sha256": "4d9586d783c331b1b0e9645028144281564173ac6290358fbc82b3c6fa202b3f",
+        "candidate_files_hash_verified": 62,
+        "score_summary_sha256": "f2e151647df20e8304f004dc5d2fa4c7c12781ed2c44abcfa94468ce88858a6e",
+        "expected_coded_inputs_sha256": "7bd86bb9fadf14fb03b1c2ab0fcc414d23c2490ece79ddeede7f129fab017c82",
+        "frames": {
+          "dumbmoney-31386": {
+            "capture_target": {
+              "peak_nits": 600.0,
+              "black_nits": 0.0001,
+              "source_master_peak_nits": 1000.0
+            },
+            "coded_input": {
+              "kind": "coded_window_input",
+              "pts_ticks": 5756,
+              "duration_ticks": 41,
+              "packet_sha256": "4e3e48dfda9684ae6247d12c6e01bc2af29d7db711e03f2122d24c8b69001022",
+              "rpu_sha256": "b9de6a6fe187a4b28f76f228fdecacf7ae1437440312c0b4e9038a9e578e4150"
+            },
+            "same_device_baseline_coded_input_matches": true,
+            "candidate_rgb48_sha256": "ee867c1ecfa1f13e62561ece634a4171e0b892329a889ad83caacf059ccdc0f5",
+            "baseline_rgb48_sha256": "8f226ae6ae97cb6f3924b6dc808b2b32c20da57ab42f7aa905136fa82891233f",
+            "licensed_float_reference_sha256": "716ba71d7954d331d03632c6dfd31a2111204c6c1c6b078607f9c4f2837ab676",
+            "score_json_sha256": "bb6a92072fae8dac0f4b5add127adf91da5bb8645582fb2f9b8eaceacf7bdfe6",
+            "score": {
+              "arms": {
+                "deployed": {
+                  "max_de": 0.26899621480254937,
+                  "mean_de": 0.007220776898200905,
+                  "over_0.05": 22,
+                  "max_at": [
+                    2617,
+                    1076
+                  ]
+                },
+                "candidate": {
+                  "max_de": 0.048790259063466436,
+                  "mean_de": 0.006682313181208582,
+                  "over_0.05": 0,
+                  "max_at": [
+                    2800,
+                    1452
+                  ]
+                }
+              },
+              "comparisons": {
+                "candidate vs deployed": {
+                  "worse": 601666,
+                  "equal": 4144727,
+                  "better": 1420647,
+                  "max_de_of_worse": 0.048790259063466436,
+                  "worse_over_0.05": 0,
+                  "max_increase": 0.027582061958129924,
+                  "worse_coords_npz": "worse/candidate__vs__deployed.npz",
+                  "worse_coords_sha256": "726dd5c64b3f814935c07b965829b104242da1d4c19334d6452b41b6f0f0262c"
+                }
+              },
+              "mapping_byte_identical_to_before": false,
+              "within_0_05": true
+            }
+          },
+          "lastbreath-98208": {
+            "capture_target": {
+              "peak_nits": 2000.0,
+              "black_nits": 0.005,
+              "source_master_peak_nits": 4000.0
+            },
+            "coded_input": {
+              "kind": "coded_window_input",
+              "pts_ticks": 6006,
+              "duration_ticks": 41,
+              "packet_sha256": "0779a0b3bc36e0a219da59918638ba40754f6ad7baebc20331e3d939b14455ff",
+              "rpu_sha256": "ad35a0f7778fe89c3a1280c08a342ebc46768a5f8aeccd68fc8691b0a7e98de1"
+            },
+            "same_device_baseline_coded_input_matches": true,
+            "candidate_rgb48_sha256": "b15866137f0257ed1851c53bcabecd51105827cc24a82d307f7012464c8c2a0e",
+            "baseline_rgb48_sha256": "b15866137f0257ed1851c53bcabecd51105827cc24a82d307f7012464c8c2a0e",
+            "licensed_float_reference_sha256": "3c646d68e841b4e68cd7847defadbd52ffaa1e70fb0dbbecefbda0dc861598a4",
+            "score_json_sha256": "aa30825e27c484acc6775071006db4f3b797952fca634c432c580cd79b863735",
+            "score": {
+              "arms": {
+                "deployed": {
+                  "max_de": 0.04366205715193759,
+                  "mean_de": 0.005798945500487737,
+                  "over_0.05": 0,
+                  "max_at": [
+                    1381,
+                    1135
+                  ]
+                },
+                "candidate": {
+                  "max_de": 0.04366205715193759,
+                  "mean_de": 0.005798945500487737,
+                  "over_0.05": 0,
+                  "max_at": [
+                    1381,
+                    1135
+                  ]
+                }
+              },
+              "comparisons": {
+                "candidate vs deployed": {
+                  "worse": 0,
+                  "equal": 8294400,
+                  "better": 0,
+                  "max_de_of_worse": 0.0,
+                  "worse_over_0.05": 0,
+                  "max_increase": 0.0,
+                  "worse_coords_npz": "worse/candidate__vs__deployed.npz",
+                  "worse_coords_sha256": "ff49982a88cd4dfa464be9d82089508d9892fe7cf8c683bfc7db6b9a375cda0b"
+                }
+              },
+              "mapping_byte_identical_to_before": true,
+              "within_0_05": true
+            }
+          }
+        },
+        "capture_time": "2026-11-16T23:53:09.780779+00:00",
+        "candidate_runtime_identity": {
+          "architecture": "x86_64",
+          "application_sha": "32fa105eed4194d85f3cbc97794b6864fb99d2ad",
+          "runtime_image_digest": "sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67",
+          "package_manifest_sha256": "16971dacdd535976c0eb8b9b170a6b8e5506d5687984a72c17644e642200ffac",
+          "engine_digest": "85e6fa5e7614ad2165fdf2e83d96542ada3f18f28fadb04d2a960f9cbf4938ab",
+          "engine_current": true
+        },
+        "baseline_runtime_identity": {
+          "architecture": "x86_64",
+          "application_sha": "32fa105eed4194d85f3cbc97794b6864fb99d2ad",
+          "runtime_image_digest": "sha256:b171d3de4e9dc30fb544b3ca18945b5e14624e7d2a7fa005deaded460c9d3e67",
+          "package_manifest_sha256": "16971dacdd535976c0eb8b9b170a6b8e5506d5687984a72c17644e642200ffac",
+          "engine_digest": "85e6fa5e7614ad2165fdf2e83d96542ada3f18f28fadb04d2a960f9cbf4938ab",
+          "engine_current": true
+        },
+        "runtime_identity_differences": {},
+        "same_runtime_image_package_manifest_engine": true
+      }
+    },
+    "scoring_params_role": "Active-area mask only; target identities come from capture frames and helper execution, not the historical score params target line.",
+    "runtime_identity_limit": "Intel enclosing application revision advanced from 314b155908aa44ae4bb3e9fd6f7f57e2c4f8270a to 32fa105eed4194d85f3cbc97794b6864fb99d2ad between baseline and candidate. Runtime image, package manifest and engine digests match on each device; AMD enclosing application revision also matches. Qualification binds the isolated helper override, not application-source equivalence."
   }
 }

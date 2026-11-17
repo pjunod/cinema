@@ -1,7 +1,7 @@
 # CM v2.9 measured gamut — reference data and qualification
 
-**Status:** built; target-black extension numerically qualified, final review and
-affected checks pending · **Owner:** Codex · **Updated:** 2026-11-16
+**Status:** built; target-black extension CPU and isolated GPU qualified, final
+combined review and affected checks pending · **Owner:** Codex · **Updated:** 2026-11-16
 
 Companion to [the display-targeted build ledger](DISPLAY-TARGETED-DV-BUILD.md).
 This records the measured gamut correction, its limits and its evidence.
@@ -42,8 +42,9 @@ the analytic lattice instead, reintroducing missing dark-chroma correction.
 The full preserved Dumb Money frame has 23 active pixels above 0.05 dE in the
 double CPU renderer's float export, with a maximum of 0.26448. Keeping its
 correct 0.0001-nit curve and using the existing measured vertices reduces the
-maximum to 0.01168, with none above 0.05. These are CPU numerical measurements;
-they do not establish a deployed GPU helper's RGB48 result.
+maximum to 0.01168, with none above 0.05. These are double CPU numerical
+measurements; the isolated GPU helper observations below have their own binary
+and coded-input identity.
 
 The [black-range qualification manifest](../../tools/dv_processing/cm29_gamut/black-range-qualification.json)
 binds 48 new licensed CPU reference runs, their inputs and outputs, measurement
@@ -72,6 +73,33 @@ nits for the same exact P3 peaks. Negative, nonfinite and higher blacks retain
 the analytic path, as do unsupported peaks/gamuts and missing vertices. The
 regression compares a fixed dark-red source tile against twelve licensed float
 outputs, exercising both the changing curve and the native lattice.
+
+## Isolated Intel and AMD helper output removes the real-frame outliers
+
+A helper built from source commit `0f3cfd1dac8119aacc196d54f48f3bfb4669e1e7`
+(SHA-256 `40095abfda7f982abe47c64973324dea215fa55e58099415bf07b6eb0d52d301`)
+was mounted as an isolated executable override on Intel and AMD GPUs. Runtime
+image, package-manifest and engine digests match each device's preserved baseline.
+The enclosing Intel application revision advanced from `314b15590` to
+`32fa105ee` between captures; AMD's enclosing revision matches. These observations
+bind the helper executable and runtime dependencies, rather than asserting whole
+application source equivalence. Each comparison uses the same-device baseline
+helper output, identical coded packet/RPU identities and the same licensed float
+reference. The manifest binds capture, transfer, coded-input,
+RGB48 raster, score and complete worsening-coordinate receipts.
+
+| GPU | Dumb Money, CM29 P3 600 / 0.0001 nits: baseline → candidate max dE | Pixels above 0.05: before → after | Worsened pixels, all below 0.05 |
+|---|---:|---:|---:|
+| Intel | 0.2689962 → 0.0494505 | 22 → 0 | 611,712 |
+| AMD | 0.2689962 → 0.0487903 | 22 → 0 | 601,666 |
+
+All 6,167,040 active pixels are scored. The CM4 Last Breath control at P3
+2000 / 0.005 nits is byte-identical before and after on each device: maximum
+dE remains 0.0367454 on Intel and 0.0436621 on AMD across 8,294,400 pixels.
+This is source-pinned isolated helper qualification. It does not establish
+served application deployment, physical display output, broader scene coverage,
+or universal mapper fidelity on the stress grid. Final combined adversarial
+review and affected tests remain pending.
 
 ## The whole stress grid remains an explicit mapper limitation
 

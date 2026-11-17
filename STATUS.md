@@ -3,7 +3,7 @@
 **Updated:** 2026-11-16 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
-- **2026-11-16 · CM29 target-black gamut reuse:** Owner Codex. State: numerical qualification complete; final review, affected checks and isolated GPU capture pending. Next: qualify the committed candidate, then record its PR checks. The [gamut ledger](docs/streaming/CM29-MEASURED-GAMUT.md) records paired black anchors, the complete Dumb Money frame and all stress-grid limitations; no CSV vertices changed.
+- **2026-11-16 · CM29 target-black gamut reuse:** Owner Codex. State: numerical and isolated Intel/AMD GPU qualification complete; final combined review and affected checks pending. Next: qualify the combined candidate, then record its PR checks. The [gamut ledger](docs/streaming/CM29-MEASURED-GAMUT.md) records paired black anchors, the complete Dumb Money frame and all stress-grid limitations; no CSV vertices changed.
 
 - **2026-11-13 · Optional Curator household login:** Owner Claude (claude-opus-5-5, taken over from Codex 2026-11-15). Independent account linking and household-only delegation; Astra production review cleared, local qualification passed; PR #1586 updated onto main and landing through the merge train. [Ledger](docs/features/CURATOR-LOGIN-STATUS.md). No deployment.
 - **2026-11-13 · CM4 trim fidelity:** Owner Codex. Implementation and bounded reference qualification complete; delivery PR #1591. Six-vector knots used a fixed BT.2020 palette and L8 MS was ignored. Real-frame and independent synthetic CPU comparisons remove all observed pixels above0.05dE; every worsening coordinate is retained. [Root cause, evidence and remaining work](docs/streaming/CM4-TRIM-FIDELITY.md).
