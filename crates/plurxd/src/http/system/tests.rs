@@ -1991,12 +1991,12 @@ fn a_prepared_seam_counts_toward_graduation_only_when_clean_and_fully_measured()
 #[test]
 fn writer_abandoned_replies_render_by_request_and_outcome() {
     let rendered = render_writer_abandoned_replies(&[
-        hiqlite::DbWriterAbandonedReplies {
+        crate::cluster::WriterAbandonedReply {
             request: "transaction",
             ok: 2,
             error: 1,
         },
-        hiqlite::DbWriterAbandonedReplies {
+        crate::cluster::WriterAbandonedReply {
             request: "shutdown",
             ok: 0,
             error: 0,
@@ -2010,6 +2010,13 @@ fn writer_abandoned_replies_render_by_request_and_outcome() {
     ] {
         assert!(rendered.contains(line), "missing {line:?} in\n{rendered}");
     }
+    assert_eq!(
+        rendered
+            .lines()
+            .filter(|line| line.starts_with("plurx_hiqlite_writer_abandoned_replies_total{"))
+            .count(),
+        4,
+    );
     assert_eq!(hiqlite::db_writer_abandoned_replies().len(), 11);
 }
 

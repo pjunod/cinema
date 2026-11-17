@@ -54,3 +54,17 @@ metadata and the lifecycle renderer do not establish those outcomes. The
 canonical acceptance ledger is the
 [shared DV/HDR plan](../streaming/SHARED-LIBRARY-DV-HDR-PLAN.md) and
 [processed sharing plan](../streaming/SHARED-DV-PROCESSED-PLAN.md).
+
+## Baseline census correction after CI
+
+The main-bound runtime census exposed an existing mismatch in main: HTTP
+metrics referenced Hiqlite five times while its pin allowed three. The two
+writer-reply observation references now live behind the cluster facade,
+which returns its own counter rows. The metrics substate snapshots them per
+request without store or membership I/O; labels and output stay unchanged.
+The pin and census ceiling remain unchanged.
+
+The original reviewer inspected only this adapter delta and found no concrete
+blocker. This was a targeted closure in the final review, not a second review
+of the effort. The existing vendor row-count assertion is preserved.
+Exact-head compilation and runtime qualification remain required.

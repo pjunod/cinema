@@ -121,6 +121,20 @@ impl Cluster {
         self.directory.clone()
     }
 
+    /// Process-local SQLite writer replies abandoned by a cancelled apply or
+    /// teardown. The vendor loads its counters atomically; this read performs
+    /// no store or membership I/O.
+    pub(crate) fn writer_abandoned_replies(&self) -> Vec<WriterAbandonedReply> {
+        hiqlite::db_writer_abandoned_replies()
+            .into_iter()
+            .map(|row| WriterAbandonedReply {
+                request: row.request,
+                ok: row.ok,
+                error: row.error,
+            })
+            .collect()
+    }
+
     /// Exact member authentication remains a fresh membership proof, never a
     /// cached peer-directory lookup. Activity read and Stop use their
     /// existing, distinct authorization windows.
@@ -161,6 +175,15 @@ impl Cluster {
             .sign_internal_peer_response(target_node_id, request_nonce, path, response)
             .map_err(ClusterError)
     }
+}
+
+/// One fixed-label writer reply counter row, independent of vendor types at
+/// feature call sites.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WriterAbandonedReply {
+    pub(crate) request: &'static str,
+    pub(crate) ok: u64,
+    pub(crate) error: u64,
 }
 
 /// This node's place in the cluster.

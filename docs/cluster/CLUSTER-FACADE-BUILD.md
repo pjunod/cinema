@@ -19,6 +19,12 @@ roster evidence. Its legacy transport construction remains counted until
 `call` lands. This extension lowers the census ceiling from 765 to 754;
 final qualification is pending.
 
+The metrics scrape also reads the process-local abandoned SQLite writer reply
+counters through `Cluster::writer_abandoned_replies`. The facade copies the
+vendor's fixed request labels and atomic counts into its own read-only rows;
+the Prometheus formatter and emitted series stay unchanged. This removes the
+HTTP handler's direct vendor counter and type reach-arounds.
+
 ## 1. Goal
 
 Feature code asks the cluster six questions through one type,
