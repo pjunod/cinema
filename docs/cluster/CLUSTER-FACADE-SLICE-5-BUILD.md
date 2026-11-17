@@ -56,11 +56,17 @@ remain explicit follow-up work with separate contracts and regressions.
 |---|---|
 | `crates/plurxd/src/cluster.rs`, `http/peer_transport.rs` | One implementation, facade composition, existing helper re-exports and preserved transport/security regressions. |
 | `state.rs`, `clock_offset.rs`, `http/internal_activity.rs`, `media_pool.rs`, `media_sessions.rs`, `shared_cache.rs` | Inject long-lived capabilities; preserve all separate authority and shutdown ownership. |
-| `copy_index_v3.rs`, `fragment_index_cluster.rs`, `subtitle_ranges.rs`, `subtitle_source.rs`, `diagnostics.rs` | Migrate transport-only parameters and per-use construction; retain directory freshness. |
+| `copy_index_v3.rs`, `fragment_index_cluster.rs`, `subtitle_ranges.rs`, `subtitle_source.rs`, `transcode.rs`, `transcode/manager/construct.rs`, `vodserve.rs`, `vod/serve/construct.rs`, `diagnostics.rs` | Migrate transport-only parameters and per-use construction; retain directory freshness. |
 | `http/activity_starts.rs`, `http/transcode_copies.rs`, `http/internal_auth_revocation.rs`, `http/remote.rs`, `http/remote/invitations/snapshots.rs`, `http/cluster_operations.rs` | Typed call composition with unchanged operation/authentication semantics. |
 | `http/live_tv.rs`, metrics composition, associated tests and regression record | Remove owner TTL, resolve through directory, truthful telemetry and behavioral regression replacement. |
 | `cluster/census.rs`, ownership inventory and formal mappings if measured | Lower actual pins only, retain matcher/exemptions and review actual source/owner shifts before repinning. |
 | This plan, cluster index, project backlog and functionality catalog | Delivery ledger and evidence. |
+
+Transport-only stored membership in subtitle access, transcode subtitle
+composition and VOD is replaced by the typed call capability. Job-manager
+membership remains for reconciliation; hydration receives a separate call
+capability alongside its existing directory. This does not change reconcile,
+capacity, custody, publication, or source-reader ownership.
 
 ## Validation and delivery
 
