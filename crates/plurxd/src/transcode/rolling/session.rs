@@ -942,6 +942,9 @@ impl Session {
         // must not retire the session while the hold lasts.
         let held_for_scratch = (*self.suspended_at.lock().await)
             .is_some_and(|held| held.hold.reason == AheadHoldReason::Global);
+        // A global scratch hold explicitly suspends production service. Its
+        // retained speed sample cannot establish the short MPV envelope.
+        let admission_producer_speed = producer_speed.filter(|_| !held_for_scratch);
         let (publish, expired, insufficient, retention_first_segment, budget) = {
             let mut clock = self.publication.lock().await;
             clock.reset_for_attempt(producer_attempt);
@@ -974,7 +977,7 @@ impl Session {
                 // Keep steady production/allowance intact. Only first snapshot
                 // readiness and endpoint selection use the frozen policy.
                 budget.desired_end_ms =
-                    clock.first_ready_end_ms(&budget, lease.as_ref(), producer_speed);
+                    clock.first_ready_end_ms(&budget, lease.as_ref(), admission_producer_speed);
             }
             let publish = match clock.served.as_ref() {
                 None => end_list || end_ms >= budget.desired_end_ms,
@@ -1006,8 +1009,10 @@ impl Session {
             // Capacity is measured at the fixed production bank independently
             // of first publication. Otherwise a shorter consumer admission lets
             // a slow-but-progressing producer bypass the initial assessment.
+            // Until a first snapshot exists, keep reassessing as before: a
+            // seek lead can leave capacity paid before admission is possible.
             let initial_capacity_due = !end_list
-                && !clock.initial_capacity_checked
+                && (!clock.initial_capacity_checked || clock.served.is_none())
                 && !held_for_scratch
                 && end_ms >= rolling_initial_runway_ms(playback_rate);
             let initial_insufficient = initial_capacity_due
@@ -1058,7 +1063,7 @@ impl Session {
             .lock()
             .await
             .startup_policy
-            .admission_policy(playback_rate, producer_speed);
+            .admission_policy(playback_rate, admission_producer_speed);
         let frozen_first_snapshot =
             previous_served.is_none() && initial_admission_policy.owns_bootstrap_position();
         let selected_last = if end_list {
@@ -1383,6 +1388,7 @@ impl Session {
                 bootstrap_ms = budget.desired_end_ms.saturating_sub(budget.consumed_end_ms),
                 producer_speed = ?producer_speed,
                 initial_capacity_checked = clock.initial_capacity_checked,
+                held_for_scratch,
                 consumed_end_ms = budget.consumed_end_ms,
                 demand_sequence = ?budget.demand_sequence,
                 lease_mode = ?lease.as_ref().map(|lease| lease.mode),

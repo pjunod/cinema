@@ -64,9 +64,11 @@ required media runway = ceil(r * (reload envelope + m))
 At 1x this requires 25.25 seconds of media rather than 48. The computed floor is
 not silently truncated to the reserve cap. Short MPV admission additionally
 requires finite recent production at least equal to playback; unknown or slow
-capacity retains native admission. The original initial-capacity assessment
+capacity, or a global scratch hold, retains native admission. The original initial-capacity assessment
 remains due at the fixed production bank even after an early first snapshot,
-so a slow producer cannot bypass it by continuing to complete cuts.
+so a slow producer cannot bypass it by continuing to complete cuts. Until a
+first snapshot is admitted, capacity continues to be reassessed even after an
+earlier sufficient sample, preserving the original pre-publication contract.
 
 The existing flow controller owns steady production and reserve. Init and
 complete-object validation, ownership/attempt fences and retired-object promises

@@ -724,6 +724,79 @@
     }
 
     #[tokio::test]
+    async fn rolling_unpublished_capacity_is_reassessed_after_an_initial_sufficient_sample() {
+        for explicit in [false, true] {
+            for (transport, initial_milli) in [("native", 1_100), ("mpv", 970)] {
+                let directory = crate::test_tempdir().expect("unpublished capacity reassessment");
+                let mut session = test_session(directory.path().to_path_buf());
+                session.start_seconds = 5_853.872;
+                session.media_origin_seconds = 5_853.639;
+                session.publication.lock().await.bind_startup_transport(Some(transport));
+                session.progress.recent_milli.store(initial_milli, Relaxed);
+                if explicit {
+                    accept_rolling_publication_demand(&session, 1, 5_853_872, 1.0,
+                        crate::playback_control::PlaybackDemand::Active,
+                        crate::playback_control::RenderState::Starting).await;
+                }
+                // Native 1.1x is sufficient; MPV 0.97x is inside the old
+                // capacity tolerance but below the short admission envelope.
+                // Both still need a complete cut beyond the 233ms seek lead.
+                tokio::fs::write(directory.path().join("index.m3u8"),
+                    rolling_playlist(&[16.0; 3], false)).await.expect("exact initial capacity boundary");
+                session.publication_cycle("initial-sufficient-but-unpublished").await.expect("capacity initially sufficient");
+                {
+                    let clock = session.publication.lock().await;
+                    assert!(clock.initial_capacity_checked, "{transport}: initial sample was assessed");
+                    assert!(clock.served.is_none(), "{transport}: 48s does not cover the seek lead");
+                }
+                session.progress.recent_milli.store(900, Relaxed);
+                tokio::fs::write(directory.path().join("index.m3u8"),
+                    rolling_playlist(&[16.0, 16.0, 16.0, 1.0], false)).await.expect("next complete cut reaches admission floor");
+                let refusal = session.publication_cycle("unpublished-capacity-became-insufficient").await
+                    .expect_err("an earlier assessment cannot waive capacity before the first snapshot");
+                assert!(refusal.starts_with("rolling_insufficient_capacity:"), "{transport}: {refusal}");
+                assert!(session.publication.lock().await.served.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rolling_mpv_global_scratch_hold_defers_short_admission_until_release() {
+        for explicit in [false, true] {
+            let directory = crate::test_tempdir().expect("MPV scratch-held admission");
+            let mut session = test_session(directory.path().to_path_buf());
+            session.start_seconds = 5_853.872;
+            session.media_origin_seconds = 5_853.639;
+            session.publication.lock().await.bind_startup_transport(Some("mpv"));
+            session.progress.recent_milli.store(2_000, Relaxed);
+            if explicit {
+                accept_rolling_publication_demand(&session, 1, 5_853_872, 1.0,
+                    crate::playback_control::PlaybackDemand::Active,
+                    crate::playback_control::RenderState::Starting).await;
+            }
+            tokio::fs::write(directory.path().join("index.m3u8"),
+                rolling_playlist(&[2.795, 8.1, 4.2, 11.387], false)).await.expect("complete MPV reload window");
+            let started = Instant::now();
+            scratch_hold_set(&session, Some(AheadHoldReason::Global), started).await;
+            session.publication_cycle_at("mpv-global-hold-native-fallback", started).await
+                .expect("scratch wait is not an insufficient-capacity reading");
+            assert!(session.publication.lock().await.served.is_none(),
+                "a known producer stop invalidates the short real-time service envelope");
+            assert_eq!(session.progress.recent_speed(), Some(2.0),
+                "the historical speed remains intact while admission uses a conservative fallback");
+            let released_at = started + Duration::from_secs(30);
+            scratch_hold_set(&session, None, released_at).await;
+            session.publication_cycle_at("mpv-global-hold-released", released_at).await
+                .expect("the same completed inventory may admit after release");
+            let clock = session.publication.lock().await;
+            assert_eq!(clock.served.as_ref().expect("released MPV snapshot").end_ms, 26_482);
+            assert_eq!(clock.startup_policy, RollingStartupPolicy::MpvReloadWindow,
+                "a temporary hold must not replace the frozen consumer contract");
+            assert_eq!(session.progress.recent_speed(), Some(2.0));
+        }
+    }
+
+    #[tokio::test]
     async fn rolling_mpv_unknown_capacity_at_four_x_uses_native_complete_cut() {
         for transport in ["native", "mpv"] {
             let directory = crate::test_tempdir().expect("unknown capacity four-times admission");
