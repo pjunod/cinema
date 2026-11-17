@@ -44,6 +44,22 @@ Historical fixture rewind verifies all current lease-owned objects and
 overlaid resource definitions before replacing them, so a rewind cannot erase
 hostile schema drift and then accept the rewritten catalogue.
 
+Historical replicated fixture rewinds also remove the exact, empty v127
+coordination adjunct before altering old analysis tables. Its published witness,
+singleton marker and accepted-data counts are checked before destructive DDL;
+child tables are removed first in the same fixture transaction. The complete
+source-tail removal drops its restored storage-holder view before removing the
+pause table that view depends on.
+
+Replicated historical-upgrade retries exposed a second bootstrap ownership
+fault: replaying the older retention base schema replaced the valid custody
+retention triggers before their strict validator ran. Bootstrap now validates
+the complete retention shape and marker before base DDL, preserves an installed
+owner, and installs both predecessor trigger definitions atomically only while
+no retention extension owns them. A concurrent winner is accepted only after
+the same strict shape and marker readback. The extension validator is unchanged;
+an owned partial catalogue is refused before bootstrap can recreate its objects.
+
 Replicated qualification also exposed a stale bootstrap installer ceiling:
 the canonical managed-layout validator accepted v6, while two installer paths
 recognized only v1–v5. A repeated bootstrap then entered the legacy-only guard

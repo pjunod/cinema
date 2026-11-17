@@ -393,7 +393,7 @@ const COORDINATION_FIXTURE_SCHEMA: &str = concat!(
 /// v127 replaces this v124 trigger rather than adding it.
 const REPLACED_RESERVATION_TRIGGER: &str = "analysis_source_reserve_on_claim";
 
-fn coordination_tail_witness() -> Vec<(String, String, String)> {
+pub(crate) fn coordination_tail_witness() -> Vec<(String, String, String)> {
     let witness = rusqlite::Connection::open_in_memory().expect("published coordination witness");
     witness
         .execute_batch(

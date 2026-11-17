@@ -157,11 +157,84 @@ async fn install_probe_and_managed_schema(client: &hiqlite::Client) -> Result<()
     ))
 }
 
+// A retention marker is not installation proof: preserve an existing owner
+// only after its complete canonical shape and singleton row both validate.
+async fn retention_bootstrap_layout(client: &hiqlite::Client) -> Result<bool, StoreError> {
+    let shape = {
+        let mut rows = timeout_store(
+            // authority: validate retention ownership before bootstrap can recreate any base object.
+            client.query_consistent(super::custody_retention::SHAPE_SQL, params!()),
+        )
+        .await?;
+        rows.iter_mut()
+            .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
+            .collect::<Vec<_>>()
+    };
+    if super::custody_retention::version(&shape)?.is_none() {
+        return Ok(false);
+    }
+    let mut marker = timeout_store(
+        // authority: canonical DDL and the committed marker must agree on the retention owner.
+        client.query_consistent(super::custody_retention::MARKER_SQL, params!()),
+    )
+    .await?;
+    if marker.len() != 1 || marker[0].get::<i64>("count") != 1 {
+        return Err(StoreError::Migration(
+            "custody retention schema marker missing".into(),
+        ));
+    }
+    Ok(true)
+}
+
+async fn install_retention_base_schema(
+    client: &hiqlite::Client,
+    installed: bool,
+) -> Result<(), StoreError> {
+    if installed {
+        return Ok(());
+    }
+    // A concurrent extension install/expand must win before either destructive
+    // legacy trigger replacement. Both replacements share this one transaction.
+    let mut statements = vec![(
+        "SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='background_custody_retention_schema') THEN 1 ELSE json('retention bootstrap ownership changed') END".to_owned(),
+        params!(),
+    )];
+    for schema in [
+        super::background_jobs::RETENTION_SCHEMA,
+        super::background_jobs::RECEIPT_PRESSURE_SCHEMA,
+    ] {
+        validate_sql(schema)?;
+        statements.extend(
+            schema
+                .split("-- next statement")
+                .map(str::trim)
+                .filter(|sql| !sql.is_empty())
+                .map(|sql| (sql.to_owned(), params!())),
+        );
+    }
+    let attempt = timeout_store(client.txn(statements))
+        .await
+        .and_then(|results| {
+            results
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .map(|_| ())
+                .map_err(database_error)
+        });
+    // A lost/stale proposal succeeds only when a complete known owner won;
+    // a marker by itself or a partial catalogue still refuses without repair.
+    if retention_bootstrap_layout(client).await? {
+        return Ok(());
+    }
+    attempt
+}
+
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     // Refuse a pre-existing partial extension before any base CREATE IF NOT
     // EXISTS could recreate its missing view. Empty fresh bootstrap is allowed;
     // the guarded installer re-observes the exact predecessor after base DDL.
     managed_bootstrap_layout(client).await?;
+    let retention_installed = retention_bootstrap_layout(client).await?;
     validate_sql(SCHEMA)?;
     for result in timeout_store(client.batch(SCHEMA)).await? {
         result.map_err(database_error)?;
@@ -226,19 +299,9 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     for result in timeout_store(client.batch(super::background_jobs_predictions::SCHEMA)).await? {
         result.map_err(database_error)?;
     }
-    // Last, as the v62→v63 upgrade applies it, so a fresh cluster and an
-    // upgraded one load the replaced triggers in the same order.
-    validate_sql(super::background_jobs::RETENTION_SCHEMA)?;
-    for result in timeout_store(client.batch(super::background_jobs::RETENTION_SCHEMA)).await? {
-        result.map_err(database_error)?;
-    }
-    // v64 after v63, as the upgrade chain applies them.
-    validate_sql(super::background_jobs::RECEIPT_PRESSURE_SCHEMA)?;
-    for result in
-        timeout_store(client.batch(super::background_jobs::RECEIPT_PRESSURE_SCHEMA)).await?
-    {
-        result.map_err(database_error)?;
-    }
+    // Fresh bootstrap follows v63 then v64 in one guarded transaction. A
+    // canonical later retention owner keeps both of its trigger definitions.
+    install_retention_base_schema(client, retention_installed).await?;
     // v65 follows v64 on both fresh and upgraded clusters.
     validate_sql(super::background_jobs::VIEWER_ANALYSIS_SCHEMA)?;
     for result in

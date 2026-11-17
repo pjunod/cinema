@@ -13774,8 +13774,10 @@ async fn replicated_source_tail_drops(
         .filter(|(kind, _, _)| kind == "table")
         .map(|(_, name, _)| (name.clone(), i64::from(name == "background_source_schema")))
         .collect::<Vec<_>>();
+    let remove_holders = remove("background_source_pauses");
     rewind
         .into_iter()
+        .chain(remove_holders.then(|| "DROP VIEW background_storage_domain_holders".to_owned()))
         .chain(validated_source_tail_drops(
             &published, &counts, true, remove,
         ))
@@ -13841,6 +13843,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
             .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
             .collect()
     }
+    let coordination_drops = replicated_coordination_drops(client).await;
     let scan_request_drops = replicated_scan_request_drops(client).await;
     let source_drops = replicated_source_tail_drops(client, |_| true).await;
     let handoff_shape = extension_shape(client, queue_fixture::HANDOFF_FIXTURE_SHAPE_SQL).await;
@@ -14016,6 +14019,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         queue_fixture::validated_empty_translation_rewind(&shape, &counts, jobs[0].value);
     let mut statements: Vec<_> = scan_request_drops
         .into_iter()
+        .chain(coordination_drops)
         .chain(source_drops)
         .chain(tail_drops)
         .chain(handoff_drops)
@@ -14036,6 +14040,94 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .expect("all managed rewind statements");
+}
+
+/// Historical fixtures remove the complete empty v127 adjunct before changing
+/// the analysis table. Validate the replaced reservation trigger with its
+/// coordination owner before removing any of its dependencies.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_coordination_drops(client: &Client) -> Vec<String> {
+    let expected = queue_fixture::source_extensions_fixture::coordination_tail_witness();
+    let actual: Vec<_> = client
+        .query_consistent(
+            "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND \
+         (name GLOB 'analysis_coordination*' OR tbl_name GLOB 'analysis_coordination*' \
+          OR name GLOB 'copy_source_*' OR tbl_name GLOB 'copy_source_*' \
+          OR name GLOB 'copy_index_v3*' OR tbl_name GLOB 'copy_index_v3*' \
+          OR name='copy_index_source_attestations' OR tbl_name='copy_index_source_attestations' \
+          OR name='analysis_source_reserve_on_claim') \
+         ORDER BY type,name",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("current coordination inventory")
+        .iter_mut()
+        .map(|row| {
+            (
+                row.get::<String>("type"),
+                row.get::<String>("name"),
+                row.get::<String>("sql"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "only the exact published coordination adjunct can rewind"
+    );
+    require_replicated_fixture_marker(client, "analysis_coordination_schema", 1).await;
+    for (_, name, _) in expected.iter().filter(|(kind, _, _)| kind == "table") {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(
+                format!(
+                    r#"SELECT count(*) AS value FROM "{}""#,
+                    name.replace('"', r#""""#)
+                ),
+                hiqlite::params!(),
+            )
+            .await
+            .expect("coordination accepted data inventory");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].value,
+            i64::from(name == "analysis_coordination_schema"),
+            "coordination roles, designations and copy index facts cannot be discarded: {name}"
+        );
+    }
+    let mut drops: Vec<_> = expected
+        .iter()
+        .filter(|(kind, _, _)| kind == "trigger")
+        .map(|(_, name, _)| format!(r#"DROP TRIGGER "{}""#, name.replace('"', r#""""#)))
+        .collect();
+    let tables = [
+        "analysis_coordination_source_interests",
+        "copy_source_designation_bindings",
+        "copy_source_owner_designations",
+        "analysis_coordination_roles",
+        "analysis_coordination_schema",
+        "copy_index_v3_heads",
+        "copy_index_v3_locations",
+        "copy_index_v3_quarantines",
+        "copy_index_v3_artifacts",
+        "copy_index_source_attestations",
+    ];
+    let mut actual_tables: Vec<_> = expected
+        .iter()
+        .filter(|(kind, _, _)| kind == "table")
+        .map(|(_, name, _)| name.as_str())
+        .collect();
+    actual_tables.sort();
+    let mut drop_tables = tables.to_vec();
+    drop_tables.sort();
+    assert_eq!(
+        actual_tables, drop_tables,
+        "complete dependency-ordered table inventory"
+    );
+    drops.extend(
+        tables
+            .into_iter()
+            .map(|name| format!(r#"DROP TABLE "{name}""#)),
+    );
+    drops
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -14544,7 +14636,7 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         ._root
         .path()
         .join("fresh-bootstrap-subtitle-source-telemetry.db");
-    let checks: [(&str, i64); 8] = [
+    let checks: [(&str, i64); 9] = [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
             AUTH_SCHEMA_BASELINE_VERSION,
@@ -14587,8 +14679,12 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'view' \
              AND name = 'background_job_required_resources' \
-             AND sql LIKE '%subtitle_model_operation%' AND sql LIKE '%subtitle_model:%' \
-             AND sql LIKE '%library-targeted-v1%'",
+             AND sql LIKE '%subtitle_model_operation%' AND sql LIKE '%subtitle_model:%'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'view' \
+             AND name = 'source_lease_job_scopes' AND sql LIKE '%library-targeted-v1%'",
             1,
         ),
     ];
