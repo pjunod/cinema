@@ -282,11 +282,22 @@ where
         encoded_init: None,
         audio_segmenter: None,
     };
+    macro_rules! phase {
+        ($stage:literal) => {
+            tracing::debug!(target: "plurxd::vodserve", stage = $stage,
+                start_entry = encoded_entry, produced_through = ?state.produced_through,
+                saw_trailer = reader.saw_trailer(), buffered_bytes = reader.buffered(),
+                "VOD parser stage");
+        };
+    }
     let mut buf = vec![0u8; READ_CHUNK];
 
     loop {
         let n = match src.read(&mut buf).await {
-            Ok(0) => break,
+            Ok(0) => {
+                phase!("pipe_eof");
+                break;
+            }
             Ok(n) => n,
             Err(error) => {
                 // A killed producer closes the pipe under us. That is a
@@ -317,7 +328,10 @@ where
                 Unit::Fragment(fragment) => state.on_fragment(fragment, reader.buffered()).await,
                 // ffmpeg's random-access index, written at EOF. Never
                 // published; a plan entry's bytes are already complete.
-                Unit::Trailer => Ok(()),
+                Unit::Trailer => {
+                    phase!("trailer_received");
+                    Ok(())
+                }
             };
             if let Err(outcome) = step {
                 return outcome;
@@ -337,7 +351,10 @@ where
     // leaves a segment unmaterialized for a later generation to redo. So:
     // trailer or nothing.
     let complete = reader.saw_trailer();
-    state.finish(complete).await
+    phase!("tail_finish_wait");
+    let outcome = state.finish(complete).await;
+    phase!("tail_finish_returned");
+    outcome
 }
 
 /// One generation's mutable state, so the phases — identity, landing,
