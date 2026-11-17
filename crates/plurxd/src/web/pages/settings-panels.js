@@ -518,11 +518,11 @@ async function saveSourceReaders(btn){
   if(error)error.textContent="";
   if(btn)btn.disabled=true;
   const number=input=>input.value.trim()===""?null:Number(input.value);
-  const body={source_readers_per_node:Number(document.getElementById("source-readers-per-node").value)};
+  const body={source_readers_per_node:Number((/** @type {HTMLInputElement} */(document.getElementById("source-readers-per-node"))).value)};
   const nodes=[...document.querySelectorAll("[data-source-reader-node]")];
-  if(nodes.length)body.source_readers_node_overrides=Object.fromEntries(nodes.map(row=>[row.dataset.sourceReaderNode,number(row.querySelector("input"))]));
+  if(nodes.length)body.source_readers_node_overrides=Object.fromEntries(nodes.map(row=>[(/** @type {HTMLElement} */(row)).dataset.sourceReaderNode,number(row.querySelector("input"))]));
   const domains=[...document.querySelectorAll("[data-source-reader-domain]")];
-  if(domains.length)body.storage_domain_source_readers=Object.fromEntries(domains.map(row=>[row.dataset.sourceReaderDomain,number(row.querySelector("input"))]));
+  if(domains.length)body.storage_domain_source_readers=Object.fromEntries(domains.map(row=>[(/** @type {HTMLElement} */(row)).dataset.sourceReaderDomain,number(row.querySelector("input"))]));
   try{
     cacheSettings(await api("/settings",{method:"PUT",body}));
     const summary=await api("/analysis/summary");
