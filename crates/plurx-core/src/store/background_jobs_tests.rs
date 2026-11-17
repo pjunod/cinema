@@ -534,11 +534,11 @@ async fn background_jobs_priority_edits_preserve_renewal_and_takeover_rejects_ol
 #[tokio::test]
 async fn background_jobs_reservations_bound_distinct_jobs_and_yield_releases_capacity() {
     let store = SqliteStore::open_in_memory().expect("store");
-    // One maintenance reader per node plus the live slot: the numbers this
-    // contract was written against (one cluster-wide slot before step 4).
-    super::SettingsStore::put_setting(&store, super::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+    // This unrooted fixture uses one maintenance reader under the generic
+    // source_io fallback, plus the spare slot for live demand.
+    super::SettingsStore::put_setting(&store, super::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
         .await
-        .expect("source readers per node");
+        .expect("source readers per root");
     let mut tokens = Vec::new();
     let mut third = None;
     for index in 0..3 {
@@ -869,11 +869,11 @@ async fn background_jobs_unknown_payloads_remain_visible_and_cancellable() {
 #[tokio::test]
 async fn background_jobs_repeated_crashes_exhaust_budget_without_automatic_reset() {
     let store = SqliteStore::open_in_memory().expect("store");
-    // Each crashed attempt's lease still charges its grace; this contract is
-    // about the attempt budget, not source capacity.
-    super::SettingsStore::put_setting(&store, super::keys::JOB_SOURCE_READERS_PER_NODE, "16")
+    // Each crashed attempt's lease still charges its grace; this unrooted
+    // fixture uses a high fallback limit so the attempt budget stays in focus.
+    super::SettingsStore::put_setting(&store, super::keys::JOB_SOURCE_READERS_PER_ROOT, "16")
         .await
-        .expect("source readers per node");
+        .expect("source readers per root");
     let request = enqueue(1_000);
     store.enqueue_job(request.clone()).await.expect("enqueue");
     for crash in 0..5 {
@@ -2165,11 +2165,10 @@ async fn advertised_manual_scan_wins_cross_type_claim_and_expiry_releases_the_tu
     use super::LibraryStore;
     use crate::domain::{LibraryKind, NewLibrary};
     let store = SqliteStore::open_in_memory().expect("store");
-    // One maintenance reader per node plus the live slot: the numbers this
-    // contract was written against (one cluster-wide slot before step 4).
-    super::SettingsStore::put_setting(&store, super::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+    // One maintenance reader for the library root plus the spare live slot.
+    super::SettingsStore::put_setting(&store, super::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
         .await
-        .expect("source readers per node");
+        .expect("source readers per root");
     let library = store
         .create_library(&NewLibrary {
             name: "Movies".into(),
@@ -2478,11 +2477,11 @@ async fn a_viewer_waiting_on_its_titles_measurement_reads_beside_background_work
     // alongside the one background source reader and a viewer waiting on a
     // measurement was not counted as playback demand.
     let store = SqliteStore::open_in_memory().expect("store");
-    // One maintenance reader per node plus the live slot: the numbers this
-    // contract was written against (one cluster-wide slot before step 4).
-    super::SettingsStore::put_setting(&store, super::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+    // This unrooted fixture uses one maintenance reader under the generic
+    // source_io fallback, plus the spare slot for live demand.
+    super::SettingsStore::put_setting(&store, super::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
         .await
-        .expect("source readers per node");
+        .expect("source readers per root");
     let job = |index: usize, viewer: Option<i64>| {
         let mut request = enqueue(1_000);
         request.dedupe_key = format!("fragment:{index}");

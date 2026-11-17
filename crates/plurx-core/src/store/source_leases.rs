@@ -52,16 +52,97 @@ macro_rules! offline_service_admission {
     };
 }
 
+// The dispatch eligibility view uses exactly the admission terms above,
+// rather than another hand-copied threshold expression.
+macro_rules! root_dispatch_contenders {
+    () => { concat!(
+        "DROP VIEW IF EXISTS dispatch_turn_contenders;\n-- next statement\n",
+        "CREATE VIEW dispatch_turn_contenders AS SELECT r.job_id,min(i.created_at_ms) AS queued_ms ",
+        "FROM dispatch_turn_attempt a JOIN dispatch_turn_ready r ON r.expires_at_ms>a.now_ms ",
+        "JOIN background_jobs j ON j.id=r.job_id AND j.state='queued' AND j.revision=r.revision ",
+        "JOIN libraries l ON l.id=json_extract(j.payload_json,'$.library_id') AND l.paths=r.roots ",
+        "JOIN dispatch_turn_interest i ON i.job_id=j.id AND (i.deadline_ms IS NULL OR i.deadline_ms>a.now_ms) ",
+        "WHERE (j.retry_deadline_ms=0 OR j.retry_deadline_ms>a.now_ms) ",
+        "AND NOT EXISTS(SELECT 1 FROM settings WHERE key='internal.cluster_job_owner_removed.'||r.node_id) ",
+        "AND NOT EXISTS(SELECT 1 FROM job_leases lease WHERE lease.resource='scan:library:'||l.id AND ",
+        "(lease.expires_at_ms>a.now_ms OR lease.fence=9223372036854775807 OR lease.revision=9223372036854775807)) ",
+        "AND EXISTS(SELECT 1 FROM dispatch_turn_library_resources overlap JOIN json_each(a.keys_json) wanted ",
+        "ON overlap.resource_key=wanted.value OR overlap.resource_key='source_io' OR wanted.value='source_io' ",
+        "WHERE overlap.job_id=r.job_id AND overlap.node_id=r.node_id AND overlap.resource_key LIKE 'source_io%') ",
+        "AND NOT EXISTS(SELECT 1 FROM dispatch_turn_library_resources k WHERE k.job_id=r.job_id ",
+        "AND k.node_id=r.node_id AND k.resource_key LIKE 'source_io%' AND (",
+        claim_foreground_window!("k.resource_key","a.now_ms")," OR ",
+        claim_source_holders!("k.resource_key","r.node_id","a.now_ms")," OR ",
+        claim_maintenance_reader!("k.resource_key","r.node_id","a.now_ms"),
+        ")) GROUP BY r.job_id;"
+    ) };
+}
+
+// A v1 independent/coordinated writer may still send domain-only keys.
+// Resolve its actual file before admitting it at the shared SQL boundary.
+macro_rules! legacy_root_resources {
+    () => { concat!(
+        "SELECT resource_key FROM analysis_required_resources WHERE NEW.owner_kind='analysis' AND request_id=NEW.work_id ",
+        "UNION SELECT resource.resource_key FROM offline_packages package JOIN source_lease_file_resources resource ",
+        "ON resource.file_id=package.file_id WHERE NEW.owner_kind='offline' AND package.id=NEW.work_id ",
+        "UNION SELECT resource_key FROM source_lease_file_resources WHERE NEW.owner_kind='lease' ",
+        "AND file_id=json_extract(NEW.owner_json,'$.file_id')"
+    ) };
+}
+macro_rules! legacy_root_admission_trigger {
+    ($name:literal,$event:literal,$extra:literal) => { concat!(
+        "CREATE TRIGGER ",$name," BEFORE ",$event," ON background_source_custody ",
+        "WHEN NEW.owner_kind IN ('analysis','lease','offline') AND NEW.phase!='paused' ",$extra," AND NOT EXISTS(SELECT 1 FROM source_leases owned ",
+        "WHERE owned.lease_id=CASE NEW.owner_kind WHEN 'analysis' THEN NEW.custody_id ELSE NEW.owner_key END ",
+        "AND owned.owner_kind=NEW.owner_kind AND owned.phase!='paused' AND owned.expires_at_ms>NEW.updated_at_ms-60000) ",
+        "BEGIN SELECT CASE WHEN EXISTS(SELECT 1 FROM (",legacy_root_resources!(),") required WHERE ",
+        claim_foreground_window!("required.resource_key","NEW.updated_at_ms")," OR ",
+        claim_source_holders!("required.resource_key",
+          "CASE NEW.owner_kind WHEN 'lease' THEN json_extract(NEW.owner_json,'$.lease.owner_node_id') ELSE json_extract(NEW.owner_json,'$.node_id') END",
+          "NEW.updated_at_ms")," OR (NOT (NEW.owner_kind='analysis' AND EXISTS(SELECT 1 FROM background_job_waiters viewer ",
+        "WHERE viewer.request_scope='playback-analysis' AND viewer.job_id=NEW.work_id AND viewer.state='pending' ",
+        "AND viewer.deadline_ms>NEW.updated_at_ms)) AND ",
+        claim_maintenance_reader!("required.resource_key",
+          "CASE NEW.owner_kind WHEN 'lease' THEN json_extract(NEW.owner_json,'$.lease.owner_node_id') ELSE json_extract(NEW.owner_json,'$.node_id') END",
+          "NEW.updated_at_ms"),
+        ")) THEN RAISE(IGNORE) END; END;"
+    ) };
+}
+macro_rules! legacy_root_admission {
+    () => {
+        concat!(
+            legacy_root_admission_trigger!("source_lease_legacy_root_insert", "INSERT", ""),
+            "\n-- next statement\n",
+            legacy_root_admission_trigger!(
+                "source_lease_legacy_root_update",
+                "UPDATE",
+                " AND NEW.owner_kind!='offline' AND NEW.settlement_proof IS NULL"
+            )
+        )
+    };
+}
+
+#[cfg(test)]
+pub(crate) const ROOTS: &str = include_str!("source_roots.sql");
+
 /// The expand, one text for both backends. It reinstalls the claim effects
 /// (open-ended source reservation slots): the replicated store installs its
 /// base job schema only when a cluster is created, so an upgraded cluster
 /// keeps the v1 two-slot trigger unless the expand replaces it.
 pub(crate) const EXPAND: &str = concat!(
+    include_str!("source_roots.sql"),
+    "\n-- next statement\n",
+    include_str!("source_root_resources.sql"),
+    "\n-- next statement\n",
     include_str!("source_leases_expand.sql"),
     "\n-- next statement\n",
     include_str!("background_job_claim_effects.sql"),
     "\n-- next statement\n",
-    offline_service_admission!()
+    offline_service_admission!(),
+    "\n-- next statement\n",
+    root_dispatch_contenders!(),
+    "\n-- next statement\n",
+    legacy_root_admission!()
 );
 /// The contract: drops the v1 source-owner objects.
 pub(crate) const CONTRACT: &str = include_str!("source_leases_contract.sql");
@@ -93,7 +174,7 @@ pub(crate) fn foreground_window(key: &str, now: &str) -> String {
         now = now
     )
 }
-/// `node`, or the mapped domain of `key`, has no reader slot left at all.
+/// The root, or explicitly limited domain, has no reader slot left.
 pub(crate) fn source_holders(key: &str, node: &str, now: &str) -> String {
     source_holders_except(key, node, now, "")
 }
@@ -108,7 +189,7 @@ pub(crate) fn source_holders_except(key: &str, node: &str, now: &str, extra: &st
         extra = extra
     )
 }
-/// Maintenance readers fill `node`, or the mapped domain of `key`.
+/// Maintenance readers fill the root, or an explicitly limited domain.
 pub(crate) fn maintenance_reader(key: &str, node: &str, now: &str) -> String {
     maintenance_reader_except(key, node, now, "")
 }
@@ -254,10 +335,15 @@ pub(crate) fn install_for_fixture(conn: &rusqlite::Connection) {
     let retention = present("background_job_enqueue_command");
     // The lease objects only: a hand-made catalogue has no attempt ledger
     // for the claim effects to write.
+    conn.execute_batch(ROOTS).expect("fixture source roots");
     conn.execute_batch(include_str!("source_leases_expand.sql"))
         .expect("fixture source leases");
     conn.execute_batch(offline_service_admission!())
         .expect("fixture offline service admission");
+    conn.execute_batch(root_dispatch_contenders!())
+        .expect("fixture root dispatch");
+    conn.execute_batch(legacy_root_admission!())
+        .expect("fixture legacy root admission");
     if !retention {
         conn.execute_batch(
             "DROP TRIGGER background_job_enqueue_command; DROP TRIGGER background_job_maintenance_command;",

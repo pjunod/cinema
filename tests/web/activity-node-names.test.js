@@ -83,7 +83,10 @@ const BORROWED = [
   "activityBlockedScans",
   "activityBlockedScansHtml",
   "activitySourceRecovery",
+  "activitySourceResourceLabel",
   "activitySourceRecoveryHtml",
+  "analysisSourceResourceLabel",
+  "analysisSourceHolders",
   "analysisLiveProgress",
   "restoreDurableFocus",
   "paintActivityBody",
@@ -121,7 +124,7 @@ const painter = new Function(
   "return (function(){" +
     PRELUDE +
     BORROWED.map(shippedSource).join("\n") +
-    "\nreturn {paintActivityBody, main, me:ME, nodeLabel, durable:DURABLE_ACTIVITY, view:ACTIVITY_VIEW, inspect:activityInspectorHtml, snapshot:(d)=>{ACTIVITY_SNAPSHOT=d;}, select:(key)=>{ACTIVITY_VIEWING_ID=key;}};})()",
+    "\nreturn {paintActivityBody, main, me:ME, nodeLabel, analysisHolders:analysisSourceHolders, durable:DURABLE_ACTIVITY, view:ACTIVITY_VIEW, inspect:activityInspectorHtml, snapshot:(d)=>{ACTIVITY_SNAPSHOT=d;}, select:(key)=>{ACTIVITY_VIEWING_ID=key;}};})()",
 )(require("../../crates/plurxd/src/web/live-tv.js"));
 
 const NODE_A = "5deeeebc-8f39-4cb5-8e4a-aa5f912f327f";
@@ -806,6 +809,21 @@ test("Jobs reports independent worker rates and flags overdue scans even when ot
     painter.durable.error="observation failed";
     assert.match(paint(d),/Job processing rate unavailable/);
   } finally {Object.assign(painter.durable,prior,{processing:prior.processing});painter.view.tab=tab;}
+});
+test("source-root lease keys render as library paths in Activity and Analysis", () => {
+  const rootId="1/2F6D6E742F6D6F76696573",key="source_io:root/"+rootId;
+  const roots=[{root_id:rootId,library_name:"Movies",root_path:"/mnt/movies",maintenance:1,readers:2,live:0}];
+  const holder=sourceHolder({resource_key:key,origin_node_id:NODE_A,kind:"library_scan",priority:"maintenance",started_at_ms:Date.now()-3000,counts_against:"root"});
+  const html=paint(snapshot({analysis:sourceObservation([holder],{source_capacity:{roots}})}));
+  assert.match(html,/Movies · \/mnt\/movies/);
+  assert.doesNotMatch(html,/source_io:root\/1\/2F/);
+
+  const analysisHtml=painter.analysisHolders({source_io_holders:[holder],source_capacity:{roots},node_hostnames:{[NODE_A]:"alpha"},now_ms:Date.now()});
+  assert.match(analysisHtml,/Movies · \/mnt\/movies/);
+  assert.doesNotMatch(analysisHtml,/source_io:root\/1\/2F/);
+  const fallback=painter.analysisHolders({source_io_holders:[holder],source_capacity:{roots:[]},now_ms:Date.now()});
+  assert.match(fallback,/Source root/);
+  assert.doesNotMatch(fallback,/source_io:root\/1\/2F/);
 });
 test("a source lease left long past its expiry stays prominent after its job disappears and escapes identities", () => {
   Object.assign(painter.durable,{rows:[],activeJobs:[]});

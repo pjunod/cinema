@@ -495,9 +495,9 @@ async fn title_priority_observation_requires_live_higher_priority_same_node_work
         // One background reader per node beside the live slot: the numbers this
         // contract was written against.
         store
-            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
             .await
-            .expect("source readers per node");
+            .expect("source readers per root");
         let scanner = "a".repeat(64);
         let file = seed(&store, "title-priority").await;
         let (_, title) = active(&store, file.id, &scanner, 1_000).await;

@@ -705,7 +705,7 @@ expiry through the existing grant write; full re-admission adds no RPC. The
 rolling legacy projection is temporary and is removed at the contract
 boundary. These source details add no modeled wait edge or liveness claim.
 
-## Source lease steps 3+4 — one lease table, per-node capacity, 2026-11-16
+## Source lease steps 3+4 — root capacity clarification, 2026-11-17
 
 [SOURCE-LEASE-AS-BUILT.md](../../docs/server/SOURCE-LEASE-AS-BUILT.md).
 Repinned after review of each anchored item. `06 queue heartbeat
@@ -716,3 +716,10 @@ immutable physical custody lookup` now resolves the lease by its id, still
 an identity lookup with no wait. `recovery dependency outside model: custody
 activation and cleanup` is removed with `activate_background_with_journal`.
 No modeled wait changes.
+
+
+Root keys now come from the canonical per-file root relation; roots have
+independent default capacity and optional explicit aggregate-domain limits.
+Dispatch and claim source-admission predicates share the same macros. This
+changes which concrete resource can admit a reader, not the modeled wait
+transitions. Root-path/configuration correctness remains outside this model.

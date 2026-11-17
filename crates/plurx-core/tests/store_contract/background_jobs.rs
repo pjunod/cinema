@@ -1710,9 +1710,9 @@ async fn background_library_publication_requires_both_live_owners() {
         // still charges its 60 s grace; this contract is about publication
         // ownership, not source capacity.
         store
-            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "16")
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "16")
             .await
-            .expect("source readers per node");
+            .expect("source readers per root");
         for scenario in ["live", "cancelled", "expired", "taken_over", "roots_changed"] {
             let (_, file_id) = seed_file(&store, &format!("dual-owner-{scenario}")).await;
             let file = store
@@ -6028,7 +6028,7 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
         // One background reader per node beside the live slot: the numbers
         // this contract was written against.
         store
-            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
             .await
             .expect("one background reader");
         let user = store

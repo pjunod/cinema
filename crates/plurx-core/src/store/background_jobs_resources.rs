@@ -251,9 +251,7 @@ pub(super) async fn register_foreground<T: QueueSql>(
     )?;
     let rows=store.queue_sql(format!(r#"INSERT INTO source_leases(lease_id,owner_kind,work_id,node_id,owner_json,resource_keys_json,fence,phase,projection_json,started_at_ms,renewed_at_ms,expires_at_ms)
       SELECT json_extract($1,'$.owner.owner_id'),'playback',json_extract($1,'$.owner.lifetime_id'),json_extract($1,'$.owner.node_id'),json_extract($1,'$.owner'),
-        (SELECT json_group_array(resource_key) FROM (SELECT DISTINCT COALESCE('source_io:'||mapping.domain_id,'source_io') AS resource_key
-          FROM libraries library LEFT JOIN json_each(CASE WHEN json_valid(library.paths) THEN library.paths ELSE '[]' END) root
-          LEFT JOIN background_storage_domains mapping ON mapping.library_id=library.id AND mapping.root_path=root.value WHERE library.id=item.library_id)),
+        (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_file_resources WHERE file_id=file.id ORDER BY resource_key)),
         1,'startup',json_extract($1,'$.projection'),json_extract($1,'$.now_ms'),json_extract($1,'$.now_ms'),json_extract($1,'$.lease_expires_at_ms')
       FROM files file JOIN items item ON item.id=file.item_id
       WHERE file.id=json_extract($1,'$.owner.file_id') AND file.size=json_extract($1,'$.owner.source_size') AND file.mtime=json_extract($1,'$.owner.source_mtime')
@@ -466,13 +464,20 @@ pub(super) async fn resume_background<T: QueueSql>(
         "job.owner_node_id",
         "json_extract($1,'$.now_ms')",
     );
+    let live = live_job_interest!("job.id", "job.fence", "json_extract($1,'$.now_ms')");
+    let maintenance = super::source_leases::maintenance_reader(
+        "resource.value",
+        "job.owner_node_id",
+        "json_extract($1,'$.now_ms')",
+    );
     let rows=store.queue_sql(format!(r#"INSERT INTO background_job_commands(id,operation,request_json,result_json)
       SELECT json_extract($1,'$.id'),'source_resume',$1,CASE WHEN EXISTS(SELECT 1 FROM background_jobs job
         JOIN background_source_pauses paused ON paused.job_id=job.id AND paused.fence=job.fence
           AND paused.node_id=job.owner_node_id AND paused.boot_id=job.owner_boot_id AND paused.claim_id=job.claim_id
         WHERE {identity} AND json_array_length(paused.resource_keys_json)>0
-          AND NOT EXISTS(SELECT 1 FROM json_each(paused.resource_keys_json) resource WHERE {blocked}
-            OR {holders})) THEN 'true' ELSE 'false' END
+          AND NOT EXISTS(SELECT 1 FROM (SELECT resource_key AS value FROM background_job_required_resources
+            WHERE job_id=job.id AND resource_key LIKE 'source_io%') resource WHERE {blocked}
+            OR {holders} OR (NOT {live} AND {maintenance}))) THEN 'true' ELSE 'false' END
       RETURNING result_json"#,identity=background_identity_sql()),body,true,true).await?;
     rows.first()
         .map(|row| decode(row))
@@ -515,11 +520,7 @@ pub(super) async fn foreground_pressure<T: QueueSql>(
     let blocked = foreground_blocks("required.resource_key", "json_extract($1,'$.now_ms')");
     let sql = format!(
         r#"SELECT CASE WHEN EXISTS(SELECT 1 FROM (
-      SELECT DISTINCT COALESCE('source_io:'||mapping.domain_id,'source_io') AS resource_key
-      FROM files file JOIN items item ON item.id=file.item_id JOIN libraries library ON library.id=item.library_id
-      LEFT JOIN json_each(CASE WHEN json_valid(library.paths) THEN library.paths ELSE '[]' END) root
-      LEFT JOIN background_storage_domains mapping ON mapping.library_id=library.id AND mapping.root_path=root.value
-      WHERE file.id=json_extract($1,'$.file_id')) required WHERE {blocked}) THEN 'true' ELSE 'false' END AS result_json"#
+      SELECT resource_key FROM source_lease_file_resources WHERE file_id=json_extract($1,'$.file_id')) required WHERE {blocked}) THEN 'true' ELSE 'false' END AS result_json"#
     );
     let rows = store
         .queue_sql(
@@ -597,7 +598,7 @@ mod source_tests {
     fn fixture() -> SourceSql {
         let connection = rusqlite::Connection::open_in_memory().expect("database");
         connection.execute_batch("CREATE TABLE libraries(id INTEGER PRIMARY KEY,paths TEXT); CREATE TABLE items(id INTEGER PRIMARY KEY,library_id INTEGER);
-          CREATE TABLE files(id INTEGER PRIMARY KEY,item_id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE settings(key TEXT,value TEXT);
+          CREATE TABLE files(id INTEGER PRIMARY KEY,item_id INTEGER,path TEXT,size INTEGER,mtime INTEGER); CREATE TABLE settings(key TEXT,value TEXT);
           CREATE TABLE job_leases(resource TEXT PRIMARY KEY,owner_node_id TEXT,fence INTEGER,revision INTEGER,expires_at_ms INTEGER,updated_at_ms INTEGER);
           CREATE TABLE offline_packages(id TEXT PRIMARY KEY,node_id TEXT,file_id INTEGER,source_size INTEGER,source_mtime INTEGER,claim_generation INTEGER,state TEXT,expires_at INTEGER);
           CREATE TABLE background_storage_domains(library_id INTEGER,root_path TEXT,domain_id TEXT);
@@ -613,7 +614,7 @@ mod source_tests {
           CREATE TABLE analysis_attempts(request_id TEXT,attempt INTEGER,claim_node_id TEXT,claim_epoch INTEGER,claim_expires_at_ms INTEGER,phase TEXT,started_at_ms INTEGER,phase_updated_at_ms INTEGER,terminal_code TEXT,PRIMARY KEY(request_id,claim_epoch));
           CREATE TABLE analysis_source_reservations(resource_key TEXT,request_id TEXT,fence INTEGER,expires_at_ms INTEGER,PRIMARY KEY(request_id,resource_key));
           CREATE VIEW analysis_required_resources AS SELECT request_id,'source_io' AS resource_key FROM analysis_requests;
-          INSERT INTO libraries VALUES(1,'[\"/media\"]'); INSERT INTO items VALUES(1,1);INSERT INTO files VALUES(1,1,100,1);").expect("existing arbiter");
+          INSERT INTO libraries VALUES(1,'[\"/media\"]'); INSERT INTO items VALUES(1,1);INSERT INTO files(id,item_id,path,size,mtime) VALUES(1,1,'/media/movie.mkv',100,1);").expect("existing arbiter");
         connection
             .execute_batch(SOURCE_ARBITRATION_SCHEMA)
             .expect("same new schema as both backends");
@@ -2096,7 +2097,7 @@ mod source_tests {
                 .lock()
                 .expect("connection")
                 .execute(
-                    "INSERT INTO settings VALUES('jobs.source_readers_per_node','1')",
+                    "INSERT INTO settings VALUES('jobs.source_readers_per_root','1')",
                     [],
                 )
                 .expect("one reader per node");
@@ -2496,7 +2497,7 @@ mod source_tests {
             {
                 let db = store.0.lock().expect("connection");
                 db.execute(
-                    "INSERT INTO settings VALUES('jobs.source_readers_per_node','1')",
+                    "INSERT INTO settings VALUES('jobs.source_readers_per_root','1')",
                     [],
                 )
                 .expect("one maintenance slot");
@@ -2575,7 +2576,7 @@ mod source_tests {
         {
             let db = store.0.lock().expect("connection");
             db.execute(
-                "INSERT INTO settings VALUES('jobs.source_readers_per_node','1')",
+                "INSERT INTO settings VALUES('jobs.source_readers_per_root','1')",
                 [],
             )
             .expect("one maintenance slot");
@@ -2588,7 +2589,7 @@ mod source_tests {
         body["epoch_id"] = 20.into();
         body["charge_bytes"] = 0.into();
         body["id"] = uuid::Uuid::new_v4().to_string().into();
-        let grant = serde_json::json!({"receipt_id":uuid::Uuid::new_v4().to_string(),"epoch_id":20,"expires_at_ms":105_000,"byte_allowance":null,"resource_keys":["source_io"]});
+        let grant = serde_json::json!({"receipt_id":uuid::Uuid::new_v4().to_string(),"epoch_id":20,"expires_at_ms":105_000,"byte_allowance":null,"resource_keys":[format!("source_io:root/1/{}",super::super::source_leases::hex_upper("/media"))]});
         body["grant"] = grant;
         let propose = |body: String| {
             store.queue_sql("INSERT INTO background_job_commands(id,operation,request_json,result_json) VALUES(json_extract($1,'$.id'),'source_service',$1,json_extract($1,'$.grant')) RETURNING result_json".into(),body,true,true)
@@ -2655,7 +2656,7 @@ mod source_tests {
                 )
                 .expect("package");
                 db.execute(
-                    "INSERT INTO settings VALUES('jobs.source_readers_per_node','1')",
+                    "INSERT INTO settings VALUES('jobs.source_readers_per_root','1')",
                     [],
                 )
                 .expect("one maintenance slot");
@@ -2701,6 +2702,13 @@ mod source_tests {
                 claim_generation: 1,
             };
             let key = background_owner_key(&owner).expect("key");
+            let expected_resources = vec![
+                "source_io:new".to_owned(),
+                format!(
+                    "source_io:root/1/{}",
+                    super::super::source_leases::hex_upper("/media")
+                ),
+            ];
             {
                 let db = store.0.lock().expect("connection");
                 db.execute(
@@ -2723,6 +2731,11 @@ mod source_tests {
             {
                 let db = store.0.lock().expect("connection");
                 // With expiry plus grace elapsed, the mapping may apply.
+                db.execute(
+                    "INSERT INTO settings VALUES('jobs.domain_source_readers.new','1')",
+                    [],
+                )
+                .expect("explicit aggregate domain limit");
                 db.execute("UPDATE background_storage_domains SET domain_id='new'", [])
                     .expect("new mapping");
                 db.execute("INSERT INTO source_leases VALUES('lease:peer:1','lease','peer',1,'peer','{}','[\"source_io:new\"]','active',NULL,100000,100000,200000)",[]).expect("new domain maintenance slot is occupied");
@@ -2747,12 +2760,13 @@ mod source_tests {
             let keys:String=store.0.lock().expect("connection").query_row("SELECT resource_keys_json FROM background_source_custody WHERE custody_id='legacy-domain-reader'",[],|r|r.get(0)).expect("legacy reader input refreshed");
             assert_eq!(
                 serde_json::from_str::<Vec<String>>(&keys).expect("keys"),
-                ["source_io:new"]
+                expected_resources
             );
             assert_eq!(store.0.lock().expect("connection").query_row("SELECT count(*) FROM source_leases WHERE owner_kind='offline' AND expires_at_ms>100000",[],|r|r.get::<_,i64>(0)).expect("metadata does not readmit"),0);
             // The old caller's existing retry now computes from current
             // custody keys, so the current domain cap must still refuse it.
-            body["grant"]["resource_keys"] = serde_json::json!(["source_io:new"]);
+            body["grant"]["resource_keys"] =
+                serde_json::to_value(&expected_resources).expect("current root/domain keys");
             assert!(propose(encode(&body).expect("retry"))
                 .await
                 .expect("current domain is full")
@@ -2779,7 +2793,7 @@ mod source_tests {
                 .expect("lease uses current domain");
             assert_eq!(
                 serde_json::from_str::<Vec<String>>(&keys).expect("keys"),
-                ["source_io:new"]
+                expected_resources
             );
         }
     }
@@ -3313,8 +3327,8 @@ fn background_owner_identity(owner: &BackgroundSourceOwner) -> String {
 fn background_owner_resources(owner: &BackgroundSourceOwner) -> String {
     match owner {
         BackgroundSourceOwner::Companion{..}=>"SELECT resource.value AS resource_key FROM source_leases fg,json_each(fg.resource_keys_json) resource WHERE fg.lease_id=json_extract($1,'$.token.owner.owner_id') AND fg.owner_kind='playback' AND fg.owner_json=json_extract($1,'$.token.owner')".to_owned(),
-        BackgroundSourceOwner::Job{..}=>"SELECT resource_key FROM background_job_reservations WHERE job_id=json_extract($1,'$.token.job_id') AND fence=json_extract($1,'$.token.fence') AND resource_key LIKE 'source_io%' AND expires_at_ms>json_extract($1,'$.now_ms') UNION SELECT resource.value AS resource_key FROM background_source_pauses paused,json_each(paused.resource_keys_json) resource WHERE paused.job_id=json_extract($1,'$.token.job_id') AND paused.fence=json_extract($1,'$.token.fence')".to_owned(),
-        BackgroundSourceOwner::Analysis{..}=>"SELECT resource_key FROM analysis_source_reservations WHERE request_id=json_extract($1,'$.request_id') AND fence=json_extract($1,'$.fence') AND expires_at_ms>json_extract($1,'$.now_ms')".to_owned(),
+        BackgroundSourceOwner::Job{..}=>"SELECT resource_key FROM background_job_required_resources WHERE job_id=json_extract($1,'$.token.job_id') AND resource_key LIKE 'source_io%'".to_owned(),
+        BackgroundSourceOwner::Analysis{..}=>"SELECT resource_key FROM analysis_required_resources WHERE request_id=json_extract($1,'$.request_id')".to_owned(),
         BackgroundSourceOwner::ReadAttestation{..}|BackgroundSourceOwner::Offline{..}=>{
             let file=if matches!(owner,BackgroundSourceOwner::Offline{..}){"(SELECT file_id FROM offline_packages WHERE id=json_extract($1,'$.package_id'))"}else{"json_extract($1,'$.file_id')"};
             format!(source_file_resources!("{file}"), file=file)

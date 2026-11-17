@@ -1093,11 +1093,13 @@ removed with their sources; the activation pin and the refreshed rows stay.
 Links above to the removed files are kept as plain text for history. No
 modeled transition changes.
 
-## Source lease steps 3+4 — one lease table, per-node capacity, 2026-11-16
+## Source lease steps 3+4 — root capacity clarification, 2026-11-17
 
 [SOURCE-LEASE-AS-BUILT.md](../../docs/server/SOURCE-LEASE-AS-BUILT.md):
-source readers are rows of `source_leases`, counted per node and per mapped
-storage domain inside the claim's own statement. Repinned after review of
+source readers are rows of `source_leases`, counted per configured library
+root inside the claim's own statement. Root defaults are two maintenance
+readers plus one live slot; node occupancy adds no rooted cap, and an
+aggregate storage-domain cap exists only when explicitly configured. Repinned after review of
 each anchored item (rows keep narrow item anchors; the runner also requires
 a digest of each containing source file, so unchanged items in edited files
 were repinned without a model note):
@@ -1112,7 +1114,7 @@ were repinned without a model note):
 - The queue protocol trait and shared adapter lose `begin_analysis_source_phase`'s
   caller custody id and gain the node in the analysis capacity clause; no
   modeled transition reads either.
-- The M2 conformance test raises the per-node reader setting so earlier
+- The M2 conformance test raises the root-default reader setting so earlier
   scenarios' leases do not refuse later claims; its assertions are unchanged.
 - `recovery dependency outside model: custody activation and cleanup`
   (`activate_background_with_journal`) is removed: the activation journal
@@ -1126,3 +1128,13 @@ service grant renews offline capacity. The rolling legacy
 
 These source details change no modeled transition and establish no liveness
 claim.
+
+
+The November 17 root-policy delta resolves each file to its longest
+component-matching configured root. The resource view supplies the same keys to
+claims, independent registrations, rolling owner bridges and pause readmission.
+Dispatch eligibility is generated from the three claim macros rather than a
+second threshold implementation. These are source correspondence obligations;
+the model's abstract resource key does not prove path resolution, root settings
+validation, or the optional aggregate-domain policy. New root/bridge regressions
+and their mutation evidence must qualify those implementation details.

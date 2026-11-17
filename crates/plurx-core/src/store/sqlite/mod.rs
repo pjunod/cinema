@@ -2359,7 +2359,7 @@ impl MetricsStore for SqliteStore {
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)),
                         'source_recovery_pending', (SELECT COUNT(*) FROM source_leases WHERE expires_at_ms <= ?2 * 1000 - 180000),
                         'source_leases', json_object('playback',(SELECT COUNT(*) FROM source_leases WHERE node_id = ?1 AND owner_kind = 'playback'),'job',(SELECT COUNT(*) FROM source_leases WHERE node_id = ?1 AND owner_kind = 'job'),'analysis',(SELECT COUNT(*) FROM source_leases WHERE node_id = ?1 AND owner_kind = 'analysis'),'lease',(SELECT COUNT(*) FROM source_leases WHERE node_id = ?1 AND owner_kind = 'lease'),'offline',(SELECT COUNT(*) FROM source_leases WHERE node_id = ?1 AND owner_kind = 'offline')),
-                        'source_readers_per_node', COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'jobs.source_readers_per_node.' || ?1 AND CAST(value AS INTEGER) BETWEEN 1 AND 16), (SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'jobs.source_readers_per_node' AND CAST(value AS INTEGER) BETWEEN 1 AND 16), 2),
+                        'source_readers_per_root', COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'jobs.source_readers_per_root' AND CAST(value AS INTEGER) BETWEEN 1 AND 16), 2),
                         'source_lease_schema_version', COALESCE((SELECT version FROM source_lease_schema WHERE singleton = 1), 0),
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))), ")
                     + &request_health

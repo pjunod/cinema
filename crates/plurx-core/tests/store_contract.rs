@@ -10025,9 +10025,9 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         // Each retried attempt's lease still charges its 60 s grace; this contract
         // is about the attempt budget, not source capacity.
         store
-            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "16")
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "16")
             .await
-            .expect("source readers per node");
+            .expect("source readers per root");
         let library = store
             .create_library(&NewLibrary {
                 name: "Pretranscode Contract Library".to_owned(),
@@ -11070,7 +11070,7 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
     let seed = &stores[0];
     // Three handles, one node: its one background reader is the contended
     // resource (readers are counted per node since source-lease step 4).
-    seed.put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+    seed.put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
         .await
         .expect("one background reader");
     let library = seed
@@ -23636,9 +23636,9 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
         // Each retried attempt's lease still charges its 60 s grace; this contract
         // is about the attempt budget, not source capacity.
         store
-            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "16")
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "16")
             .await
-            .expect("source readers per node");
+            .expect("source readers per root");
         let (_, file_id) = seed_file(&store, "attempt-history").await;
         let source_sha256 = "a".repeat(64);
         let pipeline_sha256 = "b".repeat(64);
@@ -25301,9 +25301,9 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
         // One background reader per node beside the live slot: the numbers this
         // contract was written against.
         store
-            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
             .await
-            .expect("source readers per node");
+            .expect("source readers per root");
         let (_, file_id) = seed_file(&store, "analysis-admin-control").await;
         let request_id = uuid::Uuid::new_v4().to_string();
         store
@@ -28255,9 +28255,9 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
         // Each retried attempt's lease still charges its 60 s grace; this contract
         // is about the attempt budget, not source capacity.
         store
-            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "16")
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "16")
             .await
-            .expect("source readers per node");
+            .expect("source readers per root");
         let (_, file_id) = seed_file(&store, "analysis-terminal-identity").await;
         let request = NewAnalysisRequest {
             request_id: "terminal-analysis-request".to_owned(),
@@ -28762,9 +28762,9 @@ async fn analysis_admin_retry_resets_attempt_budget_through_dyn_store() {
         // Each retried attempt's lease still charges its 60 s grace; this contract
         // is about the attempt budget, not source capacity.
         store
-            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "16")
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "16")
             .await
-            .expect("source readers per node");
+            .expect("source readers per root");
         let (_, file_id) = seed_file(&store, "analysis-retry-budget").await;
         let request_id = uuid::Uuid::new_v4().to_string();
         store

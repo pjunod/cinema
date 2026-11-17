@@ -1,3 +1,9 @@
+DROP TRIGGER source_lease_legacy_root_insert;
+-- next statement
+DROP TRIGGER source_lease_legacy_root_update;
+-- next statement
+DROP VIEW source_lease_legacy_resources;
+-- next statement
 -- Source leases v3 (contract): the v1 source-owner objects go. On the
 -- replicated store this runs only once every active node's binary has
 -- published the source_leases_v2 capability.

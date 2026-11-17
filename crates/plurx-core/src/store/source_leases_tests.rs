@@ -1,4 +1,4 @@
-//! Source leases and per-node source capacity (source-lease plan steps 3
+//! Source leases and root-scoped source capacity (source-lease plan steps 3
 //! and 4): docs/server/SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md §8.
 //! Every test here fails against the code before the build; each names the
 //! production change it pins.
@@ -83,11 +83,11 @@ async fn sql(store: &SqliteStore, statement: &str) -> Vec<String> {
         .expect("fixture statement")
 }
 
-async fn readers_per_node(store: &SqliteStore, value: &str) {
+async fn readers_per_root(store: &SqliteStore, value: &str) {
     store
-        .put_setting(super::keys::JOB_SOURCE_READERS_PER_NODE, value)
+        .put_setting("jobs.source_readers_per_root", value)
         .await
-        .expect("readers per node");
+        .expect("readers per root");
 }
 
 async fn lease(
@@ -164,9 +164,10 @@ async fn capacity_frees_without_a_sweep() {
         .is_none());
 }
 
-/// Mutation: drop `held.node_id=N` from the holder counts.
+/// Unrooted compatibility uses the bounded node-local fallback for the
+/// generic `source_io` key. Rooted media is covered in the sibling module.
 #[tokio::test]
-async fn node_cap_is_per_node() {
+async fn legacy_unrooted_node_cap_is_per_node() {
     let store = SqliteStore::open_in_memory().expect("store");
     let mut ids = Vec::new();
     for index in 0..3 {
@@ -198,23 +199,23 @@ async fn node_cap_is_per_node() {
     );
 }
 
-/// Mutation: hard-code the node limit to 2 (`node_source_readers!`).
+/// The global root-reader setting also bounds legacy unrooted readers.
 #[tokio::test]
-async fn setting_changes_the_next_claim() {
+async fn legacy_unrooted_fallback_setting_changes_the_next_claim() {
     let store = SqliteStore::open_in_memory().expect("store");
     let ids = [
         enqueued(&store, 0, false, 1_000).await,
         enqueued(&store, 1, false, 1_000).await,
         enqueued(&store, 2, false, 1_000).await,
     ];
-    readers_per_node(&store, "1").await;
+    readers_per_root(&store, "1").await;
     let first = claimed(&store, claim_on(&ids[0], 0, "node-a", 1_001))
         .await
         .expect("one reader");
     assert!(claimed(&store, claim_on(&ids[1], 0, "node-a", 1_002))
         .await
         .is_none());
-    readers_per_node(&store, "3").await;
+    readers_per_root(&store, "3").await;
     let second = claimed(&store, claim_on(&ids[1], 0, "node-a", 1_003))
         .await
         .expect("raised");
@@ -222,7 +223,7 @@ async fn setting_changes_the_next_claim() {
         .await
         .expect("raised");
     // Lowering below what runs refuses nothing already running.
-    readers_per_node(&store, "1").await;
+    readers_per_root(&store, "1").await;
     let renewed = store
         .renew_jobs(RenewJobs {
             tokens: [first, second, third]
@@ -402,7 +403,7 @@ async fn job_lease_follows_the_job() {
 #[tokio::test]
 async fn a_successor_fence_does_not_wait_on_its_own_ghost() {
     let store = SqliteStore::open_in_memory().expect("store");
-    readers_per_node(&store, "1").await;
+    readers_per_root(&store, "1").await;
     let ghosted = enqueued(&store, 0, false, 1_000).await;
     claimed(&store, claim_on(&ghosted, 0, "node-a", 1_001))
         .await
@@ -492,6 +493,10 @@ async fn domain_cap_still_binds() {
     )
     .await;
     sql(&store, "INSERT INTO background_storage_domains(library_id,root_path,domain_id) VALUES(1,'/nas','nas')").await;
+    store
+        .put_setting("jobs.domain_source_readers.nas", "1")
+        .await
+        .expect("explicit domain limit");
     let first = enqueued(&store, 0, false, 1_000).await;
     let second = enqueued(&store, 1, false, 1_000).await;
     assert!(claimed(&store, claim_on(&first, 0, "node-a", 1_001))
@@ -717,7 +722,7 @@ fn old_custody_phase_bridge_tracks_renewal_pause_offline_service_and_release() {
             .expect("recursive triggers");
         conn.execute_batch(
             r#"PRAGMA foreign_keys=OFF;
-             INSERT INTO settings(key,value) VALUES('jobs.source_readers_per_node','16');
+             INSERT INTO settings(key,value) VALUES('jobs.source_readers_per_root','16');
              INSERT INTO libraries(id,name,kind,paths) VALUES(1,'movies','movies','[]');
              INSERT INTO items(id,library_id,kind,title,sort_title)
                VALUES(1,1,'movie','Movie','Movie');
@@ -932,7 +937,7 @@ fn source_lease_custody_bridge_round_trips_without_replacing_old_uuid() {
             .expect("recursive triggers");
         conn.execute_batch(
             r#"PRAGMA foreign_keys=OFF;
-             INSERT INTO settings(key,value) VALUES('jobs.source_readers_per_node','16');
+             INSERT INTO settings(key,value) VALUES('jobs.source_readers_per_root','16');
              INSERT INTO libraries(id,name,kind,paths) VALUES(1,'movies','movies','[]');
              INSERT INTO items(id,library_id,kind,title,sort_title)
                VALUES(1,1,'movie','Movie','Movie');
@@ -1064,3 +1069,6 @@ fn source_lease_custody_bridge_round_trips_without_replacing_old_uuid() {
             .expect("contract drops temporary bridge");
     }
 }
+
+#[path = "source_leases_root_tests.rs"]
+mod roots;

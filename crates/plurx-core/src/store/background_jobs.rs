@@ -216,24 +216,32 @@ macro_rules! lease_live {
         ") OR (held.owner_kind='analysis' AND EXISTS (SELECT 1 FROM background_job_waiters viewer WHERE viewer.request_scope='playback-analysis' AND viewer.job_id=held.work_id AND viewer.state='pending' AND viewer.deadline_ms>", $now, ")))") };
 }
 
-/// Background readers node `$node` may run: its override, else the cluster
-/// default (`jobs.source_readers_per_node`), else 2. A value outside 1..=16
-/// (an override saved as "use default" is empty) reads as absent.
-macro_rules! node_source_readers {
-    ($node:literal) => { concat!("COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node.'||", $node, " AND CAST(value AS INTEGER) BETWEEN 1 AND 16),(SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node' AND CAST(value AS INTEGER) BETWEEN 1 AND 16),2)") };
+/// One catalogue expression supplies both root budgets and explicitly
+/// configured aggregate-domain caps. NULL means no aggregate cap.
+macro_rules! source_resource_readers {
+    ($key:literal) => {
+        concat!(
+            "(SELECT readers FROM source_lease_limits WHERE resource_key=",
+            $key,
+            ")"
+        )
+    };
 }
-
-/// Background readers storage domain key `$key` (`source_io:<domain>`) may
-/// serve across the cluster: its `source_readers`, else 1. A value outside
-/// 1..=16 reads as absent.
-macro_rules! domain_source_readers {
-    ($key:literal) => { concat!("COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.domain_source_readers.'||substr(", $key, ",11) AND CAST(value AS INTEGER) BETWEEN 1 AND 16),1)") };
-}
-
-/// Current source keys for a file, shared by independent registration,
-/// offline re-admission and the temporary v1 grant compatibility path.
+/// Current keys are derived once by the catalogue, including exact root
+/// selection and any optional aggregate domain.
 macro_rules! source_file_resources {
-    ($file:literal) => { concat!("SELECT DISTINCT COALESCE('source_io:'||mapping.domain_id,'source_io') AS resource_key FROM files file JOIN items item ON item.id=file.item_id LEFT JOIN libraries library ON library.id=item.library_id LEFT JOIN json_each(CASE WHEN json_valid(library.paths) THEN library.paths ELSE '[]' END) root LEFT JOIN background_storage_domains mapping ON mapping.library_id=library.id AND mapping.root_path=root.value WHERE file.id=", $file) };
+    ($file:literal) => {
+        concat!(
+            "SELECT resource_key FROM source_lease_file_resources WHERE file_id=",
+            $file
+        )
+    };
+}
+/// A pre-upgrade holder without root keys conservatively overlaps a root
+/// through its old domain (or its generic unknown source).
+macro_rules! source_lease_matches {
+    ($key:literal) => { concat!("EXISTS(SELECT 1 FROM json_each(held.resource_keys_json) held_key WHERE held_key.value=", $key,
+      " OR (substr(", $key, ",1,15)='source_io:root/' AND NOT EXISTS(SELECT 1 FROM json_each(held.resource_keys_json) rooted WHERE substr(rooted.value,1,15)='source_io:root/') AND (held_key.value='source_io' OR held_key.value IN(SELECT resource_key FROM source_lease_root_resources WHERE root_key=", $key, "))))") };
 }
 
 /// A playback lease overlapping `$key` is outside its permission window:
@@ -259,19 +267,69 @@ macro_rules! claim_foreground_window {
     };
 }
 
-/// The node, or the mapped storage domain `$key`, is full: every reader
-/// slot including the one kept for live demand is taken. `$extra` narrows
-/// the counted leases (a re-asked admission leaves its own lease out).
+/// Every slot of this root (or explicitly limited aggregate domain) is
+/// taken. A generic legacy key uses the bounded node-local fallback.
 macro_rules! claim_source_holders {
-    ($key:literal, $node:literal, $now:literal) => { claim_source_holders!($key, $node, $now, "") };
-    ($key:literal, $node:literal, $now:literal, $extra:expr) => { concat!("((SELECT COUNT(*) FROM source_leases held WHERE held.node_id=", $node, " AND ", lease_counted!($now), $extra, ")>=", node_source_readers!($node), "+1 OR (", $key, "!='source_io' AND (SELECT COUNT(*) FROM source_leases held,json_each(held.resource_keys_json) held_key WHERE held_key.value=", $key, " AND ", lease_counted!($now), $extra, ")>=", domain_source_readers!($key), "+1))") };
+    ($key:literal, $node:literal, $now:literal) => {
+        claim_source_holders!($key, $node, $now, "")
+    };
+    ($key:literal, $node:literal, $now:literal, $extra:expr) => {
+        concat!(
+            "((",
+            $key,
+            "='source_io' AND (SELECT COUNT(*) FROM source_leases held WHERE held.node_id=",
+            $node,
+            " AND ",
+            lease_counted!($now),
+            $extra,
+            ")>=",
+            source_resource_readers!($key),
+            "+1) OR (",
+            $key,
+            "!='source_io' AND (SELECT COUNT(*) FROM source_leases held WHERE ",
+            source_lease_matches!($key),
+            " AND ",
+            lease_counted!($now),
+            $extra,
+            ")>=",
+            source_resource_readers!($key),
+            "+1))"
+        )
+    };
 }
-
-/// Maintenance readers already fill the node, or the mapped storage domain
-/// `$key`. Applied only when the claimant serves no live demand.
+/// Maintenance uses two slots per root by default and leaves one for live
+/// demand. No implicit node-wide or aggregate-domain cap joins those roots.
 macro_rules! claim_maintenance_reader {
-    ($key:literal, $node:literal, $now:literal) => { claim_maintenance_reader!($key, $node, $now, "") };
-    ($key:literal, $node:literal, $now:literal, $extra:expr) => { concat!("((SELECT COUNT(*) FROM source_leases held WHERE held.node_id=", $node, " AND ", lease_counted!($now), $extra, " AND NOT ", lease_live!($now), ")>=", node_source_readers!($node), " OR (", $key, "!='source_io' AND (SELECT COUNT(*) FROM source_leases held,json_each(held.resource_keys_json) held_key WHERE held_key.value=", $key, " AND ", lease_counted!($now), $extra, " AND NOT ", lease_live!($now), ")>=", domain_source_readers!($key), "))") };
+    ($key:literal, $node:literal, $now:literal) => {
+        claim_maintenance_reader!($key, $node, $now, "")
+    };
+    ($key:literal, $node:literal, $now:literal, $extra:expr) => {
+        concat!(
+            "((",
+            $key,
+            "='source_io' AND (SELECT COUNT(*) FROM source_leases held WHERE held.node_id=",
+            $node,
+            " AND ",
+            lease_counted!($now),
+            $extra,
+            " AND NOT ",
+            lease_live!($now),
+            ")>=",
+            source_resource_readers!($key),
+            ") OR (",
+            $key,
+            "!='source_io' AND (SELECT COUNT(*) FROM source_leases held WHERE ",
+            source_lease_matches!($key),
+            " AND ",
+            lease_counted!($now),
+            $extra,
+            " AND NOT ",
+            lease_live!($now),
+            ")>=",
+            source_resource_readers!($key),
+            "))"
+        )
+    };
 }
 
 pub(super) const ENQUEUE_SQL: &str = concat!(

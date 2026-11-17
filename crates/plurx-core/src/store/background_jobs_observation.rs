@@ -108,7 +108,7 @@ FROM (
     CASE WHEN held.owner_kind='playback' THEN
         CASE WHEN held.phase IN ('source_idle','sharing') AND json_extract(held.projection_json,'$.source_quiescent')=1 THEN 0 ELSE 1 END
       WHEN {counted} THEN 1 ELSE 0 END AS active_occupancy,
-    CASE WHEN held.owner_kind='playback' OR NOT {counted} THEN 'none' WHEN key.value='source_io' THEN 'node' ELSE 'domain' END AS counts_against,
+    CASE WHEN held.owner_kind='playback' OR NOT {counted} THEN 'none' WHEN key.value='source_io' THEN 'unrooted' WHEN substr(key.value,1,15)='source_io:root/' THEN 'root' ELSE 'domain' END AS counts_against,
     held.node_id AS origin_node_id,
     CASE held.owner_kind WHEN 'job' THEN COALESCE(job.kind,json_extract(held.owner_json,'$.job_kind')) END AS origin_job_kind,
     job.state AS origin_job_state
@@ -218,7 +218,7 @@ pub struct BackgroundJobMetrics {
     /// This node's source leases by [`SOURCE_LEASE_KINDS`].
     pub source_leases: [i64; SOURCE_LEASE_KINDS.len()],
     /// Background source readers this node may run (its override or the default).
-    pub source_readers_per_node: i64,
+    pub source_readers_per_root: i64,
     /// 2 expanded (v1 objects still present for older binaries), 3 contracted.
     pub source_lease_schema_version: i64,
 }
@@ -233,7 +233,7 @@ impl Default for BackgroundJobMetrics {
             source_recovery_pending: 0,
             legacy_pending: 0,
             source_leases: [0; SOURCE_LEASE_KINDS.len()],
-            source_readers_per_node: 0,
+            source_readers_per_root: 0,
             source_lease_schema_version: 0,
         }
     }
@@ -253,7 +253,7 @@ pub(crate) fn background_job_metrics(
         #[serde(default)]
         source_leases: std::collections::BTreeMap<String, i64>,
         #[serde(default)]
-        source_readers_per_node: i64,
+        source_readers_per_root: i64,
         #[serde(default)]
         source_lease_schema_version: i64,
     }
@@ -266,7 +266,7 @@ pub(crate) fn background_job_metrics(
         legacy_pending: rows.legacy_pending,
         source_leases: SOURCE_LEASE_KINDS
             .map(|kind| rows.source_leases.get(kind).copied().unwrap_or(0).max(0)),
-        source_readers_per_node: rows.source_readers_per_node,
+        source_readers_per_root: rows.source_readers_per_root,
         source_lease_schema_version: rows.source_lease_schema_version,
         ..Default::default()
     };

@@ -2361,18 +2361,14 @@ pub mod keys {
     /// right number is a property of the silicon: a discrete card with two
     /// NVENC chips is not a NUC.
     pub const MAX_HW_SESSIONS: &str = "transcode.max_hw_sessions";
-    /// Background (maintenance) source readers each node may run at once,
-    /// cluster default (2; 1-16). One more is always kept for live demand;
-    /// playback is never counted. The claim statement reads it under the Raft
-    /// writer, so every node decides from the same value. Lowering it never
-    /// refuses a save or stops a reader: claims wait until readers finish.
-    pub const JOB_SOURCE_READERS_PER_NODE: &str = "jobs.source_readers_per_node";
-    /// Per-node override of [`JOB_SOURCE_READERS_PER_NODE`]: this prefix and
-    /// the node id. An empty value means "use the default".
-    pub const JOB_SOURCE_READERS_NODE_PREFIX: &str = "jobs.source_readers_per_node.";
-    /// A mapped storage domain's `source_readers` (default 1; 1-16): this
-    /// prefix and the domain id. Charged across the cluster, beside the
-    /// per-node limit. An empty value means the default.
+    /// Background readers per configured source root, default 2 (1-16).
+    /// One additional slot is reserved for live demand. The replicated
+    /// writer applies lower limits to new admissions without stopping readers.
+    pub const JOB_SOURCE_READERS_PER_ROOT: &str = "jobs.source_readers_per_root";
+    /// Per-root override, suffixed with library-id/uppercase-hex-root-path.
+    /// An empty value restores the root default.
+    pub const JOB_ROOT_SOURCE_READERS_PREFIX: &str = "jobs.root_source_readers.";
+    /// Explicit optional aggregate-domain cap (1-16). Empty means unlimited.
     pub const JOB_DOMAIN_SOURCE_READERS_PREFIX: &str = "jobs.domain_source_readers.";
     /// Threads the software-encoder CPU pool may hand out at once. Defaults
     /// to every core but one (plurxd derives it from the machine); an admin

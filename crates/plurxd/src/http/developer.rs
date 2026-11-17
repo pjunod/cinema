@@ -1549,31 +1549,50 @@ async fn indexing_while_serving(state: &AppState) -> DeveloperEnableItem {
             ),
             Ok(snapshot) => {
                 let settings = snapshot.values;
-                let capacity = crate::source_custody::capacity::summary(
-                    &settings,
-                    &holders,
-                    [state.node_id.clone()],
-                );
-                let this = capacity["nodes"]
-                    .as_array()
-                    .and_then(|nodes| {
-                        nodes
-                            .iter()
-                            .find(|node| node["node_id"] == state.node_id.as_str())
-                    })
-                    .cloned()
-                    .unwrap_or_default();
-                let readers = this["readers"].as_i64().unwrap_or_default();
-                let maintenance = this["maintenance"].as_i64().unwrap_or_default();
-                let live = this["live"].as_i64().unwrap_or_default();
-                (
-                    if maintenance >= readers { Unmet } else { Met },
-                    format!(
-                        "This node runs {maintenance} of {readers} background source readers, and \
-                     {live} for live demand (one slot is always kept for it). Without a live \
-                     viewer a background read takes one of the {readers}"
+                match state.store.list_libraries().await {
+                    Err(error) => (
+                        Unavailable,
+                        format!("The source root inventory could not be read: {error}"),
                     ),
-                )
+                    Ok(libraries) => {
+                        let roots = crate::source_custody::capacity::root_inventory(&libraries);
+                        let capacity = crate::source_custody::capacity::summary(
+                            &settings,
+                            &holders,
+                            [state.node_id.clone()],
+                            &roots,
+                        );
+                        let roots = capacity["roots"].as_array().cloned().unwrap_or_default();
+                        let saturated = !roots.is_empty()
+                            && roots.iter().all(|root| {
+                                root["maintenance"].as_i64().unwrap_or_default()
+                                    >= root["readers"].as_i64().unwrap_or_default()
+                            });
+                        let evidence = if roots.is_empty() {
+                            "No configured library roots have a source-reader cap.".to_owned()
+                        } else {
+                            roots
+                                .iter()
+                                .map(|root| {
+                                    format!(
+                                        "{}: {} of {} maintenance readers, {} live",
+                                        root["library_name"].as_str().unwrap_or("Library"),
+                                        root["maintenance"].as_i64().unwrap_or_default(),
+                                        root["readers"].as_i64().unwrap_or_default(),
+                                        root["live"].as_i64().unwrap_or_default(),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        };
+                        (
+                            if saturated { Unmet } else { Met },
+                            format!(
+                                "Read-only root-capacity advisory: {evidence}. Playback has a separate protected slot; this status does not gate indexing."
+                            ),
+                        )
+                    }
+                }
             }
         },
         Ok(Err(error)) => (

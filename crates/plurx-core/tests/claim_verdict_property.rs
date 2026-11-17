@@ -153,7 +153,7 @@ async fn the_verdict_and_the_admissible_listing_agree_with_the_claim_statement()
     let db = rusqlite::Connection::open(&path).expect("connection");
     // Preserve v1's two total source slots: one maintenance reader plus the live-demand slot.
     db.execute(
-        "INSERT OR REPLACE INTO settings(key,value) VALUES('jobs.source_readers_per_node','1')",
+        "INSERT OR REPLACE INTO settings(key,value) VALUES('jobs.source_readers_per_root','1')",
         [],
     )
     .expect("one maintenance reader");

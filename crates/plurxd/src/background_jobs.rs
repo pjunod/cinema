@@ -3172,11 +3172,11 @@ pub(crate) mod tests {
         };
         use plurx_core::store::NewClusterFragmentIndexJob;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        // One background reader per node beside the live slot.
+        // One maintenance reader for the /media root beside the live slot.
         store
-            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
             .await
-            .expect("one background reader");
+            .expect("one root reader");
         let library = store
             .create_library(&NewLibrary {
                 name: "co-claim".into(),

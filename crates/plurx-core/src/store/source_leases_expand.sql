@@ -186,14 +186,17 @@ AFTER INSERT ON background_job_commands WHEN NEW.operation='source_resume' AND N
 BEGIN
     DELETE FROM background_job_reservations WHERE expires_at_ms<=json_extract(NEW.request_json,'$.now_ms');
     INSERT INTO background_job_reservations(resource_key,slot,job_id,fence,expires_at_ms)
-    SELECT resource.value,(SELECT COALESCE(MAX(held.slot),-1)+1 FROM background_job_reservations held
-        WHERE held.resource_key=resource.value),paused.job_id,paused.fence,job.lease_expires_ms
-    FROM background_source_pauses paused JOIN background_jobs job ON job.id=paused.job_id,
-        json_each(paused.resource_keys_json) resource
+    SELECT resource.resource_key,(SELECT COALESCE(MAX(held.slot),-1)+1 FROM background_job_reservations held
+        WHERE held.resource_key=resource.resource_key),paused.job_id,paused.fence,job.lease_expires_ms
+    FROM background_source_pauses paused JOIN background_jobs job ON job.id=paused.job_id
+      JOIN background_job_required_resources resource ON resource.job_id=job.id AND resource.resource_key LIKE 'source_io%'
     WHERE paused.job_id=json_extract(NEW.request_json,'$.token.job_id') AND paused.phase='paused';
-    UPDATE source_leases SET phase='active',renewed_at_ms=json_extract(NEW.request_json,'$.now_ms')
+    UPDATE source_leases SET resource_keys_json=(SELECT json_group_array(resource_key) FROM
+      (SELECT resource_key FROM background_job_required_resources WHERE job_id=source_leases.work_id AND resource_key LIKE 'source_io%' ORDER BY resource_key)),
+      phase='active',renewed_at_ms=json_extract(NEW.request_json,'$.now_ms')
       WHERE lease_id='job:'||json_extract(NEW.request_json,'$.token.job_id')||':'||json_extract(NEW.request_json,'$.token.fence');
-    UPDATE background_source_pauses SET phase='active'
+    UPDATE background_source_pauses SET resource_keys_json=(SELECT json_group_array(resource_key) FROM
+      (SELECT resource_key FROM background_job_required_resources WHERE job_id=background_source_pauses.job_id AND resource_key LIKE 'source_io%' ORDER BY resource_key)),phase='active'
         WHERE job_id=json_extract(NEW.request_json,'$.token.job_id');
     DELETE FROM background_job_commands WHERE id=NEW.id;
 END;
@@ -210,47 +213,6 @@ WHERE h.owner_kind!='playback' AND h.phase!='paused' AND h.expires_at_ms>a.now_m
 AND NOT (h.owner_kind='job' AND EXISTS(SELECT 1 FROM dispatch_turn_protected_jobs p WHERE p.job_id=h.work_id))
 AND NOT (h.owner_kind='analysis' AND EXISTS(SELECT 1 FROM background_job_waiters viewer WHERE viewer.job_id=h.work_id
     AND viewer.request_scope='playback-analysis' AND viewer.state='pending' AND viewer.deadline_ms>a.now_ms));
--- next statement
-DROP VIEW IF EXISTS dispatch_turn_contenders;
--- next statement
-CREATE VIEW dispatch_turn_contenders AS
-SELECT r.job_id,min(i.created_at_ms) AS queued_ms
-FROM dispatch_turn_attempt a JOIN dispatch_turn_ready r ON r.expires_at_ms>a.now_ms
-JOIN background_jobs j ON j.id=r.job_id AND j.state='queued' AND j.revision=r.revision
-JOIN libraries l ON l.id=json_extract(j.payload_json,'$.library_id') AND l.paths=r.roots
-JOIN dispatch_turn_interest i ON i.job_id=j.id AND (i.deadline_ms IS NULL OR i.deadline_ms>a.now_ms)
-WHERE (j.retry_deadline_ms=0 OR j.retry_deadline_ms>a.now_ms)
-AND NOT EXISTS(SELECT 1 FROM settings WHERE key='internal.cluster_job_owner_removed.'||r.node_id)
--- Coordination's acquire_lease cannot reuse any live domain lease, even on
--- the same node. Owner removal alone does not bypass that lease's expiry.
-AND NOT EXISTS(SELECT 1 FROM job_leases lease WHERE lease.resource='scan:library:'||l.id
-    AND (lease.expires_at_ms>a.now_ms OR lease.fence=9223372036854775807 OR lease.revision=9223372036854775807))
-AND EXISTS (SELECT 1 FROM json_each(r.roots) root
-    LEFT JOIN background_storage_domains m ON m.library_id=l.id AND m.root_path=root.value
-    JOIN json_each(a.keys_json) wanted ON m.domain_id IS NULL OR wanted.value='source_io'
-        OR wanted.value='source_io:'||m.domain_id)
--- A ready scan can only displace other work if its claim would be admitted
--- on its node at this instant.
-AND NOT EXISTS (
-    SELECT 1 FROM dispatch_turn_library_resources k WHERE k.job_id=r.job_id AND k.node_id=r.node_id
-    AND k.resource_key LIKE 'source_io%' AND (
-      EXISTS (SELECT 1 FROM source_lease_permissions fg
-        WHERE (fg.resource_key=k.resource_key OR fg.resource_key='source_io' OR k.resource_key='source_io')
-        AND ((fg.expires_at_ms>a.now_ms AND coalesce(fg.permits_through_ms,0)<=a.now_ms)
-          OR (fg.expires_at_ms<=a.now_ms AND fg.expires_at_ms>a.now_ms-60000 AND fg.source_quiescent=0)))
-      OR (SELECT count(*) FROM source_leases h WHERE h.node_id=r.node_id AND h.owner_kind!='playback'
-          AND h.phase!='paused' AND h.expires_at_ms>a.now_ms-60000)
-        >=COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node.'||r.node_id AND CAST(value AS INTEGER) BETWEEN 1 AND 16),
-          (SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node' AND CAST(value AS INTEGER) BETWEEN 1 AND 16),2)+1
-      OR (SELECT count(DISTINCT h.lease_id) FROM dispatch_turn_ordinary_occupancy h WHERE h.node_id=r.node_id)
-        >=COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node.'||r.node_id AND CAST(value AS INTEGER) BETWEEN 1 AND 16),
-          (SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node' AND CAST(value AS INTEGER) BETWEEN 1 AND 16),2)
-      OR (k.resource_key!='source_io' AND ((SELECT count(*) FROM source_leases h, json_each(h.resource_keys_json) hk
-          WHERE hk.value=k.resource_key AND h.owner_kind!='playback' AND h.phase!='paused' AND h.expires_at_ms>a.now_ms-60000)
-        >=COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.domain_source_readers.'||substr(k.resource_key,11) AND CAST(value AS INTEGER) BETWEEN 1 AND 16),1)+1
-        OR (SELECT count(DISTINCT h.lease_id) FROM dispatch_turn_ordinary_occupancy h WHERE h.resource_key=k.resource_key)
-        >=COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.domain_source_readers.'||substr(k.resource_key,11) AND CAST(value AS INTEGER) BETWEEN 1 AND 16),1)))))
-GROUP BY r.job_id;
 -- next statement
 DROP TRIGGER IF EXISTS dispatch_turn_independent;
 -- next statement
@@ -620,14 +582,16 @@ END;
 -- so ownerless custody, settlement proofs and activation ids are dropped.
 INSERT OR IGNORE INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,projection_json,started_at_ms,renewed_at_ms,expires_at_ms)
 SELECT owner_id,'playback',COALESCE(json_extract(identity_json,'$.lifetime_id'),owner_id),fence,json_extract(identity_json,'$.node_id'),
-  identity_json,resource_keys_json,phase,projection_json,started_at_ms,updated_at_ms,lease_expires_at_ms
+  identity_json,CASE WHEN EXISTS(SELECT 1 FROM source_lease_file_resources WHERE file_id=json_extract(identity_json,'$.file_id'))
+    THEN (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_file_resources WHERE file_id=json_extract(identity_json,'$.file_id') ORDER BY resource_key))
+    ELSE resource_keys_json END,phase,projection_json,started_at_ms,updated_at_ms,lease_expires_at_ms
 FROM foreground_source_owners WHERE json_extract(identity_json,'$.node_id') IS NOT NULL;
 -- next statement
 INSERT OR IGNORE INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,started_at_ms,renewed_at_ms,expires_at_ms)
 SELECT 'job:'||job.id||':'||job.fence,'job',job.id,job.fence,job.owner_node_id,
   json_object('kind','job','job_kind',job.kind,'boot_id',job.owner_boot_id,'claim_id',job.claim_id),
-  (SELECT json_group_array(resource_key) FROM (SELECT DISTINCT held.resource_key FROM background_job_reservations held
-     WHERE held.job_id=job.id AND held.fence=job.fence AND held.resource_key LIKE 'source_io%' ORDER BY held.resource_key)),
+  (SELECT json_group_array(resource_key) FROM (SELECT DISTINCT required.resource_key FROM background_job_required_resources required
+     WHERE required.job_id=job.id AND required.resource_key LIKE 'source_io%' ORDER BY required.resource_key)),
   'active',job.updated_at_ms,job.updated_at_ms,job.lease_expires_ms
 FROM background_jobs job WHERE job.state IN ('running','cancelling') AND job.owner_node_id IS NOT NULL AND job.lease_expires_ms IS NOT NULL
   AND EXISTS(SELECT 1 FROM background_job_reservations held WHERE held.job_id=job.id AND held.fence=job.fence AND held.resource_key LIKE 'source_io%');
@@ -643,8 +607,8 @@ WHERE paused.phase='paused' AND job.state IN ('running','cancelling') AND job.le
 INSERT OR IGNORE INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,started_at_ms,renewed_at_ms,expires_at_ms)
 SELECT 'analysis:'||hex(request.request_id)||':'||request.fence,'analysis',request.request_id,request.fence,request.owner_node_id,
   json_object('kind','analysis','component',request.component,'trigger',request.trigger),
-  (SELECT json_group_array(resource_key) FROM (SELECT DISTINCT held.resource_key FROM analysis_source_reservations held
-     WHERE held.request_id=request.request_id AND held.fence=request.fence ORDER BY held.resource_key)),
+  (SELECT json_group_array(resource_key) FROM (SELECT DISTINCT required.resource_key FROM analysis_required_resources required
+     WHERE required.request_id=request.request_id ORDER BY required.resource_key)),
   'active',request.updated_at_ms,request.updated_at_ms,request.lease_expires_ms
 FROM analysis_requests request WHERE request.state='running' AND request.fence>0 AND request.owner_node_id IS NOT NULL
   AND request.lease_expires_ms IS NOT NULL
@@ -655,7 +619,9 @@ INSERT OR IGNORE INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,ow
 SELECT CASE custody.owner_kind WHEN 'analysis' THEN custody.custody_id ELSE custody.owner_key END,
   custody.owner_kind,custody.work_id,custody.fence,
   CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END,
-  custody.owner_json,custody.resource_keys_json,custody.phase,
+  custody.owner_json,CASE WHEN EXISTS(SELECT 1 FROM source_lease_legacy_resources root WHERE root.custody_id=custody.custody_id)
+      THEN (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_legacy_resources root WHERE root.custody_id=custody.custody_id ORDER BY resource_key))
+      ELSE custody.resource_keys_json END,custody.phase,
   custody.started_at_ms,custody.updated_at_ms,
   CASE custody.owner_kind WHEN 'offline' THEN MIN(custody.authority_expires_at_ms,custody.updated_at_ms+30000) ELSE custody.authority_expires_at_ms END
 FROM background_source_current_owners custody
@@ -677,7 +643,9 @@ WHEN json_extract(NEW.identity_json,'$.node_id') IS NOT NULL
 BEGIN
   INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,projection_json,started_at_ms,renewed_at_ms,expires_at_ms)
   VALUES(NEW.owner_id,'playback',COALESCE(json_extract(NEW.identity_json,'$.lifetime_id'),NEW.owner_id),NEW.fence,json_extract(NEW.identity_json,'$.node_id'),
-    NEW.identity_json,NEW.resource_keys_json,NEW.phase,NEW.projection_json,NEW.started_at_ms,NEW.updated_at_ms,NEW.lease_expires_at_ms)
+    NEW.identity_json,CASE WHEN EXISTS(SELECT 1 FROM source_lease_file_resources WHERE file_id=json_extract(NEW.identity_json,'$.file_id'))
+      THEN (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_file_resources WHERE file_id=json_extract(NEW.identity_json,'$.file_id') ORDER BY resource_key))
+      ELSE NEW.resource_keys_json END,NEW.phase,NEW.projection_json,NEW.started_at_ms,NEW.updated_at_ms,NEW.lease_expires_at_ms)
   ON CONFLICT(lease_id) DO UPDATE SET owner_kind=excluded.owner_kind,work_id=excluded.work_id,fence=excluded.fence,node_id=excluded.node_id,
     owner_json=excluded.owner_json,resource_keys_json=excluded.resource_keys_json,phase=excluded.phase,projection_json=excluded.projection_json,
     started_at_ms=excluded.started_at_ms,renewed_at_ms=excluded.renewed_at_ms,expires_at_ms=excluded.expires_at_ms
@@ -692,7 +660,9 @@ WHEN json_extract(NEW.identity_json,'$.node_id') IS NOT NULL
 BEGIN
   INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,projection_json,started_at_ms,renewed_at_ms,expires_at_ms)
   VALUES(NEW.owner_id,'playback',COALESCE(json_extract(NEW.identity_json,'$.lifetime_id'),NEW.owner_id),NEW.fence,json_extract(NEW.identity_json,'$.node_id'),
-    NEW.identity_json,NEW.resource_keys_json,NEW.phase,NEW.projection_json,NEW.started_at_ms,NEW.updated_at_ms,NEW.lease_expires_at_ms)
+    NEW.identity_json,CASE WHEN EXISTS(SELECT 1 FROM source_lease_file_resources WHERE file_id=json_extract(NEW.identity_json,'$.file_id'))
+      THEN (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_file_resources WHERE file_id=json_extract(NEW.identity_json,'$.file_id') ORDER BY resource_key))
+      ELSE NEW.resource_keys_json END,NEW.phase,NEW.projection_json,NEW.started_at_ms,NEW.updated_at_ms,NEW.lease_expires_at_ms)
   ON CONFLICT(lease_id) DO UPDATE SET owner_kind=excluded.owner_kind,work_id=excluded.work_id,fence=excluded.fence,node_id=excluded.node_id,
     owner_json=excluded.owner_json,resource_keys_json=excluded.resource_keys_json,phase=excluded.phase,projection_json=excluded.projection_json,
     started_at_ms=excluded.started_at_ms,renewed_at_ms=excluded.renewed_at_ms,expires_at_ms=excluded.expires_at_ms
@@ -751,7 +721,9 @@ BEGIN
   SELECT CASE custody.owner_kind WHEN 'analysis' THEN custody.custody_id ELSE custody.owner_key END,
     custody.owner_kind,custody.work_id,custody.fence,
     CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END,
-    custody.owner_json,custody.resource_keys_json,custody.phase,NULL,custody.started_at_ms,custody.updated_at_ms,
+    custody.owner_json,CASE WHEN EXISTS(SELECT 1 FROM source_lease_legacy_resources root WHERE root.custody_id=custody.custody_id)
+      THEN (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_legacy_resources root WHERE root.custody_id=custody.custody_id ORDER BY resource_key))
+      ELSE custody.resource_keys_json END,custody.phase,NULL,custody.started_at_ms,custody.updated_at_ms,
     CASE custody.owner_kind WHEN 'offline' THEN MIN(custody.authority_expires_at_ms,custody.updated_at_ms+30000) ELSE custody.authority_expires_at_ms END
   FROM background_source_current_owners custody
   WHERE custody.custody_id=NEW.custody_id AND custody.authority_expires_at_ms>0 AND custody.fence>0
@@ -780,7 +752,9 @@ BEGIN
   SELECT CASE custody.owner_kind WHEN 'analysis' THEN custody.custody_id ELSE custody.owner_key END,
     custody.owner_kind,custody.work_id,custody.fence,
     CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END,
-    custody.owner_json,custody.resource_keys_json,custody.phase,NULL,custody.started_at_ms,custody.updated_at_ms,
+    custody.owner_json,CASE WHEN EXISTS(SELECT 1 FROM source_lease_legacy_resources root WHERE root.custody_id=custody.custody_id)
+      THEN (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_legacy_resources root WHERE root.custody_id=custody.custody_id ORDER BY resource_key))
+      ELSE custody.resource_keys_json END,custody.phase,NULL,custody.started_at_ms,custody.updated_at_ms,
     CASE custody.owner_kind WHEN 'offline' THEN MIN(custody.authority_expires_at_ms,custody.updated_at_ms+30000) ELSE custody.authority_expires_at_ms END
   FROM background_source_current_owners custody
   WHERE custody.custody_id=NEW.custody_id AND custody.authority_expires_at_ms>0 AND custody.fence>0

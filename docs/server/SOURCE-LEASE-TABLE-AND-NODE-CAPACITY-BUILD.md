@@ -1,11 +1,15 @@
 # Source lease table and node capacity — build plan for steps 3 and 4
 
-**Status:** built ([as built](SOURCE-LEASE-AS-BUILT.md) lists where the build differs) · **Executes:** §4.3 and §4.4 of
+**Status:** historical initial build; per-root capacity continuation is WIP in [PR #1728](http://forge.lan:3000/noirr/plurx/pulls/1728); review and focused qualification pending ([current as-built state](SOURCE-LEASE-AS-BUILT.md)) · **Executes:** §4.3 and §4.4 of
 [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md) · **Design:**
 Claude (Fable 5.2), session `session_01BCWL9zn5U4msvhC85BdESw` · **Verified
 against:** `origin/claude/source-lease-expiry-releases @ 7ad527dd1` (PR #1597),
 `origin/claude/claim-local-verdict @ cc250dade` (PR #1625),
 `origin/main @ cb9bba471` · **Written:** 2026-11-15
+
+> This plan preserves the original steps 3–4 build contract. The per-root
+> policy continuation is documented in the as-built ledger; the old node-based
+> body below is historical, not the current admission policy. No deployment.
 
 > **Who reads this.** The build agent. Work §9 one commit at a time and record
 > each in the Execution log. Step 2 (proof machinery deleted) is assumed done;

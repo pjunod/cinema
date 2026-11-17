@@ -261,7 +261,7 @@ struct StoreMetricsAtomics {
     background_source_recovery: AtomicI64,
     background_legacy_pending: AtomicI64,
     source_leases: [AtomicI64; plurx_core::store::background_jobs::SOURCE_LEASE_KINDS.len()],
-    source_readers_per_node: AtomicI64,
+    source_readers_per_root: AtomicI64,
     source_lease_schema_version: AtomicI64,
     analysis_queue_depth: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
     analysis_queue_oldest_age_seconds: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
@@ -317,7 +317,7 @@ impl Default for StoreMetricsAtomics {
             background_source_recovery: AtomicI64::new(0),
             background_legacy_pending: AtomicI64::new(0),
             source_leases: std::array::from_fn(|_| AtomicI64::new(0)),
-            source_readers_per_node: AtomicI64::new(0),
+            source_readers_per_root: AtomicI64::new(0),
             source_lease_schema_version: AtomicI64::new(0),
             analysis_queue_depth: std::array::from_fn(|_| AtomicI64::new(0)),
             analysis_queue_oldest_age_seconds: std::array::from_fn(|_| AtomicI64::new(0)),
@@ -484,9 +484,9 @@ impl StoreMetricsCache {
                     source_leases: std::array::from_fn(|kind| {
                         self.inner.source_leases[kind].load(Ordering::Relaxed)
                     }),
-                    source_readers_per_node: self
+                    source_readers_per_root: self
                         .inner
-                        .source_readers_per_node
+                        .source_readers_per_root
                         .load(Ordering::Relaxed),
                     source_lease_schema_version: self
                         .inner
@@ -703,8 +703,8 @@ impl StoreMetricsCache {
         {
             target.store(value, Ordering::Relaxed);
         }
-        self.inner.source_readers_per_node.store(
-            sample.background_jobs.source_readers_per_node,
+        self.inner.source_readers_per_root.store(
+            sample.background_jobs.source_readers_per_root,
             Ordering::Relaxed,
         );
         self.inner.source_lease_schema_version.store(

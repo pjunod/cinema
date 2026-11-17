@@ -23539,27 +23539,67 @@ async fn get_it_back_asks_curator_and_says_what_it_answered() {
     assert_eq!(status, StatusCode::FORBIDDEN, "Get it back is for admins");
 }
 
-/// Background source readers (source-lease plan step 4) are ordinary
-/// settings: the default reads back as 2, a value below what a node runs now
-/// saves at once and the summary says it applies as readers finish, and only
-/// out-of-range values or malformed ids are refused.
+/// Per-root source readers are the normal settings surface. Each root has a
+/// default of two maintenance readers plus a live-demand slot; root overrides
+/// and explicit aggregate domain caps can be changed without stopping leases.
 #[tokio::test]
-async fn source_readers_setting_round_trips_and_rejects_only_bad_input() {
+async fn source_readers_per_root_setting_round_trips_and_rejects_only_bad_input() {
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
     use plurx_core::store::background_jobs::{
         ClaimJob, ClaimOutcome, EnqueueJob, JobKind, JobPayload, JobRequest,
     };
+
     let (app, state) = test_app_with_state();
     let admin = setup_admin(&app).await;
+    let library = state
+        .store
+        .create_library(&NewLibrary {
+            name: "Source Capacity".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![std::path::PathBuf::from("/source-capacity")],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = state
+        .store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Capacity".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let file_id = state
+        .store
+        .upsert_file(
+            item,
+            "/source-capacity/capacity.mkv",
+            100,
+            1,
+            &ProbeResult::default(),
+        )
+        .await
+        .expect("file");
+    let roots = crate::source_custody::capacity::root_inventory(
+        &state.store.list_libraries().await.expect("libraries"),
+    );
+    let root_id = roots.first().expect("library root").id.clone();
+
     let (_, before) = call(&app, get("/api/v1/settings", Some(&admin))).await;
-    assert_eq!(before["source_readers_per_node"], 2);
-    assert_eq!(before["source_readers_node_overrides"], json!({}));
+    assert_eq!(before["source_readers_per_root"], 2);
+    assert_eq!(before["source_readers_root_overrides"], json!({}));
 
     let (status, raised) = call(
         &app,
         put(
             "/api/v1/settings",
             Some(&admin),
-            json!({ "source_readers_per_node": 3 }),
+            json!({ "source_readers_per_root": 3 }),
         ),
     )
     .await;
@@ -23572,7 +23612,7 @@ async fn source_readers_setting_round_trips_and_rejects_only_bad_input() {
             .enqueue_job(EnqueueJob {
                 id: id.clone(),
                 payload: JobPayload::FragmentIndexBuild {
-                    file_id: 1,
+                    file_id,
                     source_generation: "source:1".into(),
                     source_size: 100,
                     source_mtime: 1,
@@ -23618,20 +23658,31 @@ async fn source_readers_setting_round_trips_and_rejects_only_bad_input() {
         );
     }
 
-    // Three readers run; lowering to one is a normal save.
     let (status, lowered) = call(
         &app,
         put(
             "/api/v1/settings",
             Some(&admin),
-            json!({ "source_readers_per_node": 1 }),
+            json!({ "source_readers_per_root": 1 }),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "lowering never refuses: {lowered}");
-    assert_eq!(lowered["source_readers_per_node"], 1);
+    assert_eq!(lowered["source_readers_per_root"], 1);
     let (status, summary) = call(&app, get("/api/v1/analysis/summary", Some(&admin))).await;
     assert_eq!(status, StatusCode::OK, "{summary}");
+    let root = summary["source_capacity"]["roots"]
+        .as_array()
+        .and_then(|roots| {
+            roots
+                .iter()
+                .find(|root| root["root_id"] == root_id.as_str())
+        })
+        .cloned()
+        .expect("root capacity");
+    assert_eq!(root["maintenance"], 3, "{summary}");
+    assert_eq!(root["readers"], 1);
+    assert_eq!(root["waiting_to_apply"], true, "applies as readers finish");
     let node = summary["source_capacity"]["nodes"]
         .as_array()
         .and_then(|nodes| {
@@ -23639,52 +23690,62 @@ async fn source_readers_setting_round_trips_and_rejects_only_bad_input() {
                 .iter()
                 .find(|node| node["node_id"] == state.node_id.as_str())
         })
-        .cloned()
-        .expect("this node");
-    assert_eq!(node["maintenance"], 3, "{summary}");
-    assert_eq!(node["readers"], 1);
-    assert_eq!(node["waiting_to_apply"], true, "applies as they finish");
+        .expect("informational node occupancy");
+    assert!(
+        node.get("readers").is_none(),
+        "node rows do not impose a cap"
+    );
 
     let (status, overridden) = call(
         &app,
         put(
             "/api/v1/settings",
             Some(&admin),
-            json!({ "source_readers_node_overrides": { "node-x": 4 },
+            json!({ "source_readers_root_overrides": { (root_id.clone()): 4 },
                     "storage_domain_source_readers": { "nas": 2 } }),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{overridden}");
     assert_eq!(
-        overridden["source_readers_node_overrides"],
-        json!({"node-x": 4})
+        overridden["source_readers_root_overrides"],
+        json!({(root_id.clone()): 4})
     );
     assert_eq!(
         overridden["storage_domain_source_readers"],
         json!({"nas": 2})
     );
+
     let (status, cleared) = call(
         &app,
         put(
             "/api/v1/settings",
             Some(&admin),
-            json!({ "source_readers_node_overrides": { "node-x": null } }),
+            json!({
+                "source_readers_root_overrides": { (root_id.clone()): null },
+                "storage_domain_source_readers": { "nas": null }
+            }),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{cleared}");
     assert_eq!(
-        cleared["source_readers_node_overrides"],
+        cleared["source_readers_root_overrides"],
         json!({}),
         "use default"
     );
+    assert_eq!(
+        cleared["storage_domain_source_readers"],
+        json!({}),
+        "unlimited"
+    );
 
     for body in [
-        json!({ "source_readers_per_node": 0 }),
-        json!({ "source_readers_per_node": 17 }),
-        json!({ "source_readers_node_overrides": { "node-x": 17 } }),
-        json!({ "source_readers_node_overrides": { "not a node": 2 } }),
+        json!({ "source_readers_per_root": 0 }),
+        json!({ "source_readers_per_root": 17 }),
+        json!({ "source_readers_root_overrides": { "node-x": 2 } }),
+        json!({ "source_readers_root_overrides": { "99/2F72656D6F766564": 2 } }),
+        json!({ "source_readers_root_overrides": { (root_id.clone()): 17 } }),
         json!({ "storage_domain_source_readers": { "nas": 0 } }),
     ] {
         let (status, refused) =
@@ -23697,7 +23758,8 @@ async fn source_readers_setting_round_trips_and_rejects_only_bad_input() {
     }
     let (_, after) = call(&app, get("/api/v1/settings", Some(&admin))).await;
     assert_eq!(
-        after["source_readers_per_node"], 1,
+        after["source_readers_per_root"], 1,
         "a refused write changes nothing"
     );
+    assert_eq!(after["source_readers_root_overrides"], json!({}));
 }

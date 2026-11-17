@@ -353,7 +353,7 @@ mod tests {
         // These contracts were written against one maintenance source reader
         // (plus the live slot); keep that number on the one node they use.
         conn.execute(
-            "INSERT OR IGNORE INTO settings(key,value) VALUES('jobs.source_readers_per_node','1')",
+            "INSERT OR IGNORE INTO settings(key,value) VALUES('jobs.source_readers_per_root','1')",
             [],
         )
         .expect("one maintenance reader");

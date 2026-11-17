@@ -18,6 +18,7 @@ current lease path.
 |---|---|---|
 | Exact-source leases replace the custody activation path | `activate_background_with_journal` and its activation-journal cleanup are removed. Release is bounded; owner expiry remains the recovery fallback. | Existing source lease actions remain descriptive. No new model or liveness proof. |
 | Coordinated phase lease close | The current close is atomic in the Store. | No new model transition or liveness claim. |
+| Root capacity clarification (2026-11-17) | Canonical longest-root keys replace default node/domain serialization; dispatch uses shared claim terms, and old-owner/pause admission revalidates current roots. | Concrete resource selection is outside the abstract model; no root-policy or liveness proof is claimed. |
 | Review scope | Source correspondence for these lease changes only. | Configurations, action inventory, and model properties are unchanged. |
 
 The action inventory is `DispatchRejected`, `DetachedReleaseApply`,

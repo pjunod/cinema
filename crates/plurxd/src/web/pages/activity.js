@@ -100,12 +100,18 @@ function activitySourceRecovery(d){
     // collects it every minute; three minutes on, the sweep is not running.
     &&holder.lease_expires_at_ms<=observed-180000);
 }
+function activitySourceResourceLabel(resourceKey,capacity){
+  const key=String(resourceKey||""),prefix="source_io:root/";
+  if(!key.startsWith(prefix))return key;
+  const root=(capacity?.roots||[]).find(row=>String(row.root_id)===key.slice(prefix.length));
+  return root?.root_path?`${root.library_name||"Library"} · ${root.root_path}`:"Source root";
+}
 function activitySourceRecoveryHtml(d){
   if(!ME?.is_admin)return "";
   const holders=activitySourceRecovery(d);
   if(holders===null)return '<p class="hint" data-activity-source-capacity role="status">Source capacity unknown: a fresh shared-reader observation is unavailable.</p>';
   if(!holders.length)return "";
-  return `<section class="system-attention" data-activity-source-uncollected role="status"><h2>Source leases not collected</h2><p>These leases expired more than three minutes ago. They stopped counting against source capacity a minute after expiry, so nothing waits on them, but the store sweep normally deletes them within two minutes; this means it is not running.</p><ul>${holders.map(holder=>`<li>${holder.origin_job_kind?`<a href="#/activity/jobs/${esc(encodeURIComponent(holder.work_id))}">${esc(holder.origin_job_kind.replace(/_/g," "))}</a> · job now ${esc(holder.origin_job_state||"unknown")} · `:""}<b>${esc(holder.work_id)}</b>${holder.origin_node_id?` · reader on ${esc(nodeLabel(d.node_hostnames||{},holder.origin_node_id))}`:""} · ${esc(holder.resource_key)} · lease lapsed ${esc(new Date(holder.lease_expires_at_ms).toLocaleString())}</li>`).join("")}</ul><a class="ghost sm" href="#/analysis">Review source readers and analysis</a></section>`;
+  return `<section class="system-attention" data-activity-source-uncollected role="status"><h2>Source leases not collected</h2><p>These leases expired more than three minutes ago. They stopped counting against source capacity a minute after expiry, so nothing waits on them, but the store sweep normally deletes them within two minutes; this means it is not running.</p><ul>${holders.map(holder=>`<li>${holder.origin_job_kind?`<a href="#/activity/jobs/${esc(encodeURIComponent(holder.work_id))}">${esc(holder.origin_job_kind.replace(/_/g," "))}</a> · job now ${esc(holder.origin_job_state||"unknown")} · `:""}<b>${esc(holder.work_id)}</b>${holder.origin_node_id?` · reader on ${esc(nodeLabel(d.node_hostnames||{},holder.origin_node_id))}`:""} · ${esc(activitySourceResourceLabel(holder.resource_key,d.analysis?.source_capacity))} · lease lapsed ${esc(new Date(holder.lease_expires_at_ms).toLocaleString())}</li>`).join("")}</ul><a class="ghost sm" href="#/analysis">Review source readers and analysis</a></section>`;
 }
 const ACTIVITY_TABS=["status","jobs","starts"];
 const ACTIVITY_TAB_LABELS={status:"Status",jobs:"Jobs",starts:"Starts"};

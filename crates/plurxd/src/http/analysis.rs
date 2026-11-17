@@ -91,10 +91,13 @@ pub(crate) async fn activity_summary(state: &AppState) -> Result<serde_json::Val
         .unwrap_or_default()
         .into_iter()
         .map(|peer| peer.node_id);
+    let libraries = state.store.list_libraries().await?;
+    let roots = crate::source_custody::capacity::root_inventory(&libraries);
     let source_capacity = crate::source_custody::capacity::summary(
         &settings,
         &source_io_holders,
         std::iter::once(state.node_id.clone()).chain(members),
+        &roots,
     );
     if let Some(object) = value.as_object_mut() {
         object.insert("source_capacity".to_owned(), source_capacity);

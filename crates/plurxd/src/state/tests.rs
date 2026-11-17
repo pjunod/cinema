@@ -1751,7 +1751,7 @@ fn metrics_sample(value: i64) -> PrometheusStoreSnapshot {
             source_recovery_pending: value,
             legacy_pending: value,
             source_leases: [value; plurx_core::store::background_jobs::SOURCE_LEASE_KINDS.len()],
-            source_readers_per_node: value,
+            source_readers_per_root: value,
             source_lease_schema_version: value,
         },
         analysis: plurx_core::store::AnalysisStoreMetrics {

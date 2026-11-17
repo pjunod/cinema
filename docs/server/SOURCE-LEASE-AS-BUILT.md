@@ -1,6 +1,6 @@
-# Source leases and node capacity — as built
+# Source leases and root capacity — as built
 
-**Status:** built; review fixes committed, [PR #1728](http://forge.lan:3000/noirr/plurx/pulls/1728) records qualification and landing · **Plan:** [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) · **Written:** 2026-11-15
+**Status:** root-capacity continuation WIP in [PR #1728](http://forge.lan:3000/noirr/plurx/pulls/1728); review and focused qualification pending · **Plan:** [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) · **Updated:** 2026-11-16
 
 
 Built on `claude/source-lease-steps-2-4` (stacked on PR #1597) by Claude Opus
@@ -8,6 +8,11 @@ Built on `claude/source-lease-steps-2-4` (stacked on PR #1597) by Claude Opus
 Continued by GPT-6 Codex, session `01a1e5c0-d4b1-7740-93b4-a0e0123a79cf`.
 Where the build had to differ, this list is authoritative and gives the
 reason. Section numbers (§) are the plan's.
+
+> **Qualification boundary.** Earlier `9a…` qualification remains evidence for
+> that prior snapshot only. The preserved external `da3…` merge is historical
+> source history, not qualification of this root-capacity delta. PR #1728 is
+> WIP; review and focused checks against the current tree remain. No deployment.
 
 1. **The expand reinstalls the claim effects, on both backends.** The
    trigger moved to `background_job_claim_effects.sql`, which the base job
@@ -34,22 +39,32 @@ reason. Section numbers (§) are the plan's.
    never delete a later phase's lease; the analysis renew and success triggers
    therefore match `(owner_kind, work_id, fence)`. A companion keeps a
    `companion:<fingerprint>` key for the byte-service ledger only.
-4. **Settings keys.** `jobs.source_readers_per_node` (default),
-   `jobs.source_readers_per_node.<node>` (override) and
-   `jobs.domain_source_readers.<domain>` (per-domain `source_readers`). The
-   store has no setting delete, so "use default" saves an empty value; the
-   claim reads any value outside 1–16 as absent (default), not as the floor.
-   API fields: `source_readers_per_node`, `source_readers_node_overrides`
-   (`{node: n|null}`), `storage_domain_source_readers` (`{domain: n|null}`).
-5. **Domain cap.** A mapped key `K` refuses at `source_readers(K)+1` counted
-   leases (holders) and `source_readers(K)` non-live leases (maintenance),
-   cluster-wide; default 1 keeps today's two-and-one numbers.
+4. **Root settings and keys.** `jobs.source_readers_per_root` defaults to
+   2; `jobs.root_source_readers.<root_id>` overrides one root with a value
+   from 1 to 16. A `root_id` is `<library_id>/<UPPERCASE_HEX_UTF8_ROOT_PATH>`.
+   The API fields are `source_readers_per_root` and
+   `source_readers_root_overrides` (`{root_id: n|null}`). Empty or null means
+   inherit because Store has no setting-delete operation. Values outside
+   1–16 are absent, not clamped to the floor. `jobs.domain_source_readers.<domain>`
+   is an optional aggregate limit; absent means unlimited.
+5. **Canonical root admission.** The key is
+   `source_io:root/<library_id>/<UPPERCASE_HEX_UTF8_ROOT_PATH>`. Root paths
+   trim trailing `/` except `/`. A file uses its longest configured root that
+   matches at a component boundary. Each root allows two maintenance readers
+   by default and one additional live reader, cluster-wide; roots are
+   independent and do not receive a node-wide cap by default. A mapped domain
+   adds no cap unless its explicit setting is present. Lowering a root, default
+   or domain limit never interrupts a holder or rejects the save; new
+   admissions wait.
+   Unrooted legacy `source_io` holders retain a bounded node-local fallback
+   using the root-reader default. Historical holder keys are charged
+   conservatively until their leases retire.
 6. **Self-exclusion where a claim is re-asked, and for a job's own older
    fence.** The analysis admission re-check leaves its own lease out; title
    preemption leaves out the job it would preempt. `CLAIM_SQL`'s holder and
    maintenance counts leave out leases of the claimant job itself (`held.owner_kind='job'
    AND held.work_id=<job>`, Paul's review decision 2): after a daemon restart
-   on a full node a viewer's own index job no longer waits up to 90 s on its
+   on a full root a viewer's own index job no longer waits up to 90 s on its
    own ghost. The old row is not deleted and keeps charging every other claim
    until its grace, so the orphan-reader protection is unchanged. No trigger,
    no migration, and no "same node, different boot" shortcut.
@@ -90,39 +105,30 @@ reason. Section numbers (§) are the plan's.
 10. **Contract on the replicated store.** A refused or failed contract leaves
     the complete expanded store and returns `Ok`, logged once at info; it
     retries on the next start.
-11. **Activity.** The holders list is in the analysis summary card
-    (`analysis.js`, rendered by Activity and the Analysis page), grouped by
-    node. It now lists every lease, including one past its grace (not
-    counted, `counts_against: none`), so the "not collected" banner can still
-    show a stopped sweep.
+11. **Activity.** Activity exposes per-root occupancy and caps alongside
+    the leases that consume them. The holders list still shows every lease,
+    including one past its grace (`counts_against: none`), so the "not
+    collected" banner can still show a stopped sweep. Node occupancy is
+    informational; it is not the rooted admission budget.
 12. **Metrics.** `plurx_source_leases{kind}` has no `node` label: every Store
-    gauge on `/metrics` is the scraped node's.
+    gauge on `/metrics` is the scraped node's. The scalar capacity metric is
+    `plurx_source_readers_per_root_default`; root occupancy and caps are
+    available through Activity.
 13. **`analysis_source_capacity_clause(now, node)`** gained the node; the
     placeholder census grammar accepts the second placeholder.
-14. **Dispatch turns over-yield across nodes (decided: no change now).**
-    `dispatch_turn_attempt` has no node column, so a maintenance claim on
-    node B yields while a ready scan elsewhere is admissible on its own node,
-    when the two share only unmapped storage. It is bounded (such a scan
-    claims within its ready window), costs throughput during scan bursts and
-    cannot over-admit. Follow-up: add the node to `dispatch_turn_attempt`.
-    Follow-up before the expand is deployed: `dispatch_turn_agrees_with_the_claim`,
-    a property test that the dispatch view's hand copy of
-    `claim_foreground_window!`/`claim_source_holders!`/`claim_maintenance_reader!`
-    agrees with the claim on generated lease states (review S8). The copy
-    uses `dispatch_turn_ordinary_occupancy`/`dispatch_turn_protected_jobs`
-    where the claim uses `lease_live!` with the `live_range` context. The
-    expand is shared static migration text on both backends and its object
-    text is part of the schema identity. Generating it from Rust claim macros
-    requires moving that migration boundary and replacing the view-specific
-    live-demand context; a textual substitution would not establish semantic
-    equality. Keep the static migration here and compare generated stores in
-    the follow-up before deployment (review S8), rather than changing the
-    migration representation as part of this review fix.
-    The reviewer compared the texts term by term and found them equal; the
-    Python cases stand in until then. The copy does not have the claimant
-    self-exclusion of item 6 (it errs toward not yielding).
-15. **Tests pinned to the old numbers** set `jobs.source_readers_per_node=1`
-    (one background reader plus the live slot) rather than being rewritten.
+14. **Dispatch turns share the claim admission groups.** The dispatch view
+    is generated from the same three claim macros for foreground windows,
+    total source holders and maintenance readers. It therefore uses the same
+    canonical root and optional explicit-domain limits as claim admission.
+    The generated-state property comparison remains a pre-deployment
+    follow-up for full behavioral equivalence; the earlier hand-copied
+    predicate has been removed. D3's expected 7/8/7 accounting is unchanged;
+    the policy adds no RPC or replicated write.
+15. **Tests pin the root policy.** Rooted tests use
+    `jobs.source_readers_per_root` or
+    `jobs.root_source_readers.<root_id>`; unrooted compatibility tests use the
+    generic `source_io` fallback. The live slot remains separate from the
+    maintenance limit.
 16. **Replicated fixtures.** The replicated contract fixtures rewind a
     current (contracted) store's lease tail to the published v1 source
     owners and the v1 claim effects (`replicated_source_lease_rewind`, the
@@ -142,9 +148,11 @@ reason. Section numbers (§) are the plan's.
 
 ## Review disposition — remaining nits and accepted limits
 
-The review is the 2026-11-16 steps 2–4 review at `33c267310`. M1/M2 and
-M4, S1–S7, and decision 2 are implemented by the review-fix commits; M3 is
-completed with the mapping repair. Item 14 records S8 and decision 1.
+The initial steps 2–4 review is the 2026-11-16 review at `33c267310`.
+M1/M2 and M4, S1–S7, and decision 2 were addressed on that snapshot; M3 was
+completed with the mapping repair. The root-capacity continuation is WIP:
+rooted admission, optional domain aggregation and the resume rule below still
+need final review and focused qualification against the current tree.
 
 | Review item | Disposition and reason |
 |---|---|
@@ -152,7 +160,7 @@ completed with the mapping repair. Item 14 records S8 and decision 1.
 | N2: vestigial recovery names | Renamed in `c65deb839` to the remaining lease actions. Historical migration identifiers remain stable. |
 | N3: display parser differs from claim CAST | Fixed in `493c1711b`; the display follows SQLite CAST including malformed stored values. |
 | N4: empty overrides and separate settings writes | Empty means inherit because Store has no settings-delete operation. Reader limits are saved together in one `put_settings`; the existing endpoint saves other setting groups separately. Cross-group atomic saves need an endpoint-wide change, deferred beyond this lease migration. |
-| N5: resumed maintenance uses the holder cap | Existing behavior retained: resume restores a paused reader's reservation under the total holder cap. Changing resume scheduling is a separate admission-policy change, not required for expiry release. |
+| N5: paused resume used only the total holder cap | Root-capacity continuation changes resume to recompute canonical resource keys and enforce the maintenance cap. The extra total-holder slot applies only to live demand; a paused maintenance reader cannot consume it. Focused qualification remains pending. |
 | N6: restart leaves charged leases through grace | Intended lease safety margin: a 30 s owner lease plus the 60 s grace. A job excludes only its own prior fence from its claim; every other claimant still counts it. No boot identity shortcut or recovery watcher. |
 
 The playback write delta is recorded with M4 in
@@ -185,11 +193,13 @@ The final independent source review of `60df4bcf0` found three remaining
 admission/lifecycle gaps. The fixes stay in the replicated Store statements
 and migration, without an additional grant RPC or runtime recovery loop.
 
-1. **Independent registrations check both caps (F1).** Offline readers and
-   read attestations apply the shared total-holder term as well as the
-   maintenance term. A node/domain full of live readers must refuse another
-   maintenance reader even when its maintenance count is zero.
-2. **Offline service re-admits after expiry (F2).** A currently counted lease
+1. **Independent registrations check rooted admission (F1).** Offline
+   readers, read attestations and older writers at the shared SQL boundary
+   apply the root maintenance and total-holder terms, plus a domain term only
+   when explicitly configured. A full root must refuse another maintenance
+   reader even when its maintenance count alone is zero.
+2. **Offline service re-admits after expiry (F2).** Metadata alone cannot
+   readmit an offline reader. A currently counted lease
    renews with its service grant. Once expiry plus grace elapsed, the same
    statement reconstructs resources from the exact preparing package and
    checks foreground, total-holder and maintenance admission before renewing
@@ -201,10 +211,15 @@ and migration, without an additional grant RPC or runtime recovery loop.
    keys and refuses that stale proposal. Its existing next request then
    recomputes permission, byte service and admission from current keys. The
    canonical file-resource query is shared with current registration and
-   re-admission, not copied into a separate policy. During expand, a
+   re-admission, not copied into a separate policy. It refreshes root and
+   optional domain keys from current library paths. During expand, a
    compatibility admission trigger generated from the claim macros applies
    these checks to old writers too; contract removes that temporary trigger.
-3. **The roll projects independent owners both ways (F3).** A v1 coordinated
+3. **Paused resume uses current rooted admission.** Resume re-derives keys from
+   the current file and root catalogue, then applies the maintenance limit.
+   The extra total-holder slot is available only when the paused job has live
+   demand.
+4. **The roll projects independent owners both ways (F3).** A v1 coordinated
    phase keeps its exact custody UUID as its projected lease identity; ordinary
    analysis claims remain represented once. V1 attestation/offline readers
    use their canonical owner key. Temporary insert/update/delete bridges make
@@ -215,18 +230,21 @@ and migration, without an additional grant RPC or runtime recovery loop.
    role pinned after its projected lease expires. The contract removes these
    bridges.
 
-Focused regressions cover live-only full node/domain capacity, offline
-re-admission with and without collection, flattened v1 grant proposals,
-and owners created after expand. Their mutation receipts and the final local
+Prior-snapshot focused regressions covered live-only full node/domain
+capacity, offline re-admission with and without collection, flattened v1
+grant proposals, and owners created after expand. Their mutation receipts and the final local
 checks are recorded with the PR; source inspection alone is not execution
 qualification. No deployment is part of this change.
 
 
-## Local qualification and landing record
+## Prior snapshot qualification — retained historical evidence
 
 Owner: GPT-6 Codex, session `01a1e5c0-d4b1-7740-93b4-a0e0123a79cf`.
-[PR #1728](http://forge.lan:3000/noirr/plurx/pulls/1728) carries current CI
-and merge-train state; no deployment is part of this change.
+The qualification results below belong to the prior `9a…` snapshot only.
+They do not qualify the root-capacity continuation. The external `da3…` merge
+is preserved as source history, not as current qualification. PR #1728 is
+restored to WIP; root-delta review and focused checks against its exact tree
+remain. No deployment.
 
 The store module run passed 767 cases; its four fixture failures passed
 failed-only retries. SQLite contracts passed 349/349. Claim-verdict and property
@@ -250,6 +268,7 @@ could be classified stranded during a parallel run. It now fills the ceiling
 with running background work, independent of that snapshot; the PR records its
 successful exact failed-test retry. Production queue policy is unchanged.
 
-Current main was integrated through `32fa105ee`. The enabled merge train
-qualifies the actual candidate and owns landing. Local results above do not
-substitute for its promotion verdict.
+The historical candidate integrated `main` through `32fa105ee`. Its merge
+train and local receipts remain part of that snapshot's record. The current
+root-capacity delta still needs review and focused qualification against its
+exact tree; no deployment is authorized by the earlier results.

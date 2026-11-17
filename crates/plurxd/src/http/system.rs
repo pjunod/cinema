@@ -2668,14 +2668,12 @@ pub struct SettingsDto {
     /// meets the number.
     pub transcode_max_hw_sessions: i64,
     pub transcode_software_pool_threads: i64,
-    /// Background (maintenance) source readers each node may run at once
-    /// (`jobs.source_readers_per_node`, default 2). One more is always kept
-    /// for live demand; playback is never counted.
-    pub source_readers_per_node: i64,
-    /// Per-node overrides of [`Self::source_readers_per_node`], by node id.
-    pub source_readers_node_overrides: std::collections::BTreeMap<String, i64>,
-    /// Each mapped storage domain's `source_readers`, by domain id; a domain
-    /// not listed uses 1. Charged across the cluster beside the node limit.
+    /// Background (maintenance) source readers for each library root; default 2.
+    /// One more reader per root is reserved for live demand.
+    pub source_readers_per_root: i64,
+    /// Per-root overrides keyed by `<library_id>/<uppercase-hex-root-path>`.
+    pub source_readers_root_overrides: std::collections::BTreeMap<String, i64>,
+    /// Explicit aggregate caps per mapped storage domain. An absent domain is unlimited.
     pub storage_domain_source_readers: std::collections::BTreeMap<String, i64>,
     /// App-managed offline preparation has a separate reservation budget from
     /// the opportunistic playback cache above.
@@ -2890,8 +2888,8 @@ async fn settings_dto(
         setting(keys::MAX_HW_SESSIONS),
         crate::admission::DEFAULT_MAX_HW_SESSIONS,
     );
-    let source_readers_per_node = crate::source_custody::capacity::readers_per_node(&settings);
-    let source_readers_node_overrides = crate::source_custody::capacity::node_overrides(&settings);
+    let source_readers_per_root = crate::source_custody::capacity::readers_per_root(&settings);
+    let source_readers_root_overrides = crate::source_custody::capacity::root_overrides(&settings);
     let storage_domain_source_readers = crate::source_custody::capacity::domain_readers(&settings);
     let transcode_software_pool_threads = transcode_stored(
         setting(keys::SW_POOL_THREADS),
@@ -3155,8 +3153,8 @@ async fn settings_dto(
         playback_display_mode_match,
         transcode_max_hw_sessions,
         transcode_software_pool_threads,
-        source_readers_per_node,
-        source_readers_node_overrides,
+        source_readers_per_root,
+        source_readers_root_overrides,
         storage_domain_source_readers,
         offline_enabled,
         offline_max_gb,
@@ -3466,13 +3464,11 @@ pub struct UpdateSettings {
     /// stored rather than what this API would have accepted.
     pub transcode_max_hw_sessions: Option<i64>,
     pub transcode_software_pool_threads: Option<i64>,
-    /// Background source readers per node, 1-16. Lowering it never refuses
-    /// and never stops a reader: claims on a node above it wait until its
-    /// readers finish.
-    pub source_readers_per_node: Option<i64>,
-    /// Per-node overrides, 1-16; `null` returns a node to the default.
-    pub source_readers_node_overrides: Option<std::collections::BTreeMap<String, Option<i64>>>,
-    /// Per-domain `source_readers`, 1-16; `null` returns a domain to 1.
+    /// Background source readers per library root, 1-16; default 2.
+    pub source_readers_per_root: Option<i64>,
+    /// Per-root overrides, 1-16; `null` returns the root to the cluster default.
+    pub source_readers_root_overrides: Option<std::collections::BTreeMap<String, Option<i64>>>,
+    /// Explicit aggregate per-domain caps, 1-16; `null` removes the cap.
     pub storage_domain_source_readers: Option<std::collections::BTreeMap<String, Option<i64>>>,
     pub offline_enabled: Option<bool>,
     pub offline_max_gb: Option<i64>,
@@ -3615,8 +3611,8 @@ impl UpdateSettings {
             || self.playback_display_mode_match.is_some()
             || self.transcode_max_hw_sessions.is_some()
             || self.transcode_software_pool_threads.is_some()
-            || self.source_readers_per_node.is_some()
-            || self.source_readers_node_overrides.is_some()
+            || self.source_readers_per_root.is_some()
+            || self.source_readers_root_overrides.is_some()
             || self.storage_domain_source_readers.is_some()
             || self.offline_enabled.is_some()
             || self.offline_max_gb.is_some()
@@ -4056,8 +4052,8 @@ pub async fn update_settings(
             }
         }
     }
-    // Source reader limits. Only malformed input is refused: a value below
-    // what a node is running now saves at once and applies as readers finish.
+    // Per-root defaults/overrides are the primary capacity controls. Saves
+    // never stop an active reader; lower limits apply as leases finish.
     let readers_range = crate::source_custody::capacity::READERS_RANGE;
     let reader_id = |id: &str| {
         !id.is_empty()
@@ -4067,37 +4063,60 @@ pub async fn update_settings(
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
     };
     let mut source_reader_values: Vec<(String, String)> = Vec::new();
-    if let Some(value) = req.source_readers_per_node {
+    if let Some(value) = req.source_readers_per_root {
         if !readers_range.contains(&value) {
             return Err(ApiError::BadRequest(
-                "source_readers_per_node must be between 1 and 16".into(),
+                "source_readers_per_root must be between 1 and 16".into(),
             ));
         }
         source_reader_values.push((
-            keys::JOB_SOURCE_READERS_PER_NODE.to_owned(),
+            keys::JOB_SOURCE_READERS_PER_ROOT.to_owned(),
             value.to_string(),
         ));
     }
-    for (label, prefix, values) in [
-        (
-            "source_readers_node_overrides",
-            keys::JOB_SOURCE_READERS_NODE_PREFIX,
-            &req.source_readers_node_overrides,
-        ),
-        (
-            "storage_domain_source_readers",
-            keys::JOB_DOMAIN_SOURCE_READERS_PREFIX,
-            &req.storage_domain_source_readers,
-        ),
-    ] {
-        for (id, value) in values.iter().flatten() {
-            if !reader_id(id) || value.is_some_and(|value| !readers_range.contains(&value)) {
-                return Err(ApiError::BadRequest(format!(
-                    "{label}: ids are 1-64 of [A-Za-z0-9._-] and values are 1-16 or null"
-                )));
+    let needs_root_inventory = req
+        .source_readers_root_overrides
+        .as_ref()
+        .is_some_and(|overrides| overrides.values().any(|value| value.is_some()));
+    let known_root_ids = if needs_root_inventory {
+        Some(
+            crate::source_custody::capacity::root_inventory(&state.store.list_libraries().await?)
+                .into_iter()
+                .map(|root| root.id)
+                .collect::<std::collections::BTreeSet<_>>(),
+        )
+    } else {
+        None
+    };
+    if let Some(overrides) = &req.source_readers_root_overrides {
+        for (id, value) in overrides {
+            let valid_id = crate::source_custody::capacity::valid_root_id(id);
+            let exists = known_root_ids
+                .as_ref()
+                .is_some_and(|known| known.contains(id));
+            if !valid_id
+                || value.is_some_and(|value| !readers_range.contains(&value))
+                || (value.is_some() && !exists)
+            {
+                return Err(ApiError::BadRequest(
+                    "source_readers_root_overrides: ids must be canonical existing roots and values are 1-16 or null".into(),
+                ));
             }
             source_reader_values.push((
-                format!("{prefix}{id}"),
+                format!("{}{}", keys::JOB_ROOT_SOURCE_READERS_PREFIX, id),
+                value.map(|value| value.to_string()).unwrap_or_default(),
+            ));
+        }
+    }
+    if let Some(overrides) = &req.storage_domain_source_readers {
+        for (id, value) in overrides {
+            if !reader_id(id) || value.is_some_and(|value| !readers_range.contains(&value)) {
+                return Err(ApiError::BadRequest(
+                    "storage_domain_source_readers: ids are 1-64 of [A-Za-z0-9._-] and values are 1-16 or null".into(),
+                ));
+            }
+            source_reader_values.push((
+                format!("{}{}", keys::JOB_DOMAIN_SOURCE_READERS_PREFIX, id),
                 value.map(|value| value.to_string()).unwrap_or_default(),
             ));
         }
@@ -6610,13 +6629,13 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
         out.push_str(&format!("plurx_source_leases{{kind=\"{kind}\"}} {count}\n"));
     }
     out.push_str(&format!(
-        "# HELP plurx_source_readers_per_node Background source readers this node may run (its override or the cluster default).\n\
-         # TYPE plurx_source_readers_per_node gauge\n\
-         plurx_source_readers_per_node {}\n\
+        "# HELP plurx_source_readers_per_root_default Configured default maintenance readers per source root.\n\
+         # TYPE plurx_source_readers_per_root_default gauge\n\
+         plurx_source_readers_per_root_default {}\n\
          # HELP plurx_source_lease_schema_version Source lease schema: 2 expanded (v1 objects kept for older binaries), 3 contracted.\n\
          # TYPE plurx_source_lease_schema_version gauge\n\
          plurx_source_lease_schema_version {}\n",
-        sample.background_jobs.source_readers_per_node,
+        sample.background_jobs.source_readers_per_root,
         sample.background_jobs.source_lease_schema_version,
     ));
     let analysis = sample.analysis;
