@@ -531,11 +531,7 @@ mod operations {
         pub(crate) async fn fresh_targets(
             &self,
         ) -> Result<Vec<plurx_core::cluster::membership::ActivityPeer>, MembershipError> {
-            self.cluster
-                .access
-                .administrative_observation()
-                .targets()
-                .await
+            self.cluster.access.administrative().targets().await
         }
         pub(crate) async fn revocation_capable(&self) -> Result<bool, MembershipError> {
             self.cluster.revocation_ready().await
@@ -708,7 +704,7 @@ impl Cluster {
     pub(crate) async fn membership_status(
         &self,
     ) -> Result<plurx_core::cluster::membership::MembershipStatus, MembershipError> {
-        self.access.administrative_observation().topology().await
+        self.access.administrative().topology().await
     }
     pub(crate) async fn replication_status(
         &self,

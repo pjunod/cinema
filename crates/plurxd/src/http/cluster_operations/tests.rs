@@ -247,7 +247,7 @@ async fn membership_status_cache_is_fresh_for_five_seconds_then_expires() {
 #[tokio::test(start_paused = true)]
 async fn unclustered_membership_cache_loop_exits_without_refresh_or_retry() {
     let (_app, state) = crate::http::tests::test_app_with_state();
-    assert!(!state.membership.is_replicated());
+    assert!(!state.cluster.role().is_clustered());
     let cache = state.membership_status_cache.clone();
     let shutdown = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn(membership_status_cache_loop(state, shutdown));
@@ -818,8 +818,9 @@ async fn aggregate_request_reads_only_node_owned_projections() {
     // projections that GET and support are allowed to consume.
     assert!(state.membership.status().await.is_err());
     assert!(state
-        .membership
-        .operations_peers()
+        .cluster
+        .operations()
+        .fresh_targets()
         .await
         .expect("unclustered peer directory")
         .is_empty());

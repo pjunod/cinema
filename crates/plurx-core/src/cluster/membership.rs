@@ -9322,48 +9322,6 @@ impl MembershipManager {
         Ok(rows.first().is_some_and(|row| row.count == 1))
     }
 
-    /// Resolve peer daemon endpoints without widening the public node status.
-    pub(super) async fn activity_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
-        let Some(inner) = self.inner.as_deref() else {
-            return Ok(Vec::new());
-        };
-        let now = unix_ms()?;
-        let voters = inner
-            .client
-            .metrics_db()
-            .await?
-            .membership_config
-            .voter_ids()
-            .take(MAX_ACTIVITY_PEERS.saturating_add(1))
-            .collect::<BTreeSet<_>>();
-        let rows = inner
-            .client
-            .query_map::<ActivityPeerRow, _>(
-                "activity_peers",
-                "SELECT node.node_id, node.raft_id, node.last_seen_at, \
-                        http.public_http_url \
-                 FROM cluster_nodes node \
-                 LEFT JOIN cluster_node_http http ON http.node_id = node.node_id \
-                 WHERE node.node_id != $1 AND node.removed_at IS NULL \
-                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
-                     WHERE removal.node_id = node.node_id) \
-                 ORDER BY node.raft_id LIMIT $2",
-                params!(inner.identity.node_id.as_str(), MAX_ACTIVITY_PEERS as i64),
-            )
-            .await?;
-        Ok(rows
-            .into_iter()
-            .filter(|row| voters.contains(&row.raft_id))
-            .take(MAX_ACTIVITY_PEERS)
-            .map(|row| ActivityPeer {
-                http_base: row.http_base,
-                node_id: row.node_id,
-                raft_id: row.raft_id,
-                reachable: node_is_reachable(now, row.last_seen_at),
-            })
-            .collect())
-    }
-
     /// Machine names for the roster, keyed by node id.
     ///
     /// *Cheaper* than [`Self::status`], not a subset of it: a caller that only
@@ -9657,58 +9615,7 @@ impl MembershipManager {
             .collect()
     }
 
-    /// Ready media-capacity targets, including committed learners.
-    ///
-    /// Activity aggregation and rollout unanimity deliberately remain
-    /// voter-only. Placement is different: a learner is useful precisely as a
-    /// non-voting node-local worker. The replicated removal fence ejects it
-    /// from this directory before owned work is settled, and the progress row
-    /// keeps a lagged learner out even while its heartbeat is fresh.
-    pub(super) async fn media_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
-        self.media_peers_for_route(true).await
-    }
-
-    /// Ready media targets restricted by the caller's learner route policy.
-    /// Read admission role with the endpoint/progress row, rather than joining
-    /// an independently fetched status snapshot onto this directory.
-    pub(super) async fn media_peers_for_route(
-        &self,
-        allow_learners: bool,
-    ) -> Result<Vec<ActivityPeer>, MembershipError> {
-        let Some(inner) = self.inner.as_deref() else {
-            return Ok(Vec::new());
-        };
-        let now = unix_ms()?;
-        let members = inner
-            .client
-            .metrics_db()
-            .await?
-            .membership_config
-            .nodes()
-            .map(|(raft_id, _)| *raft_id)
-            .take(MAX_ACTIVITY_PEERS.saturating_add(1))
-            .collect::<BTreeSet<_>>();
-        let rows = inner
-            .client
-            .query_map::<MediaPeerRow, _>(
-                "media_peers_for_route",
-                "SELECT node.node_id, node.raft_id, node.last_seen_at, node.role, \
-                        http.public_http_url, \
-                        COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
-                        progress.observed_at \
-                 FROM cluster_nodes node \
-                 LEFT JOIN cluster_node_http http ON http.node_id = node.node_id \
-                 LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
-                 WHERE node.node_id != $1 AND node.removed_at IS NULL \
-                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
-                     WHERE removal.node_id = node.node_id) \
-                 ORDER BY node.raft_id LIMIT $2",
-                params!(inner.identity.node_id.as_str(), MAX_ACTIVITY_PEERS as i64),
-            )
-            .await?;
-        Self::media_peer_directory(now, &members, rows, allow_learners)
-    }
-
+    #[cfg(test)]
     fn media_peer_directory(
         now: i64,
         members: &BTreeSet<u64>,
@@ -9736,23 +9643,6 @@ impl MembershipManager {
             }
         }
         Ok(peers)
-    }
-
-    /// Number of committed voters, including this node. Media rollout gates
-    /// compare this with the bounded peer directory so a missing, legacy, or
-    /// over-limit voter fails closed instead of being silently omitted.
-    pub(super) async fn activity_voter_count(&self) -> Result<usize, MembershipError> {
-        let Some(inner) = self.inner.as_deref() else {
-            return Ok(1);
-        };
-        Ok(inner
-            .client
-            .metrics_db()
-            .await?
-            .membership_config
-            .voter_ids()
-            .take(MAX_ACTIVITY_PEERS.saturating_add(2))
-            .count())
     }
 
     /// Sign one short-lived, sender-and-target-bound activity request with

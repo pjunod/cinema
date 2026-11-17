@@ -50,7 +50,7 @@ fn parse(bytes: &[u8], node: &str) -> Result<Vec<Snapshot>, ApiError> {
 }
 async fn inner(state: &AppState, user: i64, digest: &str) -> Result<Vec<Snapshot>, ApiError> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    let peers = tokio::time::timeout_at(deadline, state.membership.operations_peers())
+    let peers = tokio::time::timeout_at(deadline, state.cluster.operations().fresh_targets())
         .await
         .map_err(|_| fail(503, "unavailable"))?
         .map_err(|_| fail(503, "unavailable"))?;

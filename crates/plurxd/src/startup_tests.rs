@@ -373,7 +373,9 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
         > {
             Box::pin(async move {
                 let roster = membership
-                    .clock_peers()
+                    .cluster_access()
+                    .clock_protocol()
+                    .prove_roster()
                     .await
                     .map_err(|error| plurx_core::error::StoreError::Database(error.to_string()))?
                     .membership

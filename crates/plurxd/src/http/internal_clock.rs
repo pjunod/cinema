@@ -521,9 +521,16 @@ mod causal_tests {
                     .map(|peer| (peer.node_id.clone(), peer.raft_id, peer.http_base.clone()))
                     .collect::<Vec<_>>()
             };
-            let proved = leader.clock_peers().await.expect("consistent clock roster");
+            let proved = leader
+                .cluster_access()
+                .clock_protocol()
+                .prove_roster()
+                .await
+                .expect("consistent clock roster");
             let hinted = leader
-                .clock_peers_hint()
+                .cluster_access()
+                .clock_protocol()
+                .applied_hint()
                 .await
                 .expect("replica clock roster");
             assert_eq!(hinted.membership, proved.membership);

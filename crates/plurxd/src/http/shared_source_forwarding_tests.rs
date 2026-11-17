@@ -196,7 +196,9 @@ async fn actual_nonowner_forwarding(
         loop {
             let peers = ingress
                 .membership
-                .media_peers()
+                .cluster_access()
+                .directory(None)
+                .media_observation(true)
                 .await
                 .expect("actual bounded-ready media peer observation");
             if peers.iter().any(|peer| {

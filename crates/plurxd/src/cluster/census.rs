@@ -943,10 +943,27 @@ fn every_named_method_is_a_real_manager_method() {
         all.len() > 50,
         "the manager's methods were not found: {all:?}"
     );
-    for name in ROLE.iter().chain(ROSTER) {
+    let retired = [
+        "activity_peers",
+        "activity_voter_count",
+        "media_peers",
+        "media_peers_for_route",
+    ];
+    for name in &retired {
+        assert!(ROSTER.contains(name), "retired raw method remains reserved");
+        assert!(
+            !all.iter().any(|method| method == name),
+            "retired raw method {name} must not return"
+        );
+    }
+    for name in ROLE
+        .iter()
+        .chain(ROSTER)
+        .filter(|name| !retired.contains(name))
+    {
         assert!(
             all.iter().any(|method| method == name),
-            "{name} is not a manager method"
+            "{name} is not a restricted manager method"
         );
     }
     for (name, reason) in NOT_CLUSTER {

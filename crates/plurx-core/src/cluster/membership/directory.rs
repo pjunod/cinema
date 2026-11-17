@@ -421,6 +421,19 @@ impl RosterDirectory {
         Ok(self.snapshot().await?.voters(now))
     }
 
+    /// Ready media workers for this route's existing learner policy. The
+    /// same snapshot owns filtering, protocol validation and output bounds.
+    pub async fn media_observation(
+        &self,
+        allow_learners: bool,
+    ) -> Result<Vec<ActivityPeer>, MembershipError> {
+        if !self.membership.is_replicated() {
+            return Ok(Vec::new());
+        }
+        let now = super::unix_ms()?;
+        self.snapshot().await?.media_workers(now, allow_learners)
+    }
+
     /// The cached snapshot if it is still current. The table revisions are
     /// compared first (atomic loads), the membership log only after them; a
     /// node with no applied mark never caches.

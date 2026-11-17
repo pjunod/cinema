@@ -1396,7 +1396,7 @@ impl AppState {
             Arc::new(applied.clone()),
         );
         let cache_only_admin_proofs =
-            crate::http::CacheOnlyAdminProofCache::new(membership.is_replicated());
+            crate::http::CacheOnlyAdminProofCache::new(cluster.role().is_clustered());
         let live_tv_peers = cluster.calls();
         let live_tv = crate::live_tv::LiveTvManager::new(
             Arc::clone(&store),

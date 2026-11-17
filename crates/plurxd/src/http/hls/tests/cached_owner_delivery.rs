@@ -126,7 +126,7 @@ mod cached_owner_delivery_tests {
             .membership_snapshot();
         assert!(applied.committed && applied.members.contains(&token.raft_id));
         assert!(!applied.voters.contains(&token.raft_id));
-        assert!(!learner.may_run_cluster_jobs().await);
+        assert!(!plurx_core::cluster::coordination::ClusterJobAuthority::may_run_cluster_jobs(&learner.cluster_access().jobs()).await);
 
         let user = owner
             .store
@@ -248,7 +248,7 @@ mod cached_owner_delivery_tests {
                         .expect("actual finalized ingress heartbeat");
                     let peers = ingress
                         .membership
-                        .media_peers()
+                        .cluster_access().directory(None).media_observation(true)
                         .await
                         .expect("actual committed media directory");
                     if let Some(peer) = peers
