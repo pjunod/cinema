@@ -2,6 +2,9 @@
 // clippy.toml.
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 #![cfg_attr(plurx_dv_segment_probe, allow(dead_code))]
+// The Source actor/runtime ownership graph needs more than the default
+// 128 levels when rustc proves Send/Sync for spawned work.
+#![recursion_limit = "256"]
 
 mod admission;
 mod availability;

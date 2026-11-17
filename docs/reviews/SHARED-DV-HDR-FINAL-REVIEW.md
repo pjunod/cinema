@@ -68,3 +68,11 @@ The original reviewer inspected only this adapter delta and found no concrete
 blocker. This was a targeted closure in the final review, not a second review
 of the effort. The existing vendor row-count assertion is preserved.
 Exact-head compilation and runtime qualification remain required.
+
+The counter-adapter check exposed rustc E0275 proof-depth exhaustion through
+the existing Source actor/runtime Send/Sync container graph, without a
+non-Send value. The unchanged parent passed the same check. The original
+reviewer recommended one bounded compiler limit of 256, preserving ownership,
+and exact-candidate all-target Clippy; a further overflow requires investigation
+rather than another automatic increase. No runtime stack or ownership rule
+changes with this compiler setting.
