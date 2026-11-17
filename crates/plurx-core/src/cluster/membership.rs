@@ -5682,7 +5682,7 @@ impl MembershipManager {
     }
 
     #[must_use]
-    pub fn is_replicated(&self) -> bool {
+    pub(super) fn is_replicated(&self) -> bool {
         self.inner.is_some()
     }
 
@@ -8095,7 +8095,7 @@ impl MembershipManager {
 
     /// Whether this process is both present in the committed Raft voter set
     /// and non-tombstoned in replicated membership state.
-    pub async fn local_node_is_active_voter(&self) -> Result<bool, MembershipError> {
+    pub(super) async fn local_node_is_active_voter(&self) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         if !self.local_node_is_committed_voter().await? {
             return Ok(false);
@@ -8127,7 +8127,7 @@ impl MembershipManager {
     /// clustered process whose membership cannot be read right now is refused:
     /// duplicating a provider pass or a scan is the failure this exists to
     /// prevent, and skipping a tick costs at most one interval.
-    pub async fn may_run_cluster_jobs(&self) -> bool {
+    pub(super) async fn may_run_cluster_jobs(&self) -> bool {
         if self.inner.is_none() {
             return true;
         }
@@ -8141,7 +8141,7 @@ impl MembershipManager {
     /// quorum read on an HTTP request path; heartbeat acknowledgement is what
     /// proves the process has already refreshed it from local applied state.
     #[must_use]
-    pub fn local_maintenance_active(&self) -> bool {
+    pub(super) fn local_maintenance_active(&self) -> bool {
         self.inner
             .as_deref()
             .is_some_and(|inner| inner.local_maintenance.load(Ordering::Acquire))
@@ -8167,7 +8167,7 @@ impl MembershipManager {
         Ok(committed)
     }
 
-    pub async fn local_node_is_committed_voter(&self) -> Result<bool, MembershipError> {
+    pub(super) async fn local_node_is_committed_voter(&self) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
         Ok(lifecycle::committed_voter(
@@ -8184,7 +8184,7 @@ impl MembershipManager {
     /// promoted out of its intermediate learner state. Anything that reads
     /// "carries no vote" as "was removed" stops work a healthy member still
     /// has to do.
-    pub async fn local_node_is_committed_member(&self) -> Result<bool, MembershipError> {
+    pub(super) async fn local_node_is_committed_member(&self) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
         let is_member = metrics
@@ -8197,7 +8197,7 @@ impl MembershipManager {
     /// Effective role for request admission from the heartbeat-refreshed
     /// atomic projection. Membership metrics, local SQL, and promotion-role
     /// persistence all happen before publication, never on the HTTP path.
-    pub async fn local_serving_role(&self) -> Result<LocalServingRole, MembershipError> {
+    pub(super) async fn local_serving_role(&self) -> Result<LocalServingRole, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(LocalServingRole::Unclustered);
         };
@@ -9245,7 +9245,7 @@ impl MembershipManager {
     /// `cluster.artwork_url` must name an address a household client can
     /// actually reach. The ordinary membership status still omits addresses,
     /// and no unauthenticated route exposes them.
-    pub async fn reachable_peer_http_urls(&self) -> Result<Vec<String>, MembershipError> {
+    pub(super) async fn reachable_peer_http_urls(&self) -> Result<Vec<String>, MembershipError> {
         let Some(inner) = self.inner.as_ref() else {
             return Ok(Vec::new());
         };
@@ -9323,7 +9323,7 @@ impl MembershipManager {
     }
 
     /// Resolve peer daemon endpoints without widening the public node status.
-    pub async fn activity_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+    pub(super) async fn activity_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(Vec::new());
         };
@@ -9386,7 +9386,7 @@ impl MembershipManager {
     /// the first heartbeat interval after start. `status` has no such override,
     /// so during that window the two reads disagree about this one node — in
     /// the direction of the page knowing more, not less.
-    pub async fn node_hostnames(&self) -> Result<BTreeMap<String, String>, MembershipError> {
+    pub(super) async fn node_hostnames(&self) -> Result<BTreeMap<String, String>, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(BTreeMap::new());
         };
@@ -9416,7 +9416,7 @@ impl MembershipManager {
     ///
     /// Unlike media placement this deliberately retains stale/unready rows:
     /// the aggregator must render silence as unreachable, not quietly omit it.
-    pub async fn operations_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+    pub(super) async fn operations_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(Vec::new());
         };
@@ -9444,7 +9444,7 @@ impl MembershipManager {
     /// Exact bounded clock roster, including stale and pending-removal members.
     /// Missing identity or endpoint invalidates the whole round; reachability
     /// never shortens clock coverage. No credential-guard mutation is involved.
-    pub async fn clock_peers(&self) -> Result<ClockPeerRoster, MembershipError> {
+    pub(super) async fn clock_peers(&self) -> Result<ClockPeerRoster, MembershipError> {
         self.clock_peers_for_request(None, true).await
     }
 
@@ -9452,7 +9452,7 @@ impl MembershipManager {
     /// member set, query and fail-closed directory as [`Self::clock_peers`],
     /// read locally with no consensus. A hint that says whether a held
     /// `clock_peers` proof is still current, never a proof itself.
-    pub async fn clock_peers_hint(&self) -> Result<ClockPeerRoster, MembershipError> {
+    pub(super) async fn clock_peers_hint(&self) -> Result<ClockPeerRoster, MembershipError> {
         self.clock_peers_for_request(None, false).await
     }
 
@@ -9468,7 +9468,7 @@ impl MembershipManager {
     /// Last awaited response check after ordinary exact-request authorization.
     /// Does not consume a nonce again. Directory and sender removal fence must
     /// be from the same consistent read, not two snapshots separated by await.
-    pub async fn clock_peers_after_authenticated_request(
+    pub(super) async fn clock_peers_after_authenticated_request(
         &self,
         auth: &InternalPeerAuth,
     ) -> Result<ClockPeerRoster, MembershipError> {
@@ -9563,7 +9563,7 @@ impl MembershipManager {
     /// A pending removal is still a serving authority until Raft membership no
     /// longer contains it, so omission, missing identity, or missing endpoint
     /// fails the credential mutation closed instead of shortening the fanout.
-    pub async fn cache_admin_revocation_peers(
+    pub(super) async fn cache_admin_revocation_peers(
         &self,
         claim_id: &str,
     ) -> Result<Vec<ActivityPeer>, MembershipError> {
@@ -9664,14 +9664,14 @@ impl MembershipManager {
     /// non-voting node-local worker. The replicated removal fence ejects it
     /// from this directory before owned work is settled, and the progress row
     /// keeps a lagged learner out even while its heartbeat is fresh.
-    pub async fn media_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+    pub(super) async fn media_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
         self.media_peers_for_route(true).await
     }
 
     /// Ready media targets restricted by the caller's learner route policy.
     /// Read admission role with the endpoint/progress row, rather than joining
     /// an independently fetched status snapshot onto this directory.
-    pub async fn media_peers_for_route(
+    pub(super) async fn media_peers_for_route(
         &self,
         allow_learners: bool,
     ) -> Result<Vec<ActivityPeer>, MembershipError> {
@@ -9741,7 +9741,7 @@ impl MembershipManager {
     /// Number of committed voters, including this node. Media rollout gates
     /// compare this with the bounded peer directory so a missing, legacy, or
     /// over-limit voter fails closed instead of being silently omitted.
-    pub async fn activity_voter_count(&self) -> Result<usize, MembershipError> {
+    pub(super) async fn activity_voter_count(&self) -> Result<usize, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(1);
         };

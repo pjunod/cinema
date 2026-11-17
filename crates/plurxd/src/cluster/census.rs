@@ -128,6 +128,7 @@ impl Class {
 /// Raw handles and metrics types of the cluster layer.
 const TYPES: &[&str] = &[
     "MembershipManager",
+    "ClusterAccess",
     "ReplicationMonitor",
     "ServingFence",
     "PassiveRaftMetrics",
@@ -199,6 +200,10 @@ fn manager_methods() -> &'static [String] {
 }
 
 fn manager_pub_fns() -> Vec<String> {
+    manager_declared_fns(false)
+}
+
+fn manager_declared_fns(include_scoped: bool) -> Vec<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../plurx-core/src/cluster");
     let mut files = vec![root.join("membership.rs")];
     for entry in std::fs::read_dir(root.join("membership")).expect("membership children") {
@@ -237,9 +242,11 @@ fn manager_pub_fns() -> Vec<String> {
             }
             for item in block.items {
                 if let syn::ImplItem::Fn(function) = item {
-                    if matches!(function.vis, syn::Visibility::Public(_))
-                        && !is_cfg_test(&function.attrs)
-                    {
+                    let visible = matches!(function.vis, syn::Visibility::Public(_))
+                        || (include_scoped
+                            && matches!(&function.vis,
+                            syn::Visibility::Restricted(scope) if scope.path.is_ident("super")));
+                    if visible && !is_cfg_test(&function.attrs) {
                         names.push(function.sig.ident.to_string());
                     }
                 }
@@ -924,7 +931,14 @@ fn a_struct_update_in_a_macro_is_not_a_field() {
 /// counted the day it lands; the hand lists name only real methods.
 #[test]
 fn every_named_method_is_a_real_manager_method() {
-    let all = manager_pub_fns();
+    let all = manager_declared_fns(true);
+    let public = manager_pub_fns();
+    for name in ROLE.iter().chain(ROSTER) {
+        assert!(
+            !public.iter().any(|method| method == name),
+            "raw method {name} must remain module-private"
+        );
+    }
     assert!(
         all.len() > 50,
         "the manager's methods were not found: {all:?}"

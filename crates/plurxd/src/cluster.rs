@@ -93,7 +93,7 @@ mod operations {
 
         pub(crate) fn revocation(&self) -> RevocationOperations {
             RevocationOperations {
-                manager: self.cluster.membership.clone(),
+                protocol: self.cluster.access.revocation_exclusion(),
             }
         }
 
@@ -181,6 +181,7 @@ mod operations {
     #[derive(Clone)]
     pub(crate) struct ClockOperations {
         manager: plurx_core::cluster::membership::MembershipManager,
+        protocol: plurx_core::cluster::membership::ClockProtocol,
     }
 
     impl ClockOperations {
@@ -189,13 +190,16 @@ mod operations {
             super::calls::PeerTransport::new(self.manager.clone())
         }
         pub(super) fn new(manager: plurx_core::cluster::membership::MembershipManager) -> Self {
-            Self { manager }
+            Self {
+                protocol: manager.cluster_access().clock_protocol(),
+                manager,
+            }
         }
 
         pub(crate) fn guard(
             &self,
         ) -> std::sync::Arc<plurx_core::cluster::clock::ClusterClockGuard> {
-            self.manager.clock_guard()
+            self.protocol.guard()
         }
 
         pub(crate) fn same_source(&self, other: &Self) -> bool {
@@ -205,20 +209,21 @@ mod operations {
         pub(crate) fn leadership(
             &self,
         ) -> Option<plurx_core::cluster::membership::ClockLeadershipIdentity> {
-            self.manager.clock_leadership_identity()
+            self.protocol.leadership()
         }
 
         pub(crate) fn clustered(&self) -> bool {
-            self.manager.is_replicated()
+            matches!(
+                self.protocol.deployment(),
+                plurx_core::cluster::membership::Deployment::Replicated
+            )
         }
 
         pub(crate) fn change_source(&self) -> crate::settings_changes::SettingsChangeSource {
-            match self.manager.local_db_raft_metrics() {
-                Some(metrics) => {
-                    crate::settings_changes::SettingsChangeSource::Applied(super::AppliedChanges {
-                        metrics,
-                    })
-                }
+            match self.protocol.changes() {
+                Some(changes) => crate::settings_changes::SettingsChangeSource::Applied(
+                    super::AppliedChanges::Clock(changes),
+                ),
                 None => crate::settings_changes::SettingsChangeSource::LocalOnly,
             }
         }
@@ -226,22 +231,20 @@ mod operations {
         pub(crate) async fn roster(
             &self,
         ) -> Result<plurx_core::cluster::membership::ClockPeerRoster, MembershipError> {
-            self.manager.clock_peers().await
+            self.protocol.prove_roster().await
         }
 
         pub(crate) async fn roster_hint(
             &self,
         ) -> Result<plurx_core::cluster::membership::ClockPeerRoster, MembershipError> {
-            self.manager.clock_peers_hint().await
+            self.protocol.applied_hint().await
         }
 
         pub(crate) async fn roster_after_auth(
             &self,
             auth: &plurx_core::cluster::membership::InternalPeerAuth,
         ) -> Result<plurx_core::cluster::membership::ClockPeerRoster, MembershipError> {
-            self.manager
-                .clock_peers_after_authenticated_request(auth)
-                .await
+            self.protocol.after_authenticated_request(auth).await
         }
 
         pub(crate) async fn authorize_clock_request(
@@ -251,8 +254,8 @@ mod operations {
             path: &str,
             body: &[u8],
         ) -> Result<bool, MembershipError> {
-            self.manager
-                .authorize_internal_peer_request(auth, method, path, body)
+            self.protocol
+                .authorize_request(auth, method, path, body)
                 .await
         }
 
@@ -260,7 +263,7 @@ mod operations {
             &self,
             auth: &plurx_core::cluster::membership::InternalPeerAuth,
         ) -> Result<bool, MembershipError> {
-            self.manager.authenticated_clock_request_still_fresh(auth)
+            self.protocol.request_still_fresh(auth)
         }
 
         pub(crate) fn sign_clock_reply(
@@ -270,20 +273,22 @@ mod operations {
             path: &str,
             response: &[u8],
         ) -> Result<String, MembershipError> {
-            self.manager
-                .sign_internal_peer_response(target, nonce, path, response)
+            self.protocol.sign_reply(target, nonce, path, response)
         }
     }
 
     /// Exact claim-bound revocation authority; never a cached directory roster.
     #[derive(Clone)]
     pub(crate) struct RevocationOperations {
-        manager: plurx_core::cluster::membership::MembershipManager,
+        protocol: plurx_core::cluster::membership::RevocationExclusion,
     }
 
     impl RevocationOperations {
         pub(crate) fn clustered(&self) -> bool {
-            self.manager.is_replicated()
+            matches!(
+                self.protocol.deployment(),
+                plurx_core::cluster::membership::Deployment::Replicated
+            )
         }
 
         pub(crate) fn prepare_exclusion(
@@ -292,9 +297,7 @@ mod operations {
             duration: Duration,
         ) -> Result<plurx_core::cluster::membership::CacheAdminRevocationLease, MembershipError>
         {
-            plurx_core::cluster::membership::MembershipManager::prepare_cache_admin_revocation_claim(
-                node_id, duration,
-            )
+            self.protocol.prepare(node_id, duration)
         }
 
         pub(crate) async fn admit_exclusion(
@@ -303,9 +306,7 @@ mod operations {
             deadline: tokio::time::Instant,
         ) -> Result<plurx_core::cluster::membership::CacheAdminExclusionAdmission, MembershipError>
         {
-            self.manager
-                .admit_cache_admin_revocation_lease(lease, deadline)
-                .await
+            self.protocol.admit(lease, deadline).await
         }
 
         pub(crate) async fn release_exclusion(
@@ -315,36 +316,30 @@ mod operations {
             plurx_core::cluster::membership::CacheAdminRevocationCleanupOutcome,
             MembershipError,
         > {
-            self.manager
-                .release_cache_admin_revocation_lease(lease)
-                .await
+            self.protocol.release(lease).await
         }
 
         pub(crate) async fn claim_roster(
             &self,
             claim_id: &str,
         ) -> Result<Vec<plurx_core::cluster::membership::ActivityPeer>, MembershipError> {
-            self.manager.cache_admin_revocation_peers(claim_id).await
+            self.protocol.claim_roster(claim_id).await
         }
 
         pub(crate) async fn blockers(&self) -> Result<Vec<String>, MembershipError> {
-            self.manager.cache_admin_exclusion_blockers().await
+            self.protocol.blockers().await
         }
 
         pub(crate) async fn activation_ready(&self) -> Result<bool, MembershipError> {
-            self.manager.cache_admin_revocation_activation_ready().await
+            self.protocol.activation_ready().await
         }
 
         pub(crate) async fn activated_locally(&self) -> Result<bool, MembershipError> {
-            self.manager
-                .cache_admin_revocation_activated_locally()
-                .await
+            self.protocol.activated_locally().await
         }
 
         pub(crate) async fn claim_applied(&self, claim_id: &str) -> Result<bool, MembershipError> {
-            self.manager
-                .cache_admin_revocation_claim_applied(claim_id)
-                .await
+            self.protocol.claim_applied(claim_id).await
         }
     }
 
@@ -524,7 +519,10 @@ mod operations {
             self.cluster.ready()
         }
         pub(crate) fn clustered(&self) -> bool {
-            self.cluster.membership.is_replicated()
+            matches!(
+                self.cluster.access.local().deployment(),
+                plurx_core::cluster::membership::Deployment::Replicated
+            )
         }
         pub(crate) async fn topology(&self) -> Result<MembershipStatus, MembershipError> {
             self.cluster.membership_status().await
@@ -533,7 +531,11 @@ mod operations {
         pub(crate) async fn fresh_targets(
             &self,
         ) -> Result<Vec<plurx_core::cluster::membership::ActivityPeer>, MembershipError> {
-            self.cluster.membership.operations_peers().await
+            self.cluster
+                .access
+                .administrative_observation()
+                .targets()
+                .await
         }
         pub(crate) async fn revocation_capable(&self) -> Result<bool, MembershipError> {
             self.cluster.revocation_ready().await
@@ -564,6 +566,7 @@ pub(crate) struct Cluster {
     directory: Directory,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     jobs: Jobs,
+    access: plurx_core::cluster::membership::ClusterAccess,
 }
 
 impl Cluster {
@@ -575,11 +578,13 @@ impl Cluster {
         replication: plurx_core::cluster::migration::status::ReplicationMonitor,
         mark: Option<hiqlite::AppliedMarkHandle>,
     ) -> Self {
+        let access = membership.cluster_access();
         Self {
-            directory: Directory::with_mark(membership.clone(), mark),
-            jobs: Jobs {
-                manager: membership.clone(),
+            directory: Directory {
+                inner: access.directory(mark),
             },
+            jobs: access.jobs(),
+            access,
             fence,
             membership,
             replication,
@@ -611,15 +616,16 @@ impl Cluster {
     /// applied Raft membership (the source `local_node_is_committed_voter`
     /// reads) and the two atomics the heartbeat publishes. No IO, no await.
     pub(crate) fn role(&self) -> LocalRole {
-        let standing = match self.membership.applied_standing() {
+        let facts = self.access.local().facts();
+        let standing = match facts.standing {
             AppliedStanding::Standalone => Standing::Standalone,
             AppliedStanding::Voter => Standing::Voter,
             AppliedStanding::Learner => Standing::Learner,
             AppliedStanding::Absent => Standing::Absent,
         };
-        let admission = if self.membership.local_maintenance_active() {
+        let admission = if facts.maintenance {
             Admission::Maintenance
-        } else if self.membership.published_serving_role() == LocalServingRole::Fenced {
+        } else if facts.admission == LocalServingRole::Fenced {
             Admission::Fenced
         } else {
             Admission::Open
@@ -633,11 +639,11 @@ impl Cluster {
     /// The heartbeat-published role, preserving its standalone value independently
     /// of the combined standing/maintenance projection in `role()`.
     pub(crate) async fn admission_role(&self) -> Result<LocalServingRole, MembershipError> {
-        self.membership.local_serving_role().await
+        self.access.local().admission().await
     }
 
     pub(crate) fn maintenance_active(&self) -> bool {
-        self.membership.local_maintenance_active()
+        self.access.local().maintenance_fence()
     }
 
     pub(crate) fn deployment_enabled(&self, configured: bool) -> bool {
@@ -664,36 +670,45 @@ impl Cluster {
     }
 
     pub(crate) fn clock(&self) -> std::sync::Arc<plurx_core::cluster::clock::ClusterClockGuard> {
-        self.membership.clock_guard()
+        self.access.clock_protocol().guard()
     }
 
     /// Fresh confirmations keep the existing metrics and consistent removal
     /// checks. Directory projections never grant this authority.
     pub(crate) async fn confirm_active_voter(&self) -> Result<bool, MembershipError> {
-        self.membership.local_node_is_active_voter().await
+        self.access.active_voter_authority().confirm().await
     }
     pub(crate) async fn confirm_voter(&self) -> Result<bool, MembershipError> {
-        self.membership.local_node_is_committed_voter().await
+        self.access
+            .local()
+            .committed()
+            .await
+            .map(|observed| observed.voter)
     }
     pub(crate) async fn confirm_member(&self) -> Result<bool, MembershipError> {
-        self.membership.local_node_is_committed_member().await
+        self.access
+            .local()
+            .committed()
+            .await
+            .map(|observed| observed.member)
     }
 
     pub(crate) async fn singleton_jobs_allowed(&self) -> bool {
-        self.membership.may_run_cluster_jobs().await
+        plurx_core::cluster::coordination::ClusterJobAuthority::may_run_cluster_jobs(&self.jobs)
+            .await
     }
     pub(crate) async fn job_allowed(
         &self,
         kind: plurx_core::store::background_jobs::JobKind,
     ) -> bool {
         use plurx_core::cluster::coordination::ClusterJobAuthority;
-        self.membership.may_execute_job(kind).await
+        self.jobs.may_execute_job(kind).await
     }
 
     pub(crate) async fn membership_status(
         &self,
     ) -> Result<plurx_core::cluster::membership::MembershipStatus, MembershipError> {
-        self.membership.status().await
+        self.access.administrative_observation().topology().await
     }
     pub(crate) async fn replication_status(
         &self,
@@ -703,7 +718,7 @@ impl Cluster {
     pub(crate) async fn node_names(
         &self,
     ) -> Result<std::collections::BTreeMap<String, String>, MembershipError> {
-        self.membership.node_hostnames().await
+        self.access.names().node_names().await
     }
     pub(crate) async fn revocation_ready(&self) -> Result<bool, MembershipError> {
         self.membership.cache_admin_revocation_ready().await
@@ -750,6 +765,7 @@ impl Cluster {
     pub(crate) fn sharing(&self) -> Sharing {
         Sharing {
             manager: self.membership.clone(),
+            local: self.access.local(),
             fence: self.fence.clone(),
         }
     }
@@ -809,65 +825,33 @@ impl Cluster {
     }
 }
 
-/// Job decisions retain the original core algorithms, including learner
-/// execution's fresh membership proof at every publication boundary.
-#[derive(Clone)]
-pub(crate) struct Jobs {
-    manager: MembershipManager,
-}
-impl Jobs {
-    pub(crate) fn clustered(&self) -> bool {
-        self.manager.is_replicated()
-    }
-
-    pub(crate) async fn reconciliation_members(
-        &self,
-        local: &str,
-    ) -> Result<std::collections::BTreeSet<String>, MembershipError> {
-        let mut members = std::collections::BTreeSet::from([local.to_owned()]);
-        if self.clustered() {
-            members.extend(
-                self.manager
-                    .operations_peers()
-                    .await?
-                    .into_iter()
-                    .map(|peer| peer.node_id),
-            );
-        }
-        Ok(members)
-    }
-
-    /// The existing artifact inventory, without new reachability filtering.
-    pub(crate) async fn artifact_workers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
-        self.manager.operations_peers().await
-    }
-}
-#[plurx_core::cluster::coordination::cluster_job_async_trait]
-impl plurx_core::cluster::coordination::ClusterJobAuthority for Jobs {
-    async fn may_run_cluster_jobs(&self) -> bool {
-        plurx_core::cluster::coordination::ClusterJobAuthority::may_run_cluster_jobs(&self.manager)
-            .await
-    }
-    async fn may_execute_job(&self, kind: plurx_core::store::background_jobs::JobKind) -> bool {
-        plurx_core::cluster::coordination::ClusterJobAuthority::may_execute_job(&self.manager, kind)
-            .await
-    }
-}
+/// Core-owned fresh job authority and reconciliation service.
+pub(crate) use plurx_core::cluster::membership::JobControl as Jobs;
 
 /// Applied-index observation retains the original live Raft watch.
 #[derive(Clone)]
-pub(crate) struct AppliedChanges {
-    metrics: hiqlite::LocalDbRaftMetrics,
+pub(crate) enum AppliedChanges {
+    Local(hiqlite::LocalDbRaftMetrics),
+    Clock(plurx_core::cluster::membership::ClockChanges),
 }
 impl AppliedChanges {
     pub(crate) fn applied_index(&self) -> Option<u64> {
-        self.metrics.snapshot().last_applied_index
+        match self {
+            Self::Local(metrics) => metrics.snapshot().last_applied_index,
+            Self::Clock(changes) => changes.applied_index(),
+        }
     }
     pub(crate) fn live(&self) -> bool {
-        self.metrics.membership_snapshot().running
+        match self {
+            Self::Local(metrics) => metrics.membership_snapshot().running,
+            Self::Clock(changes) => changes.live(),
+        }
     }
     pub(crate) async fn changed(&mut self) -> bool {
-        self.metrics.wait_for_change().await
+        match self {
+            Self::Local(metrics) => metrics.wait_for_change().await,
+            Self::Clock(changes) => changes.changed().await,
+        }
     }
 }
 
@@ -897,7 +881,7 @@ impl BackupSource {
         self.client
             .local_db_raft_metrics()
             .ok()
-            .map(|metrics| AppliedChanges { metrics })
+            .map(AppliedChanges::Local)
     }
     pub(crate) async fn progress(&self) -> Result<BackupProgress, BackupObservationError> {
         let metrics = self
@@ -964,11 +948,15 @@ impl RestartAdmissions {
 #[derive(Clone)]
 pub(crate) struct Sharing {
     manager: MembershipManager,
+    local: plurx_core::cluster::membership::LocalNode,
     fence: ServingFence,
 }
 impl Sharing {
     pub(crate) fn is_clustered(&self) -> bool {
-        self.manager.is_replicated()
+        matches!(
+            self.local.deployment(),
+            plurx_core::cluster::membership::Deployment::Replicated
+        )
     }
     pub(crate) fn member_floor(
         &self,
@@ -1243,7 +1231,7 @@ impl Directory {
         mark: Option<hiqlite::AppliedMarkHandle>,
     ) -> Self {
         Self {
-            inner: RosterDirectory::new(membership, mark),
+            inner: membership.cluster_access().directory(mark),
         }
     }
 

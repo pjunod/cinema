@@ -410,6 +410,17 @@ impl RosterDirectory {
         }
     }
 
+    /// Current applied voter endpoints, including unreachable voters. Sample
+    /// time before loading, as the original activity roster did; filtering,
+    /// ordering and bounds remain the snapshot's voter projection.
+    pub async fn voter_observation(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+        if !self.membership.is_replicated() {
+            return Ok(Vec::new());
+        }
+        let now = super::unix_ms()?;
+        Ok(self.snapshot().await?.voters(now))
+    }
+
     /// The cached snapshot if it is still current. The table revisions are
     /// compared first (atomic loads), the membership log only after them; a
     /// node with no applied mark never caches.
