@@ -1,3 +1,8 @@
+# Static raw-retirement fixture follow-up (2026-11-17): one controlled worker
+# thread and one scoped controller thread are both joined. The controller's
+# five-second acknowledgement bound fails observation only; raw custody remains
+# held until actual worker join. Production accounting adds no task, process or timer.
+
 # HDR source-lifetime/admission and capture-boundary fixture audit (2026-11-16).
 # Authored static comparison of f83484653 with fbe197ed9, using the unchanged
 # rust_structural_source extractor and module_roots; not runtime qualification.
@@ -4034,7 +4039,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # token: live_tv/tests.rs spawns dvr_loop twice and reminder_loop once;
 # sharing.rs's idle-loop test spawns run and claim_loop. No production
 # task owner is added.
-expected_occurrences = 1170
+expected_occurrences = 1171
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4289,7 +4294,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
-expected_occurrences = 101
+expected_occurrences = 102
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6032,6 +6037,11 @@ pattern = "use\\s+tokio::time"
 # clock and its handoff tests, each on its owning task (reviewed in #1645).
 expected_occurrences = 8
 
+# Static fixture lifecycle follow-up (2026-11-17): gap-fill adds two real
+# children (FFmpeg builder and FFprobe) joined by testfixtures::run; TempDir
+# remains live through both settlements. The decode-facts change is a final
+# failure snapshot only. These are test fixtures; production gates are unchanged.
+
 [[module_structures]]
 id = "process-command-construction"
 # Source-budget audit (8ab61a779 -> bbc5c1664): +4 test-only commands. The
@@ -6502,7 +6512,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # loop verifies relative/custom/non-profile commands keep their resolution
 # and cwd, while a known absolute no-input candidate receives the owned cwd.
 # This fixture launches no child.
-expected_occurrences = 354
+expected_occurrences = 356
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7236,7 +7246,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # processed_stream_format_reports_the_attached_carrier_not_its_pq_base.
 # It reads the existing VOD owner's status_publication snapshot: no child
 # launch, lease renewal, or ownership transfer. The broad matcher is unchanged.
-expected_occurrences = 939
+# Root / corrected-Q merge: the exact configured rust_structural_source
+# census measures 946 matches, including Root custody-fixture status
+# observations and the Q test-only VOD status observer described above.
+# Preserve both sources; module roots and matching patterns are unchanged.
+# This lexical census is not runtime ownership qualification.
+expected_occurrences = 946
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
