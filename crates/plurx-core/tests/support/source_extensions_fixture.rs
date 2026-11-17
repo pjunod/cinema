@@ -829,9 +829,10 @@ fn rewind_empty_source_leases_to_v133(connection: &rusqlite::Connection) {
 }
 
 /// Leases that only the lease table records (playback, attestation,
-/// offline); a rewind that would discard one is refused.
+/// offline), plus receipt provenance the v1 catalogue cannot represent;
+/// a rewind that would discard either is refused.
 pub(crate) const SOURCE_LEASE_UNOWNED_SQL: &str =
-    "SELECT count(*) AS value FROM source_leases WHERE owner_kind NOT IN ('job','analysis')";
+    "SELECT count(*)+(SELECT count(*) FROM source_lease_receipt_sources) AS value FROM source_leases WHERE owner_kind NOT IN ('job','analysis')";
 
 /// The statements that take a contracted (v3) source-lease tail back to
 /// the published v1 source owners, on either backend. The claim effects
@@ -842,11 +843,9 @@ pub(crate) fn source_lease_rewind_plan() -> Vec<String> {
     let turns = include_str!("../../src/store/background_job_turns.sql");
     let pending = include_str!("../../src/store/storage_domain_pending.sql");
     let retention = include_str!("../../src/store/background_jobs_custody_retention.sql");
-    let mut plan = vec![
-        "DROP TABLE source_leases;".to_owned(),
-        "DROP VIEW source_lease_permissions;".to_owned(),
-        "DROP TABLE source_lease_schema;".to_owned(),
-    ];
+    let managed_v6 = include_str!("../../src/store/subtitle_managed_resources_v6.sql");
+    let analysis = include_str!("../../src/store/background_jobs_viewer_analysis.sql");
+    let mut plan = Vec::new();
     for trigger in [
         "source_lease_job_claim",
         "source_lease_job_renew",
@@ -859,6 +858,11 @@ pub(crate) fn source_lease_rewind_plan() -> Vec<String> {
         "source_lease_offline_renew",
         "source_lease_offline_end",
         "source_lease_offline_delete",
+        "source_lease_resume_admission",
+        "source_lease_service_root_admission",
+        "source_lease_receipt_insert",
+        "source_lease_receipt_update",
+        "dispatch_turn_independent",
         "background_source_pause_effects",
         "background_source_resume_effects",
         "background_job_enqueue_command",
@@ -869,11 +873,53 @@ pub(crate) fn source_lease_rewind_plan() -> Vec<String> {
     for view in [
         "dispatch_turn_ordinary_occupancy",
         "dispatch_turn_contenders",
+        "dispatch_turn_library_resources",
         "background_storage_domain_holders",
+        "background_storage_domain_disturbed",
+        "background_storage_domain_affected_jobs",
+        "background_job_required_resources",
+        "analysis_required_resources",
+        "source_lease_receipt_resources",
+        "source_lease_service_scopes",
+        "source_lease_permissions",
+        "source_lease_effective_resources",
+        "source_lease_owner_scopes",
+        "source_lease_job_scopes",
+        "source_lease_file_resources",
+        "source_lease_file_roots",
+        "source_lease_limits",
+        "source_lease_root_resources",
+        "source_lease_roots",
     ] {
         plan.push(format!("DROP VIEW {view};"));
     }
+    plan.extend([
+        "DROP TABLE source_lease_receipt_sources;".to_owned(),
+        "DROP TABLE source_leases;".to_owned(),
+        "DROP TABLE source_lease_schema;".to_owned(),
+    ]);
     plan.push(foreground.to_owned());
+    for (sql, opening) in [
+        (
+            managed_v6,
+            "CREATE VIEW IF NOT EXISTS background_job_required_resources AS",
+        ),
+        (
+            analysis,
+            "CREATE VIEW IF NOT EXISTS analysis_required_resources AS",
+        ),
+        (turns, "CREATE VIEW dispatch_turn_library_resources AS"),
+        (
+            pending,
+            "CREATE VIEW IF NOT EXISTS background_storage_domain_disturbed AS",
+        ),
+        (
+            pending,
+            "CREATE VIEW IF NOT EXISTS background_storage_domain_affected_jobs AS",
+        ),
+    ] {
+        plan.push(published_statement(sql, opening));
+    }
     for opening in [
         "CREATE VIEW dispatch_turn_ordinary_occupancy",
         "CREATE VIEW dispatch_turn_contenders",

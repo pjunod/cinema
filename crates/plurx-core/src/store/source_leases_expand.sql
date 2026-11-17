@@ -21,6 +21,24 @@ CREATE INDEX source_leases_node ON source_leases(node_id, expires_at_ms);
 -- next statement
 CREATE INDEX source_leases_work ON source_leases(owner_kind, work_id);
 -- next statement
+-- Resolve each lease owner once; expand exactly one physical file/root scope.
+CREATE VIEW source_lease_owner_scopes(lease_id,file_id,library_id) AS
+SELECT held.lease_id,file.id,NULL FROM source_leases held
+JOIN files file ON file.id=json_extract(held.owner_json,'$.file_id')
+WHERE held.owner_kind IN ('playback','lease')
+UNION ALL
+SELECT held.lease_id,scope.file_id,scope.library_id FROM source_leases held
+JOIN source_lease_job_scopes scope ON scope.job_id=held.work_id WHERE held.owner_kind='job'
+UNION ALL
+SELECT held.lease_id,request.file_id,NULL FROM source_leases held
+JOIN analysis_requests request ON request.request_id=held.work_id
+JOIN files file ON file.id=request.file_id
+WHERE held.owner_kind='analysis' AND request.component IN ('fragment_index','skip_markers')
+UNION ALL
+SELECT held.lease_id,package.file_id,NULL FROM source_leases held
+JOIN offline_packages package ON package.id=held.work_id
+JOIN files file ON file.id=package.file_id WHERE held.owner_kind='offline';
+-- next statement
 -- Receipt provenance is not authority: no lease FK and no hold/pin. It dies
 -- with the existing five-second receipt ledger and lets byte allocations be
 -- projected through the same current roots as their physical source.
@@ -35,20 +53,16 @@ CREATE TABLE source_lease_receipt_sources (
 -- never counted as a reader; outside its window it blocks background reads.
 CREATE VIEW source_lease_effective_resources AS
 WITH resolved AS NOT MATERIALIZED (
- SELECT held.lease_id,resource.resource_key FROM source_leases held
- JOIN source_lease_file_resources resource ON resource.file_id=json_extract(held.owner_json,'$.file_id')
- WHERE held.owner_kind IN ('playback','lease')
+ SELECT scope.lease_id,resource.value AS resource_key FROM source_lease_owner_scopes scope,
+ json_each((SELECT json_group_array(resource_key) FROM source_lease_file_resources WHERE file_id=scope.file_id)) resource
+ WHERE scope.file_id IS NOT NULL
  UNION
- SELECT held.lease_id,resource.resource_key FROM source_leases held
- JOIN background_job_required_resources resource ON resource.job_id=held.work_id
- WHERE held.owner_kind='job' AND resource.resource_key LIKE 'source_io%'
+ SELECT scope.lease_id,resource.resource_key FROM source_lease_owner_scopes scope
+ JOIN source_lease_root_resources resource ON resource.library_id=scope.library_id
+ WHERE scope.file_id IS NULL AND scope.library_id IS NOT NULL
  UNION
- SELECT held.lease_id,resource.resource_key FROM source_leases held
- JOIN analysis_required_resources resource ON resource.request_id=held.work_id WHERE held.owner_kind='analysis'
- UNION
- SELECT held.lease_id,resource.resource_key FROM source_leases held
- JOIN offline_packages package ON package.id=held.work_id
- JOIN source_lease_file_resources resource ON resource.file_id=package.file_id WHERE held.owner_kind='offline'
+ SELECT scope.lease_id,'source_io' FROM source_lease_owner_scopes scope
+ WHERE scope.file_id IS NULL AND (scope.library_id IS NULL OR NOT EXISTS(SELECT 1 FROM source_lease_roots root WHERE root.library_id=scope.library_id))
 )
 SELECT lease_id,resource_key FROM resolved
 UNION
@@ -69,7 +83,7 @@ JOIN source_lease_roots root ON substr(stored.value,1,15)='source_io:root/' AND 
  OR (substr(stored.value,-3)='/2F' AND substr(root.root_key,1,length(stored.value)-2)=substr(stored.value,1,length(stored.value)-2))
  OR (substr(root.root_key,-3)='/2F' AND substr(stored.value,1,length(root.root_key)-2)=substr(root.root_key,1,length(root.root_key)-2)))
 JOIN source_lease_root_resources resource ON resource.library_id=root.library_id AND resource.root_id=root.root_id
-WHERE NOT EXISTS(SELECT 1 FROM resolved current WHERE current.lease_id=held.lease_id);
+WHERE NOT EXISTS(SELECT 1 FROM source_lease_owner_scopes known WHERE known.lease_id=held.lease_id);
 -- next statement
 CREATE VIEW source_lease_permissions AS
 SELECT l.lease_id,l.node_id,k.value AS resource_key,l.expires_at_ms,

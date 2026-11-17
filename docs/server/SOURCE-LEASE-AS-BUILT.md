@@ -23,6 +23,21 @@ roll and do not downgrade the expanded catalog. M1's note that ordinary
 startup does not reinstall the old claim trigger does not establish that the
 old executable can restart against this catalog.
 
+Current resource lookups share source-job classification and the ordinary
+`source_lease_owner_scopes` metadata view. Each point lookup binds its owner
+key before expanding the union of resource keys; file-backed owners expand
+one file scope, and library-wide jobs expand their configured roots. Orphan
+fallback checks metadata presence without expanding the same root projection
+again. The focused plan regression requires primary-key owner searches on the
+store's bundled SQLite; system-SQLite diagnostic plans are supporting evidence,
+not a qualification claim for a different engine.
+
+Receipt scope is captured only when its receipt/lease pair is absent. A grant
+replay or refresh therefore preserves the first physical-source provenance
+instead of attempting a duplicate insert under the outer grant UPSERT's
+conflict policy. Job, offline and companion replay regressions cover this
+boundary; their current check results live on the pull request.
+
 1. **The expand reinstalls the claim effects, on both backends.** The
    trigger moved to `background_job_claim_effects.sql`, which the base job
    schema includes and the expand (`source_leases::EXPAND`, one text for

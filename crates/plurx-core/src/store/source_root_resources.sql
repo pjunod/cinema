@@ -2,18 +2,12 @@
 DROP VIEW background_job_required_resources;
 -- next statement
 CREATE VIEW background_job_required_resources AS
-WITH job_library AS NOT MATERIALIZED (
- SELECT job.id AS job_id,job.kind,json_extract(job.payload_json,'$.generation') AS generation,file.id AS file_id,
-   COALESCE(json_extract(job.payload_json,'$.library_id'),item.library_id) AS library_id
- FROM background_jobs job LEFT JOIN files file ON file.id=json_extract(job.payload_json,'$.file_id')
- LEFT JOIN items item ON item.id=COALESCE(file.item_id,json_extract(job.payload_json,'$.item_id'))
-), source_jobs AS NOT MATERIALIZED (
- SELECT * FROM job_library WHERE kind NOT IN
- ('semantic_embedding','subtitle_model_operation','subtitle_text_model_operation','subtitle_text_translate_artifact','artifact_hydrate','artifact_verify','artwork_derivative','fragment_index_publish')
- AND NOT (kind='library_scan' AND generation IS 'library-targeted-v1')
+WITH source_jobs AS NOT MATERIALIZED (
+ SELECT job_id,file_id,library_id FROM source_lease_job_scopes
 )
-SELECT job.job_id,resource.resource_key FROM source_jobs job
-JOIN source_lease_file_resources resource ON resource.file_id=job.file_id
+SELECT job.job_id,resource.value AS resource_key FROM source_jobs job,
+json_each((SELECT json_group_array(resource_key) FROM source_lease_file_resources WHERE file_id=job.file_id)) resource
+WHERE job.file_id IS NOT NULL
 UNION
 SELECT job.job_id,resource.resource_key FROM source_jobs job
 JOIN source_lease_root_resources resource ON resource.library_id=job.library_id WHERE job.file_id IS NULL
@@ -30,8 +24,8 @@ SELECT id,'subtitle_model:'||target_node_id FROM background_jobs WHERE kind='sub
 DROP VIEW analysis_required_resources;
 -- next statement
 CREATE VIEW analysis_required_resources AS
-SELECT request.request_id,resource.resource_key FROM analysis_requests request
-JOIN source_lease_file_resources resource ON resource.file_id=request.file_id
+SELECT request.request_id,resource.value AS resource_key FROM analysis_requests request,
+json_each((SELECT json_group_array(resource_key) FROM source_lease_file_resources WHERE file_id=request.file_id)) resource
 WHERE request.component IN ('fragment_index','skip_markers');
 -- next statement
 DROP VIEW dispatch_turn_library_resources;

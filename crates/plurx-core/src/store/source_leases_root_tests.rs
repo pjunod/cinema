@@ -922,3 +922,68 @@ async fn measured_transfer_supply_stays_shared_after_nested_root_edit() {
         vec!["transfer_service".to_owned()]
     );
 }
+
+/// A point lookup must reach one file/job/request/lease and expand only that
+/// owner's current root keys, even when catalog views use UNION for fallbacks.
+#[tokio::test]
+async fn source_resource_point_lookups_do_not_scan_owner_catalogs() {
+    let store = roots_store(&["/media"], &[(1, "/media/movie.mkv")]).await;
+    let plans = store
+        .with_read(|connection| {
+            let queries = [
+                ("file", "EXPLAIN QUERY PLAN SELECT resource_key FROM source_lease_file_resources WHERE file_id=1"),
+                ("job", "EXPLAIN QUERY PLAN SELECT resource_key FROM background_job_required_resources WHERE job_id='plan-job'"),
+                ("analysis", "EXPLAIN QUERY PLAN SELECT resource_key FROM analysis_required_resources WHERE request_id='plan-analysis'"),
+                ("holder", "EXPLAIN QUERY PLAN SELECT resource_key FROM source_lease_effective_resources WHERE lease_id='plan-holder'"),
+            ];
+            let mut plans = Vec::new();
+            for (name, query) in queries {
+                let mut statement = connection.prepare(query)?;
+                let details = statement
+                    .query_map([], |row| row.get::<_, String>(3))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                plans.push((name, details.join("\n")));
+            }
+            Ok(plans)
+        })
+        .await
+        .expect("explain source resource lookups");
+
+    for (name, plan) in &plans {
+        assert!(
+            plan.contains("SEARCH"),
+            "{name} lookup has no keyed search:\n{plan}"
+        );
+        for scan in [
+            "SCAN source_file",
+            "SCAN fallback_file",
+            "SCAN job",
+            "SCAN request",
+            "SCAN held",
+            "SCAN background_jobs",
+            "SCAN analysis_requests",
+        ] {
+            assert!(
+                !plan.contains(scan),
+                "{name} lookup scans owner catalog `{scan}`:\n{plan}"
+            );
+        }
+    }
+    for (name, alias) in [
+        ("file", "source_file"),
+        ("job", "job"),
+        ("analysis", "request"),
+        ("holder", "held"),
+    ] {
+        let plan = plans
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .expect("point lookup plan")
+            .1
+            .as_str();
+        assert!(
+            plan.contains(&format!("SEARCH {alias}")),
+            "{name} lookup does not search by owner key:\n{plan}"
+        );
+    }
+}
