@@ -178,3 +178,10 @@ and Hiqlite compilation as affected, daemon all-target check, strict Clippy,
 format, strict census, ownership/ratchet, formal source checks and exact-body
 paperwork. Lower only measured pins. Record inherited compile debt honestly.
 The final intended-base whole-diff review, gate and landing remain separate.
+
+7b also owns the backup payload wiring in `main.rs` (`Boot` and
+`build_state`) and the corresponding `startup_tests.rs` config literals.
+Those fields become a typed local backup source. Main's existing job-trait
+injections also use the facade owner; startup/listener, shutdown and vendor
+mechanisms remain with their existing owners. The 62c5f25fc baseline passed
+the isolated daemon all-target check before 7b Rust edits.
