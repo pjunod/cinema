@@ -221,14 +221,15 @@ async fn assert_clocked_head_preserves_samples_and_audio_offset(
                 && canonical_init.is_some()
                 && canonical_fragment.is_some()
             {
-                return Ok((
-                    av_init.expect("observed AV init"),
-                    av_fragment.expect("observed AV fragment"),
-                    canonical_init.expect("observed canonical init"),
-                    canonical_fragment.expect("observed canonical fragment"),
-                ));
+                break;
             }
         }
+        Ok((
+            av_init.ok_or("observed AV init")?,
+            av_fragment.ok_or("observed AV fragment")?,
+            canonical_init.ok_or("observed canonical init")?,
+            canonical_fragment.ok_or("observed canonical fragment")?,
+        ))
     }
     .await;
     // This witness claims only its first physical pair. Retire and join the
