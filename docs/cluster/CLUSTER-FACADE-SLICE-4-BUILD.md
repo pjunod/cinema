@@ -14,7 +14,8 @@ Administrative feature code asks `cluster.operations()` for typed control
 operations. The capability owns a private clone of the existing shared
 cluster, with explicit membership, fence and replication delegates. Clock
 and revocation get typed child capabilities with their original freshness
-and ownership rules. No raw-handle getter or string-dispatched command API
+and ownership rules. The clock child also supports pre-AppState startup from the existing manager,
+without constructing a fence or replication monitor. No raw-handle getter or string-dispatched command API
 is introduced. Existing readiness and observation answers remain shared.
 
 C2 and C7 remain the owners of their runtime behavior. Preserve signal/leave
@@ -28,7 +29,9 @@ The slice-3 effort has ceiling 626. The six named caller files hold 306
 pinned spellings: cluster HTTP 46, operation HTTP 109, desktop control 21,
 main 42, clock 54 and revocation 34. Even removing every spelling would
 leave 320, so the parent's approximate 170 estimate is stale. Some spellings
-are legitimate response fields or local authority methods. Recount exact
+are legitimate response fields or local authority methods. The associated
+internal clock observation context adds eight pins, making the complete
+seven-file bound 314 and its theoretical remaining floor 312. Recount exact
 removals after dependency integration; never rename local data to hide it.
 
 Mutation preflight refreshes membership, its operations roster and bounded
@@ -61,7 +64,7 @@ for these authorizers. Handoff precedes cancellation and admission drain.
 | `crates/plurxd/src/http/cluster_operations.rs` | Existing claim guards, serialization, cancellation, drain, private observations and cache producers through the capability. |
 | `crates/plurxd/src/desktop_control.rs` | Existing identity/topology checks and prepare/commit/cancel ownership. |
 | `crates/plurxd/src/main.rs`, `state.rs` | Composition roots and existing lifecycle wiring; C7-dependent shutdown migration follows actual C7 landing. Sharing/custody/job wiring remains with later slices. |
-| `crates/plurxd/src/clock_offset.rs` | Existing proof source, leadership, guard and authenticated clock roster paths without extra polling. |
+| `crates/plurxd/src/clock_offset.rs`, `http/internal_clock.rs` | Existing proof source, startup/observer identity, leadership, guard and authenticated clock roster paths without extra polling. Keep transport construction visible in its existing composition boundary. |
 | `crates/plurxd/src/http/internal_auth_revocation.rs` | Existing claim-bound fresh roster, exact exclusion lifetime, activation and apply acknowledgments. |
 | `crates/plurxd/src/cluster/census.rs` | Exact reductions and one narrowly justified internal facade-owner exemption for the new operations module. Keep transport and legitimate data sites visible. |
 | `tests/playback/rolling-producer-owners.toml` | Review any conservative syntax-count movement against actual task/process ownership; never change the matcher to make counts pass. |
