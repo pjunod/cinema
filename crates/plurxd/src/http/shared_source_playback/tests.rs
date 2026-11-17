@@ -1695,7 +1695,7 @@ async fn actual_vtt_writer_end(
                         eprintln!("actual VTT refused before DATA: {status}; task={}", fixture_task_diagnostic(entry));
                         let body = tokio::time::timeout_at(
                             marker_deadline,
-                            axum::body::to_bytes(response.into_body(), 128 * 1024),
+                            axum::body::to_bytes(axum::body::Body::new(response.into_body()), 128 * 1024),
                         ).await;
                         let body = match body {
                             Ok(Ok(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
