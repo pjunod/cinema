@@ -253,12 +253,13 @@
             &fixture.state.serving,
             route,
             &path,
-            control_inner(
+            // Keep the large debug handler future off the joined polling stack.
+            Box::pin(control_inner(
                 fixture.state.clone(),
                 session_id.clone(),
                 body,
                 unix_ms() + 4_000,
-            ),
+            )),
         );
         let release = async {
             if let Some((entered, gate)) = gate {
@@ -345,10 +346,10 @@
 
     #[tokio::test]
     async fn control_release_before_lookup_logs_typed_failure_without_serving_active_route() {
-        control_release_failure_diagnostics(true).await;
+        Box::pin(control_release_failure_diagnostics(true)).await;
     }
 
     #[tokio::test]
     async fn control_release_during_lookup_logs_typed_failure_without_serving_stale_answer() {
-        control_release_failure_diagnostics(false).await;
+        Box::pin(control_release_failure_diagnostics(false)).await;
     }
