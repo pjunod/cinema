@@ -223,3 +223,74 @@ No suppressions or unrelated owner changes were made. Final current-base
 integration must resolve this debt; a passing all-target check is not a
 Clippy pass. The new committed census pins/format still require their archive
 checks. Final review, effort gate, landing and promotion remain outstanding.
+
+## 7c implementation contract — core-owned domains
+
+The preparatory base includes the actual roster-mark effort landing through
+`6c95fed4c`. Requalify that archive before Rust edits. Final C7 integration,
+complete-diff review and gates still use the actual intended effort base.
+
+Add `crates/plurx-core/src/cluster/membership/access.rs`, declared privately
+and with its public domain types re-exported by `membership.rs`. A public
+`MembershipManager::cluster_access()` constructs the private-handle aggregate;
+its constructor stays within membership. This returns typed services, never
+a raw manager, Deref, generic callback or arbitrary SQL executor. Existing
+selected-backend and startup-observer signatures stay intact: the daemon
+facade derives services inside composition; the external startup observer
+derives its clock protocol from the existing callback argument. This avoids
+an overlapping SelectedBackend/listener factory change. It neither replaces
+the separately owned startup mechanism nor cherry-picks an unlanded C7 head.
+
+The core aggregate owns these distinct domains:
+
+- Local deployment, applied standing, heartbeat admission and maintenance
+  observations retain their original sources and unavailable/standalone
+  behavior. They are not one atomic or linearizable snapshot. Fresh committed
+  membership returns a typed observation, rather than public renamed member
+  and voter predicates. Active-voter confirmation is a separate fresh service.
+- The existing stamped RosterDirectory is constructed through the aggregate.
+  Purpose projections retain ordering, caps, learner route eligibility and
+  time-dependent readiness/reachability. Naming/origin queries remain a
+  distinct service: they deliberately include non-Raft nodes, and hostname
+  evidence is not present in the general roster.
+- Move the narrow Jobs owner behind the core boundary; keep its existing
+  public trait and both fresh core algorithms. Reconciliation keeps unknown
+  membership refusal and the exact operations inventory semantics.
+- A clock protocol owns guard identity, leadership, applied changes, proved
+  roster, local hint, final authenticated-request roster, request freshness
+  and exact signed response binding. Do not turn proofs into directory hints.
+  Keep peer-call factory timing and process-shared pool ownership unchanged.
+- Revocation exclusion owns preparation/admission, claim-bound roster, local
+  apply acknowledgement, exact release and cleanup as one coherent protocol.
+  Preserve current opaque lease types, deadline and cancellation ownership.
+
+After consumers migrate, make the seven ROLE and eleven ROSTER methods
+`pub(super)` — **18 total**, including `media_peers_for_route`. Preserve their
+algorithms. Core cluster descendants remain legal callers; migrate actual
+external `plurx-cluster-check` activity/origin requests and the proved clock
+reads in `plurx-core/tests/fixtures/startup_observer.rs`.
+
+7c owns those core files, daemon `cluster.rs`, the census's declaration
+reality check, and exact source-guard expectations in membership tests that
+reference changed visibility. Retain the explicit ROLE/ROSTER arrays and
+all counting patterns/exemptions; check selected private declarations without
+counting every private helper as a new public mechanism. Strengthen the
+visibility expectation rather than dropping source assertions.
+
+For coherent composition without a temporary raw-parts getter, finish
+`Boot`/AppConfig typed ownership together with raw AppState field removal
+in 7d. That step owns main/state wiring, the last media-pool fence uses and
+media-session clock uses, lifecycle delegates and compiler privacy probes.
+This changes the delivery order within the same acceptance contract: 7c
+closes core visibility; 7d closes runtime ownership and honest census zero.
+It does not defer or retire any required endpoint. Preserve actual C7
+shutdown behavior on its landed base before final delivery.
+
+Compile actual consumers with pinned1.97.1: core default all-targets; core
+all-targets with `hiqlite-contract-tests`; cluster-check all-targets; daemon
+all-targets with `cluster-integration-tests`. Plain hiqlite-store does not
+compile the external startup observer. Run focused core role/roster, clock
+proof/identity, revocation exclusion, directory ordering/filtering, learner
+job and daemon protocol regressions; strict Clippy, formatting, census,
+ownership/ratchet, source mapping and paperwork remain required. Record
+inherited debt and acceptance limits rather than weakening a guard.
