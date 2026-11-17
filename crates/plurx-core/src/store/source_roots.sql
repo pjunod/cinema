@@ -27,32 +27,24 @@ SELECT DISTINCT root.library_id,root.root_id,root.root_path,root.root_key,'sourc
 FROM source_lease_roots root JOIN background_storage_domains mapping
   ON mapping.library_id=root.library_id AND mapping.root_path=root.mapping_path;
 -- next statement
--- Match path components, not a textual prefix (/media/a is not /media/ab).
--- Only the most specific configured root owns a file.
-CREATE VIEW source_lease_file_roots AS
-SELECT DISTINCT source_file.id AS file_id,root.library_id,root.root_id,root.root_path,root.root_key
-FROM files source_file JOIN items item ON item.id=source_file.item_id
-JOIN source_lease_roots root ON root.library_id=item.library_id
-WHERE (source_file.path=root.root_path OR (root.root_path='/' AND substr(source_file.path,1,1)='/')
-  OR (substr(source_file.path,1,length(root.root_path))=root.root_path AND substr(source_file.path,length(root.root_path)+1,1)='/'))
-AND NOT EXISTS(SELECT 1 FROM source_lease_roots nested WHERE nested.library_id=root.library_id
-  AND length(nested.root_path)>length(root.root_path)
-  AND (source_file.path=nested.root_path OR (substr(source_file.path,1,length(nested.root_path))=nested.root_path
-    AND substr(source_file.path,length(nested.root_path)+1,1)='/')));
--- next statement
+-- Select the file before expanding root keys. Keeping the catalogue outside
+-- the aggregate lets correlated job/analysis/lease lookups use its primary key.
+-- Match components (/media/a is not /media/ab) and keep the longest root.
 CREATE VIEW source_lease_file_resources AS
-SELECT DISTINCT matched_file.file_id,resource.resource_key FROM source_lease_file_roots matched_file
-JOIN source_lease_root_resources resource ON resource.library_id=matched_file.library_id AND resource.root_id=matched_file.root_id
-UNION
-SELECT fallback_file.id,'source_io' FROM files fallback_file
--- Existence needs any matching root, not a second expansion of the DISTINCT
--- file-root view. Correlating that view can scan the entire files catalogue.
-WHERE NOT EXISTS(SELECT 1 FROM items fallback_item
-JOIN source_lease_roots root ON root.library_id=fallback_item.library_id
-WHERE fallback_item.id=fallback_file.item_id
- AND (fallback_file.path=root.root_path OR (root.root_path='/' AND substr(fallback_file.path,1,1)='/')
-  OR (substr(fallback_file.path,1,length(root.root_path))=root.root_path
-    AND substr(fallback_file.path,length(root.root_path)+1,1)='/')));
+SELECT source_file.id AS file_id,resource.value AS resource_key
+FROM files source_file,json_each(COALESCE((
+ SELECT json_group_array(root.resource_key)
+ FROM items item JOIN source_lease_root_resources root ON root.library_id=item.library_id
+ WHERE item.id=source_file.item_id
+  AND (source_file.path=root.root_path OR (root.root_path='/' AND substr(source_file.path,1,1)='/')
+   OR (substr(source_file.path,1,length(root.root_path))=root.root_path
+    AND substr(source_file.path,length(root.root_path)+1,1)='/'))
+  AND NOT EXISTS(SELECT 1 FROM source_lease_roots nested WHERE nested.library_id=root.library_id
+   AND length(nested.root_path)>length(root.root_path)
+   AND (source_file.path=nested.root_path OR (substr(source_file.path,1,length(nested.root_path))=nested.root_path
+    AND substr(source_file.path,length(nested.root_path)+1,1)='/')))
+ HAVING count(*)>0
+),'["source_io"]')) resource;
 -- next statement
 -- Root capacity is primary. Domains impose an aggregate limit only when
 -- explicitly configured; merely mapping roots to the same disk adds no cap.

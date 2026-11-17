@@ -886,7 +886,6 @@ pub(crate) fn source_lease_rewind_plan() -> Vec<String> {
         "source_lease_owner_scopes",
         "source_lease_job_scopes",
         "source_lease_file_resources",
-        "source_lease_file_roots",
         "source_lease_limits",
         "source_lease_root_resources",
         "source_lease_roots",
