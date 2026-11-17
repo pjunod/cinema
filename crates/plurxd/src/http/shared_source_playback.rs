@@ -37,6 +37,8 @@ pub(crate) struct SourceStartRegistry {
     settled: std::sync::Mutex<std::collections::VecDeque<std::sync::Arc<SourceStartEntry>>>,
     #[cfg(test)]
     discovery_pause: crate::seam_hooks::PauseSlot,
+    #[cfg(test)]
+    preparation_finished_pause: crate::seam_hooks::PauseSlot,
 }
 struct SourceStartEntry {
     identity: SourceStartIdentity,
@@ -2020,15 +2022,10 @@ async fn own_start(
         planned_incarnation,
         _intent: (*intent).clone(),
     });
-    let members = state
-        .membership
-        .observe_source_admission_members()
-        .await
-        .map_err(|_| SourceStartFailure::Unresolved)?
-        .ok_or(SourceStartFailure::Unavailable)?;
     // Pure planning precedes owner designation; the claim rechecks the exact
     // catalog file revision atomically. No producer or Source I/O custody is
-    // admitted by this preparation.
+    // admitted by this preparation. Capture the claim's short-lived member
+    // proof afterward so filesystem or Store planning waits cannot age it.
     let source_presentation = if receiver_presentation::range_bound(&input) {
         super::hls::SourceCopyPresentation::BoundedRange
     } else {
@@ -2042,6 +2039,19 @@ async fn own_start(
         input.session,
     ))
     .await?;
+    #[cfg(test)]
+    state
+        .transcode
+        .source_http_starts
+        .preparation_finished_pause
+        .hold()
+        .await;
+    let members = state
+        .membership
+        .observe_source_admission_members()
+        .await
+        .map_err(|_| SourceStartFailure::Unresolved)?
+        .ok_or(SourceStartFailure::Unavailable)?;
     entry.retain_stage(SourceStartTaskStage::Claiming {
         planned_incarnation,
         intent: (*intent).clone(),

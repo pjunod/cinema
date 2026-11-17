@@ -18,6 +18,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Source playback Start observes membership at its claim boundary after pure
+  preparation. Slow filesystem or planning work no longer consumes the
+  five-second authority proof before it is used; claim expiry, file and grant
+  checks, and overlapping playback ownership are preserved.
+
 - Cluster startup accepts caller-owned Raft and API listener reservations
   through import and activation, preserving the advertised endpoints and
   existing admission checks. Source playback fixtures retain those sockets
