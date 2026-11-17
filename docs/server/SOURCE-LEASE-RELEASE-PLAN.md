@@ -5,6 +5,15 @@ the per-root capacity continuation is WIP in [PR #1728](http://forge.lan:3000/no
 session `01a1e5c0-d4b1-7740-93b4-a0e0123a79cf`, continuing Claude Opus 5.5 ·
 **Written:** 2026-11-14 · **Updated:** 2026-11-16 · No deployment
 
+The expanded catalog is a forward-only transition. The origin/main binary
+at 32fa rejects the rewritten pause/resume SQL at its exact
+source_arbitration_shape check, and its managed-v6 and dispatch validators
+reject the expanded resource views. Already-running v1 writers remain bridged,
+but restart and rejoin after expand require the new binary. Keep quorum during
+the binary roll; do not start a pre-expand binary on the expanded catalog.
+M1's note that ordinary startup does not reinstall the old claim trigger is
+not evidence that the old executable accepts this catalog.
+
 Companion to [SOURCE-CUSTODY-RECOVERY.md](../archive/SOURCE-CUSTODY-RECOVERY.md), which
 records the physical-proof model this plan retires, and
 [JOB-QUEUE-ROOT-CAUSE-AND-FIX.md](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md), which owns

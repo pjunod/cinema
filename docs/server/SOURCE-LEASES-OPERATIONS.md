@@ -40,6 +40,16 @@ offline metadata alone cannot readmit a reader, and resuming a paused reader
 recomputes its current root keys and applies the maintenance limit. There is
 no physical-stop proof barrier.
 
+The expanded lease catalog is forward-only. The origin/main binary at
+32fa rejects its rewritten pause/resume SQL during the exact
+source_arbitration_shape check; its managed-v6 and dispatch validators also
+reject the new resource views. Existing v1 processes can keep running through
+the compatibility writers, but after expand every restart or rejoin must use
+the new binary. Keep quorum during the binary roll and do not downgrade an
+expanded catalog to a pre-expand binary. M1's finding that ordinary startup
+does not reinstall the old claim trigger does not mean an old binary can
+restart against the expanded catalog.
+
 **How to read Activity.** Activity shows per-root occupancy and caps alongside
 the leases that consume them. Node occupancy is informational, not the rooted
 admission policy. A lease inside its 60 s grace still counts. One whose expiry

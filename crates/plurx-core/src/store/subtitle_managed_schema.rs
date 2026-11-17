@@ -328,7 +328,9 @@ pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreEr
         Ok(Some(4))
     } else if canonical(shape) == canonical(&SHAPES.6) {
         Ok(Some(5))
-    } else if canonical(shape) == canonical(&SHAPES.7) {
+    } else if super::source_leases::accepts_extension_shape(shape, &SHAPES.7) {
+        // Source leases replace the resource view after managed v6. Recognize
+        // only the exact expanded or contracted catalogue projection.
         Ok(Some(6))
     } else {
         Err(StoreError::Migration(
