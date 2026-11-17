@@ -92,3 +92,24 @@ checks. The Source offer case still requires overlapping ordinary and affirmed
 Starts; failure-stage diagnostics do not waive its unresolved 503. These repairs
 have not yet compiled or passed their failed-only runtime checks. Main promotion,
 deployment and real-title/device acceptance remain outstanding.
+
+## Corrected predecessor integration
+
+The effort integrates corrected candidate809be33c (tree8fa71cbb) by normal
+merge. Its upstream source reviews and formal repair remain separate evidence.
+The integration resolves the metrics projection overlap by retaining one
+cluster-owned fixed-label projection, without a redundant Cluster method or
+MetricsState counter copy. Both the exact rendered-row and all11-source-row
+assertions remain.
+
+The unchanged ownership scanner and module roots measure the union of both
+parents:1176 task shapes,104 method spawns,2271 timers,361 Command constructors
+and951 launch-shaped methods. Each equals the sum of the parent counts minus
+their common base. This is static ownership inventory, not process execution.
+
+The actual main source retains both uniquely mapped startup/worker anchors.
+The source-pin rebind preserves both parents' scoped provenance and explicitly
+excludes timed runtime/Store shutdown and physical cleanup from the finite
+models' guarantees. Models/configuration bytes are unchanged. Targeted merge
+delta review, static compilation and affected validation remain pending; no
+new model execution or runtime qualification is claimed by this integration.

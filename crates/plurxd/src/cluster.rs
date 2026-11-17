@@ -88,6 +88,15 @@ impl Cluster {
         self.fence.authority()
     }
 
+    /// Resolves once, with the error, when this node's own database Raft
+    /// core has quit on a fatal error; never for an ordinary stop or an
+    /// unclustered process. The daemon drains and exits on it.
+    pub(crate) fn core_failure(
+        &self,
+    ) -> impl std::future::Future<Output = String> + Send + 'static {
+        self.membership.raft_core_failure()
+    }
+
     /// This node's standing and admission, from in-process state only: the
     /// applied Raft membership (the source `local_node_is_committed_voter`
     /// reads) and the two atomics the heartbeat publishes. No IO, no await.
@@ -119,20 +128,6 @@ impl Cluster {
     /// The shared directory, for a subsystem that keeps its own handle.
     pub(crate) fn directory(&self) -> Directory {
         self.directory.clone()
-    }
-
-    /// Process-local SQLite writer replies abandoned by a cancelled apply or
-    /// teardown. The vendor loads its counters atomically; this read performs
-    /// no store or membership I/O.
-    pub(crate) fn writer_abandoned_replies(&self) -> Vec<WriterAbandonedReply> {
-        hiqlite::db_writer_abandoned_replies()
-            .into_iter()
-            .map(|row| WriterAbandonedReply {
-                request: row.request,
-                ok: row.ok,
-                error: row.error,
-            })
-            .collect()
     }
 
     /// Exact member authentication remains a fresh membership proof, never a
@@ -177,13 +172,22 @@ impl Cluster {
     }
 }
 
-/// One fixed-label writer reply counter row, independent of vendor types at
-/// feature call sites.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Process-local writer observations projected through the raw cluster owner.
+/// These fixed-label counters need neither a Store nor serving authority.
 pub(crate) struct WriterAbandonedReply {
     pub(crate) request: &'static str,
     pub(crate) ok: u64,
     pub(crate) error: u64,
+}
+pub(crate) fn writer_abandoned_replies() -> Vec<WriterAbandonedReply> {
+    hiqlite::db_writer_abandoned_replies()
+        .into_iter()
+        .map(|row| WriterAbandonedReply {
+            request: row.request,
+            ok: row.ok,
+            error: row.error,
+        })
+        .collect()
 }
 
 /// This node's place in the cluster.

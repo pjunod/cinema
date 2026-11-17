@@ -591,7 +591,7 @@ impl TranscodeManager {
             .map_err(|_| SourceWorkerError::Unavailable)?;
         // The census Input and every reader are joined. Reopen independently
         // against the exact object before the primary operation gets a URL.
-        let input = crate::source_input::SourceInput::open_foreground_held(
+        let mut input = crate::source_input::SourceInput::open_foreground_held(
             request,
             source
                 .reopen(&file)
@@ -610,7 +610,10 @@ impl TranscodeManager {
                 }
             };
         let observer = input.observer();
-        owners.set_source_observer(1, observer.clone());
+        input
+            .publish_source_observer(&owners, 1)
+            .await
+            .map_err(|_| SourceWorkerError::Unavailable)?;
         let running = spawn_source_generation(
             input,
             &file.path,

@@ -686,7 +686,10 @@ fn machine_names_reach_the_activity_page_only_for_an_admin() {
         .iter()
         .map(|snippet| {
             let start = handler.find(snippet).expect("known roster transport");
-            start + snippet.find("hostnames").expect("roster value in transport")
+            start
+                + snippet
+                    .find("hostnames")
+                    .expect("roster value in transport")
         })
         .collect::<Vec<_>>();
     let publication_use = handler
@@ -708,7 +711,11 @@ fn machine_names_reach_the_activity_page_only_for_an_admin() {
             (!before_is_identifier && !after_is_identifier).then_some(at)
         })
         .collect::<Vec<_>>();
-    assert_eq!(roster_uses.len(), 4, "all roster-value uses are accounted for");
+    assert_eq!(
+        roster_uses.len(),
+        4,
+        "all roster-value uses are accounted for"
+    );
     for at in roster_uses {
         assert!(
             allowed_uses.contains(&at),
@@ -2051,7 +2058,7 @@ fn writer_abandoned_replies_render_by_request_and_outcome() {
             .count(),
         4,
     );
-    assert_eq!(hiqlite::db_writer_abandoned_replies().len(), 11);
+    assert_eq!(crate::cluster::writer_abandoned_replies().len(), 11);
 }
 
 /// E1a: the applied view's families render from one observation, the mark's

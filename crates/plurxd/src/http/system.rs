@@ -6278,7 +6278,6 @@ pub(crate) struct MetricsState {
     start_attempts: Arc<crate::playstart::StartAttempts>,
     route_cache: Arc<crate::media_sessions::RouteCacheMetrics>,
     applied: plurx_core::store::AppliedViewMetrics,
-    writer_abandoned_replies: Vec<crate::cluster::WriterAbandonedReply>,
     cluster_directory: crate::cluster::Directory,
 }
 
@@ -6305,7 +6304,6 @@ impl FromRef<AppState> for MetricsState {
             start_attempts: Arc::clone(&state.start_attempts),
             route_cache: state.media_sessions.route_cache_metrics(),
             applied: state.applied.metrics_handle(),
-            writer_abandoned_replies: state.cluster.writer_abandoned_replies(),
             cluster_directory: state.cluster.directory(),
         }
     }
@@ -6892,7 +6890,7 @@ pub(crate) async fn metrics(
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
     let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot())
         + &render_applied_view_metrics(&state.applied.observation(), &hiqlite::db_read_pool_wait())
-        + &render_writer_abandoned_replies(&state.writer_abandoned_replies)
+        + &render_writer_abandoned_replies(&crate::cluster::writer_abandoned_replies())
         + &render_cluster_directory_metrics(state.cluster_directory.reads());
     let membership_metrics = render_passive_membership_metrics(state.passive_membership.snapshot());
     let process_metrics = format!(

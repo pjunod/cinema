@@ -951,6 +951,7 @@ impl TranscodeManager {
                 .try_vod_session(
                     vod_settings,
                     req,
+                    priority,
                     recovery
                         .map(|identity| {
                             identity.principal.local_user_id().ok_or_else(|| {
@@ -4219,6 +4220,7 @@ impl TranscodeManager {
         self.vod
             .preview_recipe(
                 crate::vodserve::VodRecipeRequest {
+                    admission_priority: crate::admission::Priority::Live,
                     root_admission: None,
                     measured_candidate: None,
                     retained_capture: crate::vodserve::RetainedOutputCapture::New,
@@ -4632,6 +4634,7 @@ impl TranscodeManager {
         &self,
         vod_settings: Option<crate::vodserve::VodSettings>,
         req: &SessionRequest,
+        admission_priority: Priority,
         user_id: Option<i64>,
         user_name: &str,
         supersession_user: &str,
@@ -4813,6 +4816,7 @@ impl TranscodeManager {
             )
         });
         let prepared = crate::vodserve::VodRecipeRequest {
+            admission_priority,
             root_admission: None,
             companion,
             measured_candidate,
@@ -5989,6 +5993,11 @@ impl TranscodeManager {
                 .vod
                 .try_create_before_release(
                     crate::vodserve::VodRecipeRequest {
+                        admission_priority: if speculative {
+                            Priority::Speculative
+                        } else {
+                            Priority::Live
+                        },
                         root_admission,
                         companion,
                         measured_candidate,

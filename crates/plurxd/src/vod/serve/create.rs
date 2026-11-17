@@ -955,7 +955,7 @@ impl VodServe {
 
     pub(super) async fn reserve_media_group(
         media: &[Arc<Rendition>],
-        priority: Option<crate::admission::Priority>,
+        priority: crate::admission::Priority,
     ) -> Result<Vec<crate::vodencode::EncodePermit>, String> {
         let refuse = || {
             crate::transcode::vod_refusal_error(
@@ -1004,16 +1004,6 @@ impl VodServe {
             .iter()
             .map(|encoding| encoding.resources())
             .collect::<Vec<_>>();
-        let priority = priority.unwrap_or_else(|| {
-            if encodings
-                .iter()
-                .any(|encoding| encoding.is_speculative() || encoding.nonpreemptive_trial)
-            {
-                crate::admission::Priority::Speculative
-            } else {
-                crate::admission::Priority::Live
-            }
-        });
         // Foreground family starts participate in the same preemption protocol
         // as ordinary encoders. Keep the waiter alive across every attempt so
         // background indexing yields and cannot reclaim its released budget.
@@ -1131,15 +1121,7 @@ impl VodServe {
             .encoding
             .as_ref()
             .is_some_and(|encoding| encoding.nonpreemptive_trial);
-        let admission_priority = if prepared
-            .encoding
-            .as_ref()
-            .is_some_and(|encoding| encoding.is_speculative() || encoding.nonpreemptive_trial)
-        {
-            crate::admission::Priority::Speculative
-        } else {
-            crate::admission::Priority::Live
-        };
+        let admission_priority = prepared.admission_priority;
         let passive_grant = if req.passive_vod {
             if !req.vod_only || req.presentation != crate::transcode::Presentation::Vod {
                 return Err(crate::transcode::vod_refusal_error(
@@ -1267,6 +1249,7 @@ impl VodServe {
                 let attachment = self
                     .resolve_rendition(
                         &mut VodRecipeRequest {
+                            admission_priority,
                             root_admission: None,
                             measured_candidate: None,
                             retained_capture: RetainedOutputCapture::New,
@@ -1304,6 +1287,7 @@ impl VodServe {
                 let attachment = self
                     .resolve_rendition(
                         &mut VodRecipeRequest {
+                            admission_priority,
                             root_admission: None,
                             measured_candidate: None,
                             retained_capture: RetainedOutputCapture::New,
@@ -1385,7 +1369,7 @@ impl VodServe {
                 .filter(|child| !deferred(child))
                 .cloned()
                 .collect::<Vec<_>>();
-            let mut permits = Self::reserve_media_group(&admitted, Some(admission_priority))
+            let mut permits = Self::reserve_media_group(&admitted, admission_priority)
                 .await?
                 .into_iter();
             media
