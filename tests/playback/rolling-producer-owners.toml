@@ -4053,7 +4053,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Shared: both sides carried the Twilight/reader source (title-lane scheduling and reader
 # reclamation), so main's figure already counts admission.rs +1 and source_probe/title_work_tests.rs +4.
 # Union 1153 + 15 (F+) + 13 (main) = 1181, less those 5 counted twice = 1176.
-expected_occurrences = 1176
+# Raw-probe retirement fixture: One test worker thread is joined before raw-probe retirement.
+expected_occurrences = 1177
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4308,7 +4309,8 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
-expected_occurrences = 99
+# Raw-probe retirement fixture: One scoped controller thread is joined after observing the held worker.
+expected_occurrences = 100
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7285,7 +7287,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Prepared delivery (#1736/#1752) contributes main's additional test-only
 # `.vod.status()` snapshot observation. It launches no child and transfers no
 # ownership. Preserve both reviewed contributions: main 937 + F+ 5 = 942.
-expected_occurrences = 942
+# Raw-probe retirement fixture: The scoped test controller spawn matches lexically and starts no child.
+expected_occurrences = 943
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
