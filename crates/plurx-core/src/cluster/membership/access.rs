@@ -418,3 +418,50 @@ impl AdministrativeObservation {
         self.manager.operations_peers()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn standalone_job_and_admission_answers_do_not_fabricate_committed_authority() {
+        let manager = MembershipManager::unavailable();
+        let access = manager.cluster_access();
+        let local = access.local();
+        assert_eq!(local.deployment(), Deployment::Standalone);
+        let facts = local.facts();
+        assert_eq!(facts.standing, AppliedStanding::Standalone);
+        assert_eq!(facts.admission, LocalServingRole::Unclustered);
+        assert!(!facts.maintenance);
+        assert_eq!(
+            local.admission().await.expect("local admission"),
+            LocalServingRole::Unclustered
+        );
+        assert!(
+            access.jobs().may_run_cluster_jobs().await,
+            "standalone owns singleton jobs"
+        );
+        assert!(matches!(
+            local.committed().await,
+            Err(MembershipError::Unavailable)
+        ));
+        assert!(matches!(
+            access.active_voter_authority().confirm().await,
+            Err(MembershipError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn clones_keep_clock_source_identity_and_independent_managers_do_not() {
+        let manager = MembershipManager::unavailable();
+        let access = manager.cluster_access();
+        let first = access.clock_protocol();
+        let cloned = access.clone().clock_protocol();
+        assert!(Arc::ptr_eq(&first.guard(), &manager.clock_guard()));
+        assert!(Arc::ptr_eq(&first.guard(), &cloned.guard()));
+        let independent = MembershipManager::unavailable()
+            .cluster_access()
+            .clock_protocol();
+        assert!(!Arc::ptr_eq(&first.guard(), &independent.guard()));
+    }
+}

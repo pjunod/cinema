@@ -7217,7 +7217,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # cluster HTTP reads, two operations readers, and one desktop topology read
 # now enter the existing Cluster::membership_status delegate. No task, timer,
 # child launch, admission, or cleanup owner changes; the matcher is unchanged.
-expected_occurrences = 927
+# 927 -> 926 with cluster7c: one MembershipManager.status observation moves
+# from the daemon facade to its core administrative service. This removes one
+# lexical .status() match from these roots, not a process or task owner.
+expected_occurrences = 926
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

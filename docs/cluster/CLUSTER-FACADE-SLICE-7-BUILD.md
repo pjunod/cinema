@@ -339,3 +339,37 @@ fresh operation preflight under its original absolute deadline. Actual
 activity-start, cached-owner, shared-source-forwarding, internal-clock,
 cluster-operation and startup fixtures migrate their private API calls to
 the appropriate services without changing assertions, proof type or timing.
+
+## 7c preparatory delivery ledger
+
+Checkpoint `21c60d0da` passed core contract-feature all-target compilation,
+cluster-check all-target compilation, integration-enabled daemon all-target
+compilation, core default all-target compilation and strict contract-feature
+core Clippy. Earlier checkpoints found the iterator temporary lifetime and
+remaining actual consumers; those failed receipts are retained. Four unused
+query entry points were retired rather than silenced.
+
+Real external-crate compiler controls used the exact Cargo-produced core
+metadata: public services compiled; all14 restricted raw methods produced
+E0624; all4 retired raw methods produced E0599; unrelated errors were refused.
+Probe source and receipts remain in owned durable task storage, outside
+compiler/cache output. Tracked archive blobs were verified before and after.
+
+The unchanged counting behavior measured204 → 201 after the last production
+mode/preflight callers migrated. All18 raw names remain reserved; the generic
+method inventory still counts public methods, the declaration check now
+requires private-or-retired definitions, and ClusterAccess was added to raw
+aggregate detection. No NOT_CLUSTER or file exemption was expanded. One
+`.status()` observation moved from the daemon to the core administrative
+service, reducing the conservative process pattern927 → 926 without changing
+its matcher or any actual process/task/timer owner. The first ownership run
+failed only that explained syntax count; its updated check remains pending.
+
+Nine existing formal source windows were reviewed: eight unchanged and one
+with only restricted visibility. The new core JobControl forwarding owner
+is explicitly tracked so a future cached-authority change cannot evade source
+drift. All three mapping checks pass; this is source correspondence, not new
+model execution. Added regressions distinguish standalone job/admission from
+fresh committed authority and cloned clock identity from independent sources.
+Focused execution, updated census/ownership checks and final intended-base
+review/gate/landing remain pending.
