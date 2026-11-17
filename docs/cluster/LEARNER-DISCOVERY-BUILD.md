@@ -1,6 +1,6 @@
 # Learner discovery — advertise client-serving membership only
 
-**Status:** open — plan committed before implementation. **Owner:** Codex.
+**Status:** open — implemented and focused local regressions passed; current-effort integration, complete-diff review and qualification remain pending. **Owner:** Codex.
 **Decision:** Paul, 2026-11-16: “Hide learners from discovery.”
 
 C8 from the [cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md).
@@ -73,3 +73,25 @@ is introduced.
 
 No source build, review, test pass, gate, merge or fleet acceptance is claimed
 by this plan. The slice-4 workspace remains active and separately owned.
+
+## Local checkpoint — 2026-11-17
+
+The typed standing watch, owned Bonjour/GDM lifecycle, companion eligibility
+loop and exact public eligibility route are implemented. The four tests
+affected by acknowledged mDNS withdrawal pass, including promotion, explicit
+withdrawal failure, a closed watch and transient HTTP timeout retention. The
+real K06 join observes applied Learner then Voter using one watch; it and the
+clock timing rejection regression pass. Existing discovery, identity, GDM
+and shutdown regressions passed in the earlier focused batch.
+
+The K06 availability probe previously raced the live clock observer by asking
+for timing evidence. Its original function reproduced the same failure. The
+fixture now verifies the exact signed committed-member response and node ID
+without minting timing evidence; production clock verification is unchanged.
+A mode-cycle negative control preserves the strict ticket-invalidity assertion
+while ordinary join and finalization use their normal advisory policy.
+
+These are local source results on the effort snapshot, not final qualification
+or fleet acceptance. Integrate current effort/C7 before final review and
+exact-head gate. Reconcile inherited Clippy/census failures on that base
+without suppressions, raised pins or duplicate ownership fixes.

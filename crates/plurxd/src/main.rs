@@ -37,6 +37,7 @@ mod delivery;
 mod desktop_control;
 mod diagnostics;
 mod diagnostics_delivery;
+mod discovery;
 mod dv_disk;
 #[cfg(unix)]
 mod dv_segment;
@@ -2553,6 +2554,7 @@ async fn boot_observing(
     let live_tv_shutdown = Arc::clone(&state.live_tv);
     let serving_shutdown = state.serving.clone();
     let membership_shutdown = state.membership.clone();
+    let discovery_standing = state.cluster.standing_watch();
     let jellyfin_standard_port = Arc::clone(&state.jellyfin_standard_port);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let desktop_server = if let Some(desktop) = &desktop {
@@ -2600,7 +2602,13 @@ async fn boot_observing(
     trigger_shutdown_registration_failpoint("after-listener-bind");
     let discovery_node_id =
         (!config.cluster.advertise_host.trim().is_empty()).then_some(node_id.as_str());
-    let mdns = start_discovery(&config, &instance_id, discovery_node_id, advertiser);
+    let mdns = start_discovery(
+        &config,
+        &instance_id,
+        discovery_node_id,
+        advertiser,
+        discovery_standing,
+    );
     let jellyfin = JellyfinStandardListener::open(
         config.server.jellyfin_bind(),
         &app,
@@ -2919,24 +2927,32 @@ async fn bind_listener(bind: SocketAddr) -> anyhow::Result<tokio::net::TcpListen
 /// never connect — so nothing is advertised at all in that case. Both
 /// protocols are best-effort past that point: failing to join multicast must
 /// not take down the HTTP server.
-fn start_discovery(
+fn start_discovery<S: discovery::StandingSource>(
     config: &Config,
     instance_id: &str,
     node_id: Option<&str>,
     advertiser: MdnsAdvertiser,
-) -> Option<mdns_sd::ServiceDaemon> {
-    let lan_discovery = !config.server.bind.ip().is_loopback();
-    if let Some(gdm_port) = gdm_responder_port(lan_discovery, config.server.bind) {
-        // GDM keeps direct-connect Plex clients working. Bonjour is the native
-        // plurx contract used by the Apple apps.
-        spawn_gdm_responder(
-            config,
-            instance_id.to_owned(),
-            node_id.map(str::to_owned),
-            gdm_port,
-        );
+    standing: S,
+) -> Option<discovery::Owner> {
+    let lan = !config.server.bind.ip().is_loopback();
+    let gdm = gdm_responder_port(lan, config.server.bind).map(|port| discovery::Gdm {
+        instance_id: instance_id.to_owned(),
+        node_id: node_id.map(str::to_owned),
+        name: config.server.name.clone(),
+        http_port: config.server.bind.port(),
+        port,
+    });
+    if gdm.is_none() && (!lan || !mdns_advertising_enabled()) {
+        return None;
     }
-    start_bonjour(config, instance_id, node_id, advertiser, lan_discovery)
+    let config = config.clone();
+    let instance_id = instance_id.to_owned();
+    let node_id = node_id.map(str::to_owned);
+    Some(discovery::Owner::start(
+        standing,
+        move || start_bonjour(&config, &instance_id, node_id.as_deref(), advertiser, lan),
+        gdm,
+    ))
 }
 
 /// The native plurx discovery contract, which the Apple clients browse for.
@@ -2979,25 +2995,6 @@ fn start_bonjour(
             None
         }
     }
-}
-
-/// Answer Plex clients' GDM searches for as long as the server runs.
-///
-/// Best-effort by construction: a box where the multicast join is refused
-/// still serves HTTP, and the only trace is one warning.
-fn spawn_gdm_responder(
-    config: &Config,
-    instance_id: String,
-    node_id: Option<String>,
-    gdm_port: u16,
-) {
-    let name = config.server.name.clone();
-    let http_port = config.server.bind.port();
-    tokio::spawn(async move {
-        if let Err(e) = gdm_responder(instance_id, node_id, name, http_port, gdm_port).await {
-            tracing::warn!(error = %e, "GDM discovery responder unavailable");
-        }
-    });
 }
 
 /// Lay out the configured storage roots, and clear exactly the one directory
@@ -3905,7 +3902,7 @@ async fn serve(
     jellyfin: JellyfinStandardListener,
     https: https::Serving,
     progress: Arc<crate::progress::ProgressCoalescer>,
-    mdns: Option<mdns_sd::ServiceDaemon>,
+    mdns: Option<discovery::Owner>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<HttpDrain> {
     // The shutdown future stops both listeners at once; the standard port
@@ -3926,7 +3923,7 @@ async fn serve_observed(
     jellyfin: JellyfinStandardListener,
     https: https::Serving,
     progress: Arc<crate::progress::ProgressCoalescer>,
-    mdns: Option<mdns_sd::ServiceDaemon>,
+    mdns: Option<discovery::Owner>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<HttpDrain> {
     let main = owner.serve_normal(app, shutdown).await;
@@ -4049,7 +4046,7 @@ impl Drop for JellyfinStandardListener {
 
 async fn drain_serving_state(
     progress: Arc<crate::progress::ProgressCoalescer>,
-    mdns: Option<mdns_sd::ServiceDaemon>,
+    mdns: Option<discovery::Owner>,
 ) -> anyhow::Result<()> {
     match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, progress.drain()).await {
         Ok(Ok(flushed)) if flushed > 0 => {
@@ -4069,10 +4066,8 @@ async fn drain_serving_state(
             );
         }
     }
-    if let Some(mdns) = mdns {
-        if let Err(error) = mdns.shutdown() {
-            tracing::warn!(%error, "Bonjour discovery shutdown failed");
-        }
+    if let Some(discovery) = mdns {
+        discovery.shutdown().await;
     }
     Ok(())
 }
@@ -4552,35 +4547,7 @@ async fn advertise_with(
     retry_after: Duration,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> anyhow::Result<()> {
-    let (base, port, info_url) = discovery_endpoints(server)?;
-    let client = discovery_client()?;
-    tokio::pin!(shutdown);
-
-    let Some(info) =
-        await_discovery_identity(&client, &base, info_url, retry_after, &mut shutdown).await
-    else {
-        return Ok(());
-    };
-
-    let host_name = system_hostname();
-    let lan_address = primary_lan_address();
-    let node_id = info.cluster_advertisement.then_some(info.node_id.as_str());
-    let name = discovery_name(&info.name, host_name.as_deref(), lan_address.as_ref());
-    let instance_name = instance_label(&name, node_id);
-    let daemon = advertiser(
-        &info.instance_id,
-        &name.label,
-        &instance_name,
-        node_id,
-        SocketAddr::from(([0, 0, 0, 0], port)),
-        &info.version,
-    )?;
-    tracing::info!(server = %base, "host Bonjour discovery companion ready");
-    (&mut shutdown).await;
-    daemon
-        .shutdown()
-        .context("shutting down host Bonjour advertiser")?;
-    Ok(())
+    discovery::companion(server, advertiser, retry_after, shutdown).await
 }
 
 /// Console logging for the discovery companion. It has no admin UI behind it,
@@ -4644,22 +4611,30 @@ async fn await_discovery_identity(
 ) -> Option<DiscoveryServerInfo> {
     let mut failed_attempts = 0_u64;
     loop {
-        match fetch_discovery_server_info(client, info_url.clone()).await {
-            Ok(info) => return Some(info),
-            Err(error) => {
-                failed_attempts += 1;
-                if should_log_wait(failed_attempts) {
-                    tracing::warn!(
-                        %error,
-                        server = %base,
-                        "waiting for server before advertising Bonjour"
-                    );
+        let observed = tokio::select! {
+            biased;
+            () = &mut *shutdown => return None,
+            observed = async {
+                if !discovery::eligibility(client, base).await?.advertise {
+                    return Ok::<_, anyhow::Error>(None);
                 }
-                tokio::select! {
-                    _ = &mut *shutdown => return None,
-                    _ = tokio::time::sleep(retry_after) => {}
+                fetch_discovery_server_info(client, info_url.clone()).await.map(Some)
+            } => observed,
+        };
+        match observed {
+            Ok(Some(info)) => return Some(info),
+            Ok(None) => failed_attempts = 0,
+            Err(error) => {
+                failed_attempts = failed_attempts.saturating_add(1);
+                if should_log_wait(failed_attempts) {
+                    tracing::warn!(%error, server = %base, "waiting for server before advertising Bonjour");
                 }
             }
+        }
+        tokio::select! {
+            biased;
+            () = &mut *shutdown => return None,
+            () = tokio::time::sleep(retry_after) => {}
         }
     }
 }
@@ -4940,15 +4915,24 @@ fn first_version_line(stdout: &[u8]) -> Option<String> {
 /// GDM discovery responder: answers Plex clients' multicast `M-SEARCH` on the
 /// LAN (docs/CLIENTS.md §3). Multicast is TTL-scoped to the local network, so
 /// this never answers WAN queries (avoids GDM/SSDP reflection abuse).
-async fn gdm_responder(
+async fn gdm_responder<S: discovery::StandingSource>(
     instance_id: String,
     node_id: Option<String>,
     name: String,
     http_port: u16,
     gdm_port: u16,
+    standing: S,
 ) -> anyhow::Result<()> {
     let socket = gdm_socket(gdm_port).await?;
-    gdm_serve(&socket, &instance_id, node_id.as_deref(), &name, http_port).await
+    gdm_serve(
+        &socket,
+        &instance_id,
+        node_id.as_deref(),
+        &name,
+        http_port,
+        &standing,
+    )
+    .await
 }
 
 /// Bind the GDM port and join the group Plex clients search on.
@@ -4978,12 +4962,13 @@ async fn gdm_socket(gdm_port: u16) -> anyhow::Result<tokio::net::UdpSocket> {
 /// joining a multicast group: what matters here is that only a real `M-SEARCH`
 /// draws a reply. Answering anything else would turn the server into an
 /// amplification reflector for whatever else arrives on the port.
-async fn gdm_serve(
+async fn gdm_serve<S: discovery::StandingSource>(
     socket: &tokio::net::UdpSocket,
     instance_id: &str,
     node_id: Option<&str>,
     name: &str,
     http_port: u16,
+    standing: &S,
 ) -> anyhow::Result<()> {
     // Plex clients parse what GDM advertises, so this stays bare semver — the
     // git build stamp would not survive their version comparisons.
@@ -4991,7 +4976,7 @@ async fn gdm_serve(
     let mut buf = [0u8; 1024];
     loop {
         let (n, addr) = socket.recv_from(&mut buf).await?;
-        if plurx_compat_plex::gdm::is_search(&buf[..n]) {
+        if discovery::visible(standing.current()) && plurx_compat_plex::gdm::is_search(&buf[..n]) {
             let resp = plurx_compat_plex::gdm::response_for(
                 &plurx_compat_plex::gdm::Advertisement {
                     instance_id,

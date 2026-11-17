@@ -2760,6 +2760,99 @@ async fn local_https_certificate_exports_only_loaded_public_chain_even_after_dis
     assert_eq!(after["certificate"], snapshot["certificate"]);
 }
 
+#[test]
+fn discovery_policy_route_is_exact_for_every_admission_projection() {
+    for role in [
+        None,
+        Some(LocalServingRole::Learner),
+        Some(LocalServingRole::Fenced),
+    ] {
+        assert!(capacity_role_refusal(role, &Method::GET, crate::discovery::PATH).is_none());
+        assert!(capacity_role_refusal(role, &Method::POST, crate::discovery::PATH).is_some());
+        assert!(
+            capacity_role_refusal(role, &Method::GET, "/api/v1/server/discovery/extra").is_some()
+        );
+        assert!(capacity_role_refusal(role, &Method::GET, "/api/v1/settings").is_some());
+    }
+    assert!(learner_route_eligible(&Method::GET, crate::discovery::PATH));
+    assert!(maintenance_route_eligible(
+        &Method::GET,
+        crate::discovery::PATH
+    ));
+    assert!(!maintenance_route_eligible(
+        &Method::POST,
+        crate::discovery::PATH
+    ));
+}
+
+#[tokio::test]
+async fn discovery_route_survives_learner_and_maintenance_admission() {
+    // The real handler's state is standalone. Inject only admission facts,
+    // proving both production gates admit this exact Store-free public route.
+    let app = router(test_state_without_router());
+    for (role, maintenance) in [
+        (LocalServingRole::Unclustered, false),
+        (LocalServingRole::Learner, false),
+        (LocalServingRole::Fenced, false),
+        (LocalServingRole::Voter, true),
+    ] {
+        let admitted = app.clone().layer(axum::middleware::from_fn(
+            move |request: Request<Body>, next: Next| async move {
+                if let Some(response) = capacity_maintenance_refusal(
+                    maintenance,
+                    request.method(),
+                    request.uri().path(),
+                ) {
+                    return response;
+                }
+                if let Some(response) =
+                    capacity_role_refusal(Some(role), request.method(), request.uri().path())
+                {
+                    return response;
+                }
+                next.run(request).await
+            },
+        ));
+        let response = admitted
+            .clone()
+            .oneshot(get(crate::discovery::PATH, None))
+            .await
+            .expect("route");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CACHE_CONTROL],
+            "no-store"
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).expect("bounded eligibility"),
+            json!({"advertise":true})
+        );
+        if maintenance || role == LocalServingRole::Learner {
+            assert_eq!(
+                call(&admitted, get("/api/v1/settings", None)).await.0,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+    }
+    for method in [Method::POST, Method::PUT, Method::DELETE] {
+        assert!(!learner_route_eligible(&method, crate::discovery::PATH));
+        assert!(!maintenance_route_eligible(&method, crate::discovery::PATH));
+    }
+    for path in [
+        "/api/v1/server/discovery/extra",
+        "/api/v1/server/discovery-other",
+    ] {
+        assert!(!learner_route_eligible(&Method::GET, path));
+        assert!(!maintenance_route_eligible(&Method::GET, path));
+    }
+}
+
 #[tokio::test]
 async fn local_https_admin_auth_survives_exact_learner_and_maintenance_admission() {
     let root = crate::test_tempdir().expect("tempdir");
