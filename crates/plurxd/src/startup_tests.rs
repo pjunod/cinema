@@ -5041,3 +5041,97 @@ fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
         "clone membership before the router takes the state"
     );
 }
+
+/// Audit C7: a database Raft core that quit on a fatal error resolves the
+/// same drain a signal resolves, and the drained process then exits with an
+/// error (status 1 from `daemon_main`), where a signal's drain exits cleanly.
+#[test]
+fn a_dead_raft_core_drains_like_a_signal_and_exits_non_zero() {
+    assert!(
+        exit_after_drain(None).is_ok(),
+        "a signal's drain exits zero"
+    );
+    let error = exit_after_drain(Some(&"database or disk is full".to_owned()))
+        .expect_err("a dead core's drain exits non-zero");
+    assert!(format!("{error:#}").contains("database or disk is full"));
+    let drained = Err(error.context("serving"));
+    assert!(
+        drained_a_dead_core(&drained),
+        "the verdict stays recognisable through context"
+    );
+    assert!(!drained_a_dead_core(&Ok(())));
+    assert!(!drained_a_dead_core(&Err(anyhow::anyhow!(
+        "listener failed"
+    ))));
+
+    let source = include_str!("main.rs");
+    let created = source
+        .find("let raft_core_failure = state.cluster.core_failure();")
+        .expect("the daemon watches its own Raft core");
+    let router = source
+        .find("let app = http::router(state);")
+        .expect("the router takes the state");
+    assert!(
+        created < router,
+        "watch the core before the router takes the state"
+    );
+    let future = source
+        .split_once("    let shutdown = async move {\n")
+        .expect("the boot shutdown future")
+        .1
+        .split_once("        tokio::select! {\n")
+        .expect("the drain select")
+        .1
+        .split_once("\n        }\n")
+        .expect("the select ends")
+        .0;
+    let biased = future.find("biased;").expect("the select is biased");
+    let signal = future.find("() = shutdown => {}").expect("the signal arm");
+    let leave = future
+        .find("() = leave_shutdown.cancelled() => {")
+        .expect("the leave arm");
+    let fatal = future
+        .find("error = raft_core_failure => {")
+        .expect("the dead core resolves the same select as the signal");
+    assert!(
+        biased < signal && signal < leave && leave < fatal,
+        "a pending signal or leave wins over a core failure"
+    );
+    let arm = &future[fatal..];
+    assert!(arm.contains("tracing::error!("), "one error line names it");
+    assert!(arm.contains("raft_core_fatal_drain.set(error)"));
+    assert_eq!(source.matches("state.cluster.core_failure()").count(), 1);
+    assert!(
+        source.contains("exit_after_drain(raft_core_fatal.get())"),
+        "the drained boot ends with the recorded verdict"
+    );
+    assert!(
+        source.contains(".map_or(1, |error| error.code)"),
+        "an error from the daemon is exit status 1"
+    );
+    assert!(
+        source.contains("let shutdown = if native_commit || drained_a_dead_core(&result) {"),
+        "a dead core's store close is bounded like a committed native close"
+    );
+    let daemon = source
+        .split_once("fn daemon_main() -> anyhow::Result<()> {")
+        .expect("daemon_main")
+        .1
+        .split_once("\n}\n")
+        .expect("end of daemon_main")
+        .0;
+    let ran = daemon
+        .find("runtime.block_on(daemon_run())")
+        .expect("the daemon runs on its own runtime");
+    let dropped = daemon
+        .find("runtime.shutdown_timeout(RUNTIME_SHUTDOWN);")
+        .expect("the runtime is shut down");
+    let exited = daemon
+        .find("std::process::exit(code)")
+        .expect("an error exits with its status");
+    assert!(
+        ran < dropped && dropped < exited,
+        "the runtime drops before the process exits"
+    );
+    assert_eq!(source.matches("std::process::exit(code)").count(), 1);
+}
