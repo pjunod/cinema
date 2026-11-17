@@ -1,7 +1,7 @@
 # CM v2.9 measured gamut — reference data and qualification
 
-**Status:** built; target-black extension CPU and isolated GPU qualified, final
-combined review and affected checks pending · **Owner:** Codex · **Updated:** 2026-11-16
+**Status:** built; target-black extension CPU and isolated GPU qualified;
+served application acceptance open · **Owner:** Codex · **Updated:** 2026-11-16
 
 Companion to [the display-targeted build ledger](DISPLAY-TARGETED-DV-BUILD.md).
 This records the measured gamut correction, its limits and its evidence.
@@ -98,8 +98,8 @@ All 6,167,040 active pixels are scored. The CM4 Last Breath control at P3
 dE remains 0.0367454 on Intel and 0.0436621 on AMD across 8,294,400 pixels.
 This is source-pinned isolated helper qualification. It does not establish
 served application deployment, physical display output, broader scene coverage,
-or universal mapper fidelity on the stress grid. Final combined adversarial
-review and affected tests remain pending.
+or universal mapper fidelity on the stress grid. Integrated adversarial review and affected test state are recorded in
+[PR #1727](http://forge.lan:3000/noirr/plurx/pulls/1727).
 
 ## The whole stress grid remains an explicit mapper limitation
 
