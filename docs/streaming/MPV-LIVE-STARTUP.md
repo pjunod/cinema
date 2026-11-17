@@ -1,7 +1,7 @@
 # MPV live startup admission
 
 **Owner:** Codex; Sol implements the Linux Player request and request regressions.
-**Status:** revision in progress after a reload-starvation review finding; Rust validation and runtime acceptance pending.
+**Status:** revised source independently reviewed; Rust validation and runtime acceptance pending.
 **Updated:** 2026-11-17.
 
 A normal Linux Player seek recreated a live copy session. The first frame
@@ -87,8 +87,8 @@ normal seek, OSC film seek and quality recreation.
 The Player run accounts for 120 tests. Successful cases were retained; only
 55 failed methods were rerun in a Linux container after resolving Mac runner
 socket-path/Bash limitations and package-version metadata. All 55 passed with
-no skips. The 0.5.2 frontend package is built. Revised server review, affected
-Rust validation and normal-route runtime acceptance remain open.
+no skips. The 0.5.2 frontend package is built. Revised server review is clear after the reload and capacity boundary fixes.
+Affected Rust validation and normal-route runtime acceptance remain open.
 
 Before-change metrics were retained privately from the same lab node. Its
 `plurx_ttff_ms` and `plurx_seek_to_picture_ms` series have zero observations, so
