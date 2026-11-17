@@ -1,9 +1,15 @@
 # Shared DV/HDR — final review and owner disposition
 
-**Status:** one P1 corrected and compiled; runtime qualification pending.
+**Status:** reviewed repairs; runtime qualification and real-title acceptance pending.
 **Owner:** GPT/Codex · **Promotion:** [#1732](http://forge.lan:3000/noirr/plurx/pulls/1732)
-**Reviewed candidate:** `efe5400d4faf5dec7a4a8fbf63e93b1a4991e1fa`
-**Main base:** `32fa105eed4194d85f3cbc97794b6864fb99d2ad`
+**Original full-review candidate:** `efe5400d4faf5dec7a4a8fbf63e93b1a4991e1fa`
+**Original full-review base:** `32fa105eed4194d85f3cbc97794b6864fb99d2ad`
+
+Latest source integration is `a93d30b343`: the targeted closure found no
+additional blocker, and local format/bookkeeping checks passed. Its new exact
+compiler proof, failed-case checks and required current M3 witness remain
+pending. Published source `588a20cb29` compiled and ran 15 named cases with
+13 passes and two failures; that is not main/deployment qualification.
 
 The single independent adversarial pass requested changes for one blocker.
 M1 was previously reviewed; this pass covered the integrated M2/M3/M4 work,
@@ -36,9 +42,10 @@ Coverage is deliberately split:
   separately owns the actual Source operation, child and reader barrier and
   checks that Stop waits for physical settlement.
 
-Both tests are authored and their targets compile; execution results belong
-to final qualification.
-No second adversarial pass or independent approval of later edits is claimed.
+Both tests are authored and their targets compile. The actual Source Stop
+case passed in run8278 on588a; full acceptance remains separate. The original
+pass did not review later edits; the targeted closures below have their own
+scopes. No second whole-effort adversarial pass is claimed.
 
 ## Independent review scope and remaining acceptance
 
@@ -89,9 +96,11 @@ maximum JSON-escaped titles and checks all families together.
 
 Fixture and structural-inventory repairs retain production admission and privacy
 checks. The Source offer case still requires overlapping ordinary and affirmed
-Starts; failure-stage diagnostics do not waive its unresolved 503. These repairs
-have not yet compiled or passed their failed-only runtime checks. Main promotion,
-deployment and real-title/device acceptance remain outstanding.
+Starts. Published588a compiled and its targeted run passed13 of15 named cases.
+The affirmed Start now succeeds but its offer is absent; no behavior fix or
+baseline waiver is claimed. The two failures are that offer assertion and the
+exact diagnostic seam census. Main promotion, deployment and real-title/device
+acceptance remain outstanding.
 
 ## Corrected predecessor integration
 
@@ -114,3 +123,26 @@ models' guarantees. Models/configuration bytes are unchanged. Independent target
 an additional blocker. Static compilation and affected validation remain
 pending; no new model execution or runtime qualification is claimed by this
 integration.
+
+## Tested decoder and clock repair integration
+
+Normal merge `a93d30b343` incorporates correctedQ `dd31755644cb` (tree
+`da926c64c66f`) and tested source `92d8d9f7f8b0`. Ref, tree, parent and patch
+identities were verified before integration. All three incoming Rust files
+remain byte-identical to that reviewed source; the only conflict was the
+ownership ledger. The unchanged source matcher measures1177 namespaced task
+shapes,105 method spawns,2271 timers,363 command constructors and952 broad
+launch shapes. B6 adds joined worker/controller fixture threads and two
+waited/reaped fixture commands; the extra broad launch shape is a scoped
+thread spawn, not another process. Roots, patterns, zeroes and ownership
+contracts remain unchanged. A scoped independent integration review approved
+this reconciliation without repeating the whole-effort review.
+
+The local diagnostic delta records only existing eligibility inputs in test
+builds, with exact observational-site census pins. HLS routes retain zero
+test-only sites; the Source Activity guard retains(1,1,1). Replies, fixture
+facts, policy and overlapping Start requirements are unchanged. The next
+runtime selection is the two failed cases plus one required current-source
+M3 positive after the daemon component key changes. The separate old-predicate
+expected-red control remains pending. No new model or runtime execution is
+claimed by this integration review.
