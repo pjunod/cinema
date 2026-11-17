@@ -5,11 +5,13 @@
 **Original full-review candidate:** `efe5400d4faf5dec7a4a8fbf63e93b1a4991e1fa`
 **Original full-review base:** `32fa105eed4194d85f3cbc97794b6864fb99d2ad`
 
-Latest source integration is `a93d30b343`: the targeted closure found no
-additional blocker, and local format/bookkeeping checks passed. Its new exact
-compiler proof, failed-case checks and required current M3 witness remain
-pending. Published source `588a20cb29` compiled and ran 15 named cases with
-13 passes and two failures; that is not main/deployment qualification.
+Latest source integration is `c9fc162b99`: normal merges preserve the frozen
+Q3 Source-preparation/quota-clock repair and the frozen native HLS rendezvous
+candidate. The bounded integration closure approved it with no findings.
+Exact-source compiler proof, failed-case checks and the required current M3
+witness remain pending. Published source `588a20cb29` compiled and ran 15 named
+cases with 13 passes and two failures; that is not main/deployment qualification.
+Local static evidence is recorded in the external progress ledger.
 
 The single independent adversarial pass requested changes for one blocker.
 M1 was previously reviewed; this pass covered the integrated M2/M3/M4 work,
@@ -146,3 +148,28 @@ runtime selection is the two failed cases plus one required current-source
 M3 positive after the daemon component key changes. The separate old-predicate
 expected-red control remains pending. No new model or runtime execution is
 claimed by this integration review.
+
+## Q3 and native rendezvous integration closure
+
+Normal merge `af6911c779` imports frozen Q3 `1e4197ef20`, whose exact-source
+all-target Clippy passed separately. Its four nonoverlapping Rust files are
+byte-identical to Q3; the two overlapping Source playback files preserve the
+effort's diagnostics and import the exact preparation/member-observation and
+fixture changes. The ownership ledger is the only conflict: pure source
+measurement gives 1,178 task spawns, 2,273 timers, 953 broad launch methods and
+401 lifecycle methods. All 22 unique rows, roots, patterns and zero rules remain.
+
+Normal merge `c9fc162b99` imports frozen native HLS candidate `a78bf99858`.
+Its four web/test files match that source exactly. The changelog conflict keeps
+both Unreleased fixes; the status entries coexist. Four Q3 and nine hotfix
+regression declarations are retained in their merge messages and the proposed
+promotion description. Independent review of this bounded integration found
+no issue; it did not repeat the whole-effort review or execute tests.
+
+Q3's focused runtime checks and the hotfix's normal train verdict remain under
+their owners. Their static evidence does not qualify this combined effort. The
+13 historical targeted passes remain preserved; the next owned runtime selection
+is the two failed cases plus the required current-source M3 positive. The
+separate old-predicate M3 control, deployment and real-title acceptance remain
+open. No new host operation, CI dispatch or source publication accompanies this
+local integration record.
