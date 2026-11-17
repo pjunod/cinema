@@ -47,11 +47,26 @@ impl State {
         }
     }
 }
+/// Test-only evidence captured by the actual child active-time deadline,
+/// before its error returns to the owner that kills and reaps the child.
+#[cfg(any(test, feature = "fixtures"))]
+#[derive(Clone, Copy, Debug)]
+pub struct SourceChildActiveTimeout {
+    pub child_id: u64,
+    pub process_id: u32,
+    pub active_budget: Duration,
+    pub elapsed: Duration,
+    pub credited: Duration,
+    pub charged: Duration,
+}
+
 struct Inner {
     state: Mutex<State>,
     changed: watch::Sender<u64>,
     max_paused: Duration,
     quota_waiters: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "fixtures"))]
+    active_timeouts: Mutex<Vec<SourceChildActiveTimeout>>,
 }
 
 /// One owned scanner attempt explicitly scopes this controller. It never
@@ -87,6 +102,8 @@ impl SourcePauseController {
             changed: watch::channel(0).0,
             max_paused,
             quota_waiters: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(any(test, feature = "fixtures"))]
+            active_timeouts: Mutex::new(Vec::new()),
         }))
     }
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -142,6 +159,43 @@ impl SourcePauseController {
                 .credited_since
                 .map_or(Duration::ZERO, |since| since.elapsed()),
         )
+    }
+    /// Actual deadline observations for this controller only; never authority.
+    #[cfg(any(test, feature = "fixtures"))]
+    pub fn test_child_active_timeouts(&self) -> Vec<SourceChildActiveTimeout> {
+        self.0
+            .active_timeouts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+    fn record_child_active_timeout(
+        &self,
+        child_id: u64,
+        process_id: u32,
+        active_budget: Duration,
+        started: Instant,
+        decision: Instant,
+        paused: Duration,
+    ) {
+        // These are the exact timer start, timeout-decision instant and
+        // relative credit snapshot used by that decision. No clock or credit
+        // is sampled after entering this helper or waiting for its lock.
+        let elapsed = decision.duration_since(started);
+        let observation = SourceChildActiveTimeout {
+            child_id,
+            process_id,
+            active_budget,
+            elapsed,
+            credited: paused,
+            charged: elapsed.saturating_sub(paused),
+        };
+        self.0
+            .active_timeouts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(observation);
     }
     fn verified_duration(&self) -> Duration {
         let state = self.state();
@@ -390,7 +444,17 @@ impl ChildPauseGuard {
                 // The owner may have awaited a store RPC while this future
                 // was not polled. A later finite hold cannot erase that spent
                 // active time merely because credit is active now.
-                if Instant::now() >= active_deadline {
+                let decision = Instant::now();
+                if decision >= active_deadline {
+                    #[cfg(any(test, feature = "fixtures"))]
+                    controller.record_child_active_timeout(
+                        self.child,
+                        process_id,
+                        active_budget,
+                        started,
+                        decision,
+                        paused,
+                    );
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "source child active execution timed out",
@@ -398,7 +462,14 @@ impl ChildPauseGuard {
                 }
                 tokio::select! {
                     result=&mut work=>return result,
-                    ()=tokio::time::sleep_until(active_deadline),if !aggregate_paused=>return Err(io::Error::new(io::ErrorKind::TimedOut,"source child active execution timed out")),
+                    ()=tokio::time::sleep_until(active_deadline),if !aggregate_paused=>{
+                        #[cfg(any(test, feature = "fixtures"))]
+                        {
+                            let decision = Instant::now();
+                            controller.record_child_active_timeout(self.child, process_id, active_budget, started, decision, paused);
+                        }
+                        return Err(io::Error::new(io::ErrorKind::TimedOut,"source child active execution timed out"));
+                    },
                     ()=tokio::time::sleep_until(wall)=>return Err(io::Error::new(io::ErrorKind::TimedOut,"source child paused wall age exhausted")),
                     result=changes.changed()=>{result.map_err(io::Error::other)?;},
                     _=ticks.tick()=>{},

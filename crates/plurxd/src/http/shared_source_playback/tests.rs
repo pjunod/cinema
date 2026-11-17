@@ -3464,6 +3464,18 @@ async fn actual_source_budgeted_start() {
         .transcode
         .test_hold_source_software_capacity()
         .expect("actual occupied software capacity");
+    // Hold pure preparation through the viewer-clock checks. Only after the
+    // NotYet rejoin do we let this real worker enter its unchanged queue.
+    let preparation = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .preparation_finished_pause
+        .arm("budgeted_start_preparation");
+    let index_pause = fixture
+        .state
+        .transcode
+        .pause_source_index_after_spawn(crate::seam_hooks::ASYNC_PAUSE_BOUND);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("private fixture listener");
@@ -3622,12 +3634,24 @@ async fn actual_source_budgeted_start() {
         "local fall-through preserves the ingress clock"
     );
     // Past the viewer's whole window (2 s plus the re-post grace) the
-    // entry is still working on its own budget: the clock bounded the
-    // answer, not the work.
+    // entry is still retained in pure preparation on its own budget. After
+    // this viewer window, release it into the real queue and rejoin only
+    // once its actual owned index child is held after spawn.
     tokio::time::sleep_until(tokio::time::Instant::from_std(
         began + Duration::from_millis(4_600),
     ))
     .await;
+    let held_preparation = preparation.reached().await;
+    let viewer_elapsed_before_release = began.elapsed();
+    let preparation_released_at = Instant::now();
+    held_preparation.release();
+    // Free capacity before the actual queue's five-second limit. The next
+    // observation is the real owned index child, with permit/fence/authority.
+    drop(hold);
+    let held_index = index_pause.reached().await;
+    let index_after_preparation_release = preparation_released_at.elapsed();
+    // Rejoin while the actual owned index child is held, rather than
+    // inferring a live cold-index operation from a planned incarnation.
     let (status, _, bytes) = post(body(abandoned), Some(300)).await;
     assert_eq!(
         (status, typed(&bytes[..])),
@@ -3635,7 +3659,7 @@ async fn actual_source_budgeted_start() {
             StatusCode::SERVICE_UNAVAILABLE,
             "startup_timeout".to_owned()
         ),
-        "the viewer's window does not end owned preparation: {}",
+        "the viewer's window does not end owned preparation: {}; viewer_elapsed={viewer_elapsed_before_release:?}, index_after_preparation_release={index_after_preparation_release:?}",
         String::from_utf8_lossy(&bytes)
     );
     let entry = entry_of(abandoned).expect("the abandoned start's entry");
@@ -3646,10 +3670,9 @@ async fn actual_source_budgeted_start() {
         .expect("stage")
         .incarnation()
         .expect("the entry owns its claim");
-    // The viewer leaves: B sends the End while preparation waits on the
-    // held capacity. The capacity then frees inside the 5 s queue, the cold
-    // index runs to completion and persists, and only then does the start
-    // end at its next stage boundary and settle.
+    // Deliver End while this exact owned index child is held after spawn.
+    // Its stage cannot complete or its queue expire before End ownership.
+    // Releasing the existing seam lets the real index persist and settle.
     let end_url = format!("{path}/{abandoned}/end");
     // End must arrive on a fresh driver: the Start driver's retained
     // ingress custody cannot be settled while that same driver awaits End.
@@ -3683,7 +3706,19 @@ async fn actual_source_budgeted_start() {
     })
     .await
     .expect("the End is owned");
-    drop(hold);
+    assert!(
+        held_index.is_held(),
+        "owned index hold expired before End observation"
+    );
+    assert!(
+        !indexed().await,
+        "the actual index is still unpersisted at owned End"
+    );
+    assert!(
+        held_index.is_held(),
+        "owned index hold expired during the index observation"
+    );
+    held_index.release();
     let receipt = tokio::time::timeout(Duration::from_secs(40), end)
         .await
         .expect("the abandoned start settles after its preparation")
