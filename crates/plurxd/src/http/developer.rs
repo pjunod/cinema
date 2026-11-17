@@ -2397,17 +2397,21 @@ fn dolby_vision_refit_items(
     progress: Result<plurx_core::store::dv_refit_jobs::RefitProgress, String>,
     spool: &[(bool, u64)],
 ) -> [DeveloperEnableItem; 4] {
-    let clients = |id: &'static str| DeveloperRequirement {
+    let clients = |id: &'static str| {
+        DeveloperRequirement {
         id,
         title: "Clients that apply the 8.1 mapping",
         status: RequirementStatus::Unobservable,
         evidence: format!("{DV_REFIT_CLIENTS}. Serving the curves to a platform that ignores them changes nothing it shows."),
+    }
     };
-    let timing = |id: &'static str| DeveloperRequirement {
+    let timing = |id: &'static str| {
+        DeveloperRequirement {
         id,
         title: "Fitted copy qualification",
         status: RequirementStatus::Unmet,
         evidence: "Fitted copy requires a matching picture timeline. Some AAC layouts change that timing and are refused before publication. Audio-bearing copy acceptance remains pending. Fitted copies requiring retained in-band parameter sets are unsupported by the current muxer.".into(),
+    }
     };
     let helper = match helper {
         Ok(Some(identity)) => DeveloperRequirement {
@@ -2480,7 +2484,10 @@ fn dolby_vision_refit_items(
             "dolby_vision_refit_web",
             "Dolby Vision F+ curves: web",
             enabled[0],
-            vec![clients("refit_web_clients"), timing("refit_web_copy_timing")],
+            vec![
+                clients("refit_web_clients"),
+                timing("refit_web_copy_timing"),
+            ],
         ),
         item(
             "dolby_vision_refit_apple",
@@ -2499,13 +2506,19 @@ fn dolby_vision_refit_items(
             "dolby_vision_refit_android",
             "Dolby Vision F+ curves: Android",
             enabled[2],
-            vec![clients("refit_android_clients"), timing("refit_android_copy_timing")],
+            vec![
+                clients("refit_android_clients"),
+                timing("refit_android_copy_timing"),
+            ],
         ),
         item(
             "dolby_vision_refit_linux",
             "Dolby Vision F+ curves: Linux",
             enabled[3],
-            vec![clients("refit_linux_clients"), timing("refit_linux_copy_timing")],
+            vec![
+                clients("refit_linux_clients"),
+                timing("refit_linux_copy_timing"),
+            ],
         ),
     ]
 }
@@ -4051,7 +4064,6 @@ mod tests {
             ]
         );
     }
-
 
     #[test]
     fn unavailable_source_recovery_preserves_local_diagnostics_without_a_poison_count() {
