@@ -45,7 +45,7 @@ Preparatory source checkpoints do not establish landing or qualification.
 | Piece | Files and ownership | Result |
 |---|---|---|
 | 7a — incoming authentication and admission | `cluster.rs`; `diagnostics.rs`; HTTP `activity_starts`, `internal_activity`, `internal_auth_revocation`, `internal_live_tv`, `internal_media`, `internal_media_sessions`, `remote`, `cluster_operations`, `mod`, `stream`; HLS `control`, `create`, `fence`, `preparation`, `response`; `offline.rs`, `state.rs`, associated fixtures | Reuse PeerAuthentication; preserve distinct legacy/read/voter/exact algorithms. Inject owned restart admission into OfflineManager. HLS response observation retains the same authority source and arrival/answer sampling. Route classification stays stateless and exact. |
-| 7b — job, backup and applied-change services | `cluster.rs`, `background_jobs.rs`, `background_jobs/analysis_reconcile.rs`, `cache_preparation.rs`, `state.rs`, `subtitle_models/mod.rs`, small remaining role callers, `backup.rs`, `settings_changes.rs` | Owned ClusterJobAuthority with fresh learner authority, typed reconciliation that preserves unreadable refusal, exact backup apply/anchor/apply/snapshot deadline sequence, typed applied-index/liveness/change source with unchanged settings proof. |
+| 7b — job, backup and applied-change services | `cluster.rs`, `background_jobs.rs`, `background_jobs/analysis_reconcile.rs`, `cache_preparation.rs`, `state.rs`, `subtitle_models/mod.rs`, small remaining role callers, `backup.rs`, `settings_changes.rs`; backup-only Boot/AppStateConfig wiring in `main.rs` and corresponding `startup_tests.rs` literals | Owned ClusterJobAuthority with fresh learner authority, typed reconciliation that preserves unreadable refusal, exact backup apply/anchor/apply/snapshot deadline sequence, typed applied-index/liveness/change source with unchanged settings proof. |
 | 7c — bootstrap and core boundary | `cluster.rs`, `main.rs`, `state.rs`; scoped core membership/access APIs, SelectedBackend factory; cluster-check and external startup observer fixture | Cluster-owned composition from selected mechanisms, typed Boot/AppStateConfig, high-level core bridge and private raw role/roster methods. Coordinate the small SelectedBackend addition after the active listener owner's integration; no competing vendor/startup/listener repair. Preserve C7 on its actual landed base. |
 | 7d — privacy and semantic census | `cluster.rs`, `state.rs`, `cluster/census.rs`, ratchet/ownership tests and fixtures, final plan/audit/backlog ledger | Remove last raw fields/reach-arounds, exact non-raw receiver classification, strengthened negative controls, compiler probes, empty measured pins and zero ceiling. |
 
@@ -122,3 +122,59 @@ After the bookkeeping update, all 14 ratchet/ownership checks passed.
 Seven state source identities were repinned only after each unique modeled
 42-line window was verified unchanged; all three mapping checks report no
 drift. This is source correspondence evidence, not a new model execution.
+
+## 7b execution contract — jobs, backup and applied changes
+
+The preparatory base is `62c5f25fc`. Its exact source-only daemon all-target
+check passed before 7b Rust edits. The task remains serialized behind the
+actual landing of earlier slices. The table above includes backup-only Boot
+and AppStateConfig wiring and matching startup fixture literals; it does not
+authorize competing listener, startup-drain or vendor repairs.
+
+**Job authority.** An owned facade capability implements the existing core
+`ClusterJobAuthority` by delegating each decision to its original manager.
+Keep fresh learner/voter authorization at every existing claim, renewal,
+settlement and publication boundary. Inject that trait owner rather than the
+raw manager. Existing trait calls in job guards remain meaningful calls,
+not new facade reach-arounds to hide by renaming methods.
+
+**Reconciliation.** Replace the optional raw manager with typed cluster/job
+reconciliation access. Preserve the exact replicated-mode test, fresh
+operations-member lookup and local-node inclusion. Missing capability or
+unreadable replicated membership stays unknown (`None`), never a guessed
+sole local member that could authorize retirement or reassignment. Preserve
+the standalone engine fast path and peer inventory errors. Cache preparation
+keeps both inventories, including the second reachable/base-address filter;
+subtitle model selection keeps voter order/filter, readiness and maintenance
+checks and its existing 60-second observation lifetime.
+
+**Backup.** An owned `BackupSource` privately holds the local client and
+returns plain local progress (applied index, last-log index and optional
+published-snapshot index), the acknowledged commit anchor and the existing
+local snapshot trigger. It exposes no raw client, SQL callback or new policy.
+The backup manager retains this exact algorithm: acquire its lease; establish
+one absolute deadline; wait for applied=current last log; commit the
+forwarded anchor and refuse a missing acknowledged index; wait again for
+applied=current last log and at least the anchor; trigger once; wait for a
+published snapshot at least the anchor; then copy, validate and package.
+All phases spend the original budget; keep bounded metrics reads, immediate
+error handling, the existing 50 ms wait cap and lease cleanup. Missing local
+source remains a refusal.
+
+**Applied changes.** A narrow owned capability privately wraps
+`LocalDbRaftMetrics` and supplies its existing applied-index, running and
+change-wait operations. SettingsChangeSource changes only its payload and
+delegates: retain arm-before-read, mark/confirm/applied-past, ProofMark and
+Proved behavior, index agreement, unknown-force-refresh and cancel-safe watch
+semantics. Replicated-without-local-watch remains Polled; preserve the
+distinct clock fallback rather than combining the two policies.
+
+**Focused evidence.** Run existing backup current-log/anchor catch-up,
+original-deadline, stalled-read, metrics-error, deadline-completion and spent
+snapshot-budget cases. Run settings proof/reload cases and reconciliation
+missing-member/changed-engine cases, including a meaningful unknown-membership
+refusal control, plus fresh learner job-claim regressions. Run core default
+and Hiqlite compilation as affected, daemon all-target check, strict Clippy,
+format, strict census, ownership/ratchet, formal source checks and exact-body
+paperwork. Lower only measured pins. Record inherited compile debt honestly.
+The final intended-base whole-diff review, gate and landing remain separate.
