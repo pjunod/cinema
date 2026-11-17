@@ -210,7 +210,7 @@ async fn three_voter_floor_and_atomic_admission_refuse_incomplete_member_proofs(
             "orphan membership transition refuses"
         );
         write(&client, "DELETE FROM cluster_node_join_staging").await;
-        write(&client, "DELETE FROM cluster_node_removals").await;
+        write(&client, "DELETE FROM cluster_node_removals WHERE 1 = 1").await;
         write(&client, "DELETE FROM cluster_node_removal_attempts").await;
         assert!(ready(&client).await);
     }
