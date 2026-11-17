@@ -71,6 +71,13 @@ impl ClusterAccess {
     }
 
     #[must_use]
+    pub fn administrative(&self) -> AdministrativeObservation {
+        AdministrativeObservation {
+            manager: self.manager.clone(),
+        }
+    }
+
+    #[must_use]
     pub fn names(&self) -> ClusterNames {
         ClusterNames {
             manager: self.manager.clone(),
@@ -141,16 +148,15 @@ impl LocalNode {
     pub async fn committed(&self) -> Result<CommittedMembership, MembershipError> {
         let inner = self.manager.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
-        Ok(CommittedMembership {
-            voter: super::lifecycle::committed_voter(
-                metrics.membership_config.voter_ids(),
-                inner.identity.raft_id,
-            ),
-            member: metrics
-                .membership_config
-                .nodes()
-                .any(|(raft_id, _)| *raft_id == inner.identity.raft_id),
-        })
+        let voter = super::lifecycle::committed_voter(
+            metrics.membership_config.voter_ids(),
+            inner.identity.raft_id,
+        );
+        let member = metrics
+            .membership_config
+            .nodes()
+            .any(|(raft_id, _)| *raft_id == inner.identity.raft_id);
+        Ok(CommittedMembership { member, voter })
     }
 }
 
@@ -391,5 +397,24 @@ impl ClusterNames {
         &self,
     ) -> impl Future<Output = Result<BTreeMap<String, String>, MembershipError>> + Send + '_ {
         self.manager.node_hostnames()
+    }
+}
+
+/// Fresh administrative preflight observations. These do not replace the
+/// caller's active-voter check, exact claim or original absolute deadline.
+#[derive(Clone)]
+pub struct AdministrativeObservation {
+    manager: MembershipManager,
+}
+impl AdministrativeObservation {
+    pub fn topology(
+        &self,
+    ) -> impl Future<Output = Result<super::MembershipStatus, MembershipError>> + Send + '_ {
+        self.manager.status()
+    }
+    pub fn targets(
+        &self,
+    ) -> impl Future<Output = Result<Vec<ActivityPeer>, MembershipError>> + Send + '_ {
+        self.manager.operations_peers()
     }
 }

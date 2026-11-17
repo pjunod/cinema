@@ -44,8 +44,9 @@ use super::ClusterIdentity;
 
 mod access;
 pub use access::{
-    ActiveVoterAuthority, ClockChanges, ClockProtocol, ClusterAccess, ClusterNames,
-    CommittedMembership, Deployment, JobControl, LocalFacts, LocalNode, RevocationExclusion,
+    ActiveVoterAuthority, AdministrativeObservation, ClockChanges, ClockProtocol, ClusterAccess,
+    ClusterNames, CommittedMembership, Deployment, JobControl, LocalFacts, LocalNode,
+    RevocationExclusion,
 };
 
 pub mod directory;
