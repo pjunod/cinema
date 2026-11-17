@@ -1012,7 +1012,10 @@ impl Session {
                 && end_ms >= rolling_initial_runway_ms(playback_rate);
             let initial_insufficient = initial_capacity_due
                 && rolling_insufficient_capacity(playback_rate, producer_speed);
-            if initial_capacity_due && !initial_insufficient {
+            if initial_capacity_due
+                && !initial_insufficient
+                && producer_speed.is_some_and(|speed| speed.is_finite())
+            {
                 clock.initial_capacity_checked = true;
             }
             let insufficient = initial_insufficient
@@ -1050,13 +1053,14 @@ impl Session {
         let first_new_segment = previous_served
             .as_ref()
             .map_or(i64::MIN, |served| served.last_segment.saturating_add(1));
-        let frozen_first_snapshot = previous_served.is_none()
-            && self
-                .publication
-                .lock()
-                .await
-                .startup_policy
-                .owns_bootstrap_position();
+        let initial_admission_policy = self
+            .publication
+            .lock()
+            .await
+            .startup_policy
+            .admission_policy(playback_rate, producer_speed);
+        let frozen_first_snapshot =
+            previous_served.is_none() && initial_admission_policy.owns_bootstrap_position();
         let selected_last = if end_list {
             last_segment
         } else if budget.demand_sequence.is_none() && !frozen_first_snapshot {
@@ -1078,13 +1082,8 @@ impl Session {
             // The producer retains its steady allowance plus that bounded
             // complete-cut envelope. A short candidate may use less of it:
             // keep its first advertised endpoint within the policy ceiling.
-            let short_first_snapshot = previous_served.is_none()
-                && self
-                    .publication
-                    .lock()
-                    .await
-                    .startup_policy
-                    .uses_small_bootstrap();
+            let short_first_snapshot =
+                previous_served.is_none() && initial_admission_policy.uses_small_bootstrap();
             let selection_allowed_end_ms = if short_first_snapshot {
                 budget.allowed_end_ms.min(
                     budget
@@ -1380,6 +1379,7 @@ impl Session {
                 elapsed_ms = clock.first_staged_at.map(|at| available_at.saturating_duration_since(at).as_millis() as u64),
                 produced_end_ms = end_ms,
                 startup_policy = ?clock.startup_policy,
+                admission_policy = ?initial_admission_policy,
                 bootstrap_ms = budget.desired_end_ms.saturating_sub(budget.consumed_end_ms),
                 producer_speed = ?producer_speed,
                 initial_capacity_checked = clock.initial_capacity_checked,

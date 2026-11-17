@@ -691,6 +691,66 @@
     }
 
     #[tokio::test]
+    async fn rolling_mpv_unknown_initial_capacity_is_not_paid_before_a_slow_first_measurement() {
+        for explicit in [false, true] {
+            let directory = crate::test_tempdir().expect("MPV deferred first capacity measurement");
+            let mut session = test_session(directory.path().to_path_buf());
+            session.start_seconds = 5_853.872;
+            session.media_origin_seconds = 5_853.639;
+            session.publication.lock().await.bind_startup_transport(Some("mpv"));
+            if explicit {
+                accept_rolling_publication_demand(&session, 1, 5_853_872, 1.0,
+                    crate::playback_control::PlaybackDemand::Active,
+                    crate::playback_control::RenderState::Starting).await;
+            }
+            assert_eq!(session.progress.recent_speed(), None);
+            tokio::fs::write(directory.path().join("index.m3u8"),
+                rolling_playlist(&[16.0; 3], false)).await.expect("exact old capacity boundary");
+            session.publication_cycle("mpv-unknown-at-capacity-boundary").await.expect("unknown is not a capacity failure");
+            {
+                let clock = session.publication.lock().await;
+                assert!(clock.served.is_none(), "the 233ms seek lead still lacks native coverage");
+                assert!(!clock.initial_capacity_checked,
+                    "an unknown observation cannot pay the initial capacity assessment");
+            }
+            session.progress.recent_milli.store(900, Relaxed);
+            tokio::fs::write(directory.path().join("index.m3u8"),
+                rolling_playlist(&[16.0, 16.0, 16.0, 1.0], false)).await.expect("new complete cut after first measurement");
+            let refusal = session.publication_cycle("mpv-first-capacity-measurement-is-slow").await
+                .expect_err("the first measured slow rate must fail before native fallback publication");
+            assert!(refusal.starts_with("rolling_insufficient_capacity:"));
+            assert!(session.publication.lock().await.served.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn rolling_mpv_unknown_capacity_at_four_x_uses_native_complete_cut() {
+        for transport in ["native", "mpv"] {
+            let directory = crate::test_tempdir().expect("unknown capacity four-times admission");
+            let session = test_session(directory.path().to_path_buf());
+            session.publication.lock().await.bind_startup_transport(Some(transport));
+            accept_rolling_publication_demand(&session, 1, 0, 4.0,
+                crate::playback_control::PlaybackDemand::Active,
+                crate::playback_control::RenderState::Starting).await;
+            assert_eq!(session.progress.recent_speed(), None);
+            tokio::fs::write(directory.path().join("index.m3u8"),
+                rolling_playlist(&[16.0; 7], false)).await.expect("112 seconds remain below native floor");
+            session.publication_cycle("unknown-four-times-below-native-floor").await.expect("stage complete cuts");
+            assert!(session.publication.lock().await.served.is_none());
+            tokio::fs::write(directory.path().join("index.m3u8"),
+                rolling_playlist(&[16.0; 8], false)).await.expect("first complete cut beyond native floor");
+            session.publication_cycle("unknown-four-times-native-endpoint").await.expect("native fallback admission");
+            let clock = session.publication.lock().await;
+            assert_eq!(clock.served.as_ref().expect("native complete endpoint").end_ms, 128_000,
+                "{transport}: the effective 124s native floor rounds up, not down to 112s");
+            if transport == "mpv" {
+                assert_eq!(clock.startup_policy, RollingStartupPolicy::MpvReloadWindow,
+                    "effective fallback must not replace the frozen consumer contract");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn rolling_mpv_early_publication_does_not_waive_initial_capacity_assessment() {
         for explicit in [false, true] {
             let directory = crate::test_tempdir().expect("MPV later slowdown");

@@ -170,6 +170,18 @@ impl RollingStartupPolicy {
         matches!(self, Self::NativePresentationWindow | Self::MpvReloadWindow)
     }
 
+    /// Unknown or slow MPV capacity keeps the entire native admission
+    /// contract, including complete-cut rounding, not merely its duration.
+    pub(super) fn admission_policy(self, rate: f64, producer_speed: Option<f64>) -> Self {
+        if self == Self::MpvReloadWindow
+            && !producer_speed.is_some_and(|speed| speed.is_finite() && speed >= rate)
+        {
+            Self::NativePresentationWindow
+        } else {
+            self
+        }
+    }
+
     pub(super) fn bootstrap_ms(self, rate: f64) -> i64 {
         match self {
             #[cfg(test)]
@@ -322,17 +334,12 @@ impl RollingPublicationClock {
         producer_speed: Option<f64>,
     ) -> i64 {
         let rate = rolling_playback_rate(lease.and_then(|lease| lease.demand.as_ref()));
-        // The short MPV envelope assumes sustainable real-time production.
-        // Unknown/slow capacity retains native admission; a recent average is
-        // evidence for this admission assessment, never a future guarantee.
-        let bootstrap_ms = if self.startup_policy == RollingStartupPolicy::MpvReloadWindow
-            && !producer_speed.is_some_and(|speed| speed.is_finite() && speed >= rate)
-        {
-            rolling_initial_runway_ms(rate)
-        } else {
-            self.startup_policy.bootstrap_ms(rate)
-        };
-        budget.consumed_end_ms.saturating_add(bootstrap_ms)
+        // A recent average supports this admission assessment, never a
+        // future guarantee. Conservative fallback also governs cut selection.
+        let policy = self.startup_policy.admission_policy(rate, producer_speed);
+        budget
+            .consumed_end_ms
+            .saturating_add(policy.bootstrap_ms(rate))
     }
 
     pub(super) fn staged_seconds(&self) -> i64 {
