@@ -661,10 +661,12 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     }
     if mode == SOURCE_FIXTURE_PROCESSED_ADMIN_STOP {
         body.processed_upgrade = Some(true);
-        body.caps
-            .as_mut()
-            .expect("processed client caps")
-            .hls_hevc_sample_entries = Some(vec!["hvc1".into()]);
+        let caps = body.caps.as_mut().expect("processed client caps");
+        caps.hls_hevc_sample_entries = Some(vec!["hvc1".into()]);
+        // The processed Source uses the same canonical encoded-audio claim
+        // as an ordinary receiver. Let production planning reconcile the
+        // E-AC-3 source track to this declared stereo AAC output route.
+        caps.audio_sinks = plurx_core::playback::audio::canonical_producer_claim().sinks;
     }
     if source_fixture_encoded(mode) {
         body.copy = Some(false);

@@ -1004,6 +1004,11 @@ async fn sharing_source_http_offers_a_processed_upgrade_only_to_an_affirming_rec
         "the ordinary source output remains its compatible HDR10 base"
     );
     assert_eq!(ordinary.response().delivered_dolby_vision_profile, None);
+    assert_eq!(
+        fixture.active_source_sessions().await,
+        1,
+        "the ordinary Source session remains active during successor admission"
+    );
 
     let mut affirmed_headers = fixture.headers.clone();
     affirmed_headers.insert(
@@ -1025,7 +1030,40 @@ async fn sharing_source_http_offers_a_processed_upgrade_only_to_an_affirming_rec
         axum::body::Body::from(serde_json::to_vec(&affirmed).expect("affirmed recipe")),
     )
     .await
-    .expect("affirmed Source Start");
+    .unwrap_or_else(|error| {
+        let request_id = affirmed["session"]["request_id"]
+            .as_str()
+            .expect("affirmed request ID");
+        let registry = &fixture.state.transcode.source_http_starts;
+        let entries = registry.entries.lock().expect("Source Start registry");
+        let settled = registry
+            .settled
+            .lock()
+            .expect("settled Source Start registry");
+        let stage = entries
+            .iter()
+            .chain(settled.iter())
+            .find(|entry| entry.identity.request_id.to_string() == request_id)
+            .map(|entry| {
+                let stage = entry.task.stage.lock().expect("affirmed Start stage");
+                match &*stage {
+                    SourceStartTaskStage::Registered => "registered".to_owned(),
+                    SourceStartTaskStage::ReadingIntent { .. } => "reading_intent".to_owned(),
+                    SourceStartTaskStage::IntentReady { .. } => "intent_ready".to_owned(),
+                    SourceStartTaskStage::Claiming { .. } => "claiming".to_owned(),
+                    SourceStartTaskStage::Acquired(_) => "acquired".to_owned(),
+                    SourceStartTaskStage::Assigning(_) => "assigning".to_owned(),
+                    SourceStartTaskStage::Assigned(_) => "assigned".to_owned(),
+                    SourceStartTaskStage::Activating(_) => "activating".to_owned(),
+                    SourceStartTaskStage::InvokingFactory(_) => "invoking_factory".to_owned(),
+                    SourceStartTaskStage::FactoryRefused(receipt) => {
+                        format!("factory_refused:{:?}", receipt.reason())
+                    }
+                }
+            })
+            .unwrap_or_else(|| "unregistered".to_owned());
+        panic!("affirmed Source Start: {error:?}; retained stage={stage}");
+    });
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
         .await

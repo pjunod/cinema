@@ -647,42 +647,76 @@ fn machine_names_reach_the_activity_page_only_for_an_admin() {
         .split_once("\n/// DELETE /api/v1/activity/producer")
         .expect("handler after activity_detail")
         .0;
-    // `GET /api/v1/cluster/nodes` is `AdminUser`. This page is `AuthUser`,
-    // so an ungated map here would make the activity page the one place an
-    // ordinary household member can read the fleet's hostnames.
-    //
-    // Asserted as "every use of the map value", not "the text near the
-    // publication I happen to know about". An earlier form of this test
-    // found the publication by its key and checked the branch above it,
-    // and a second publication under a *different* key from an ungated
-    // `if clustered {` satisfied it while leaking to every signed-in
-    // household member.
-    let names = handler
-        .match_indices("hostnames")
-        // `node_hostnames` is the reader's name, not the value's.
-        .filter(|(at, _)| !handler[..*at].ends_with("node_"))
-        .map(|(at, _)| at)
-        .collect::<Vec<_>>();
-    let bound = names.first().copied().expect("the map is read at all");
+    // `GET /api/v1/cluster/nodes` is `AdminUser`. This page accepts any
+    // authenticated household member, so roster values may be carried through
+    // the concurrent join but must not be serialized into a non-admin response.
     let gate = handler
         .find("if clustered && user.0.is_admin {")
-        .expect("machine names are gated on the admin the roster is gated on");
-    for at in &names {
+        .expect("machine-name publication is under the admin gate");
+    let publication = "response[\"node_hostnames\"] = serde_json::to_value(&hostnames)";
+    assert_eq!(
+        handler.matches("serde_json::to_value(&hostnames)").count(),
+        1,
+        "the roster map is serialized exactly once"
+    );
+    assert_eq!(
+        handler.matches(publication).count(),
+        1,
+        "the serialized roster uses only the machine-name response field"
+    );
+    let admin_branch = handler[gate..]
+        .split_once("\n    }")
+        .expect("admin publication branch closes")
+        .0;
+    assert_eq!(
+        admin_branch.matches(publication).count(),
+        1,
+        "the sole roster publication is inside the clustered-admin branch"
+    );
+    // Count every standalone use of the map value, not just its current
+    // serializer. These three pre-gate occurrences only bind/transport the
+    // map through the concurrent join; any additional use must be the one
+    // admin-gated response publication above.
+    let transport_snippets = [
+        "let ((sessions, deliveries), peers, hostnames, source_processed",
+        "let (local, peers, hostnames, source_processed",
+        "\n                hostnames,\n",
+    ];
+    let mut allowed_uses = transport_snippets
+        .iter()
+        .map(|snippet| {
+            let start = handler.find(snippet).expect("known roster transport");
+            start + snippet.find("hostnames").expect("roster value in transport")
+        })
+        .collect::<Vec<_>>();
+    let publication_use = handler
+        .find("serde_json::to_value(&hostnames)")
+        .expect("admin-gated roster serialization")
+        + "serde_json::to_value(&".len();
+    allowed_uses.push(publication_use);
+    let roster_uses = handler
+        .match_indices("hostnames")
+        .filter_map(|(at, _)| {
+            let before_is_identifier = handler[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+            let after_is_identifier = handler[at + "hostnames".len()..]
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+            (!before_is_identifier && !after_is_identifier).then_some(at)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(roster_uses.len(), 4, "all roster-value uses are accounted for");
+    for at in roster_uses {
         assert!(
-            *at <= bound || handler[..*at].ends_with("(local, peers, ") || *at > gate,
-            "the roster map is used outside the admin branch at byte {at}: {}",
-            &handler[at.saturating_sub(80)..*at + 40]
+            allowed_uses.contains(&at),
+            "unexpected roster-value use outside tuple transport/publication at byte {at}"
         );
     }
-    // …and the one use past the gate is the publication itself.
-    assert_eq!(
-        handler[gate..]
-            .matches("response[\"node_hostnames\"] = serde_json::to_value(&hostnames)")
-            .count(),
-        1
-    );
-    // The reader itself is asked for the map exactly once, with this
-    // reader's own admin flag and not a literal.
+    // The reader itself receives this request's authorization decision; its
+    // non-admin path returns an empty map, and the handler omits the field.
     assert_eq!(
         handler
             .matches("node_hostnames(&state, user.0.is_admin)")

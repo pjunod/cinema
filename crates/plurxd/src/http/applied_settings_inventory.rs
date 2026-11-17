@@ -820,9 +820,9 @@ fn every_settings_view_read_and_its_callers_are_pinned_by_function() {
     }
 }
 
-/// The helpers that take the create's plan (D3b, contract §4.2): each takes
-/// `plan: Option<&StartPlan>` as its last argument, and `None` reads the
-/// Store exactly as before.
+/// The helpers that take the create's plan (D3b, contract §4.2): `plan` is
+/// last except in the two Source VOD helpers, where the final argument holds
+/// processed-work custody. `None` reads the Store exactly as before.
 const PLANNED_HELPERS: &[&str] = &[
     "cluster_playlist_is_typeless",
     "create_cluster_session",
@@ -889,8 +889,8 @@ const PLAN_CALLS: &[(&str, &str, &str, &str)] = &[
     ("transcode/manager/create.rs", "create_session_inner", "try_vod_session", "plan"),
     ("transcode/manager/create.rs", "create_session_inner", "validate_candidate_planning_binding", "plan"),
     ("transcode/manager/create.rs", "create_session_inner", "vod_settings_planned", "plan"),
-    ("transcode/manager/create.rs", "prepare_processed_upgrade", "prepare_vod_encoding_with_source", "None"),
-    ("transcode/manager/create.rs", "prepare_processed_upgrade", "validate_candidate_planning_binding", "None"),
+    ("transcode/manager/create.rs", "prepare_processed_upgrade_with_source", "prepare_vod_encoding_with_source", "None"),
+    ("transcode/manager/create.rs", "prepare_processed_upgrade_with_source", "validate_candidate_planning_binding", "None"),
     ("transcode/manager/create.rs", "prepare_source_vod_encoding", "prepare_vod_encoding_with_source", "None"),
     ("transcode/manager/create.rs", "prepare_source_vod_encoding", "refuse_unadmittable_encoding", "None"),
     ("transcode/manager/create.rs", "prepare_vod_encoding_noting", "prepare_vod_encoding_with_source", "plan"),
@@ -916,13 +916,13 @@ const PLAN_CALLS: &[(&str, &str, &str, &str)] = &[
     ("transcode/manager/start.rs", "start_with_audio_offset", "rolling_start_inputs", "plan"),
 ];
 
-/// The last top-level argument of the call whose `(` is at `open`, with its
-/// whitespace collapsed.
-fn last_argument(text: &str, open: usize) -> String {
+/// The plan argument of the call whose `(` is at `open`, with its whitespace
+/// collapsed. Source VOD helpers retain the plan before processed custody.
+fn plan_argument(text: &str, open: usize, helper: &str) -> String {
     let bytes = text.as_bytes();
     let mut depth = 0_i32;
     let mut start = open + 1;
-    let mut last = String::new();
+    let mut arguments = Vec::new();
     for (index, byte) in bytes.iter().enumerate().skip(open) {
         match byte {
             b'(' | b'[' | b'{' => depth += 1,
@@ -931,7 +931,7 @@ fn last_argument(text: &str, open: usize) -> String {
                 if depth == 0 {
                     let arg = text[start..index].trim();
                     if !arg.is_empty() {
-                        last = arg.to_owned();
+                        arguments.push(arg);
                     }
                     break;
                 }
@@ -939,14 +939,25 @@ fn last_argument(text: &str, open: usize) -> String {
             b',' if depth == 1 => {
                 let arg = text[start..index].trim();
                 if !arg.is_empty() {
-                    last = arg.to_owned();
+                    arguments.push(arg);
                 }
                 start = index + 1;
             }
             _ => {}
         }
     }
-    last.split_whitespace().collect::<Vec<_>>().join("")
+    let offset = usize::from(matches!(
+        helper,
+        "prepare_vod_encoding_with_source" | "prepare_vod_encoding_with_source_scoped"
+    ));
+    arguments
+        .iter()
+        .rev()
+        .nth(offset)
+        .expect("planned helper has a plan argument")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 #[test]
@@ -974,7 +985,7 @@ fn every_plan_argument_is_pinned_by_call() {
                     path.clone(),
                     enclosing(&text, pos),
                     (*helper).to_owned(),
-                    last_argument(&text, open),
+                    plan_argument(&text, open, helper),
                 ));
             }
         }

@@ -10405,10 +10405,12 @@ async fn activity_requires_auth_and_reports_idle() {
             // P-02 §3.2); node-local, so not a clustered-only field.
             "processes",
             "producing",
+            "receiver_processed",
             "retained_output",
             "retained_output_node",
             "scans",
             "sessions",
+            "source_processed",
             "trakt",
             // Local worker observations are useful on SQLite too, with the
             // nodes that were observed (learner workers included).

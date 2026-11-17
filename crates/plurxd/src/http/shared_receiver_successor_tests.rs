@@ -1044,8 +1044,8 @@ async fn sharing_receiver_cancelled_change_never_restages_the_sessions_own_ask()
     }
 }
 
-#[test]
-fn shared_processed_offer_waits_for_first_frame_and_is_one_shot() {
+#[tokio::test]
+async fn shared_processed_offer_waits_for_first_frame_and_is_one_shot() {
     let registry = ReceiverStartRegistry::default();
     let state = Arc::new(crate::http::source_actor_test_state());
     let predecessor = registered(&registry, "predecessor", "player", 1);
@@ -1101,8 +1101,8 @@ fn shared_processed_offer_waits_for_first_frame_and_is_one_shot() {
     );
 }
 
-#[test]
-fn shared_processed_offer_is_spent_by_viewer_change_before_first_frame() {
+#[tokio::test]
+async fn shared_processed_offer_is_spent_by_viewer_change_before_first_frame() {
     let registry = ReceiverStartRegistry::default();
     let state = Arc::new(crate::http::source_actor_test_state());
     let predecessor = registered(&registry, "predecessor", "player", 1);
@@ -1138,8 +1138,8 @@ fn shared_processed_offer_is_spent_by_viewer_change_before_first_frame() {
     );
 }
 
-#[test]
-fn processed_successor_decline_reports_only_on_its_live_b_generation() {
+#[tokio::test]
+async fn processed_successor_decline_reports_only_on_its_live_b_generation() {
     for (failure, expected_reason) in [
         (ReceiverStartError::Deadline, "did not complete in time"),
         (
