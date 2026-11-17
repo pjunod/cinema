@@ -9,8 +9,10 @@ repository.workspace = true
 
 [features]
 # Compiles `testfixtures` — the shared media-fixture builder the plurxd test
-# suite also uses. Dev-dependencies only; `cargo build` never turns it on.
-fixtures = []
+# suite also uses, plus the existing vendor validation pause for startup
+# ownership regressions. Weak activation does not enable the optional store.
+# Dev-dependencies only; `cargo build` never turns it on.
+fixtures = ["hiqlite?/validation-test-helpers"]
 # The workspace cluster harness enables the replicated backend, so feature
 # unification also runs these core unit tests during workspace checks. M2
 # enables the same backend on plurxd when the complete store becomes selectable.

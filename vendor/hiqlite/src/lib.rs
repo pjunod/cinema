@@ -55,8 +55,8 @@ pub const LEADER_RETRY_RECOVERY_TIMEOUT: Duration = Duration::from_secs(14);
 
 #[cfg(feature = "sqlite")]
 pub use crate::client::{
-    DB_LOCAL_READ_PROTOCOL_VERSION, DbQuorumWatermark, LocalDbMembershipSnapshot,
-    LocalDbCoreStop, LocalDbRaftMetrics, LocalDbRaftSnapshot, WriteAck,
+    DB_LOCAL_READ_PROTOCOL_VERSION, DbQuorumWatermark, LocalDbCoreStop, LocalDbMembershipSnapshot,
+    LocalDbRaftMetrics, LocalDbRaftSnapshot, WriteAck,
 };
 /// The database Raft metrics [`Client::metrics_db`] returns (Raft ids are `u64`), named so a
 /// caller can forward them without depending on `openraft` itself (Plurx).
@@ -81,6 +81,7 @@ pub use crate::store::state_machine::sqlite::state_machine::{
     validation_applied_payload_counts, validation_applied_sql_class_counts,
     validation_apply_pause_observed, validation_pause_apply,
     validation_register_applied_sql_classes, validation_resume_apply,
+    validation_wait_until_apply_paused,
 };
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 pub use crate::transport_status::{
@@ -233,36 +234,36 @@ mod empty {
     }
 }
 
-pub use start::StartupListeners;
+pub use start::{StartupListeners, StartupResources};
 
-/// Start with an owned listener reservation and the ordinary membership policy.
+/// Start with caller-owned resources and the ordinary membership policy.
 #[cfg(feature = "sqlite")]
-pub async fn start_node_with_membership_admission_and_listeners(
+pub async fn start_node_with_membership_admission_and_resources(
     node_config: NodeConfig,
     admission: std::sync::Arc<dyn membership_admission::MembershipAdmission>,
-    listeners: StartupListeners,
+    resources: StartupResources,
 ) -> Result<Client, Error> {
-    start::start_node_inner_with_listeners::<empty::Empty>(
+    start::start_node_inner_with_resources::<empty::Empty>(
         Box::new(node_config),
         Some(admission),
         start::StartupPhase::Normal,
-        Some(listeners),
+        resources,
     )
     .await
 }
 
-/// Start clock observation without releasing caller-reserved listening sockets.
+/// Start clock observation while preserving caller resource ownership.
 #[cfg(feature = "sqlite")]
-pub async fn start_node_for_clock_observation_with_listeners(
+pub async fn start_node_for_clock_observation_with_resources(
     node_config: NodeConfig,
     admission: std::sync::Arc<dyn membership_admission::MembershipAdmission>,
-    listeners: StartupListeners,
+    resources: StartupResources,
 ) -> Result<Client, Error> {
-    start::start_node_inner_with_listeners::<empty::Empty>(
+    start::start_node_inner_with_resources::<empty::Empty>(
         Box::new(node_config),
         Some(admission),
         start::StartupPhase::ClockObservation,
-        Some(listeners),
+        resources,
     )
     .await
 }

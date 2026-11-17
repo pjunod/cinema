@@ -4,6 +4,35 @@ use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+pub(crate) type Keepalive = Option<std::sync::Arc<dyn Send + Sync>>;
+
+/// An unconfirmed owner must never release the caller's directory lease.
+#[derive(Default)]
+pub(crate) struct CompletionClaim(Keepalive);
+
+impl CompletionClaim {
+    pub(crate) fn new(keepalive: &Keepalive) -> Self {
+        Self(keepalive.clone())
+    }
+    pub(crate) fn confirmed(&mut self) {
+        self.0.take();
+    }
+}
+
+impl Drop for CompletionClaim {
+    fn drop(&mut self) {
+        if let Some(keepalive) = self.0.take() {
+            tracing::error!("startup retirement is unconfirmed; retaining caller lease");
+            std::mem::forget(keepalive);
+        }
+    }
+}
+
+struct StorageCleanup {
+    work: Pin<Box<dyn Future<Output = Result<(), ()>> + Send>>,
+    claim: CompletionClaim,
+}
+
 /// Actual staged listeners and their spawned connections survive Client handoff.
 #[derive(Default)]
 pub(crate) struct StartupListenerOwner {
@@ -49,7 +78,8 @@ impl StartupListenerOwner {
 
 pub(crate) struct StartupStorageOwner {
     enabled: bool,
-    cleanup: Vec<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    cleanup: Vec<StorageCleanup>,
+    keepalive: Keepalive,
 }
 
 impl StartupStorageOwner {
@@ -57,20 +87,37 @@ impl StartupStorageOwner {
         Self {
             enabled,
             cleanup: Vec::new(),
+            keepalive: None,
         }
     }
 
+    pub(crate) fn retain(&mut self, keepalive: Keepalive) {
+        self.keepalive = keepalive;
+    }
+
     pub(crate) fn handoff(&mut self) {
+        for cleanup in &mut self.cleanup {
+            cleanup.claim.confirmed();
+        }
         self.cleanup.clear();
+    }
+
+    fn protect(&mut self, work: impl Future<Output = Result<(), ()>> + Send + 'static) {
+        self.cleanup.push(StorageCleanup {
+            work: Box::pin(work),
+            claim: CompletionClaim::new(&self.keepalive),
+        });
     }
 
     pub(crate) fn protect_wal(&mut self, wal: hiqlite_wal::ShutdownHandle) {
         if self.enabled {
-            self.cleanup.push(Box::pin(async move {
+            self.protect(async move {
                 if let Err(error) = wal.shutdown().await {
                     tracing::error!(?error, "staged partial WAL cleanup failed");
+                    return Err(());
                 }
-            }));
+                Ok(())
+            });
         }
     }
 
@@ -80,7 +127,7 @@ impl StartupStorageOwner {
         writer: flume::Sender<crate::store::state_machine::sqlite::writer::WriterRequest>,
     ) {
         if self.enabled {
-            self.cleanup.push(Box::pin(async move {
+            self.protect(async move {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 if writer
                     .send_async(
@@ -91,8 +138,10 @@ impl StartupStorageOwner {
                     || rx.await.is_err()
                 {
                     tracing::error!("staged partial SQLite writer cleanup failed");
+                    return Err(());
                 }
-            }));
+                Ok(())
+            });
         }
     }
 
@@ -106,7 +155,7 @@ impl StartupStorageOwner {
         let raft = state.raft.clone();
         let wal = state.shutdown_handle.clone();
         let writer = state.sql_writer.clone();
-        self.cleanup.push(Box::pin(async move {
+        self.protect(async move {
             stopped.store(true, Ordering::Relaxed);
             snapshots.request_shutdown();
             // Never cancel an accepted durable snapshot to satisfy a caller
@@ -119,14 +168,14 @@ impl StartupStorageOwner {
                     ?error,
                     "staged SQLite Raft cleanup failed; no clean termination claim"
                 );
-                return;
+                return Err(());
             }
             if let Err(error) = wal.shutdown().await {
                 tracing::error!(
                     ?error,
                     "staged SQLite WAL cleanup failed; no clean termination claim"
                 );
-                return;
+                return Err(());
             }
             let (tx, rx) = tokio::sync::oneshot::channel();
             if writer
@@ -138,8 +187,10 @@ impl StartupStorageOwner {
                 || rx.await.is_err()
             {
                 tracing::error!("staged SQLite writer cleanup failed; no clean termination claim");
+                return Err(());
             }
-        }));
+            Ok(())
+        });
     }
 
     #[cfg(feature = "cache")]
@@ -151,7 +202,7 @@ impl StartupStorageOwner {
         let snapshots = state.snapshot_executor.clone();
         let raft = state.raft.clone();
         let wal = state.shutdown_handle.clone();
-        self.cleanup.push(Box::pin(async move {
+        self.protect(async move {
             stopped.store(true, Ordering::Relaxed);
             snapshots.request_shutdown();
             while !snapshots.wait_for_shutdown(Duration::from_secs(5)).await {
@@ -162,7 +213,7 @@ impl StartupStorageOwner {
                     ?error,
                     "staged cache Raft cleanup failed; no clean termination claim"
                 );
-                return;
+                return Err(());
             }
             if let Some(wal) = wal
                 && let Err(error) = wal.shutdown().await
@@ -171,9 +222,11 @@ impl StartupStorageOwner {
                     ?error,
                     "staged cache WAL cleanup failed; no clean termination claim"
                 );
+                return Err(());
             }
             // No leave/remove proposal: durable fenced reduction is separate.
-        }));
+            Ok(())
+        });
     }
 }
 
@@ -181,6 +234,7 @@ impl StartupStorageOwner {
 /// must deliver the result to either startup or cancellation cleanup, never
 /// to a dropped JoinHandle while the interval syncer retains the writer.
 struct PendingWal<C: openraft::RaftTypeConfig> {
+    claim: CompletionClaim,
     task: Option<
         tokio::task::JoinHandle<Result<hiqlite_wal::LogStore<C>, hiqlite_wal::error::Error>>,
     >,
@@ -189,11 +243,17 @@ struct PendingWal<C: openraft::RaftTypeConfig> {
 impl<C: openraft::RaftTypeConfig> Drop for PendingWal<C> {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
+            let mut claim = std::mem::take(&mut self.claim);
             tokio::spawn(async move {
                 match task.await {
                     Ok(Ok(store)) => {
-                        if let Err(error) = store.shutdown_handle().shutdown().await {
-                            tracing::error!(?error, "cancelled WAL constructor cleanup failed");
+                        let stopped = store.shutdown_handle().shutdown().await;
+                        drop(store);
+                        match stopped {
+                            Ok(()) => claim.confirmed(),
+                            Err(error) => {
+                                tracing::error!(?error, "cancelled WAL constructor cleanup failed")
+                            }
                         }
                     }
                     Ok(Err(error)) => tracing::error!(?error, "cancelled WAL constructor failed"),
@@ -209,18 +269,23 @@ pub(crate) async fn start_wal<C: openraft::RaftTypeConfig>(
     sync: hiqlite_wal::LogSync,
     size: u32,
     staged: bool,
+    keepalive: Keepalive,
 ) -> Result<hiqlite_wal::LogStore<C>, crate::Error> {
     if !staged {
         return Ok(hiqlite_wal::LogStore::<C>::start(path, sync, size).await?);
     }
+    let claim = CompletionClaim::new(&keepalive);
     let mut pending = PendingWal {
+        claim,
         task: Some(tokio::spawn(hiqlite_wal::LogStore::<C>::start_staged(
             path, sync, size,
         ))),
     };
     let result = pending.task.as_mut().expect("owned constructor task").await;
     pending.task.take();
-    Ok(result??)
+    let store = result??;
+    pending.claim.confirmed();
+    Ok(store)
 }
 
 #[cfg(feature = "sqlite")]
@@ -228,6 +293,7 @@ type SqliteState = crate::store::state_machine::sqlite::state_machine::StateMach
 
 #[cfg(feature = "sqlite")]
 struct PendingSqlite {
+    claim: CompletionClaim,
     task: Option<tokio::task::JoinHandle<Result<SqliteState, crate::Error>>>,
 }
 
@@ -235,6 +301,7 @@ struct PendingSqlite {
 impl Drop for PendingSqlite {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
+            let mut claim = std::mem::take(&mut self.claim);
             tokio::spawn(async move {
                 match task.await {
                     Ok(Ok(state)) => {
@@ -244,6 +311,9 @@ impl Drop for PendingSqlite {
                         if state.write_tx.send_async(crate::store::state_machine::sqlite::writer::WriterRequest::Shutdown(tx)).await.is_err()
                             || rx.await.is_err() {
                             tracing::error!("cancelled SQLite constructor writer cleanup failed");
+                        } else {
+                            drop(state);
+                            claim.confirmed();
                         }
                     }
                     Ok(Err(error)) => {
@@ -259,11 +329,16 @@ impl Drop for PendingSqlite {
 }
 
 #[cfg(feature = "sqlite")]
-pub(crate) async fn construct_sqlite<F>(constructor: F) -> Result<SqliteState, crate::Error>
+pub(crate) async fn construct_sqlite<F>(
+    constructor: F,
+    keepalive: Keepalive,
+) -> Result<SqliteState, crate::Error>
 where
     F: Future<Output = Result<SqliteState, crate::Error>> + Send + 'static,
 {
+    let claim = CompletionClaim::new(&keepalive);
     let mut pending = PendingSqlite {
+        claim,
         task: Some(tokio::spawn(constructor)),
     };
     let result = pending
@@ -272,7 +347,9 @@ where
         .expect("owned SQLite constructor task")
         .await;
     pending.task.take();
-    result?
+    let state = result??;
+    pending.claim.confirmed();
+    Ok(state)
 }
 
 impl Drop for StartupStorageOwner {
@@ -280,7 +357,12 @@ impl Drop for StartupStorageOwner {
         for cleanup in self.cleanup.drain(..) {
             // This owner survives cancellation of the requesting startup
             // future. Shutdown ordering never depends on that future polling.
-            tokio::spawn(cleanup);
+            tokio::spawn(async move {
+                let StorageCleanup { work, mut claim } = cleanup;
+                if work.await.is_ok() {
+                    claim.confirmed();
+                }
+            });
         }
     }
 }
@@ -290,6 +372,7 @@ type CacheState = crate::store::state_machine::memory::state_machine::StateMachi
 
 #[cfg(feature = "cache")]
 struct PendingCache {
+    claim: CompletionClaim,
     task: Option<tokio::task::JoinHandle<Result<CacheState, crate::Error>>>,
 }
 
@@ -297,7 +380,9 @@ struct PendingCache {
 impl Drop for PendingCache {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
+            let claim = std::mem::take(&mut self.claim);
             tokio::spawn(async move {
+                let _retained_claim = claim;
                 match task.await {
                     // Finish accepted snapshot restoration before dropping
                     // sender ownership. TTL receivers then close and release
@@ -314,11 +399,16 @@ impl Drop for PendingCache {
 }
 
 #[cfg(feature = "cache")]
-pub(crate) async fn construct_cache<F>(constructor: F) -> Result<CacheState, crate::Error>
+pub(crate) async fn construct_cache<F>(
+    constructor: F,
+    keepalive: Keepalive,
+) -> Result<CacheState, crate::Error>
 where
     F: Future<Output = Result<CacheState, crate::Error>> + Send + 'static,
 {
+    let claim = CompletionClaim::new(&keepalive);
     let mut pending = PendingCache {
+        claim,
         task: Some(tokio::spawn(constructor)),
     };
     let result = pending
@@ -327,7 +417,9 @@ where
         .expect("owned cache constructor task")
         .await;
     pending.task.take();
-    result?
+    let state = result??;
+    pending.claim.confirmed();
+    Ok(state)
 }
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -495,12 +587,21 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let path = root.to_string_lossy().into_owned();
+        std::fs::create_dir_all(&root).unwrap();
+        let lock_path = root.join("root.lock");
+        let lease = std::fs::File::create(&lock_path).unwrap();
+        lease.lock().unwrap();
+        let probe = std::fs::File::open(&lock_path).unwrap();
+        let keepalive: super::Keepalive = Some(std::sync::Arc::new(lease));
+        let claim = super::CompletionClaim::new(&keepalive);
+        drop(keepalive);
+        let path = root.join("wal").to_string_lossy().into_owned();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let owned_path = path.clone();
         let requester = tokio::spawn(async move {
             let mut pending = super::PendingWal {
+                claim,
                 task: Some(tokio::spawn(async move {
                     let store = hiqlite_wal::LogStore::<TypeConfigSqlite>::start_staged(
                         owned_path,
@@ -526,14 +627,23 @@ mod tests {
             status.snapshot().state,
             hiqlite_wal::WalRuntimeState::Stopped
         );
+        assert!(
+            probe.try_lock().is_err(),
+            "constructor cancellation must retain the actual root lease"
+        );
+        let released = tokio::task::spawn_blocking(move || {
+            probe.lock().unwrap();
+            probe
+        });
         release_tx.send(()).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while status.snapshot().state != hiqlite_wal::WalRuntimeState::Stopped {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("owned cancellation cleanup drains real writer");
+        let probe = tokio::time::timeout(std::time::Duration::from_secs(5), released)
+            .await
+            .expect("owned cancellation cleanup drains real writer")
+            .expect("root lease waiter joined");
+        assert_eq!(
+            status.snapshot().state,
+            hiqlite_wal::WalRuntimeState::Stopped
+        );
         let replacement = hiqlite_wal::LogStore::<TypeConfigSqlite>::start(
             path,
             hiqlite_wal::LogSync::Immediate,
@@ -542,7 +652,46 @@ mod tests {
         .await
         .expect("OS lock released, not merely requester cancelled");
         replacement.shutdown_handle().shutdown().await.unwrap();
+        drop(probe);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_missing_writer_ack_retains_the_root_lease() {
+        let root =
+            std::env::temp_dir().join(format!("startup-missing-ack-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("root.lock");
+        let lease = std::fs::File::create(&path).unwrap();
+        lease.lock().unwrap();
+        let probe = std::fs::File::open(&path).unwrap();
+        let mut owner = super::StartupStorageOwner::new(true);
+        owner.retain(Some(std::sync::Arc::new(lease)));
+        let (writer, requests) = flume::unbounded();
+        owner.protect_writer(writer);
+        let super::StorageCleanup { work, claim } = owner.cleanup.pop().unwrap();
+        drop(owner);
+        let receiver = tokio::spawn(async move {
+            match requests.recv_async().await.unwrap() {
+                crate::store::state_machine::sqlite::writer::WriterRequest::Shutdown(ack) => {
+                    drop(ack)
+                }
+                _ => panic!("expected shutdown request"),
+            }
+        });
+        assert!(
+            work.await.is_err(),
+            "missing shutdown ACK is not a terminal receipt"
+        );
+        receiver.await.unwrap();
+        drop(claim);
+        assert!(
+            probe.try_lock().is_err(),
+            "unknown retirement must retain the actual root lease"
+        );
+        // Do not unlink a guarded path: custody intentionally lasts for this
+        // isolated test process, whose exit closes the retained descriptor.
+        drop(probe);
     }
 
     #[tokio::test]
@@ -566,6 +715,7 @@ mod tests {
                 hiqlite_wal::LogSync::IntervalMillis(0),
                 1024 * 1024,
                 true,
+                None,
             ),
         )
         .await

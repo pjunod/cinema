@@ -2250,7 +2250,7 @@ fn k06_vendor_start_and_catchup_do_not_spend_the_admission_phase() {
         .expect("start_voter boundary")
         .0;
     let vendor_start = start
-        .find("hiqlite::start_node_for_clock_observation(")
+        .find("hiqlite::start_node_for_clock_observation_with_resources(")
         .expect("observation start");
     let health = start
         .find("client.wait_until_healthy_db()")
@@ -2291,7 +2291,7 @@ fn k06_vendor_start_and_catchup_do_not_spend_the_admission_phase() {
         .find("tokio::time::timeout(vendor_timeout, vendor_start)")
         .expect("vendor start is bounded");
     let normal_start = start
-        .find("hiqlite::start_node_with_membership_admission(")
+        .find("hiqlite::start_node_with_membership_admission_and_resources(")
         .expect("normal start");
     assert!(budget < vendor_start && vendor_start < bounded);
     assert!(normal_start < bounded && bounded < health);
@@ -6174,4 +6174,91 @@ async fn owned_listener_singleton_import_refuses_each_wildcard_role_before_store
         let _api = std::net::TcpListener::bind(config.cluster.api_bind)
             .expect("refused API reservation released");
     }
+}
+
+#[cfg(all(feature = "hiqlite-store", feature = "fixtures", unix))]
+#[test]
+fn cancelled_pre_client_startup_keeps_root_lease_until_actual_storage_drains() {
+    use std::os::unix::fs::MetadataExt as _;
+    startup_observer::run_full_hiqlite_fixture("pre-client-root-lease", || async {
+        struct ResumeApply;
+        impl Drop for ResumeApply {
+            fn drop(&mut self) {
+                hiqlite::validation_resume_apply();
+            }
+        }
+        struct CancelStartup(tokio::task::AbortHandle);
+        impl Drop for CancelStartup {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let root = tempfile::tempdir().expect("owned pre-Client fixture");
+        let (config, listeners) = owned_listener_config(root.path()).await;
+        let source = root.path().join(SQLITE_FILENAME);
+        drop(SqliteStore::open(&source).expect("current real SQLite source"));
+        let source_hash = sha256_file(&source).expect("source hash before startup");
+        hiqlite::validation_pause_apply();
+        let resume = ResumeApply;
+        let task_config = config.clone();
+        let mut startup = tokio::spawn(async move {
+            Box::pin(select_daemon_store_observing_with_listeners(
+                &task_config,
+                None,
+                listeners,
+            ))
+            .await
+        });
+        let _cancel = CancelStartup(startup.abort_handle());
+        tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::select! {
+                () = hiqlite::validation_wait_until_apply_paused() => {}
+                result = &mut startup => panic!("startup ended before actual apply pause: {:?}", result.map(|result| result.err())),
+            }
+        }).await.expect("actual pre-Client apply reached");
+        let incoming = root.path().join(HIQLITE_INCOMING_DIRNAME);
+        let before = std::fs::metadata(&incoming).expect("actual incoming directory");
+        let database = incoming
+            .join("state_machine/db")
+            .join(HIQLITE_DATABASE_FILENAME);
+        let database_hash = sha256_file(&database).expect("actual pre-Client database");
+        startup.abort();
+        assert!(matches!(startup.await, Err(error) if error.is_cancelled()));
+        let probe = File::open(root.path().join(DAEMON_LOCK_FILENAME)).expect("root lease probe");
+        assert!(
+            probe.try_lock().is_err(),
+            "request cancellation is not storage drainage"
+        );
+        assert!(
+            Box::pin(select_daemon_store(&config)).await.is_err(),
+            "another selector must not enter incoming recovery"
+        );
+        let after =
+            std::fs::metadata(&incoming).expect("incoming must not be removed while draining");
+        assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+        assert_eq!(sha256_file(&source).expect("source preserved"), source_hash);
+        assert_eq!(
+            sha256_file(&database).expect("incoming preserved"),
+            database_hash
+        );
+        // The kernel lock waiter observes actual lease release; no polling or sleep.
+        let released = tokio::task::spawn_blocking(move || {
+            probe.lock().expect("root lease released after drainage");
+            probe
+        });
+        drop(resume);
+        let probe = tokio::time::timeout(Duration::from_secs(15), released)
+            .await
+            .expect("storage drainage releases root lease")
+            .expect("kernel waiter joined");
+        let _raft = std::net::TcpListener::bind(config.cluster.raft_bind)
+            .expect("cancelled Raft socket closed");
+        let _api = std::net::TcpListener::bind(config.cluster.api_bind)
+            .expect("cancelled API socket closed");
+        assert_eq!(
+            sha256_file(&source).expect("source remains unchanged"),
+            source_hash
+        );
+        drop(probe);
+    });
 }

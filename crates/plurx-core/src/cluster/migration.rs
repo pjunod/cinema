@@ -1543,17 +1543,13 @@ async fn activate_fresh_store(
         .as_ref()
         .map(StartupListeners::for_import)
         .transpose()?;
-    let import_lock = if listeners.is_some() {
-        Some(daemon_lock.try_clone().map_err(|error| {
-            migration_io(
-                "retaining import daemon lock",
-                &config.storage.data_dir,
-                error,
-            )
-        })?)
-    } else {
-        None
-    };
+    let import_lock = Some(daemon_lock.try_clone().map_err(|error| {
+        migration_io(
+            "retaining import daemon lock",
+            &config.storage.data_dir,
+            error,
+        )
+    })?);
     let (client, mut pending_import) = match start_voter(
         config,
         &incoming,
@@ -1569,14 +1565,9 @@ async fn activate_fresh_store(
     .await
     {
         Ok((client, _, pending)) => (client, pending),
-        Err(error) => {
-            // Supplied startup resources can still be draining under their
-            // retained daemon lock. Recovery cleans the target after that fence.
-            if listeners.is_none() {
-                remove_abandoned_incoming(&config.storage.data_dir)?;
-            }
-            return Err(error);
-        }
+        // Startup may still be draining under its retained root lease.
+        // Recovery cleans the incoming target only after that fence releases.
+        Err(error) => return Err(error),
     };
     let store = match HiqliteAuthStore::bootstrap(
         client.clone(),
@@ -4011,30 +4002,38 @@ async fn start_voter(
         config.cluster.snapshot_transfer_timeout_secs,
         config.cluster.install_snapshot_timeout_secs,
     );
+    // Bridge the pre-Client constructor lifetime with the actual root lease.
+    // The original remains here for immediate PendingStartupClient handoff.
+    let keepalive: Option<Arc<dyn Send + Sync>> = cleanup_lock
+        .as_ref()
+        .map(|lock| {
+            lock.try_clone()
+                .map(|lease| Arc::new(lease) as Arc<dyn Send + Sync>)
+                .map_err(|error| {
+                    migration_io(
+                        "retaining pre-Client daemon lock",
+                        &config.storage.data_dir,
+                        error,
+                    )
+                })
+        })
+        .transpose()?;
+    let resources = hiqlite::StartupResources::new(listeners, keepalive);
     let vendor_start = async {
-        match (observation_only, listeners) {
-            (true, Some(listeners)) => {
-                hiqlite::start_node_for_clock_observation_with_listeners(
-                    node_config,
-                    admission.clone(),
-                    listeners,
-                )
-                .await
-            }
-            (false, Some(listeners)) => {
-                hiqlite::start_node_with_membership_admission_and_listeners(
-                    node_config,
-                    admission.clone(),
-                    listeners,
-                )
-                .await
-            }
-            (true, None) => {
-                hiqlite::start_node_for_clock_observation(node_config, admission.clone()).await
-            }
-            (false, None) => {
-                hiqlite::start_node_with_membership_admission(node_config, admission.clone()).await
-            }
+        if observation_only {
+            hiqlite::start_node_for_clock_observation_with_resources(
+                node_config,
+                admission.clone(),
+                resources,
+            )
+            .await
+        } else {
+            hiqlite::start_node_with_membership_admission_and_resources(
+                node_config,
+                admission.clone(),
+                resources,
+            )
+            .await
         }
     };
     let client = match tokio::time::timeout(vendor_timeout, vendor_start).await {

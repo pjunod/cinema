@@ -44,17 +44,20 @@ pub(crate) async fn start_raft_db(
     do_reset_metadata: bool,
     snapshot_transport: crate::LocalSnapshotTransportStatus,
     staged_startup: bool,
+    keepalive: crate::startup_cleanup::Keepalive,
 ) -> Result<StateRaftDB, Error> {
     // We always want to start stopped and set to `false` as soon as we found out,
     // that we are not pristine node and need cleanup.
     let is_raft_stopped = Arc::new(AtomicBool::new(true));
 
     let mut startup_owner = crate::startup_cleanup::StartupStorageOwner::new(staged_startup);
+    startup_owner.retain(keepalive.clone());
     let log_store = crate::startup_cleanup::start_wal::<TypeConfigSqlite>(
         logs::logs_dir_db(&node_config.data_dir),
         node_config.wal_sync.clone(),
         node_config.wal_size,
         staged_startup,
+        keepalive.clone(),
     )
     .await?;
     startup_owner.protect_wal(log_store.shutdown_handle());
@@ -76,26 +79,31 @@ pub(crate) async fn start_raft_db(
         #[cfg(feature = "backup")]
         let backup_keep_days = node_config.backup_keep_days_local;
         let constructor_mark = std::sync::Arc::clone(&applied_mark);
-        crate::startup_cleanup::construct_sqlite(async move {
-            StateMachineSqlite::new(
-                &data_dir,
-                &filename,
-                node_id,
-                log_statements,
-                statement_capacity,
-                read_pool_size,
-                snapshot_deferral,
-                #[cfg(feature = "s3")]
-                s3_config,
-                do_reset_metadata,
-                #[cfg(feature = "backup")]
-                backup_keep_days,
-                true,
-                constructor_mark,
-            )
-            .await
-            .map_err(|error| Error::Error(format!("SQLite startup constructor: {error}").into()))
-        })
+        crate::startup_cleanup::construct_sqlite(
+            async move {
+                StateMachineSqlite::new(
+                    &data_dir,
+                    &filename,
+                    node_id,
+                    log_statements,
+                    statement_capacity,
+                    read_pool_size,
+                    snapshot_deferral,
+                    #[cfg(feature = "s3")]
+                    s3_config,
+                    do_reset_metadata,
+                    #[cfg(feature = "backup")]
+                    backup_keep_days,
+                    true,
+                    constructor_mark,
+                )
+                .await
+                .map_err(|error| {
+                    Error::Error(format!("SQLite startup constructor: {error}").into())
+                })
+            },
+            keepalive.clone(),
+        )
         .await?
     } else {
         StateMachineSqlite::new(
@@ -197,6 +205,7 @@ pub(crate) async fn start_raft_cache<C>(
     raft_config: Arc<RaftConfig>,
     snapshot_transport: crate::LocalSnapshotTransportStatus,
     staged_startup: bool,
+    keepalive: crate::startup_cleanup::Keepalive,
 ) -> Result<StateRaftCache, Error>
 where
     C: Debug + CacheVariants,
@@ -206,15 +215,19 @@ where
     // We always want to start stopped and set to `false` as soon as we found out,
     // that we are not pristine node and need cleanup.
     let is_raft_stopped = Arc::new(AtomicBool::new(true));
+    // Cache partial construction has no complete shutdown receipt before Raft handoff.
+    let mut construction_claim = crate::startup_cleanup::CompletionClaim::new(&keepalive);
     let is_startup_finished = Arc::new(AtomicBool::new(false));
     let mut startup_owner = crate::startup_cleanup::StartupStorageOwner::new(staged_startup);
+    startup_owner.retain(keepalive.clone());
 
     let state_machine_store = Arc::new(if staged_startup {
         let data_dir = node_config.data_dir.clone();
         let in_memory_only = !node_config.cache_storage_disk;
-        crate::startup_cleanup::construct_cache(async move {
-            StateMachineMemory::new::<C>(&data_dir, in_memory_only).await
-        })
+        crate::startup_cleanup::construct_cache(
+            async move { StateMachineMemory::new::<C>(&data_dir, in_memory_only).await },
+            keepalive.clone(),
+        )
         .await?
     } else {
         StateMachineMemory::new::<C>(&node_config.data_dir, !node_config.cache_storage_disk).await?
@@ -249,6 +262,7 @@ where
             node_config.wal_sync.clone(),
             node_config.wal_size,
             staged_startup,
+            keepalive.clone(),
         )
         .await?;
         let shutdown_handle = log_store.shutdown_handle();
@@ -318,6 +332,7 @@ where
     )
     .await?;
 
+    construction_claim.confirmed();
     startup_owner.handoff();
     Ok(state)
 }

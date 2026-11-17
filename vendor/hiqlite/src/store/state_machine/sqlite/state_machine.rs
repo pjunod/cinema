@@ -40,6 +40,8 @@ static VALIDATION_APPLY_PAUSE_OBSERVED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "validation-test-helpers")]
 static VALIDATION_APPLY_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
 #[cfg(feature = "validation-test-helpers")]
+static VALIDATION_APPLY_OBSERVED_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
+#[cfg(feature = "validation-test-helpers")]
 static VALIDATION_APPLIED_BLANK: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(feature = "validation-test-helpers")]
@@ -65,6 +67,20 @@ pub fn validation_pause_apply() {
 #[cfg(feature = "validation-test-helpers")]
 pub fn validation_apply_pause_observed() -> bool {
     VALIDATION_APPLY_PAUSE_OBSERVED.load(Ordering::Acquire)
+}
+
+/// Await the existing validation pause without timer-based observation.
+#[cfg(feature = "validation-test-helpers")]
+pub async fn validation_wait_until_apply_paused() {
+    loop {
+        let observed = VALIDATION_APPLY_OBSERVED_NOTIFY.notified();
+        tokio::pin!(observed);
+        observed.as_mut().enable();
+        if VALIDATION_APPLY_PAUSE_OBSERVED.load(Ordering::Acquire) {
+            return;
+        }
+        observed.await;
+    }
 }
 
 /// Counts of Raft entries this process's SQLite state machine has applied,
@@ -168,6 +184,7 @@ async fn validation_wait_for_apply() {
         tokio::pin!(notified);
         notified.as_mut().enable();
         VALIDATION_APPLY_PAUSE_OBSERVED.store(true, Ordering::Release);
+        VALIDATION_APPLY_OBSERVED_NOTIFY.notify_waiters();
         if !VALIDATION_APPLY_PAUSED.load(Ordering::Acquire) {
             break;
         }

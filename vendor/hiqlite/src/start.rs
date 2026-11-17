@@ -55,6 +55,7 @@ struct StartupTaskOwner {
     enabled: bool,
     tasks: Vec<tokio::task::AbortHandle>,
     listeners: crate::startup_cleanup::StartupListenerOwner,
+    keepalive: crate::startup_cleanup::Keepalive,
 }
 
 impl StartupTaskOwner {
@@ -69,7 +70,6 @@ impl StartupTaskOwner {
         task: tokio::task::JoinHandle<()>,
         handle: axum_server::Handle<std::net::SocketAddr>,
     ) {
-        self.track(&task);
         self.listeners.track(task, handle);
     }
 
@@ -82,13 +82,44 @@ impl StartupTaskOwner {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some(std::mem::take(&mut self.listeners));
         }
+        self.enabled = false;
     }
 }
 
 impl Drop for StartupTaskOwner {
     fn drop(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        self.listeners.stop_admitting();
         for task in &self.tasks {
             task.abort();
+        }
+        let mut listeners = std::mem::take(&mut self.listeners);
+        let mut claim = crate::startup_cleanup::CompletionClaim::new(&self.keepalive);
+        tokio::spawn(async move {
+            if listeners.finish().await.is_ok() {
+                claim.confirmed();
+            }
+        });
+    }
+}
+
+/// Non-serialized resources whose ownership must survive cancelled startup.
+#[derive(Default)]
+pub struct StartupResources {
+    listeners: Option<StartupListeners>,
+    keepalive: crate::startup_cleanup::Keepalive,
+}
+
+impl StartupResources {
+    pub fn new(
+        listeners: Option<StartupListeners>,
+        keepalive: Option<Arc<dyn Send + Sync>>,
+    ) -> Self {
+        Self {
+            listeners,
+            keepalive,
         }
     }
 }
@@ -143,27 +174,40 @@ pub(crate) async fn start_node_inner<C>(
 where
     C: Debug + CacheVariants,
 {
-    start_node_inner_with_listeners::<C>(node_config, membership_admission, phase, None).await
+    start_node_inner_with_resources::<C>(
+        node_config,
+        membership_admission,
+        phase,
+        StartupResources::default(),
+    )
+    .await
 }
 
 #[allow(clippy::extra_unused_type_parameters)]
-pub(crate) async fn start_node_inner_with_listeners<C>(
+pub(crate) async fn start_node_inner_with_resources<C>(
     mut node_config: Box<NodeConfig>,
     membership_admission: Option<Arc<dyn crate::membership_admission::MembershipAdmission>>,
     phase: StartupPhase,
-    listeners: Option<StartupListeners>,
+    resources: StartupResources,
 ) -> Result<Client, Error>
 where
     C: Debug + CacheVariants,
 {
-    let owned_startup = phase == StartupPhase::ClockObservation || listeners.is_some();
+    let StartupResources {
+        listeners,
+        keepalive,
+    } = resources;
+    let owned_startup =
+        phase == StartupPhase::ClockObservation || listeners.is_some() || keepalive.is_some();
     let mut startup_storage = crate::startup_cleanup::StartupStorageOwner::new(owned_startup);
+    startup_storage.retain(keepalive.clone());
     // Locals drop in reverse declaration order: stop admitting network work
     // synchronously before spawning the asynchronous storage drainage owner.
     let mut startup_tasks = StartupTaskOwner {
         enabled: owned_startup,
         tasks: Vec::new(),
         listeners: Default::default(),
+        keepalive: keepalive.clone(),
     };
     if phase == StartupPhase::ClockObservation {
         node_config.learner_only = true;
@@ -243,6 +287,7 @@ where
         _do_reset_metadata,
         snapshot_transport.clone(),
         owned_startup,
+        keepalive.clone(),
     )
     .await?;
 
@@ -255,6 +300,7 @@ where
         raft_config.clone(),
         snapshot_transport.clone(),
         owned_startup,
+        keepalive.clone(),
     )
     .await?;
 

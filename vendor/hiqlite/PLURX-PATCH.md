@@ -630,20 +630,36 @@ patch description remains the historical/local contract; row 19 stays
   Files: `src/store/state_machine/sqlite/writer.rs`, `src/lib.rs`.
 
 - **Row 34 — Owned startup listeners:** `src/lib.rs` exports a move-only
-  `StartupListeners` pair and listener-taking variants of the existing
+  `StartupListeners` pair and non-serialized `StartupResources` variants of the existing
   membership-admission and clock-observation startup entrypoints. `src/start.rs`
   validates both bound addresses against the configured local listening addresses
   and nonzero advertised ports before storage starts, then transfers the exact
   sockets to the existing server tasks. Supplied resources retain the existing
   staged listener/storage cleanup owners through Client handoff; ordinary
-  callers keep their bind and startup behavior. Core may retain custody of the
+  callers keep their bind and startup behavior. `StartupResources` also carries
+  an opaque caller lease. `src/startup_cleanup.rs` and `src/store/mod.rs` transfer
+  completion claims into pending WAL/SQLite constructors and detached cleanup
+  before work can outlive its requester. Only positive handoff or actual
+  listener/WAL/writer shutdown acknowledgements release a claim; missing ACK,
+  error, panic or cancelled cleanup retains the lease fail-closed. Pre-Client
+  listener tasks are joined, rather than aborted without a terminal receipt.
+  Core retains the actual root daemon file through that boundary for every
+  temporary import, active reopen and join, then transfers directly into its
+  post-Client guard. A startup refusal preserves its incoming tree while
+  drainage remains uncertain; subsequent locked recovery owns cleanup. The existing apply-pause validation seam
+  provides asynchronous observation for the core cancellation regression;
+  `fixtures` weak-enables existing `validation-test-helpers` in workspace tests. Core may retain custody of the
   listening sockets across a sequential import and reopen by lending duplicate
   descriptors, waiting for confirmed listener/storage drainage, then moving the
   originals into the active node. Core requires loopback sockets for a fresh
   singleton import before data-directory mutation, preserving the temporary
   voter's cleartext confinement; active reopen and join retain their existing
   transport policy. No endpoint, membership, or admission policy changes. Workspace regressions live in
-  `crates/plurx-core/src/cluster/migration/tests.rs` and require `hiqlite-store`.
+  `crates/plurx-core/src/cluster/migration/tests.rs`; pre-Client coverage requires
+  `hiqlite-store,fixtures`. Vendor `startup_cleanup::tests` also proves real WAL
+  constructor drainage retains the root file, and missing writer ACK retains
+  it without asserting termination. A cache constructor cancellation lacks a
+  complete worker receipt and conservatively retains any supplied lease.
 
 Remove this vendor when both halves of its exit hold. First, the rows an
 upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26, 28, 32 and 34: the
