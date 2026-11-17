@@ -299,18 +299,33 @@ final class SharedDecisionClientTests: XCTestCase {
         let context = try await context(), client = try SharedDecisionClient(testConfiguration: configuration); var calls = 0
         DecisionHTTP.answer = { _ in calls += 1; return nil }
         let base = CreateSessionRequest(playbackId: "shared", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", caps: Caps.snapshot().document)
-        for index in [0, 1, 2, 4, 5] {
+        for index in [0, 1, 2, 5] {
             var request = base
             switch index {
             case 0: request.previousSessionId = ""
             case 1: request.controlSequence = 0
             case 2: request.reopenReason = "stall"
-            case 4: request.preserveDolbyVision = true
             default: request.requestId = request.requestId!.uppercased()
             }
             do { _ = try await client.start(context: context, request: request); XCTFail("accepted unsupported initial Start") } catch {}
         }
         XCTAssertEqual(calls, 0)
+    }
+    /// A Dolby Vision capable player asks to preserve exactly as Local does;
+    /// the Source's planner clamps the plan to that ask.
+    func testInitialStartSendsTheDolbyVisionPreservationAsk() async throws {
+        let context = try await context(), client = try SharedDecisionClient(testConfiguration: configuration)
+        var sent: [String: Any]?
+        DecisionHTTP.answer = { request in
+            // Answer at once: a blocked request would hold the start until the
+            // session's 300 s timeout.
+            sent = try JSONSerialization.jsonObject(with: try self.body(request)) as? [String: Any]
+            return (request.url!, 500, [:], Data())
+        }
+        var request = CreateSessionRequest(playbackId: "shared", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", caps: Caps.snapshot().document)
+        request.copy = true; request.preserveDolbyVision = true
+        _ = try? await client.start(context: context, request: request)
+        XCTAssertEqual(sent?["preserve_dolby_vision"] as? Bool, true)
     }
 
 }

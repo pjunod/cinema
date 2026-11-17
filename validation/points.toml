@@ -774,6 +774,7 @@ contract = "An admin issues an encrypted single-use join token whose cleartext i
 paths = [
   "crates/plurxd/src/http/test_agents.rs",
   "crates/plurxd/src/http/tests.rs",
+  "crates/plurxd/src/http/tests/activity_routes.rs",
   "crates/plurx-core/src/cluster/membership.rs",
   "crates/plurx-core/src/cluster/membership/**",
   "crates/plurxd/src/cluster.rs",

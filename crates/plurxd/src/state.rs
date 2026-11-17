@@ -108,6 +108,14 @@ pub(crate) fn node_hwaccel_key(node_id: &str) -> String {
     format!("node.{node_id}.transcode.hwaccel")
 }
 
+/// Encoders as their labels, for the settings page.
+fn encoder_labels<S: serde::Serializer>(
+    encoders: &[plurx_core::transcode::Encoder],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(encoders.iter().map(|encoder| encoder.label()))
+}
+
 /// Environment facts collected once at startup, shown on the settings page.
 /// Everything here is admin-facing diagnostics — paths, tool versions,
 /// detected hardware — not runtime state.
@@ -162,6 +170,11 @@ pub struct SystemInfo {
     /// Whether this exact ffmpeg can run the software-decode → tonemapx
     /// Dolby Vision reshape → software-encode graph.
     pub dovi_reshape: bool,
+    /// The hardware encoders boot proved that reshape graph with, by label.
+    /// Every detected hardware encoder is probed once at boot, so a Profile 5
+    /// session never starts a capability probe of its own.
+    #[serde(serialize_with = "encoder_labels")]
+    pub dovi_reshape_hardware: Vec<plurx_core::transcode::Encoder>,
     /// Whether this exact ffmpeg can run the HDR10 rung: the same software
     /// decode into `tonemapx`'s HDR *passthrough* mode at 10 bit, into
     /// libx265 Main10. Separate from `dovi_reshape` because it is a separate
@@ -1236,8 +1249,10 @@ impl AppState {
         // registry can distinguish active tuner scratch from restart debris.
         let live_tv_scratch = transcode_dir.join(crate::transcode::LIVE_TV_WORK_DIR_NAME);
         let system = Arc::new(system);
-        let peer_activity =
-            crate::http::internal_activity::PeerActivityClient::new(membership.clone());
+        let peer_activity = crate::http::internal_activity::PeerActivityClient::new(
+            membership.clone(),
+            cluster.directory(),
+        );
         let jobs = Arc::new(
             JobManager::new_with_scan_prune_percent(
                 Arc::clone(&store),
@@ -1319,6 +1334,7 @@ impl AppState {
             .with_dv_strippable(system.dovi_rpu)
             .with_dv_convertible(system.dolby_vision_convert)
             .with_dovi_reshape(system.dovi_reshape)
+            .with_dovi_reshape_hardware(system.dovi_reshape_hardware.clone())
             .with_dovi_passthrough(system.dovi_passthrough)
             .with_dovi_passthrough_qsv(system.dovi_passthrough_qsv)
             .with_hdr10_passthrough(system.hdr10_passthrough)
@@ -1495,6 +1511,10 @@ impl AppState {
             self.serving.clone(),
             membership.clone(),
             self.applied.applied_mark(),
+        );
+        self.peer_activity = crate::http::internal_activity::PeerActivityClient::new(
+            membership.clone(),
+            self.cluster.directory(),
         );
         self.membership = membership;
     }

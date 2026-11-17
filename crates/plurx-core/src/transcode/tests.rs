@@ -1958,6 +1958,93 @@ fn copy_args_copy_audio_when_supported() {
     assert!(ss < i);
 }
 
+#[test]
+fn preserved_dolby_vision_copy_uses_scanned_base_colour_for_every_copy_recipe() {
+    let cases = [
+        (
+            "HDR10-compatible Profile 8",
+            Some(1),
+            "dolby_vision",
+            true,
+            Some("smpte2084"),
+        ),
+        (
+            "HDR10-compatible Profile 8",
+            Some(6),
+            "dolby_vision",
+            true,
+            Some("smpte2084"),
+        ),
+        (
+            "HLG-compatible Profile 8",
+            Some(4),
+            "dolby_vision",
+            true,
+            Some("arib-std-b67"),
+        ),
+        ("Profile 5", Some(0), "dolby_vision", true, None),
+        ("unknown compatibility", None, "dolby_vision", true, None),
+        ("stripped HDR10 base", Some(1), "dolby_vision", false, None),
+        ("ordinary HDR10", Some(1), "hdr10", true, None),
+    ];
+    let mut tagged_fingerprint = None;
+    let mut untagged_fingerprint = None;
+
+    for (label, compatibility, hdr, preserve, transfer) in cases {
+        let mut source = file(Some(hdr));
+        source.dolby_vision.bl_compat_id = compatibility;
+        let options = CopyVideoOptions::new(false, preserve);
+        let video = copy_video_args(&source, options);
+        let expected = transfer.map(|transfer| {
+            [
+                "-color_primaries",
+                "bt2020",
+                "-color_trc",
+                transfer,
+                "-colorspace",
+                "bt2020nc",
+            ]
+        });
+        let recipes = [
+            video.clone(),
+            copy_index_pipe_args(&source, options),
+            copy_pipe_args_with_dolby_vision(&source, 0.0, None, true, Pacing::unpaced(), options),
+        ];
+        for args in recipes {
+            match expected {
+                Some(ref expected) => {
+                    for pair in expected.chunks_exact(2) {
+                        assert!(
+                            args.windows(2).any(|actual| actual == pair),
+                            "{label} copy must carry {pair:?}: {args:?}"
+                        );
+                    }
+                }
+                None => assert!(
+                    !args.iter().any(|arg| matches!(
+                        arg.as_str(),
+                        "-color_primaries" | "-color_trc" | "-colorspace"
+                    )),
+                    "{label} copy must not invent compatible-base colour: {args:?}"
+                ),
+            }
+        }
+
+        let fingerprint = crate::segplan::argv_fingerprint(&video);
+        if compatibility == Some(1) && preserve && hdr == "dolby_vision" {
+            tagged_fingerprint = Some(fingerprint);
+        } else if compatibility.is_none() && preserve && hdr == "dolby_vision" {
+            untagged_fingerprint = Some(fingerprint);
+        }
+    }
+
+    assert_ne!(
+        tagged_fingerprint.expect("compatible base fingerprint"),
+        untagged_fingerprint.expect("unknown base fingerprint"),
+        "the compatible-base tags participate in copy/index identity"
+    );
+}
+
 /// A copy-video seek may start at the prior keyframe. Accurate input seek
 /// would discard encoded audio until the requested instant but retain that
 /// video preroll, which is an immediate A/V offset after every seek.

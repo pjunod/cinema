@@ -198,6 +198,9 @@ pub(super) fn explicit_hls_hevc_claim(caps: &plurx_core::playback::DeviceCaps) -
 /// and orphan the first.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct CreateSession {
+    /// Receiver-affirmed shared upgrade: false is ordinary support, true requests the prepared successor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processed_upgrade: Option<bool>,
     /// Stable for one player instance. Supersession is keyed by it, so two
     /// devices on one account no longer kill each other's streams.
     pub playback_id: String,
@@ -4794,6 +4797,7 @@ async fn create_with_purpose_attempt(
         processing_decline.as_deref(),
     );
     let response = StartResponse {
+        processed_upgrade: None,
         enhancement,
         effective_processing,
         delivered_audio: info.audio_delivery.clone(),
@@ -6457,10 +6461,22 @@ pub(crate) struct PreparedSourcePlayback {
     source_invocation_fingerprint: Option<String>,
     source_presentation: Option<SourceCopyPresentation>,
     copy_head_caps: plurx_core::playback::DeviceCaps,
+    processed_upgrade_requested: bool,
+    processed_upgrade_offered: bool,
+    processed_upgrade_ask: crate::transcode::ProcessedUpgradeAsk,
     decision: super::super::stream::DecisionResponse,
+    /// The receiver affirmed Dolby Vision relay, and with it that its Start
+    /// decoder relays the enhancement rows.
+    relays_enhancement: bool,
 }
 #[allow(dead_code)]
 impl PreparedSourcePlayback {
+    pub(crate) fn processed_upgrade_requested(&self) -> bool {
+        self.processed_upgrade_requested
+    }
+    pub(crate) fn processed_upgrade_ask(&self) -> &crate::transcode::ProcessedUpgradeAsk {
+        &self.processed_upgrade_ask
+    }
     pub(crate) fn request(&self) -> &crate::transcode::SessionRequest {
         &self.resolved.request
     }
@@ -6475,6 +6491,15 @@ impl PreparedSourcePlayback {
     }
     pub(crate) fn plan_notes(&self) -> &[String] {
         &self.resolved.plan_notes
+    }
+    /// The receiver affirmed Dolby Vision relay: the Start carries the
+    /// enhancement rows.
+    pub(crate) fn relay_enhancement(&mut self) {
+        self.relays_enhancement = true;
+    }
+    /// A note the Source's own start policy adds to what this plan says.
+    pub(crate) fn add_plan_note(&mut self, note: &str) {
+        self.resolved.plan_notes.push(note.to_owned());
     }
     pub(crate) fn native_subtitles(&self) -> (bool, Option<i64>) {
         (
@@ -6526,6 +6551,7 @@ impl PreparedSourcePlayback {
         };
         let crate::transcode::SessionKind::Copy {
             preserve_dolby_vision,
+            convert_dolby_vision,
             ..
         } = self.resolved.request.kind
         else {
@@ -6536,7 +6562,7 @@ impl PreparedSourcePlayback {
             &self.file,
             self.resolved.height,
             &self.copy_head_caps,
-            preserve_dolby_vision,
+            (preserve_dolby_vision, convert_dolby_vision),
             &facts,
         )
         .map_err(|()| refused())
@@ -6598,26 +6624,41 @@ impl PreparedSourcePlayback {
             .capability_height_ceiling_for_request(Some(&self.file), self.resolved.request.hdr10)
             .await;
         let quality_negotiated = self.resolved.request.candidate_context.is_some();
-        let playlist_url = if self.resolved.native_subtitles {
-            let master = format!("/api/v1/hls/{}/master.m3u8", info.session_id);
-            match self.resolved.native_subtitle {
-                Some(index) => format!("{master}?subtitle={index}"),
-                None => master,
-            }
-        } else {
-            info.playlist_url.clone()
-        };
-        Ok(StartResponse {
-            enhancement: session_enhancement(
+        let (delivered_dynamic_range, delivered_dolby_vision_profile) =
+            session_delivered_processing_shape(
                 Some(&self.file),
                 &info.kind,
                 info.grade,
                 info.processed_dv_profile,
-                info.processed_fel,
-                None,
-                None,
-                None,
-            ),
+            );
+        let playlist_url = source_start_playlist_url(
+            &info.session_id,
+            &info.playlist_url,
+            self.resolved.native_subtitles,
+            self.resolved.native_subtitle,
+            delivered_dynamic_range,
+        );
+        Ok(StartResponse {
+            processed_upgrade: self.processed_upgrade_offered.then(|| "offered".to_owned()),
+            // The FEL / RPU / DYN rows local playback shows. A receiver that
+            // affirmed Dolby Vision relay decodes and relays them; an older
+            // one round-trips the Start through a `StartResponse` that never
+            // deserializes them and would refuse it, so it gets none.
+            enhancement: self
+                .relays_enhancement
+                .then(|| {
+                    session_enhancement(
+                        Some(&self.file),
+                        &info.kind,
+                        info.grade,
+                        info.processed_dv_profile,
+                        info.processed_fel,
+                        None,
+                        None,
+                        None,
+                    )
+                })
+                .flatten(),
             effective_processing: None,
             delivered_audio: info.audio_delivery.clone(),
             measured_candidate_outputs: None,
@@ -6654,21 +6695,8 @@ impl PreparedSourcePlayback {
             vod: info.vod,
             ladder: crate::transcode::advertised_ladder(self.file.height, ladder_ceiling),
             prior_kbps: None,
-            delivered_dynamic_range: session_delivered_processing_shape(
-                Some(&self.file),
-                &info.kind,
-                info.grade,
-                info.processed_dv_profile,
-            )
-            .0
-            .map(str::to_owned),
-            delivered_dolby_vision_profile: session_delivered_processing_shape(
-                Some(&self.file),
-                &info.kind,
-                info.grade,
-                info.processed_dv_profile,
-            )
-            .1,
+            delivered_dynamic_range: delivered_dynamic_range.map(str::to_owned),
+            delivered_dolby_vision_profile,
             control: Some(control),
             plan_notes: self.resolved.plan_notes.clone(),
         })
@@ -6689,6 +6717,34 @@ impl PreparedSourcePlayback {
             && binding.playback_id() == self.resolved.request.playback_id
             && Some(binding.request_id()) == self.resolved.request.request_id.as_deref()
             && self.source_invocation_fingerprint.as_deref() == Some(binding.request_fingerprint())
+    }
+}
+
+/// The URL a shared Start opens on. Native subtitles need the master for
+/// their media group; an HDR or Dolby Vision session needs it for
+/// `VIDEO-RANGE` and `SUPPLEMENTAL-CODECS`, which a bare media playlist cannot
+/// say (a Profile 8.1 copy is `hvc1`, so without the master nothing tells the
+/// player it is Dolby Vision). Local Apple playback always asks for native
+/// subtitles and so always opens on the master; a shared client asks only
+/// when a subtitle is selected, so the Source decides here, from what the
+/// session delivers. Without prepared tracks the master admits none.
+pub(crate) fn source_start_playlist_url(
+    session_id: &str,
+    index_url: &str,
+    native_subtitles: bool,
+    native_subtitle: Option<i64>,
+    delivered_dynamic_range: Option<&str>,
+) -> String {
+    let master = format!("/api/v1/hls/{session_id}/master.m3u8");
+    if native_subtitles {
+        return match native_subtitle {
+            Some(index) => format!("{master}?subtitle={index}"),
+            None => master,
+        };
+    }
+    match delivered_dynamic_range {
+        Some("hdr10" | "hlg" | "dolby_vision") => master,
+        _ => index_url.to_owned(),
     }
 }
 
@@ -6814,7 +6870,10 @@ pub(crate) async fn prepare_source_playback<
         unix_ms(),
     );
     let hdr10_requested = review.hdr10;
-    let resolved = resolve_plan_for_principal(
+    let processed_upgrade = body.processed_upgrade;
+    let processed_query =
+        body.selection_catalog_request(&file, &caps, body.reviewed_copy_scope(Some(&review)));
+    let mut resolved = resolve_plan_for_principal(
         FilePlanInputs {
             snapshot: Some(&snapshot),
             state,
@@ -6827,6 +6886,85 @@ pub(crate) async fn prepare_source_playback<
         body,
     )
     .await?;
+    let processed_upgrade_ask = crate::transcode::ProcessedUpgradeAsk {
+        canonical_caps: Some(caps.clone()),
+        target_height: u32::try_from(resolved.height).map_err(|_| refused("processed_height"))?,
+        grade: if resolved.request.hdr10 || decision.decision.delivered_dynamic_range == "hdr10" {
+            plurx_core::transcode::OutputGrade::Hdr10
+        } else {
+            plurx_core::transcode::OutputGrade::Sdr
+        },
+        names_processed: false,
+        route: resolved
+            .request
+            .candidate_context
+            .as_ref()
+            .map(|context| context.selected_candidate.route)
+            .unwrap_or(
+                if matches!(
+                    resolved.request.kind,
+                    crate::transcode::SessionKind::Copy { .. }
+                ) {
+                    plurx_core::playback::candidate::CandidateRoute::Remux
+                } else {
+                    plurx_core::playback::candidate::CandidateRoute::Encode
+                },
+            ),
+        average_bps: None,
+        peak_bps: None,
+        recipe_digest: [0; 32],
+        required_fel_qualification: None,
+        catalog_query: Some(processed_query),
+        display_target: None,
+        display_target_note: None,
+    };
+    let destination = if processed_upgrade.is_some() {
+        match crate::transcode::TranscodeManager::processed_upgrade_gates_with_ask(
+            &resolved.request,
+            &snapshot,
+            hdr10_requested,
+            Some(&processed_upgrade_ask),
+        ) {
+            Ok(destination) => destination,
+            Err(reason) if processed_upgrade == Some(true) => {
+                return Err(ApiError::Conflict(reason))
+            }
+            Err(reason) => {
+                resolved
+                    .plan_notes
+                    .push(format!("Processed upgrade: {reason}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if processed_upgrade == Some(true) {
+        #[cfg(target_os = "linux")]
+        {
+            if destination.is_none() {
+                return Err(ApiError::Conflict(
+                    "processed upgrade no longer applies".into(),
+                ));
+            }
+            let (mut trial, _) =
+                crate::transcode::TranscodeManager::processed_qualification_input_with_ask(
+                    &snapshot,
+                    &resolved.request,
+                    resolved.height,
+                    &processed_upgrade_ask,
+                )
+                .map_err(ApiError::Conflict)?;
+            // Source has its own held probe and current assignment. A local Auto
+            // candidate's dispatch context is not its processed-trial authority.
+            trial.candidate_context = None;
+            resolved.request = trial;
+        }
+        #[cfg(not(target_os = "linux"))]
+        return Err(ApiError::Conflict(
+            "processed upgrades require a processing Source".into(),
+        ));
+    }
     // Source preparation must not run the local census, which can change
     // the revision being authorized and starts children outside its owner.
     let probe_json = snapshot.probe_json.as_deref();
@@ -6872,21 +7010,35 @@ pub(crate) async fn prepare_source_playback<
         source_invocation_fingerprint: None,
         source_presentation: None,
         copy_head_caps: caps,
+        processed_upgrade_requested: processed_upgrade == Some(true),
+        processed_upgrade_offered: processed_upgrade == Some(false) && destination.is_some(),
+        processed_upgrade_ask,
         target,
         principal,
         file,
         resolved,
         decision,
+        relays_enhancement: false,
     })
 }
 
 /// Checks only declared decoder configuration/raster/color. Missing facts do
 /// not acquire an optimistic source or decoder qualification.
+///
+/// A Dolby Vision delivery (a preserve, or the Profile 7 → 8.1 conversion,
+/// which also preserves) is checked against the client's Dolby Vision claim
+/// rather than its HDR presentation list: some video entry must enumerate the
+/// delivered profile (8 for a conversion). The head's transfer must be its
+/// compatible base's (PQ for an HDR10 base, HLG for an HLG base, SDR for an
+/// SDR base); a Profile 5 head has no compatible base, so its declared
+/// transfer is accepted as is. A `dvh1`/`dvhe` sample entry is admitted by
+/// that same Dolby Vision claim: `hls_hevc_sample_entries` can only name the
+/// plain `hvc1`/`hev1` entries.
 fn validate_prepared_copy_head(
     file: &MediaFile,
     resolved_height: i64,
     caps: &plurx_core::playback::DeviceCaps,
-    preserve_dolby_vision: bool,
+    (preserve_dolby_vision, convert_dolby_vision): (bool, bool),
     facts: &plurx_core::fmp4::CopyVideoSampleEntryFacts,
 ) -> Result<(), ()> {
     use plurx_core::{
@@ -6938,33 +7090,62 @@ fn validate_prepared_copy_head(
         preserve_dolby_vision,
         OutputGrade::Sdr,
     );
-    let expected_transfer = match range {
-        "hdr10" => Transfer::Pq,
-        "hlg" => Transfer::Hlg,
-        "sdr" => Transfer::Sdr,
-        _ => return Err(()),
-    };
     let actual_transfer = match transfer {
-        16 => Transfer::Pq,
-        18 => Transfer::Hlg,
-        1 | 6 | 13 | 14 | 15 => Transfer::Sdr,
+        16 => Some(Transfer::Pq),
+        18 => Some(Transfer::Hlg),
+        1 | 6 | 13 | 14 | 15 => Some(Transfer::Sdr),
+        _ => None,
+    };
+    // The Dolby Vision profile the delivered bytes carry; `None` for every
+    // non-Dolby delivery (a strip, an HDR10/HLG/SDR copy).
+    let dolby_vision_profile = match range {
+        "dolby_vision" => Some(
+            plurx_core::playback::delivered_dolby_vision_profile(
+                file,
+                PlaybackMethod::Remux,
+                preserve_dolby_vision,
+                convert_dolby_vision,
+            )
+            .ok_or(())?,
+        ),
+        _ => None,
+    };
+    let expected_transfer = match range {
+        "hdr10" => Some(Transfer::Pq),
+        "hlg" => Some(Transfer::Hlg),
+        "sdr" => Some(Transfer::Sdr),
+        "dolby_vision" => dolby_vision_base_transfer(file),
         _ => return Err(()),
     };
-    if actual_transfer != expected_transfer {
-        return Err(());
+    match (expected_transfer, actual_transfer) {
+        (Some(expected), Some(actual)) if expected == actual => {}
+        // Profile 5 alone has no compatible base; its head declares the
+        // transfer. Every other Dolby Vision head must carry its known base.
+        (None, _) if dolby_vision_profile == Some(5) => {}
+        _ => return Err(()),
     }
     if !caps.video.iter().any(|entry| {
         entry.codec == codec
             && (entry.profiles.is_empty() || entry.profiles.iter().any(|claim| claim == profile))
             && entry.geometry_admission(u32::from(facts.width), u32::from(facts.height), None)
                 != Some(false)
-            && entry.present.contains(&actual_transfer)
+            && match dolby_vision_profile {
+                Some(delivered) => entry.dv_profiles.contains(&delivered),
+                None => actual_transfer.is_some_and(|actual| entry.present.contains(&actual)),
+            }
     }) {
         return Err(());
     }
     if codec == "hevc" {
         let tag = std::str::from_utf8(&facts.sample_entry).map_err(|_| ())?;
-        if caps
+        let dolby_vision_entry = matches!(tag, "dvh1" | "dvhe");
+        if dolby_vision_entry {
+            // Only a Dolby Vision delivery may carry a Dolby Vision sample
+            // entry, and the profile claim checked above is what admits it.
+            if dolby_vision_profile.is_none() {
+                return Err(());
+            }
+        } else if caps
             .hls_hevc_sample_entries
             .as_ref()
             .is_some_and(|entries| !entries.iter().any(|entry| entry == tag))
@@ -6973,6 +7154,29 @@ fn validate_prepared_copy_head(
         }
     }
     Ok(())
+}
+
+/// The transfer a Dolby Vision copy's base layer declares, from the scan's
+/// base-layer compatibility id (1 and 6 are HDR10, 4 is HLG, 2 is SDR), or
+/// from its label for a row without the column. `None` for a source with no
+/// compatible base (Profile 5), whose head declares its own transfer.
+fn dolby_vision_base_transfer(file: &MediaFile) -> Option<plurx_core::playback::Transfer> {
+    use plurx_core::playback::Transfer;
+    match file.dolby_vision.bl_compat_id {
+        Some(1 | 6) => return Some(Transfer::Pq),
+        Some(4) => return Some(Transfer::Hlg),
+        Some(2) => return Some(Transfer::Sdr),
+        Some(_) => return None,
+        None => {}
+    }
+    let label = file.hdr_format.as_deref()?;
+    if label.contains("HLG-compatible") {
+        Some(Transfer::Hlg)
+    } else if label.contains("HDR10-compatible") {
+        Some(Transfer::Pq)
+    } else {
+        None
+    }
 }
 
 fn source_media_origin_ms(
@@ -7063,6 +7267,40 @@ mod source_presentation_origin_tests {
 }
 
 #[cfg(test)]
+mod source_start_playlist_tests {
+    use super::source_start_playlist_url;
+    const SESSION: &str = "7d4f3c7e-6f5b-4a39-9a43-0f4f1d3f3a11";
+    #[test]
+    fn source_start_response_opens_hdr_and_dolby_vision_sessions_on_the_master() {
+        let index = format!("/api/v1/hls/{SESSION}/index.m3u8");
+        let master = format!("/api/v1/hls/{SESSION}/master.m3u8");
+        for range in ["hdr10", "hlg", "dolby_vision"] {
+            assert_eq!(
+                source_start_playlist_url(SESSION, &index, false, None, Some(range)),
+                master,
+                "{range} without a subtitle opens on the master"
+            );
+        }
+        for range in [Some("sdr"), None] {
+            assert_eq!(
+                source_start_playlist_url(SESSION, &index, false, None, range),
+                index,
+                "{range:?} keeps the media playlist"
+            );
+        }
+        for range in [Some("sdr"), Some("hdr10"), Some("dolby_vision")] {
+            assert_eq!(
+                source_start_playlist_url(SESSION, &index, true, Some(2), range),
+                format!("{master}?subtitle=2")
+            );
+            assert_eq!(
+                source_start_playlist_url(SESSION, &index, true, None, range),
+                master
+            );
+        }
+    }
+}
+#[cfg(test)]
 mod source_copy_head_tests {
     use super::*;
     fn file() -> MediaFile {
@@ -7119,23 +7357,33 @@ mod source_copy_head_tests {
         let source = file();
         let caps = caps();
         let good = facts();
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &good).is_ok());
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, (false, false), &good).is_ok());
         let mut changed = good.clone();
         changed.width = 1280;
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        assert!(
+            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &changed).is_err()
+        );
         let mut changed = good.clone();
         changed.profile_idc = 77;
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        assert!(
+            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &changed).is_err()
+        );
         let mut changed = good.clone();
         changed.bit_depth = 10;
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        assert!(
+            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &changed).is_err()
+        );
         let mut changed = good.clone();
         changed.color = Some((9, 16, 9, false));
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        assert!(
+            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &changed).is_err()
+        );
         let mut changed = good.clone();
         changed.color = None;
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
-        assert!(validate_prepared_copy_head(&source, 720, &caps, false, &good).is_err());
+        assert!(
+            validate_prepared_copy_head(&source, 1080, &caps, (false, false), &changed).is_err()
+        );
+        assert!(validate_prepared_copy_head(&source, 720, &caps, (false, false), &good).is_err());
     }
     #[test]
     fn prepared_copy_head_rechecks_specific_decoder_profile_and_geometry_claim() {
@@ -7143,9 +7391,189 @@ mod source_copy_head_tests {
         let good = facts();
         let mut caps = caps();
         caps.video[0].max_width = Some(1280);
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &good).is_err());
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, (false, false), &good).is_err());
         caps.video[0].max_width = Some(1920);
         caps.video[0].profiles = vec!["main".into()];
-        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &good).is_err());
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, (false, false), &good).is_err());
+    }
+
+    /// A 4K HEVC Main10 Dolby Vision source with the given profile, base
+    /// compatibility id and label.
+    fn dolby_vision_file(profile: i64, compat: i64, label: &str) -> MediaFile {
+        MediaFile {
+            container: Some("matroska".into()),
+            video_codec: Some("hevc".into()),
+            video_codec_tag: Some("hvc1".into()),
+            video_profile: Some("Main 10".into()),
+            width: Some(3840),
+            height: Some(2160),
+            bit_depth: Some(10),
+            hdr: Some("dolby_vision".into()),
+            hdr_format: Some(label.into()),
+            dolby_vision: plurx_core::domain::DolbyVisionFacts {
+                profile: Some(profile),
+                level: Some(6),
+                bl_compat_id: Some(compat),
+                el_present: Some(profile == 7),
+                rpu_present: Some(true),
+            },
+            ..file()
+        }
+    }
+    fn dolby_vision_head(
+        sample_entry: [u8; 4],
+        transfer: u16,
+    ) -> plurx_core::fmp4::CopyVideoSampleEntryFacts {
+        plurx_core::fmp4::CopyVideoSampleEntryFacts {
+            codec: plurx_core::fmp4::VideoCodec::Hevc,
+            sample_entry,
+            width: 3840,
+            height: 2160,
+            profile_idc: 2,
+            level_idc: 153,
+            bit_depth: 10,
+            chroma_format_idc: 1,
+            color: Some((9, transfer, 9, false)),
+            dolby_vision_config: true,
+        }
+    }
+    /// An Apple TV-shaped claim: HEVC Main10 4K presenting SDR and PQ, with
+    /// the given Dolby Vision profiles enumerated.
+    fn dolby_vision_caps(profiles: &[u8]) -> plurx_core::playback::DeviceCaps {
+        serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"hevc","profiles":["main","main10"],"max_height":2160,"max_width":3840,"present":["sdr","pq"],"dv_profiles":profiles}],"hls_hevc_sample_entries":["hvc1"],"dv_transport":"hls"})).expect("Dolby Vision capabilities fixture")
+    }
+    #[test]
+    fn source_copy_head_admits_profile8_preserve_for_a_client_that_enumerates_8() {
+        let source = dolby_vision_file(8, 1, "Dolby Vision · Profile 8.1 (HDR10-compatible)");
+        let head = dolby_vision_head(*b"hvc1", 16);
+        let caps = dolby_vision_caps(&[8]);
+        assert!(validate_prepared_copy_head(&source, 2160, &caps, (true, false), &head).is_ok());
+        // An HLG-compatible 8.4 carries an HLG base.
+        let hlg = dolby_vision_file(8, 4, "Dolby Vision · Profile 8.4 (HLG-compatible)");
+        assert!(validate_prepared_copy_head(
+            &hlg,
+            2160,
+            &caps,
+            (true, false),
+            &dolby_vision_head(*b"hvc1", 18)
+        )
+        .is_ok());
+        assert!(
+            validate_prepared_copy_head(&hlg, 2160, &caps, (true, false), &head).is_err(),
+            "a PQ head is not the HLG base the scan recorded"
+        );
+        // The strip of the same source is an HDR10 head with no record.
+        let mut stripped = head.clone();
+        stripped.dolby_vision_config = false;
+        assert!(
+            validate_prepared_copy_head(&source, 2160, &caps, (false, false), &stripped).is_ok()
+        );
+        assert!(
+            validate_prepared_copy_head(&source, 2160, &caps, (true, false), &stripped).is_err(),
+            "a preserve must carry the Dolby Vision record"
+        );
+    }
+    #[test]
+    fn source_copy_head_admits_profile7_converted_to_8_1() {
+        let source = dolby_vision_file(7, 6, "Dolby Vision · Profile 7 (HDR10-compatible)");
+        let head = dolby_vision_head(*b"hvc1", 16);
+        // The conversion delivers 8.1, so a client that enumerates only 8
+        // takes it; one that enumerates only 7 does not.
+        assert!(validate_prepared_copy_head(
+            &source,
+            2160,
+            &dolby_vision_caps(&[8]),
+            (true, true),
+            &head
+        )
+        .is_ok());
+        assert!(validate_prepared_copy_head(
+            &source,
+            2160,
+            &dolby_vision_caps(&[7]),
+            (true, true),
+            &head
+        )
+        .is_err());
+    }
+    #[test]
+    fn source_copy_head_admits_profile5_dvh1_for_a_dolby_vision_client() {
+        let source = dolby_vision_file(5, 0, "Dolby Vision · Profile 5");
+        let caps = dolby_vision_caps(&[5, 8]);
+        // No compatible base: whatever transfer the promoted head declares.
+        for transfer in [16, 2] {
+            assert!(
+                validate_prepared_copy_head(
+                    &source,
+                    2160,
+                    &caps,
+                    (true, false),
+                    &dolby_vision_head(*b"dvh1", transfer)
+                )
+                .is_ok(),
+                "transfer {transfer}"
+            );
+        }
+        // `dvh1` is admitted by the Dolby Vision claim, never for a plain
+        // HEVC delivery.
+        let hdr10 = MediaFile {
+            hdr: Some("hdr10".into()),
+            hdr_format: Some("HDR10".into()),
+            dolby_vision: Default::default(),
+            ..source.clone()
+        };
+        let mut plain = dolby_vision_head(*b"dvh1", 16);
+        plain.dolby_vision_config = false;
+        assert!(validate_prepared_copy_head(&hdr10, 2160, &caps, (false, false), &plain).is_err());
+        plain.sample_entry = *b"hvc1";
+        assert!(validate_prepared_copy_head(&hdr10, 2160, &caps, (false, false), &plain).is_ok());
+    }
+    #[test]
+    fn source_copy_head_requires_a_known_base_for_every_profile_but_5() {
+        // A Profile 8 row whose base compatibility is unknown or none: no
+        // base transfer to check, so the head is refused, whatever it says.
+        let caps = dolby_vision_caps(&[8]);
+        for (compat, label) in [
+            (0, "Dolby Vision · Profile 8"),
+            (3, "Dolby Vision · Profile 8"),
+        ] {
+            let source = dolby_vision_file(8, compat, label);
+            for transfer in [16, 18, 1, 2] {
+                assert!(
+                    validate_prepared_copy_head(
+                        &source,
+                        2160,
+                        &caps,
+                        (true, false),
+                        &dolby_vision_head(*b"hvc1", transfer)
+                    )
+                    .is_err(),
+                    "compat {compat} transfer {transfer}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn source_copy_head_refuses_dolby_vision_for_a_client_without_the_profile() {
+        let profile8 = dolby_vision_file(8, 1, "Dolby Vision · Profile 8.1 (HDR10-compatible)");
+        let profile5 = dolby_vision_file(5, 0, "Dolby Vision · Profile 5");
+        for caps in [dolby_vision_caps(&[]), dolby_vision_caps(&[7])] {
+            assert!(validate_prepared_copy_head(
+                &profile8,
+                2160,
+                &caps,
+                (true, false),
+                &dolby_vision_head(*b"hvc1", 16)
+            )
+            .is_err());
+            assert!(validate_prepared_copy_head(
+                &profile5,
+                2160,
+                &caps,
+                (true, false),
+                &dolby_vision_head(*b"dvh1", 16)
+            )
+            .is_err());
+        }
     }
 }

@@ -13,6 +13,9 @@
 //! its own task, so a start that gives up waiting neither cancels the probe
 //! for the callers still waiting nor leaves a half-finished flight behind.
 //!
+//! A Source start does not fly here: it runs the probes as its own children
+//! and hands the verdict to [`DoviProofs::record`].
+//!
 //! A flight runs its probes at the class of the caller that opened it, so a
 //! caller joins only a flight at least as urgent as itself. A session start
 //! ([`ChildClass::Realtime`]) never waits on a probe that is yielding CPU to
@@ -55,10 +58,13 @@ impl DoviProofs {
             .copied()
     }
 
-    /// Record a verdict directly. Tests use it to stand in for a proof that
-    /// already ran.
-    #[cfg(test)]
-    pub(crate) fn insert(&self, key: String, verdict: bool) {
+    /// Remember a verdict a proof reached outside [`Self::prove`]: the
+    /// Source runs the same two probes as its own children, under its copy
+    /// permit, held file fence, deadline and cancellation
+    /// (`source_preparation`), and records what they established here so the
+    /// planner's `require_dovi_renderer` finds it and spawns nothing. Only a
+    /// verdict is recorded; an inconclusive proof never reaches this.
+    pub(crate) fn record(&self, key: String, verdict: bool) {
         self.ledger
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -177,6 +183,31 @@ mod tests {
             )
             .await;
         assert_eq!(cached, DoviPixelProof::Refuted);
+    }
+
+    #[tokio::test]
+    async fn a_recorded_verdict_is_found_without_starting_a_flight() {
+        let proofs = DoviProofs::default();
+        for (key, verdict, expected) in [
+            ("p5:1:1", true, DoviPixelProof::Proved),
+            ("p5:2:2", false, DoviPixelProof::Refuted),
+        ] {
+            proofs.record(key.into(), verdict);
+            assert_eq!(proofs.verdict(key), Some(verdict));
+            for class in ChildClass::ALL {
+                let proof = proofs
+                    .prove(
+                        key.into(),
+                        class,
+                        || -> std::future::Ready<DoviPixelProof> {
+                            panic!("a recorded verdict must not start a flight")
+                        },
+                    )
+                    .await;
+                assert_eq!(proof, expected);
+            }
+            assert!(proofs.ledger.lock().expect("ledger").flights.is_empty());
+        }
     }
 
     #[tokio::test]
