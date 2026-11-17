@@ -18,6 +18,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Web prepared upgrades keep predecessor control observations on their own
+  media source through exposure, so a transient successor wait cannot cancel
+  its own preparation. The first visible frame freezes the final commit;
+  retries and close preserve that exact settlement before changing reporters.
+
 - Auto playback keeps foreground admission through VOD creation, so a cold
   start can ask background work to yield; prepared successors retain their
   separate speculative purpose even when they share a cached rendition.

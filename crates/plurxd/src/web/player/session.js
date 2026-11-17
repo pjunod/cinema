@@ -238,7 +238,19 @@ function playbackControlHlsFatal(data,started){
         error_detail:detail||type||"hls_fatal"};
   return {media_failure:mediaFailure,observation};
 }
-function playbackControlSnapshot(v,p){
+function playbackControlSnapshot(v,p,mediaObservation=null){
+  if(mediaObservation){
+    // During exposure the presentation and control generation have different
+    // owners. Observe the retained source; viewer intent and ACKs stay live.
+    v=mediaObservation.element;
+    const source=mediaObservation.context;
+    if(v.readyState>=3&&!v.error&&!v.seeking){
+      source.waitAt=null;
+    }else if(!v.paused&&v.readyState<3&&!source.waitAt){
+      source.waitAt=performance.now();
+    }
+    p=Object.assign({},p,source);
+  }
   if(!v||!p) return null;
   // R1. A committed destination is only this presentation's seek once an
   // attachment has executed it — `markPlaybackControlSeekExecuted` runs when
