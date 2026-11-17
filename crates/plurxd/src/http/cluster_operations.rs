@@ -271,8 +271,9 @@ pub(crate) async fn local(
 ) -> Result<(HeaderMap, Json<ClusterNodeOperationsStatus>), StatusCode> {
     let auth = exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !state
-        .membership
-        .authorize_internal_peer_read_request(&auth, "GET", INTERNAL_PATH, &[])
+        .cluster
+        .authentication()
+        .authorize_read_request(&auth, "GET", INTERNAL_PATH, &[])
         .await
         .unwrap_or(false)
     {

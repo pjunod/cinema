@@ -671,8 +671,9 @@ pub(crate) async fn receive(
 ) -> Result<Response<Body>, StatusCode> {
     let auth = exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !state
-        .membership
-        .authorize_internal_peer_request(&auth, "POST", PATH, &body)
+        .cluster
+        .authentication()
+        .authorize_exact_request(&auth, "POST", PATH, &body)
         .await
         .unwrap_or(false)
     {
@@ -705,8 +706,9 @@ pub(crate) async fn receive(
     let payload =
         super::peer_transport::signed_response_payload(StatusCode::NO_CONTENT.as_u16(), &[]);
     let signature = state
-        .membership
-        .sign_internal_peer_response(&auth.node_id, &auth.nonce, PATH, &payload)
+        .cluster
+        .authentication()
+        .sign_exact_response(&auth.node_id, &auth.nonce, PATH, &payload)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -826,7 +828,8 @@ mod tests {
             .split_once("fn validate(")
             .expect("revocation receiver end")
             .0;
-        assert!(receive.contains("sign_internal_peer_response"));
+        assert!(receive.contains(".authentication()"));
+        assert!(receive.contains("sign_exact_response"));
         assert!(receive.contains("RESPONSE_SIGNATURE_HEADER"));
         assert!(receive.contains("StatusCode::NO_CONTENT"));
     }

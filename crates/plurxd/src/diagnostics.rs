@@ -748,8 +748,9 @@ async fn peer(
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let payload = crate::http::peer_transport::signed_response_payload(200, &bytes);
     let signature = state
-        .membership
-        .sign_internal_peer_response(&auth.node_id, &auth.nonce, PEER_PATH, &payload)
+        .cluster
+        .authentication()
+        .sign_exact_response(&auth.node_id, &auth.nonce, PEER_PATH, &payload)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let mut response = private(bytes);
     response.headers_mut().insert(

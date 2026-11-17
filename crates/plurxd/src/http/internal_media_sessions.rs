@@ -88,7 +88,7 @@ const REMOTE_ABORT_WAIT: Duration = Duration::from_secs(5);
 fn admit_remote_start_serving_authority(
     state: &AppState,
 ) -> Result<(crate::serving_fence::ServingAuthority, u64), RemoteStartError> {
-    let authority = state.serving.authority();
+    let authority = state.cluster.authority();
     let generation = authority.admit().ok_or(RemoteStartError::ServingFence)?;
     Ok((authority, generation))
 }
@@ -142,8 +142,9 @@ async fn authorize(
 ) -> Result<(), StatusCode> {
     let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if state
-        .membership
-        .authorize_internal_peer_request(&auth, "POST", path, body)
+        .cluster
+        .authentication()
+        .authorize_exact_request(&auth, "POST", path, body)
         .await
         .unwrap_or(false)
     {
@@ -161,8 +162,9 @@ async fn authorize_read(
 ) -> Result<(), StatusCode> {
     let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if state
-        .membership
-        .authorize_internal_peer_read_request(&auth, "POST", path, body)
+        .cluster
+        .authentication()
+        .authorize_read_request(&auth, "POST", path, body)
         .await
         .unwrap_or(false)
     {
@@ -180,7 +182,7 @@ pub(crate) async fn start(
     let start_deadline = tokio::time::Instant::now() + START_DEADLINE;
     authorize(&state, &headers, START_PATH, &body).await?;
     let restart_admission = state
-        .serving
+        .cluster
         .try_restart_admission()
         .await
         .ok_or(RemoteStartError::RestartDrain)?;
@@ -515,10 +517,10 @@ pub(crate) async fn activate(
     else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let Some(restart_admission) = state.serving.try_restart_admission().await else {
+    let Some(restart_admission) = state.cluster.try_restart_admission().await else {
         return RemoteStartError::RestartDrain.into_response();
     };
-    let authority = state.serving.authority();
+    let authority = state.cluster.authority();
     if authority.admit() != Some(request.target_generation) {
         return RemoteStartError::ServingFence.into_response();
     }
@@ -675,10 +677,10 @@ pub(crate) async fn prepare_authorized(state: AppState, body: Bytes) -> Response
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         };
     }
-    let Some(_restart_admission) = state.serving.try_restart_admission().await else {
+    let Some(_restart_admission) = state.cluster.try_restart_admission().await else {
         return RemoteStartError::RestartDrain.into_response();
     };
-    let authority = state.serving.authority();
+    let authority = state.cluster.authority();
     let Some(admitted_generation) = authority.admit() else {
         return RemoteStartError::ServingFence.into_response();
     };

@@ -1386,7 +1386,7 @@ impl AppState {
             Arc::clone(&store),
             Arc::clone(&transcode),
             node_id.clone(),
-            serving.clone(),
+            cluster.restart_admissions(),
         );
         let media_pool = crate::media_pool::MediaPool::new(cluster.calls(), cluster.directory());
         let media_sessions = crate::media_sessions::MediaSessionCoordinator::with_directory(

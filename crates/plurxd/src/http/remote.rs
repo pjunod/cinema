@@ -444,8 +444,9 @@ pub(crate) async fn internal(
         None => return error_response(fail(401, "unauthorized")),
     };
     if !state
-        .membership
-        .authorize_internal_peer_request(&auth, "POST", INTERNAL_PATH, &body)
+        .cluster
+        .authentication()
+        .authorize_exact_request(&auth, "POST", INTERNAL_PATH, &body)
         .await
         .unwrap_or(false)
     {
@@ -492,7 +493,7 @@ pub(crate) async fn internal(
         _ => return error_response(fail(503, "unavailable")),
     };
     let payload = signed_response_payload(status, &bytes);
-    let signature = match state.membership.sign_internal_peer_response(
+    let signature = match state.cluster.authentication().sign_exact_response(
         &auth.node_id,
         &auth.nonce,
         INTERNAL_PATH,

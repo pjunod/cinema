@@ -666,8 +666,9 @@ pub(crate) async fn peer(
         super::peer_transport::exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let payload = super::peer_transport::signed_response_payload(200, &bytes);
     let signature = state
-        .membership
-        .sign_internal_peer_response(&auth.node_id, &auth.nonce, PEER_PATH, &payload)
+        .cluster
+        .authentication()
+        .sign_exact_response(&auth.node_id, &auth.nonce, PEER_PATH, &payload)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let mut response = (StatusCode::OK, bytes).into_response();
     response.headers_mut().insert(

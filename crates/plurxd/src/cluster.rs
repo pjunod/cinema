@@ -448,6 +448,9 @@ mod operations {
         pub(crate) fn retain_restart_cancel(&self) -> PlannedOutageFenceToken {
             self.cluster.fence.retain_restart_cancellation()
         }
+        pub(crate) async fn current_outage(&self) -> Option<PlannedOutageFenceToken> {
+            self.cluster.fence.current_planned_outage().await
+        }
         pub(crate) async fn outage_is_current(&self, token: PlannedOutageFenceToken) -> bool {
             self.cluster.fence.planned_outage_is_current(token).await
         }
@@ -755,6 +758,17 @@ impl Cluster {
     pub(crate) fn authentication(&self) -> calls::PeerAuthentication {
         calls::PeerAuthentication::new(self.membership.clone())
     }
+    /// Retained restart admission uses the fence's expires-at predicate,
+    /// which intentionally differs from projected authority admission.
+    pub(crate) fn restart_admissions(&self) -> RestartAdmissions {
+        RestartAdmissions {
+            fence: self.fence.clone(),
+        }
+    }
+    pub(crate) fn starts_mutable_media(method: &str, path: &str) -> bool {
+        ServingFence::starts_mutable_media(method, path)
+    }
+
     /// Preserve the fence's exact new-media admission, not a cached verdict.
     pub(crate) async fn admitting_new_media(&self) -> bool {
         self.fence.accepting_new_media().await
@@ -779,6 +793,24 @@ impl Cluster {
     /// The shared directory, for a subsystem that keeps its own handle.
     pub(crate) fn directory(&self) -> Directory {
         self.directory.clone()
+    }
+}
+
+/// Owned admission for a subsystem that must retain the exact restart guard.
+#[derive(Clone)]
+pub(crate) struct RestartAdmissions {
+    fence: ServingFence,
+}
+impl RestartAdmissions {
+    pub(crate) fn try_admit(
+        &self,
+    ) -> impl std::future::Future<Output = Option<crate::serving_fence::RestartAdmission>> + Send + '_
+    {
+        self.fence.try_restart_admission()
+    }
+    #[cfg(test)]
+    pub(crate) fn for_fence(fence: ServingFence) -> Self {
+        Self { fence }
     }
 }
 
@@ -1462,6 +1494,34 @@ pub(crate) mod calls {
     impl PeerAuthentication {
         pub(super) fn new(membership: MembershipManager) -> Self {
             Self { membership }
+        }
+        pub(crate) async fn authorize_activity(
+            &self,
+            auth: &ActivityPeerAuth,
+        ) -> Result<bool, plurx_core::cluster::membership::MembershipError> {
+            self.membership.authorize_activity_request(auth).await
+        }
+        pub(crate) async fn authorize_read_request(
+            &self,
+            auth: &InternalPeerAuth,
+            method: &str,
+            path: &str,
+            body: &[u8],
+        ) -> Result<bool, plurx_core::cluster::membership::MembershipError> {
+            self.membership
+                .authorize_internal_peer_read_request(auth, method, path, body)
+                .await
+        }
+        pub(crate) async fn authorize_voter_request(
+            &self,
+            auth: &InternalPeerAuth,
+            method: &str,
+            path: &str,
+            body: &[u8],
+        ) -> Result<bool, plurx_core::cluster::membership::MembershipError> {
+            self.membership
+                .authorize_internal_peer_voter_request(auth, method, path, body)
+                .await
         }
         pub(crate) async fn authorize_exact_request(
             &self,

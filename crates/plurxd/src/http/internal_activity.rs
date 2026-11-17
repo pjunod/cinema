@@ -556,8 +556,9 @@ pub async fn snapshot(
 ) -> Result<(HeaderMap, Json<ActivitySnapshot>), StatusCode> {
     let auth = peer_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !state
-        .membership
-        .authorize_activity_request(&auth)
+        .cluster
+        .authentication()
+        .authorize_activity(&auth)
         .await
         .unwrap_or(false)
     {

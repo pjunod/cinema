@@ -3307,7 +3307,7 @@ async fn mutable_media_serving_gate(
         return serving_gate(&state, request, next).await;
     };
     let path = request.uri().path().to_owned();
-    hls::fence::observe_hls_session_response(&state.serving, route, &path, async {
+    hls::fence::observe_hls_session_response(state.cluster.authority(), route, &path, async {
         if route.existing_session_read {
             hls::fence::hold_for_outage_resolution(&state).await;
         }
@@ -3321,7 +3321,7 @@ async fn serving_gate(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let starts_media = crate::serving_fence::ServingFence::starts_mutable_media(
+    let starts_media = crate::cluster::Cluster::starts_mutable_media(
         request.method().as_str(),
         request.uri().path(),
     );

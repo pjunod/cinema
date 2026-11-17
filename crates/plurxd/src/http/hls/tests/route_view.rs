@@ -250,7 +250,7 @@
             .expect("control route");
         let path = format!("/api/v1/hls/{session_id}/control");
         let exchange = super::fence::observe_hls_session_response(
-            &fixture.state.serving,
+            fixture.state.cluster.authority(),
             route,
             &path,
             control_inner(
