@@ -2318,6 +2318,148 @@ pub(in crate::http) fn viewer_hash<H: AuthenticationHeaders + ?Sized>(
     Ok(value.to_owned())
 }
 
+// Test diagnostics only: these retained observations never authorize admission
+// or infer a durable/physical outcome from an absent registry entry.
+#[cfg(test)]
+fn fixture_task_diagnostic(entry: &SourceStartEntry) -> Value {
+    let observed_at_ms = crate::state::clock_ms();
+    let (stage, incarnation, factory_refusal, retained_assignment_freshness) = {
+        let stage = entry.task.stage.lock().expect("diagnostic Source stage");
+        let name = match &*stage {
+            SourceStartTaskStage::Registered => "registered",
+            SourceStartTaskStage::ReadingIntent { .. } => "reading_intent",
+            SourceStartTaskStage::IntentReady { .. } => "intent_ready",
+            SourceStartTaskStage::Claiming { .. } => "claiming",
+            SourceStartTaskStage::Acquired(_) => "acquired",
+            SourceStartTaskStage::Assigning(_) => "assigning",
+            SourceStartTaskStage::Assigned(_) => "assigned",
+            SourceStartTaskStage::Activating(_) => "activating",
+            SourceStartTaskStage::InvokingFactory(_) => "invoking_factory",
+            SourceStartTaskStage::FactoryRefused(_) => "factory_refused",
+        };
+        let refusal = match &*stage {
+            SourceStartTaskStage::FactoryRefused(receipt) => {
+                Some(format!("{:?}", receipt.reason()))
+            }
+            _ => None,
+        };
+        let assignment = match &*stage {
+            SourceStartTaskStage::Assigned(assignment)
+            | SourceStartTaskStage::Activating(assignment)
+            | SourceStartTaskStage::InvokingFactory(assignment) => Some(assignment),
+            SourceStartTaskStage::FactoryRefused(receipt) => Some(receipt.assignment()),
+            _ => None,
+        };
+        let freshness = assignment.map(|assignment| {
+            format!(
+                "{:?}",
+                assignment.validate_observation_freshness(observed_at_ms)
+            )
+        });
+        (name, stage.incarnation(), refusal, freshness)
+    };
+    let joined = match &*entry.task.joined.lock().expect("diagnostic Source join") {
+        None => "pending",
+        Some(SourceStartTaskJoined::Returned) => "returned",
+        Some(SourceStartTaskJoined::PanickedOrCancelled) => "panicked_or_cancelled",
+    };
+    let result = entry
+        .result
+        .lock()
+        .expect("diagnostic Source result")
+        .clone();
+    let (result, actor_settlement) = match result {
+        None => ("pending".to_owned(), None),
+        Some(Err(error)) => (format!("{error:?}"), None),
+        Some(Ok(owned)) => (
+            "ready".to_owned(),
+            Some(format!("{:?}", owned.actor.settlement_status())),
+        ),
+    };
+    let cleanup = match &*entry
+        .task
+        .cleanup
+        .lock()
+        .expect("diagnostic Source cleanup")
+    {
+        None => "none",
+        Some(SourceUninvokedCleanup::UncertainG0 { .. }) => "uncertain_g0",
+        Some(SourceUninvokedCleanup::G0(_)) => "g0",
+        Some(SourceUninvokedCleanup::G1(_)) => "g1",
+    };
+    serde_json::json!({
+        "request_id":entry.identity.request_id,
+        "stage":stage,
+        "incarnation_id":incarnation,
+        "joined":joined,
+        "result":result,
+        "factory_refusal":factory_refusal,
+        "diagnostic_observed_at_ms":observed_at_ms,
+        "retained_assignment_freshness_at_diagnostic":retained_assignment_freshness,
+        // Claiming retains an opaque intent, not the original members proof.
+        // Its absence cannot establish freshness at the earlier claim write.
+        "claim_members_observation_retained":false,
+        "actor_settlement":actor_settlement,
+        "cleanup":cleanup,
+        "cleanup_confirmed":entry.task.cleanup_confirmation.lock().expect("diagnostic cleanup confirmation").is_some(),
+    })
+}
+#[cfg(test)]
+fn fixture_start_diagnostic(
+    state: &crate::state::AppState,
+    headers: &HeaderMap,
+    bytes: &[u8],
+    item: &str,
+    file: &str,
+) -> Value {
+    use sha2::Digest;
+    let Ok(input) = parse_start_request(bytes, item, file) else {
+        return serde_json::json!({"request":"unparsed","entries":[]});
+    };
+    let headers: SourceHeaders = headers.clone().into();
+    let (Ok(viewer), Ok(hash)) = (viewer_hash(&headers), source_credential_hash(&headers)) else {
+        return serde_json::json!({"request_id":input.request_id,"identity":"unparsed","entries":[]});
+    };
+    let recipe_hash: [u8; 32] = sha2::Sha256::digest(&input.canonical_recipe).into();
+    let registry = &state.transcode.source_http_starts;
+    // Separate, non-coherent diagnostic snapshots: no registry lock remains
+    // held while inspecting an entry or its authentication/task observations.
+    let active = registry
+        .entries
+        .lock()
+        .expect("diagnostic active Source tasks")
+        .iter()
+        .map(std::sync::Arc::clone)
+        .collect::<Vec<_>>();
+    let settled = registry
+        .settled
+        .lock()
+        .expect("diagnostic settled Source tasks")
+        .iter()
+        .map(std::sync::Arc::clone)
+        .collect::<Vec<_>>();
+    let matching = active
+        .into_iter()
+        .map(|entry| ("active", entry))
+        .chain(settled.into_iter().map(|entry| ("settled", entry)))
+        .filter(|(_, entry)| {
+            entry.identity.request_id == input.request_id
+                && entry.identity.reference == input.reference
+                && entry.identity.recipe_hash == recipe_hash
+                && entry.viewer == viewer
+                && entry
+                    .authenticated_hashes
+                    .lock()
+                    .expect("diagnostic task authentication")
+                    .contains(&hash)
+        })
+        .take(2)
+        .collect::<Vec<_>>();
+    let entries = matching.into_iter().map(|(registry, entry)| {
+        serde_json::json!({"registry":registry,"task":fixture_task_diagnostic(&entry)})
+    }).collect::<Vec<_>>();
+    serde_json::json!({"request_id":input.request_id,"entries":entries})
+}
 #[cfg(test)]
 async fn fixture_start(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
@@ -2325,6 +2467,7 @@ async fn fixture_start(
     axum::extract::Path((item, file)): axum::extract::Path<(String, String)>,
     body: axum::body::Body,
 ) -> Result<axum::response::Response, ApiError> {
+    let started = std::time::Instant::now();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("actual Source fixture listener");
@@ -2334,18 +2477,24 @@ async fn fixture_start(
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(crate::serve_http(
         listener,
-        super::sharing::peer_router(state),
+        super::sharing::peer_router(state.clone()),
         async move {
             let _ = stopped.await;
         },
         crate::HTTP_TIMEOUTS,
     ));
-    let bytes = axum::body::to_bytes(body, 128 * 1024)
+    let request_bytes = axum::body::to_bytes(body, 128 * 1024)
         .await
         .map_err(|_| invalid())?;
     let url = format!("http://{address}/sharing/v1/items/{item}/files/{file}/sessions");
-    let response =
-        tests::actual_resource_request(address, false, &url, headers, bytes.to_vec()).await;
+    let response = tests::actual_resource_request(
+        address,
+        false,
+        &url,
+        headers.clone(),
+        request_bytes.to_vec(),
+    )
+    .await;
     let _ = stop.send(());
     server
         .await
@@ -2358,6 +2507,12 @@ async fn fixture_start(
     let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
         .await
         .map_err(|_| invalid())?;
+    eprintln!(
+        "Source fixture Start failure: status={status} elapsed_ms={} body={} retained={}",
+        started.elapsed().as_millis(),
+        String::from_utf8_lossy(&bytes),
+        fixture_start_diagnostic(&state, &headers, &request_bytes, &item, &file),
+    );
     let value: Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
     let code = [
         "sharing_start_conflict",

@@ -1334,6 +1334,50 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
                     serde_json::to_vec(&recipe).expect("native request"),
                 )
                 .await;
+                if response.status() != StatusCode::OK {
+                    let status = response.status();
+                    let body = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        axum::body::to_bytes(response.into_body(), 128 * 1024),
+                    )
+                    .await;
+                    let body = match body {
+                        Ok(Ok(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+                        Ok(Err(error)) => format!("native failure body read failed: {error}"),
+                        Err(_) => "native failure body exceeded the 2s diagnostic bound".to_owned(),
+                    };
+                    let retained = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        fixture
+                            .state
+                            .transcode
+                            .hls_session_status(&decoded.response().session_id),
+                    )
+                    .await;
+                    let retained = match retained {
+                        Ok(value) => {
+                            serde_json::to_value(value).expect("retained native HLS diagnostic")
+                        }
+                        Err(_) => json!({"diagnostic_timeout":"retained_status"}),
+                    };
+                    let task = fixture_start_diagnostic(
+                        &fixture.state,
+                        &fixture.headers,
+                        &fixture.request,
+                        fixture.reference.item_id.as_str(),
+                        fixture.reference.file_id.as_str(),
+                    );
+                    let members = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        fixture.state.membership.observe_source_admission_members(),
+                    )
+                    .await;
+                    panic!(
+                        "actual native Source resource {resource} h2={h2} refused: {status}; body={}; retained={retained}; task={task}; current_member_floor={:?}",
+                        body,
+                        members.as_ref().map(|value| value.as_ref().map(|observation| observation.is_some())),
+                    );
+                }
                 assert_eq!(response.status(), StatusCode::OK, "native {resource}");
                 assert_eq!(response.headers()["cinemashare-resource"], resource);
                 let mime = response.headers()["content-type"]
@@ -1514,15 +1558,60 @@ async fn actual_vtt_writer_end(
         ))
         .expect("request");
     *request.headers_mut() = fixture.headers.clone();
-    let send = tokio::spawn(async move { sender.send_request(request).await });
+    let mut send = tokio::spawn(async move { sender.send_request(request).await });
     let connection = captured.await.expect("actual accepted VTT connection");
-    tokio::time::timeout(Duration::from_secs(10), async {
+    // Keep the same marker and deadline, but observe the real request instead
+    // of treating every failed response/transport as an unobserved DATA wait.
+    let marker_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut received: Option<hyper::Response<hyper::body::Incoming>> = None;
+    let mut send_completed = false;
+    let marker = tokio::time::timeout_at(marker_deadline, async {
         while !probe.blocked.load(Ordering::SeqCst) {
-            tokio::task::yield_now().await;
+            tokio::select! {
+                result = &mut send, if !send_completed => {
+                    send_completed = true;
+                    let response = match result {
+                        Ok(Ok(response)) => response,
+                        Ok(Err(error)) => panic!(
+                            "actual VTT request failed before DATA: {error}; task={}; actor_settlement={:?}; connection_closed={}",
+                            fixture_task_diagnostic(entry), owned.actor.settlement_status(), connection.closed().is_closed(),
+                        ),
+                        Err(error) => panic!(
+                            "actual VTT request task failed before DATA: {error}; task={}; actor_settlement={:?}",
+                            fixture_task_diagnostic(entry), owned.actor.settlement_status(),
+                        ),
+                    };
+                    if response.status() != StatusCode::OK {
+                        let status = response.status();
+                        eprintln!("actual VTT refused before DATA: {status}; task={}", fixture_task_diagnostic(entry));
+                        let body = tokio::time::timeout_at(
+                            marker_deadline,
+                            axum::body::to_bytes(response.into_body(), 128 * 1024),
+                        ).await;
+                        let body = match body {
+                            Ok(Ok(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+                            Ok(Err(error)) => format!("body read failed: {error}"),
+                            Err(_) => "body did not finish within the original DATA deadline".to_owned(),
+                        };
+                        panic!(
+                            "actual VTT refused before DATA: {status}; body={body}; task={}; actor_settlement={:?}; connection_closed={}",
+                            fixture_task_diagnostic(entry), owned.actor.settlement_status(), connection.closed().is_closed(),
+                        );
+                    }
+                    // Retain the actual successful incoming body just as the
+                    // JoinHandle retained its response before diagnostics.
+                    received = Some(response);
+                }
+                () = tokio::task::yield_now() => {}
+            }
         }
-    })
-    .await
-    .expect("actual VTT DATA at blocked accepted writer");
+    }).await;
+    assert!(
+        marker.is_ok(),
+        "actual VTT DATA at blocked accepted writer timed out; response_status={:?}; send_completed={send_completed}; send_finished={}; task={}; actor_settlement={:?}; connection_closed={}; writer_dropped={}",
+        received.as_ref().map(|response| response.status()), send.is_finished(),
+        fixture_task_diagnostic(entry), owned.actor.settlement_status(), connection.closed().is_closed(), probe.dropped.load(Ordering::SeqCst),
+    );
     assert!(probe.queued_start.load(Ordering::SeqCst));
     assert!(!probe.dropped.load(Ordering::SeqCst));
     assert!(!connection.closed().is_closed());
@@ -1584,8 +1673,11 @@ async fn actual_vtt_writer_end(
         receipt["incarnation_id"],
         owned.assignment.binding().incarnation_id().to_string()
     );
-    send.abort();
-    let _ = send.await;
+    if !send_completed {
+        send.abort();
+        let _ = send.await;
+    }
+    drop(received);
     driver.abort();
     let _ = driver.await;
     let _ = stop.send(());
