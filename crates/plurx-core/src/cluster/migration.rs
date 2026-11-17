@@ -3348,8 +3348,11 @@ async fn materialize_join_snapshot(
 /// that would hold a voter's image.
 #[cfg(feature = "hiqlite-store")]
 const JOIN_SNAPSHOT_MIN_COPY_BYTES_PER_SECOND: u64 = 8 * 1024 * 1024;
-/// How long the snapshot builder waits for storage before it fails the build
-/// (Hiqlite's `snapshot_storage_deferral`, which Plurx leaves at its default).
+/// The longest the snapshot builder waits for storage that can fit the build
+/// or cannot be measured before attempting it (Hiqlite's
+/// `snapshot_storage_deferral`, which Plurx leaves at its default). Storage
+/// that cannot fit the build at all (patch 33) defers with no bound, so such
+/// a join's build outlives this budget and the backstop below ends the join.
 #[cfg(feature = "hiqlite-store")]
 const JOIN_SNAPSHOT_STORAGE_DEFERRAL: Duration = Duration::from_secs(600);
 
@@ -7254,6 +7257,23 @@ pub mod status {
                 passive_metrics: PassiveRaftMetrics::remote_authority(),
                 local_transport: None,
                 previous: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        /// Resolves once, with OpenRaft's error, when this node's own database
+        /// Raft core quits on a fatal error (a storage error or a panic). It
+        /// never resolves for an ordinary `Raft::shutdown`, for SQLite, or for
+        /// a remote client: there is no local core to die. The core's own
+        /// terminal state on the metrics watch is the signal; nothing polls.
+        pub fn raft_core_failure(&self) -> impl Future<Output = String> + Send + 'static {
+            let watch = self.local_metrics.clone();
+            async move {
+                if let Some(mut watch) = watch {
+                    if let hiqlite::LocalDbCoreStop::Fatal(error) = watch.core_stopped().await {
+                        return error;
+                    }
+                }
+                std::future::pending().await
             }
         }
 
