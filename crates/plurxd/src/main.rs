@@ -2007,7 +2007,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             applied,
             identity: selected.identity.clone(),
             credential_key: Arc::clone(&selected.credential_key),
-            backup_client: selected.local_client(),
+            backup_source: selected.local_client().map(crate::cluster::backup_source),
             dirs,
             encoder_caps,
             system,
@@ -2066,7 +2066,7 @@ struct Boot {
     /// Resolved before the store is handed on, so a node that cannot open its
     /// existing Trakt rows fails here rather than at the first sync.
     credential_key: Arc<plurx_core::secrets::CredentialKey>,
-    backup_client: Option<hiqlite::Client>,
+    backup_source: Option<crate::cluster::BackupSource>,
     dirs: crate::state::Dirs,
     encoder_caps: plurx_core::transcode::EncoderCaps,
     system: SystemInfo,
@@ -2417,7 +2417,7 @@ async fn boot_observing(
         applied,
         identity,
         credential_key,
-        backup_client,
+        backup_source,
         dirs,
         encoder_caps,
         system,
@@ -2448,7 +2448,7 @@ async fn boot_observing(
         node_id.clone(),
         instance_id.clone(),
         credential_key,
-        backup_client,
+        backup_source,
         replication,
         membership,
         catalogue,
@@ -3510,7 +3510,7 @@ fn build_state(
     node_id: String,
     cluster_id: String,
     credential_key: Arc<plurx_core::secrets::CredentialKey>,
-    backup_client: Option<hiqlite::Client>,
+    backup_source: Option<crate::cluster::BackupSource>,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
     catalogue: plurx_core::store::CatalogueReader,
@@ -3544,7 +3544,7 @@ fn build_state(
             },
             data_dir: config.storage.data_dir.clone(),
             credential_key_path: config.cluster.credential_key_path(&config.storage.data_dir),
-            backup_client,
+            backup_source,
         },
         store,
         dirs,
@@ -3820,7 +3820,8 @@ fn spawn_background_loops(
     // ungated; claiming the next queued package is not, and takes the same
     // live membership check the other cluster-wide loops do.
     tokio::spawn(
-        std::sync::Arc::clone(&state.offline).run(std::sync::Arc::new(state.membership.clone())),
+        std::sync::Arc::clone(&state.offline)
+            .run(std::sync::Arc::new(state.cluster.jobs().clone())),
     );
 
     // What the libraries' storage reads at. Deliberately after the listener
@@ -3849,7 +3850,7 @@ fn spawn_background_loops(
     // Trakt: hourly (and on-demand) two-way sync + the scrobble-pause sweep.
     tokio::spawn(
         std::sync::Arc::clone(&state.trakt)
-            .sync_loop(std::sync::Arc::new(state.membership.clone())),
+            .sync_loop(std::sync::Arc::new(state.cluster.jobs().clone())),
     );
     tokio::spawn(std::sync::Arc::clone(&state.trakt).sweep_loop());
     // The watched outbox. Its own loop because a retry scheduled two minutes
@@ -3863,7 +3864,7 @@ fn spawn_background_loops(
             tokio::spawn(std::sync::Arc::clone(&state.watched).run(
                 crate::watched::DrainAuthority {
                     coordinator,
-                    authority: std::sync::Arc::new(state.membership.clone()),
+                    authority: std::sync::Arc::new(state.cluster.jobs().clone()),
                     policy: crate::watched::WatchedLeasePolicy::PRODUCTION,
                 },
             ));

@@ -214,7 +214,11 @@ mod operations {
 
         pub(crate) fn change_source(&self) -> crate::settings_changes::SettingsChangeSource {
             match self.manager.local_db_raft_metrics() {
-                Some(applied) => crate::settings_changes::SettingsChangeSource::Applied(applied),
+                Some(metrics) => {
+                    crate::settings_changes::SettingsChangeSource::Applied(super::AppliedChanges {
+                        metrics,
+                    })
+                }
                 None => crate::settings_changes::SettingsChangeSource::LocalOnly,
             }
         }
@@ -559,6 +563,7 @@ pub(crate) struct Cluster {
     membership: MembershipManager,
     directory: Directory,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
+    jobs: Jobs,
 }
 
 impl Cluster {
@@ -572,6 +577,9 @@ impl Cluster {
     ) -> Self {
         Self {
             directory: Directory::with_mark(membership.clone(), mark),
+            jobs: Jobs {
+                manager: membership.clone(),
+            },
             fence,
             membership,
             replication,
@@ -790,9 +798,146 @@ impl Cluster {
         Operations::new(self.clone())
     }
 
+    /// Existing fresh job authority and reconciliation evidence.
+    pub(crate) fn jobs(&self) -> &Jobs {
+        &self.jobs
+    }
+
     /// The shared directory, for a subsystem that keeps its own handle.
     pub(crate) fn directory(&self) -> Directory {
         self.directory.clone()
+    }
+}
+
+/// Job decisions retain the original core algorithms, including learner
+/// execution's fresh membership proof at every publication boundary.
+#[derive(Clone)]
+pub(crate) struct Jobs {
+    manager: MembershipManager,
+}
+impl Jobs {
+    pub(crate) fn clustered(&self) -> bool {
+        self.manager.is_replicated()
+    }
+
+    pub(crate) async fn reconciliation_members(
+        &self,
+        local: &str,
+    ) -> Result<std::collections::BTreeSet<String>, MembershipError> {
+        let mut members = std::collections::BTreeSet::from([local.to_owned()]);
+        if self.clustered() {
+            members.extend(
+                self.manager
+                    .operations_peers()
+                    .await?
+                    .into_iter()
+                    .map(|peer| peer.node_id),
+            );
+        }
+        Ok(members)
+    }
+
+    /// The existing artifact inventory, without new reachability filtering.
+    pub(crate) async fn artifact_workers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+        self.manager.operations_peers().await
+    }
+}
+#[plurx_core::cluster::coordination::cluster_job_async_trait]
+impl plurx_core::cluster::coordination::ClusterJobAuthority for Jobs {
+    async fn may_run_cluster_jobs(&self) -> bool {
+        plurx_core::cluster::coordination::ClusterJobAuthority::may_run_cluster_jobs(&self.manager)
+            .await
+    }
+    async fn may_execute_job(&self, kind: plurx_core::store::background_jobs::JobKind) -> bool {
+        plurx_core::cluster::coordination::ClusterJobAuthority::may_execute_job(&self.manager, kind)
+            .await
+    }
+}
+
+/// Applied-index observation retains the original live Raft watch.
+#[derive(Clone)]
+pub(crate) struct AppliedChanges {
+    metrics: hiqlite::LocalDbRaftMetrics,
+}
+impl AppliedChanges {
+    pub(crate) fn applied_index(&self) -> Option<u64> {
+        self.metrics.snapshot().last_applied_index
+    }
+    pub(crate) fn live(&self) -> bool {
+        self.metrics.membership_snapshot().running
+    }
+    pub(crate) async fn changed(&mut self) -> bool {
+        self.metrics.wait_for_change().await
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct BackupSource {
+    client: hiqlite::Client,
+}
+#[derive(Clone, Copy)]
+pub(crate) struct BackupProgress {
+    pub(crate) applied: Option<u64>,
+    pub(crate) last_log: Option<u64>,
+    pub(crate) snapshot: Option<u64>,
+}
+#[derive(Debug)]
+pub(crate) struct BackupObservationError(String);
+impl std::fmt::Display for BackupObservationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+/// Bootstrap hands only the owned backup protocol to feature code.
+pub(crate) fn backup_source(client: hiqlite::Client) -> BackupSource {
+    BackupSource { client }
+}
+impl BackupSource {
+    pub(crate) fn applied_changes(&self) -> Option<AppliedChanges> {
+        self.client
+            .local_db_raft_metrics()
+            .ok()
+            .map(|metrics| AppliedChanges { metrics })
+    }
+    pub(crate) async fn progress(&self) -> Result<BackupProgress, BackupObservationError> {
+        let metrics = self
+            .client
+            .metrics_db()
+            .await
+            .map_err(|error| BackupObservationError(error.to_string()))?;
+        Ok(BackupProgress {
+            applied: metrics.last_applied.as_ref().map(|log| log.index),
+            last_log: metrics.last_log_index,
+            snapshot: metrics.snapshot.as_ref().map(|log| log.index),
+        })
+    }
+    pub(crate) async fn commit_anchor(&self) -> Result<u64, plurx_core::error::StoreError> {
+        use plurx_core::error::StoreError;
+        // This no-row write is forwarded to the leader and acknowledges the
+        // committed cut. The caller retains its single absolute lease budget.
+        self.client
+            .execute_acked(
+                "UPDATE settings SET updated_at = updated_at WHERE 0",
+                hiqlite::macros::params!(),
+            )
+            .await
+            .map_err(|error| StoreError::Database(format!("anchoring the backup cut: {error}")))?
+            .log_index
+            .ok_or_else(|| {
+                StoreError::Task(
+                    "the leader did not report the backup anchor's log index".to_owned(),
+                )
+            })
+    }
+    pub(crate) async fn trigger_snapshot(&self) -> Result<(), plurx_core::error::StoreError> {
+        self.client
+            .trigger_local_db_snapshot()
+            .await
+            .map_err(|error| {
+                plurx_core::error::StoreError::Database(format!(
+                    "triggering database snapshot: {error}"
+                ))
+            })
     }
 }
 

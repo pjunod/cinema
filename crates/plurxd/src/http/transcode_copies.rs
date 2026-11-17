@@ -349,8 +349,8 @@ async fn prepare(
             .map_err(|error| error.to_string())?;
     }
     let peers = state
-        .membership
-        .operations_peers()
+        .cluster
+        .operation_targets()
         .await
         .map_err(|error| error.to_string())?;
     let holders = sources
