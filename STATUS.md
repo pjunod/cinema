@@ -1,8 +1,8 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-11-16 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-11-17 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
-- **2026-11-16 · Source leases steps 2–4:** Owner GPT-6 Codex, session `01a1e5c0-d4b1-7740-93b4-a0e0123a79cf`, continuing Claude Opus 5.5. Branch `claude/source-lease-steps-2-4`; dependencies #1597 and #1625 landed. Per-root capacity continuation is WIP in [PR #1728](http://forge.lan:3000/noirr/plurx/pulls/1728); review and focused qualification against the current tree remain. Earlier `9a…` qualification and preserved external `da3…` merge are historical only. [Release plan](docs/server/SOURCE-LEASE-RELEASE-PLAN.md), [as-built dispositions](docs/server/SOURCE-LEASE-AS-BUILT.md). No deployment.
+- **2026-11-17 · Source leases steps 2–4:** Owner GPT-6 Codex with scoped Luna assistance, session `01a1e5c0-d4b1-7740-93b4-a0e0123a79cf`, continuing Claude. Branch `claude/source-lease-steps-2-4`; dependencies #1597/#1625 landed. [PR #1728](http://forge.lan:3000/noirr/plurx/pulls/1728) is WIP: exact plan plus ten failed store cases pass; SQLite contracts retain340passes with nine focused corrections under review. Formatting/core Clippy pass; daemon Clippy exceeds the enforced8GiB voter limit, with a RAM-only storage exception prepared for human review. Independent #1565 must publish its migration before lease ordinal integration. [Release plan](docs/server/SOURCE-LEASE-RELEASE-PLAN.md), [as-built dispositions](docs/server/SOURCE-LEASE-AS-BUILT.md). No deployment.
 
 - **2026-11-17 · Web prepared-switch ownership:** owner GPT. New Moon's exposed
   successor could report Waiting under its predecessor's control generation,

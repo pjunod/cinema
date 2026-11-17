@@ -802,6 +802,68 @@ fn published_statement(migration: &str, opening: &str) -> String {
     format!("{};", statement.trim_end_matches(';'))
 }
 
+// Inventory every lease-owned object (including foreign-named indexes/triggers)
+// and every existing object the rewind replaces. Validate before any DROP can
+// hide hostile drift from the older extensions' own strict validators.
+const SOURCE_LEASE_REWIND_SHAPE_SQL: &str = "SELECT type,name,sql FROM sqlite_master
+ WHERE sql IS NOT NULL AND (
+ name GLOB 'source_lease*' OR tbl_name GLOB 'source_lease*'
+ OR name IN (
+ 'background_job_required_resources','analysis_required_resources',
+ 'dispatch_turn_library_resources','dispatch_turn_contenders',
+ 'dispatch_turn_ordinary_occupancy','dispatch_turn_independent',
+ 'background_storage_domain_holders','background_storage_domain_disturbed',
+ 'background_storage_domain_affected_jobs','background_source_pause_effects',
+ 'background_source_resume_effects','background_job_enqueue_command',
+ 'background_job_maintenance_command')
+ OR tbl_name IN (
+ 'background_job_required_resources','analysis_required_resources',
+ 'dispatch_turn_library_resources','dispatch_turn_contenders',
+ 'dispatch_turn_ordinary_occupancy','dispatch_turn_independent',
+ 'background_storage_domain_holders','background_storage_domain_disturbed',
+ 'background_storage_domain_affected_jobs','background_source_pause_effects',
+ 'background_source_resume_effects','background_job_enqueue_command',
+ 'background_job_maintenance_command')) ORDER BY type,name";
+
+fn source_lease_rewind_objects(connection: &rusqlite::Connection) -> Vec<(String, String, String)> {
+    connection
+        .prepare(SOURCE_LEASE_REWIND_SHAPE_SQL)
+        .expect("source lease rewind inventory")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("source lease rewind rows")
+        .collect::<Result<_, _>>()
+        .expect("complete source lease rewind inventory")
+}
+
+fn verify_current_source_lease_rewind_shape(connection: &rusqlite::Connection) {
+    static EXPECTED: std::sync::OnceLock<Vec<(String, String, String)>> =
+        std::sync::OnceLock::new();
+    let expected = EXPECTED.get_or_init(|| {
+        let directory = tempfile::tempdir().expect("current lease rewind witness");
+        let path = directory.path().join("current.db");
+        drop(plurx_core::store::SqliteStore::open(&path).expect("canonical current SQLite store"));
+        let witness = rusqlite::Connection::open(&path).expect("current lease rewind catalogue");
+        source_lease_rewind_objects(&witness)
+    });
+    assert_eq!(
+        &source_lease_rewind_objects(connection),
+        expected,
+        "exact current source lease and overlaid catalogue required before rewind"
+    );
+    let marker: (i64, i64) = connection
+        .query_row(
+            "SELECT count(*),count(*) FILTER (WHERE singleton=1 AND version=3) FROM source_lease_schema",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("contracted source lease marker");
+    assert_eq!(
+        marker,
+        (1, 1),
+        "current lease rewind requires its singular contracted marker"
+    );
+}
+
 /// Rewind an owned, empty v134-v135 source-lease tail to pre-lease v133:
 /// drop the lease objects and restore the v1 source owners and the four
 /// dependents the expand replaced, from their own published text.
@@ -812,6 +874,7 @@ fn rewind_empty_source_leases_to_v133(connection: &rusqlite::Connection) {
     if version != 135 {
         return;
     }
+    verify_current_source_lease_rewind_shape(connection);
     // A job or analysis lease is also recorded by its owner's claim and
     // reservations; playback, attestation and offline leases are not.
     let leases: i64 = connection

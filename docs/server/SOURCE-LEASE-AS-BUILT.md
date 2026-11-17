@@ -38,7 +38,12 @@ view from job, analysis and lease lookups. The shared file-resource view now
 selects one file before aggregating its matching longest-root resource keys.
 Only configuration roots and domain mappings expand inside that aggregate.
 No matching item/root yields the generic fallback; a missing file yields no
-row. The unused intermediate file-root view is removed. Every captured owner
+row.
+
+Historical fixture rewind verifies all current lease-owned objects and
+overlaid resource definitions before replacing them, so a rewind cannot erase
+hostile schema drift and then accept the rewritten catalogue.
+The unused intermediate file-root view is removed. Every captured owner
 plan remains subject to the same no-catalogue-scan assertion.
 
 The Python dispatch fixture consumes the current contender view generated

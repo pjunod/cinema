@@ -2071,6 +2071,19 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
             });
             files.push(file_id);
         }
+        for domain in ["nas", "other"] {
+            store
+                .put_setting(
+                    &format!(
+                        "{}{}",
+                        plurx_core::store::keys::JOB_DOMAIN_SOURCE_READERS_PREFIX,
+                        domain,
+                    ),
+                    "1",
+                )
+                .await
+                .expect("explicit storage-domain reader cap");
+        }
         assert!(
             store
                 .save_storage_domains(mappings.clone(), None, 1_000)
@@ -2281,10 +2294,22 @@ async fn storage_domain_bare_to_named_applies_while_a_foreground_reader_holds_ba
         let item = store.get_item(file.item_id).await.expect("item").expect("item");
         let library = store.get_library(item.library_id).await.expect("library").expect("library");
         let root = library.paths[0].display().to_string();
+        // Keep the foreground owner outside the configured library root. Mapping
+        // the different root leaves this file's generic source_io identity unchanged.
+        let unrooted_file_id = store
+            .upsert_file(
+                file.item_id,
+                "/unconfigured-originals/bare-reader.mkv",
+                file.size,
+                file.mtime,
+                &Default::default(),
+            )
+            .await
+            .expect("seed unmatched foreground source");
         let token = store.register_foreground_source(ForegroundSourceOwner {
             owner_id: uuid::Uuid::new_v4().to_string(), lifetime_id: "bare-reader".into(),
             session_incarnation: uuid::Uuid::new_v4().to_string(), producer_attempt: "producer-1".into(),
-            node_id: "node-a".into(), boot_id: uuid::Uuid::new_v4().to_string(), file_id,
+            node_id: "node-a".into(), boot_id: uuid::Uuid::new_v4().to_string(), file_id: unrooted_file_id,
             source_size: file.size, source_mtime: file.mtime, source_generation: "bare-source".into(),
             policy: ForegroundSourcePolicy::Rolling,
         }, 1_000, 20_000).await.expect("foreground registration").expect("reader");
@@ -2405,6 +2430,10 @@ async fn background_provider_contention_does_not_reserve_independent_storage() {
             libraries.push(library_id);
             files.push(file_id);
         }
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
+            .await
+            .expect("one maintenance reader per root");
         assert!(set_storage_domains(store.as_ref(), mappings, 1_000)
             .await
             .expect("map"));
@@ -5038,6 +5067,19 @@ async fn probe_batches_respect_scan_parent_and_shared_domain_reservations() {
             mappings.push(StorageDomainMapping { library_id: item.library_id,
                 root_path: format!("/{prefix}"), domain_id: domain.into() });
             files.push(file_id);
+        }
+        for domain in ["nas", "other"] {
+            store
+                .put_setting(
+                    &format!(
+                        "{}{}",
+                        plurx_core::store::keys::JOB_DOMAIN_SOURCE_READERS_PREFIX,
+                        domain,
+                    ),
+                    "1",
+                )
+                .await
+                .expect("explicit storage-domain reader cap");
         }
         assert!(set_storage_domains(store.as_ref(), mappings.clone(), 1_000).await.expect("map"));
         let mut payloads = vec![JobPayload::LibraryScan {

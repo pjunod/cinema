@@ -1225,6 +1225,16 @@ where
 #[tokio::test]
 async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
     for_each_backend(|store, backend| async move {
+        store
+            .put_setting(
+                &format!(
+                    "{}shared-nas",
+                    plurx_core::store::keys::JOB_DOMAIN_SOURCE_READERS_PREFIX
+                ),
+                "1",
+            )
+            .await
+            .expect("one maintenance reader for the shared NAS");
         let mut requests = Vec::new();
         let mut mappings = Vec::new();
         for (index, node) in ["source-a", "source-b", "source-c"].into_iter().enumerate() {
@@ -1276,11 +1286,13 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
             .unwrap_or_else(|error| panic!("{backend}: first claim: {error}"))
             .expect("one ordinary source reader");
         assert_eq!(first.request_id, requests[0].request_id, "{backend}");
+        let first_holders = store.source_io_holders(1_004).await.expect("first holder");
+        // One reader is charged to both its root and the mapped domain.
         assert_eq!(
-            store
-                .source_io_holders(1_004)
-                .await
-                .expect("first holder")
+            first_holders
+                .iter()
+                .map(|holder| (&holder.kind, &holder.work_id, &holder.lease_id))
+                .collect::<BTreeSet<_>>()
                 .len(),
             1,
             "{backend}: the first claim must reserve its source domain"
@@ -1332,7 +1344,15 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
             .source_io_holders(1_007)
             .await
             .unwrap_or_else(|error| panic!("{backend}: observe source readers: {error}"));
-        assert_eq!(holders.len(), 2, "{backend}: both source slots are visible");
+        assert_eq!(
+            holders
+                .iter()
+                .map(|holder| (&holder.kind, &holder.work_id, &holder.lease_id))
+                .collect::<BTreeSet<_>>()
+                .len(),
+            2,
+            "{backend}: both source slots are visible"
+        );
         assert!(
             holders
                 .iter()
@@ -1476,6 +1496,16 @@ async fn concurrent_viewers_keep_cancelled_reader_reservation_until_expiry() {
                     .expect("enqueue"),
             );
         }
+        store
+            .put_setting(
+                &format!(
+                    "{}shared-nas",
+                    plurx_core::store::keys::JOB_DOMAIN_SOURCE_READERS_PREFIX
+                ),
+                "1",
+            )
+            .await
+            .expect("explicit shared NAS reader cap");
         assert!(set_storage_domains(store.as_ref(), mappings, 1_000)
             .await
             .expect("storage domain"));
@@ -10028,6 +10058,18 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "16")
             .await
             .expect("source readers per root");
+        for domain in ["pretranscode-primary", "pretranscode-secondary"] {
+            store
+                .put_setting(
+                    &format!(
+                        "{}{domain}",
+                        plurx_core::store::keys::JOB_DOMAIN_SOURCE_READERS_PREFIX
+                    ),
+                    "1",
+                )
+                .await
+                .expect("one maintenance reader per explicit source domain");
+        }
         let library = store
             .create_library(&NewLibrary {
                 name: "Pretranscode Contract Library".to_owned(),
@@ -25298,7 +25340,7 @@ async fn timeline_annotation_contract_runs_through_dyn_store() {
 #[tokio::test]
 async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
     for_each_backend(|store, backend| async move {
-        // One background reader per node beside the live slot: the numbers this
+        // One maintenance reader per root beside the live slot: the numbers this
         // contract was written against.
         store
             .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_ROOT, "1")
@@ -25362,8 +25404,9 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             "{backend}: a cancelled reader still owns its source slot"
         );
         // Its old lease expired at 20 ms and charges the 60 s grace.
+        let current_reader_deadline = 60_100;
         let current = store
-            .claim_analysis_request("analysis-node", 60_021, 60_100)
+            .claim_analysis_request("analysis-node", 60_021, current_reader_deadline)
             .await
             .unwrap_or_else(|error| panic!("{backend}: reclaim analysis request: {error}"))
             .unwrap_or_else(|| panic!("{backend}: replacement analysis claim"));
@@ -25403,6 +25446,9 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             "backend {backend}: cancellation never deletes a published artifact"
         );
 
+        // Keep this subscenario after the preceding reader's expiry/grace.
+        // A different worker still shares the same root-wide capacity.
+        let semantic_start = current_reader_deadline + 60_001;
         let semantic_request_id = uuid::Uuid::new_v4().to_string();
         let semantic_request = NewAnalysisRequest {
             request_id: semantic_request_id.clone(),
@@ -25419,8 +25465,8 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             // Empty means cluster-owned semantic work. It is intentionally not
             // pinned to whichever ingress accepted the request.
             target_node_id: String::new(),
-            not_before_ms: 20,
-            created_at_ms: 20,
+            not_before_ms: semantic_start,
+            created_at_ms: semantic_start,
         };
         store
             .enqueue_analysis_request(&semantic_request)
@@ -25437,7 +25483,7 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             "backend {backend}: semantic work is cluster-owned once"
         );
         let expired = store
-            .claim_analysis_request("analysis-node-a", 20, 30)
+            .claim_analysis_request("analysis-node-a", semantic_start, semantic_start + 10)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim semantic request: {error}"))
             .unwrap_or_else(|| panic!("{backend}: first semantic claim"));
@@ -25448,7 +25494,7 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
         assert_eq!(attempts[0].phase, "claimed", "backend {backend}");
         assert!(
             store
-                .claim_analysis_request("analysis-node-b", 30, 50)
+                .claim_analysis_request("analysis-node-b", semantic_start + 10, semantic_start + 30)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: reclaim semantic request: {error}"))
                 .is_none(),
@@ -25463,7 +25509,8 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             attempts[0].terminal_code, "lease_expired",
             "backend {backend}"
         );
-        let first_retry_at = 30 + analysis_backoff_ms(&semantic_request_id, 1, 5_000, 300_000);
+        let first_retry_at =
+            semantic_start + 10 + analysis_backoff_ms(&semantic_request_id, 1, 5_000, 300_000);
         assert!(store
             .claim_analysis_request("analysis-node-b", first_retry_at - 1, first_retry_at + 9)
             .await

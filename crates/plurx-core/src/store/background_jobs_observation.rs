@@ -51,12 +51,12 @@ pub struct SourceIoHolder {
     pub lease_expires_at_ms: i64,
     pub phase: Option<String>,
     pub last_phase_at_ms: Option<i64>,
-    /// What this lease is charged against: `node` (its node's background
-    /// readers), `domain` (its node and its mapped storage domain), or
-    /// `none` (playback, paused, or past its grace).
+    /// What this lease is charged against: `root` (its canonical root),
+    /// `domain` (its mapped storage domain), `unrooted` (the node-local
+    /// fallback), or `none` (playback, paused, or past its grace).
     #[serde(default)]
     pub counts_against: Option<String>,
-    /// The lease serves live demand, so it may take the node's reserved slot.
+    /// The lease serves live demand, so it may take its resource's reserved live slot.
     #[serde(default)]
     pub live_demand: bool,
     #[serde(default)]
