@@ -736,6 +736,36 @@ impl Cluster {
         self.directory.peers(purpose).await
     }
 
+    pub(crate) fn sharing(&self) -> Sharing {
+        Sharing {
+            manager: self.membership.clone(),
+            fence: self.fence.clone(),
+        }
+    }
+    pub(crate) fn source_members(&self) -> SourceMembers {
+        SourceMembers {
+            manager: self.membership.clone(),
+        }
+    }
+    pub(crate) fn receiver_members(&self) -> ReceiverMembers {
+        ReceiverMembers {
+            manager: self.membership.clone(),
+        }
+    }
+    pub(crate) fn authentication(&self) -> calls::PeerAuthentication {
+        calls::PeerAuthentication::new(self.membership.clone())
+    }
+    /// Preserve the fence's exact new-media admission, not a cached verdict.
+    pub(crate) async fn admitting_new_media(&self) -> bool {
+        self.fence.accepting_new_media().await
+    }
+    pub(crate) async fn media_targets_for_route(
+        &self,
+        allow_learners: bool,
+    ) -> Result<Vec<ActivityPeer>, MembershipError> {
+        self.directory.media_targets_for_route(allow_learners).await
+    }
+
     /// An owned bounded peer-call capability over this manager's shared pool.
     pub(crate) fn calls(&self) -> calls::PeerTransport {
         calls::PeerTransport::new(self.membership.clone())
@@ -749,6 +779,67 @@ impl Cluster {
     /// The shared directory, for a subsystem that keeps its own handle.
     pub(crate) fn directory(&self) -> Directory {
         self.directory.clone()
+    }
+}
+
+/// Read-only sharing admission uses the original advisory cache and the
+/// same fence epoch; an unreadable floor remains an unreadable observation.
+#[derive(Clone)]
+pub(crate) struct Sharing {
+    manager: MembershipManager,
+    fence: ServingFence,
+}
+impl Sharing {
+    pub(crate) fn is_clustered(&self) -> bool {
+        self.manager.is_replicated()
+    }
+    pub(crate) fn member_floor(
+        &self,
+        required: plurx_core::cluster::membership::SharingMemberFloor,
+    ) -> impl std::future::Future<Output = Result<bool, MembershipError>> + Send + '_ {
+        // Sample at call creation, just as the original argument expression
+        // did before the caller's timeout future was constructed.
+        self.manager
+            .sharing_member_floor_advisory(required, self.fence.advisory_epoch())
+    }
+}
+
+/// Reacquire the opaque Source write observation at every proof boundary.
+/// This capability retains a source, never a previously observed permission.
+#[derive(Clone)]
+pub(crate) struct SourceMembers {
+    manager: MembershipManager,
+}
+impl SourceMembers {
+    pub(crate) fn observe(
+        &self,
+    ) -> impl std::future::Future<
+        Output = Result<
+            Option<plurx_core::cluster::membership::SourceAdmissionMembers>,
+            MembershipError,
+        >,
+    > + Send
+           + '_ {
+        self.manager.observe_source_admission_members()
+    }
+}
+
+/// Receiver custody has a distinct opaque proof from Source admission.
+#[derive(Clone)]
+pub(crate) struct ReceiverMembers {
+    manager: MembershipManager,
+}
+impl ReceiverMembers {
+    pub(crate) fn observe(
+        &self,
+    ) -> impl std::future::Future<
+        Output = Result<
+            Option<plurx_core::cluster::membership::IngressCustodyMembers>,
+            MembershipError,
+        >,
+    > + Send
+           + '_ {
+        self.manager.observe_ingress_custody_members()
     }
 }
 
@@ -994,6 +1085,17 @@ impl Directory {
             .await
             .map(|peers| peers.list)
             .map_err(|error| error.0)
+    }
+
+    /// The caller's route policy decides whether ready learners are eligible.
+    pub(crate) async fn media_targets_for_route(
+        &self,
+        allow_learners: bool,
+    ) -> Result<Vec<ActivityPeer>, MembershipError> {
+        self.inner
+            .snapshot()
+            .await?
+            .media_workers(roster_now()?, allow_learners)
     }
 
     /// The other committed voters with the voter facts of the same snapshot.
@@ -1349,6 +1451,39 @@ pub(crate) mod calls {
         Unreachable,
         TimedOut,
         InvalidResponse,
+    }
+
+    /// Exact inbound authorization and response signing share the existing
+    /// core algorithm, without requiring an outbound HTTP pool.
+    #[derive(Clone)]
+    pub(crate) struct PeerAuthentication {
+        membership: MembershipManager,
+    }
+    impl PeerAuthentication {
+        pub(super) fn new(membership: MembershipManager) -> Self {
+            Self { membership }
+        }
+        pub(crate) async fn authorize_exact_request(
+            &self,
+            auth: &InternalPeerAuth,
+            method: &str,
+            path: &str,
+            body: &[u8],
+        ) -> Result<bool, plurx_core::cluster::membership::MembershipError> {
+            self.membership
+                .authorize_internal_peer_request(auth, method, path, body)
+                .await
+        }
+        pub(crate) fn sign_exact_response(
+            &self,
+            target_node_id: &str,
+            nonce: &str,
+            path: &str,
+            response: &[u8],
+        ) -> Result<String, plurx_core::cluster::membership::MembershipError> {
+            self.membership
+                .sign_internal_peer_response(target_node_id, nonce, path, response)
+        }
     }
 
     #[derive(Clone)]

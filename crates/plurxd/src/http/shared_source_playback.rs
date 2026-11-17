@@ -2021,8 +2021,9 @@ async fn own_start(
         _intent: (*intent).clone(),
     });
     let members = state
-        .membership
-        .observe_source_admission_members()
+        .cluster
+        .source_members()
+        .observe()
         .await
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unavailable)?;
@@ -2074,8 +2075,9 @@ async fn own_start(
         return Err(SourceStartFailure::Unresolved);
     }
     let members = state
-        .membership
-        .observe_source_admission_members()
+        .cluster
+        .source_members()
+        .observe()
         .await
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unresolved)?;
@@ -2112,9 +2114,7 @@ async fn own_start(
             .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_wait", error_class = "deadline", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
     }
 
-    let members = state
-        .membership
-        .observe_source_admission_members()
+    let members = state.cluster.source_members().observe()
         .await
         .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.members", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?
         .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ingress_members_absent", error_class = "absent", "Source initial admission refused"); SourceStartFailure::Unresolved })?;

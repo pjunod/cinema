@@ -946,7 +946,7 @@ async fn source_actual_copy_attachment(
     .await;
     let gate = Arc::new(SourceProducerAuthority {
         store: Arc::clone(store),
-        membership: membership.clone(),
+        source_members: state.cluster.source_members(),
         master: Arc::clone(master),
         registry_boot_id: state.sharing.accepted_drivers.boot_id(),
         ingress: ingress_fixture.permission().await,
@@ -1178,7 +1178,7 @@ async fn source_actual_actor(
     if mode == 52 {
         let gate = SourceProducerAuthority {
             store: Arc::clone(&state.store),
-            membership: state.membership.clone(),
+            source_members: state.cluster.source_members(),
             master: Arc::clone(&state.sharing.key),
             registry_boot_id: state.sharing.accepted_drivers.boot_id(),
             ingress: ingress_permission.clone(),

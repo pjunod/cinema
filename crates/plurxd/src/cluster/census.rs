@@ -319,24 +319,6 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("http/remote.rs", "manager", 2),
     ("http/remote/invitations/snapshots.rs", "membership", 1),
     ("http/remote/invitations/snapshots.rs", "roster", 1),
-    ("http/shared_library.rs", "membership", 4),
-    ("http/shared_library.rs", "serving", 3),
-    ("http/shared_library.rs", "role", 2),
-    ("http/shared_library.rs", "manager", 2),
-    ("http/shared_receiver_forwarding.rs", "membership", 2),
-    ("http/shared_receiver_forwarding.rs", "manager", 2),
-    ("http/shared_receiver_ingress_custody.rs", "membership", 2),
-    ("http/shared_receiver_ingress_custody.rs", "role", 1),
-    ("http/shared_receiver_ingress_custody.rs", "manager", 1),
-    ("http/shared_receiver_playback.rs", "serving", 1),
-    ("http/shared_source_forwarding.rs", "membership", 3),
-    ("http/shared_source_forwarding.rs", "roster", 1),
-    ("http/shared_source_forwarding.rs", "manager", 2),
-    ("http/shared_source_ingress.rs", "membership", 4),
-    ("http/shared_source_ingress.rs", "serving", 1),
-    ("http/shared_source_ingress.rs", "manager", 4),
-    ("http/shared_source_playback.rs", "membership", 3),
-    ("http/shared_source_playback.rs", "manager", 3),
     ("http/stream.rs", "serving", 2),
     ("http/system.rs", "replication", 1),
     ("http/transcode_copies.rs", "membership", 1),
@@ -361,9 +343,7 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("offline.rs", "role", 1),
     ("pgs_overlay.rs", "manager", 1),
     ("settings_changes.rs", "type", 1),
-    ("sharing.rs", "serving", 4),
-    ("sharing_connection_custody.rs", "membership", 2),
-    ("sharing_connection_custody.rs", "manager", 2),
+    ("sharing.rs", "serving", 3),
     ("state.rs", "membership", 4),
     ("state.rs", "replication", 2),
     ("state.rs", "serving", 1),
@@ -379,19 +359,12 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("subtitles.rs", "manager", 2),
     ("trakt.rs", "role", 1),
     ("transcode/manager/control.rs", "type", 5),
-    ("transcode/source_actor.rs", "membership", 6),
-    ("transcode/source_actor.rs", "type", 1),
-    ("transcode/source_actor.rs", "manager", 5),
-    ("transcode/source_actor/growing.rs", "membership", 2),
-    ("transcode/source_actor/growing.rs", "manager", 2),
-    ("transcode/source_direct.rs", "membership", 3),
-    ("transcode/source_direct.rs", "manager", 2),
     ("waitpool.rs", "serving", 4),
     ("watched.rs", "role", 1),
 ];
 
 /// The sum of [`REACH_AROUNDS`]; it may only fall.
-const CEILING: usize = 369;
+const CEILING: usize = 302;
 
 fn exempt(rel: &str) -> bool {
     EXEMPT.iter().any(|(path, _)| rel == *path)

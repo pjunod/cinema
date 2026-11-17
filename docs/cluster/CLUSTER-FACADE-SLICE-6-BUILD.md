@@ -1,6 +1,6 @@
 # Cluster facade slice 6 — fresh sharing and custody capabilities
 
-**Status:** open — plan committed before implementation. **Owner:** Codex.
+**Status:** open — implementation checkpoint; isolated validation, integration, review and qualification remain pending. **Owner:** Codex.
 
 Companion to [the facade contract](CLUSTER-FACADE-BUILD.md) and
 [slice 5](CLUSTER-FACADE-SLICE-5-BUILD.md). Start from slice 5 checkpoint
@@ -51,7 +51,7 @@ task, watchdog, toggle, pool, transport protocol or durable format is added.
 | `crates/plurxd/src/cluster.rs` | Typed sharing/Source/receiver observations, exact fence delegates, incoming authentication/signing capability inside the existing facade boundary. |
 | `sharing.rs`, `http/shared_library.rs`, `http/shared_receiver_playback.rs` | Existing authority subscriptions and epoch-bound advisory member floor. Local `ListenerWake.serving` is a watch receiver, not a raw fence; retain it honestly. |
 | `http/shared_receiver_ingress_custody.rs`, `http/shared_source_ingress.rs`, `http/shared_source_playback.rs` | Fresh purpose-specific witnesses and exact new-media admission predicate. |
-| `transcode/source_actor.rs`, `transcode/source_actor/growing.rs`, `transcode/source_direct.rs` | Producer retains typed Source capability; all fresh observation boundaries unchanged. |
+| `transcode/source_actor.rs`, `transcode/source_actor/growing.rs`, `transcode/source_direct.rs`, associated `transcode/tests/source_actor.rs` fixtures | Producer retains typed Source capability; all fresh observation boundaries unchanged. |
 | `sharing_connection_custody.rs`, `http/shared_receiver_forwarding.rs`, `http/shared_source_forwarding.rs` | Single exact incoming authentication/signing owner and route-sensitive media lookup. |
 | `cluster/census.rs`, ownership inventory and formal source mappings if measured | Lower actual pins only; retain matchers/exemptions, genuine local fields and all proof sentinels. |
 | This plan, cluster index, project backlog, functionality catalog | Delivery and actual evidence. |
@@ -77,3 +77,22 @@ adversarial review, fix findings, run the Effort gate once on its exact
 head and land only on a pass with regression trailers. Main promotion,
 deployment and fleet acceptance remain separate. No execution or review
 success is claimed by this plan.
+
+## Validation provenance correction — 2026-11-17
+
+The first local runs used a Cargo target directory shared with independent
+checkouts. A later run reused incompatible core metadata and a test binary
+without the expected facade tests. Those shared-target executions are
+provisional observations, not exact-tree qualification. The source checkpoint
+will be rechecked through an owned normalized source-only compiler slot and
+an isolated target directory; dependency downloads may remain shared.
+
+The Source actor fixture also needs the repository CI setting
+`RUST_MIN_STACK=8388608`; omitting it aborted a first local batch. Using the
+existing setting preserves every custody/capacity assertion. Neither
+artifact isolation nor stack configuration is a source-policy change.
+
+The implementation lowers measured raw spellings from 369 to 302 without
+changing matchers or exemptions. Fresh Source/receiver calls return the
+existing core futures directly, and advisory epoch sampling remains at
+call creation. Isolated checks must verify these claims before qualification.
