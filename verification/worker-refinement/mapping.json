@@ -4,7 +4,7 @@
   "model_sha256": "abe9667c462b6275445f5c488456c208885e143e10bb0d017c20870cee63b3b0",
   "correspondence": {
     "path": "verification/worker-refinement/correspondence.json",
-    "sha256": "03d03768eb5b8eb23bb63216caa31d202e679b7ac67f7ea5c811b049a61e6217"
+    "sha256": "53a0fae7e27a9409dc0e5e16634f7aa32997f39bc0750572f6bd571075bcb546"
   },
   "configs": {
     "progress.cfg": {
@@ -667,5 +667,5 @@
       "minimum_trace_states": 2
     }
   },
-  "review_basis": "Codex source-only correspondence reconciliation (2026-11-09) for the reviewed pipeline-v2 security corrections. Refreshed 14 library_work.rs action pins after verifying every mapped anchor remains present. The worker correspondence continues to cover queue admission/claim, scan start/finish, completion, acknowledgement timeout, detached drain, reconciliation, wake, and arrival; their selected claim/domain/settlement transitions are unchanged. Credential ownership now uses a keyed hash and expected-file resolution scopes/no-follows probes; those identity and file-selection details are outside the modeled claim/domain protocol. This is source correspondence only and does not claim Rust test or model-check execution."
+  "review_basis": "Codex source-only correspondence reconciliation (2026-11-09) for the reviewed pipeline-v2 security corrections. Refreshed 14 library_work.rs action pins after verifying every mapped anchor remains present. The worker correspondence continues to cover queue admission/claim, scan start/finish, completion, acknowledgement timeout, detached drain, reconciliation, wake, and arrival; their selected claim/domain/settlement transitions are unchanged. Credential ownership now uses a keyed hash and expected-file resolution scopes/no-follows probes; those identity and file-selection details are outside the modeled claim/domain protocol. This is source correspondence only and does not claim Rust test or model-check execution. Checkpoint-yield test-fixture correspondence reviewed on 2026-11-17 at 46f37f2fd809: background_jobs.rs production prefix before #[cfg(test)] pub(crate) mod tests is byte-identical to 4f9a8b228daa; only the checkpoint test yield due-time fixture changed. All governed background-job anchor occurrence counts are unchanged. Refreshes that whole-file source pin only; model/configuration/production behavior and prior review history are unchanged. No new execution, qualification or refinement proof is claimed."
 }
