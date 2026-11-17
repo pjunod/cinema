@@ -77,6 +77,8 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         proof.check_workflow_environment(current,proof.CURRENT_JOB)
         for changed in (current.replace('CARGO_TERM_COLOR: always','CARGO_TERM_COLOR: always\n  RUSTFLAGS: -Copt-level=3'),
                         current.replace('RUST_TEST_THREADS: "2"','RUST_TEST_THREADS: "4"'),
+                        current.replace('      RUST_MIN_STACK: "8388608"\n', ''),
+                        current.replace('RUST_MIN_STACK: "8388608"', 'RUST_MIN_STACK: "16777216"'),
                         current.replace('--memory 20g', '--memory 21g'),
                         current.replace('--cpus 4', '--cpus 5')):
             with self.assertRaises(receipts.ReceiptError):
@@ -110,8 +112,8 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     def test_reviewed_historical_jobs_do_not_relax_current_admission(self):
         from pathlib import Path
         current = Path('.github/workflows/ci.yml').read_text()
-        self.assertEqual(proof.HISTORICAL_JOBS, (proof.ORIGINAL_JOB, proof.PRE_NONVOTER_JOB, proof.NONVOTER_JOB, proof.CGROUP_PARSE_JOB, proof.TIMEOUT_180_JOB, proof.IMAGE_PIN_JOB, proof.CURRENT_JOB))
-        self.assertEqual(len(set(proof.HISTORICAL_JOBS)), 7)
+        self.assertEqual(proof.HISTORICAL_JOBS, (proof.ORIGINAL_JOB, proof.PRE_NONVOTER_JOB, proof.NONVOTER_JOB, proof.CGROUP_PARSE_JOB, proof.TIMEOUT_180_JOB, proof.IMAGE_PIN_JOB, proof.SOURCE_LEASE_STEP2_JOB, proof.STACK_8M_JOB, proof.CURRENT_JOB))
+        self.assertEqual(len(set(proof.HISTORICAL_JOBS)), 9)
         for identity in proof.HISTORICAL_JOBS:
             with self.subTest(identity=identity), patch.object(proof.retention, 'digest', return_value=identity):
                 proof.check_workflow_environment(current, proof.HISTORICAL_JOBS)

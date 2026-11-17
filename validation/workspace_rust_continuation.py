@@ -45,9 +45,15 @@ IMAGE_PIN_JOB = 'ea8ae633cfe0e1b489dfa9295b7ab83a8b0b1d54564ac8c9312197be16df5e7
 # root-container source recovery ownership step goes with the host recovery
 # helper it exercised. Checkout, image, toolchain, Cargo flags, job/test
 # threads, timeout and resource limits are unchanged.
-CURRENT_JOB = '08fba8ecb9f3b70c10cc18defaf2a7d6eb18d126464062ab504df6c1481bd08b'
+SOURCE_LEASE_STEP2_JOB = '08fba8ecb9f3b70c10cc18defaf2a7d6eb18d126464062ab504df6c1481bd08b'
+# PR #1718 independently reviewed the eight MiB stack before the legacy
+# recovery step was removed. Preserve both parent recipes as historical.
+STACK_8M_JOB = '89fcea13dc18711bb02021fcd414e2489a07ce51831e0322fbc9940637e0fd3b'
+# This exact combined job keeps that stack and removes only the retired step.
+# It is the sole current recipe; historical jobs cannot satisfy admission.
+CURRENT_JOB = 'd5ab64d11a15bc00aedfb2c6d099bd079f94091a4dcedef585aaa1384cda1fd6'
 HISTORICAL_JOBS = (ORIGINAL_JOB, PRE_NONVOTER_JOB, NONVOTER_JOB, CGROUP_PARSE_JOB, TIMEOUT_180_JOB,
-                   IMAGE_PIN_JOB, CURRENT_JOB)
+                   IMAGE_PIN_JOB, SOURCE_LEASE_STEP2_JOB, STACK_8M_JOB, CURRENT_JOB)
 PROTECTED = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'Makefile'}
 NATIVE_ACTIONS = ('.cargo/', '.github/actions/rust-native-deps/', '.github/actions/ffmpeg/',
                   '.github/actions/cargo-cache/', '.github/actions/cargo-cache-finalize/')

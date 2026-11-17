@@ -641,29 +641,50 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(all(not(unix), plurx_dv_segment_probe))]
 compile_error!("DV segment physical probe requires Unix descriptor custody");
 
-#[tokio::main]
-async fn daemon_main() -> anyhow::Result<()> {
+/// How long the runtime's own shutdown may wait for blocking work once the
+/// daemon has returned, before the process exits anyway.
+const RUNTIME_SHUTDOWN: Duration = Duration::from_secs(10);
+
+/// Run the daemon, then drop its runtime (and every task, listener and store
+/// handle it still owns) before the process exits: an error's exit status is
+/// set only after that, never with `std::process::exit` from inside it.
+fn daemon_main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building the Tokio runtime")?;
+    let outcome = runtime.block_on(daemon_run());
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN);
+    match outcome {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            let code = error
+                .downcast_ref::<CliExit>()
+                .map_or(1, |error| error.code);
+            eprintln!("{error:#}");
+            std::process::exit(code);
+        }
+        // Parsing and configuration errors return from `main` as before.
+        Err(error) => Err(error),
+    }
+}
+
+/// The command line and configuration (whose errors `main` returns), then
+/// the command's own outcome.
+async fn daemon_run() -> anyhow::Result<anyhow::Result<()>> {
     let cli = Cli::parse();
     #[cfg(unix)]
     if cli.source_commit {
         println!("{}", crate::version::SOURCE_COMMIT);
-        return Ok(());
+        return Ok(Ok(()));
     }
     let config = Config::load(cli.config.as_deref()).context("loading configuration")?;
-    if let Err(error) = dispatch(
+    Ok(dispatch(
         cli.command.unwrap_or(Command::Run),
         config,
         cli.config.as_deref(),
     )
-    .await
-    {
-        let code = error
-            .downcast_ref::<CliExit>()
-            .map_or(1, |error| error.code);
-        eprintln!("{error:#}");
-        std::process::exit(code);
-    }
-    Ok(())
+    .await)
 }
 
 /// The deliberate panic behind `plurxd diagnostic-panic`. Its own function, and
@@ -2011,11 +2032,13 @@ async fn run(config: Config) -> anyhow::Result<()> {
     };
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let native_commit = false;
-    let shutdown = if native_commit {
+    // A committed native close, and the close after a dead Raft core, are
+    // bounded: neither may hold the process open past 30 s.
+    let shutdown = if native_commit || drained_a_dead_core(&result) {
         match tokio::time::timeout(Duration::from_secs(30), selected.shutdown()).await {
             Ok(result) => result.context("stopping local Hiqlite voter"),
             Err(_) => Err(anyhow::anyhow!(
-                "local Hiqlite store close timed out during committed native shutdown"
+                "local Hiqlite store close timed out after 30 s during a bounded shutdown"
             )),
         }
     } else {
@@ -2533,6 +2556,13 @@ async fn boot_observing(
     let live_tv_shutdown = Arc::clone(&state.live_tv);
     let serving_shutdown = state.serving.clone();
     let membership_shutdown = state.membership.clone();
+    // The database Raft core's own terminal state. A core that quit on a
+    // fatal error (a full disk, a storage error, a panic) never serves again
+    // in this process, so it resolves the same drain a signal does and the
+    // process then exits non-zero for its supervisor to restart.
+    let raft_core_failure = state.cluster.core_failure();
+    let raft_core_fatal = Arc::new(std::sync::OnceLock::<String>::new());
+    let raft_core_fatal_drain = Arc::clone(&raft_core_fatal);
     let jellyfin_standard_port = Arc::clone(&state.jellyfin_standard_port);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let desktop_server = if let Some(desktop) = &desktop {
@@ -2592,11 +2622,23 @@ async fn boot_observing(
     // listener (including its startup-observation handoff) redirects.
     let app = https::redirect::router(app, https_redirect_port);
 
+    // The select is biased, in order: a signal or a leave that is already
+    // pending wins over a core failure, so a deliberate stop is never recorded
+    // as a dead core (and never exits non-zero) just because both were ready.
     let shutdown = async move {
         tokio::select! {
+            biased;
             () = shutdown => {}
             () = leave_shutdown.cancelled() => {
                 tracing::info!("local shutdown requested, draining");
+            }
+            error = raft_core_failure => {
+                tracing::error!(
+                    target: "plurx::cluster",
+                    %error,
+                    "the database Raft core stopped with a fatal error; draining and exiting"
+                );
+                let _ = raft_core_fatal_drain.set(error);
             }
         }
         // The drain's first act, while Raft and every listener are still
@@ -2683,7 +2725,42 @@ async fn boot_observing(
     {
         tracing::warn!(%error, "could not record the Plex façade census at shutdown");
     }
-    served.map(|_| ())
+    served?;
+    exit_after_drain(raft_core_fatal.get())
+}
+
+/// How a drained daemon ends: cleanly after a signal or a leave, with an
+/// error, and so a non-zero exit status, after its database Raft core died.
+fn exit_after_drain(raft_core_fatal: Option<&String>) -> anyhow::Result<()> {
+    match raft_core_fatal {
+        None => Ok(()),
+        Some(error) => Err(RaftCoreFatal(error.clone()).into()),
+    }
+}
+
+/// The drain's verdict after the database Raft core died. Typed, so the
+/// store's close after it is bounded like a committed native close: a dead
+/// core's store must not hold the exit, and so the restart, open.
+#[derive(Debug)]
+struct RaftCoreFatal(String);
+
+impl std::fmt::Display for RaftCoreFatal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the database Raft core stopped with a fatal error: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for RaftCoreFatal {}
+
+/// Whether the serving result is a dead core's drain.
+fn drained_a_dead_core(result: &anyhow::Result<()>) -> bool {
+    result
+        .as_ref()
+        .is_err_and(|error| error.downcast_ref::<RaftCoreFatal>().is_some())
 }
 
 /// How a Bonjour record gets published. A parameter rather than a direct call
@@ -2694,7 +2771,7 @@ type MdnsAdvertiser =
 
 /// Widen the inherited open-file limit and say what it now is.
 ///
-/// `#[tokio::main]` builds the runtime before any of `main`'s body runs, so
+/// `daemon_main` builds the runtime before any of the daemon's body runs, so
 /// there is no "before the runtime starts" to run this in. What matters is
 /// that the limit is consulted when a descriptor is opened, and this runs
 /// before the store, the system probe and every listener open theirs.
