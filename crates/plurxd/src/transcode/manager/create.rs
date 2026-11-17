@@ -2241,6 +2241,20 @@ impl TranscodeManager {
         }
         #[cfg(target_os = "linux")]
         {
+            #[cfg(test)]
+            eprintln!(
+                "processed upgrade eligibility kind={} hdr10_intent={} grade={:?} copy_contract={:?} hdr_processing={:?} dv_profile={:?}",
+                match request.kind {
+                    SessionKind::Copy { .. } => "copy",
+                    SessionKind::Transcode { .. } => "transcode",
+                },
+                hdr10_intent,
+                ask.map(|ask| ask.grade),
+                ask.and_then(|ask| ask.catalog_query.as_ref())
+                    .and_then(|query| query.copy_contract),
+                planning.settings.get(keys::DV_HDR_PROCESSING),
+                planning.file.dolby_vision.profile,
+            );
             // Two processed destinations. A Profile 7 copy converted to 8.1
             // for a Dolby Vision display becomes the reconstructed 8.1 (the
             // FEL rebuilt into the picture, a new RPU) under FEL re-encode.
