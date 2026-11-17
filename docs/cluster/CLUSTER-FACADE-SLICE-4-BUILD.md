@@ -59,14 +59,15 @@ for these authorizers. Handoff precedes cancellation and admission drain.
 
 | Files | Responsibility |
 |---|---|
-| `crates/plurxd/src/cluster.rs`, `cluster/operations.rs` | Cloneable Operations capability and typed Clock/Revocation children; private underlying mechanisms, explicit delegates and shared observations. |
+| `crates/plurxd/src/cluster.rs` (inline operations module) | Cloneable Operations capability and typed Clock/Revocation children; private underlying mechanisms, explicit delegates and shared observations. |
 | `crates/plurxd/src/http/cluster.rs` | Existing token, protocol and membership mutations, maintenance and ingress roster through the facade; same typed refusals and ordering. |
 | `crates/plurxd/src/http/cluster_operations.rs` | Existing claim guards, serialization, cancellation, drain, private observations and cache producers through the capability. |
 | `crates/plurxd/src/desktop_control.rs` | Existing identity/topology checks and prepare/commit/cancel ownership. |
 | `crates/plurxd/src/main.rs`, `state.rs` | Composition roots and existing lifecycle wiring; C7-dependent shutdown migration follows actual C7 landing. Sharing/custody/job wiring remains with later slices. |
-| `crates/plurxd/src/clock_offset.rs`, `http/internal_clock.rs` | Existing proof source, startup/observer identity, leadership, guard and authenticated clock roster paths without extra polling. Keep transport construction visible in its existing composition boundary. |
+| `crates/plurxd/src/clock_offset.rs`, `http/internal_clock.rs`, associated startup/forwarding fixtures | Existing proof source, startup/observer identity, leadership, guard and authenticated clock roster paths without extra polling. Keep transport construction visible in its existing composition boundary. |
 | `crates/plurxd/src/http/internal_auth_revocation.rs` | Existing claim-bound fresh roster, exact exclusion lifetime, activation and apply acknowledgments. |
-| `crates/plurxd/src/cluster/census.rs` | Exact reductions and one narrowly justified internal facade-owner exemption for the new operations module. Keep transport and legitimate data sites visible. |
+| `crates/plurxd/src/http/system.rs`, `http/system/tests.rs` | Move the five remaining raw read-pool/writer telemetry sites to plain observation snapshots. Preserve atomics-only reads, fixed labels, histogram bounds and exact Prometheus output; no new task, timer, Store access or allocation for writer rows. This closes the pre-existing actual-5/pin-3 mismatch by migration, without raising its pin. |
+| `crates/plurxd/src/cluster/census.rs` | Exact reductions and the existing facade-owner exemption without adding an exempt path. Keep transport and legitimate data sites visible. |
 | `tests/playback/rolling-producer-owners.toml` | Review any conservative syntax-count movement against actual task/process ownership; never change the matcher to make counts pass. |
 | `verification/*/mapping.json` | Deliberate source-anchor review and whole-file repins; no semantic acceptance inferred from hashes. |
 | This plan, cluster index, facade contract, project backlog and `validation/points.toml` | Source delivery, dependency/base identity and qualification evidence. |
@@ -100,6 +101,25 @@ for these authorizers. Handoff precedes cancellation and admission drain.
    and land only after its exact-head pass. Verify tree and regression
    trailers. Main promotion waits for the finished effort and fresh main
    qualification; Paul owns deployment and fleet acceptance.
+
+## Preparation findings
+
+The first preparatory all-target check passed on pinned Rust 1.97.1. The
+capability graph needs compiler trait-resolution depth 256 for the existing
+source-worker Send proof; Send remains enforced. The ratchet forbids adding
+an exempt path, so Operations is an inline child of the already exempt facade.
+No exemption, matcher, or pin ceiling is loosened. The inline module keeps
+that existing ratchet boundary. The measured preparatory reduction is 193,
+from ceiling 626 to 433; the existing system Hiqlite discrepancy remains
+actual 5/pin 3 and is not absorbed by raising its pin. Eight passive lexical
+status-call matches now share the existing topology delegate; process/task
+ownership is unchanged.
+
+The first focused batch passed 81 of 87 tests. Three remaining source-shape
+assertions needed the new facade method names. Three desktop tests were
+refused by their unchanged filesystem security checks: the required external
+drive's root is group-writable. Preserve the security requirement and run
+these tests on a protected filesystem before final acceptance.
 
 ## Evidence and remaining acceptance
 
