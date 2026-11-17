@@ -109,21 +109,25 @@ remain intact. Payload, timing, decoder, colour and other metadata differences
 still refuse adoption. The receipt binds the revised runner and all three
 native results by SHA-256.
 
-On `359641a06`, affected core/daemon all-target compilation (including
-`hiqlite-store`), Clippy with `-D warnings`, all three formal source mappings
-and paperwork 17/17 pass. Store inventory and the three focused daemon
-regressions pass; the daemon cases ran under a 20 GiB/no-swap/four-CPU
-learner allocation after their first binary build exhausted its 15 GiB cap.
-Earlier native 30/36 passes have historical source scopes. PR #1565 stays
-`WIP:` pending required CI; independent review and M6 pass for the new method. `MERGE_TRAIN` is on; readiness then boards
-the train under [the merge convention](../ci/MERGE-TRAIN.md).
+Earlier source-scoped compile, store, daemon, formal-mapping and native results
+remain in the historical receipts and PR history. They do not qualify later
+source automatically. PR #1565 stays `WIP:` pending the required focused lane;
+readiness then boards [the merge train](../ci/MERGE-TRAIN.md).
 
-Current-main source `35d109d5e` (main `7829748b9` included) passes formatting,
-affected all-target compilation and Clippy with warnings denied. Its production
-export writes the exact same qualified RPU. The native receipt preserves its
-original measurement scope and separately binds this export and its verified
-source manifest; no accepted capture was repeated. Independent adversarial
-review of the integration found no code blockers. Unit tests await the fast lane.
+The F+-first source `ef4345dd5` includes main `16d097973` and preserves
+SQLite v134. Formatting and affected all-target daemon Clippy pass; core source
+and dependencies are unchanged from their prior passing compilation checks.
+Its current production export writes the exact same qualified 435-byte RPU,
+with identical mapping readback. The native receipt preserves its original
+measurement scope and earlier source bindings, and separately binds this export
+and its verified source manifest; no accepted capture was repeated. Independent
+adversarial review found no blockers in the failed-case fixes or provenance.
+
+The prior focused probe passed 22 cases and failed two. The fixes preserve
+Apple's prerequisite lookup IDs while making platform IDs unique, and supply
+the persisted HDR fact required by the method-selection fixture. Six unaffected
+passes remain valid; 19 failed, new or shared-fixture cases await the focused
+lane. The source-lease/schema-v136 prototype is isolated from this candidate.
 
 ## 1. Objective
 
