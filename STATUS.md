@@ -8,9 +8,9 @@
   causing the server to cancel the prepared stream. Actual-source reproduction
   confirms the mechanism; Astra reviewed the root cause and repair direction.
   Generation-bound observation and immutable final commit are implemented;
-  regression gates, exact-diff review and train qualification remain. Real
-  Safari continuity after deployment and the preparation-deadline follow-up
-  remain open. Twilight's earlier Profile 8.1 FEL metadata upgrade was accepted.
+  33 focused regressions and independent Astra review pass. Runtime Safari
+  continuity after deployment and the preparation-deadline follow-up remain
+  open. Twilight's earlier Profile 8.1 FEL metadata upgrade was accepted.
 
 - **2026-11-13 · Optional Curator household login:** Owner Claude (claude-opus-5-5, taken over from Codex 2026-11-15). Independent account linking and household-only delegation; Astra production review cleared, local qualification passed; PR #1586 updated onto main and landing through the merge train. [Ledger](docs/features/CURATOR-LOGIN-STATUS.md). No deployment.
 - **2026-11-13 · CM4 trim fidelity:** Owner Codex. Implementation and bounded reference qualification complete; delivery PR #1591. Six-vector knots used a fixed BT.2020 palette and L8 MS was ignored. Real-frame and independent synthetic CPU comparisons remove all observed pixels above0.05dE; every worsening coordinate is retained. [Root cause, evidence and remaining work](docs/streaming/CM4-TRIM-FIDELITY.md).
