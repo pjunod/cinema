@@ -2397,21 +2397,17 @@ fn dolby_vision_refit_items(
     progress: Result<plurx_core::store::dv_refit_jobs::RefitProgress, String>,
     spool: &[(bool, u64)],
 ) -> [DeveloperEnableItem; 4] {
-    let clients = || {
-        DeveloperRequirement {
-        id: "refit_clients",
+    let clients = |id: &'static str| DeveloperRequirement {
+        id,
         title: "Clients that apply the 8.1 mapping",
         status: RequirementStatus::Unobservable,
         evidence: format!("{DV_REFIT_CLIENTS}. Serving the curves to a platform that ignores them changes nothing it shows."),
-    }
     };
-    let timing = || {
-        DeveloperRequirement {
-        id: "refit_copy_timing",
+    let timing = |id: &'static str| DeveloperRequirement {
+        id,
         title: "Fitted copy qualification",
         status: RequirementStatus::Unmet,
         evidence: "Fitted copy requires a matching picture timeline. Some AAC layouts change that timing and are refused before publication. Audio-bearing copy acceptance remains pending. Fitted copies requiring retained in-band parameter sets are unsupported by the current muxer.".into(),
-    }
     };
     let helper = match helper {
         Ok(Some(identity)) => DeveloperRequirement {
@@ -2484,25 +2480,32 @@ fn dolby_vision_refit_items(
             "dolby_vision_refit_web",
             "Dolby Vision F+ curves: web",
             enabled[0],
-            vec![clients(), timing()],
+            vec![clients("refit_web_clients"), timing("refit_web_copy_timing")],
         ),
         item(
             "dolby_vision_refit_apple",
             "Dolby Vision F+ curves: Apple",
             enabled[1],
-            vec![helper, coverage, clients(), timing(), spool],
+            // The web card reads these Apple requirement IDs directly.
+            vec![
+                helper,
+                coverage,
+                clients("refit_clients"),
+                timing("refit_copy_timing"),
+                spool,
+            ],
         ),
         item(
             "dolby_vision_refit_android",
             "Dolby Vision F+ curves: Android",
             enabled[2],
-            vec![clients(), timing()],
+            vec![clients("refit_android_clients"), timing("refit_android_copy_timing")],
         ),
         item(
             "dolby_vision_refit_linux",
             "Dolby Vision F+ curves: Linux",
             enabled[3],
-            vec![clients(), timing()],
+            vec![clients("refit_linux_clients"), timing("refit_linux_copy_timing")],
         ),
     ]
 }
@@ -4008,6 +4011,47 @@ pub async fn source_recovery(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refit_platform_requirements_are_unique_and_preserve_web_lookup_ids() {
+        let items = dolby_vision_refit_items(
+            [false; 4],
+            Ok(None),
+            Ok(plurx_core::store::dv_refit_jobs::RefitProgress::default()),
+            &[],
+        );
+        let mut ids = std::collections::BTreeSet::new();
+        for item in &items {
+            for requirement in &item.requirements {
+                assert!(
+                    ids.insert(requirement.id),
+                    "{} repeats requirement {}",
+                    item.id,
+                    requirement.id
+                );
+            }
+        }
+        assert_eq!(ids.len(), 11);
+        let apple = items
+            .iter()
+            .find(|item| item.id == "dolby_vision_refit_apple")
+            .expect("web readiness source");
+        assert_eq!(
+            apple
+                .requirements
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [
+                "refit_helper",
+                "refit_coverage",
+                "refit_clients",
+                "refit_copy_timing",
+                "refit_spool",
+            ]
+        );
+    }
+
 
     #[test]
     fn unavailable_source_recovery_preserves_local_diagnostics_without_a_poison_count() {

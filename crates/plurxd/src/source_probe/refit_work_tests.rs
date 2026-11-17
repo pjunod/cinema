@@ -246,6 +246,9 @@ async fn title(fx: &Fixture, name: &str, profile: i64, fel: bool) -> MediaFile {
             mtime,
             &ProbeResult {
                 video_codec: Some("hevc".into()),
+                // The coarse HDR column is independent of the numeric DV
+                // configuration and is the delivery predicate's first check.
+                hdr: Some("dolby_vision".into()),
                 dolby_vision: DolbyVisionFacts {
                     profile: Some(profile),
                     // New serving selections need the numeric configuration
@@ -619,6 +622,11 @@ async fn new_refit_selections_require_current_method_but_legacy_pins_keep_exact_
 
     let fx = fixture().await;
     let file = title(&fx, "fit-method-upgrade", 7, true).await;
+    // Check the persisted fixture independently of the compound predicate.
+    assert_eq!(file.hdr.as_deref(), Some("dolby_vision"));
+    assert_eq!(file.dolby_vision.profile, Some(7));
+    assert_eq!(file.dolby_vision.bl_compat_id, Some(1));
+    assert_eq!(file.dolby_vision.level, Some(6));
     assert!(
         plurx_core::playback::file_can_convert_to_p81(&file),
         "the fixture must be eligible for new selections before testing fit versions"
