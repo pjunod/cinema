@@ -2,12 +2,12 @@
 DROP VIEW background_job_required_resources;
 -- next statement
 CREATE VIEW background_job_required_resources AS
-WITH job_library AS (
+WITH job_library AS NOT MATERIALIZED (
  SELECT job.id AS job_id,job.kind,json_extract(job.payload_json,'$.generation') AS generation,file.id AS file_id,
    COALESCE(json_extract(job.payload_json,'$.library_id'),item.library_id) AS library_id
  FROM background_jobs job LEFT JOIN files file ON file.id=json_extract(job.payload_json,'$.file_id')
  LEFT JOIN items item ON item.id=COALESCE(file.item_id,json_extract(job.payload_json,'$.item_id'))
-), source_jobs AS (
+), source_jobs AS NOT MATERIALIZED (
  SELECT * FROM job_library WHERE kind NOT IN
  ('semantic_embedding','subtitle_model_operation','subtitle_text_model_operation','subtitle_text_translate_artifact','artifact_hydrate','artifact_verify','artwork_derivative','fragment_index_publish')
  AND NOT (kind='library_scan' AND generation IS 'library-targeted-v1')

@@ -122,6 +122,78 @@ macro_rules! legacy_root_admission {
     };
 }
 
+// Old binaries may propose a resume using their former two-slot rule.
+// Revalidate the current root keys under the writer, and acknowledge an
+// already-admitted active phase without charging a second admission.
+macro_rules! root_resume_admission {
+    () => { concat!(
+      "CREATE TRIGGER source_lease_resume_admission BEFORE INSERT ON background_job_commands ",
+      "WHEN NEW.operation='source_resume' AND NEW.result_json='true' BEGIN ",
+      "SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM background_jobs job JOIN background_source_pauses paused ",
+      "ON paused.job_id=job.id AND paused.fence=job.fence AND paused.node_id=job.owner_node_id ",
+      "AND paused.boot_id=job.owner_boot_id AND paused.claim_id=job.claim_id ",
+      "WHERE job.id=json_extract(NEW.request_json,'$.token.job_id') AND job.fence=json_extract(NEW.request_json,'$.token.fence') ",
+      "AND job.owner_node_id=json_extract(NEW.request_json,'$.token.node_id') ",
+      "AND job.owner_boot_id=json_extract(NEW.request_json,'$.token.boot_id') AND job.claim_id=json_extract(NEW.request_json,'$.token.claim_id') ",
+      "AND job.state='running' AND job.lease_expires_ms>json_extract(NEW.request_json,'$.now_ms') ",
+      "AND NOT EXISTS(SELECT 1 FROM settings WHERE key='internal.cluster_job_owner_removed.'||job.owner_node_id) ",
+      "AND ((paused.phase='active' AND EXISTS(SELECT 1 FROM source_leases owned WHERE owned.lease_id='job:'||job.id||':'||job.fence ",
+      "AND owned.owner_kind='job' AND owned.node_id=job.owner_node_id AND owned.phase='active' ",
+      "AND owned.expires_at_ms>json_extract(NEW.request_json,'$.now_ms')-60000)) ",
+      "OR (paused.phase='paused' AND EXISTS(SELECT 1 FROM background_job_required_resources required WHERE required.job_id=job.id ",
+      "AND required.resource_key LIKE 'source_io%') AND NOT EXISTS(SELECT 1 FROM background_job_required_resources required ",
+      "WHERE required.job_id=job.id AND required.resource_key LIKE 'source_io%' AND (",
+      claim_foreground_window!("required.resource_key","json_extract(NEW.request_json,'$.now_ms')")," OR ",
+      claim_source_holders!("required.resource_key","job.owner_node_id","json_extract(NEW.request_json,'$.now_ms')"),
+      " OR (NOT ",live_job_interest!("job.id","job.fence","json_extract(NEW.request_json,'$.now_ms')")," AND ",
+      claim_maintenance_reader!("required.resource_key","job.owner_node_id","json_extract(NEW.request_json,'$.now_ms')"),
+      ")))))) THEN RAISE(IGNORE) END; END;"
+    ) };
+}
+
+// Permission/budget scope follows current roots as well as the admitted
+// physical snapshot. Old writers learn new keys through their existing retry.
+macro_rules! service_root_resources {
+    () => { concat!(
+      "SELECT resource_key FROM background_job_required_resources WHERE json_extract(NEW.request_json,'$.kind')='job' ",
+      "AND job_id=json_extract(NEW.request_json,'$.token.job_id') AND resource_key LIKE 'source_io%' ",
+      "UNION SELECT resource_key FROM analysis_required_resources WHERE json_extract(NEW.request_json,'$.kind')='analysis' ",
+      "AND request_id=json_extract(NEW.request_json,'$.request_id') ",
+      "UNION SELECT resource_key FROM source_lease_file_resources WHERE json_extract(NEW.request_json,'$.kind')='read_attestation' ",
+      "AND file_id=json_extract(NEW.request_json,'$.file_id') ",
+      "UNION SELECT resource.resource_key FROM offline_packages package JOIN source_lease_file_resources resource ON resource.file_id=package.file_id ",
+      "WHERE json_extract(NEW.request_json,'$.kind')='offline' AND package.id=json_extract(NEW.request_json,'$.package_id') ",
+      "UNION SELECT resource.resource_key FROM source_lease_effective_resources resource JOIN source_leases owned ON owned.lease_id=resource.lease_id ",
+      "WHERE owned.phase!='paused' AND owned.expires_at_ms>json_extract(NEW.request_json,'$.now_ms')-60000 AND (",
+      "owned.lease_id=json_extract(NEW.request_json,'$.owner_key') OR owned.lease_id=json_extract(NEW.request_json,'$.custody_id') ",
+      "OR (owned.owner_kind='analysis' AND json_extract(NEW.request_json,'$.kind')='analysis' ",
+      "AND owned.work_id=json_extract(NEW.request_json,'$.request_id') AND owned.fence=json_extract(NEW.request_json,'$.fence')) ",
+      "OR (owned.owner_kind='playback' AND json_extract(NEW.request_json,'$.kind')='companion' ",
+      "AND owned.lease_id=json_extract(NEW.request_json,'$.token.owner.owner_id')))"
+    ) };
+}
+macro_rules! legacy_service_root_refresh {
+    () => { concat!(
+      "UPDATE background_source_custody SET resource_keys_json=(SELECT json_group_array(resource_key) FROM (",
+      service_root_resources!()," ORDER BY resource_key)) WHERE owner_key=json_extract(NEW.request_json,'$.owner_key') ",
+      "AND EXISTS(SELECT 1 FROM (",service_root_resources!(),")) AND resource_keys_json IS NOT ",
+      "(SELECT json_group_array(resource_key) FROM (",service_root_resources!()," ORDER BY resource_key)); "
+    ) };
+}
+macro_rules! root_service_admission {
+    ($($compat:expr),*) => { concat!(
+      "CREATE TRIGGER source_lease_service_root_admission BEFORE INSERT ON background_job_commands ",
+      "WHEN NEW.operation='source_service' AND NEW.result_json<>'false' BEGIN ",
+      $($compat,)*
+      "SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM (",service_root_resources!(),")) ",
+      "OR EXISTS(SELECT 1 FROM (",service_root_resources!(),") required WHERE ",
+      claim_foreground_window!("required.resource_key","json_extract(NEW.request_json,'$.now_ms')"),") ",
+      "OR (NOT EXISTS(SELECT 1 FROM json_each(NEW.result_json,'$.resource_keys') WHERE value='source_io') ",
+      "AND EXISTS(SELECT resource_key FROM (",service_root_resources!(),") ",
+      "EXCEPT SELECT value FROM json_each(NEW.result_json,'$.resource_keys'))) THEN RAISE(IGNORE) END; END;"
+    ) };
+}
+
 #[cfg(test)]
 pub(crate) const ROOTS: &str = include_str!("source_roots.sql");
 
@@ -142,10 +214,18 @@ pub(crate) const EXPAND: &str = concat!(
     "\n-- next statement\n",
     root_dispatch_contenders!(),
     "\n-- next statement\n",
-    legacy_root_admission!()
+    legacy_root_admission!(),
+    "\n-- next statement\n",
+    root_resume_admission!(),
+    "\n-- next statement\n",
+    root_service_admission!(legacy_service_root_refresh!())
 );
 /// The contract: drops the v1 source-owner objects.
-pub(crate) const CONTRACT: &str = include_str!("source_leases_contract.sql");
+pub(crate) const CONTRACT: &str = concat!(
+    include_str!("source_leases_contract.sql"),
+    "\n-- next statement\n",
+    root_service_admission!()
+);
 /// The claim-effects trigger the expand rewrites; part of the lease shape.
 pub(crate) const CLAIM_EFFECTS: &str = "background_job_claim_effects";
 /// SQLite schema version before the expand and after it.
@@ -342,6 +422,10 @@ pub(crate) fn install_for_fixture(conn: &rusqlite::Connection) {
         .expect("fixture offline service admission");
     conn.execute_batch(root_dispatch_contenders!())
         .expect("fixture root dispatch");
+    conn.execute_batch(root_service_admission!(legacy_service_root_refresh!()))
+        .expect("fixture root service");
+    conn.execute_batch(root_resume_admission!())
+        .expect("fixture root resume");
     conn.execute_batch(legacy_root_admission!())
         .expect("fixture legacy root admission");
     if !retention {

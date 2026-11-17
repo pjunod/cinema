@@ -112,7 +112,7 @@ FROM (
     held.node_id AS origin_node_id,
     CASE held.owner_kind WHEN 'job' THEN COALESCE(job.kind,json_extract(held.owner_json,'$.job_kind')) END AS origin_job_kind,
     job.state AS origin_job_state
-  FROM source_leases held, json_each(held.resource_keys_json) key
+  FROM source_leases held JOIN (SELECT lease_id,resource_key AS value FROM source_lease_effective_resources) key ON key.lease_id=held.lease_id
   LEFT JOIN background_jobs job ON held.owner_kind='job' AND job.id=held.work_id
   LEFT JOIN background_job_attempts attempt ON held.owner_kind='job' AND attempt.job_id=held.work_id AND attempt.fence=held.fence
   LEFT JOIN analysis_attempts analysis_attempt ON held.owner_kind='analysis' AND analysis_attempt.request_id=held.work_id

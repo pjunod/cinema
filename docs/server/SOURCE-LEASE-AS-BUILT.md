@@ -272,3 +272,23 @@ The historical candidate integrated `main` through `32fa105ee`. Its merge
 train and local receipts remain part of that snapshot's record. The current
 root-capacity delta still needs review and focused qualification against its
 exact tree; no deployment is authorized by the earlier results.
+
+
+Root-policy review fixes (R1-R3): active lease ownership stays unchanged while
+its effective resource projection resolves the owner's current file/root scope.
+A library-root edit therefore cannot hide an existing reader or playback window.
+Unresolvable retired owners conservatively charge overlapping snapshot scopes
+during their bounded grace; explicit physical-domain associations remain charged
+until the phase closes. The shared writer rechecks old-binary resume proposals
+against current roots and maintenance/live capacity, while exact already-active
+resume acknowledgements remain idempotent. Resource CTEs are explicitly not
+materialized so identity-filtered lookups retain queue-key pushdown. Regression
+and mutation results are recorded separately after review; this paragraph is not
+a pass claim or a new model/liveness proof.
+
+
+The receipt-to-source relation also snapshots the immutable library/path scope.
+It survives physical lease retirement for the rest of the receipt epoch, so a
+root edit cannot erase bytes already allocated before an owner finishes.
+Receipt deletion cascades this metadata; it owns no lease, file or library and
+adds no recovery wait, pin, timer or RPC. Import inventory is 109 tables.

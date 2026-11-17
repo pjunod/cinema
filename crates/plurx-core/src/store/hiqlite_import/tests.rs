@@ -467,6 +467,7 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
         "background_source_pauses",
         "background_source_service_epochs",
         "background_source_service_grants",
+        "source_lease_receipt_sources",
         "analysis_source_checkpoints",
         "playback_analysis_suspensions",
     ] {
@@ -491,9 +492,10 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     assert!(!names.contains(&"delegation_schema"));
     // 104 with the source arbitration tables (SQLite v122), 105 with the scan
     // request sidecar (SQLite v125), 106 with pending storage-domain changes
-    // (SQLite v131), 108 with delegation's three durable tables and the
-    // source-lease table replacing the two v1 owner tables.
-    assert_eq!(names.len(), 108, "review every imported durable table");
+    // (SQLite v131), 109 with delegation's three durable tables, the
+    // source-lease table replacing the two v1 owner tables, and receipt-to-lease
+    // import provenance.
+    assert_eq!(names.len(), 109, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its

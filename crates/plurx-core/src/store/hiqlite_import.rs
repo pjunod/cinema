@@ -1973,6 +1973,15 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "source_lease_receipt_sources",
+        columns: &["receipt_id", "lease_id", "library_id", "source_path"],
+        order_by: "receipt_id, lease_id",
+        minimum_schema: super::source_leases::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "analysis_source_checkpoints",
         columns: &["request_id", "fence", "owner_node_id", "artifact_json"],
         order_by: "request_id",

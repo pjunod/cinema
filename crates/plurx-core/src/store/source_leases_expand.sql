@@ -21,8 +21,56 @@ CREATE INDEX source_leases_node ON source_leases(node_id, expires_at_ms);
 -- next statement
 CREATE INDEX source_leases_work ON source_leases(owner_kind, work_id);
 -- next statement
+-- Receipt provenance is not authority: no lease FK and no hold/pin. It dies
+-- with the existing five-second receipt ledger and lets byte allocations be
+-- projected through the same current roots as their physical source.
+CREATE TABLE source_lease_receipt_sources (
+ receipt_id TEXT NOT NULL REFERENCES background_source_service_grants(receipt_id) ON DELETE CASCADE,
+ lease_id TEXT NOT NULL,
+ library_id INTEGER, source_path TEXT,
+ PRIMARY KEY(receipt_id,lease_id)
+) STRICT;
+-- next statement
 -- Playback windows, one row per (playback lease, source key). Playback is
 -- never counted as a reader; outside its window it blocks background reads.
+CREATE VIEW source_lease_effective_resources AS
+WITH resolved AS NOT MATERIALIZED (
+ SELECT held.lease_id,resource.resource_key FROM source_leases held
+ JOIN source_lease_file_resources resource ON resource.file_id=json_extract(held.owner_json,'$.file_id')
+ WHERE held.owner_kind IN ('playback','lease')
+ UNION
+ SELECT held.lease_id,resource.resource_key FROM source_leases held
+ JOIN background_job_required_resources resource ON resource.job_id=held.work_id
+ WHERE held.owner_kind='job' AND resource.resource_key LIKE 'source_io%'
+ UNION
+ SELECT held.lease_id,resource.resource_key FROM source_leases held
+ JOIN analysis_required_resources resource ON resource.request_id=held.work_id WHERE held.owner_kind='analysis'
+ UNION
+ SELECT held.lease_id,resource.resource_key FROM source_leases held
+ JOIN offline_packages package ON package.id=held.work_id
+ JOIN source_lease_file_resources resource ON resource.file_id=package.file_id WHERE held.owner_kind='offline'
+)
+SELECT lease_id,resource_key FROM resolved
+UNION
+-- Preserve the admitted physical scope until the phase closes, as well as
+-- charging the current logical scope above. New parent/child phases each
+-- start with their own exact root; only an in-flight root edit can charge both.
+SELECT held.lease_id,stored.value FROM source_leases held,json_each(held.resource_keys_json) stored
+UNION
+-- Retired owner rows still charge overlapping current roots during grace.
+-- Known file/scope owners above remain exact, preserving normal independent
+-- budgets for configured parent/child roots.
+SELECT held.lease_id,resource.resource_key
+FROM source_leases held,json_each(held.resource_keys_json) stored
+JOIN source_lease_roots root ON substr(stored.value,1,15)='source_io:root/' AND (
+ stored.value=root.root_key
+ OR substr(root.root_key,1,length(stored.value)+2)=stored.value||'2F'
+ OR substr(stored.value,1,length(root.root_key)+2)=root.root_key||'2F'
+ OR (substr(stored.value,-3)='/2F' AND substr(root.root_key,1,length(stored.value)-2)=substr(stored.value,1,length(stored.value)-2))
+ OR (substr(root.root_key,-3)='/2F' AND substr(stored.value,1,length(root.root_key)-2)=substr(root.root_key,1,length(root.root_key)-2)))
+JOIN source_lease_root_resources resource ON resource.library_id=root.library_id AND resource.root_id=root.root_id
+WHERE NOT EXISTS(SELECT 1 FROM resolved current WHERE current.lease_id=held.lease_id);
+-- next statement
 CREATE VIEW source_lease_permissions AS
 SELECT l.lease_id,l.node_id,k.value AS resource_key,l.expires_at_ms,
   CASE WHEN json_extract(l.projection_json,'$.source_quiescent')=1 THEN 1 ELSE 0 END AS source_quiescent,
@@ -32,7 +80,7 @@ SELECT l.lease_id,l.node_id,k.value AS resource_key,l.expires_at_ms,
       THEN MIN(l.expires_at_ms,json_extract(l.projection_json,'$.observation_expires_at_ms'))
     WHEN l.phase='transfer_service' THEN MIN(l.expires_at_ms,json_extract(l.projection_json,'$.transfer_grant.expires_at_ms'))
     ELSE 0 END AS permits_through_ms
-FROM source_leases l, json_each(l.resource_keys_json) k WHERE l.owner_kind='playback';
+FROM source_leases l JOIN (SELECT lease_id,resource_key AS value FROM source_lease_effective_resources) k ON k.lease_id=l.lease_id WHERE l.owner_kind='playback';
 -- next statement
 CREATE TABLE source_lease_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version IN (2,3))) STRICT;
 -- next statement
@@ -194,10 +242,11 @@ BEGIN
     UPDATE source_leases SET resource_keys_json=(SELECT json_group_array(resource_key) FROM
       (SELECT resource_key FROM background_job_required_resources WHERE job_id=source_leases.work_id AND resource_key LIKE 'source_io%' ORDER BY resource_key)),
       phase='active',renewed_at_ms=json_extract(NEW.request_json,'$.now_ms')
-      WHERE lease_id='job:'||json_extract(NEW.request_json,'$.token.job_id')||':'||json_extract(NEW.request_json,'$.token.fence');
+      WHERE lease_id='job:'||json_extract(NEW.request_json,'$.token.job_id')||':'||json_extract(NEW.request_json,'$.token.fence')
+      AND EXISTS(SELECT 1 FROM background_source_pauses paused WHERE paused.job_id=source_leases.work_id AND paused.phase='paused');
     UPDATE background_source_pauses SET resource_keys_json=(SELECT json_group_array(resource_key) FROM
       (SELECT resource_key FROM background_job_required_resources WHERE job_id=background_source_pauses.job_id AND resource_key LIKE 'source_io%' ORDER BY resource_key)),phase='active'
-        WHERE job_id=json_extract(NEW.request_json,'$.token.job_id');
+        WHERE job_id=json_extract(NEW.request_json,'$.token.job_id') AND phase='paused';
     DELETE FROM background_job_commands WHERE id=NEW.id;
 END;
 -- next statement
@@ -208,7 +257,7 @@ DROP VIEW IF EXISTS dispatch_turn_ordinary_occupancy;
 -- next statement
 CREATE VIEW dispatch_turn_ordinary_occupancy AS
 SELECT k.value AS resource_key,h.work_id,h.lease_id,h.node_id
-FROM source_leases h CROSS JOIN dispatch_turn_attempt a, json_each(h.resource_keys_json) k
+FROM source_leases h CROSS JOIN dispatch_turn_attempt a JOIN (SELECT lease_id,resource_key AS value FROM source_lease_effective_resources) k ON k.lease_id=h.lease_id
 WHERE h.owner_kind!='playback' AND h.phase!='paused' AND h.expires_at_ms>a.now_ms-60000
 AND NOT (h.owner_kind='job' AND EXISTS(SELECT 1 FROM dispatch_turn_protected_jobs p WHERE p.job_id=h.work_id))
 AND NOT (h.owner_kind='analysis' AND EXISTS(SELECT 1 FROM background_job_waiters viewer WHERE viewer.job_id=h.work_id
@@ -236,7 +285,10 @@ SELECT CASE l.owner_kind WHEN 'playback' THEN 'foreground' ELSE l.owner_kind END
     CASE WHEN l.phase='paused' OR (l.owner_kind='playback' AND json_extract(l.projection_json,'$.source_quiescent')=1)
       THEN l.expires_at_ms ELSE l.expires_at_ms+60000 END AS expires_at_ms,
     0 AS custody_held, l.node_id, NULL AS library_id
-FROM source_leases l, json_each(l.resource_keys_json) k WHERE k.value LIKE 'source_io%'
+FROM source_leases l JOIN (
+ SELECT lease_id,resource_key AS value FROM source_lease_effective_resources
+ UNION SELECT stored.lease_id,key.value FROM source_leases stored,json_each(stored.resource_keys_json) key
+) k ON k.lease_id=l.lease_id WHERE k.value LIKE 'source_io%'
 UNION ALL
 SELECT 'pause', paused.job_id, paused.fence, resource.value, job.lease_expires_ms, 0, paused.node_id, NULL
 FROM background_source_pauses paused
@@ -619,9 +671,15 @@ INSERT OR IGNORE INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,ow
 SELECT CASE custody.owner_kind WHEN 'analysis' THEN custody.custody_id ELSE custody.owner_key END,
   custody.owner_kind,custody.work_id,custody.fence,
   CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END,
-  custody.owner_json,CASE WHEN EXISTS(SELECT 1 FROM source_lease_legacy_resources root WHERE root.custody_id=custody.custody_id)
+  custody.owner_json,CASE WHEN EXISTS(SELECT 1 FROM source_leases retained
+      WHERE retained.lease_id=CASE custody.owner_kind WHEN 'analysis' THEN custody.custody_id ELSE custody.owner_key END
+        AND retained.owner_kind=custody.owner_kind AND retained.work_id=custody.work_id AND retained.fence=custody.fence
+        AND retained.phase!='paused' AND retained.expires_at_ms>custody.updated_at_ms-60000)
+      THEN (SELECT retained.resource_keys_json FROM source_leases retained
+        WHERE retained.lease_id=CASE custody.owner_kind WHEN 'analysis' THEN custody.custody_id ELSE custody.owner_key END)
+      ELSE CASE WHEN EXISTS(SELECT 1 FROM source_lease_legacy_resources root WHERE root.custody_id=custody.custody_id)
       THEN (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_legacy_resources root WHERE root.custody_id=custody.custody_id ORDER BY resource_key))
-      ELSE custody.resource_keys_json END,custody.phase,
+      ELSE custody.resource_keys_json END END,custody.phase,
   custody.started_at_ms,custody.updated_at_ms,
   CASE custody.owner_kind WHEN 'offline' THEN MIN(custody.authority_expires_at_ms,custody.updated_at_ms+30000) ELSE custody.authority_expires_at_ms END
 FROM background_source_current_owners custody
@@ -660,7 +718,12 @@ WHEN json_extract(NEW.identity_json,'$.node_id') IS NOT NULL
 BEGIN
   INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,projection_json,started_at_ms,renewed_at_ms,expires_at_ms)
   VALUES(NEW.owner_id,'playback',COALESCE(json_extract(NEW.identity_json,'$.lifetime_id'),NEW.owner_id),NEW.fence,json_extract(NEW.identity_json,'$.node_id'),
-    NEW.identity_json,CASE WHEN EXISTS(SELECT 1 FROM source_lease_file_resources WHERE file_id=json_extract(NEW.identity_json,'$.file_id'))
+    NEW.identity_json,CASE WHEN EXISTS(SELECT 1 FROM source_leases retained WHERE retained.lease_id=NEW.owner_id
+      AND retained.owner_kind='playback' AND retained.owner_json=NEW.identity_json
+      AND COALESCE(json_extract(retained.projection_json,'$.source_quiescent'),0)=0
+      AND retained.expires_at_ms>NEW.updated_at_ms-60000)
+      THEN (SELECT resource_keys_json FROM source_leases WHERE lease_id=NEW.owner_id)
+      WHEN EXISTS(SELECT 1 FROM source_lease_file_resources WHERE file_id=json_extract(NEW.identity_json,'$.file_id'))
       THEN (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_file_resources WHERE file_id=json_extract(NEW.identity_json,'$.file_id') ORDER BY resource_key))
       ELSE NEW.resource_keys_json END,NEW.phase,NEW.projection_json,NEW.started_at_ms,NEW.updated_at_ms,NEW.lease_expires_at_ms)
   ON CONFLICT(lease_id) DO UPDATE SET owner_kind=excluded.owner_kind,work_id=excluded.work_id,fence=excluded.fence,node_id=excluded.node_id,
@@ -721,9 +784,15 @@ BEGIN
   SELECT CASE custody.owner_kind WHEN 'analysis' THEN custody.custody_id ELSE custody.owner_key END,
     custody.owner_kind,custody.work_id,custody.fence,
     CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END,
-    custody.owner_json,CASE WHEN EXISTS(SELECT 1 FROM source_lease_legacy_resources root WHERE root.custody_id=custody.custody_id)
+    custody.owner_json,CASE WHEN EXISTS(SELECT 1 FROM source_leases retained
+      WHERE retained.lease_id=CASE custody.owner_kind WHEN 'analysis' THEN custody.custody_id ELSE custody.owner_key END
+        AND retained.owner_kind=custody.owner_kind AND retained.work_id=custody.work_id AND retained.fence=custody.fence
+        AND retained.phase!='paused' AND retained.expires_at_ms>custody.updated_at_ms-60000)
+      THEN (SELECT retained.resource_keys_json FROM source_leases retained
+        WHERE retained.lease_id=CASE custody.owner_kind WHEN 'analysis' THEN custody.custody_id ELSE custody.owner_key END)
+      ELSE CASE WHEN EXISTS(SELECT 1 FROM source_lease_legacy_resources root WHERE root.custody_id=custody.custody_id)
       THEN (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_legacy_resources root WHERE root.custody_id=custody.custody_id ORDER BY resource_key))
-      ELSE custody.resource_keys_json END,custody.phase,NULL,custody.started_at_ms,custody.updated_at_ms,
+      ELSE custody.resource_keys_json END END,custody.phase,NULL,custody.started_at_ms,custody.updated_at_ms,
     CASE custody.owner_kind WHEN 'offline' THEN MIN(custody.authority_expires_at_ms,custody.updated_at_ms+30000) ELSE custody.authority_expires_at_ms END
   FROM background_source_current_owners custody
   WHERE custody.custody_id=NEW.custody_id AND custody.authority_expires_at_ms>0 AND custody.fence>0
@@ -752,9 +821,15 @@ BEGIN
   SELECT CASE custody.owner_kind WHEN 'analysis' THEN custody.custody_id ELSE custody.owner_key END,
     custody.owner_kind,custody.work_id,custody.fence,
     CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END,
-    custody.owner_json,CASE WHEN EXISTS(SELECT 1 FROM source_lease_legacy_resources root WHERE root.custody_id=custody.custody_id)
+    custody.owner_json,CASE WHEN EXISTS(SELECT 1 FROM source_leases retained
+      WHERE retained.lease_id=CASE custody.owner_kind WHEN 'analysis' THEN custody.custody_id ELSE custody.owner_key END
+        AND retained.owner_kind=custody.owner_kind AND retained.work_id=custody.work_id AND retained.fence=custody.fence
+        AND retained.phase!='paused' AND retained.expires_at_ms>custody.updated_at_ms-60000)
+      THEN (SELECT retained.resource_keys_json FROM source_leases retained
+        WHERE retained.lease_id=CASE custody.owner_kind WHEN 'analysis' THEN custody.custody_id ELSE custody.owner_key END)
+      ELSE CASE WHEN EXISTS(SELECT 1 FROM source_lease_legacy_resources root WHERE root.custody_id=custody.custody_id)
       THEN (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_legacy_resources root WHERE root.custody_id=custody.custody_id ORDER BY resource_key))
-      ELSE custody.resource_keys_json END,custody.phase,NULL,custody.started_at_ms,custody.updated_at_ms,
+      ELSE custody.resource_keys_json END END,custody.phase,NULL,custody.started_at_ms,custody.updated_at_ms,
     CASE custody.owner_kind WHEN 'offline' THEN MIN(custody.authority_expires_at_ms,custody.updated_at_ms+30000) ELSE custody.authority_expires_at_ms END
   FROM background_source_current_owners custody
   WHERE custody.custody_id=NEW.custody_id AND custody.authority_expires_at_ms>0 AND custody.fence>0
@@ -837,4 +912,93 @@ WHEN OLD.owner_kind IN ('lease','offline')
 BEGIN
   DELETE FROM background_source_custody WHERE custody_id=OLD.lease_id
     AND owner_key=OLD.lease_id AND owner_kind=OLD.owner_kind;
+END;
+
+
+-- next statement
+-- Immutable physical scope survives its owner for the rest of the receipt
+-- epoch. It owns no reader and has no FK/pin on a file, library, or lease.
+CREATE VIEW source_lease_service_scopes AS
+WITH commands AS NOT MATERIALIZED (
+ SELECT command.id,command.request_json,command.result_json,
+   json_extract(command.request_json,'$.kind') AS kind,
+   CASE json_extract(command.request_json,'$.kind') WHEN 'companion'
+     THEN json_extract(command.request_json,'$.token.owner.owner_id')
+     ELSE json_extract(command.request_json,'$.owner_key') END AS direct_lease,
+   CASE json_extract(command.request_json,'$.kind')
+     WHEN 'read_attestation' THEN json_extract(command.request_json,'$.file_id')
+     WHEN 'companion' THEN json_extract(command.request_json,'$.token.owner.file_id')
+     WHEN 'job' THEN json_extract(job.payload_json,'$.file_id')
+     WHEN 'analysis' THEN analysis.file_id WHEN 'offline' THEN package.file_id END AS file_id,
+   COALESCE(json_extract(job.payload_json,'$.library_id'),job_item.library_id) AS scope_library
+ FROM background_job_commands command
+ LEFT JOIN background_jobs job ON json_extract(command.request_json,'$.kind')='job'
+   AND job.id=json_extract(command.request_json,'$.token.job_id')
+ LEFT JOIN items job_item ON job_item.id=json_extract(job.payload_json,'$.item_id')
+ LEFT JOIN analysis_requests analysis ON json_extract(command.request_json,'$.kind')='analysis'
+   AND analysis.request_id=json_extract(command.request_json,'$.request_id')
+ LEFT JOIN offline_packages package ON json_extract(command.request_json,'$.kind')='offline'
+   AND package.id=json_extract(command.request_json,'$.package_id')
+ WHERE command.operation='source_service' AND json_type(command.result_json)='object'
+), scopes AS NOT MATERIALIZED (
+ SELECT command.*,COALESCE(item.library_id,command.scope_library) AS library_id,file.path AS source_path
+ FROM commands command LEFT JOIN files file ON file.id=command.file_id LEFT JOIN items item ON item.id=file.item_id
+)
+SELECT id,result_json,direct_lease AS lease_id,library_id,source_path FROM scopes
+WHERE kind IN ('job','read_attestation','offline','companion') AND direct_lease IS NOT NULL
+UNION ALL
+SELECT scope.id,scope.result_json,held.lease_id,scope.library_id,scope.source_path
+FROM scopes scope JOIN source_leases held ON held.owner_kind='analysis'
+ AND held.work_id=json_extract(scope.request_json,'$.request_id') AND held.fence=json_extract(scope.request_json,'$.fence')
+ AND (json_extract(scope.request_json,'$.custody_id') IS NULL OR held.lease_id=json_extract(scope.request_json,'$.custody_id'))
+WHERE scope.kind='analysis';
+-- next statement
+CREATE VIEW source_lease_receipt_resources AS
+WITH matched AS NOT MATERIALIZED (
+ SELECT DISTINCT scope.receipt_id,scope.lease_id,root.library_id,root.root_id
+ FROM source_lease_receipt_sources scope JOIN source_lease_roots root ON root.library_id=scope.library_id
+ WHERE scope.source_path IS NULL OR (
+  (scope.source_path=root.root_path OR (root.root_path='/' AND substr(scope.source_path,1,1)='/')
+    OR (substr(scope.source_path,1,length(root.root_path))=root.root_path AND substr(scope.source_path,length(root.root_path)+1,1)='/'))
+  AND NOT EXISTS(SELECT 1 FROM source_lease_roots nested WHERE nested.library_id=root.library_id
+    AND length(nested.root_path)>length(root.root_path)
+    AND (scope.source_path=nested.root_path OR (substr(scope.source_path,1,length(nested.root_path))=nested.root_path
+      AND substr(scope.source_path,length(nested.root_path)+1,1)='/'))))
+)
+SELECT DISTINCT matched.receipt_id,resource.resource_key FROM matched JOIN source_lease_root_resources resource
+ ON resource.library_id=matched.library_id AND resource.root_id=matched.root_id
+UNION
+SELECT scope.receipt_id,'source_io' FROM source_lease_receipt_sources scope
+WHERE NOT EXISTS(SELECT 1 FROM matched WHERE matched.receipt_id=scope.receipt_id AND matched.lease_id=scope.lease_id);
+-- next statement
+-- Existing v1 receipts use domain/generic keys. Resolve their live owners;
+-- opaque companion keys conservatively retain all possible matching scopes
+-- only until this receipt epoch is retired.
+INSERT OR IGNORE INTO source_lease_receipt_sources(receipt_id,lease_id,library_id,source_path)
+SELECT receipt.receipt_id,held.lease_id,COALESCE(item.library_id,json_extract(job.payload_json,'$.library_id'),job_item.library_id),file.path
+FROM background_source_service_grants receipt JOIN source_leases held
+ ON held.lease_id=receipt.owner_key
+ OR (held.owner_kind='analysis' AND 'analysis:'||hex(held.work_id)||':'||held.fence=receipt.owner_key)
+ OR (receipt.owner_key LIKE 'companion:%' AND held.owner_kind='playback' AND EXISTS(
+   SELECT 1 FROM json_each(receipt.grant_json,'$.resource_keys') a,json_each(held.resource_keys_json) b
+   WHERE a.value=b.value OR a.value='source_io' OR b.value='source_io'))
+LEFT JOIN background_jobs job ON held.owner_kind='job' AND job.id=held.work_id
+LEFT JOIN items job_item ON job_item.id=json_extract(job.payload_json,'$.item_id')
+LEFT JOIN analysis_requests analysis ON held.owner_kind='analysis' AND analysis.request_id=held.work_id
+LEFT JOIN offline_packages package ON held.owner_kind='offline' AND package.id=held.work_id
+LEFT JOIN files file ON file.id=COALESCE(json_extract(held.owner_json,'$.file_id'),json_extract(job.payload_json,'$.file_id'),analysis.file_id,package.file_id)
+LEFT JOIN items item ON item.id=file.item_id;
+-- next statement
+CREATE TRIGGER source_lease_receipt_insert AFTER INSERT ON background_source_service_grants
+BEGIN
+ INSERT OR IGNORE INTO source_lease_receipt_sources(receipt_id,lease_id,library_id,source_path)
+ SELECT NEW.receipt_id,scope.lease_id,scope.library_id,scope.source_path FROM source_lease_service_scopes scope
+ WHERE json_extract(scope.result_json,'$.receipt_id')=NEW.receipt_id;
+END;
+-- next statement
+CREATE TRIGGER source_lease_receipt_update AFTER UPDATE ON background_source_service_grants
+BEGIN
+ INSERT OR IGNORE INTO source_lease_receipt_sources(receipt_id,lease_id,library_id,source_path)
+ SELECT NEW.receipt_id,scope.lease_id,scope.library_id,scope.source_path FROM source_lease_service_scopes scope
+ WHERE json_extract(scope.result_json,'$.receipt_id')=NEW.receipt_id;
 END;

@@ -240,8 +240,9 @@ macro_rules! source_file_resources {
 /// A pre-upgrade holder without root keys conservatively overlaps a root
 /// through its old domain (or its generic unknown source).
 macro_rules! source_lease_matches {
-    ($key:literal) => { concat!("EXISTS(SELECT 1 FROM json_each(held.resource_keys_json) held_key WHERE held_key.value=", $key,
-      " OR (substr(", $key, ",1,15)='source_io:root/' AND NOT EXISTS(SELECT 1 FROM json_each(held.resource_keys_json) rooted WHERE substr(rooted.value,1,15)='source_io:root/') AND (held_key.value='source_io' OR held_key.value IN(SELECT resource_key FROM source_lease_root_resources WHERE root_key=", $key, "))))") };
+    ($key:literal) => { concat!(
+      "EXISTS(SELECT 1 FROM source_lease_effective_resources held_key WHERE held_key.lease_id=held.lease_id AND (held_key.resource_key=", $key,
+      " OR (substr(", $key, ",1,15)='source_io:root/' AND NOT EXISTS(SELECT 1 FROM source_lease_effective_resources rooted WHERE rooted.lease_id=held.lease_id AND substr(rooted.resource_key,1,15)='source_io:root/') AND (held_key.resource_key='source_io' OR held_key.resource_key IN(SELECT resource_key FROM source_lease_root_resources WHERE root_key=", $key, ")))))") };
 }
 
 /// A playback lease overlapping `$key` is outside its permission window:

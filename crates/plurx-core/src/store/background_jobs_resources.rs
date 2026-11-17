@@ -295,17 +295,19 @@ pub(super) async fn project_foreground<T: QueueSql>(
         AND json_extract($1,'$.projection.observation_version')>json_extract(projection_json,'$.observation_version')
         AND json_extract($1,'$.projection.observed_at_ms')>=json_extract(projection_json,'$.observed_at_ms')
         AND (json_extract($1,'$.projection.transfer_grant.service_class') IS NOT 'measured' OR NOT EXISTS(
-          SELECT 1 FROM json_each(source_leases.resource_keys_json) required WHERE 1
+          SELECT 1 FROM source_lease_effective_resources required WHERE required.lease_id=source_leases.lease_id
             AND (COALESCE((SELECT SUM(json_extract(peer.projection_json,'$.transfer_grant.foreground_bytes'))
-                FROM source_leases peer,json_each(peer.resource_keys_json) peer_resource
-                WHERE (peer_resource.value=required.value OR (peer_resource.value LIKE 'source_io%' AND required.value LIKE 'source_io%' AND (peer_resource.value='source_io' OR required.value='source_io'))) AND peer.owner_kind='playback' AND peer.lease_id!=source_leases.lease_id
+                FROM source_leases peer
+                WHERE EXISTS(SELECT 1 FROM source_lease_effective_resources peer_resource WHERE peer_resource.lease_id=peer.lease_id
+                  AND (peer_resource.resource_key=required.resource_key OR (peer_resource.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (peer_resource.resource_key='source_io' OR required.resource_key='source_io')))) AND peer.owner_kind='playback' AND peer.lease_id!=source_leases.lease_id
                   AND peer.phase='transfer_service' AND peer.expires_at_ms>json_extract($1,'$.now_ms')
                   AND json_extract(peer.projection_json,'$.transfer_grant.expires_at_ms')>json_extract($1,'$.now_ms')),0)
               +json_extract($1,'$.projection.transfer_grant.foreground_bytes'))+json_extract($1,'$.projection.transfer_grant.background_bytes')
               >MIN(json_extract($1,'$.projection.transfer_grant.supply_floor_bps'),COALESCE(
                 (SELECT MIN(json_extract(peer.projection_json,'$.transfer_grant.supply_floor_bps'))
-                FROM source_leases peer,json_each(peer.resource_keys_json) peer_resource
-                WHERE (peer_resource.value=required.value OR (peer_resource.value LIKE 'source_io%' AND required.value LIKE 'source_io%' AND (peer_resource.value='source_io' OR required.value='source_io'))) AND peer.owner_kind='playback' AND peer.lease_id!=source_leases.lease_id
+                FROM source_leases peer
+                WHERE EXISTS(SELECT 1 FROM source_lease_effective_resources peer_resource WHERE peer_resource.lease_id=peer.lease_id
+                  AND (peer_resource.resource_key=required.resource_key OR (peer_resource.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (peer_resource.resource_key='source_io' OR required.resource_key='source_io')))) AND peer.owner_kind='playback' AND peer.lease_id!=source_leases.lease_id
                   AND peer.phase='transfer_service' AND peer.expires_at_ms>json_extract($1,'$.now_ms')
                   AND json_extract(peer.projection_json,'$.transfer_grant.expires_at_ms')>json_extract($1,'$.now_ms')),
                 json_extract($1,'$.projection.transfer_grant.supply_floor_bps')))*5/8))
@@ -474,10 +476,13 @@ pub(super) async fn resume_background<T: QueueSql>(
       SELECT json_extract($1,'$.id'),'source_resume',$1,CASE WHEN EXISTS(SELECT 1 FROM background_jobs job
         JOIN background_source_pauses paused ON paused.job_id=job.id AND paused.fence=job.fence
           AND paused.node_id=job.owner_node_id AND paused.boot_id=job.owner_boot_id AND paused.claim_id=job.claim_id
-        WHERE {identity} AND json_array_length(paused.resource_keys_json)>0
+        WHERE {identity} AND (
+          (paused.phase='active' AND EXISTS(SELECT 1 FROM source_leases owned WHERE owned.lease_id='job:'||job.id||':'||job.fence
+            AND owned.owner_kind='job' AND owned.node_id=job.owner_node_id AND owned.phase='active' AND owned.expires_at_ms>json_extract($1,'$.now_ms')-60000))
+          OR (paused.phase='paused' AND json_array_length(paused.resource_keys_json)>0
           AND NOT EXISTS(SELECT 1 FROM (SELECT resource_key AS value FROM background_job_required_resources
             WHERE job_id=job.id AND resource_key LIKE 'source_io%') resource WHERE {blocked}
-            OR {holders} OR (NOT {live} AND {maintenance}))) THEN 'true' ELSE 'false' END
+            OR {holders} OR (NOT {live} AND {maintenance}))))) THEN 'true' ELSE 'false' END
       RETURNING result_json"#,identity=background_identity_sql()),body,true,true).await?;
     rows.first()
         .map(|row| decode(row))
@@ -3225,15 +3230,15 @@ async fn claim_background_service_inner<T: QueueSql>(
     // that resumes after that boundary must reacquire capacity in this same
     // write, whether its expired row is still present or has been collected.
     let offline_resources = background_owner_resources(&owner);
-    let offline_custody = format!("SELECT resource_keys_json FROM source_leases WHERE lease_id=json_extract($1,'$.owner_key') AND ({counted_offline}) UNION ALL SELECT json_group_array(resource_key) AS resource_keys_json FROM ({offline_resources}) WHERE NOT ({counted_offline}) HAVING count(*)>0");
+    let offline_custody = format!("SELECT (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_effective_resources WHERE lease_id=source_leases.lease_id ORDER BY resource_key)) AS resource_keys_json FROM source_leases WHERE lease_id=json_extract($1,'$.owner_key') AND ({counted_offline}) UNION ALL SELECT json_group_array(resource_key) AS resource_keys_json FROM ({offline_resources}) WHERE NOT ({counted_offline}) HAVING count(*)>0");
     let custody = if offline {
         offline_custody.as_str()
     } else if exact_phase.is_some() {
-        "SELECT owned.resource_keys_json FROM source_leases owned JOIN analysis_coordination_roles role ON role.active_custody_id=owned.lease_id AND role.request_id=owned.work_id AND role.physical_fence=owned.fence WHERE owned.lease_id=json_extract($1,'$.custody_id') AND owned.owner_kind='analysis' AND role.phase_sequence=json_extract($1,'$.phase_sequence') AND owned.phase IN ('active','paused')"
+        "SELECT (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_effective_resources WHERE lease_id=owned.lease_id ORDER BY resource_key)) AS resource_keys_json FROM source_leases owned JOIN analysis_coordination_roles role ON role.active_custody_id=owned.lease_id AND role.request_id=owned.work_id AND role.physical_fence=owned.fence WHERE owned.lease_id=json_extract($1,'$.custody_id') AND owned.owner_kind='analysis' AND role.phase_sequence=json_extract($1,'$.phase_sequence') AND owned.phase IN ('active','paused')"
     } else if companion {
-        "SELECT fg.resource_keys_json FROM source_leases fg WHERE fg.lease_id=json_extract($1,'$.token.owner.owner_id') AND fg.owner_kind='playback' AND fg.owner_json=json_extract($1,'$.token.owner') AND json_extract(fg.owner_json,'$.policy')='companion' AND fg.phase='transfer_service' AND fg.expires_at_ms>json_extract($1,'$.now_ms') AND json_extract(fg.projection_json,'$.transfer_grant.expires_at_ms')>json_extract($1,'$.now_ms')"
+        "SELECT (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_effective_resources WHERE lease_id=fg.lease_id ORDER BY resource_key)) AS resource_keys_json FROM source_leases fg WHERE fg.lease_id=json_extract($1,'$.token.owner.owner_id') AND fg.owner_kind='playback' AND fg.owner_json=json_extract($1,'$.token.owner') AND json_extract(fg.owner_json,'$.policy')='companion' AND fg.phase='transfer_service' AND fg.expires_at_ms>json_extract($1,'$.now_ms') AND json_extract(fg.projection_json,'$.transfer_grant.expires_at_ms')>json_extract($1,'$.now_ms')"
     } else {
-        "SELECT owned.resource_keys_json FROM source_leases owned WHERE owned.lease_id=json_extract($1,'$.owner_key') AND owned.owner_kind!='playback' AND owned.phase IN ('active','paused')"
+        "SELECT (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_effective_resources WHERE lease_id=owned.lease_id ORDER BY resource_key)) AS resource_keys_json FROM source_leases owned WHERE owned.lease_id=json_extract($1,'$.owner_key') AND owned.owner_kind!='playback' AND owned.phase IN ('active','paused')"
     };
     let readmission = if offline {
         let node = "json_extract($1,'$.node_id')";
@@ -3258,25 +3263,30 @@ async fn claim_background_service_inner<T: QueueSql>(
           OR EXISTS(SELECT 1 FROM source_leases peer,json_each(peer.resource_keys_json) resource WHERE peer.owner_kind!='playback' AND resource.value='source_io')
         THEN '["source_io"]' ELSE resource_keys_json END AS resources FROM custody),
       policy AS (SELECT EXISTS(SELECT 1 FROM custody,json_each(custody.resource_keys_json) resource,
-          source_leases fg,json_each(fg.resource_keys_json) fg_resource WHERE fg.owner_kind='playback'
+          source_leases fg JOIN (SELECT lease_id,resource_key AS value FROM source_lease_effective_resources) fg_resource ON fg_resource.lease_id=fg.lease_id WHERE fg.owner_kind='playback'
             AND (fg_resource.value=resource.value OR fg_resource.value='source_io' OR resource.value='source_io')
             AND fg.phase='transfer_service' AND fg.expires_at_ms>json_extract($1,'$.now_ms')
             AND json_extract(fg.projection_json,'$.transfer_grant.expires_at_ms')>json_extract($1,'$.now_ms')) AS finite,
         (SELECT MIN(json_extract(fg.projection_json,'$.transfer_grant.background_bytes')) FROM custody,json_each(custody.resource_keys_json) resource,
-          source_leases fg,json_each(fg.resource_keys_json) fg_resource WHERE fg.owner_kind='playback'
+          source_leases fg JOIN (SELECT lease_id,resource_key AS value FROM source_lease_effective_resources) fg_resource ON fg_resource.lease_id=fg.lease_id WHERE fg.owner_kind='playback'
             AND (fg_resource.value=resource.value OR fg_resource.value='source_io' OR resource.value='source_io')
             AND fg.phase='transfer_service' AND fg.expires_at_ms>json_extract($1,'$.now_ms')
             AND json_extract(fg.projection_json,'$.transfer_grant.expires_at_ms')>json_extract($1,'$.now_ms')) AS quota,
         (SELECT MAX(1,COUNT(*)
           + (SELECT COUNT(*) FROM source_leases peer WHERE peer.owner_kind='playback' AND peer.phase='transfer_service' AND json_extract(peer.owner_json,'$.policy')='companion' AND peer.expires_at_ms>json_extract($1,'$.now_ms')
-            AND EXISTS(SELECT 1 FROM json_each(peer.resource_keys_json) a,custody,json_each(custody.resource_keys_json) b
-              WHERE a.value=b.value OR a.value='source_io' OR b.value='source_io')))
+            AND EXISTS(SELECT 1 FROM source_lease_effective_resources a,custody,json_each(custody.resource_keys_json) b
+              WHERE a.lease_id=peer.lease_id AND (a.resource_key=b.value OR a.resource_key='source_io' OR b.value='source_io'))))
           FROM source_leases peer WHERE peer.owner_kind!='playback' AND peer.expires_at_ms>json_extract($1,'$.now_ms')
-          AND EXISTS(SELECT 1 FROM json_each(peer.resource_keys_json) a,custody,json_each(custody.resource_keys_json) b
-            WHERE a.value=b.value OR a.value='source_io' OR b.value='source_io')) AS readers,
+          AND EXISTS(SELECT 1 FROM source_lease_effective_resources a,custody,json_each(custody.resource_keys_json) b
+            WHERE a.lease_id=peer.lease_id AND (a.resource_key=b.value OR a.resource_key='source_io' OR b.value='source_io'))) AS readers,
         COALESCE((SELECT SUM(grant_row.allocated_bytes) FROM background_source_service_grants grant_row
-          WHERE grant_row.epoch_id=json_extract($1,'$.epoch_id') AND EXISTS(SELECT 1 FROM json_each(grant_row.grant_json,'$.resource_keys') held,
-            resource_set,json_each(resource_set.resources) required WHERE held.value=required.value OR held.value='source_io' OR required.value='source_io')),0) AS allocated,
+          WHERE grant_row.epoch_id=json_extract($1,'$.epoch_id') AND (
+          EXISTS(SELECT 1 FROM json_each(grant_row.grant_json,'$.resource_keys') held,
+            resource_set,json_each(resource_set.resources) required WHERE held.value=required.value OR held.value='source_io' OR required.value='source_io')
+          OR EXISTS(SELECT 1 FROM source_lease_receipt_resources scope,
+            resource_set,json_each(resource_set.resources) required
+            WHERE scope.receipt_id=grant_row.receipt_id AND
+              (scope.resource_key=required.value OR scope.resource_key='source_io' OR required.value='source_io'))),0) AS allocated,
         COALESCE((SELECT allocated_bytes FROM prior),0) AS owned),
       allowance AS (SELECT CASE WHEN finite=1 THEN CASE WHEN owned>0 THEN
           CASE WHEN allocated>quota THEN 0 ELSE MIN(owned,quota/readers) END
@@ -3326,7 +3336,7 @@ fn background_owner_identity(owner: &BackgroundSourceOwner) -> String {
 }
 fn background_owner_resources(owner: &BackgroundSourceOwner) -> String {
     match owner {
-        BackgroundSourceOwner::Companion{..}=>"SELECT resource.value AS resource_key FROM source_leases fg,json_each(fg.resource_keys_json) resource WHERE fg.lease_id=json_extract($1,'$.token.owner.owner_id') AND fg.owner_kind='playback' AND fg.owner_json=json_extract($1,'$.token.owner')".to_owned(),
+        BackgroundSourceOwner::Companion{..}=>"SELECT resource.resource_key FROM source_leases fg JOIN source_lease_effective_resources resource ON resource.lease_id=fg.lease_id WHERE fg.lease_id=json_extract($1,'$.token.owner.owner_id') AND fg.owner_kind='playback' AND fg.owner_json=json_extract($1,'$.token.owner')".to_owned(),
         BackgroundSourceOwner::Job{..}=>"SELECT resource_key FROM background_job_required_resources WHERE job_id=json_extract($1,'$.token.job_id') AND resource_key LIKE 'source_io%'".to_owned(),
         BackgroundSourceOwner::Analysis{..}=>"SELECT resource_key FROM analysis_required_resources WHERE request_id=json_extract($1,'$.request_id')".to_owned(),
         BackgroundSourceOwner::ReadAttestation{..}|BackgroundSourceOwner::Offline{..}=>{

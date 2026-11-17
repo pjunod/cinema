@@ -1,3 +1,5 @@
+DROP TRIGGER source_lease_service_root_admission;
+-- next statement
 DROP TRIGGER source_lease_legacy_root_insert;
 -- next statement
 DROP TRIGGER source_lease_legacy_root_update;
