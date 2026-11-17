@@ -650,7 +650,7 @@ INSERT OR IGNORE INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,ow
 SELECT owner_id,'playback',COALESCE(json_extract(identity_json,'$.lifetime_id'),owner_id),fence,json_extract(identity_json,'$.node_id'),
   identity_json,CASE WHEN EXISTS(SELECT 1 FROM source_lease_file_resources WHERE file_id=json_extract(identity_json,'$.file_id'))
     THEN (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_file_resources WHERE file_id=json_extract(identity_json,'$.file_id') ORDER BY resource_key))
-    ELSE resource_keys_json END,phase,projection_json,started_at_ms,updated_at_ms,lease_expires_at_ms
+    ELSE '["source_io"]' END,phase,projection_json,started_at_ms,updated_at_ms,lease_expires_at_ms
 FROM foreground_source_owners WHERE json_extract(identity_json,'$.node_id') IS NOT NULL;
 -- next statement
 INSERT OR IGNORE INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,started_at_ms,renewed_at_ms,expires_at_ms)
@@ -717,7 +717,7 @@ BEGIN
   VALUES(NEW.owner_id,'playback',COALESCE(json_extract(NEW.identity_json,'$.lifetime_id'),NEW.owner_id),NEW.fence,json_extract(NEW.identity_json,'$.node_id'),
     NEW.identity_json,CASE WHEN EXISTS(SELECT 1 FROM source_lease_file_resources WHERE file_id=json_extract(NEW.identity_json,'$.file_id'))
       THEN (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_file_resources WHERE file_id=json_extract(NEW.identity_json,'$.file_id') ORDER BY resource_key))
-      ELSE NEW.resource_keys_json END,NEW.phase,NEW.projection_json,NEW.started_at_ms,NEW.updated_at_ms,NEW.lease_expires_at_ms)
+      ELSE '["source_io"]' END,NEW.phase,NEW.projection_json,NEW.started_at_ms,NEW.updated_at_ms,NEW.lease_expires_at_ms)
   ON CONFLICT(lease_id) DO UPDATE SET owner_kind=excluded.owner_kind,work_id=excluded.work_id,fence=excluded.fence,node_id=excluded.node_id,
     owner_json=excluded.owner_json,resource_keys_json=excluded.resource_keys_json,phase=excluded.phase,projection_json=excluded.projection_json,
     started_at_ms=excluded.started_at_ms,renewed_at_ms=excluded.renewed_at_ms,expires_at_ms=excluded.expires_at_ms
@@ -739,7 +739,7 @@ BEGIN
       THEN (SELECT resource_keys_json FROM source_leases WHERE lease_id=NEW.owner_id)
       WHEN EXISTS(SELECT 1 FROM source_lease_file_resources WHERE file_id=json_extract(NEW.identity_json,'$.file_id'))
       THEN (SELECT json_group_array(resource_key) FROM (SELECT resource_key FROM source_lease_file_resources WHERE file_id=json_extract(NEW.identity_json,'$.file_id') ORDER BY resource_key))
-      ELSE NEW.resource_keys_json END,NEW.phase,NEW.projection_json,NEW.started_at_ms,NEW.updated_at_ms,NEW.lease_expires_at_ms)
+      ELSE '["source_io"]' END,NEW.phase,NEW.projection_json,NEW.started_at_ms,NEW.updated_at_ms,NEW.lease_expires_at_ms)
   ON CONFLICT(lease_id) DO UPDATE SET owner_kind=excluded.owner_kind,work_id=excluded.work_id,fence=excluded.fence,node_id=excluded.node_id,
     owner_json=excluded.owner_json,resource_keys_json=excluded.resource_keys_json,phase=excluded.phase,projection_json=excluded.projection_json,
     started_at_ms=excluded.started_at_ms,renewed_at_ms=excluded.renewed_at_ms,expires_at_ms=excluded.expires_at_ms

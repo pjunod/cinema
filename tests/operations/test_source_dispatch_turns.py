@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 SCHEMA = Path(__file__).resolve().parents[2] / "crates/plurx-core/src/store/background_job_turns.sql"
+DISPATCH_FIXTURE = Path(__file__).resolve().parents[2] / "crates/plurx-core/tests/fixtures/source-lease-dispatch-current.sql"
 
 class SourceDispatchTurns(unittest.TestCase):
     def setUp(self):
@@ -185,6 +186,7 @@ class SourceLeaseDispatchTurns(SourceDispatchTurns):
                       or "source_lease_permissions AS" in s or "dispatch_turn" in s]
         for statement in statements:
             self.db.executescript(statement)
+        self.db.executescript(DISPATCH_FIXTURE.read_text())
 
     def lease(self, name, node, key="source_io", expires=9000, kind="job", phase="active", projection=None):
         self.db.execute("INSERT INTO source_leases VALUES(?,?,?,1,?,'{}',json_array(?),?,?,1,1,?)",

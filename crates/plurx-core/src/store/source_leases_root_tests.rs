@@ -987,3 +987,165 @@ async fn source_resource_point_lookups_do_not_scan_owner_catalogs() {
         );
     }
 }
+
+fn dispatch_contenders_view(sql: &str) -> &str {
+    sql.split("-- next statement")
+        .map(str::trim)
+        .find(|statement| statement.starts_with("CREATE VIEW dispatch_turn_contenders AS"))
+        .expect("generated dispatch contenders view")
+}
+
+#[test]
+fn dispatch_fixture_matches_the_rust_admission_macro() {
+    let fixture = include_str!("../../tests/fixtures/source-lease-dispatch-current.sql");
+    let expanded = super::super::source_leases::EXPAND;
+    assert_eq!(
+        dispatch_contenders_view(fixture),
+        dispatch_contenders_view(expanded),
+        "Python dispatch fixture must track the current generated Rust admission SQL"
+    );
+}
+
+#[test]
+fn v1_playback_without_file_metadata_protects_new_roots_through_its_window() {
+    use super::super::background_jobs_resources::{
+        ForegroundSourceOwner, ForegroundSourcePhase, ForegroundSourcePolicy,
+        ForegroundSourceProjection,
+    };
+
+    for collect_expired_owner in [false, true] {
+        let conn =
+            SqliteStore::open_migrated_through(super::super::source_leases::EXPANDED_VERSION - 1)
+                .expect("pre-expand catalogue");
+        conn.execute_batch(
+            r#"
+            INSERT INTO libraries(id,name,kind,paths) VALUES(1,'Orphan playback','movies','["/media"]');
+            INSERT INTO background_storage_domains(library_id,root_path,domain_id) VALUES(1,'/media','shared-disk');
+            INSERT INTO items(id,library_id,kind,title,sort_title)
+              VALUES(1,1,'movie','Old source','Old source'),(2,1,'movie','New source','New source');
+            INSERT INTO files(id,item_id,path,size,mtime)
+              VALUES(1,1,'/media/movies/old.mkv',100,7),(2,2,'/media/movies/new.mkv',100,7);
+            INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms)
+              VALUES('subtitle-read-attest:node-b:1','node-b',1,1,100000,1000);
+            "#,
+        )
+        .expect("legacy playback and attestation authority");
+
+        let owner = ForegroundSourceOwner {
+            owner_id: uuid::Uuid::new_v4().to_string(),
+            lifetime_id: "old-playback-lifetime".into(),
+            session_incarnation: uuid::Uuid::new_v4().to_string(),
+            producer_attempt: "producer-1".into(),
+            node_id: "node-a".into(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            file_id: 1,
+            source_size: 100,
+            source_mtime: 7,
+            source_generation: "source-1".into(),
+            policy: ForegroundSourcePolicy::Rolling,
+        };
+        let identity = serde_json::to_string(&owner).expect("legacy foreground identity");
+        let startup = serde_json::to_string(&ForegroundSourceProjection::startup(1000))
+            .expect("foreground startup projection");
+        conn.execute(
+            "INSERT INTO foreground_source_owners(owner_id,identity_json,resource_keys_json,fence,phase,projection_json,started_at_ms,updated_at_ms,lease_expires_at_ms) VALUES(?1,?2,'[\"source_io:shared-disk\"]',1,'startup',?3,1000,1000,5000)",
+            rusqlite::params![owner.owner_id, identity, startup],
+        )
+        .expect("old binary playback startup");
+
+        conn.execute("DELETE FROM files WHERE id=1", [])
+            .expect("production file-delete path");
+        let retained: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM foreground_source_owners WHERE owner_id=?1",
+                [&owner.owner_id],
+                |row| row.get(0),
+            )
+            .expect("retained old playback");
+        assert_eq!(
+            retained, 1,
+            "deleting the old file does not end playback custody"
+        );
+
+        conn.execute_batch(super::super::source_leases::EXPAND)
+            .expect("production lease expand");
+        conn.execute(
+            "UPDATE libraries SET paths='[\"/media\",\"/media/movies\"]' WHERE id=1",
+            [],
+        )
+        .expect("add the nested root after the old file is gone");
+
+        let idle = ForegroundSourceProjection {
+            phase: ForegroundSourcePhase::SourceIdle,
+            observation_version: 1,
+            source_quiescent: true,
+            ..ForegroundSourceProjection::startup(2000)
+        };
+        conn.execute(
+            "UPDATE foreground_source_owners SET phase='source_idle',projection_json=?1,updated_at_ms=2000 WHERE owner_id=?2",
+            rusqlite::params![serde_json::to_string(&idle).expect("idle projection"), owner.owner_id],
+        )
+        .expect("old playback idle update without file metadata");
+        let retained_idle: bool = conn
+            .query_row(
+                "SELECT json_extract(projection_json,'$.source_quiescent') FROM source_leases WHERE lease_id=?1",
+                [&owner.owner_id],
+                |row| row.get(0),
+            )
+            .expect("bridged idle projection");
+        assert!(retained_idle);
+        let refill = ForegroundSourceProjection {
+            phase: ForegroundSourcePhase::Refill,
+            observation_version: 2,
+            source_quiescent: false,
+            ..ForegroundSourceProjection::startup(3000)
+        };
+        conn.execute(
+            "UPDATE foreground_source_owners SET phase='refill',projection_json=?1,updated_at_ms=3000 WHERE owner_id=?2",
+            rusqlite::params![serde_json::to_string(&refill).expect("refill projection"), owner.owner_id],
+        )
+        .expect("old playback refill update without file metadata");
+
+        let attestation_key = "lease:subtitle-read-attest:node-b:1:1";
+        let authority: i64 = conn
+            .query_row(
+                "SELECT lease.expires_at_ms FROM job_leases lease JOIN files file ON file.id=2 AND file.size=100 AND file.mtime=7 WHERE lease.resource='subtitle-read-attest:node-b:1' AND lease.fence=1 AND lease.owner_node_id='node-b'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("valid legacy attestation authority");
+        assert_eq!(authority, 100000);
+        let attest = |custody_id: &str, now_ms: i64| {
+            conn.execute(
+                "INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,owner_kind,work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms) VALUES(?1,?2,'{\"lease\":{\"owner_node_id\":\"node-b\"},\"file_id\":2,\"source_size\":100,\"source_mtime\":7}', '[\"source_io\"]','lease','subtitle-read-attest:node-b:1',1,'active',1000,?3,100000)",
+                rusqlite::params![custody_id, attestation_key, now_ms],
+            )
+            .expect("legacy independent attestation proposal")
+        };
+        assert_eq!(
+            attest("orphan-window", 64999),
+            0,
+            "the orphaned old playback blocks the new nested root through expiry grace"
+        );
+        if collect_expired_owner {
+            conn.execute(
+                "DELETE FROM source_leases WHERE lease_id=?1",
+                [&owner.owner_id],
+            )
+            .expect("collect expired playback lease");
+        }
+        assert_eq!(
+            attest("orphan-window", 65001),
+            1,
+            "the attestation is admitted after expiry grace, with or without collection"
+        );
+        let admitted: i64 = conn.query_row(
+            "SELECT count(*) FROM source_leases WHERE lease_id=?1 AND owner_kind='lease' AND expires_at_ms>65001",
+            [attestation_key], |row| row.get(0),
+        ).expect("admitted authoritative lease");
+        assert_eq!(
+            admitted, 1,
+            "the post-window proposal creates a real source lease"
+        );
+    }
+}

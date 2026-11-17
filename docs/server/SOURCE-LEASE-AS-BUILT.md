@@ -1,6 +1,6 @@
 # Source leases and root capacity — as built
 
-**Status:** built; root-capacity continuation WIP in [PR #1728](http://forge.lan:3000/noirr/plurx/pulls/1728); review and focused qualification pending · **Plan:** [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) · **Updated:** 2026-11-16
+**Status:** built; root-capacity continuation WIP in [PR #1728](http://forge.lan:3000/noirr/plurx/pulls/1728); review and focused qualification pending · **Plan:** [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) · **Updated:** 2026-11-17
 
 
 Built on `claude/source-lease-steps-2-4` (stacked on PR #1597) by Claude Opus
@@ -31,6 +31,19 @@ fallback checks metadata presence without expanding the same root projection
 again. The focused plan regression requires primary-key owner searches on the
 store's bundled SQLite; system-SQLite diagnostic plans are supporting evidence,
 not a qualification claim for a different engine.
+
+The Python dispatch fixture consumes the current contender view generated
+from the same Rust claim macros. `scripts/source-dispatch-fixture` emits the
+standalone Rust exporter; compiling it in the normal bounded compiler loop
+and running it refreshes `crates/plurx-core/tests/fixtures/source-lease-dispatch-current.sql`.
+A Rust drift assertion compares that fixture with the actual expand text.
+The fixture does not retain the pre-lease contender policy.
+
+A v1 foreground row can survive file deletion. Where its physical file scope
+cannot be resolved, carry and old-writer bridge fallbacks use the existing
+generic `source_io` scope. It protects roots added later through the same
+lease expiry and grace; it neither pins metadata nor adds a recovery timer.
+An already-known active rooted snapshot remains preserved.
 
 Receipt scope is captured only when its receipt/lease pair is absent. A grant
 replay or refresh therefore preserves the first physical-source provenance
