@@ -319,3 +319,23 @@ that directly call one of the now-private methods. Preserve their original
 assertions and runtime prerequisites; the compiler identifies those consumers
 with the actual integration feature enabled. No fixture may replace a proved
 clock roster with an applied hint to avoid an API error.
+
+The first private-consumer compile exposed four obsolete roster query entry
+points with no production caller: `activity_peers`, `activity_voter_count`,
+`media_peers` and `media_peers_for_route`. Retire those duplicated paths; the
+canonical directory already supplies their projections. Preserve the existing
+`media_peer_directory` test oracle under cfg(test). The remaining 14 raw
+methods stay pub(super). All 18 names stay in ROLE/ROSTER and are forbidden
+to external raw callers. The declaration check must assert the retired four
+are absent, while the compiler control requires E0624 for the restricted14
+and E0599 for the explicitly retired4 — no unrelated error is a pass. This
+strengthens API closure without adding a counting exemption or a lint
+suppression. Run the existing directory output/limit/order parity regressions
+and real replicated invalidation fixture after retiring the old query paths.
+
+Additional actual consumers belong to7c: `state.rs`'s cache-only proof mode
+uses facade deployment; `http/remote/invitations/snapshots.rs` uses the existing
+fresh operation preflight under its original absolute deadline. Actual
+activity-start, cached-owner, shared-source-forwarding, internal-clock,
+cluster-operation and startup fixtures migrate their private API calls to
+the appropriate services without changing assertions, proof type or timing.
