@@ -1,6 +1,6 @@
 # Cluster facade slice 7 — close ownership and prove honest zero
 
-**Status:** open — plan committed before implementation. **Owner:** Codex.
+**Status:** open — 7a is implemented in a preparatory checkpoint; current-base integration, final review and gates remain. The plan preceded implementation. **Owner:** Codex.
 
 Companion to [slice 6](CLUSTER-FACADE-SLICE-6-BUILD.md),
 [the facade contract](CLUSTER-FACADE-BUILD.md), and
@@ -92,3 +92,33 @@ weaken proof validators, widen pins or infer fleet acceptance. Final effort
 promotion freezes task merges, integrates actual current main, qualifies
 the new tree and passes Main promotion gate. Deployment remains Paul's
 action. No implementation, review, gate or acceptance is claimed here.
+
+## 7a preparatory delivery ledger
+
+Checkpoint `c4164ecf0` passed the isolated daemon all-target check and 13
+focused daemon/core tests for incoming authentication, HLS authority loss,
+restart admission and offline cancellation. These include exact request and
+response binding, learner/voter classification and read-window replay. The
+core cases and structural HTTP checks do not establish successful signed
+requests through every migrated route. Existing offline tests cover adjacent
+ownership rules rather than directly proving the claim-to-registration race.
+
+The unchanged census measured 302 → 242 raw sites (60 removed). Only actual
+pins and the ceiling were lowered; matcher, method inventories and exemptions
+were retained. The ownership inventory gains one `ServingAuthority` spelling:
+the HLS response observer takes the same live authority directly and samples
+its original source at arrival and answer. It adds no authority lease, task
+or timer. The seven ratchet checks passed before the pin reduction.
+
+The first census command selected a nonexistent nested `tests` module and
+matched zero tests; its minimum-test guard rejected the receipt. The actual
+module ran all ten cases, with nine passing and only the expected stale-pin
+assertion failing. Updated pins and ownership bookkeeping still require the
+new committed archive's checks. Dedicated source-only build receipts remain
+outside compiler/cache directories. This preparatory evidence is not final
+intended-base qualification, an independent review, landing or deployment.
+
+After the bookkeeping update, all 14 ratchet/ownership checks passed.
+Seven state source identities were repinned only after each unique modeled
+42-line window was verified unchanged; all three mapping checks report no
+drift. This is source correspondence evidence, not a new model execution.

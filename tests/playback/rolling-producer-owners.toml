@@ -1954,7 +1954,10 @@ pattern = "ServingAuthority"
 # 31 -> 33 with the cluster facade (B1 slice 1): `crate::cluster`'s import
 # and its `authority()` return type. The facade hands out the fence's own
 # authority; it projects nothing new and owns no producer.
-expected_occurrences = 33
+# 33 -> 34 with cluster facade7a: HLS response observation takes the same
+# live ServingAuthority directly rather than obtaining it from a raw fence.
+# Arrival and answer sample the original source; no lease, task or timer added.
+expected_occurrences = 34
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
