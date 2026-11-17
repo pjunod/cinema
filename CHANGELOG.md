@@ -18,6 +18,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Cluster startup accepts caller-owned Raft and API listener reservations
+  through import and activation, preserving the advertised endpoints and
+  existing admission checks. Source playback fixtures retain those sockets
+  instead of releasing their ports before startup, removing a bind race.
+
 - Rust unit qualification requires a positive authenticated pass for every due
   case. Baseline failures, skipped cases, absent listings and missing workflow
   outputs cannot authorize promotion; a selected but skipped Rust stage also

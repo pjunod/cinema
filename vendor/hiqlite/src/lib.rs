@@ -233,6 +233,40 @@ mod empty {
     }
 }
 
+pub use start::StartupListeners;
+
+/// Start with an owned listener reservation and the ordinary membership policy.
+#[cfg(feature = "sqlite")]
+pub async fn start_node_with_membership_admission_and_listeners(
+    node_config: NodeConfig,
+    admission: std::sync::Arc<dyn membership_admission::MembershipAdmission>,
+    listeners: StartupListeners,
+) -> Result<Client, Error> {
+    start::start_node_inner_with_listeners::<empty::Empty>(
+        Box::new(node_config),
+        Some(admission),
+        start::StartupPhase::Normal,
+        Some(listeners),
+    )
+    .await
+}
+
+/// Start clock observation without releasing caller-reserved listening sockets.
+#[cfg(feature = "sqlite")]
+pub async fn start_node_for_clock_observation_with_listeners(
+    node_config: NodeConfig,
+    admission: std::sync::Arc<dyn membership_admission::MembershipAdmission>,
+    listeners: StartupListeners,
+) -> Result<Client, Error> {
+    start::start_node_inner_with_listeners::<empty::Empty>(
+        Box::new(node_config),
+        Some(admission),
+        start::StartupPhase::ClockObservation,
+        Some(listeners),
+    )
+    .await
+}
+
 /// The main entry function to start a Raft / Hiqlite node.
 /// # Panics
 /// If an incorrect `node_config` was given.

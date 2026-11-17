@@ -2752,7 +2752,7 @@ async fn build_real_source_start_fixture(
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) -> RealSourceStartFixture {
     use plurx_core::{
-        cluster::migration::select_daemon_store_observing,
+        cluster::migration::{select_daemon_store_observing_with_listeners, StartupListeners},
         config::Config,
         domain::{ItemKind, LibraryKind, NewItem, NewLibrary},
         sharing::{new_secret, secret_hash, InvitationRecord, SecretDomain, ShareClaim, SourceId},
@@ -2770,12 +2770,18 @@ async fn build_real_source_start_fixture(
         config.server.bind = address;
         config.cluster.artwork_url = format!("http://{address}");
     }
-    let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("Raft port");
-    let api = std::net::TcpListener::bind("127.0.0.1:0").expect("API port");
+    let raft = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("owned Raft listener");
+    let api = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("owned API listener");
     config.cluster.raft_bind = raft.local_addr().expect("Raft address");
     config.cluster.api_bind = api.local_addr().expect("API address");
     config.cluster.advertise_host = "localhost".into();
-    drop((raft, api));
+    // Transfer the actual reservations through import and active startup;
+    // releasing their ports here would race every other fixture/client bind.
+    let listeners = StartupListeners::new(raft, api).expect("owned cluster listeners");
     let startup_clock = advertised_http.map(|listener| {
         Arc::new(
             crate::StartupObservationHttp::from_listener(listener)
@@ -2783,9 +2789,19 @@ async fn build_real_source_start_fixture(
         )
     });
     let mut selected = if let Some(clock) = &startup_clock {
-        Box::pin(select_daemon_store_observing(&config, Some(clock.as_ref()))).await
+        Box::pin(select_daemon_store_observing_with_listeners(
+            &config,
+            Some(clock.as_ref()),
+            listeners,
+        ))
+        .await
     } else {
-        crate::sharing_fixture_clock::select_applied_singleton(&config).await
+        Box::pin(select_daemon_store_observing_with_listeners(
+            &config,
+            Some(&crate::sharing_fixture_clock::AppliedSingletonObserver),
+            listeners,
+        ))
+        .await
     }
     .expect("actual one voter");
     selected

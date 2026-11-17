@@ -429,6 +429,71 @@ impl ActivationFailpoint {
     }
 }
 
+/// Keeps resolved listening ports reserved across temporary import and active startup.
+/// Temporary startup borrows duplicated descriptors; only confirmed drainage permits
+/// handing the originals to the active node. No descriptor escapes back to the caller.
+/// A fresh singleton import requires loopback sockets because its temporary
+/// voter uses cleartext loopback transport. Active reopen and join retain their
+/// existing configured listening-address and transport policy.
+#[cfg(feature = "hiqlite-store")]
+#[derive(Debug)]
+pub struct StartupListeners {
+    raft: std::net::TcpListener,
+    api: std::net::TcpListener,
+}
+
+#[cfg(feature = "hiqlite-store")]
+impl StartupListeners {
+    pub fn new(
+        raft: tokio::net::TcpListener,
+        api: tokio::net::TcpListener,
+    ) -> Result<Self, StoreError> {
+        Ok(Self {
+            raft: raft
+                .into_std()
+                .map_err(|error| StoreError::Migration(format!("owning Raft listener: {error}")))?,
+            api: api.into_std().map_err(|error| {
+                StoreError::Migration(format!("owning cluster API listener: {error}"))
+            })?,
+        })
+    }
+
+    fn validate(&self, config: &Config) -> Result<(), StoreError> {
+        let actual = (self.raft.local_addr(), self.api.local_addr());
+        match actual {
+            (Ok(raft), Ok(api))
+                if raft == config.cluster.raft_bind
+                    && api == config.cluster.api_bind
+                    && raft.port() != 0
+                    && api.port() != 0
+                    && raft != api =>
+            {
+                Ok(())
+            }
+            _ => Err(StoreError::Migration(
+                "owned Raft/API listeners do not match configured nonzero listening addresses"
+                    .into(),
+            )),
+        }
+    }
+
+    fn for_import(&self) -> Result<hiqlite::StartupListeners, StoreError> {
+        let duplicate = |listener: &std::net::TcpListener| {
+            listener.try_clone().map_err(|error| {
+                StoreError::Migration(format!("retaining startup listener custody: {error}"))
+            })
+        };
+        Ok(hiqlite::StartupListeners::new(
+            duplicate(&self.raft)?,
+            duplicate(&self.api)?,
+        ))
+    }
+
+    fn into_vendor(self) -> hiqlite::StartupListeners {
+        hiqlite::StartupListeners::new(self.raft, self.api)
+    }
+}
+
 /// Select the daemon's one-voter replicated store before any producer or HTTP
 /// listener exists.
 ///
@@ -561,6 +626,41 @@ pub async fn select_daemon_store_observing(
     config: &Config,
     observer: Option<&dyn StartupClockObserver>,
 ) -> Result<SelectedStore, StoreError> {
+    select_daemon_store_inner(config, observer, None).await
+}
+
+/// Select through the ordinary admission path while retaining exact listener custody.
+/// Fresh singleton import requires both reserved sockets to be loopback; this
+/// is checked before creating or mutating the data directory. Reopen and join
+/// use their ordinary listening-address and transport validation.
+#[cfg(feature = "hiqlite-store")]
+pub async fn select_daemon_store_observing_with_listeners(
+    config: &Config,
+    observer: Option<&dyn StartupClockObserver>,
+    listeners: StartupListeners,
+) -> Result<SelectedStore, StoreError> {
+    select_daemon_store_inner(config, observer, Some(listeners)).await
+}
+
+#[cfg(feature = "hiqlite-store")]
+async fn select_daemon_store_inner(
+    config: &Config,
+    observer: Option<&dyn StartupClockObserver>,
+    listeners: Option<StartupListeners>,
+) -> Result<SelectedStore, StoreError> {
+    if let Some(listeners) = &listeners {
+        listeners.validate(config)?;
+        let imports_singleton = config.cluster.join_token_file.as_os_str().is_empty()
+            && !path_exists(&config.storage.data_dir.join(HIQLITE_ACTIVE_DIRNAME))?;
+        if imports_singleton
+            && (!config.cluster.raft_bind.ip().is_loopback()
+                || !config.cluster.api_bind.ip().is_loopback())
+        {
+            return Err(StoreError::Migration(
+                "fresh singleton import requires owned Raft and API listeners on loopback; its temporary voter must not serve cleartext on a wildcard or non-loopback interface".into(),
+            ));
+        }
+    }
     install_default_crypto_provider();
     std::fs::create_dir_all(&config.storage.data_dir)
         .map_err(|error| migration_io("creating", &config.storage.data_dir, error))?;
@@ -573,10 +673,11 @@ pub async fn select_daemon_store_observing(
             && path_exists(&config.cluster.join_token_file)?
             && !path_exists(&active.join(ACTIVATION_MARKER_FILENAME))?;
         if pending_join {
-            return Box::pin(join_fresh_store(config, daemon_lock, observer)).await;
+            return Box::pin(join_fresh_store(config, daemon_lock, observer, listeners)).await;
         }
         readdress_single_voter_if_needed(config)?;
-        let selected = Box::pin(open_active_store(config, daemon_lock, observer)).await?;
+        let selected =
+            Box::pin(open_active_store(config, daemon_lock, observer, listeners)).await?;
         Box::pin(finalize_pending_join_best_effort(config, &selected)).await;
         // A crash immediately after rename may expose the target before its
         // parent-directory entry is durable. Observing it on recovery lets us
@@ -616,7 +717,7 @@ pub async fn select_daemon_store_observing(
     }
 
     if !config.cluster.join_token_file.as_os_str().is_empty() {
-        return Box::pin(join_fresh_store(config, daemon_lock, observer)).await;
+        return Box::pin(join_fresh_store(config, daemon_lock, observer, listeners)).await;
     }
 
     ensure_sqlite_source(&config.storage.data_dir)?;
@@ -670,6 +771,7 @@ pub async fn select_daemon_store_observing(
         identity,
         credential_key,
         observer,
+        listeners,
     ))
     .await
     {
@@ -683,6 +785,7 @@ async fn join_fresh_store(
     config: &Config,
     daemon_lock: File,
     observer: Option<&dyn StartupClockObserver>,
+    listeners: Option<StartupListeners>,
 ) -> Result<SelectedStore, StoreError> {
     let source = config.storage.data_dir.join(SQLITE_FILENAME);
     if path_exists(&source)? {
@@ -846,6 +949,7 @@ async fn join_fresh_store(
         Some(cleanup_lock),
         false,
         true,
+        listeners.map(StartupListeners::into_vendor),
     )
     .await?;
     // Every handled error below awaits the voter's drain before returning.
@@ -1411,6 +1515,7 @@ async fn activate_fresh_store(
     identity: super::ClusterIdentity,
     credential_key: Arc<CredentialKey>,
     observer: Option<&dyn StartupClockObserver>,
+    listeners: Option<StartupListeners>,
 ) -> Result<SelectedStore, StoreError> {
     write_activation_attempt(&config.storage.data_dir)?;
     ActivationFailpoint::crash_if(failpoint, ActivationFailpoint::Quiescence);
@@ -1434,14 +1539,42 @@ async fn activate_fresh_store(
     // pre-M3 activation failpoints and lets cleartext staging shut down cleanly.
     // Once the atomic active target exists, the closed-store readdress path
     // below rebuilds sole-voter metadata with an explicitly advertised address.
-    let client = match start_voter(
-        config, &incoming, &secrets, &identity, None, false, None, true, false,
+    let import_listeners = listeners
+        .as_ref()
+        .map(StartupListeners::for_import)
+        .transpose()?;
+    let import_lock = if listeners.is_some() {
+        Some(daemon_lock.try_clone().map_err(|error| {
+            migration_io(
+                "retaining import daemon lock",
+                &config.storage.data_dir,
+                error,
+            )
+        })?)
+    } else {
+        None
+    };
+    let (client, mut pending_import) = match start_voter(
+        config,
+        &incoming,
+        &secrets,
+        &identity,
+        None,
+        false,
+        import_lock,
+        true,
+        false,
+        import_listeners,
     )
     .await
     {
-        Ok((client, _, _)) => client,
+        Ok((client, _, pending)) => (client, pending),
         Err(error) => {
-            remove_abandoned_incoming(&config.storage.data_dir)?;
+            // Supplied startup resources can still be draining under their
+            // retained daemon lock. Recovery cleans the target after that fence.
+            if listeners.is_none() {
+                remove_abandoned_incoming(&config.storage.data_dir)?;
+            }
             return Err(error);
         }
     };
@@ -1453,7 +1586,7 @@ async fn activate_fresh_store(
     .await
     {
         Ok(store) => store,
-        Err(error) => return abort_incoming(client, &incoming, error, false).await,
+        Err(error) => return abort_incoming(client, &incoming, error, false, pending_import).await,
     };
     ActivationFailpoint::crash_if(failpoint, ActivationFailpoint::Incoming);
 
@@ -1468,23 +1601,28 @@ async fn activate_fresh_store(
         Ok(report) => report,
         Err(error) => {
             drop(store);
-            return abort_incoming(client, &incoming, error, false).await;
+            return abort_incoming(client, &incoming, error, false, pending_import).await;
         }
     };
     let marker = ActivationMarker::from_report(&prepared.cluster_id, report);
     if let Err(error) = write_activation_marker(&incoming, &marker) {
         drop(store);
-        return abort_incoming(client, &incoming, error, false).await;
+        return abort_incoming(client, &incoming, error, false, pending_import).await;
     }
     ActivationFailpoint::crash_if(failpoint, ActivationFailpoint::Marker);
 
     drop(store);
     if let Err(error) = shutdown_voter(&client, false).await {
         drop(client);
-        return Err(cleanup_incoming_failure(
-            &incoming,
-            StoreError::Database(format!("stopping incoming Hiqlite voter: {error}")),
-        ));
+        let error = StoreError::Database(format!("stopping incoming Hiqlite voter: {error}"));
+        return Err(if pending_import.is_some() {
+            error
+        } else {
+            cleanup_incoming_failure(&incoming, error)
+        });
+    }
+    if let Some(pending) = pending_import.as_mut() {
+        pending.handoff();
     }
     drop(client);
     if let Err(error) = sync_directory(&incoming) {
@@ -1503,8 +1641,14 @@ async fn activate_fresh_store(
     remove_activation_attempt(&config.storage.data_dir)?;
 
     readdress_single_voter_if_needed(config)?;
-    let selected =
-        open_active_store_with_key(config, daemon_lock, Some(credential_key), observer).await?;
+    let selected = open_active_store_with_key(
+        config,
+        daemon_lock,
+        Some(credential_key),
+        observer,
+        listeners,
+    )
+    .await?;
     finish_readdress(&config.storage.data_dir)?;
     Ok(selected)
 }
@@ -2918,8 +3062,9 @@ async fn open_active_store(
     config: &Config,
     daemon_lock: File,
     observer: Option<&dyn StartupClockObserver>,
+    listeners: Option<StartupListeners>,
 ) -> Result<SelectedStore, StoreError> {
-    open_active_store_with_key(config, daemon_lock, None, observer).await
+    open_active_store_with_key(config, daemon_lock, None, observer, listeners).await
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -2928,6 +3073,7 @@ async fn open_active_store_with_key(
     daemon_lock: File,
     credential_key: Option<Arc<CredentialKey>>,
     observer: Option<&dyn StartupClockObserver>,
+    listeners: Option<StartupListeners>,
 ) -> Result<SelectedStore, StoreError> {
     let active = config.storage.data_dir.join(HIQLITE_ACTIVE_DIRNAME);
     require_real_directory(&active)?;
@@ -2975,6 +3121,7 @@ async fn open_active_store_with_key(
         Some(cleanup_lock),
         force_loopback,
         true,
+        listeners.map(StartupListeners::into_vendor),
     )
     .await?;
     let result = async move {
@@ -3754,6 +3901,7 @@ async fn start_voter(
     cleanup_lock: Option<File>,
     force_loopback: bool,
     observation_only: bool,
+    listeners: Option<hiqlite::StartupListeners>,
 ) -> Result<(Client, ClusterPeer, Option<PendingStartupClient>), StoreError> {
     let raft_bind = if force_loopback {
         local_client_address(config.cluster.raft_bind)
@@ -3801,13 +3949,31 @@ async fn start_voter(
     // Without this check the node does not report a bind conflict: it reaches a
     // foreign voter's listener, retries the handshake for the full start
     // timeout, and then blames the migration. Check first and say which port.
-    for (role, address) in [("raft", raft_bind), ("cluster API", api_bind)] {
-        if let Err(error) = std::net::TcpListener::bind(address) {
-            return Err(StoreError::Migration(format!(
-                "the {role} port {address} is not available: {error}. Another plurxd on \
+    if let Some(listeners) = &listeners {
+        let advertised_port = |address: &str| {
+            address
+                .rsplit_once(':')
+                .and_then(|(_, port)| port.parse::<u16>().ok())
+        };
+        if advertised_port(&local.raft_address) != Some(raft_bind.port())
+            || advertised_port(&local.api_address) != Some(api_bind.port())
+        {
+            return Err(StoreError::Identity(
+                "owned listeners do not match advertised cluster ports".into(),
+            ));
+        }
+        listeners
+            .validate(raft_bind, api_bind)
+            .map_err(|error| StoreError::Migration(error.to_string()))?;
+    } else {
+        for (role, address) in [("raft", raft_bind), ("cluster API", api_bind)] {
+            if let Err(error) = std::net::TcpListener::bind(address) {
+                return Err(StoreError::Migration(format!(
+                    "the {role} port {address} is not available: {error}. Another plurxd on \
                  this host is using it — cluster ports are host-wide, so a second data \
                  directory needs its own raft_bind and api_bind"
-            )));
+                )));
+            }
         }
     }
     let node_config = NodeConfig {
@@ -3843,10 +4009,29 @@ async fn start_voter(
         config.cluster.install_snapshot_timeout_secs,
     );
     let vendor_start = async {
-        if observation_only {
-            hiqlite::start_node_for_clock_observation(node_config, admission.clone()).await
-        } else {
-            hiqlite::start_node_with_membership_admission(node_config, admission.clone()).await
+        match (observation_only, listeners) {
+            (true, Some(listeners)) => {
+                hiqlite::start_node_for_clock_observation_with_listeners(
+                    node_config,
+                    admission.clone(),
+                    listeners,
+                )
+                .await
+            }
+            (false, Some(listeners)) => {
+                hiqlite::start_node_with_membership_admission_and_listeners(
+                    node_config,
+                    admission.clone(),
+                    listeners,
+                )
+                .await
+            }
+            (true, None) => {
+                hiqlite::start_node_for_clock_observation(node_config, admission.clone()).await
+            }
+            (false, None) => {
+                hiqlite::start_node_with_membership_admission(node_config, admission.clone()).await
+            }
         }
     };
     let client = match tokio::time::timeout(vendor_timeout, vendor_start).await {
@@ -4614,19 +4799,28 @@ async fn abort_incoming(
     incoming: &Path,
     error: StoreError,
     active_transport: bool,
+    mut pending: Option<PendingStartupClient>,
 ) -> Result<SelectedStore, StoreError> {
     let shutdown = shutdown_voter(&client, active_transport).await.err();
+    if shutdown.is_none() {
+        if let Some(pending) = pending.as_mut() {
+            pending.handoff();
+        }
+    }
     drop(client);
     let mut message = error.to_string();
-    if let Some(shutdown) = shutdown {
+    if let Some(shutdown) = &shutdown {
         message.push_str(&format!(
             "; additionally failed to stop incoming voter: {shutdown}"
         ));
     }
-    Err(cleanup_incoming_failure(
-        incoming,
-        StoreError::Migration(message),
-    ))
+    let error = StoreError::Migration(message);
+    if shutdown.is_some() && pending.is_some() {
+        // Preserve storage until the retained cleanup owner confirms drainage.
+        Err(error)
+    } else {
+        Err(cleanup_incoming_failure(incoming, error))
+    }
 }
 
 #[cfg(feature = "hiqlite-store")]

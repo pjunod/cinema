@@ -1,8 +1,8 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries thirty-two patches for clustered deployments. An
-upstream release can retire the ten generic bugs and the one dependency-only
+Apache-2.0. Plurx carries thirty-three patches for clustered deployments. An
+upstream release can retire the eleven generic bugs and the one dependency-only
 constraint; it cannot retire the twenty-one Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
@@ -43,6 +43,23 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 30 | Local switch that stops this node's own election timer | plurx policy | — | Never; a stopping Plurx leader hands off and must not campaign again, and OpenRaft 0.9 exposes the switch only on the embedded `Raft` handle. |
 | 31 | One proposal gate on the database Raft, with a local hold and metrics wait | plurx policy | — | Never; a Plurx leader handing off must stop its own log before triggering its successor, and OpenRaft 0.9 has no leadership transfer. |
 | 32 | Keep the SQLite writer alive when a reply's receiver is gone | generic bug | pending M6 | Upstream release delivers every writer reply without panicking when a cancelled Raft apply or a teardown has dropped its receiver. |
+| 33 | Retain caller-owned listening sockets through node startup | generic bug | pending M6 | Upstream release accepts and validates an owned listener pair without closing and rebinding reserved addresses, retaining startup drainage through Client handoff. |
+
+- **Row 33 — Owned startup listeners:** `src/lib.rs` exports a move-only
+  `StartupListeners` pair and listener-taking variants of the existing
+  membership-admission and clock-observation startup entrypoints. `src/start.rs`
+  validates both bound addresses against the configured local listening addresses
+  and nonzero advertised ports before storage starts, then transfers the exact
+  sockets to the existing server tasks. Supplied resources retain the existing
+  staged listener/storage cleanup owners through Client handoff; ordinary
+  callers keep their bind and startup behavior. Core may retain custody of the
+  listening sockets across a sequential import and reopen by lending duplicate
+  descriptors, waiting for confirmed listener/storage drainage, then moving the
+  originals into the active node. Core requires loopback sockets for a fresh
+  singleton import before data-directory mutation, preserving the temporary
+  voter's cleartext confinement; active reopen and join retain their existing
+  transport policy. No endpoint, membership, or admission policy changes. Workspace regressions live in
+  `crates/plurx-core/src/cluster/migration/tests.rs` and require `hiqlite-store`.
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an

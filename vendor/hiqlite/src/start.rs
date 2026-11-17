@@ -93,21 +93,75 @@ impl Drop for StartupTaskOwner {
     }
 }
 
+/// A move-only reservation of this node's Raft and API listening sockets.
+/// Addresses are resolved by the caller before startup; no advertised port may be zero.
+#[derive(Debug)]
+pub struct StartupListeners {
+    raft: StdTcpListener,
+    api: StdTcpListener,
+}
+
+impl StartupListeners {
+    pub fn new(raft: StdTcpListener, api: StdTcpListener) -> Self {
+        Self { raft, api }
+    }
+
+    pub fn local_addrs(&self) -> std::io::Result<(std::net::SocketAddr, std::net::SocketAddr)> {
+        Ok((self.raft.local_addr()?, self.api.local_addr()?))
+    }
+
+    pub fn validate(
+        &self,
+        raft: std::net::SocketAddr,
+        api: std::net::SocketAddr,
+    ) -> Result<(), Error> {
+        let actual = self.local_addrs()?;
+        if raft.port() == 0 || api.port() == 0 || raft == api || actual != (raft, api) {
+            return Err(Error::Connect(format!(
+                "owned listeners {:?} do not match configured Raft {raft} and API {api}",
+                actual
+            )));
+        }
+        Ok(())
+    }
+
+    fn into_std(self) -> Result<(StdTcpListener, StdTcpListener), Error> {
+        let raft = self.raft;
+        let api = self.api;
+        raft.set_nonblocking(true)?;
+        api.set_nonblocking(true)?;
+        Ok((raft, api))
+    }
+}
+
 #[allow(clippy::extra_unused_type_parameters)]
 pub(crate) async fn start_node_inner<C>(
-    mut node_config: Box<NodeConfig>,
+    node_config: Box<NodeConfig>,
     membership_admission: Option<Arc<dyn crate::membership_admission::MembershipAdmission>>,
     phase: StartupPhase,
 ) -> Result<Client, Error>
 where
     C: Debug + CacheVariants,
 {
-    let mut startup_storage =
-        crate::startup_cleanup::StartupStorageOwner::new(phase == StartupPhase::ClockObservation);
+    start_node_inner_with_listeners::<C>(node_config, membership_admission, phase, None).await
+}
+
+#[allow(clippy::extra_unused_type_parameters)]
+pub(crate) async fn start_node_inner_with_listeners<C>(
+    mut node_config: Box<NodeConfig>,
+    membership_admission: Option<Arc<dyn crate::membership_admission::MembershipAdmission>>,
+    phase: StartupPhase,
+    listeners: Option<StartupListeners>,
+) -> Result<Client, Error>
+where
+    C: Debug + CacheVariants,
+{
+    let owned_startup = phase == StartupPhase::ClockObservation || listeners.is_some();
+    let mut startup_storage = crate::startup_cleanup::StartupStorageOwner::new(owned_startup);
     // Locals drop in reverse declaration order: stop admitting network work
     // synchronously before spawning the asynchronous storage drainage owner.
     let mut startup_tasks = StartupTaskOwner {
-        enabled: phase == StartupPhase::ClockObservation,
+        enabled: owned_startup,
         tasks: Vec::new(),
         listeners: Default::default(),
     };
@@ -136,6 +190,32 @@ where
         .map(|c| c.danger_tls_no_verify())
         .unwrap_or(false);
 
+    let (api_addr, rpc_addr) = {
+        let node = node_config
+            .nodes
+            .iter()
+            .find(|node| node.id == node_config.node_id)
+            .expect("NodeConfig.node_id not found in NodeConfig.nodes");
+
+        let api_addr = build_listen_addr(
+            &node_config.listen_addr_api,
+            &node.addr_api,
+            tls_api_client_config.is_some(),
+        );
+        let addr_raft = build_listen_addr(&node_config.listen_addr_raft, &node.addr_raft, tls_raft);
+
+        (api_addr, addr_raft)
+    };
+
+    if let Some(listeners) = &listeners {
+        let address = |value: &str| {
+            value.parse::<std::net::SocketAddr>().map_err(|error| {
+                Error::Connect(format!("invalid owned-listener address {value}: {error}"))
+            })
+        };
+        listeners.validate(address(&rpc_addr)?, address(&api_addr)?)?;
+    }
+
     #[cfg(any(feature = "s3", feature = "dashboard"))]
     node_config.init_enc_keys();
 
@@ -162,7 +242,7 @@ where
         raft_config.clone(),
         _do_reset_metadata,
         snapshot_transport.clone(),
-        phase == StartupPhase::ClockObservation,
+        owned_startup,
     )
     .await?;
 
@@ -174,7 +254,7 @@ where
         &node_config,
         raft_config.clone(),
         snapshot_transport.clone(),
-        phase == StartupPhase::ClockObservation,
+        owned_startup,
     )
     .await?;
 
@@ -188,29 +268,17 @@ where
         ))?;
     }
 
-    let (api_addr, rpc_addr) = {
-        let node = node_config
-            .nodes
-            .iter()
-            .find(|node| node.id == node_config.node_id)
-            .expect("NodeConfig.node_id not found in NodeConfig.nodes");
-
-        let api_addr = build_listen_addr(
-            &node_config.listen_addr_api,
-            &node.addr_api,
-            tls_api_client_config.is_some(),
-        );
-        let addr_raft = build_listen_addr(&node_config.listen_addr_raft, &node.addr_raft, tls_raft);
-
-        (api_addr, addr_raft)
-    };
-
     // Bind both externally advertised sockets before starting either detached
     // server task. A successful `start_node` must mean this exact process owns
     // both listeners; otherwise a late bind failure can be hidden in a spawned
     // task while callers publish the node as ready.
-    let listener_raft = bind_listener(&rpc_addr, "Raft")?;
-    let listener_api = bind_listener(&api_addr, "API")?;
+    let (listener_raft, listener_api) = match listeners {
+        Some(listeners) => listeners.into_std()?,
+        None => (
+            bind_listener(&rpc_addr, "Raft")?,
+            bind_listener(&api_addr, "API")?,
+        ),
+    };
 
     #[cfg(feature = "sqlite")]
     let (tx_client_stream, rx_client_stream) = flume::bounded(1);

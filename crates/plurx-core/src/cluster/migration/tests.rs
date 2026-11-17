@@ -2372,9 +2372,11 @@ fn readdress_completion_waits_for_a_transferable_database_snapshot() {
         .split_once("fn install_default_crypto_provider")
         .expect("daemon selection boundary")
         .0;
+    let active_open = selection
+        .find("Box::pin(open_active_store(")
+        .expect("snapshot-owning active-store open");
     assert!(
-        selection.contains("let selected = Box::pin(open_active_store(")
-            && selection.contains("finish_readdress(&config.storage.data_dir)?"),
+        selection[active_open..].contains("finish_readdress(&config.storage.data_dir)?"),
         "readdress cleanup must remain after the snapshot-owning active-store open"
     );
     let hiqlite_management = include_str!("../../../../../vendor/hiqlite/src/client/mgmt.rs");
@@ -2968,6 +2970,7 @@ fn k06_post_client_cancellation_retains_actual_daemon_lock_until_tls_drain() {
                         Some(retained_lock),
                         true,
                         true,
+                        None,
                     ))
                     .await
                     .expect("start actual staged client");
@@ -3059,7 +3062,7 @@ fn k06_post_client_uncertain_cleanup_keeps_actual_lock_without_runtime_or_after_
             std::fs::create_dir(&target).expect("active directory");
             let (client, _, _) = runtime
                 .block_on(Box::pin(start_voter(
-                    &config, &target, &secrets, &identity, None, true, None, true, true,
+                    &config, &target, &secrets, &identity, None, true, None, true, true, None,
                 )))
                 .expect("actual staged Client");
             let make_owned = |name: &str| {
@@ -5946,4 +5949,229 @@ async fn the_heartbeat_purpose_factory_reads_no_authority_while_sharing_is_off()
     );
 
     selected.shutdown().await.expect("stop the voter");
+}
+
+#[cfg(feature = "hiqlite-store")]
+async fn owned_listener_config(data_dir: &Path) -> (Config, StartupListeners) {
+    let raft = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve Raft");
+    let api = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve API");
+    let mut config = Config::default();
+    config.storage.data_dir = data_dir.to_owned();
+    config.cluster.raft_bind = raft.local_addr().expect("Raft address");
+    config.cluster.api_bind = api.local_addr().expect("API address");
+    config.cluster.advertise_host = "localhost".into();
+    (
+        config,
+        StartupListeners::new(raft, api).expect("own listener pair"),
+    )
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[test]
+fn owned_listeners_survive_actual_import_and_serve_the_same_committed_endpoints() {
+    startup_observer::run_full_hiqlite_fixture("owned-listener-import", || async {
+        let root = tempfile::tempdir().expect("owned store fixture");
+        let (config, listeners) = owned_listener_config(root.path()).await;
+        for address in [config.cluster.raft_bind, config.cluster.api_bind] {
+            assert!(
+                std::net::TcpListener::bind(address).is_err(),
+                "reservation must already own {address}"
+            );
+        }
+        let selected = Box::pin(select_daemon_store_observing_with_listeners(
+            &config,
+            Some(&startup_observer::AppliedSingletonObserver),
+            listeners,
+        ))
+        .await
+        .expect("actual import then active startup on reserved sockets");
+        selected
+            .store
+            .put_setting("owned-listener-regression", "committed")
+            .await
+            .expect("actual Raft write");
+        assert_eq!(
+            selected
+                .store
+                .get_setting("owned-listener-regression")
+                .await
+                .expect("actual read")
+                .as_deref(),
+            Some("committed")
+        );
+        let local = read_local_membership(root.path())
+            .expect("membership file")
+            .expect("committed local membership")
+            .local;
+        assert_eq!(
+            local.raft_address,
+            format!("localhost:{}", config.cluster.raft_bind.port())
+        );
+        assert_eq!(
+            local.api_address,
+            format!("localhost:{}", config.cluster.api_bind.port())
+        );
+        let http = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("test client");
+        assert!(http
+            .get(format!("https://{}/ping", config.cluster.api_bind))
+            .send()
+            .await
+            .expect("actual reserved API endpoint")
+            .status()
+            .is_success());
+        selected
+            .shutdown()
+            .await
+            .expect("confirmed selected store shutdown");
+        drop(selected);
+        let _raft =
+            std::net::TcpListener::bind(config.cluster.raft_bind).expect("Raft listener drained");
+        let _api =
+            std::net::TcpListener::bind(config.cluster.api_bind).expect("API listener drained");
+    });
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test]
+async fn owned_listener_selection_rejects_a_swapped_pair_before_store_mutation() {
+    let root = tempfile::tempdir().expect("owned refusal fixture");
+    let data = root.path().join("untouched");
+    let (mut config, listeners) = owned_listener_config(&data).await;
+    let raft = config.cluster.raft_bind;
+    let api = config.cluster.api_bind;
+    std::mem::swap(&mut config.cluster.raft_bind, &mut config.cluster.api_bind);
+    let result = Box::pin(select_daemon_store_observing_with_listeners(
+        &config, None, listeners,
+    ))
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::Migration(_))),
+        "wrong socket roles must be refused"
+    );
+    assert!(
+        !data.exists(),
+        "validation must precede even data directory creation"
+    );
+    let _raft = std::net::TcpListener::bind(raft).expect("rejected Raft ownership released");
+    let _api = std::net::TcpListener::bind(api).expect("rejected API ownership released");
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[test]
+fn cancelled_owned_listener_selection_drains_the_actual_client_before_releasing_the_directory() {
+    startup_observer::run_full_hiqlite_fixture("owned-listener-cancel", || async {
+        struct HoldObservation(tokio::sync::Notify);
+        impl StartupClockObserver for HoldObservation {
+            fn start(
+                &self,
+                _manager: MembershipManager,
+                _node: String,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<(), StoreError>> + Send + '_>,
+            > {
+                Box::pin(async move {
+                    self.0.notify_one();
+                    std::future::pending().await
+                })
+            }
+        }
+        let root = tempfile::tempdir().expect("owned cancellation fixture");
+        let (config, listeners) = owned_listener_config(root.path()).await;
+        let raft = config.cluster.raft_bind;
+        let api = config.cluster.api_bind;
+        let observer = Arc::new(HoldObservation(tokio::sync::Notify::new()));
+        let task_observer = Arc::clone(&observer);
+        let mut task = tokio::spawn(async move {
+            Box::pin(select_daemon_store_observing_with_listeners(
+                &config,
+                Some(task_observer.as_ref()),
+                listeners,
+            ))
+            .await
+        });
+        tokio::select! {
+            () = observer.0.notified() => {}
+            result = &mut task => panic!("selection ended before Client observation: {:?}", result.map(|result| result.err())),
+        }
+        // This callback runs after actual vendor Client handoff, under the
+        // core pending owner, rather than cancelling an unpolled constructor.
+        assert!(std::net::TcpListener::bind(raft).is_err());
+        assert!(std::net::TcpListener::bind(api).is_err());
+        let probe =
+            File::open(root.path().join(DAEMON_LOCK_FILENAME)).expect("actual directory lease");
+        assert!(probe.try_lock().is_err());
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if probe.try_lock().is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("cleanup must confirm listener and storage drainage");
+        let _raft = std::net::TcpListener::bind(raft).expect("cancelled Raft listener drained");
+        let _api = std::net::TcpListener::bind(api).expect("cancelled API listener drained");
+    });
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test]
+async fn owned_listener_singleton_import_refuses_each_wildcard_role_before_store_mutation() {
+    for wildcard_raft in [true, false] {
+        let root = tempfile::tempdir().expect("owned interface refusal fixture");
+        let data = root.path().join("untouched");
+        let raft_host = if wildcard_raft {
+            "0.0.0.0:0"
+        } else {
+            "127.0.0.1:0"
+        };
+        let api_host = if wildcard_raft {
+            "127.0.0.1:0"
+        } else {
+            "0.0.0.0:0"
+        };
+        let raft = tokio::net::TcpListener::bind(raft_host)
+            .await
+            .expect("reserve configured Raft interface");
+        let api = tokio::net::TcpListener::bind(api_host)
+            .await
+            .expect("reserve configured API interface");
+        let mut config = Config::default();
+        config.storage.data_dir = data.clone();
+        config.cluster.raft_bind = raft.local_addr().expect("Raft address");
+        config.cluster.api_bind = api.local_addr().expect("API address");
+        config.cluster.advertise_host = "localhost".into();
+        let listeners = StartupListeners::new(raft, api).expect("own matching configured sockets");
+        let result = Box::pin(select_daemon_store_observing_with_listeners(
+            &config, None, listeners,
+        ))
+        .await;
+        let error = result
+            .err()
+            .expect("fresh import must preserve cleartext loopback confinement");
+        assert!(
+            error.to_string().contains(
+                "fresh singleton import requires owned Raft and API listeners on loopback"
+            ),
+            "{error}"
+        );
+        assert!(
+            !data.exists(),
+            "interface refusal must precede any store mutation"
+        );
+        let _raft = std::net::TcpListener::bind(config.cluster.raft_bind)
+            .expect("refused Raft reservation released");
+        let _api = std::net::TcpListener::bind(config.cluster.api_bind)
+            .expect("refused API reservation released");
+    }
 }
