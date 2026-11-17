@@ -1,6 +1,56 @@
 use super::*;
 use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
 
+// Scoped to the test's original decision future; never shared across tests.
+#[cfg(test)]
+tokio::task_local! {
+    static CATALOG_OMISSIONS: std::cell::RefCell<Vec<String>>;
+}
+
+#[cfg(test)]
+fn note_catalog_omission(height: i64, stage: &str, detail: &str) {
+    let _ = CATALOG_OMISSIONS.try_with(|rows| {
+        let mut rows = rows.borrow_mut();
+        if rows.len() < 64 {
+            rows.push(format!("height={height} stage={stage}: {detail}"));
+        }
+    });
+}
+
+#[cfg(test)]
+impl TranscodeManager {
+    pub(crate) fn note_catalog_result(result: &crate::media_pool::QualityCatalogResult) {
+        let _ = CATALOG_OMISSIONS.try_with(|rows| {
+            let mut rows = rows.borrow_mut();
+            if rows.len() == 64 {
+                rows.pop();
+            }
+            rows.insert(
+                0,
+                format!(
+                    "catalog complete={} authority_refused={} candidates={} causes={:?}",
+                    result.complete,
+                    result.authority_refused,
+                    result.candidates.len(),
+                    result.causes
+                ),
+            );
+        });
+    }
+
+    pub(crate) async fn capture_catalog_omissions<T>(
+        future: impl std::future::Future<Output = T>,
+    ) -> (T, Vec<String>) {
+        CATALOG_OMISSIONS
+            .scope(std::cell::RefCell::new(Vec::new()), async move {
+                let result = future.await;
+                let rows = CATALOG_OMISSIONS.with(|rows| rows.take());
+                (result, rows)
+            })
+            .await
+    }
+}
+
 /// Descriptions only: no source descriptor, executable, parent or admission.
 /// A query can retain several full recipe identities at distinct rung ceilings.
 #[cfg(any(target_os = "linux", test))]
@@ -1203,6 +1253,10 @@ impl TranscodeManager {
             {
                 Ok(resolved) => resolved,
                 Err(error) => {
+                    #[cfg(test)]
+                    if normalized_geometry {
+                        note_catalog_omission(height, "encoder_and_grade", &error);
+                    }
                     if selected.is_some() {
                         selected_unavailable = Some(error);
                     }
@@ -1240,7 +1294,13 @@ impl TranscodeManager {
                 options,
             ) {
                 Ok(options) => options,
-                Err(_) => continue,
+                Err(_error) => {
+                    #[cfg(test)]
+                    if normalized_geometry {
+                        note_catalog_omission(height, "audio_options", &_error);
+                    }
+                    continue;
+                }
             };
             if normalized_geometry && grade == OutputGrade::Sdr && height == 1440 {
                 let profile = transcode::AutoQualityRateProfile::H264Sdr1440P30V1;
@@ -1262,21 +1322,40 @@ impl TranscodeManager {
                 }
             }
             let Some(facts) = source_facts.as_ref() else {
+                #[cfg(test)]
+                if normalized_geometry {
+                    note_catalog_omission(height, "facts", "source facts unavailable");
+                }
                 continue;
             };
-            let Ok(plan) = self.resolve_movie_plan_with_facts(
+            let plan = match self.resolve_movie_plan_with_facts(
                 file,
                 &options,
                 encoder,
                 facts,
                 &AttemptRestrictions::none(),
-            ) else {
-                continue;
+            ) {
+                Ok(plan) => plan,
+                Err(_error) => {
+                    #[cfg(test)]
+                    if normalized_geometry {
+                        note_catalog_omission(height, "resolve_movie_plan_with_facts", &_error);
+                    }
+                    continue;
+                }
             };
             let contract = plan.output_contract();
             let (Some(width), Some(height_px)) =
                 (contract.effective_width(), contract.effective_height())
             else {
+                #[cfg(test)]
+                if normalized_geometry {
+                    note_catalog_omission(
+                        height,
+                        "output_contract",
+                        "effective dimensions unavailable",
+                    );
+                }
                 continue;
             };
             if height == 1440 && height_px <= 1080 {
@@ -1291,6 +1370,10 @@ impl TranscodeManager {
                 match self.candidate_recipe_digest(&plan, presentation, reorder_frames) {
                     Ok(digest) => digest,
                     Err(error) => {
+                        #[cfg(test)]
+                        if normalized_geometry {
+                            note_catalog_omission(height, "candidate_recipe_digest", &error);
+                        }
                         if selected.is_some() {
                             selected_unavailable = Some(error);
                         }

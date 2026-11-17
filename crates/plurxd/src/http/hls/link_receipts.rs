@@ -1912,23 +1912,28 @@ mod tests {
         let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(
             serde_json::json!({"v":2,"video":[{"codec":"h264","present":["sdr"]}],"containers":["mp4"]})
         ).expect("actual request caps");
-        let decision = crate::http::stream::decision(
-            crate::http::extract::AuthUser(user.clone()),
-            State(state.clone()),
-            Path(file.id),
-            Query(crate::http::stream::Caps {
-                caps_v2: Some(caps.clone()),
-                force: Some("auto".into()),
-                ..Default::default()
-            }),
-            headers.clone(),
-            crate::http::network::RemoteAddress(Some(remote)),
-        )
-        .await
-        .expect("actual catalog")
-        .0;
+        let (decision, catalog_omissions) =
+            crate::transcode::TranscodeManager::capture_catalog_omissions(
+                crate::http::stream::decision(
+                    crate::http::extract::AuthUser(user.clone()),
+                    State(state.clone()),
+                    Path(file.id),
+                    Query(crate::http::stream::Caps {
+                        caps_v2: Some(caps.clone()),
+                        force: Some("auto".into()),
+                        ..Default::default()
+                    }),
+                    headers.clone(),
+                    crate::http::network::RemoteAddress(Some(remote)),
+                ),
+            )
+            .await;
+        let decision = decision.expect("actual catalog").0;
         let catalog = decision.quality_candidates.expect("catalog");
-        assert!(catalog.len() >= 2, "real distinct candidate recipes");
+        assert!(
+            catalog.len() >= 2,
+            "real distinct candidate recipes; rows={catalog:?}; normalized omissions={catalog_omissions:?}"
+        );
         let incumbent = catalog[0].clone();
         let proposed = catalog
             .iter()
