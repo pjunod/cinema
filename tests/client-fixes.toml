@@ -1,6 +1,15 @@
 version = 1
 enforce_after = "e8a910f"
 
+# Await every submitted debounce task before counting tuner starts.
+[[fixes]]
+id = "apple.held-channel-key-task-settlement"
+commits = ["e64e399d847abbf97d000e04fb3c7d93001dbcc8"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "func requestChannel(_ channel: LiveTvChannel) -> Task<Void, Never>"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testAHeldChannelKeyIsOneTunerStart()"
+
 # PR #1651: a malformed prepare probes origins outside the signed media range.
 [[fixes]]
 id = "apple.malformed-prepare-outside-signed-origin-range"
