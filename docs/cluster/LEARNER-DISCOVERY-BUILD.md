@@ -20,7 +20,11 @@ responses. The host-network `plurxd advertise` companion follows the same
 policy. A learner makes no identity requests to the forbidden `/api/v1/server`
 route. Promotion becomes discoverable without restart; explicit loss of
 eligible membership withdraws advertising. Preserve instance/node identity,
-configured labels, published host ports, LAN-bind rules and environment controls.
+configured labels, published host ports, LAN-bind rules and environment controls. Normal withdrawal waits for the
+mDNS daemon's shutdown acknowledgement before a replacement registration.
+A bounded, unconfirmed withdrawal is logged and stops that Bonjour owner;
+GDM keeps its own standing checks. Cancellation still has a synchronous
+best-effort Drop cleanup, and normal drain joins the protocol tasks.
 
 An HTTP timeout, malformed response or 5xx is an unknown observation, not
 proof of learner status. The companion retains an existing advertisement
