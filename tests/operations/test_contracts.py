@@ -3381,6 +3381,7 @@ assert.equal(context.ACT_TIMER, null);
             header,
         )
         self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"\n      RUST_TEST_THREADS: "2"\n', header)
+        self.assertIn('      RUST_MIN_STACK: "8388608"\n', header)
         self.assertRegex(header, r"(?m)^    timeout-minutes: 180$")
         self.assertIn(
             FLEET_REGISTRY_EXPR + "/noirr/plurx-ci@sha256:"
