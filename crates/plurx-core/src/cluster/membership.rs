@@ -42,6 +42,12 @@ use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
 use super::ClusterIdentity;
 
+mod access;
+pub use access::{
+    ActiveVoterAuthority, ClockChanges, ClockProtocol, ClusterAccess, ClusterNames,
+    CommittedMembership, Deployment, JobControl, LocalFacts, LocalNode, RevocationExclusion,
+};
+
 pub mod directory;
 pub mod lifecycle;
 mod sharing_source_schema;
@@ -5665,6 +5671,13 @@ impl MembershipManager {
                 .verify_committed_clock_peer_authority(&auth.node_id, false)
                 .await?
             && self.authenticated_clock_request_still_fresh(auth)?)
+    }
+
+    /// Construct domain services over this exact manager for server composition.
+    /// The returned aggregate exposes no manager getter or arbitrary callback.
+    #[must_use]
+    pub fn cluster_access(&self) -> ClusterAccess {
+        ClusterAccess::new(self.clone())
     }
 
     #[must_use]
