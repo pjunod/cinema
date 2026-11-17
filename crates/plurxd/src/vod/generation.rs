@@ -1,5 +1,4 @@
 use super::*;
-use tracing::Instrument;
 
 /// Spawn a real generation positioned at plan entry `at` and hand its stdout
 /// to [`run_generation`].
@@ -802,10 +801,7 @@ pub(super) async fn spawn_generation(
     let shared = Arc::clone(shared);
     let rendition = Arc::clone(rendition);
     let (supervised_shared, supervised) = (Arc::clone(&shared), Arc::clone(&rendition));
-    let writer_span = tracing::debug_span!(target: "plurxd::vodserve", "vod_writer",
-        rendition = %rendition.key, generation = epoch, start_entry = at);
     let writer = tokio::spawn(async move {
-        let phase = |stage: &'static str| tracing::debug!(stage, "VOD writer stage");
         let key = rendition.key.clone();
         let (retiring, retired) = tokio::sync::oneshot::channel();
         let (outcome, diagnostic) = tokio::join!(
@@ -820,38 +816,30 @@ pub(super) async fn spawn_generation(
                     landing_probe,
                 )
                 .await;
-                phase("run_returned");
                 // Killing starts before diagnostic drain is joined, while the
                 // owned reaper waits for this task's actual writer settlement.
-                phase("retirement_request_wait");
                 let _ = super::driver::request_registered_driver_retirement(
                     &shared,
                     &rendition,
                     &registration,
                 )
                 .await;
-                phase("retirement_request_returned");
                 let _ = retiring.send(());
                 outcome
             },
             async {
                 let diagnostic = crate::ffmpeg::drain_diagnostics(stderr);
                 tokio::pin!(diagnostic);
-                let diagnostic = tokio::select! {
+                tokio::select! {
                     text=&mut diagnostic=>text,
                     _=retired=>match tokio::time::timeout(Duration::from_secs(5),&mut diagnostic).await{
                         Ok(text)=>text,
                         Err(_)=>"producer diagnostic drain exceeded its retirement deadline".to_owned(),
                     },
-                };
-                phase("diagnostic_drained");
-                diagnostic
+                }
             }
         );
-        phase("diagnostic_join_returned");
         writers.settled();
-        phase("writers_settled");
-        phase("reap_wait");
         match rendition
             .slot
             .wait_registered_retirement(&registration)
@@ -864,15 +852,12 @@ pub(super) async fn spawn_generation(
                 tracing::warn!(target: "plurxd::vodserve",%error,"generation retirement was superseded")
             }
         }
-        phase("reap_returned");
         // Completion is metadata about already-settled writes. It may wait
         // for the manifest only after the reaper has released the writer's
         // resources and any cleanup owner can release its publication gate.
         let (outcome, completed) = outcome;
         if let Some((sink, _)) = completed {
-            phase("completion_wait");
             vodgen::Sink::completed_output(&sink).await;
-            phase("completion_returned");
         }
         let diagnostic = crate::ffmpeg::classify_diagnostic(&diagnostic);
         if !diagnostic.informational.is_empty() {
@@ -884,7 +869,7 @@ pub(super) async fn spawn_generation(
         if let Some(outcome) = outcome {
             on_generation_end(&shared, &rendition, outcome, epoch, at).await;
         }
-    }.instrument(writer_span));
+    });
     // The writer task owns this generation's segment writes and its end. A
     // panic unwinds past `on_generation_end` and drops the writer barrier, so
     // the reaper releases the slot but nothing tells the rendition. Only the
@@ -2267,12 +2252,6 @@ impl RenditionSink {
         }
     }
     async fn materialize_observed(&self, entry: u32, bytes: Vec<u8>) -> io::Result<bool> {
-        let phase = |stage: &'static str| {
-            tracing::debug!(target: "plurxd::vodserve",
-            rendition = %self.rendition.key, generation = self.epoch, entry,
-            bytes = bytes.len(), stage, "VOD publication stage")
-        };
-        phase("sink_arrived");
         // Pin the exact entry before the optimistic presence check. A driver
         // may otherwise evict it while engine validation awaits, turning a
         // retained replay into a fresh write with no allocation grant.
@@ -2285,29 +2264,20 @@ impl RenditionSink {
         )?;
         // Reserve before publication/dependency locks: making room can retire
         // a different rendition through the same locking protocol.
-        phase("presence_wait");
         let already_present = self
             .publication_lock(self.rendition.manifest.lock())
             .await?
             .state(entry)
             .is_some_and(|state| state.is_materialized());
-        phase("presence_ready");
-        phase("presence_hook_wait");
         self.shared
             .hooks
             .get()
             .after_cache_presence_observed()
             .await;
-        phase("presence_hook_ready");
         let reservation = if already_present {
             None
         } else {
-            phase("reservation_wait");
-            let reservation =
-                crate::playback_cache::reserve(self.rendition.dir.path(), bytes.len() as u64)
-                    .await?;
-            phase("reservation_ready");
-            reservation
+            crate::playback_cache::reserve(self.rendition.dir.path(), bytes.len() as u64).await?
         };
         if self.rendition.closed.load(Relaxed) {
             // The quiet teardown: `NotFound` is how vodgen learns the session
@@ -2344,10 +2314,7 @@ impl RenditionSink {
             );
             return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
         }
-        phase("engine_validation_wait");
-        let engine_current = recipe_engine_is_current(&self.rendition.recipe).await;
-        phase("engine_validation_ready");
-        if !engine_current {
+        if !recipe_engine_is_current(&self.rendition.recipe).await {
             let cause = "immutable media engine changed before fragment publication".to_owned();
             record_failure(
                 &self.shared,
@@ -2372,15 +2339,11 @@ impl RenditionSink {
                 "continuous object exceeds its advertised container-inclusive delivery budget",
             ));
         }
-        phase("dependencies_wait");
         let (dependency_guard, dependencies) = self.reserved_dependencies().await?;
-        phase("dependencies_ready");
         let retained = {
-            phase("retained_manifest_wait");
             let manifest = self
                 .publication_lock(self.rendition.manifest.lock())
                 .await?;
-            phase("retained_manifest_acquired");
             if self.rendition.gen_epoch.load(Relaxed) != self.epoch {
                 return Err(io::Error::from(io::ErrorKind::NotFound));
             }
@@ -2397,7 +2360,6 @@ impl RenditionSink {
             // A restarted encoder can use different rate-control history.
             // Traverse the original publication instead of replacing it.
             let expected = retained.expect("materialized published interval");
-            phase("retained_verify_wait");
             verify_retained_publication(
                 &self
                     .rendition
@@ -2410,7 +2372,6 @@ impl RenditionSink {
                 &dependencies,
             )
             .await?;
-            phase("retained_verify_ready");
         } else {
             verify_reserved_publication(&self.rendition.plan, entry, &bytes, &dependencies)?;
         }
@@ -2431,11 +2392,9 @@ impl RenditionSink {
         }
         if retain_published {
             {
-                phase("retained_commit_wait");
                 let _manifest = self
                     .publication_lock(self.rendition.manifest.lock())
                     .await?;
-                phase("retained_commit_acquired");
                 if self.rendition.gen_epoch.load(Relaxed) != self.epoch {
                     return Err(io::Error::from(io::ErrorKind::NotFound));
                 }
@@ -2444,29 +2403,22 @@ impl RenditionSink {
             drop(dependency_guard);
             // This is process progress through existing bytes, not a fresh
             // publication, working-set charge or marker-prewarm credit.
-            phase("slot_progress_wait");
             self.rendition.slot.produced(entry).await;
-            phase("slot_progress_ready");
             self.shared.pool.satisfy(&self.rendition.key, entry);
             self.rendition.kick();
-            phase("sink_return_retained");
             return Ok(false);
         }
         let len = bytes.len() as u64;
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        phase("identity_wait");
         let init = self
             .publication_lock(self.rendition.identity.lock())
             .await?
             .identity
             .clone();
-        phase("identity_ready");
         {
-            phase("publish_manifest_wait");
             let mut manifest = self
                 .publication_lock(self.rendition.manifest.lock())
                 .await?;
-            phase("publish_manifest_acquired");
             // Checked under the manifest lock, so a driver bumping the epoch
             // cannot interleave between the check and the write.
             if self.rendition.gen_epoch.load(Relaxed) != self.epoch {
@@ -2489,26 +2441,20 @@ impl RenditionSink {
             } else {
                 None
             };
-            phase("publish_hook_wait");
             if pending.is_some() {
                 self.shared.hooks.get().before_private_materialize().await;
             } else {
                 self.shared.hooks.get().before_ordinary_materialize().await;
             }
-            phase("publish_hook_ready");
-            phase("write_wait");
             self.rendition
                 .dir
                 .materialize(&mut manifest, entry, &bytes, now_ms())
                 .await?;
-            phase("write_ready");
             if let Some(reservation) = reservation {
                 reservation.commit(len);
             }
-            phase("marker_credit_wait");
             let publication =
                 credit_marker_prewarm_publication(&self.rendition, self.epoch, entry).await;
-            phase("marker_credit_ready");
             if let Some(init) = init.as_ref() {
                 self.rendition
                     .output_measurement
@@ -2537,9 +2483,7 @@ impl RenditionSink {
                 pending.commit(true);
             }
             if manifest.next_gap(0).is_none() && self.rendition.private_storage.is_none() {
-                phase("admission_wait");
                 self.shared.try_admit(&self.rendition, &mut manifest).await;
-                phase("admission_ready");
             }
             if let Some(preparation) = preparation {
                 preparation.progress.notify_waiters();
@@ -2561,12 +2505,9 @@ impl RenditionSink {
             self.rendition.clear_demand(entry);
         }
         drop(dependency_guard);
-        phase("slot_progress_wait");
         self.rendition.slot.produced(entry).await;
-        phase("slot_progress_ready");
         self.shared.pool.satisfy(&self.rendition.key, entry);
         self.rendition.kick();
-        phase("sink_return_fresh");
         Ok(true)
     }
 }

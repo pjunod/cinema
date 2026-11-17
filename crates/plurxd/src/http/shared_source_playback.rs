@@ -1229,8 +1229,6 @@ impl SourceStartFailure {
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unavailable"),
             Self::Deadline => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_deadline"),
         };
-        #[cfg(test)]
-        eprintln!("actual Source Start refusal={code}");
         ApiError::typed(status, code, "Shared start is unavailable")
     }
 }
