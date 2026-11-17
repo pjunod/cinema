@@ -24,6 +24,7 @@ mod backup;
 mod cachekeep;
 mod channel_subjects;
 mod clock_offset;
+mod cluster;
 mod copy_analysis;
 mod copy_index_v3;
 mod copy_normalization;
@@ -1947,6 +1948,11 @@ async fn run(config: Config) -> anyhow::Result<()> {
             tracing::info!("shutdown signal received during store activation; not serving");
             return Ok(());
         }
+        crate::source_custody::validate_recovery_startup(
+            selected.backend == SelectedBackend::Replicated,
+        )
+        .map_err(anyhow::Error::msg)
+        .context("validating physical source recovery before serving")?;
         let source_layout_ready = Box::pin(selected.prepare_source_schema_before_serving())
             .await
             .context("qualifying Source schema before serving")?;
@@ -1973,7 +1979,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let catalogue = selected.catalogue_reader();
         let applied = selected.applied_view();
         let dirs = create_dirs_for_config(&config)?;
-        if let Err(error) = crate::source_custody::configure_access_roots(&config, &dirs) {
+        if let Err(error) = crate::source_custody::configure_access_roots(&config, &dirs).await {
             tracing::warn!(%error, "source-access roots unavailable; launches remain unverified");
         }
         // Probing only measures ffmpeg and the host, so cancelling it leaves
@@ -2546,6 +2552,7 @@ async fn boot_observing(
     let leave_shutdown = state.shutdown.clone();
     let live_tv_shutdown = Arc::clone(&state.live_tv);
     let serving_shutdown = state.serving.clone();
+    let membership_shutdown = state.membership.clone();
     let jellyfin_standard_port = Arc::clone(&state.jellyfin_standard_port);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let desktop_server = if let Some(desktop) = &desktop {
@@ -2612,6 +2619,12 @@ async fn boot_observing(
                 tracing::info!("local shutdown requested, draining");
             }
         }
+        // The drain's first act, while Raft and every listener are still
+        // fully up: a stopping leader moves leadership to a caught-up voter
+        // (bounded at 10 s), and every replicated node stops campaigning, so
+        // the drain's own writes go to the successor and the survivors never
+        // wait out a timeout election. It never fails; the drain continues.
+        membership_shutdown.handoff_for_shutdown().await;
         // One drain token for both causes: owners that must hand work back
         // before exit (shared session retirement) observe `state.shutdown`,
         // and a signal is as much a drain as a committed leave.

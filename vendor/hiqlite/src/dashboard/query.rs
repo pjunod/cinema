@@ -89,7 +89,6 @@ async fn execute_dynamic(state: &AppStateExt, sql: Query) -> Result<usize, Error
         debug!("Executing dynamic dashboard query as local leader");
         let res = state
             .raft_db
-            .raft
             .client_write(QueryWrite::Execute(sql))
             .await?;
         let resp: crate::Response = res.data;

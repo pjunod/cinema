@@ -1951,7 +1951,10 @@ pattern = "ServingAuthority"
 # Measured on the merge with main at 36: 36 + (-9) = 27.
 # PR1341: +3 in serving_fence.rs: the packed ready+generation word and
 # `admit_or_outage_baseline` project the same ServingAuthority.
-expected_occurrences = 31
+# 31 -> 33 with the cluster facade (B1 slice 1): `crate::cluster`'s import
+# and its `authority()` return type. The facade hands out the fence's own
+# authority; it projects nothing new and owns no producer.
+expected_occurrences = 33
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -2075,7 +2078,10 @@ pattern = "media_session_route_for_playback"
 # active state, and usable control response. This is a test-only observation of
 # the Store-published successor; it does not make a read-then-act decision or
 # change the Store CAS as the sole pointer authority.
-expected_occurrences = 29
+# +2 #1595 (d722b0c36): test-only, in http/hls/tests/processed_upgrade_runs.rs;
+# two route-read assertions proving the cancelled successor never reserved.
+
+expected_occurrences = 31
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -2265,7 +2271,11 @@ pattern = "publication_ready_at_ms"
 # with a publishable fence. Test-only.
 # 168 -> 169 with the E1c review: the HTTP route-view fixture activates with
 # a publishable fence. Test-only.
-expected_occurrences = 169
+# 169 -> 171 with #1629 (idle quorum pollers): lease_inventory_tests.rs
+# builds one blocked and one publishable media-session row to prove an idle
+# lease tick takes no inventory and an owned row still does. Test-only; no
+# fence is advanced or cleared.
+expected_occurrences = 171
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -2337,7 +2347,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # writes the blocked sentinel the way every other actor registration does.
 # 59 -> 60 with E1c: route_view_tests.rs's committed-row helper activates
 # behind the blocked sentinel, as every activation must. Test-only.
-expected_occurrences = 60
+# 60 -> 61 with #1629: the same lease_inventory_tests.rs fixture seeds one
+# row with the blocked sentinel. Test-only.
+expected_occurrences = 61
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -2838,6 +2850,25 @@ expected_occurrences = 14
 # Windows adds nine bounded `spawn_blocking` owners for handle-based identity
 # and filesystem work. Every JoinHandle is awaited by its caller; timeout paths
 # retain or abort-and-await the task before the surrounding owner returns.
+
+# FEL/title ownership audit (ef01fdcb8 -> 8ad3e9f5b), including test shapes:
+# +5 namespaced tasks: admission::tests::foreground_preparation_waits_for_companion_reap_within_its_deadline
+# joins its foreground waiter; title_work_tests::playback_qualification_reclaims_local_index_heavy_turn_without_encoder_waiter
+# joins both index and qualification owners after the explicit reap acknowledgment;
+# qualification_pressure_does_not_preempt_speech_and_cleans_up_on_cancel aborts
+# AND awaits its two qualification waiters. None adds a detached production task.
+# The local-index fixture owns one sleep child (+1 method spawn, Command::new,
+# launch and kill_on_drop); try_wait/start_kill/wait add the three lifecycle
+# calls. The index task retains its admission until child.wait physically reaps.
+# fel_qualification::tests::qualification_broker_pauses_pipe_partners_and_reaps_before_close
+# adds two Command::new sites: its isolated self-exec is bounded and reaped by
+# output_command_inherited_env (45s/64KiB); testfixtures::run synchronously owns
+# and waits for the real FFmpeg generator. Neither is a new runtime producer.
+# +11 timer constructors: eight bounded coordination/join deadlines in those
+# two title fixtures; one joined foreground-admission fixture deadline; one
+# broker-fixture setup-failure cleanup timeout; and admit_dv_title(true)'s
+# production QUEUE_WAIT around acquire_owned. That future is directly awaited,
+# and HeavyTurnWait removes its pressure on timeout/cancellation before return.
 
 [[module_structures]]
 id = "namespaced-task-spawn"
@@ -3966,7 +3997,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # even after request cancellation; contention returns unavailable, never queues.
 # #1602: +1 joined test-only probe worker in http::tests::seeded_write_surface;
 # the test cancels its token and awaits the JoinHandle before asserting.
-expected_occurrences = 1154
+# +1 #1609 (da8f9357d, processed-window stage timings): dv_segment's stage
+# clock and its handoff tests, each on its owning task (reviewed in #1645).
+# +1 #1595 (d722b0c36): test-only, in http/hls/tests/processed_upgrade_runs.rs;
+# the staging task, joined by tokio::time::timeout on its JoinHandle.
+
+# +5 with #1629 (idle quorum pollers), all test-only tokio::spawn of the
+# real loops under test, each joined or cancelled by its test's shutdown
+# token: live_tv/tests.rs spawns dvr_loop twice and reminder_loop once;
+# sharing.rs's idle-loop test spawns run and claim_loop. No production
+# task owner is added.
+expected_occurrences = 1166
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4221,7 +4262,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
-expected_occurrences = 98
+expected_occurrences = 99
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5877,7 +5918,44 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # closes that gate after deterministic admission. Expiry fails the test and
 # drops the joined observation futures; it proves no terminal mutation, child
 # reap or resource settlement. No production timer, task or process is added.
-expected_occurrences = 2212
+# +1 #1609 (da8f9357d, processed-window stage timings): dv_segment's stage
+# clock and its handoff tests, each on its owning task (reviewed in #1645).
+# +3 #1595 (d722b0c36): test-only, in http/hls/tests/processed_upgrade_runs.rs;
+# two 2 s test timeouts (registration seam, staging join) and the 260 ms
+# control-cadence sleep.
+# Sharing outage policy (A6 M1): +4. SessionGrace::resolve_from bounds one
+# recovery wait with timeout_at and UnknownSpan paces its re-reads with
+# sleep, both on the owner's own task (no new task or timer owner); two
+# test-only timeouts bound the outage-retirement fixture's waits.
+# +4 measured on main after #1610 (cb9bba471, a processed trial claims
+# its own viewer's encoder permit), which landed without updating this
+# ledger; reconciled here so every lane's preflight passes again.
+# +1 with #1597 (lease expiry releases source capacity):
+# `Completion::retire_after_release` in background_jobs/source/completion.rs
+# sleeps REAP_CHECK (5 s) between checks of whether the store sweep has
+# released its custody, then removes its local witness. It owns no producer,
+# process or child, spawns nothing, and decides nothing about capacity: the
+# sweep does; the loop only ends the ledger task once there is nothing left.
+# Change-driven sharing monitors (A6 M3): +2 net. The Source body and
+# receiver connection monitors drop their one-second `interval` for a wait on
+# the applied-mark watch, the serving fence and (receiver) the lease deadline,
+# paced by a one-second `sleep_until` floor after their last look; the
+# listener's fixed sleep becomes the same floor. Every timer runs on the
+# monitor's own task; no new task or timer owner.
+# +1 test-only timeout: the listener change-driven test bounds an hour with
+# no change, which must read nothing; expiry is the passing case.
+# +2 #1657 (main-units harness repairs), test-only: http/tests.rs's
+# `settle_admitted_scans` polls the scan queue every 25 ms (at most 200
+# rounds, then fails), and state/tests.rs's idle-wake test sleeps 100 ms on a
+# paused clock so the worker's first pass is parked before the request. Both
+# run on the test's own task; no task, producer or process.
+# +10 with #1629 (idle quorum pollers): media_sessions.rs's lease loop
+# replaces one timeout with two timeout_at bounds on its own task (+1 net);
+# playback_cache.rs's ceiling read and sharing.rs's loop_enabled each bound
+# an applied-view read with timeout on the caller's task (+2); the rest are
+# test-only waits in live_tv/tests.rs (5) and sharing.rs (2). No new task or
+# timer owner.
+expected_occurrences = 2251
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5923,7 +6001,9 @@ pattern = "use\\s+tokio::time"
 # Merged with main's architecture review (#793): main's count plus the
 # effort's reviewed sites, measured on the merged tree.
 # PR1341: +1 test-only `use tokio::time` in authority_recovery.rs.
-expected_occurrences = 7
+# +1 #1609 (da8f9357d, processed-window stage timings): dv_segment's stage
+# clock and its handoff tests, each on its owning task (reviewed in #1645).
+expected_occurrences = 8
 
 [[module_structures]]
 id = "process-command-construction"
@@ -6395,7 +6475,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # loop verifies relative/custom/non-profile commands keep their resolution
 # and cwd, while a known absolute no-input candidate receives the owned cwd.
 # This fixture launches no child.
-expected_occurrences = 349
+expected_occurrences = 352
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7114,7 +7194,18 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Control refusal diagnostics: +2 HTTP Response::status() assertions, one
 # in the process-free release-interleaving fixture and one in the privacy
 # observer fixture. Both inspect returned values; neither launches a process.
-expected_occurrences = 929
+# Sharing listener (#1598): +5 SharingManager::status() reads in the listener
+# tests, asserting the reported listener state. They read an in-memory status
+# snapshot; none launches a process.
+
+# Sharing outage policy (A6 M1): -1. The listener tests were rewritten
+# around UnknownSpan with one fewer SharingManager::status() read; none of
+# them launches a process.
+# +1 SharingManager::status() read in the listener change-driven test (A6 M3);
+# it reads listener state and launches nothing.
+# +1 with #1629: the sharing idle-loop test reads SharingManager::status()
+# to observe the listener state; it launches nothing.
+expected_occurrences = 936
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7428,7 +7519,14 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Reader B0/B1: +1 explicit wait for the verified native true fixture. The
 # fixture retains ChildJob through the positive physical join. The output-pipe
 # collision fixture now calls status instead of output (net zero lifecycle).
-expected_occurrences = 390
+
+# Sharing outage policy (A6 M1): +1 closed.wait() in the receiver
+# connection monitor, racing its outage-grace wait against the same accepted
+# transport's closure the loop already waits on. No process is involved.
+# Change-driven sharing monitors (A6 M3): +1 closed.wait() in the receiver
+# connection monitor's one-second floor wait, beside its change wait. No
+# process is involved.
+expected_occurrences = 395
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -7670,7 +7768,7 @@ pattern = "kill_on_drop\\s*\\("
 # Reader B0/B1: -1 former reader-fixture kill_on_drop configuration. Its
 # isolated real no-source true helper uses the production ChildJob and awaits
 # actual exit; no production kill-on-drop guarantee is removed.
-expected_occurrences = 126
+expected_occurrences = 127
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

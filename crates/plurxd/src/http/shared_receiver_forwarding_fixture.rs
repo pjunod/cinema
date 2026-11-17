@@ -215,7 +215,7 @@ async fn actual_nonowner_b(
     let mut ingress = super::super::source_actor_test_state();
     ingress.store = Arc::clone(&selected.store);
     ingress.node_id = selected.identity.node_id.clone();
-    ingress.membership = selected.membership_manager();
+    ingress.replace_membership(selected.membership_manager());
     ingress.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
         ingress.membership.clone(),
         Arc::clone(&ingress.store),

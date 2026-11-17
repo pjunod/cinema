@@ -408,6 +408,7 @@ function sourceRecoveryCard(value,error=""){
       <div><b>Kernel available</b><br>${yn(value.kernel_available)}</div>
       <div><b>Local filesystem</b><br>${yn(value.local_filesystem)}</div>
       <div><b>Daemon is init or subreaper</b><br>${yn(value.daemon_init_or_subreaper)}</div>
+      <div><b>Source-access roots configured</b><br>${yn(value.roots_configured)}${value.roots_configured===false?` · ${esc(value.roots_unconfigured_reason||"reason unavailable")}. Every launch on this node runs unverified until it restarts with its roots; nothing is blocked.`:""} (advisory; never gates playback)</div>
     </div>
     <div class="setfields">
       <div><b>Verified attempts since process start</b><br>${count(launches.verified)}</div>

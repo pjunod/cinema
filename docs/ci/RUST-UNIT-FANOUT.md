@@ -27,7 +27,8 @@ authenticated is simply not adopted.
 
 The stage is six jobs (names are part of receipt authentication):
 
-1. **`Rust units: select`** (any `general` runner). Computes
+1. **`Rust units: select`** (any `general` runner, in the `plurx-ci` image like
+   every general job — [GENERAL-LANE-IMAGE.md](GENERAL-LANE-IMAGE.md)). Computes
    every unit crate's content key at the head and at the merge-base with the
    base (§3). A crate is *due* when they differ. For each due crate it then
    looks up authenticated receipts under the head key (§4) and drops the tests
@@ -63,7 +64,9 @@ The stage is six jobs (names are part of receipt authentication):
 6. **`Rust unit verdict`** is the stage's single result. Every due case needs
    an authenticated same-key historical PASS or a PASS from the current run.
    A baseline failure cannot substitute for that positive evidence. Missing,
-   malformed or unknown required outputs fail closed.
+   malformed or unknown required outputs fail closed. The main promotion
+   gate also requires success when Rust units were selected; a skipped
+   selected stage cannot bypass the verdict.
 
 What `make unit` runs and this stage does not: doctests (nextest cannot run
 them; `make unit` runs them through `cargo test`), and `spike-lock-check` /
@@ -182,23 +185,31 @@ change re-keys its dependents, an unrelated crate or a docs change does not,
 `Cargo.lock` and the harness re-key everything, an exempt fixture named by a
 literal re-keys only its reader.
 
-## 5. Re-running
+## 5. Continuing after a failure
 
-- **One shard, from the Forgejo UI:** "Re-run" on the `Rust units shard i`
-  job. Its receipt artifact is overwritten; re-run the verdict and the gate
-  after it if Forgejo does not do so itself.
-- **Agents (Forgejo 17):** retry only the failed workflow job with
-  `POST /api/v1/repos/<owner>/<repo>/actions/jobs/<job_id>/rerun`. Use the
-  workflow job ID, not the task ID. Forgejo also reruns its dependent gates;
-  unrelated successful jobs keep their results. If source inputs changed,
-  push the corrected source and let authenticated receipts preserve matching
-  passes. The old Forgejo 16 close/reopen workaround is no longer needed.
-- **Any branch, by hand:** `POST /actions/workflows/rust-units.yml/dispatches`
-  with `{"ref": "<branch>", "inputs": {"base": "<sha or origin/main>"}}`.
+Keep the completed run and its artifacts. Start a fresh run on the corrected
+source, with the same intended base, so selection can authenticate each
+existing pass and run only the failed or invalidated remainder. A shard is a
+partition of cases, not the unit of reuse: rerunning a whole failed shard
+would also repeat its successful cases. Overwriting an evidence-bearing run
+can also remove artifacts needed by later adoption.
+
+- **Same committed source:** dispatch `rust-units.yml` with
+  `{"ref": "<branch>", "inputs": {"base": "<sha or origin/main>"}}`.
+  The new run adopts authenticated same-key passes before planning work.
+- **Changed source:** commit the correction and use the normal PR/train lane.
+  Its selector reuses matching passes and leaves changed-input cases due.
+- **Required coverage:** compare the final plan with adopted and newly passed
+  IDs. A missing, skipped, absent, or failed required case remains due.
+  Baseline classification and historical merge errata do not clear it.
+
+Do not use the workflow-job rerun endpoint or close/reopen a proof-bearing PR
+as a substitute for case-level continuation. Keep the original failures and
+adoption provenance visible.
 
 ## 6. Known constraints carried over
 
-- Environment: the `plurx-ci@sha256:3d84b711…` image (Jellyfin FFmpeg 8, Rust
+- Environment: the `plurx-ci@sha256:6a989b4d…` image (Jellyfin FFmpeg 8, Rust
   1.97.1), the same as ci.yml's full Rust lane, not the fast Rust gate's Ubuntu
   24.04 / FFmpeg 6. A change of image is a change of every key.
 - `hiqlite-store`: kept by building the whole unit workspace (§1).

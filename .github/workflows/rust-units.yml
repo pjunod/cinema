@@ -56,6 +56,15 @@ jobs:
   select:
     name: "Rust units: select"
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 15
     outputs:
       build: ${{ steps.adopt.outputs.build }}
@@ -87,7 +96,6 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 7
-
       # Only absent named tests: no archive or shard; the verdict reads this plan.
       - name: Hand the all-absent plan to the verdict
         if: steps.adopt.outputs.absent_only == 'true'
@@ -98,6 +106,11 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 7
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   rust_units_archive:
     name: "Rust units: build archive"
@@ -108,7 +121,7 @@ jobs:
     # Jellyfin FFmpeg 8 build and the native libraries. Its digest is part of
     # every crate's key through this file.
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
       credentials:
         username: noirr
@@ -240,11 +253,14 @@ jobs:
     # bounded exactly like every other general job (docs/ci/RUNNER-DISK.md).
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -312,6 +328,15 @@ jobs:
       always() && (needs.select.outputs.absent_only == 'true' ||
       (needs.rust_units_archive.result == 'success' && needs.rust_units_archive.outputs.shards != '[]'))
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 15
     outputs:
       failures: ${{ steps.verdict.outputs.failures }}
@@ -440,6 +465,11 @@ jobs:
       - name: Fail when a shard's partition is missing
         if: always() && steps.verdict.outputs.complete != 'true'
         run: exit 1
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   rust_units_baseline:
     name: "Rust units: merge-base check of failures"
@@ -449,7 +479,7 @@ jobs:
     if: always() && needs.verdict.outputs.failures == 'true' && inputs.tests == ''
     runs-on: [ci-nonvoter-compile-amd64]
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
       credentials:
         username: noirr
@@ -579,7 +609,16 @@ jobs:
     needs: [select, rust_units_archive, shard, verdict, rust_units_baseline]
     if: always()
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 2
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 10
     steps:
       - name: Require every due test to have passed here or before
         env:
@@ -598,23 +637,17 @@ jobs:
         run: |
           echo "select=$SELECT build=$BUILD absent_only=$ABSENT_ONLY archive=$ARCHIVE shards=$SHARDS shard=$SHARD verdict=$VERDICT complete=$COMPLETE failures=$FAILURES absent=$ABSENT baseline=$BASELINE"
           [ "$SELECT" = success ] || { echo "selection did not complete"; exit 1; }
-          if [ -n "$TRAIN_TESTS" ] && [ "$ABSENT_ONLY" = true ]; then
-            [ "$VERDICT" = success ] || { echo "the verdict ended with $VERDICT"; exit 1; }
-            echo "every named test is absent (see the verdict's ABSENT lines); absent is never a pass"; exit 1
-          fi
-          if [ -n "$TRAIN_TESTS" ]; then
-            # Named tests must actually run: no "nothing due" or "already passed" exit.
-            [ "$BUILD" = true ] && [ "$SHARDS" != '[]' ] || { echo "named tests were not planned to run: $TRAIN_TESTS"; exit 1; }
-            [ "$ARCHIVE" = success ] && [ "$SHARD" = success ] && [ "$VERDICT" = success ] || { echo "named tests did not all run and pass (archive=$ARCHIVE shard=$SHARD verdict=$VERDICT failures=$FAILURES)"; exit 1; }
-            [ "$COMPLETE" = true ] || { echo "a named test has no recorded outcome"; exit 1; }
-            [ "$FAILURES" = false ] || { echo "a named test failed"; exit 1; }
-            [ "$ABSENT" = false ] || { echo "a named test is absent (see the verdict's ABSENT lines); absent is never a pass"; exit 1; }
-            echo "Every named test ran and passed."; exit 0
-          fi
-          # Not a probe: nothing may be named, so nothing may be absent.
-          [ "$ABSENT_ONLY" = false ] || { echo "missing or invalid absent-only selection"; exit 1; }
+          case "$ABSENT_ONLY" in
+            false) ;;
+            true)
+              [ -n "$TRAIN_TESTS" ] || { echo "an unnamed run reported absent-only selection"; exit 1; }
+              [ "$VERDICT" = success ] || { echo "the verdict ended with $VERDICT"; exit 1; }
+              echo "every named test is absent (see the verdict's ABSENT lines); absent is never a pass"; exit 1 ;;
+            *) echo "missing or invalid absent-only selection"; exit 1 ;;
+          esac
           case "$BUILD" in
             false)
+              [ -z "$TRAIN_TESTS" ] || { echo "named tests were not planned to run: $TRAIN_TESTS"; exit 1; }
               [ "$ARCHIVE" = skipped ] && [ "$SHARD" = skipped ] && [ "$VERDICT" = skipped ] || { echo "unexpected jobs after no-build selection"; exit 1; }
               [ -z "$SHARDS$COMPLETE$FAILURES$ABSENT" ] || { echo "unexpected outputs after no-build selection"; exit 1; }
               echo "No due Rust unit test: all affected cases already have authenticated same-key passes, or none is affected."
@@ -623,18 +656,21 @@ jobs:
             *) echo "missing or invalid build selection"; exit 1 ;;
           esac
           [ "$ARCHIVE" = success ] || { echo "the archive job ended with $ARCHIVE"; exit 1; }
-          if ! python3 - <<'PY'
+          if ! shard_count="$(python3 - <<'PY_SHARDS'
           import json, os
           try:
               shards = json.loads(os.environ["SHARDS"])
-              assert type(shards) is list and len(shards) <= 6
-              assert all(type(index) is int for index in shards)
-              assert shards == list(range(1, len(shards) + 1))
-          except (KeyError, ValueError, AssertionError):
+              if (type(shards) is not list or len(shards) > 6
+                      or any(type(index) is not int for index in shards)
+                      or shards != list(range(1, len(shards) + 1))):
+                  raise ValueError("invalid shard indices")
+          except (KeyError, ValueError):
               raise SystemExit("missing or invalid shard plan")
-          PY
-          then exit 1; fi
-          if [ "$SHARDS" = '[]' ]; then
+          print(len(shards))
+          PY_SHARDS
+          )"; then exit 1; fi
+          if [ "$shard_count" = 0 ]; then
+            [ -z "$TRAIN_TESTS" ] || { echo "named tests were not planned to run: $TRAIN_TESTS"; exit 1; }
             [ "$SHARD" = skipped ] && [ "$VERDICT" = skipped ] || { echo "unexpected jobs after an all-adopted plan"; exit 1; }
             [ -z "$COMPLETE$FAILURES$ABSENT" ] || { echo "unexpected outputs after an all-adopted plan"; exit 1; }
             echo "Every due test already passed under the same keys."
@@ -644,4 +680,12 @@ jobs:
           [ "$VERDICT" = success ] || { echo "the verdict ended with $VERDICT"; exit 1; }
           [ "$COMPLETE" = true ] || { echo "missing or incomplete positive-pass coverage"; exit 1; }
           [ "$FAILURES" = false ] || { echo "every required Rust case needs a positive pass; baseline failures cannot authorize promotion"; exit 1; }
-          [ "$ABSENT" = false ] || { echo "an unnamed run reported an absent test"; exit 1; }
+          [ "$ABSENT" = false ] || { echo "a required test is absent or its output is invalid; absent is never a pass"; exit 1; }
+          if [ -n "$TRAIN_TESTS" ]; then
+            echo "Every named test ran and passed."
+          fi
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"

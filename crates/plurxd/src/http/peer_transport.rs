@@ -51,14 +51,12 @@ pub(crate) struct PeerTransport {
 }
 
 impl PeerTransport {
+    /// A transport over the membership manager's pooled client. Building one
+    /// is cheap and opens nothing: every transport made from the same cluster
+    /// membership shares one connection pool, however many callers make one.
     pub(crate) fn new(membership: MembershipManager) -> Self {
-        Self {
-            membership,
-            client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|error| error.to_string()),
-        }
+        let client = membership.peer_http().into_result();
+        Self { membership, client }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -611,6 +609,28 @@ fn unix_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every transport must take the membership manager's pooled client. A
+    /// client built here is a connection pool per caller, which is what made
+    /// node-to-node requests redial on every use.
+    #[test]
+    fn a_transport_never_builds_its_own_http_client() {
+        let source = include_str!("peer_transport.rs");
+        let production = &source[..source
+            .find("\n#[cfg(test)]\nmod tests")
+            .expect("the test module follows the production code")];
+        assert!(
+            production.contains("membership.peer_http()"),
+            "PeerTransport::new must take MembershipManager::peer_http()"
+        );
+        for built_here in ["Client::builder", "Client::new", "ClientBuilder"] {
+            assert!(
+                !production.contains(built_here),
+                "peer_transport.rs builds an HTTP client with {built_here}; take \
+                 MembershipManager::peer_http() so the connection pool is shared"
+            );
+        }
+    }
     use std::convert::Infallible;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;

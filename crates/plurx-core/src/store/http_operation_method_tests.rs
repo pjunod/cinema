@@ -157,3 +157,38 @@ async fn a_spawned_start_counts_into_its_own_request_and_a_bare_spawn_counts_now
     .await
     .expect("an unscoped start");
 }
+
+/// A request's split reaches its family when the last holder of its counts
+/// is dropped, not when the handler returns: a task the handler spawned in
+/// its scope is still counted, and the whole split arrives exactly once.
+#[tokio::test]
+async fn a_scope_folds_its_methods_once_when_its_last_holder_is_dropped() {
+    let folded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let counts = HttpStoreOperationCounts::default();
+    let sink = std::sync::Arc::clone(&folded);
+    counts.fold_methods_into(move |methods| sink.lock().expect("sink").push(methods.to_vec()));
+    let detached = counts.clone();
+    scope_http_store_operations(counts.clone(), async {
+        record_http_store_operation(AUTHORITY, "get_file", Duration::ZERO);
+    })
+    .await;
+    // The handler is done and its counts are gone; a detached task is not.
+    drop(counts);
+    assert!(
+        folded.lock().expect("sink").is_empty(),
+        "not while a holder remains"
+    );
+    scope_http_store_operations(detached.clone(), async {
+        record_http_store_operation(WRITE, "activate_media_session", Duration::ZERO);
+    })
+    .await;
+    drop(detached);
+    assert_eq!(
+        *folded.lock().expect("sink"),
+        vec![vec![
+            ("activate_media_session", [0, 0, 1]),
+            ("get_file", [0, 1, 0])
+        ]],
+        "one fold, holding what the detached task did after the handler"
+    );
+}

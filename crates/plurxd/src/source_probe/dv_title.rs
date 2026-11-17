@@ -118,13 +118,13 @@ pub(crate) async fn publish_title_with_tools_for_control(
     use tokio_util::sync::CancellationToken;
 
     let admission = transcode
-        .admit_dv_title()
+        .admit_dv_title(false)
         .await
         .ok_or("title probe admission unavailable")?;
     let scanner = tools.title_scanner_digest();
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
     let mut demand = store
-        .dv_title_demands(&scanner, 0)
+        .dv_title_demands(&scanner, 0, crate::source_probe::now_ms())
         .await
         .map_err(|e| e.to_string())?
         .into_iter()

@@ -70,6 +70,7 @@ async fn begin(state: &AppState, job_id: &str, kind: JobKind) -> ActiveBackgroun
             after: None,
             now_ms: crate::state::clock_ms(),
             limit: 32,
+            admissible_only: false,
         })
         .await
         .expect("candidates")

@@ -29,6 +29,11 @@ async fn applied_view_on_sqlite_forwards_to_the_only_copy() {
         .await
         .expect("seed settings");
     let view = AppliedView::authority(Arc::clone(&store));
+    // A6 M3: no mark on SQLite, so a sharing monitor looks once a second.
+    assert!(matches!(
+        view.sharing_watch(&["settings"]),
+        plurx_core::store::SharingWatch::Interval
+    ));
     let read = view
         .settings(&["e1.left", "e1.right", "e1.absent"])
         .await
@@ -361,6 +366,128 @@ async fn applied_view_stamp_moves_with_its_own_table_only() {
         view.setting("e1.k").await.expect("view read").as_deref(),
         Some("v2")
     );
+}
+
+/// A6 M3: production registers every table a sharing monitor waits on, and a
+/// sharing watch wakes on its own table's applied change and not another's.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn sharing_watch_wakes_on_its_own_table_only() {
+    let node = EmbeddedSingleton::start().await;
+    let mark = node
+        .client
+        .local_db_applied_mark()
+        .expect("embedded client owns the mark");
+    for table in plurx_core::store::applied_mark_tables() {
+        assert!(mark.slot(table).is_some(), "{table} is registered");
+    }
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(node.applied_index());
+    let view = node.view(metrics);
+    assert!(matches!(
+        view.sharing_watch(&["not_a_registered_table"]),
+        plurx_core::store::SharingWatch::Interval
+    ));
+    let watch = view.sharing_watch(&["libraries"]);
+    assert!(matches!(watch, plurx_core::store::SharingWatch::Applied(_)));
+    node.store
+        .put_setting("m3.k", "v1")
+        .await
+        .expect("settings write");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), watch.changed())
+            .await
+            .is_err(),
+        "a settings write does not wake a libraries watch"
+    );
+    node.store
+        .create_library(&NewLibrary {
+            name: "M3 watched write".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![PathBuf::from("/m3/watched")],
+            anime: false,
+        })
+        .await
+        .expect("libraries write");
+    tokio::time::timeout(Duration::from_secs(5), watch.changed())
+        .await
+        .expect("the libraries write wakes its watch");
+}
+
+/// A6 M3 coverage proofs for the two revocations that reach a sharing
+/// monitor only through a trigger or a cascade (no backstop re-look covers
+/// them): deleting a user deletes its tokens through `ON DELETE CASCADE`,
+/// which must move the delete-only `tokens` slot; a library made through the
+/// production path under the Source's catalogue-order layout has its
+/// `sharing_catalogue_revisions` row, so an item change (the same `UPDATE`
+/// an item delete runs) moves that slot.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn sharing_watch_sees_a_cascaded_token_delete_and_a_catalogue_revision() {
+    let node = EmbeddedSingleton::start().await;
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(node.applied_index());
+    let view = node.view(metrics);
+    let user = node
+        .store
+        .create_user("m3-cascade", "hash", false)
+        .await
+        .expect("user");
+    let token = view.sharing_watch(&["tokens"]);
+    node.store
+        .create_token(&"a".repeat(64), user.id, Some("m3"))
+        .await
+        .expect("token");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), token.changed())
+            .await
+            .is_err(),
+        "a token insert does not move the delete-only slot"
+    );
+    assert!(node.store.delete_user(user.id).await.expect("delete user"));
+    tokio::time::timeout(Duration::from_secs(5), token.changed())
+        .await
+        .expect("the cascaded token delete wakes the tokens watch");
+
+    // The catalogue-order layout a Source installs when sharing turns on.
+    let mut ddl = plurx_core::store::sharing_catalogue_source::candidate_item_identity_statements();
+    ddl.extend(plurx_core::store::sharing_catalogue_source::candidate_statements());
+    for result in node
+        .client
+        .txn(
+            ddl.into_iter()
+                .map(|sql| (sql, hiqlite::params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("catalogue-order layout")
+    {
+        result.expect("catalogue-order statement");
+    }
+    let library = node
+        .store
+        .create_library(&NewLibrary {
+            name: "M3 revisions".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![PathBuf::from("/m3/revisions")],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let revisions = view.sharing_watch(&["sharing_catalogue_revisions"]);
+    node.store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "m3".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    tokio::time::timeout(Duration::from_secs(5), revisions.changed())
+        .await
+        .expect("the library's revisions row exists and its trigger moves the slot");
 }
 
 /// A replica that is really behind its own commit: the singleton's writer
@@ -1707,7 +1834,7 @@ async fn applied_planning_view_closes_on_the_dv_title_and_probe_result_writers()
     let scanner = hex::encode(sha2::Sha256::digest(b"d3b-scanner"));
     let demand = node
         .store
-        .dv_title_demands(&scanner, 0)
+        .dv_title_demands(&scanner, 0, 1_000)
         .await
         .expect("demands")
         .into_iter()

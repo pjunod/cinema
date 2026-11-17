@@ -37,6 +37,7 @@ import posixpath
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 import urllib.error
@@ -982,10 +983,47 @@ def bound_cpus(limit=SHARD_CPUS):
           f"cgroup quota {quota if quota is not None else 'none'}")
 
 
+# plurxd's playback cache keeps max(1 GiB, 2% of the filesystem) free and
+# refuses every write below that (crates/plurxd/src/playback_cache.rs
+# `DiskSpace::floor`; tests/validation/test_rust_units.py holds these two
+# numbers to that source). The tests that play real media build that cache in
+# the temp directory, so on a runner whose disk is under the floor they fail
+# as playback faults ("filesystem reserve exhausted", `Capacity`, 429, 502)
+# that name neither the disk nor the runner: run 7724 lost 24 tests that way
+# on one full host. The headroom is room for the fixtures themselves.
+CACHE_FLOOR_MIN_BYTES = 1 << 30
+CACHE_FLOOR_FRACTION = 50
+TEST_DISK_HEADROOM_BYTES = 1 << 30
+
+
+def cache_floor(total):
+    return max(CACHE_FLOOR_MIN_BYTES, total // CACHE_FLOOR_FRACTION)
+
+
+def require_test_disk(directory=None, statvfs=os.statvfs):
+    """Refuse to run tests where the playback cache's own reserve is not free.
+
+    A shard that cannot run its tests must say so; one that runs them on a
+    full disk reports product failures that are not the product's.
+    """
+    directory = directory or tempfile.gettempdir()
+    stat = statvfs(directory)
+    total = stat.f_blocks * stat.f_frsize
+    free = stat.f_bavail * stat.f_frsize
+    needed = cache_floor(total) + TEST_DISK_HEADROOM_BYTES
+    runner = os.environ.get("RUNNER_NAME") or os.uname().nodename
+    require(free >= needed,
+            f"{runner} cannot run unit tests: {free / 2**30:.1f} GiB free at {directory}, "
+            f"under the {needed / 2**30:.1f} GiB the playback cache floor and the fixtures need "
+            f"(filesystem of {total / 2**30:.1f} GiB); free the runner's disk and rerun")
+    print(f"test disk: {free / 2**30:.1f} GiB free at {directory} (need {needed / 2**30:.1f} GiB)")
+
+
 def run_shard(plan_path, archive, index, threads):
     plan = read_json(plan_path)
     count = plan["shards"]
     require(1 <= index <= count, f"shard {index} is outside 1..{count}")
+    require_test_disk()
     bound_cpus()
     outcomes = {}
     runs = []

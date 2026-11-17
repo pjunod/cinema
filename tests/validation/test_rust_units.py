@@ -28,7 +28,13 @@ def workflow_gate(**outputs):
     """Exercise the actual checked-in gate shell, not a copied predicate."""
     workflow = (ROOT / ".github/workflows/rust-units.yml").read_text()
     gate = workflow.split("\n  gate:\n", 1)[1]
-    script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+    run = gate.split("        run: |\n", 1)[1]
+    script_lines = []
+    for line in run.splitlines():
+        if line.strip() and not line.startswith("          "):
+            break
+        script_lines.append(line)
+    script = textwrap.dedent("\n".join(script_lines))
     values = dict(SELECT="success", BUILD="true", ARCHIVE="success", SHARDS="[1, 2]",
                   SHARD="success", VERDICT="success", COMPLETE="true", FAILURES="false", BASELINE="success",
                   ABSENT_ONLY="false", ABSENT="false", TRAIN_TESTS="")
@@ -41,6 +47,30 @@ def workflow_gate(**outputs):
             environment[name] = value
     return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], env=environment,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def main_promotion_gate(**outputs):
+    """Exercise only the actual main promotion prerequisite shell block."""
+    workflow = (ROOT / ".github/workflows/main-fast-lane.yml").read_text()
+    gate = workflow.split("\n  promotion_gate:\n", 1)[1]
+    run = gate.split("        run: |\n", 1)[1]
+    script_lines = []
+    for line in run.splitlines():
+        if line.strip() and not line.startswith("          "):
+            break
+        script_lines.append(line)
+    values = dict(PAPERWORK_RESULT="success", SCOPE_RESULT="success", PREFLIGHT_RESULT="success",
+                  WORKER_CONTROL_RESULT="success", RUST_UNITS_REQUIRED="true", RUST_UNITS_RESULT="success",
+                  RUST_RESULT="skipped", WEB_RESULT="skipped", APPLE_RESULT="skipped", ANDROID_RESULT="skipped")
+    values.update(outputs)
+    environment = os.environ.copy()
+    for name, value in values.items():
+        if value is None:
+            environment.pop(name, None)
+        else:
+            environment[name] = value
+    return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", textwrap.dedent("\n".join(script_lines))],
+                          env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 CONFIG = """
@@ -667,7 +697,7 @@ class NamedVerdictTests(unittest.TestCase):
         # Raw producer output: a missing `absent_only` must not default to false.
         self.assertIn("absent_only: ${{ steps.adopt.outputs.absent_only }}\n", stage)
         self.assertIn("needs.select.outputs.absent_only == 'true'", stage)
-        self.assertIn('[ "$ABSENT_ONLY" = true ]', stage)
+        # NamedProbeGateTests exercises the actual shell's absent-only refusal.
         self.assertNotIn("none()", (ROOT / "validation/rust_units.py").read_text())
 
     def test_the_gate_fails_on_absent_but_the_verdict_job_does_not(self):
@@ -888,6 +918,54 @@ class StrictGateTests(unittest.TestCase):
         fields["ARCHIVE"] = "failure"
         self.assertNotEqual(workflow_gate(**fields).returncode, 0)
 
+    def test_all_adopted_cases_require_a_valid_empty_plan_and_no_downstream_results(self):
+        # Parse the JSON instead of comparing its raw spelling to "[]".
+        fields = dict(SHARDS="[ ]", SHARD="skipped", VERDICT="skipped", COMPLETE="", FAILURES="", ABSENT="")
+        result = workflow_gate(**fields)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for unexpected in ({"TRAIN_TESTS": "app t::a"}, {"SHARD": "success"}, {"VERDICT": "success"},
+                           {"COMPLETE": "true"}, {"FAILURES": "false"}, {"ABSENT": "false"}):
+            with self.subTest(unexpected=unexpected):
+                self.assertNotEqual(workflow_gate(**{**fields, **unexpected}).returncode, 0)
+
+    def test_no_build_selection_rejects_named_tests_and_unexpected_outputs(self):
+        fields = dict(BUILD="false", ARCHIVE="skipped", SHARDS="", SHARD="skipped", VERDICT="skipped",
+                      COMPLETE="", FAILURES="", ABSENT="")
+        for unexpected in ({"TRAIN_TESTS": "app t::a"}, {"ABSENT_ONLY": ""}, {"ABSENT_ONLY": "true"},
+                           {"SHARDS": "[]"}, {"COMPLETE": "true"}, {"FAILURES": "false"}, {"ABSENT": "false"}):
+            with self.subTest(unexpected=unexpected):
+                self.assertNotEqual(workflow_gate(**{**fields, **unexpected}).returncode, 0)
+
+
+class MainPromotionGateTests(unittest.TestCase):
+    def test_successful_selected_rust_units_allow_promotion(self):
+        workflow = (ROOT / ".github/workflows/main-fast-lane.yml").read_text()
+        gate = workflow.split("\n  promotion_gate:\n", 1)[1]
+        self.assertIn("RUST_UNITS_REQUIRED: ${{ needs.scope.outputs.rust_units }}", gate)
+        result = main_promotion_gate()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_selected_rust_units_must_succeed(self):
+        for result in ("skipped", "failure", "cancelled", "", None):
+            with self.subTest(result=result):
+                self.assertNotEqual(main_promotion_gate(RUST_UNITS_RESULT=result).returncode, 0)
+
+    def test_explicitly_unaffected_rust_units_may_be_skipped(self):
+        result = main_promotion_gate(RUST_UNITS_REQUIRED="false", RUST_UNITS_RESULT="skipped")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotEqual(main_promotion_gate(RUST_UNITS_REQUIRED="false", RUST_UNITS_RESULT="failure").returncode, 0)
+
+    def test_missing_or_unknown_rust_unit_scope_refuses_promotion(self):
+        for required in (None, "", "unknown", "TRUE"):
+            with self.subTest(required=required):
+                self.assertNotEqual(main_promotion_gate(RUST_UNITS_REQUIRED=required).returncode, 0)
+
+    def test_scope_and_preflight_must_succeed(self):
+        for stage in ("SCOPE_RESULT", "PREFLIGHT_RESULT"):
+            for result in ("skipped", "failure", "cancelled", "", None):
+                with self.subTest(stage=stage, result=result):
+                    self.assertNotEqual(main_promotion_gate(**{stage: result}).returncode, 0)
+
 
 class NamedProbeGateTests(unittest.TestCase):
     """The strict gate on a Train-Tests probe: ABSENT is a result, never a pass."""
@@ -908,10 +986,14 @@ class NamedProbeGateTests(unittest.TestCase):
         self.assertIn("absent is never a pass", result.stdout)
 
     def test_a_missing_or_malformed_named_output_fails_closed(self):
-        for name in ("COMPLETE", "FAILURES", "ABSENT"):
+        for name in ("SELECT", "BUILD", "ABSENT_ONLY", "ARCHIVE", "SHARD", "VERDICT", "COMPLETE", "FAILURES", "ABSENT"):
             for value in (None, "", "unknown", "TRUE"):
                 with self.subTest(name=name, value=value):
                     self.assertNotEqual(self.gate(**{name: value}).returncode, 0)
+        for value in (None, "", "null", "true", "{}", "broken", "[0]", "[2]", "[1, true]",
+                      "[1, 1]", "[1, 3]", "[1,2,3,4,5,6,7]"):
+            with self.subTest(shards=value):
+                self.assertNotEqual(self.gate(SHARDS=value).returncode, 0)
         for fields in ({"COMPLETE": "false"}, {"FAILURES": "true"}, {"SHARDS": "[]"}, {"BUILD": "false"},
                        {"SHARD": "skipped"}, {"VERDICT": "failure"}, {"ARCHIVE": "skipped"}):
             with self.subTest(fields=fields):
@@ -940,6 +1022,56 @@ class NamedProbeGateTests(unittest.TestCase):
         for fields in ({"ABSENT_ONLY": "true"}, {"ABSENT": "true"}):
             with self.subTest(fields=fields):
                 self.assertNotEqual(workflow_gate(**fields).returncode, 0)
+
+
+class TestDiskTests(unittest.TestCase):
+    """A shard refuses a runner whose temp filesystem is under the playback
+    cache's floor instead of reporting the cache's refusals as test failures."""
+
+    @staticmethod
+    def filesystem(total, free, fragment=4096):
+        return lambda _directory: os.statvfs_result(
+            (fragment, fragment, total // fragment, free // fragment, free // fragment,
+             0, 0, 0, 0, 255))
+
+    def test_the_floor_is_the_playback_caches_own(self):
+        source = (ROOT / "crates/plurxd/src/playback_cache.rs").read_text()
+        self.assertIn("const GIB: u64 = 1024 * 1024 * 1024;", source)
+        self.assertIn("GIB.max(self.total / 50)", source)
+        self.assertEqual(ru.CACHE_FLOOR_MIN_BYTES, 1024 ** 3)
+        self.assertEqual(ru.CACHE_FLOOR_FRACTION, 50)
+        self.assertEqual(ru.cache_floor(10 * 2 ** 30), 2 ** 30)
+        self.assertEqual(ru.cache_floor(1000 * 2 ** 30), 20 * 2 ** 30)
+
+    def test_a_disk_under_the_cache_floor_stops_the_shard_and_names_the_runner(self):
+        # 1 TiB with 2% free: every cache reservation would be refused.
+        full = self.filesystem(1024 * 2 ** 30, 1024 * 2 ** 30 // 50)
+        with mock.patch.dict(os.environ, {"RUNNER_NAME": "lab5-general-2"}):
+            with self.assertRaisesRegex(ru.UnitsError, "lab5-general-2 cannot run unit tests"):
+                ru.require_test_disk("/tmp", statvfs=full)
+        # A small temp filesystem is held to the 1 GiB minimum, not to 2%.
+        small = self.filesystem(900 * 2 ** 20, 890 * 2 ** 20)
+        with self.assertRaises(ru.UnitsError):
+            ru.require_test_disk("/tmp", statvfs=small)
+
+    def test_a_disk_with_the_floor_and_headroom_free_runs(self):
+        total = 1000 * 2 ** 30
+        enough = self.filesystem(total, ru.cache_floor(total) + ru.TEST_DISK_HEADROOM_BYTES)
+        with mock.patch("sys.stdout", io.StringIO()) as out:
+            ru.require_test_disk("/tmp", statvfs=enough)
+        self.assertIn("test disk:", out.getvalue())
+
+    def test_the_shard_checks_the_disk_before_it_runs_a_test(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan = Path(directory) / "plan.json"
+            plan.write_text(json.dumps({"shards": 1, "filters": ["all()"], "serial_filters": []}))
+            with mock.patch.object(ru, "require_test_disk",
+                                   side_effect=ru.UnitsError("full")) as check, \
+                    mock.patch.object(ru, "run_nextest") as nextest:
+                with self.assertRaises(ru.UnitsError):
+                    ru.run_shard(plan, "archive.tar.zst", 1, 2)
+            check.assert_called_once_with()
+            nextest.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -38,15 +38,21 @@ jobs:
   paperwork:
     name: paperwork
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22.23.4"
       - name: Check index rows, release counters, names and Regression-Test fields
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -69,6 +75,11 @@ jobs:
           # one commit to this head; its bot push starts the replacement lane.
           echo "Paperwork failed. Use make paperwork-fix locally, or inspect the trusted publisher status; no compiler jobs started."
           exit 1
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   scope:
     name: fast-lane validation scope
@@ -85,7 +96,16 @@ jobs:
     if: >-
       github.event.pull_request.draft == false
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 2
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 10
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
       # The content selector must see every ready PR: Rust tests also read
@@ -121,6 +141,11 @@ jobs:
           set -euo pipefail
           python3 -m validation.ci_scope --event pull_request --base "$VALIDATION_BASE" \
             | python3 -m validation.merge_train scope >> "$GITHUB_OUTPUT"
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   worker_control_proof:
     name: production worker controller proof
@@ -274,6 +299,15 @@ jobs:
     needs: scope
     if: needs.scope.outputs.preflight == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     # A cold continuation can run the full unit set when older receipts cannot
     # authenticate. History alone took seven minutes in run 6234; allow the
     # remaining contracts and receipt publication to finish on a busy runner.
@@ -283,27 +317,8 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Install the job-local Python receipt runtime
-        id: python-runtime
-        run: |
-          set -euo pipefail
-          test -d "$RUNNER_TEMP" && test ! -L "$RUNNER_TEMP"
-          plurx_python_dir="$(mktemp -d "$RUNNER_TEMP/plurx-python312.XXXXXXXX")"
-          printf 'directory=%s\n' "$plurx_python_dir" >> "$GITHUB_OUTPUT"
-          curl -q --fail --location --proto '=https' --proto-redir '=https' \
-            --connect-timeout 20 --max-time 180 --max-filesize 34285590 \
-            --output "$plurx_python_dir/runtime.tgz" \
-            'https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.12.15%2B20261003-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
-          test "$(wc -c < "$plurx_python_dir/runtime.tgz")" -eq 34285590
-          printf '%s  %s\n' '731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91' \
-            "$plurx_python_dir/runtime.tgz" | sha256sum --check --status
-          tar -xzf "$plurx_python_dir/runtime.tgz" -C "$plurx_python_dir"
-          "$plurx_python_dir/python/bin/python3" -c \
-            'import platform, sys; assert sys.version_info[:2] == (3, 12) and sys.platform == "linux" and platform.machine() == "x86_64"'
-          printf '%s\n' "$plurx_python_dir/python/bin" >> "$GITHUB_PATH"
-      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22.23.4"
+      - name: Check the ci image toolchain
+        run: bash scripts/ci-toolchain-check
       - name: Restore attributable main Python successes
         id: receipts
         env:
@@ -344,8 +359,6 @@ jobs:
       # the same diff, and tests/validation/test_regression_field.py refuses
       # one without the other.
       - name: Check validation catalog and static contracts
-        env:
-          KNOWLEDGE_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           make validation-lint
       - name: Check formal protocol source mapping
@@ -437,21 +450,14 @@ jobs:
           path: .main-preflight-receipts/receipt.json
           if-no-files-found: error
           retention-days: 90
-      - name: Remove the exact job-local Python receipt runtime
-        if: always()
-        env:
-          PLURX_PYTHON_DIRECTORY: ${{ steps.python-runtime.outputs.directory }}
-        run: |
-          set -euo pipefail
-          if [ -n "$PLURX_PYTHON_DIRECTORY" ]; then
-            test "$(dirname "$PLURX_PYTHON_DIRECTORY")" = "$RUNNER_TEMP"
-            case "$(basename "$PLURX_PYTHON_DIRECTORY")" in plurx-python312.????????) ;; *) exit 1 ;; esac
-            test ! -L "$PLURX_PYTHON_DIRECTORY"
-            rm -rf -- "$PLURX_PYTHON_DIRECTORY"
-          fi
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only diff; compiler surfaces are skipped."
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   rust_compile:
     name: fast Rust gate
@@ -583,6 +589,15 @@ jobs:
        (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
       (needs.scope.outputs.web_layout == 'true')
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     # web-unit-check measured 103 s serial on two cores; the rest is checkout,
     # node and the pinned tsc.
     timeout-minutes: 10
@@ -592,9 +607,6 @@ jobs:
           persist-credentials: false
           # --base reads the baseline at the merge-base with the target.
           fetch-depth: 0
-      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22.23.4"
       - name: Parse every shipped JavaScript surface
         run: |
           scripts/js-check
@@ -631,6 +643,11 @@ jobs:
           path: .main-preflight-receipts/web-unit
           if-no-files-found: error
           retention-days: 90
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   apple_compile:
     name: Apple compile and native TV navigation
@@ -786,7 +803,16 @@ jobs:
       - apple_compile
       - android_compile
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 2
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 10
     steps:
       - name: Require policy and every affected compile surface
         env:
@@ -796,6 +822,7 @@ jobs:
           WORKER_CONTROL_RESULT: ${{ needs.worker_control_proof.result }}
           RUST_RESULT: ${{ needs.rust_compile.result }}
           RUST_UNITS_RESULT: ${{ needs.rust_units.result }}
+          RUST_UNITS_REQUIRED: ${{ needs.scope.outputs.rust_units }}
           WEB_RESULT: ${{ needs.web_compile.result }}
           APPLE_RESULT: ${{ needs.apple_compile.result }}
           ANDROID_RESULT: ${{ needs.android_compile.result }}
@@ -805,12 +832,20 @@ jobs:
           if [ "$PAPERWORK_RESULT" != success ]; then
             echo "paperwork ended with: $PAPERWORK_RESULT"; exit 1
           fi
+          if [ "$SCOPE_RESULT" != success ] || [ "$PREFLIGHT_RESULT" != success ]; then
+            echo "Required scope/preflight did not pass (scope=$SCOPE_RESULT preflight=$PREFLIGHT_RESULT)"; exit 1
+          fi
+          case "$RUST_UNITS_REQUIRED" in
+            true)
+              [ "$RUST_UNITS_RESULT" = success ] || { echo "Selected Rust units did not pass: $RUST_UNITS_RESULT"; exit 1; } ;;
+            false) ;;
+            *) echo "Missing or invalid Rust unit scope: $RUST_UNITS_REQUIRED"; exit 1 ;;
+          esac
           if [ "$WORKER_CONTROL_RESULT" != success ]; then
             echo "The required production worker controller proof ended with: $WORKER_CONTROL_RESULT"
             exit 1
           fi
           for result in \
-            "$SCOPE_RESULT" "$PREFLIGHT_RESULT" \
             "$RUST_RESULT" "$RUST_UNITS_RESULT" "$WEB_RESULT" "$APPLE_RESULT" \
             "$ANDROID_RESULT"; do
             case "$result" in
@@ -878,3 +913,8 @@ jobs:
             --json-color brightgreen \
             --label-width 48 \
             --message-width 48
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"

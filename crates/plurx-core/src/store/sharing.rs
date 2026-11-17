@@ -59,6 +59,13 @@ impl LogicalClock {
         Self(std::marker::PhantomData)
     }
 
+    pub(crate) fn advance(milliseconds: i64) {
+        LOGICAL_NOW.with(|now| {
+            let current = now.get().expect("logical clock installed");
+            now.set(Some(current + milliseconds))
+        })
+    }
+
     fn tick() -> Option<i64> {
         LOGICAL_NOW.with(|now| {
             let current = now.get()?;

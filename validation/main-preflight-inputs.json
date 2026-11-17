@@ -3672,11 +3672,12 @@
       "reason": "Reads the listed repository files; invoked scripts are bound only when loaded/executed, not when their names occur in asserted text."
     },
     {
-      "id_prefix": "operations:test_contracts.OperationsContractCase.test_main_preflight_runtime_is_job_local_bounded_and_precedes_receipts",
+      "id_prefix": "operations:test_contracts.OperationsContractCase.test_main_preflight_runtime_is_the_image_pinned_python_and_precedes_receipts",
       "inputs": [
-        ".github/workflows/main-fast-lane.yml"
+        ".github/workflows/main-fast-lane.yml",
+        "Dockerfile"
       ],
-      "reason": "Checks the immutable workflow runtime download, ordering, checksum and exact owned-path cleanup."
+      "reason": "Checks that preflight downloads no runtime, the CI image stage's checksummed CPython 3.12.15, and receipt ordering."
     },
     {
       "id_prefix": "operations:test_contracts.OperationsContractCase.test_main_qualification_is_full_and_effort_prs_are_compile_only",
@@ -4823,153 +4824,6 @@
         "tests/operations/test_hiqlite_patch_ledger.py"
       ],
       "reason": "Synthetic archive/download/lifetime controls call the real pinned fixture helper and receipt executor; no external source is fetched by these controls."
-    },
-    {
-      "id_prefix": "validation:test_knowledge_model.",
-      "inputs": [
-        "validation/__init__.py",
-        "validation/knowledge/__init__.py",
-        "validation/knowledge/model.py",
-        "validation/knowledge/adapters.py",
-        "validation/runner.py",
-        "validation/rust_modules.py",
-        "validation/main_preflight_adoption.py"
-      ],
-      "reason": "Reviewed synthetic roots and source anchors; model/adapter definitions and existing catalog/module helpers are the production closure."
-    },
-    {
-      "id_prefix": "validation:test_knowledge_snapshot.",
-      "inputs": [
-        "validation/__init__.py",
-        "validation/knowledge/__init__.py",
-        "validation/knowledge/model.py",
-        "validation/knowledge/adapters.py",
-        "validation/runner.py",
-        "validation/rust_modules.py",
-        "validation/knowledge/snapshot.py",
-        "validation/knowledge/index.py",
-        "validation/knowledge/evidence.py",
-        "validation/knowledge/queries.py",
-        "validation/knowledge/capture.py",
-        "validation/knowledge/lint.py",
-        "validation/knowledge/cli.py",
-        "validation/main_preflight_adoption.py"
-      ],
-      "reason": "Reviewed isolated Git, frozen model and SQLite fixtures; source policy, adapter, capture, index and evidence closure retained."
-    },
-    {
-      "id_prefix": "validation:test_knowledge_queries.",
-      "inputs": [
-        "validation/__init__.py",
-        "validation/knowledge/__init__.py",
-        "validation/knowledge/model.py",
-        "validation/knowledge/queries.py"
-      ],
-      "reason": "Reviewed pure graph fixtures; query semantics depend on typed model and canonical serialization, not unrelated source bodies."
-    },
-    {
-      "id_prefix": "validation:test_knowledge_capture.",
-      "inputs": [
-        "validation/__init__.py",
-        "validation/knowledge/__init__.py",
-        "validation/knowledge/model.py",
-        "validation/knowledge/adapters.py",
-        "validation/runner.py",
-        "validation/rust_modules.py",
-        "validation/knowledge/snapshot.py",
-        "validation/knowledge/index.py",
-        "validation/knowledge/evidence.py",
-        "validation/knowledge/capture.py",
-        "validation/knowledge/lint.py",
-        "validation/knowledge/queries.py",
-        "validation/knowledge/cli.py",
-        "validation/main_preflight_adoption.py"
-      ],
-      "reason": "Reviewed synthetic body and isolated Git fixtures; acknowledgment never authorizes execution or narrows proof closure."
-    },
-    {
-      "id_prefix": "operations:test_knowledge_pilot.",
-      "inputs": [
-        "validation/__init__.py",
-        "validation/knowledge/__init__.py",
-        "validation/knowledge/model.py",
-        "validation/knowledge/adapters.py",
-        "validation/runner.py",
-        "validation/rust_modules.py",
-        "validation/knowledge/snapshot.py",
-        "validation/knowledge/index.py",
-        "validation/knowledge/evidence.py",
-        "validation/knowledge/queries.py",
-        "validation/knowledge/capture.py",
-        "validation/knowledge/lint.py",
-        "validation/knowledge/cli.py",
-        "validation/knowledge/__main__.py",
-        "scripts/knowledge",
-        "validation/knowledge/pilot.json",
-        "validation/knowledge/records.toml",
-        "validation/knowledge/coverage.toml",
-        "validation/knowledge/conflicts.toml",
-        "validation/points.toml",
-        "validation/main-preflight-inputs.json",
-        "tests/playback/routing-decisions.toml",
-        "validation/python_unit_receipts.py",
-        "validation/main_unit_receipts.py",
-        "validation/main_preflight_adoption.py",
-        "crates/plurx-core/src/playback/**",
-        "crates/plurxd/src/http/stream.rs",
-        "crates/plurxd/src/http/stream/**",
-        "docs/PLAYBACK.md",
-        "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md",
-        "docs/streaming/PLAYBACK-CAPS-V2-PLAN.md",
-        "tests/validation/test_main_preflight_adoption.py",
-        "tests/validation/test_main_unit_receipts.py",
-        "tests/validation/test_python_unit_receipts.py"
-      ],
-      "pathsets": [
-        "crates/plurx-core/src/playback/**",
-        "crates/plurxd/src/http/stream/**"
-      ],
-      "reason": "Real pilot CLI smoke binds bytes and modes of reviewed route owners/split children, authored literal scopes, receipt tests and governing documents. Pathsets additionally bind physical child membership; unrelated bodies remain reusable."
-    },
-    {
-      "id_prefix": "validation:test_knowledge_evaluation.",
-      "inputs": [
-        "validation/__init__.py",
-        "validation/knowledge/__init__.py",
-        "validation/knowledge/model.py",
-        "validation/knowledge/evaluation.py"
-      ],
-      "reason": "Reviewed synthetic or mocked evaluation boundaries; no private gold, provider calls or live executor is part of this unit family."
-    },
-    {
-      "id_prefix": "validation:test_knowledge_provider.",
-      "inputs": [
-        "validation/__init__.py",
-        "validation/knowledge/__init__.py",
-        "validation/knowledge/model.py",
-        "validation/knowledge/evaluation_provider.py"
-      ],
-      "reason": "Reviewed synthetic or mocked evaluation boundaries; no private gold, provider calls or live executor is part of this unit family."
-    },
-    {
-      "id_prefix": "validation:test_knowledge_projection.",
-      "inputs": [
-        "validation/__init__.py",
-        "validation/knowledge/__init__.py",
-        "validation/knowledge/model.py",
-        "validation/knowledge/evaluation_projection.py"
-      ],
-      "reason": "Reviewed synthetic or mocked evaluation boundaries; no private gold, provider calls or live executor is part of this unit family."
-    },
-    {
-      "id_prefix": "validation:test_knowledge_isolation.",
-      "inputs": [
-        "validation/__init__.py",
-        "validation/knowledge/__init__.py",
-        "validation/knowledge/model.py",
-        "validation/knowledge/evaluation_isolation.py"
-      ],
-      "reason": "Reviewed synthetic or mocked evaluation boundaries; no private gold, provider calls or live executor is part of this unit family."
     },
     {
       "id_prefix": "validation:test_main_preflight_adoption.MainPreflightAdoptionCase.test_media_runtime_witnesses_bind_only_the_recipes_they_read",

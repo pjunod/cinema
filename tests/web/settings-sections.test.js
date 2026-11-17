@@ -2466,6 +2466,10 @@ test("playback restart recovery is node-local, read-only, and conservative when 
   assert.match(html,/native Linux\/macOS crash recovery and performance qualification are accepted/);
   assert.doesNotMatch(html,/TOG:|onclick="[^\"]*(?:save|enable)/i);
   assert.match(html,/onclick="reloadSourceRecovery\(this\)"/);
+  assert.match(html,/Source-access roots configured<\/b><br>Unknown \(advisory/,"a payload without the fact is unobservable, not healthy");
+  const rootless=render({node_name:"lab4",supported:true,roots_configured:false,roots_unconfigured_reason:"reader roots <cannot> be empty",launches:{},poisoned:null},"");
+  assert.match(rootless,/Source-access roots configured<\/b><br>No · reader roots &lt;cannot&gt; be empty\. Every launch on this node runs unverified[^<]*nothing is blocked\./);
+  assert.doesNotMatch(render({node_name:"lab4",roots_configured:true,roots_unconfigured_reason:null,launches:{},poisoned:null},""),/runs unverified until/);
   const errored=render({node_name:"lab4",error:"partial source status",supported:true,launches:{mediated:0,unknown:0},poisoned:{total:0,witnesses:[]}},"");
   assert.match(errored,/Poisoned witness status is unavailable/);
   assert.doesNotMatch(errored,/Poisoned witnesses:<\/b> 0/);

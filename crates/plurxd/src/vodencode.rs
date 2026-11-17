@@ -181,6 +181,106 @@ pub(crate) fn try_admit_frozen_bundle(
         .ok_or(false)
 }
 
+/// What a processed upgrade trial learned at, and brings to, its admission.
+///
+/// Scoped around one trial by the upgrade (task-local, the way source custody
+/// carries its foreground request): the trial records the exact bundle it was
+/// refused for, and a retried trial brings its own viewer's incumbent permit
+/// claim (`crate::vodserve::IncumbentPermitClaim`) to admit with.
+#[derive(Default)]
+pub(crate) struct ProcessedTrialAdmission {
+    claim: std::sync::Mutex<Option<Arc<crate::vodserve::TrialClaim>>>,
+    needed: std::sync::Mutex<Option<TranscodeResourceEstimate>>,
+}
+
+tokio::task_local! {
+    pub(crate) static PROCESSED_TRIAL_ADMISSION: Arc<ProcessedTrialAdmission>;
+}
+
+impl ProcessedTrialAdmission {
+    pub(crate) fn with_claim(claim: Arc<crate::vodserve::TrialClaim>) -> Self {
+        Self {
+            claim: std::sync::Mutex::new(Some(claim)),
+            needed: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The bundle a capacity refusal asked for, if the trial reached admission.
+    pub(crate) fn needed(&self) -> Option<TranscodeResourceEstimate> {
+        *self.needed.lock().expect("trial admission")
+    }
+
+    fn record_needed(&self, resources: TranscodeResourceEstimate) {
+        *self.needed.lock().expect("trial admission") = Some(resources);
+    }
+
+    fn claim(&self) -> Option<Arc<crate::vodserve::TrialClaim>> {
+        self.claim.lock().expect("trial admission").clone()
+    }
+}
+
+/// Admit one processed trial's frozen bundle.
+///
+/// With a claim whose incumbent has yielded, the trial takes its bundle with
+/// that reservation in one attempt and registers no pool waiter: it is owed
+/// exactly the capacity its own viewer gave back, and a waiter would make
+/// other viewers' stopped encoders yield to it. Otherwise it is the ordinary
+/// [`admit_frozen_preparation`], and a capacity refusal records what it asked
+/// for so the upgrade can claim it.
+///
+/// Unlike a voluntary Auto probe (`Encoding::nonpreemptive_trial`, which may
+/// not borrow the incumbent's resources), a processed upgrade's claim is taken
+/// only while the incumbent's published runway covers a failed hand-back, so
+/// its viewer never waits on the trial: the incumbent is parked, not starved.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) async fn admit_processed_trial(
+    admissions: &Admissions,
+    hardware_limit: usize,
+    software_budget: usize,
+    resources: &TranscodeResourceEstimate,
+    deadline: Instant,
+) -> Result<crate::admission::TranscodePermit, bool> {
+    let scoped = PROCESSED_TRIAL_ADMISSION.try_with(Arc::clone).ok();
+    let claim = scoped.as_ref().and_then(|scope| scope.claim());
+    let claimed = claim.as_ref().is_some_and(|claim| !claim.is_closed());
+    let result = match claim.as_ref().filter(|claim| !claim.is_closed()) {
+        Some(claim) => match claim.token() {
+            Some(token) => try_admit_frozen_bundle(
+                admissions,
+                hardware_limit,
+                software_budget,
+                resources,
+                Some(1),
+                Priority::Live,
+                Some(token),
+            )
+            .inspect(|_| claim.mark_admitted()),
+            None => Err(false),
+        },
+        None => {
+            admit_frozen_preparation(
+                admissions,
+                hardware_limit,
+                software_budget,
+                resources,
+                Some(1),
+                deadline,
+            )
+            .await
+        }
+    };
+    // Only the immediate foreground refusal names an incumbent that could
+    // yield. A deadline spent waiting for background work to yield is not
+    // this viewer's incumbent's doing, and a claim for it would end that
+    // incumbent for nothing.
+    if !claimed && matches!(result, Err(false)) && !admissions.background_is_active() {
+        if let Some(scope) = scoped.as_ref() {
+            scope.record_needed(*resources);
+        }
+    }
+    result
+}
+
 /// A first processed window is foreground preparation. Register its demand
 /// before waiting so background producers actually yield their owned permits.
 /// Never discount a still-running producer or extend the caller's deadline.
@@ -1983,5 +2083,88 @@ mod source_copy_admission_tests {
         assert!(matches!(read, SourceCopyPermitRead::Capacity));
         assert_eq!(admissions.snapshot().live_waiting, 0);
         assert_eq!(admissions.software_in_use(), 0);
+    }
+
+    /// The Air (Profile 5) refusal: the viewer's own incumbent (6 threads and
+    /// a slot) leaves too little of an 11-thread budget for the trial (9 and a
+    /// slot). The trial records the bundle it was refused for; retried with
+    /// the reservation its incumbent left, it admits in one attempt and never
+    /// registers a pool waiter.
+    #[tokio::test]
+    async fn a_processed_trial_records_its_refusal_and_admits_with_its_claim() {
+        let admissions = Admissions::new();
+        let trial = TranscodeResourceEstimate {
+            hardware_slot: true,
+            cpu_threads: 9,
+            decoder_threads: Some(1),
+        };
+        let incumbent = admissions
+            .try_admit_bundle(
+                2,
+                11,
+                &TranscodeResourceEstimate {
+                    hardware_slot: true,
+                    cpu_threads: 6,
+                    decoder_threads: None,
+                },
+                Priority::Live,
+            )
+            .expect("the viewer's incumbent");
+        let scope = Arc::new(ProcessedTrialAdmission::default());
+        let refused = PROCESSED_TRIAL_ADMISSION
+            .scope(
+                Arc::clone(&scope),
+                admit_processed_trial(
+                    &admissions,
+                    2,
+                    11,
+                    &trial,
+                    Instant::now() + std::time::Duration::from_secs(1),
+                ),
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(false)),
+            "foreground capacity is refused at once"
+        );
+        assert_eq!(
+            scope.needed(),
+            Some(trial),
+            "the refusal names the exact bundle"
+        );
+        drop(incumbent);
+        let token = admissions.reserve_for_handoff(&trial, std::time::Duration::from_secs(5));
+        assert!(
+            admissions
+                .try_admit_bundle(2, 11, &trial, Priority::Live)
+                .is_none(),
+            "reserved"
+        );
+        let claim = crate::vodserve::TrialClaim::reserved_for_test(token);
+        let scope = Arc::new(ProcessedTrialAdmission::with_claim(Arc::clone(&claim)));
+        let admitted = PROCESSED_TRIAL_ADMISSION
+            .scope(
+                scope,
+                admit_processed_trial(
+                    &admissions,
+                    2,
+                    11,
+                    &trial,
+                    Instant::now() + std::time::Duration::from_secs(1),
+                ),
+            )
+            .await
+            .expect("the trial admits with its own viewer's reservation");
+        assert_eq!(
+            admissions.snapshot().live_waiting,
+            0,
+            "no pool waiter at any point"
+        );
+        assert_eq!(
+            admissions.snapshot().reservations,
+            0,
+            "the reservation was consumed"
+        );
+        drop(admitted);
     }
 }

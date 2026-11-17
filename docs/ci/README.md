@@ -8,9 +8,9 @@ a document to this folder.
 | File | Answers | |
 |---|---|---|
 | [RUST-GATE-IMAGE.md](RUST-GATE-IMAGE.md) | The Rust gate's image, pool and parallelism | built |
+| [GENERAL-LANE-IMAGE.md](GENERAL-LANE-IMAGE.md) | Why every `general` job runs in the pinned CI image, what that image holds and lacks, and which jobs stay on the host | built |
 | [MEDIA-RUNTIME.md](MEDIA-RUNTIME.md) | Publishing the pinned media base separately, consuming it in application builds, and updating or rolling back its digest. | built |
 | [UNIT-COVERAGE-REPAIR.md](UNIT-COVERAGE-REPAIR.md) | The 24 baseline failures, owned fixes, added behavioral tests, and the 85–90% coverage target and evidence. | open |
-| [ENGINEERING-KNOWLEDGE.md](ENGINEERING-KNOWLEDGE.md) | Code/diff queries, source-backed record maintenance, advisory PR capture and evidence limits for the bounded knowledge pilot. | open |
 | [DOCKER-HARDWARE-STATUS.md](DOCKER-HARDWARE-STATUS.md) | Automatic Docker GPU passthrough, device groups, NVIDIA libraries, review and validation progress. | open |
 | [NATIVE-CI-RECEIPTS.md](NATIVE-CI-RECEIPTS.md) | Authenticated native successes, unchanged source closures, build-specification boundaries and original-run provenance. | built |
 | [PYTHON-UNIT-PR-RECEIPTS.md](PYTHON-UNIT-PR-RECEIPTS.md) | Once-per-PR Python successes: authenticated journals are adopted, anything else simply runs again — history never blocks a PR. | open |
@@ -19,6 +19,7 @@ a document to this folder.
 | [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md) | Implementation plan from the 2026-09-20 architecture review: a PR-level regression field bound to the merged tree that replaces per-commit receipts without deleting one, the narrowed corrective rule, the text-contract pruning protocol, the STATUS.md split, and the release-tag restart with `sha-` images kept as deploy identity. | open |
 | [ARCHITECTURE-DOC-RECONCILIATION.md](ARCHITECTURE-DOC-RECONCILIATION.md) | Implementation plan from the 2026-09-20 architecture review: every wrong number in ARCHITECTURE.md verified against its constant, the one PR that rewrites it with named constants, the DVR reversal as a dated decision, a `doc_versions.py` extension, and the 46 index rows whose doc header disagrees. | done |
 | [RUST-UNIT-FANOUT.md](RUST-UNIT-FANOUT.md) | Which Rust unit tests a ready PR runs (content-keyed selection), how passes are reused across runs, how shards fan out over the fleet, and how to run or re-run it. | open |
+| [PR1592-QUALIFICATION-AUDIT.md](PR1592-QUALIFICATION-AUDIT.md) | Why #1592 landed after a failed source run, which later passes authenticate, and how remaining coverage is closed without replay. | open |
 | [RUST-TEST-EXECUTION-POLICY.md](RUST-TEST-EXECUTION-POLICY.md) | Current compile-only ready-Rust policy and recorded known-failure close-out; historical gaps, original failed receipts and source/environment adoption limits remain explicit. | done |
 | [SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md](SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md) | Implementation plan from the 2026-09-20 architecture review: systemd and Compose limits each with its validation step, child priorities and OOM adjustment, CI on the shipped ffmpeg 8, the corrected release profile, and parser fuzz targets. | open |
 | [RIPWIRE-PILOT.md](RIPWIRE-PILOT.md) | Measured query cost, source/fixture omissions, and the trial's opt-in verdict (superseded 2026-10-17: Ripwire is the default navigator). | done |

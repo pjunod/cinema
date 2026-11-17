@@ -1328,7 +1328,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v113: item ratings and per-person item lists (watchlist, favorites).
     super::library_annotations_schema::SCHEMA,
     // v114: source-revision title acquisition, independent of ordinary probes.
-    super::dv_title_jobs::SCHEMA,
+    super::dv_title_jobs::SCHEMA_V1,
     // v115: one-time playback handoff codes and their file-scoped tokens.
     super::playback_handoffs::SCHEMA,
     // v116: centrally fenced recomputable text subtitle translation slices.
@@ -1363,6 +1363,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::offload::SQLITE_MIGRATION,
     // v131: storage-domain changes are saved at once and applied when safe.
     super::storage_domain_pending::SCHEMA,
+    // v132: exact FEL outbox continuity and independent quality waiters.
+    super::dv_title_jobs::MIGRATION_V2,
+    // v133: optional scoped application login, separate from native sessions.
+    super::delegation::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1820,6 +1824,9 @@ impl SqliteStore {
         already_applied: bool,
     ) -> Result<(), StoreError> {
         let tx = conn.unchecked_transaction()?;
+        if version == 133 {
+            super::delegation::verify_predecessor(&tx)?;
+        }
         if !already_applied {
             if version == super::subtitle_managed_schema::RESOURCE_MIGRATION_VERSION {
                 super::subtitle_managed_schema::verify_resource_predecessor(&tx)?;
@@ -1838,6 +1845,9 @@ impl SqliteStore {
             }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
+        }
+        if version == 133 {
+            super::delegation::verify_sqlite(&tx)?;
         }
         // Foreign keys are OFF for the step (see the caller), so integrity is
         // checked here, before the step can commit.
@@ -1929,6 +1939,7 @@ impl SqliteStore {
         super::subtitle_text_translation_schema::verify_sqlite(conn)?;
         super::shared_caption_schema::verify_sqlite(conn)?;
         super::playback_handoffs::verify_sqlite(conn)?;
+        super::delegation::verify_sqlite(conn)?;
         super::scan_request_v2::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
@@ -2313,7 +2324,7 @@ impl MetricsStore for SqliteStore {
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)
                             + (SELECT COUNT(*) FROM analysis_source_reservations
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)),
-                        'source_recovery_pending', (SELECT COUNT(DISTINCT custody_id) FROM source_io_occupancy WHERE custody_id IS NOT NULL AND active_occupancy=1 AND expires_at_ms <= ?2 * 1000),
+                        'source_recovery_pending', (SELECT COUNT(DISTINCT held.custody_id) FROM source_io_occupancy held JOIN background_source_current_owners c ON c.custody_id = held.custody_id WHERE held.active_occupancy=1 AND (CASE WHEN c.authority_expires_at_ms>0 THEN c.authority_expires_at_ms WHEN c.phase='cleanup_pending' THEN c.updated_at_ms WHEN c.phase='paused' THEN 0 ELSE NULL END) <= ?2 * 1000 - 180000),
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))), ")
                     + &request_health
                     + " FROM offline_packages WHERE node_id = ?1"),

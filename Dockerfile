@@ -95,6 +95,18 @@ RUN placebo_pc=$(dirname "$(find /opt/dv-dependencies/placebo/lib -name libplace
         $(PKG_CONFIG_PATH="$placebo_pc" pkg-config --cflags --libs libplacebo) -lm \
         -o /build-inputs/test_dm_active_area \
     && LD_LIBRARY_PATH=/opt/dv-bundle/lib /build-inputs/test_dm_active_area
+# The base reconstruction control drives the production base renderer, which
+# needs a Vulkan device. This stage has the compiler and headers but no
+# Vulkan driver, so it only compiles the control, with the helper's own
+# flags; the runtime stage below runs it on that image's software device.
+RUN placebo_pc=$(dirname "$(find /opt/dv-dependencies/placebo/lib -name libplacebo.pc -print)") \
+    && mkdir /opt/dv-controls \
+    && cc -O2 -fno-math-errno -frounding-math -ffp-contract=off -std=c11 -Wall -Wextra -Werror -Wno-unused-function \
+        -I/opt/dv-dependencies/include \
+        /build-inputs/dv_processing/controls/test_base_master_black.c /opt/dv-dependencies/lib/libdovi.a \
+        $(PKG_CONFIG_PATH=/opt/dv-dependencies/ffmpeg/lib/pkgconfig pkg-config --static --cflags --libs libavformat libavcodec libavutil) \
+        $(PKG_CONFIG_PATH="$placebo_pc" pkg-config --cflags --libs libplacebo) -lm -lpthread -ldl \
+        -o /opt/dv-controls/test_base_master_black
 
 # Published media dependencies are independent of application source.
 # A base published before 2026-11-12 still carries a DV helper bundle of its
@@ -107,9 +119,13 @@ FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:b171d3de4e9dc30fb544b3ca18945b5e14
 # digest just like the release bases; neither builds the release binaries.
 FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS ci-rust-toolchain
 FROM node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS ci-node-toolchain
+# The Docker client and compose plugin only: the contract tests that resolve a
+# compose file or inspect through a socket need the CLI, never a daemon.
+FROM docker:27.5.1-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c AS ci-docker-cli
 
 FROM runtime-assets AS ci
 ARG PLURX_CI_SOURCE_SHA=""
+ARG TARGETARCH
 LABEL org.opencontainers.image.revision="${PLURX_CI_SOURCE_SHA}"
 ENV CARGO_HOME=/usr/local/cargo \
     RUSTUP_HOME=/usr/local/rustup \
@@ -121,6 +137,10 @@ ENV CARGO_HOME=/usr/local/cargo \
 # only the repository-pinned 1.97.1 toolchain belongs in this CI layer.
 COPY --from=ci-rust-toolchain /usr/local/cargo/bin /usr/local/cargo/bin
 COPY --from=ci-node-toolchain /usr/local/bin/node /usr/local/bin/node
+# npm with the same Node: scripts/web-types installs its locked TypeScript.
+COPY --from=ci-node-toolchain /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+COPY --from=ci-docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=ci-docker-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/plurx/
 COPY licenses/ /usr/share/doc/plurx/licenses/
 # Keep both the daemon's explicit path and shell-invoked fixture generation on
@@ -133,17 +153,60 @@ COPY licenses/ /usr/share/doc/plurx/licenses/
 RUN rm -rf /usr/lib/plurx/dv-processing \
     && ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg \
     && ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe \
+    # bookworm's curl is 7.88; scripts/provision-hiqlite-upstream needs 8.4
+    # (--max-filesize on unknown-length bodies). Only curl and libcurl4 come
+    # from bookworm-backports, from a fixed snapshot so the build reproduces,
+    # at exactly the versions below; the pin keeps every other package on
+    # bookworm. Same snapshot as Dockerfile.pi.
+    && printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260928T000000Z bookworm-backports main\n' \
+         > /etc/apt/sources.list.d/plurx-ci-backports.list \
+    && printf 'Package: *\nPin: release n=bookworm-backports\nPin-Priority: 1\n\nPackage: curl libcurl4\nPin: version 8.14.1-2+deb13u2~bpo13+1\nPin-Priority: 900\n' \
+         > /etc/apt/preferences.d/plurx-ci-curl \
     && apt-get -o Acquire::Retries=3 update \
     && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-        build-essential clang cmake curl git jq libssl-dev lld llvm make nasm ninja-build \
-        libgtk-4-dev libdbus-1-dev pkg-config python3 python3-venv \
-    && python3 -m venv /opt/playwright-venv \
+        autoconf automake build-essential clang cmake dbus-daemon git jq libssl-dev lld llvm \
+        make nasm ninja-build openssl libgtk-4-dev libdbus-1-dev pkg-config procps python3 \
+        curl=8.14.1-2+deb13u2~bpo13+1 libcurl4=8.14.1-2+deb13u2~bpo13+1 \
+    && rm /etc/apt/sources.list.d/plurx-ci-backports.list \
+    && curl -q --version | sed -n 1p | grep -E '^curl 8\.([4-9]|[1-9][0-9])\.' \
+    && ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    # One interpreter for every job in the image: the CPython the main fast
+    # lane used to download per job, checksummed, with the Playwright venv
+    # built from it so `python3` is this 3.12 wherever it is called.
+    && case "$TARGETARCH" in \
+         amd64) python_arch=x86_64; python_sha=731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91 ;; \
+         arm64) python_arch=aarch64; python_sha=6541297dd1798dec8b98c3ad7492808a5b9d1c126801ceb2011e7754cd20d1ce ;; \
+         *) echo "the ci image has no pinned Python for TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+       esac \
+    && curl -q --fail --location --proto '=https' --proto-redir '=https' --retry 3 \
+         --connect-timeout 20 --max-time 180 --output /tmp/python.tgz \
+         "https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.12.15%2B20261003-${python_arch}-unknown-linux-gnu-install_only_stripped.tar.gz" \
+    && printf '%s  %s\n' "$python_sha" /tmp/python.tgz | sha256sum --check --strict \
+    && mkdir -p /opt/python \
+    && tar -xzf /tmp/python.tgz -C /opt/python --strip-components=1 --no-same-owner \
+    && rm /tmp/python.tgz \
+    && /opt/python/bin/python3 -m venv /opt/playwright-venv \
     && /opt/playwright-venv/bin/pip install --no-cache-dir 'playwright==1.62.0' \
     && /opt/playwright-venv/bin/python3 -m playwright install --with-deps chromium \
+    # Debian's python3 (3.11) stays installed for the packages that depend on
+    # it, but nothing in this image may reach it: scripts that name
+    # /usr/bin/python3 (install-sharing-host, prepare-linux-dolby-sdk's meson
+    # launcher, evaluation_isolation) and any job with a reset PATH get 3.12.
+    # After the last apt step so no package install puts 3.11 back.
+    && ln -sf /opt/python/bin/python3 /usr/bin/python3 \
+    && /usr/bin/python3 --version | grep -Fx 'Python 3.12.15' \
     && rustup toolchain install 1.97.1 --profile minimal \
         --component rustfmt --component clippy --component llvm-tools-preview \
     && rustc +1.97.1 --version | grep -F 'rustc 1.97.1' \
     && node --version | grep -Fx 'v22.23.4' \
+    && python3 -c 'import sys, tomllib, playwright; assert sys.version_info[:3] == (3, 12, 15), sys.version' \
+    && npm --version \
+    && docker --version | grep -F 'Docker version 27.5.1' \
+    && docker compose version \
+    && autoconf --version | sed -n '1p' && aclocal --version | sed -n '1p' \
+    && command -v dbus-run-session pgrep openssl \
+    && pkg-config --exists openssl 'gtk4 >= 4.0' dbus-1 \
     && ffmpeg -version | grep -E '^ffmpeg version n?8' \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -198,6 +261,15 @@ RUN test -n "$(find /usr/share/vulkan/icd.d -name '*.json' -print -quit)" \
       { test "$status" -eq 1 && printf '%s\n' "$message" | grep -q 'usage:'; } \
         || { echo "FATAL: DV helper $helper does not load in this runtime: $message" >&2; exit 1; }; \
     done
+# The installed renderer must reconstruct the composed master, true black
+# included, for Profile 5, Profile 8 and base-only Profile 7
+# (controls/test_base_master_black.c). The control is mounted from the helper
+# stage, never copied, and runs on lavapipe: a failing case fails the image.
+RUN --mount=type=bind,from=dv-processing-helpers,source=/opt/dv-controls,target=/opt/dv-controls \
+    icd=$(find /usr/share/vulkan/icd.d -name 'lvp_icd.*.json' -print -quit) \
+    && test -n "$icd" \
+    && VK_ICD_FILENAMES="$icd" LD_LIBRARY_PATH=/usr/lib/plurx/dv-processing/lib \
+        /opt/dv-controls/test_base_master_black
 
 # NVIDIA Container Toolkit must also mount the video encode/decode libraries.
 # This default covers direct Docker users; GPU device access is still runtime

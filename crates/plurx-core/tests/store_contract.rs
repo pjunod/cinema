@@ -110,6 +110,8 @@ mod applied_view;
 mod background_jobs;
 #[path = "store_contract/claim_selection.rs"]
 mod claim_selection;
+#[path = "store_contract/delegation.rs"]
+mod delegation;
 #[path = "store_contract/dv_title_jobs.rs"]
 mod dv_title_jobs;
 #[path = "store_contract/formal_publication.rs"]
@@ -801,6 +803,11 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "enqueue_job_fenced",
     "retry_background_job",
     "claim_job",
+    // The same claim, reporting proposed / settled / skipped on the local
+    // verdict: tests/claim_local_verdict.rs drives it on both backends.
+    "claim_job_attempt",
+    // The verdict alone, for dv_title_scan before it binds (same test file).
+    "claim_verdict",
     "claim_artifact_job",
     "resolve_claim",
     "job_labels",
@@ -881,6 +888,7 @@ const OFFLINE_METHODS: &[&str] = &[
     "offline_transfers_in_flight",
     "request_offline_source_probes",
     "pending_offline_source_probes",
+    "local_pending_offline_source_probes",
     "answer_offline_source_probe",
     "outstanding_offline_source_probes",
     "verified_offline_source_nodes",
@@ -995,6 +1003,7 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "end_media_session",
     "maintain_media_sessions",
     "owned_media_sessions",
+    "owned_media_sessions_hint",
     "prepare_media_session",
     "rejoin_media_session_preparation",
     "staged_media_session_for_playback",
@@ -5442,6 +5451,30 @@ async fn media_session_a_committed_successor_can_renew_and_outlives_its_preparat
         assert!(
             owned.iter().any(|lease| lease.incarnation_id == staged),
             "{backend}: commit removes the staging ledger and makes the successor renewable"
+        );
+        // The lease loop's idle hint covers the inventory: every row the
+        // inventory returns makes it true, and a node owning nothing reads
+        // false, all from this replica.
+        assert!(
+            store
+                .owned_media_sessions_hint("staged-node", 4_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: owner hint: {error}")),
+            "{backend}: an owned, renewable session is visible to the hint"
+        );
+        assert!(
+            !store
+                .owned_media_sessions_hint("another-node", 4_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: other owner hint: {error}")),
+            "{backend}: a node that owns nothing reads an idle hint"
+        );
+        assert!(
+            !store
+                .owned_media_sessions_hint("staged-node", i64::MAX)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: expired hint: {error}")),
+            "{backend}: an expired lease is not one the inventory would return"
         );
         let renewed = store
             .renew_media_sessions(
@@ -13426,25 +13459,26 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         &tail_counts,
         &tail_markers,
     );
-    require_replicated_fixture_marker(client, "dv_title_jobs_schema", 1).await;
+    require_replicated_fixture_marker(client, "dv_title_jobs_schema", 2).await;
     require_replicated_fixture_marker(client, "library_annotations_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_translation_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_managed_schema", 5).await;
     let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
     let title_marker: Vec<I64Value> = client
         .query_consistent_map(
-            "SELECT count(*) AS value FROM dv_title_jobs_schema WHERE singleton=1 AND version=1",
+            "SELECT count(*) AS value FROM dv_title_jobs_schema WHERE singleton=1 AND version=2",
             hiqlite::params!(),
         )
         .await
         .expect("current title fixture marker");
     assert_eq!(title_marker.len(), 1);
     let title_data: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM dv_title_jobs_demand) + (SELECT count(*) FROM background_jobs WHERE kind='dv_title_scan') + (SELECT count(*) FROM background_job_commands WHERE operation IN ('bind_dv_title','publish_dv_title')) + (SELECT count(*) FROM files WHERE json_valid(probe_json) AND json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL) AS value", hiqlite::params!(),
+        "SELECT (SELECT count(*) FROM dv_title_jobs_demand) + (SELECT count(*) FROM background_jobs WHERE kind='dv_title_scan') + (SELECT count(*) FROM background_job_commands WHERE operation IN ('bind_dv_title','publish_dv_title')) + (SELECT count(*) FROM files WHERE json_valid(probe_json) AND (json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL OR json_type(probe_json,'$.plurx_dv_fel_requests_v3') IS NOT NULL)) AS value", hiqlite::params!(),
     ).await.expect("complete title fixture data inventory");
     assert_eq!(title_data.len(), 1);
     let title_drops = queue_fixture::validated_empty_title_rewind(
         &title_shape,
+        2,
         title_marker[0].value,
         title_data[0].value,
     );
@@ -19353,6 +19387,9 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "cluster_fragment_index_locations",
             "cluster_fragment_index_sources",
             "continuous_quality_ledgers",
+            "delegation_clients",
+            "delegation_codes",
+            "delegation_grants",
             "dv_conversions",
             "dv_recovery_guards",
             "dvr_recordings",
@@ -21250,6 +21287,8 @@ const RECENT_SOURCE_METHODS: &[&str] = &[
     "copy_index_v3_locations",
     "copy_index_v3_quarantine_code",
     "copy_index_v3_variant",
+    "dv_title_can_preempt",
+    "dv_title_playback_demands",
     "ensure_copy_index_v3_head",
     "establish_analysis_coordination",
     "find_offloaded_episode",
@@ -21480,7 +21519,23 @@ fn contract_inventory_matches_every_store_method() {
     // exercised by the source-fenced DV title-job contracts.
     // Current main declares 591 distinct methods; save/apply/state replace
     // one storage-domain method, adding two names without hiding existing APIs.
-    assert_eq!(declared.len(), 593, "review the Store method count");
+    // +2: `dv_title_playback_demands` (owned live title interest, paged or by
+    // file) and `dv_title_can_preempt` (a queued live title may displace this
+    // node's running maintenance title), both in `RECENT_SOURCE_METHODS` and
+    // covered on both backends by `dv_title_jobs::title_live_paging_*` and
+    // `dv_title_jobs::title_live_preemption_rejects_running_and_backoff_candidates`.
+    // No new trait or supertrait of `Store`.
+    // +1: `local_pending_offline_source_probes` on `OfflinePackageStore`, the
+    // replica read of `pending_offline_source_probes`'s own statement that
+    // decides only whether the probe loop asks the authority; inert on
+    // SQLite like the rest of node removal. No new trait or supertrait.
+    // +1: `owned_media_sessions_hint` on `MediaSessionStore`, a replica read
+    // of a superset of `owned_media_sessions`'s predicate that decides only
+    // whether the lease loop takes that inventory; covered on both backends
+    // by `media_session_a_committed_successor_can_renew_and_outlives_its_preparation`.
+    // +2: claim_job_attempt and claim_verdict, the claim local verdict
+    // (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md), in BACKGROUND_JOB_METHODS.
+    assert_eq!(declared.len(), 599, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

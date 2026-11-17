@@ -99,7 +99,9 @@ async function render(){
   if(!h.startsWith("#/item/")) NAV_ORIGIN=null;
   dvrRouteChanged(h);
   try{
-    if(h.startsWith("#/read/")) await viewReader(h.split("/")[2],h.split("/")[3]);
+    if(h.startsWith("#/curator-consent?")) await viewCuratorConsent(generation);
+    else if(h==="#/curator-connections") await viewCuratorConnections(generation);
+    else if(h.startsWith("#/read/")) await viewReader(h.split("/")[2],h.split("/")[3]);
     else if(h==="#/shared"||h.startsWith("#/shared/")) await viewSharedCatalogue(generation);
     else if(h.startsWith("#/item/")) await viewItem(h.split("/")[2]);
     else if(h.startsWith("#/library/")) await viewLibrary(h.split("/")[2]);
