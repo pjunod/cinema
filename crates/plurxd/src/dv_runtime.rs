@@ -1676,7 +1676,15 @@ async fn capture_private_output(
             _ = tokio::time::sleep_until(deadline) => Err("DV private window deadline expired".into()),
         }
     };
-    let result = private_window_result(result, cancel, &retirement, observed_helper.outcome());
+    // The supervisor publishes completion before retiring the encoder. That
+    // retirement can win the select before completed_helper is polled, so
+    // observe its retained result here too, before our cleanup stops anything.
+    // A helper that settles only during cleanup must remain unmarked.
+    let helper_outcome = observed_helper.outcome();
+    if helper_outcome.is_some() {
+        stages.mark(crate::dv_segment::WindowStage::HelperExited);
+    }
+    let result = private_window_result(result, cancel, &retirement, helper_outcome);
     writers.settled();
     let cleanup = slot
         .request_registered_retirement(registration)
@@ -2815,10 +2823,14 @@ mod private_window_outcome_tests {
         assert!(stages.report(None).encoder_tail.is_some());
 
         let stages = WindowStageClock::start();
-        capture_timed_graph(&stages, false, true, false, false, false)
+        let error = capture_timed_graph(&stages, false, true, false, false, false)
             .await
             .expect_err("failed helper graph");
-        assert!(stages.at(WindowStage::HelperExited).is_some());
+        assert!(error.contains("renderer helper failed"), "{error}");
+        assert!(
+            stages.at(WindowStage::HelperExited).is_some(),
+            "published helper completion is observed even when retirement wins capture"
+        );
 
         let stages = WindowStageClock::start();
         let error = capture_timed_graph(&stages, false, false, false, true, false)
