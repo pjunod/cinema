@@ -1,6 +1,6 @@
 # PR #1592: landing and qualification evidence
 
-**Status:** historical audit complete; coverage closure belongs to PR #1640 · **Updated:** 2026-11-16
+**Status:** open — historical evidence audited; positive coverage closure belongs to PR #1640 · **Updated:** 2026-11-16
 
 PR #1592 landed through a direct API merge with the train off after its final
 source run failed. The account recorded by Forgejo identifies the credential,
