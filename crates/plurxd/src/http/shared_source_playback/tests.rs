@@ -1073,7 +1073,8 @@ async fn sharing_source_http_offers_a_processed_upgrade_only_to_an_affirming_rec
     assert_eq!(
         affirmed.response().processed_upgrade.as_deref(),
         Some("offered"),
-        "the exact authenticated header offers a successor without changing this Start"
+        "the exact authenticated header offers a successor without changing this Start; plan_notes={:?}",
+        affirmed.response().plan_notes
     );
     assert_eq!(
         affirmed.response().delivered_dynamic_range.as_deref(),

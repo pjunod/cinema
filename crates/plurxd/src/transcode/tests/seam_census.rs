@@ -1052,16 +1052,21 @@ fn seam_census_of_the_workspace() {
         routes.is_empty(),
         "the HLS route group keeps no test-only site: {routes:?}"
     );
-    // The manager keeps only the Source processed Activity fixture's
-    // cfg(test)-gated observation. Pin its exact file, owner and class so
-    // another test-only manager seam cannot pass as it. The record call is
-    // absent from production builds because its entire block is cfg(test).
+    // The manager keeps two cfg(test)-gated observation families: six
+    // normalized-catalog omission records and the Source Activity record.
+    // Pin exact files, owners, classes and multiplicity so no other manager
+    // seam passes as either family. All records are absent from production.
     // The test-build decoder fallback remains deleted; its test names the
     // decoder through `with_decoders`.
     let manager: Vec<&Site> = sites
         .iter()
         .filter(|site| transcode_manager_site(&site.owner))
         .collect();
+    let expected_catalog_record = Site {
+        file: "crates/plurxd/src/transcode/manager/candidates.rs".to_owned(),
+        owner: "TranscodeManager::quality_catalog_from_snapshot_progress".to_owned(),
+        seam: Seam::Record,
+    };
     let expected_record = Site {
         file: "crates/plurxd/src/transcode/source_actor.rs".to_owned(),
         owner: "TranscodeManager::prepare_source_encoded_recipe".to_owned(),
@@ -1069,8 +1074,16 @@ fn seam_census_of_the_workspace() {
     };
     assert_eq!(
         manager,
-        [&expected_record],
-        "the only manager seam is the exact test-only Source Activity record: {manager:?}"
+        [
+            &expected_catalog_record,
+            &expected_catalog_record,
+            &expected_catalog_record,
+            &expected_catalog_record,
+            &expected_catalog_record,
+            &expected_catalog_record,
+            &expected_record,
+        ],
+        "manager seams are exactly the test-only catalog and Source Activity records: {manager:?}"
     );
     let source_actor =
         std::fs::read_to_string(workspace.join("crates/plurxd/src/transcode/source_actor.rs"))
