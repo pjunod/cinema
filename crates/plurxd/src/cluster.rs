@@ -66,6 +66,7 @@ pub(crate) struct Cluster {
     fence: ServingFence,
     membership: MembershipManager,
     directory: Directory,
+    replication: plurx_core::cluster::migration::status::ReplicationMonitor,
 }
 
 impl Cluster {
@@ -74,12 +75,14 @@ impl Cluster {
     pub(crate) fn new(
         fence: ServingFence,
         membership: MembershipManager,
+        replication: plurx_core::cluster::migration::status::ReplicationMonitor,
         mark: Option<hiqlite::AppliedMarkHandle>,
     ) -> Self {
         Self {
             directory: Directory::with_mark(membership.clone(), mark),
             fence,
             membership,
+            replication,
         }
     }
 
@@ -127,6 +130,117 @@ impl Cluster {
         }
     }
 
+    /// The heartbeat-published role, preserving its standalone value independently
+    /// of the combined standing/maintenance projection in `role()`.
+    pub(crate) async fn admission_role(&self) -> Result<LocalServingRole, MembershipError> {
+        self.membership.local_serving_role().await
+    }
+
+    pub(crate) fn maintenance_active(&self) -> bool {
+        self.membership.local_maintenance_active()
+    }
+
+    pub(crate) fn deployment_enabled(&self, configured: bool) -> bool {
+        self.membership.cluster_enabled(configured)
+    }
+
+    pub(crate) fn quorum_managed(&self) -> bool {
+        self.fence.is_quorum_managed()
+    }
+    pub(crate) fn ready(&self) -> bool {
+        self.fence.is_ready()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn desktop_admission(&self) -> Option<crate::serving_fence::RestartAdmission> {
+        self.fence.try_desktop_http_admission().await
+    }
+
+    pub(crate) fn http_refusal(
+        &self,
+        path: &str,
+    ) -> Option<crate::serving_fence::ServingHttpPolicy> {
+        self.fence.http_policy(path)
+    }
+
+    pub(crate) fn clock(&self) -> std::sync::Arc<plurx_core::cluster::clock::ClusterClockGuard> {
+        self.membership.clock_guard()
+    }
+
+    /// Fresh confirmations keep the existing metrics and consistent removal
+    /// checks. Directory projections never grant this authority.
+    pub(crate) async fn confirm_active_voter(&self) -> Result<bool, MembershipError> {
+        self.membership.local_node_is_active_voter().await
+    }
+    pub(crate) async fn confirm_voter(&self) -> Result<bool, MembershipError> {
+        self.membership.local_node_is_committed_voter().await
+    }
+    pub(crate) async fn confirm_member(&self) -> Result<bool, MembershipError> {
+        self.membership.local_node_is_committed_member().await
+    }
+
+    pub(crate) async fn singleton_jobs_allowed(&self) -> bool {
+        self.membership.may_run_cluster_jobs().await
+    }
+    pub(crate) async fn job_allowed(
+        &self,
+        kind: plurx_core::store::background_jobs::JobKind,
+    ) -> bool {
+        use plurx_core::cluster::coordination::ClusterJobAuthority;
+        self.membership.may_execute_job(kind).await
+    }
+
+    pub(crate) async fn membership_status(
+        &self,
+    ) -> Result<plurx_core::cluster::membership::MembershipStatus, MembershipError> {
+        self.membership.status().await
+    }
+    pub(crate) async fn replication_status(
+        &self,
+    ) -> plurx_core::cluster::migration::status::ReplicationStatus {
+        self.replication.status().await
+    }
+    pub(crate) async fn node_names(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, String>, MembershipError> {
+        self.membership.node_hostnames().await
+    }
+    pub(crate) async fn revocation_ready(&self) -> Result<bool, MembershipError> {
+        self.membership.cache_admin_revocation_ready().await
+    }
+    pub(crate) async fn revocation_activated(&self) -> Result<bool, MembershipError> {
+        self.membership
+            .cache_admin_revocation_activated_locally()
+            .await
+    }
+    pub(crate) async fn source_layout_available(&self) -> Result<bool, MembershipError> {
+        self.membership.source_layout_ready().await
+    }
+
+    /// Preserve the existing roster result types at protocol boundaries while
+    /// all purposes share the same stamped directory.
+    pub(crate) async fn operation_targets(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+        self.directory.targets(Purpose::Operations).await
+    }
+    pub(crate) async fn media_targets(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+        self.directory.targets(Purpose::MediaWorkers).await
+    }
+    pub(crate) async fn voter_targets(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+        self.directory.targets(Purpose::Voters).await
+    }
+    pub(crate) fn artwork(&self) -> Artwork {
+        Artwork {
+            manager: self.membership.clone(),
+            directory: self.directory.clone(),
+        }
+    }
+    pub(crate) fn observations(&self) -> Observations {
+        Observations {
+            raft: self.replication.metrics_handle(),
+            members: self.membership.metrics_handle(),
+        }
+    }
+
     /// Who can help, for `purpose`; see [`Directory::peers`].
     pub(crate) async fn peers(&self, purpose: Purpose) -> Result<Peers, ClusterError> {
         self.directory.peers(purpose).await
@@ -135,6 +249,68 @@ impl Cluster {
     /// The shared directory, for a subsystem that keeps its own handle.
     pub(crate) fn directory(&self) -> Directory {
         self.directory.clone()
+    }
+}
+
+/// Existing artwork wire proofs and repair leases. These remain fresh
+/// membership operations; the cached artwork roster is only a recovery hint.
+#[derive(Clone)]
+pub(crate) struct Artwork {
+    manager: MembershipManager,
+    directory: Directory,
+}
+impl Artwork {
+    pub(crate) async fn targets(&self) -> Result<Vec<String>, MembershipError> {
+        Ok(self
+            .directory
+            .targets(Purpose::Artwork)
+            .await?
+            .into_iter()
+            .filter_map(|peer| peer.http_base)
+            .collect())
+    }
+
+    pub(crate) fn sign(
+        &self,
+        name: &str,
+    ) -> Result<plurx_core::cluster::membership::ArtworkPeerAuth, MembershipError> {
+        self.manager.artwork_peer_auth(name)
+    }
+    pub(crate) async fn verify(
+        &self,
+        name: &str,
+        proof: &plurx_core::cluster::membership::ArtworkPeerAuth,
+    ) -> Result<bool, MembershipError> {
+        self.manager.verify_artwork_peer_auth(name, proof).await
+    }
+    pub(crate) async fn claim_repair(
+        &self,
+        item: i64,
+        lease: std::time::Duration,
+    ) -> Result<Option<plurx_core::cluster::membership::ArtworkRepairClaim>, MembershipError> {
+        self.manager.claim_artwork_source_repair(item, lease).await
+    }
+    pub(crate) async fn retire_repair(
+        &self,
+        fence: &plurx_core::store::ArtworkRepairFence,
+    ) -> Result<bool, MembershipError> {
+        self.manager.retire_artwork_source_repair(fence).await
+    }
+}
+
+/// Canonical passive samples without exposing the raw metrics handles to
+/// HTTP composition or request attribution.
+#[derive(Clone)]
+pub(crate) struct Observations {
+    raft: plurx_core::cluster::migration::status::PassiveRaftMetrics,
+    members: plurx_core::cluster::membership::PassiveMembershipMetrics,
+}
+impl Observations {
+    pub(crate) fn raft(&self) -> plurx_core::cluster::migration::status::PassiveRaftMetricsView {
+        self.raft.snapshot()
+    }
+    pub(crate) fn members(&self) -> plurx_core::cluster::membership::PassiveMembershipMetricsView {
+        self.members.snapshot()
     }
 }
 
@@ -180,6 +356,10 @@ pub(crate) enum Purpose {
     Voters,
     /// Ready media targets, learners included (`media_peers`).
     MediaWorkers,
+    /// All committed members for remote control and Activity starts, stale or not.
+    Operations,
+    /// Reachable artwork recovery endpoints, without voter or readiness filtering.
+    Artwork,
 }
 
 /// A failed roster read. Displays exactly as the membership error it wraps,
@@ -235,6 +415,17 @@ impl Directory {
         Peers::of(&snapshot, purpose, roster_now().map_err(ClusterError)?)
     }
 
+    /// Existing protocol consumers keep their original membership error type.
+    pub(crate) async fn targets(
+        &self,
+        purpose: Purpose,
+    ) -> Result<Vec<ActivityPeer>, MembershipError> {
+        self.peers(purpose)
+            .await
+            .map(|peers| peers.list)
+            .map_err(|error| error.0)
+    }
+
     /// The other committed voters with the voter facts of the same snapshot.
     pub(crate) async fn voters(&self) -> Result<Voters, ClusterError> {
         let snapshot = self.inner.snapshot().await.map_err(ClusterError)?;
@@ -257,6 +448,8 @@ impl Peers {
         let list = match purpose {
             Purpose::Voters => snapshot.voters(now),
             Purpose::MediaWorkers => snapshot.media_workers(now, true).map_err(ClusterError)?,
+            Purpose::Operations => snapshot.operations(now).map_err(ClusterError)?,
+            Purpose::Artwork => snapshot.artwork(now),
         };
         Ok(Self { list })
     }
@@ -441,6 +634,15 @@ pub(crate) mod tests {
             ["node-2", "node-3", "node-5"],
             "media workers: ready members, learners included"
         );
+        assert_eq!(
+            ids(&Peers::of(&snapshot, Purpose::Operations, NOW).expect("operations")),
+            ["node-2", "node-3", "node-4", "node-5"]
+        );
+        assert_eq!(
+            ids(&Peers::of(&snapshot, Purpose::Artwork, NOW).expect("artwork")),
+            ["node-2", "node-5", "node-6"],
+            "artwork includes a noncommitted endpoint, without stale or missing endpoints"
+        );
     }
 
     /// `Voters` carries the voter facts of the same snapshot.
@@ -505,6 +707,7 @@ pub(crate) mod tests {
                     .metrics_handle(),
             ),
             MembershipManager::unavailable(),
+            plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
             None,
         );
         assert_eq!(

@@ -171,7 +171,7 @@ fn error_response(error: ApiError) -> Response {
     (status, [("cache-control", "no-store")], axum::Json(value)).into_response()
 }
 async fn enabled(state: &AppState) -> Result<(), ApiError> {
-    if state.membership.local_maintenance_active() {
+    if state.cluster.maintenance_active() {
         return Err(fail(503, "unavailable"));
     }
     #[cfg(test)]
@@ -192,8 +192,8 @@ async fn route(state: &AppState, dispatch: Dispatch) -> Result<(u16, Value), Api
     if let Some(target) = dispatch.request.target() {
         if target.owner_node_id != state.node_id {
             let peers = state
-                .membership
-                .operations_peers()
+                .cluster
+                .operation_targets()
                 .await
                 .map_err(|_| fail(503, "unavailable"))?;
             let peer = peers
@@ -243,7 +243,7 @@ async fn listings(state: &AppState, d: &Dispatch) -> Result<Value, ApiError> {
     let mut summaries = local["sessions"].as_array().cloned().unwrap_or_default();
     let mut unavailable = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    let peers = tokio::time::timeout_at(deadline, state.membership.operations_peers())
+    let peers = tokio::time::timeout_at(deadline, state.cluster.operation_targets())
         .await
         .map_err(|_| fail(503, "unavailable"))?
         .map_err(|_| fail(503, "unavailable"))?;

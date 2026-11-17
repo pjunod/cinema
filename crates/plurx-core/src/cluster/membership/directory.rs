@@ -224,6 +224,24 @@ impl RosterSnapshot {
         Ok(peers)
     }
 
+    /// Artwork recovery's original local-SQL rule: all reachable, nonremoved
+    /// remote endpoints, including uncommitted nodes, with no media peer cap.
+    /// The shared SQL already excludes removal rows and the local node.
+    #[must_use]
+    pub fn artwork(&self, now: i64) -> Vec<ActivityPeer> {
+        let mut rows = self
+            .rows
+            .iter()
+            .filter(|row| row.http_base.is_some() && row.last_seen_at >= reachable_after(now))
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| {
+            b.last_seen_at
+                .cmp(&a.last_seen_at)
+                .then_with(|| a.raft_id.cmp(&b.raft_id))
+        });
+        rows.into_iter().map(|row| peer(now, row)).collect()
+    }
+
     /// Every other committed member, stale or not (`operations_peers`). A
     /// roster beyond the bounded operations limit fails closed.
     pub fn operations(&self, now: i64) -> Result<Vec<ActivityPeer>, MembershipError> {

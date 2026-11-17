@@ -1210,6 +1210,7 @@ impl AppState {
         let cluster = crate::cluster::Cluster::new(
             serving.clone(),
             membership.clone(),
+            replication.clone(),
             applied.applied_mark(),
         );
         let Dirs {
@@ -1236,8 +1237,10 @@ impl AppState {
         // registry can distinguish active tuner scratch from restart debris.
         let live_tv_scratch = transcode_dir.join(crate::transcode::LIVE_TV_WORK_DIR_NAME);
         let system = Arc::new(system);
-        let peer_activity =
-            crate::http::internal_activity::PeerActivityClient::new(membership.clone());
+        let peer_activity = crate::http::internal_activity::PeerActivityClient::new(
+            membership.clone(),
+            cluster.directory(),
+        );
         let jobs = Arc::new(
             JobManager::new_with_scan_prune_percent(
                 Arc::clone(&store),
@@ -1495,6 +1498,7 @@ impl AppState {
         self.cluster = crate::cluster::Cluster::new(
             self.serving.clone(),
             membership.clone(),
+            self.replication.clone(),
             self.applied.applied_mark(),
         );
         self.membership = membership;

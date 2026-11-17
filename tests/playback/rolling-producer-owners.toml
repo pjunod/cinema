@@ -7205,7 +7205,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # it reads listener state and launches nothing.
 # +1 with #1629: the sharing idle-loop test reads SharingManager::status()
 # to observe the listener state; it launches nothing.
-expected_occurrences = 936
+# Facade slice 3: -1. Two Developer MembershipManager::status() readers now
+# enter one Cluster::membership_status() delegate. The replication status
+# reader also moves into one delegate, with no net shape change. These are
+# state observations; no task or process ownership changes. The broad matcher
+# remains unchanged so future process-capable shapes still require review.
+expected_occurrences = 935
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
