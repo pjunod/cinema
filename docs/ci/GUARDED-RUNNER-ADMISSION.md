@@ -13,7 +13,8 @@ eligibility and changes no labels, registrations, resource limits or placement.
 `plurx-runner-watchdog --describe-owner-contract` prints version 2 without
 reading state or contacting Incus. A guarded call requires `--vm`,
 `--expected-instance-uuid`, `--expected-instance-generation` and
-`--authorization-deadline-monotonic`. Both identities must be canonical,
+`--authorization-deadline-monotonic`, `--expected-owner-sha256`,
+`--guarded-command-id` and `--guarded-command-hash`. Both identities must be canonical,
 nonzero UUIDs. Partial identity cannot fall back to a name-only operation.
 
 The watchdog reads the exact instance under the fixed physical-host lock
@@ -29,7 +30,18 @@ receipt says `already_running` and performs no daemon repair. Starting a VM
 returns `started`; it does not prove service readiness or eligible job pickup.
 An external start timeout is `unknown` with the attempt retained. Identity
 conflicts are rejected; maintenance, budget and expired authorization defer.
-Versioned JSON includes expected and observed resource identity plus outcome.
+Versioned JSON includes expected and observed resource identity, command ID,
+full command hash, exact owner code hash, whether external submission began and
+outcome. The host agent opens and hashes the installed script, retains its FD,
+and on Linux executes that exact inode via `/proc/self/fd`. Install replaces the
+script atomically with a new inode under the fixed admission lock and refuses
+any maintenance marker.
+
+Before guarded Incus submission, the watchdog fsyncs an owned maintenance marker
+and a submitting record. An unknown/timeout retains both and blocks cooperating
+timers/provisioning. A terminal receipt is persisted before its exact owned marker
+is released. Restart can clear only a marker whose IDs/hashes match that durable
+terminal record; metadata reconciliation never reruns the VM effect.
 
 ## Managed mutations share the physical lock
 
@@ -55,7 +67,7 @@ lock. Do not clear another operation's maintenance intent to free capacity.
 
 ## Evidence and remaining gates
 
-Local focused owner suite: **36 tests pass**, including same-name replacement,
+Local focused owner suite: **41 tests pass**, including same-name replacement,
 changed or absent generation, running-VM no-daemon-effect, pause during
 headroom and persistence, deadline expiry, timeout uncertainty, actual fsynced
 attempt state and cooperating mutation exclusion. Ansible has five offline
