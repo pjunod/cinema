@@ -225,10 +225,17 @@ fn source_with_explicit_audio_lead(directory: &std::path::Path) -> (PathBuf, Fix
         video_pts.windows(2).all(|p| p[0] < p[1]),
         "strict authored video PTS order"
     );
+    // Container origin and signed packet clocks are separate: one observed
+    // source had video 250 ms, audio -21 ms and format 0. Keep the measured
+    // audio PTS for the packet-offset oracle, not a container-start proxy.
     assert_eq!(
-        timing.audio.0 * timing.format_start.1,
-        timing.format_start.0 * timing.audio.1,
-        "first audio packet is the actual format origin: {timing:?}"
+        timing.format_start.0, 0,
+        "the private container has the authored zero origin: {timing:?}"
+    );
+    assert_eq!(
+        4 * (timing.video.0 * timing.format_start.1 - timing.format_start.0 * timing.video.1),
+        timing.video.1 * timing.format_start.1,
+        "video starts exactly 250 ms after the container origin: {timing:?}"
     );
     let lead_num = timing.video.0 * timing.audio.1 - timing.audio.0 * timing.video.1;
     let lead_den = timing.video.1 * timing.audio.1;
