@@ -14,6 +14,8 @@ failures.
 
 | File | Answers | |
 |---|---|---|
+| [CLUSTER-FACADE-BOUNDARY-DECISION.md](CLUSTER-FACADE-BOUNDARY-DECISION.md) | How core-private mechanisms cross into one daemon facade without fake privacy. | open |
+| [CLUSTER-FACADE-SLICE-7-BUILD.md](CLUSTER-FACADE-SLICE-7-BUILD.md) | The serialized final ownership migrations and evidence required for honest zero. | open |
 | [CLUSTER-FACADE-SLICE-6-BUILD.md](CLUSTER-FACADE-SLICE-6-BUILD.md) | How sharing, Source and receiver custody retain fresh typed witnesses through the facade. | open |
 | [CLUSTER-FACADE-SLICE-5-BUILD.md](CLUSTER-FACADE-SLICE-5-BUILD.md) | How typed peer-call ownership and stamped owner lookup replace raw transports and the Live TV TTL. | open |
 | [SHARING-AUTHORITY-A6-BUILD.md](SHARING-AUTHORITY-A6-BUILD.md) | How shared-library monitors stop proving their own authority: classified observations, one outage policy through `SessionGrace`, a cached advisory member floor, then change-driven re-observation (audit A6). | built |
