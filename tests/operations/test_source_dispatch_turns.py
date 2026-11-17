@@ -83,7 +83,8 @@ class SourceDispatchTurns(unittest.TestCase):
         waiting = ["index", "index2", "index3"]
         for name in waiting[1:]:
             self.db.execute("INSERT INTO analysis_requests(request_id,component,trigger,state,fence,created_at_ms,updated_at_ms) VALUES(?,'fragment_index','background','queued',0,1,0)", (name,))
-            self.db.execute("INSERT INTO analysis_required_resources VALUES(?,'source_io:a')", (name,))
+            if self.db.execute("SELECT type FROM sqlite_master WHERE name='analysis_required_resources'").fetchone()[0] == 'table':
+                self.db.execute("INSERT INTO analysis_required_resources VALUES(?,'source_io:a')", (name,))
         now = 70000
         for round_number in range(3):
             for i in range(8):
