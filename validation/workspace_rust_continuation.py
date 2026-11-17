@@ -41,8 +41,14 @@ TIMEOUT_180_JOB = '5ed443546bfbd4d4cfea28aeccd3add213f3dcc61a1be65f99a4a65822478
 # every general lane job now uses. Checkout, toolchain, Cargo flags, job/test
 # threads, timeout and resource limits are unchanged. Passes recorded under
 # the previous image stay historical and are not current evidence.
-CURRENT_JOB = 'ea8ae633cfe0e1b489dfa9295b7ab83a8b0b1d54564ac8c9312197be16df5e77'
-HISTORICAL_JOBS = (ORIGINAL_JOB, PRE_NONVOTER_JOB, NONVOTER_JOB, CGROUP_PARSE_JOB, TIMEOUT_180_JOB, CURRENT_JOB)
+IMAGE_6A989B4D_JOB = 'ea8ae633cfe0e1b489dfa9295b7ab83a8b0b1d54564ac8c9312197be16df5e77'
+# Reviewed test-thread stack only (2026-11-16): match rust-units.yml's 8 MiB
+# floor for debug source-actor futures (docs/ci/RUST-UNIT-FANOUT.md).
+# Checkout, image, toolchain, Cargo flags, thread counts and resource caps
+# are unchanged. Prior recipes remain historical; failed or unrun bodies
+# still require execution, and current admission accepts only this recipe.
+CURRENT_JOB = '89fcea13dc18711bb02021fcd414e2489a07ce51831e0322fbc9940637e0fd3b'
+HISTORICAL_JOBS = (ORIGINAL_JOB, PRE_NONVOTER_JOB, NONVOTER_JOB, CGROUP_PARSE_JOB, TIMEOUT_180_JOB, IMAGE_6A989B4D_JOB, CURRENT_JOB)
 ROOT_SOURCES = {'tests/operations/test_source_custody_recovery.py', 'scripts/source-custody-recovery'}
 PROTECTED = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'Makefile'}
 NATIVE_ACTIONS = ('.cargo/', '.github/actions/rust-native-deps/', '.github/actions/ffmpeg/',
