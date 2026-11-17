@@ -1,13 +1,12 @@
 # streaming/ — delivery: VOD, Dolby Vision, capabilities, reliability
 
-Status words and documentation rules: [docs index](../README.md). Add each
-document's row here in the same commit.
+Status terms: [index](../README.md). Index new docs here.
 
 Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 
 | File | Answers | |
 |---|---|---|
-| [MPV live startup](MPV-LIVE-STARTUP.md) | Why a normal seek waited 26–27 seconds, consumer-specific admission and acceptance. | open |
+| [MPV startup](MPV-LIVE-STARTUP.md) | Admission and latency. | open |
 | [Fleet acceptance](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md) | Hour measurements and attribution limits. | done |
 | [CM4 trim fidelity](CM4-TRIM-FIDELITY.md) | Source-gamut hue and L8 spatial controls. | built |
 | [CM29 gamut](CM29-MEASURED-GAMUT.md) | Measured vertices and qualification. | built |
