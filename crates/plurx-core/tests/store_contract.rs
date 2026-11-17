@@ -13851,6 +13851,65 @@ async fn replicated_source_tail_drops(
         .collect::<Vec<_>>();
     let remove_holders = remove("background_source_pauses");
     let mut rewind = rewind;
+    if remove_holders {
+        use queue_fixture::source_extensions_fixture::{
+            published_storage_pending_fixture_shape, STORAGE_PENDING_FIXTURE_SHAPE_SQL,
+            STORAGE_PENDING_REWIND_SQL,
+        };
+        let pending_shape = client
+            .query_consistent(STORAGE_PENDING_FIXTURE_SHAPE_SQL, hiqlite::params!())
+            .await
+            .expect("complete pending-domain fixture inventory")
+            .iter_mut()
+            .map(|row| {
+                (
+                    row.get::<String>("type"),
+                    row.get::<String>("name"),
+                    row.get::<String>("sql"),
+                )
+            })
+            .collect::<Vec<_>>();
+        // The lease preflight already validates these root-overlaid views
+        // against the exact v2/v3 generation. Every other object is frozen v131.
+        let stable = |rows: Vec<(String, String, String)>| {
+            rows.into_iter()
+                .filter(|(_, name, _)| {
+                    !matches!(
+                        name.as_str(),
+                        "background_storage_domain_holders"
+                            | "background_storage_domain_disturbed"
+                            | "background_storage_domain_affected_jobs"
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            stable(pending_shape),
+            stable(published_storage_pending_fixture_shape()),
+            "exact pending-domain owner before full rewind"
+        );
+        require_replicated_fixture_marker(client, "background_storage_domain_pending_schema", 1)
+            .await;
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(
+                "SELECT count(*) AS value FROM background_storage_domain_pending",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("accepted pending-domain configuration");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].value, 0,
+            "desired storage-domain configuration cannot be discarded"
+        );
+        rewind.extend(
+            STORAGE_PENDING_REWIND_SQL
+                .split(';')
+                .map(str::trim)
+                .filter(|sql| !sql.is_empty() && !sql.starts_with("PRAGMA"))
+                .map(str::to_owned),
+        );
+    }
     if remove("background_source_custody") {
         // The exact current preflight covers both retention triggers, its
         // marker DDL and its index. The lease rewind restores their frozen
@@ -13874,7 +13933,6 @@ async fn replicated_source_tail_drops(
     }
     rewind
         .into_iter()
-        .chain(remove_holders.then(|| "DROP VIEW background_storage_domain_holders".to_owned()))
         .chain(validated_source_tail_drops(
             &published, &counts, true, remove,
         ))

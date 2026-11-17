@@ -52,7 +52,12 @@ service guard, before the same v3 rewind. It does not forge node capabilities
 or weaken readiness. The restored-trigger oracle applies only the exact
 canonical generation delta and preserves every unrelated captured definition.
 Full source removal also restores the published pre-custody retention triggers
-before removing their custody-table dependency.
+before removing their custody-table dependency. It removes the whole empty
+pending-domain extension using the same published rewind as SQLite, after
+validating its exact stable DDL, marker and pending-data count. Root-overlaid
+views are covered by the generation-specific lease preflight. Leaving its
+marker after removing only the holder view would correctly fail bootstrap's
+partial-catalogue check.
 
 Historical replicated fixture rewinds also remove the exact, empty v127
 coordination adjunct before altering old analysis tables. Its published witness,

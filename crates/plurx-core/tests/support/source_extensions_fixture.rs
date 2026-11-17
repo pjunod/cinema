@@ -721,6 +721,46 @@ pub(crate) fn rewind_title_v2_to_v131(connection: &rusqlite::Connection) {
 /// Rewind an owned, empty v131 storage-domain extension to published v130.
 /// Desired configuration is user data, including an already settled revision,
 /// so no pending-table row may be discarded by a historical fixture.
+pub(crate) const STORAGE_PENDING_FIXTURE_SHAPE_SQL: &str =
+    "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (
+        name IN ('background_storage_domain_pending','background_storage_domains_live',
+        'background_storage_domain_changed_roots','background_storage_domain_disturbed',
+        'background_storage_domain_holders','background_storage_domain_affected_jobs',
+        'background_storage_domains_apply','background_storage_domain_pending_schema')
+        OR tbl_name IN ('background_storage_domain_pending','background_storage_domains_live',
+        'background_storage_domain_changed_roots','background_storage_domain_disturbed',
+        'background_storage_domain_holders','background_storage_domain_affected_jobs',
+        'background_storage_domains_apply','background_storage_domain_pending_schema'))
+        ORDER BY type,name";
+
+pub(crate) const STORAGE_PENDING_REWIND_SQL: &str = "DROP TRIGGER background_storage_domains_apply;
+             DROP VIEW background_storage_domain_affected_jobs;
+             DROP VIEW background_storage_domain_disturbed;
+             DROP VIEW background_storage_domain_changed_roots;
+             DROP VIEW background_storage_domain_holders;
+             DROP VIEW background_storage_domains_live;
+             DROP TABLE background_storage_domain_pending_schema;
+             DROP TABLE background_storage_domain_pending;
+             PRAGMA user_version=130;";
+
+/// The exact published pending-domain extension, before root overlays.
+pub(crate) fn published_storage_pending_fixture_shape() -> Vec<(String, String, String)> {
+    let witness = rusqlite::Connection::open_in_memory().expect("published storage domain witness");
+    witness.execute_batch("CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);")
+        .expect("storage domain dependency");
+    witness
+        .execute_batch(include_str!("../../src/store/storage_domain_pending.sql"))
+        .expect("published storage domain extension");
+    let result = witness
+        .prepare(STORAGE_PENDING_FIXTURE_SHAPE_SQL)
+        .expect("storage pending inventory")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("storage pending rows")
+        .collect::<Result<_, _>>()
+        .expect("complete storage pending fixture");
+    result
+}
+
 fn rewind_empty_storage_domain_pending_to_v130(connection: &rusqlite::Connection) {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -732,13 +772,7 @@ fn rewind_empty_storage_domain_pending_to_v130(connection: &rusqlite::Connection
         version, 131,
         "only the published v131 storage domain tail may be rewound"
     );
-    let shape_sql = "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (
-        name IN ('background_storage_domain_pending','background_storage_domains_live',
-        'background_storage_domain_changed_roots','background_storage_domain_disturbed',
-        'background_storage_domain_holders','background_storage_domain_affected_jobs',
-        'background_storage_domains_apply','background_storage_domain_pending_schema')
-        OR tbl_name IN ('background_storage_domain_pending','background_storage_domain_pending_schema'))
-        ORDER BY type,name";
+    let shape_sql = STORAGE_PENDING_FIXTURE_SHAPE_SQL;
     let objects = |catalogue: &rusqlite::Connection| -> Vec<(String, String, String)> {
         catalogue
             .prepare(shape_sql)
@@ -748,15 +782,9 @@ fn rewind_empty_storage_domain_pending_to_v130(connection: &rusqlite::Connection
             .collect::<Result<_, _>>()
             .expect("complete storage domain fixture objects")
     };
-    let witness = rusqlite::Connection::open_in_memory().expect("published storage domain witness");
-    witness.execute_batch("CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);")
-        .expect("storage domain trigger dependency");
-    witness
-        .execute_batch(include_str!("../../src/store/storage_domain_pending.sql"))
-        .expect("published v131 storage domain extension");
     assert_eq!(
         objects(connection),
-        objects(&witness),
+        published_storage_pending_fixture_shape(),
         "exact published storage domain tail required"
     );
     let marker: (i64, i64) = connection.query_row(
@@ -783,17 +811,7 @@ fn rewind_empty_storage_domain_pending_to_v130(connection: &rusqlite::Connection
     // also protects direct callers from a refused or failed DDL statement.
     within_fixture_savepoint(connection, || {
         connection
-            .execute_batch(
-                "DROP TRIGGER background_storage_domains_apply;
-             DROP VIEW background_storage_domain_affected_jobs;
-             DROP VIEW background_storage_domain_disturbed;
-             DROP VIEW background_storage_domain_changed_roots;
-             DROP VIEW background_storage_domain_holders;
-             DROP VIEW background_storage_domains_live;
-             DROP TABLE background_storage_domain_pending_schema;
-             DROP TABLE background_storage_domain_pending;
-             PRAGMA user_version=130;",
-            )
+            .execute_batch(STORAGE_PENDING_REWIND_SQL)
             .expect("published storage domain pending rewind");
     });
 }
