@@ -7259,7 +7259,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # it reads listener state and launches nothing.
 # +1 with #1629: the sharing idle-loop test reads SharingManager::status()
 # to observe the listener state; it launches nothing.
-expected_occurrences = 948
+# Main #1736 adds one `VodSessionStore::status()` read in
+# `processed_reuse_tests.rs::processed_stream_format_reports_the_attached_carrier_not_its_pq_base`.
+# It inspects the attached playback status for HDR10 base vs DV carrier and is
+# not an OS process launch.
+expected_occurrences = 949
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
