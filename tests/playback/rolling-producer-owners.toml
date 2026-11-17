@@ -6032,6 +6032,11 @@ pattern = "use\\s+tokio::time"
 # clock and its handoff tests, each on its owning task (reviewed in #1645).
 expected_occurrences = 8
 
+# Static fixture lifecycle follow-up (2026-11-17): gap-fill adds two real
+# children (FFmpeg builder and FFprobe) joined by testfixtures::run; TempDir
+# remains live through both settlements. The decode-facts change is a final
+# failure snapshot only. These are test fixtures; production gates are unchanged.
+
 [[module_structures]]
 id = "process-command-construction"
 # Source-budget audit (8ab61a779 -> bbc5c1664): +4 test-only commands. The
@@ -6502,7 +6507,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # loop verifies relative/custom/non-profile commands keep their resolution
 # and cwd, while a known absolute no-input candidate receives the owned cwd.
 # This fixture launches no child.
-expected_occurrences = 354
+expected_occurrences = 356
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
