@@ -1006,13 +1006,13 @@ impl Session {
                     clock.hard_deadline.is_some_and(|deadline| now >= deadline)
                         && end_ms <= served.end_ms
                 });
-            // Capacity is measured at the fixed production bank independently
-            // of first publication. Otherwise a shorter consumer admission lets
-            // a slow-but-progressing producer bypass the initial assessment.
-            // Until a first snapshot exists, keep reassessing as before: a
-            // seek lead can leave capacity paid before admission is possible.
+            // Keep the original repeated pre-publication assessment. A short
+            // MPV snapshot additionally carries its unpaid initial assessment
+            // to the fixed bank; native/unknown admission already paid its
+            // media bank and retains the old post-publication deadline rules.
             let initial_capacity_due = !end_list
-                && (!clock.initial_capacity_checked || clock.served.is_none())
+                && (clock.served.is_none()
+                    || clock.initial_capacity_pending_after_short_admission)
                 && !held_for_scratch
                 && end_ms >= rolling_initial_runway_ms(playback_rate);
             let initial_insufficient = initial_capacity_due
@@ -1022,6 +1022,7 @@ impl Session {
                 && producer_speed.is_some_and(|speed| speed.is_finite())
             {
                 clock.initial_capacity_checked = true;
+                clock.initial_capacity_pending_after_short_admission = false;
             }
             let insufficient = initial_insufficient
                 || (!end_list
@@ -1376,6 +1377,10 @@ impl Session {
             return Ok(());
         }
         if clock.served.is_none() {
+            clock.initial_capacity_pending_after_short_admission =
+                initial_admission_policy == RollingStartupPolicy::MpvReloadWindow
+                    && !clock.initial_capacity_checked
+                    && served_end_ms < rolling_initial_runway_ms(playback_rate);
             tracing::info!(
                 target: "plurxd::transcode",
                 session = %session_log_id(session_id),
@@ -1388,6 +1393,7 @@ impl Session {
                 bootstrap_ms = budget.desired_end_ms.saturating_sub(budget.consumed_end_ms),
                 producer_speed = ?producer_speed,
                 initial_capacity_checked = clock.initial_capacity_checked,
+                initial_capacity_pending_after_short_admission = clock.initial_capacity_pending_after_short_admission,
                 held_for_scratch,
                 consumed_end_ms = budget.consumed_end_ms,
                 demand_sequence = ?budget.demand_sequence,

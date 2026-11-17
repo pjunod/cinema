@@ -202,26 +202,32 @@ impl RollingStartupPolicy {
     }
 }
 
-/// MPV/FFmpeg reloads after the last EXTINF, then at target/2 after an
-/// unchanged reload. Under the supported >= playback-rate production envelope,
-/// the next bounded cut takes at most Dmax/rate; publication waits at most the
-/// 2s refill spacing plus its normal poll. A missed reload costs another half
-/// target. Cover both the longest initial reload and that missed-reload case.
+/// A changed FFmpeg reload can already see an old published endpoint, then
+/// wait the last EXTINF (up to the target) before looking again. The reserve
+/// must cover both endpoint age and that following reload, not only an
+/// unchanged reload's target/2 delay.
 ///
-/// The 1s scheduling/delivery margin is a measured operating envelope (the
-/// retained snapshot-to-first-frame maximum was <0.9s), not a universal network
-/// or filesystem guarantee. Actual selected-player continuity remains required.
-/// No finite startup reserve can cover an unbounded producer or delivery stall.
+/// A commit can lag its latest endpoint by at most P + poll. The next
+/// endpoint completes within Dmax/rate of that endpoint, but its commit also
+/// waits for the previous commit + P, then another poll. Its delivery age is
+/// therefore max(Dmax/rate, 2P + poll) + poll + margin. Add one target for the
+/// consumer's next reload. No alignment between commit/poll phases is assumed.
+///
+/// The 1s scheduling/delivery margin is an operating assumption informed by
+/// retained snapshot-to-first-frame observations below 0.9s, not a universal
+/// scheduler, network or filesystem guarantee. Selected-player continuity
+/// remains required. No finite reserve covers unbounded production/delivery.
 pub(super) fn rolling_mpv_reload_runway_ms(rate: f64) -> i64 {
     let target_ms = ROLLING_PUBLICATION_TARGET.as_millis() as f64;
     let spacing_ms = f64::from(plurx_core::transcode::SEGMENT_SECONDS) * 1_000.0;
-    let next_cut_ms = (ROLLING_SEGMENT_MAX_MS as f64 / rate).max(spacing_ms)
-        + ROLLING_PUBLICATION_POLL.as_millis() as f64;
-    let reload_ms = target_ms.max(next_cut_ms + target_ms / 2.0);
+    let poll_ms = ROLLING_PUBLICATION_POLL.as_millis() as f64;
+    let endpoint_age_ms = (ROLLING_SEGMENT_MAX_MS as f64 / rate)
+        .max(2.0 * spacing_ms + poll_ms)
+        + poll_ms;
     // Do not truncate a required floor to the reserve cap and claim coverage.
     // All supported 0.25x..4x rates fit; an unsupported larger floor stays
     // unready within the ordinary bounded publication allowance.
-    (rate * (reload_ms + 1_000.0)).ceil() as i64
+    (rate * (target_ms + endpoint_age_ms + 1_000.0)).ceil() as i64
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -238,9 +244,13 @@ pub(super) struct RollingPublicationClock {
     pub(super) startup_policy: RollingStartupPolicy,
     startup_policy_bound: bool,
     pub(super) reserve_phase: RollingReservePhase,
-    /// The fixed initial capacity assessment must still occur after an early
-    /// consumer attachment; new completed segments do not waive this check.
+    /// A finite sufficient sample paid the fixed initial capacity assessment.
+    /// Until publication, a later sample is still reassessed at that bank.
     pub(super) initial_capacity_checked: bool,
+    /// Only a short MPV first snapshot carries its unpaid assessment forward.
+    /// Native admission with unknown speed keeps the old post-publication
+    /// deadline behavior without pretending the speed was measured.
+    pub(super) initial_capacity_pending_after_short_admission: bool,
     pub(super) served: Option<ServedPlaylistSnapshot>,
     pub(super) staged_attempt: Option<u64>,
     /// Actual monotonic observation of the writer's first gated inventory.
@@ -358,6 +368,7 @@ impl RollingPublicationClock {
         {
             self.reserve_phase = RollingReservePhase::Prepublication;
             self.initial_capacity_checked = false;
+            self.initial_capacity_pending_after_short_admission = false;
             self.served = None;
             self.first_staged_at = None;
             self.staged_last_segment = None;

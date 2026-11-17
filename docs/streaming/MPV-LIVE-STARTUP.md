@@ -1,13 +1,13 @@
 # MPV live startup admission
 
 **Owner:** Codex; Sol implements the Linux Player request and request regressions.
-**Status:** revised source independently reviewed; Rust validation and runtime acceptance pending.
+**Status:** revised reload bound and capacity semantics await review and Rust validation; runtime acceptance pending.
 **Updated:** 2026-11-17.
 
 A normal Linux Player seek recreated a live copy session. The first frame
-arrived 26.993 seconds after the OSC click. The server had already committed
-a complete 2.795-second fragment, but withheld the first playlist for another
-22.281 seconds. The create request omitted its consumer transport, so MPV
+arrived 26.993 seconds after the OSC click. A complete 2.795-second fragment existed;
+22.281 seconds elapsed from the writer playlist gate opening to the first
+served playlist. The create request omitted its consumer transport, so MPV
 inherited Safari's 48-second native presentation admission requirement.
 
 ## Measured cause
@@ -15,7 +15,7 @@ inherited Safari's 48-second native presentation admission requirement.
 Retained production phase logs distinguish writer readiness, publication and
 init validation. These are server observations, not optical picture measurements.
 
-| Start | Complete cut to first snapshot | First snapshot media | Init validation |
+| Start | Writer gate to first snapshot | First snapshot media | Init validation |
 |---|---:|---:|---:|
 | Initial play | 10.803 s | 49.675 s | 122 ms |
 | OSC seek | 22.281 s | 49.759 s | 13 ms |
@@ -46,29 +46,65 @@ the [MPV tag](https://github.com/mpv-player/mpv/blob/v0.42.0/demux/demux_lavf.c)
 does not establish every distribution/native patch in the selected binary.
 
 The supported operating envelope assumes sustainable production at least as
-fast as playback, bounded 16-second complete cuts, ordinary 2-second refill
-spacing and 250 ms polling. The scheduling/delivery margin is 1 second: retained
-snapshot-to-first-frame observations were below 0.9 seconds. Neither this margin
-nor recent average speed guarantees future network, disk or producer behavior.
-Selected-build continuity is required for acceptance.
+fast as playback, complete cuts no longer than 16 seconds, 2-second minimum
+refill spacing and a publication poll/commit opportunity within 250 ms after
+eligibility. The scheduling/delivery allowance is 1 second, informed by retained
+snapshot-to-first-frame observations below 0.9 seconds. These are conditional
+service bounds: nominal polling and recent average speed do not guarantee future
+scheduler, network, disk or producer behavior. Selected-build continuity remains
+required for acceptance.
 
-For playback rate `r`, presentation target/cut bound `T`, refill spacing `P`,
-poll interval `q` and measured scheduling/delivery margin `m`:
+The first reload-window formula covered an unchanged reload's half-target wait,
+but missed a steady-state case. At 4x, its 68-second floor admitted a 70.265-second
+complete prefix. The deterministic replay's changed reload at 38.361 seconds
+received the endpoint at 217.614 media seconds. That snapshot's last `EXTINF`
+was 16 seconds, so the next reload was at 54.361 seconds. With a 233 ms seek
+lead, known media ran out at `(217614 - 233) / 4 = 54345.25` ms, before that
+reload. A changed playlist can already contain a stale endpoint.
+
+For playback rate `r`, presentation target `T`, cut bound `Dmax`, minimum refill
+spacing `P`, maximum eligible poll/commit gap `q` and scheduling/delivery allowance
+`m`, let `c` be the completion time of the latest endpoint in a committed
+snapshot and `p` its commit time:
+
+1. A cut held by refill spacing can wait one `P` plus a poll, so `p-c <= P+q`.
+2. The next cut completes by `c+Dmax/r`. Its commit must also wait until `p+P`,
+   then at most another `q`. Delivery adds `m`.
+3. The latest delivered endpoint can therefore lag production by wall time
+   `A = max(Dmax/r, 2P+q) + q + m`.
+4. A changed reload can read that stale endpoint and then wait up to `T` for
+   another reload. An unchanged reload waits `T/2`, which is already covered.
 
 ```text
-next publication envelope = max(T/r, P) + q
-reload envelope = max(T, next publication envelope + T/2)
-required media runway = ceil(r * (reload envelope + m))
+endpoint age envelope A = max(Dmax/r, 2P + q) + q + m
+required media runway = ceil(r * (T + A))
+T = Dmax = 16000 ms; P = 2000 ms; q = 250 ms; m = 1000 ms
 ```
 
-At 1x this requires 25.25 seconds of media rather than 48. The computed floor is
-not silently truncated to the reserve cap. Short MPV admission additionally
-requires finite recent production at least equal to playback; unknown or slow
-capacity, or a global scratch hold, retains native admission. The original initial-capacity assessment
-remains due at the fixed production bank even after an early first snapshot,
-so a slow producer cannot bypass it by continuing to complete cuts. Until a
-first snapshot is admitted, capacity continues to be reassessed even after an
-earlier sufficient sample, preserving the original pre-publication contract.
+The separate poll allowance inside `2P+q` covers the first commit's endpoint
+age. The outer poll allowance covers the following commit. No alignment between
+publication commits and polling phases is assumed.
+
+| Playback rate | Required MPV media runway | Native media runway |
+|---|---:|---:|
+| 0.25x | 20.313 s | 48 s |
+| 1x | 33.250 s | 48 s |
+| 4x | 86 s | 124 s |
+
+The computed MPV floor is not silently truncated to the reserve cap. Short MPV
+admission additionally requires finite recent production at least equal to
+playback; unknown or slow capacity, or a global scratch hold, retains the entire
+native admission and complete-cut rounding policy. The actual first snapshot
+must include the seek lead and ends on a complete cut. The 1x seek replay
+therefore waits for five variable-GOP cuts ending at 34.582 seconds, rather than
+publishing the earlier 26.482-second prefix.
+
+Until a first snapshot is admitted, capacity is reassessed at the fixed original
+production bank even after an earlier sufficient sample. A short MPV first
+snapshot carries an explicit unpaid initial-capacity assessment to that bank.
+A finite sufficient observation pays this debt; unknown speed does not. Native
+admission at its original bank carries no short-start debt and preserves the
+existing post-publication deadline behavior, including global scratch holds.
 
 The existing flow controller owns steady production and reserve. Init and
 complete-object validation, ownership/attempt fences and retired-object promises
@@ -79,8 +115,9 @@ capability masks missing media.
 
 The causal regression constrains complete inventory by production timestamps
 and independently models FFmpeg’s reload schedule, including unchanged reloads,
-short-to-long GOPs, seek offsets and supported playback rates. The original
-first-cut policy must fail its counterexample. Actual publication tests cover
+short-to-long GOPs, seek offsets, supported playback rates and irregular bounded
+publication poll phases. Both the original first-cut policy and the superseded
+68-second 4x floor must fail their causal counterexamples. Actual publication tests cover
 explicit/legacy demand, conservative unknown-capacity rounding, replenishment
 and the initial capacity assessment after early publication. Safari’s fixture
 remains a separate regression. Player tests cover initial remux/transcode,
@@ -89,14 +126,17 @@ normal seek, OSC film seek and quality recreation.
 The Player run accounts for 120 tests. Successful cases were retained; only
 55 failed methods were rerun in a Linux container after resolving Mac runner
 socket-path/Bash limitations and package-version metadata. All 55 passed with
-no skips. The 0.5.2 frontend package is built. Revised server review is clear after the reload and capacity boundary fixes.
-Affected Rust validation and normal-route runtime acceptance remain open.
+no skips. The 0.5.2 frontend package is built. The source-35def Rust run exposed the
+steady-state reload counterexample and two publication/capacity test failures;
+the revised bound, explicit short-admission debt and coherent worker-clock
+fixture require review and affected Rust validation. Normal-route runtime
+acceptance remains open.
 
 Before-change metrics were retained privately from the same lab node. Its
 `plurx_ttff_ms` and `plurx_seek_to_picture_ms` series have zero observations, so
 no historical latency distribution is claimed. Compare after-change server
 phase timestamps with normal-player opening/MIME/first-frame timing; expect
-`MpvReloadWindow` and a 25250 ms bootstrap at 1x with established capacity.
+`MpvReloadWindow` and a 33250 ms bootstrap at 1x with established capacity.
 Unknown capacity should report the conservative 48000 ms requirement.
 
 Device acceptance must establish advancing playback without the reload
