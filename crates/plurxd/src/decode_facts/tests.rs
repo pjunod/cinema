@@ -3728,7 +3728,12 @@ async fn tracked_raw_probe_retirement_survives_timeout_and_abandoned_collector()
         }
     })
     .await
-    .expect("explicit child reap and worker join retire the collector");
+    .unwrap_or_else(|error| {
+        panic!(
+            "explicit child reap and worker join retire the collector: {error:?}; final completion (operations, raw, veto) = {:?}",
+            budget.completion_observation()
+        )
+    });
     assert_eq!(budget.completion_observation(), Some((0, 0, false)));
     active.finish().await;
 }
