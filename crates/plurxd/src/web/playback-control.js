@@ -307,7 +307,12 @@
       // and a Shared session is Shared on every exchange.
       this.supportedActions = value.sharedSuccessor === true
         ? SHARED_SUPPORTED_ACTIONS : SUPPORTED_ACTIONS;
-      this.capture = value.capture;
+      // A final exchange keeps the source turn that authored it, even after
+      // the visible media changes or its live capture becomes unavailable.
+      this.terminalCapture = null;
+      this.finalAccepted = false;
+      this.acceptingCapture = null;
+      this.capture = () => this.terminalCapture || value.capture();
       this.send = value.send;
       // Wrapped, not assigned. `setTimeout` and `clearTimeout` are
       // WindowTimers methods and every browser brand-checks their receiver:
@@ -345,9 +350,30 @@
       return this;
     }
 
-    notify(value) {
+    // Freeze this reporter's remaining work. Earlier uncertain requests keep
+    // their exact retry; once they settle, only this immutable capture drains.
+    // An accepted final may synchronously hand off to another explicit final
+    // (commit then end), but ordinary notifications cannot extend its life.
+    finish(value) {
       if (this.stopped) return null;
-      const newest = value || this.capture();
+      // An accepted earlier request may already have settled the ACK at the
+      // queued final's head. Only its synchronous success callback can replace
+      // that still-unsent final; external callers cannot overwrite it.
+      const acceptedBeforeFinal = this.acceptingCapture !== null
+        && this.acceptingCapture !== this.terminalCapture
+        && this.pending === this.terminalCapture;
+      if (!this.terminalCapture || this.finalAccepted || acceptedBeforeFinal) {
+        const finalCapture = value && capture(value.snapshot, value.intentGeneration, value.owner);
+        if (!finalCapture) return null;
+        this.terminalCapture = finalCapture;
+        this.finalAccepted = false;
+      }
+      return this.notify(this.terminalCapture);
+    }
+
+    notify(value) {
+      if (this.stopped || this.finalAccepted) return null;
+      const newest = this.terminalCapture || value || this.capture();
       if (!newest || !validSnapshot(newest.snapshot)) return null;
       this.pending = newest;
       if (this.timer !== null) {
@@ -457,8 +483,17 @@
           this.nextAllowedAt = this.now()
             + Math.max(MIN_EXCHANGE_MS, response.action.after_ms);
         }
-        this.onExchange({ request, response, error: null, capture:requestCapture,
-          intentGeneration:requestCapture.intentGeneration });
+        const acceptedFinal = requestCapture === this.terminalCapture;
+        if (acceptedFinal) this.finalAccepted = true;
+        this.acceptingCapture = requestCapture;
+        try {
+          this.onExchange({ request, response, error: null, capture:requestCapture,
+            intentGeneration:requestCapture.intentGeneration });
+        } finally {
+          this.acceptingCapture = null;
+          if (acceptedFinal && requestCapture === this.terminalCapture) this.stop();
+        }
+        if (this.stopped) return;
         // A terminal verdict ends reporting. It does not tear down the player:
         // this reporter still owns no recovery, and the buffer already fetched
         // is still worth playing. The milestone that moves that authority is
@@ -537,6 +572,9 @@
     }
 
     resetForOwner(error) {
+      // A frozen settlement belongs to its original owner tuple. Replaying it
+      // against a new incarnation would authorize an unrelated transaction.
+      if (this.terminalCapture) return false;
       const generation = error && error.generation;
       const epoch = Number(error && error.controlEpoch);
       const generationChanged = typeof generation === "string"
