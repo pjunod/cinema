@@ -59,6 +59,11 @@ bump may break compatibility and a **patch** bump never does.
   qualifies their actual stored precision. The new fitting method reuses
   existing statistics; new sessions wait for its replacement table while
   existing digest pins retain their original coefficients.
+- Web prepared upgrades keep predecessor control observations on their own
+  media source through exposure, so a transient successor wait cannot cancel
+  its own preparation. The first visible frame freezes the final commit;
+  retries and close preserve that exact settlement before changing reporters.
+
 - Dolby Vision titles the server reconstructs from the base layer alone no
   longer have their black level raised: Profile 5, Profile 8, and Profile 7
   when it is processed without its enhancement layer. The reconstruction pass

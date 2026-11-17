@@ -302,6 +302,7 @@ mod qualification {
             _ => Err("use sqlite-init <new database> or node <runner-owned config>".into()),
         }
     }
+
     #[cfg(test)]
     mod tests {
         use super::*;

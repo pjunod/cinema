@@ -2,6 +2,16 @@
 
 **Updated:** 2026-11-13 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
+
+- **2026-11-17 · Web prepared-switch ownership:** owner GPT. New Moon's exposed
+  successor could report Waiting under its predecessor's control generation,
+  causing the server to cancel the prepared stream. Actual-source reproduction
+  confirms the mechanism; Astra reviewed the root cause and repair direction.
+  Generation-bound observation and immutable final commit are implemented;
+  33 focused regressions and independent Astra review pass. Runtime Safari
+  continuity after deployment and the preparation-deadline follow-up remain
+  open. Twilight's earlier Profile 8.1 FEL metadata upgrade was accepted.
+
 - **2026-11-13 · Optional Curator household login:** Owner Claude (claude-opus-5-5, taken over from Codex 2026-11-15). Independent account linking and household-only delegation; Astra production review cleared, local qualification passed; PR #1586 updated onto main and landing through the merge train. [Ledger](docs/features/CURATOR-LOGIN-STATUS.md). No deployment.
 - **2026-11-13 · CM4 trim fidelity:** Owner Codex. Implementation and bounded reference qualification complete; delivery PR #1591. Six-vector knots used a fixed BT.2020 palette and L8 MS was ignored. Real-frame and independent synthetic CPU comparisons remove all observed pixels above0.05dE; every worsening coordinate is retained. [Root cause, evidence and remaining work](docs/streaming/CM4-TRIM-FIDELITY.md).
 - **2026-11-13 · Linux replicated custody startup identity:** The lab4 exact-custody owner was released through merged PR #1567's normal census recovery at 19:01:59 UTC; read-only checks found the exact row absent and `plurx_background_source_recovery_pending=0` on lab3, lab4, lab6 and media1 at 19:06 UTC (revision `882d4b691e04`). All four had valid, host-matching read-only identity mounts at 19:03 UTC. PR #1570's reviewed guard is incorporated into the playback scheduling batch; combined qualification and fleet rollout remain pending. Broader playback acceptance also remains open. [Canonical ledger §1.5](docs/server/SOURCE-CUSTODY-RECOVERY.md#15-linux-replicated-startup-requires-actual-host-identity).
