@@ -7279,14 +7279,13 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # it reads listener state and launches nothing.
 # +1 with #1629: the sharing idle-loop test reads SharingManager::status()
 # to observe the listener state; it launches nothing.
-# F+ (#1565) on main 59022fd2a: main's 936 plus 5 F+-only launches, all test-only and
-# awaited: dv_disk/tests.rs +1, fragindex/refit_acceptance_tests.rs +1, fragindex/tests.rs
-# +1 and source_probe/dv_refit.rs +2 (.output() of the two isolated test images).
-# Shared: both sides carried the Twilight/reader source (title-lane scheduling and reader
-# reclamation), so main's figure already counts source_probe/title_work_tests.rs +1.
-# Union at 0d501cae6: 929 + 5 + 7 = 941, less 1 counted twice = 940; the spool
-# registration test adds one: 941.
-expected_occurrences = 941
+# F+ (#1565) contributes five awaited test-only launches beyond current main:
+# dv_disk/tests.rs +1, fragindex/refit_acceptance_tests.rs +1,
+# fragindex/tests.rs +1, and source_probe/dv_refit.rs +2.
+# Prepared delivery (#1736/#1752) contributes main's additional test-only
+# `.vod.status()` snapshot observation. It launches no child and transfers no
+# ownership. Preserve both reviewed contributions: main 937 + F+ 5 = 942.
+expected_occurrences = 942
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
