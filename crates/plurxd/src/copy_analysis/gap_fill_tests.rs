@@ -3,7 +3,7 @@
 //! its head census child and its primary triple-output child, the observed
 //! mux, normalizer, companion verifier, producer slot and reap, against a
 //! generated HEVC fixture title. Three fills and the test's own contract
-//! census make seven ffmpeg children.
+//! census plus the timestamp-preservation witness make eight ffmpeg children.
 //!
 //! What is not real:
 //! - The physical phase is an exact, well-formed `AnalysisPhysicalPhase`
@@ -19,10 +19,14 @@
 //!   Source-authority checks of `observe` are not exercised.
 use super::*;
 use crate::copy_normalization::CopyNormalizationContract;
-use crate::copyrange::{fill_copy_gap, run_source_census, CopyGapFill, CopyGenerationOwner};
+use crate::copyrange::{
+    fill_copy_gap, run_source_census, spawn_source_generation, CopyClockCensus, CopyGapFill,
+    CopyGenerationOwner, CopyPipeEvent, CopyPipeKind,
+};
 use crate::prodrun::ProducerSlot;
 use crate::source_input::SourceInput;
-use plurx_core::domain::MediaFile;
+use plurx_core::domain::{AudioStream, MediaFile};
+use plurx_core::fmp4::{FragmentReader, TrackKind, Unit};
 use plurx_core::segplan::ranges::RangeGap;
 use plurx_core::store::analysis_coordination::AnalysisCoordinationClaim;
 use plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken;
@@ -64,7 +68,15 @@ fn media_file(path: PathBuf) -> MediaFile {
         mastering_max_luminance: None,
         luminance_source: None,
         bitrate: Some(1_000_000),
-        audio_streams: Vec::new(),
+        // source("clean-cra") contains the real stereo AAC track whose
+        // priming makes the first video packet later than the format start.
+        audio_streams: vec![AudioStream {
+            index: 0,
+            codec: "aac".into(),
+            channels: Some(2),
+            sample_rate: Some(48_000),
+            ..Default::default()
+        }],
         subtitle_streams: Vec::new(),
         scanned_at: 1,
         audio_offset_ms: 0,
@@ -150,6 +162,150 @@ fn failed(step: &'static str) -> impl Fn(crate::copyrange::CopyGapFillError) -> 
     move |error| format!("{step}: {error:?}")
 }
 
+/// Observe the actual same-recipe mux outputs before range verification.
+/// Equal sample durations alone would miss independently rebased track starts.
+async fn assert_clocked_head_preserves_samples_and_audio_offset(
+    fill: &CopyGapFill<'_>,
+    census: &CopyClockCensus,
+    input: SourceInput,
+) -> Result<(), String> {
+    let args = fill.recipe.args(fill.file, 0.0)?;
+    let mut running = spawn_source_generation(
+        input,
+        &fill.file.path,
+        &args,
+        fill.runtime_cache,
+        CopyGenerationOwner::Analysis { phase: fill.phase },
+        Arc::new(ProducerSlot::new()),
+    )
+    .await?;
+    let observed = async {
+        let mut av_reader = FragmentReader::new();
+        let mut canonical_reader = FragmentReader::new();
+        let (mut av_init, mut av_fragment, mut canonical_init, mut canonical_fragment) =
+            (None, None, None, None);
+        loop {
+            let pipes = running.pipes.as_mut().ok_or("fixture output readers")?;
+            let event = tokio::select! {
+                ()=fill.stop.cancelled()=>return Err("fixture timestamp witness cancelled".to_owned()),
+                event=pipes.next()=>event.ok_or("fixture timestamp witness lost output")?,
+            };
+            match event {
+                CopyPipeEvent::Data(kind, bytes) => {
+                    let (reader, init, fragment) = match kind {
+                        CopyPipeKind::Av => (&mut av_reader, &mut av_init, &mut av_fragment),
+                        CopyPipeKind::Canonical => (
+                            &mut canonical_reader,
+                            &mut canonical_init,
+                            &mut canonical_fragment,
+                        ),
+                        _ => continue,
+                    };
+                    reader.push(&bytes);
+                    while let Some(unit) = reader.next_unit().map_err(|error| error.to_string())? {
+                        match unit {
+                            Unit::Init(value) if init.is_none() => *init = Some(value),
+                            Unit::Fragment(value) if fragment.is_none() => *fragment = Some(value),
+                            _ => {}
+                        }
+                    }
+                }
+                CopyPipeEvent::Failed(_, error) => return Err(error),
+                CopyPipeEvent::Eof(_) if pipes.all_eof() => {
+                    return Err("fixture timestamp witness ended without a pair".into());
+                }
+                _ => {}
+            }
+            if av_init.is_some()
+                && av_fragment.is_some()
+                && canonical_init.is_some()
+                && canonical_fragment.is_some()
+            {
+                break;
+            }
+        }
+        Ok((
+            av_init.ok_or("observed AV init")?,
+            av_fragment.ok_or("observed AV fragment")?,
+            canonical_init.ok_or("observed canonical init")?,
+            canonical_fragment.ok_or("observed canonical fragment")?,
+        ))
+    }
+    .await;
+    // This witness claims only its first physical pair. Retire and join the
+    // actual producer, every writer and SourceInput on both success and error.
+    let settled = running.settle(false).await;
+    let (av_init, av, canonical_init, canonical) = observed?;
+    settled?;
+    let canonical_video = canonical_init.video().ok_or("fixture canonical video")?;
+    let av_video = av_init.video().ok_or("fixture AV video")?;
+    let audio = av_init
+        .tracks
+        .iter()
+        .find(|track| track.kind == TrackKind::Audio)
+        .ok_or("fixture AV audio")?;
+    let canonical_track = canonical
+        .track(canonical_video.id)
+        .ok_or("canonical track")?;
+    let video_track = av.track(av_video.id).ok_or("AV video track")?;
+    let audio_track = av.track(audio.id).ok_or("AV audio track")?;
+    assert_eq!(canonical_video.timescale, av_video.timescale);
+    let tuples = |track: &plurx_core::fmp4::TrackFragment| {
+        track
+            .samples()
+            .map(|sample| (sample.duration, sample.size, sample.flags, sample.cto))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        tuples(canonical_track),
+        tuples(video_track),
+        "audio must not stretch a video sample"
+    );
+    let canonical_payloads = canonical.samples_with_bytes(canonical_video.id);
+    let av_payloads = av.samples_with_bytes(av_video.id);
+    assert_eq!(
+        canonical_payloads
+            .iter()
+            .map(|(_, bytes)| bytes)
+            .collect::<Vec<_>>(),
+        av_payloads
+            .iter()
+            .map(|(_, bytes)| bytes)
+            .collect::<Vec<_>>(),
+        "the timestamp policy preserves every copied video payload"
+    );
+    let video_first = video_track.samples().next().ok_or("first video sample")?;
+    let audio_first = audio_track.samples().next().ok_or("first audio sample")?;
+    let video_pts = i128::from(video_track.base_decode_time) + i128::from(video_first.cto);
+    let audio_pts = i128::from(audio_track.base_decode_time) + i128::from(audio_first.cto);
+    // In this exact clean-cra fixture the AAC track starts at format_start;
+    // its encoded priming leads the first video packet. This is a fixture
+    // oracle, not a general claim that every file starts with its first audio.
+    let format = census.format_start.ok_or("fixture format start")?;
+    let expected_num = i128::from(census.first_pts)
+        * i128::from(census.first_dts.time_base_num)
+        * i128::from(format.time_base_den)
+        - i128::from(format.dts)
+            * i128::from(format.time_base_num)
+            * i128::from(census.first_dts.time_base_den);
+    let expected_den =
+        i128::from(census.first_dts.time_base_den) * i128::from(format.time_base_den);
+    assert!(
+        expected_num > 0,
+        "AAC priming must give this fixture a real audio lead"
+    );
+    let actual_num =
+        video_pts * i128::from(audio.timescale) - audio_pts * i128::from(av_video.timescale);
+    let actual_den = i128::from(av_video.timescale) * i128::from(audio.timescale);
+    assert_eq!(
+        actual_num * expected_den,
+        expected_num * actual_den,
+        "the mux must preserve the source's initial A/V offset without an edit list"
+    );
+    assert!(!av_video.has_edit_list && !audio.has_edit_list);
+    Ok(())
+}
+
 async fn head_and_gap_equal_the_whole_title(stop: CancellationToken) -> Result<(), String> {
     let path = plurx_core::testfixtures::source("clean-cra");
     let bytes = Arc::new(std::fs::read(&path).expect("fixture bytes"));
@@ -225,6 +381,17 @@ async fn head_and_gap_equal_the_whole_title(stop: CancellationToken) -> Result<(
         runtime_cache: cache.path(),
         stop: &stop,
     };
+
+    let mut open = opener(&bytes, &held);
+    assert_clocked_head_preserves_samples_and_audio_offset(
+        &fill(RangeGap {
+            start: None,
+            end: None,
+        }),
+        &census,
+        open().await?,
+    )
+    .await?;
 
     // One whole-title observation: the reference. It is given no contract
     // to check against, as the first generation of a source nothing has
