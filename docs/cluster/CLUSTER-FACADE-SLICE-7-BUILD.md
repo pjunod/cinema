@@ -185,3 +185,10 @@ Those fields become a typed local backup source. Main's existing job-trait
 injections also use the facade owner; startup/listener, shutdown and vendor
 mechanisms remain with their existing owners. The 62c5f25fc baseline passed
 the isolated daemon all-target check before 7b Rust edits.
+
+The first 7b all-target check found one remaining `build_state` fixture in
+`desktop_control.rs`; 7b owns only its typed backup-argument conversion. The
+protected runtime-directory rules and desktop shutdown algorithm stay intact.
+Extend `http/analysis_reconcile.rs`'s existing departed-target regression with
+an unknown-membership negative control before its known-membership positive
+case, proving that no queued request is retired or replaced from ignorance.
