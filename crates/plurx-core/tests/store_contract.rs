@@ -13456,7 +13456,17 @@ async fn replicated_source_lease_rewind(client: &Client) -> Option<Vec<String>> 
     if present.first().is_none_or(|row| row.value == 0) {
         return None;
     }
-    require_replicated_fixture_marker(client, "source_lease_schema", 3).await;
+    let marker: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT version AS value FROM source_lease_schema",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("source lease generation");
+    assert_eq!(marker.len(), 1);
+    let version = marker[0].value;
+    assert!(matches!(version, 2 | 3), "known lease generation");
+    require_replicated_fixture_marker(client, "source_lease_schema", version).await;
     let shape = client
         .query_consistent(SOURCE_LEASE_REWIND_SHAPE_SQL.to_owned(), hiqlite::params!())
         .await
@@ -13472,8 +13482,14 @@ async fn replicated_source_lease_rewind(client: &Client) -> Option<Vec<String>> 
         .collect::<Vec<_>>();
     assert_eq!(
         shape.as_slice(),
-        current_source_lease_rewind_shape(),
-        "exact current lease catalogue required before replicated rewind"
+        if version == 2 {
+            queue_fixture::source_extensions_fixture::expanded_source_lease_witness()
+                .lease_shape
+                .as_slice()
+        } else {
+            current_source_lease_rewind_shape()
+        },
+        "exact generation-specific lease catalogue required before replicated rewind"
     );
     let unowned: Vec<I64Value> = client
         .query_consistent_map(SOURCE_LEASE_UNOWNED_SQL, hiqlite::params!())
@@ -13484,9 +13500,30 @@ async fn replicated_source_lease_rewind(client: &Client) -> Option<Vec<String>> 
         Some(0),
         "historical fixture must not discard source leases"
     );
+    if version == 2 {
+        // CONTRACT removes v1 owner tables. Every caller, including standalone
+        // lease rewinds, must validate their exact DDL and empty facts first.
+        let inventory = replicated_source_tail_inventory(client).await;
+        let witness = queue_fixture::source_extensions_fixture::expanded_source_lease_witness();
+        assert_eq!(
+            inventory.shape, witness.source_shape,
+            "exact expanded source tail"
+        );
+        assert_eq!(
+            inventory.counts, witness.source_counts,
+            "expanded owner facts cannot be discarded by fixture contract"
+        );
+    }
+    let mut plan = if version == 2 {
+        queue_fixture::source_extensions_fixture::expanded_source_lease_witness()
+            .contract
+            .clone()
+    } else {
+        Vec::new()
+    };
+    plan.extend(source_lease_rewind_plan());
     Some(
-        source_lease_rewind_plan()
-            .iter()
+        plan.iter()
             .flat_map(|text| text.split("-- next statement"))
             .chain(CLAIM_EFFECTS_V1)
             .map(str::trim)
@@ -13716,17 +13753,15 @@ async fn replicated_v1_source_store_expands_carries_holders_and_contracts_when_e
     );
 }
 
-/// The validated drops of the published source tail. A current store's
-/// contracted lease tail is rewound to it first, in the same statements.
 #[cfg(feature = "hiqlite-contract-tests")]
-async fn replicated_source_tail_drops(
-    client: &Client,
-    remove: impl Fn(&str) -> bool,
-) -> Vec<String> {
-    use queue_fixture::source_extensions_fixture::{
-        current_source_tail, published_source_tail, validated_source_tail_drops, SOURCE_TAIL_SHAPE,
-    };
-    let rewind = replicated_source_lease_rewind(client).await;
+struct ReplicatedSourceTailInventory {
+    shape: Vec<(String, String, String)>,
+    counts: Vec<(String, i64)>,
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_source_tail_inventory(client: &Client) -> ReplicatedSourceTailInventory {
+    use queue_fixture::source_extensions_fixture::SOURCE_TAIL_SHAPE;
     let source_shape: Vec<_> = client
         .query_consistent(SOURCE_TAIL_SHAPE.to_owned(), hiqlite::params!())
         .await
@@ -13753,21 +13788,61 @@ async fn replicated_source_tail_drops(
         assert_eq!(rows.len(), 1);
         source_counts.push((name.clone(), rows[0].value));
     }
+    ReplicatedSourceTailInventory {
+        shape: source_shape,
+        counts: source_counts,
+    }
+}
+
+/// The validated drops of the published source tail. A current store's
+/// contracted lease tail is rewound to it first, in the same statements.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_source_tail_drops(
+    client: &Client,
+    remove: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    use queue_fixture::source_extensions_fixture::{
+        current_source_tail, published_source_tail, validated_source_tail_drops,
+    };
+    let rewind = replicated_source_lease_rewind(client).await;
+    let ReplicatedSourceTailInventory {
+        shape: source_shape,
+        counts: source_counts,
+    } = replicated_source_tail_inventory(client).await;
     let Some(rewind) = rewind else {
         require_replicated_fixture_marker(client, "background_source_schema", 1).await;
         return validated_source_tail_drops(&source_shape, &source_counts, true, remove);
     };
-    // The current tail exactly, holding no grants, checkpoints or dispatch
-    // demand; the rewind leaves the published tail with only its marker.
-    assert_eq!(
-        source_shape,
-        current_source_tail(),
-        "exact current source tail required"
-    );
-    assert!(
-        source_counts.iter().all(|(_, count)| *count == 0),
-        "source grants, checkpoints or dispatch demand must not be discarded: {source_counts:?}"
-    );
+    // Both known generations are legitimate. Expansion keeps v1 metadata
+    // until every node's binary is ready; never forge capabilities to contract.
+    let marker: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT version AS value FROM source_lease_schema",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("source tail generation");
+    assert_eq!(marker.len(), 1);
+    if marker[0].value == 2 {
+        let witness = queue_fixture::source_extensions_fixture::expanded_source_lease_witness();
+        assert_eq!(
+            source_shape, witness.source_shape,
+            "exact expanded source tail"
+        );
+        assert_eq!(
+            source_counts, witness.source_counts,
+            "no accepted expanded source facts may be discarded"
+        );
+    } else {
+        assert_eq!(marker[0].value, 3);
+        assert_eq!(
+            source_shape,
+            current_source_tail(),
+            "exact contracted source tail"
+        );
+        assert!(source_counts.iter().all(|(_, count)| *count == 0),
+            "source grants, checkpoints or dispatch demand must not be discarded: {source_counts:?}");
+    }
     let published = published_source_tail(true);
     let counts = published
         .iter()
@@ -13775,6 +13850,28 @@ async fn replicated_source_tail_drops(
         .map(|(_, name, _)| (name.clone(), i64::from(name == "background_source_schema")))
         .collect::<Vec<_>>();
     let remove_holders = remove("background_source_pauses");
+    let mut rewind = rewind;
+    if remove("background_source_custody") {
+        // The exact current preflight covers both retention triggers, its
+        // marker DDL and its index. The lease rewind restores their frozen
+        // custody form; full source removal must then restore their predecessor
+        // before dropping the custody table they reference.
+        require_replicated_fixture_marker(client, "background_custody_retention_schema", 1).await;
+        rewind.extend([
+            "DROP TABLE background_custody_retention_schema".to_owned(),
+            "DROP INDEX background_source_custody_owner_work".to_owned(),
+            "DROP TRIGGER background_job_enqueue_command".to_owned(),
+            "DROP TRIGGER background_job_maintenance_command".to_owned(),
+            queue_fixture::source_extensions_fixture::published_trigger(
+                include_str!("../src/store/background_jobs_retention.sql"),
+                "background_job_enqueue_command",
+            ),
+            queue_fixture::source_extensions_fixture::published_trigger(
+                include_str!("../src/store/background_jobs_receipt_pressure.sql"),
+                "background_job_maintenance_command",
+            ),
+        ]);
+    }
     rewind
         .into_iter()
         .chain(remove_holders.then(|| "DROP VIEW background_storage_domain_holders".to_owned()))
@@ -15860,6 +15957,21 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
         .iter_mut()
         .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
         .collect::<Vec<_>>();
+    let lease_marker: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT version AS value FROM source_lease_schema",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("restored lease generation");
+    assert_eq!(lease_marker.len(), 1);
+    let expected_background_triggers = match lease_marker[0].value {
+        2 => queue_fixture::source_extensions_fixture::expanded_background_trigger_oracle(
+            expected_background_triggers,
+        ),
+        3 => expected_background_triggers,
+        version => panic!("unknown restored lease generation: {version}"),
+    };
     assert_eq!(
         restored_triggers, expected_background_triggers,
         "historical migration must restore every removed background and Jellyfin trigger definition"

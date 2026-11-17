@@ -44,6 +44,16 @@ Historical fixture rewind verifies all current lease-owned objects and
 overlaid resource definitions before replacing them, so a rewind cannot erase
 hostile schema drift and then accept the rewritten catalogue.
 
+Historical migrations may legitimately leave the lease catalogue expanded
+at v2 while node compatibility is pending. Replicated fixture rewinds validate
+v2 and v3 against separate production-generated catalogues and exact data
+inventories. The v2 path uses the generated contract, including its permanent
+service guard, before the same v3 rewind. It does not forge node capabilities
+or weaken readiness. The restored-trigger oracle applies only the exact
+canonical generation delta and preserves every unrelated captured definition.
+Full source removal also restores the published pre-custody retention triggers
+before removing their custody-table dependency.
+
 Historical replicated fixture rewinds also remove the exact, empty v127
 coordination adjunct before altering old analysis tables. Its published witness,
 singleton marker and accepted-data counts are checked before destructive DDL;

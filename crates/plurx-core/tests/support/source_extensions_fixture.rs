@@ -101,6 +101,96 @@ pub(crate) fn current_source_tail() -> Vec<(String, String, String)> {
     source_tail_objects(&rusqlite::Connection::open(&path).expect("current catalogue"))
 }
 
+#[cfg(feature = "hiqlite-contract-tests")]
+pub(crate) struct ExpandedLeaseWitness {
+    pub lease_shape: Vec<(String, String, String)>,
+    pub source_shape: Vec<(String, String, String)>,
+    pub source_counts: Vec<(String, i64)>,
+    pub contract: Vec<String>,
+    background: Vec<(String, String)>,
+    contracted_background: Vec<(String, String)>,
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+fn background_trigger_rows(conn: &rusqlite::Connection) -> Vec<(String, String)> {
+    conn.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND (name GLOB 'background_*' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0) ORDER BY name")
+        .expect("canonical background trigger inventory")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("canonical background trigger rows")
+        .collect::<Result<_, _>>()
+        .expect("complete canonical background triggers")
+}
+
+/// Use the production migration and generated contract, including macro guards;
+/// a raw SQL include would omit the permanent contracted service guard.
+#[cfg(feature = "hiqlite-contract-tests")]
+pub(crate) fn expanded_source_lease_witness() -> &'static ExpandedLeaseWitness {
+    static EXPECTED: std::sync::OnceLock<ExpandedLeaseWitness> = std::sync::OnceLock::new();
+    EXPECTED.get_or_init(|| {
+        let (conn, contract) = plurx_core::store::validation_expanded_source_lease_fixture()
+            .expect("canonical expanded source leases");
+        let source_shape = source_tail_objects(&conn);
+        let source_counts = source_shape
+            .iter()
+            .filter(|(kind, _, _)| kind == "table")
+            .map(|(_, name, _)| {
+                let count = conn
+                    .query_row(
+                        &format!(r#"SELECT count(*) FROM "{}""#, name.replace('"', r#""""#)),
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("expanded source marker/data witness");
+                (name.clone(), count)
+            })
+            .collect();
+        let directory = tempfile::tempdir().expect("contracted background witness");
+        let path = directory.path().join("current.db");
+        drop(plurx_core::store::SqliteStore::open(&path).expect("contracted current witness"));
+        let current = rusqlite::Connection::open(path).expect("contracted catalogue");
+        ExpandedLeaseWitness {
+            lease_shape: source_lease_rewind_objects(&conn),
+            source_shape,
+            source_counts,
+            contract,
+            background: background_trigger_rows(&conn),
+            contracted_background: background_trigger_rows(&current),
+        }
+    })
+}
+
+/// Preserve every unrelated captured definition; replace only the exact
+/// canonical generation delta, refusing an already-drifted original oracle.
+#[cfg(feature = "hiqlite-contract-tests")]
+pub(crate) fn expanded_background_trigger_oracle(
+    original: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let witness = expanded_source_lease_witness();
+    let before: BTreeMap<_, _> = witness.contracted_background.iter().cloned().collect();
+    let after: BTreeMap<_, _> = witness.background.iter().cloned().collect();
+    let mut result: BTreeMap<_, _> = original.into_iter().collect();
+    let names: BTreeSet<_> = before.keys().chain(after.keys()).cloned().collect();
+    for name in names {
+        if before.get(&name) != after.get(&name) {
+            assert_eq!(
+                result.get(&name),
+                before.get(&name),
+                "original generation drift: {name}"
+            );
+            match after.get(&name) {
+                Some(sql) => {
+                    result.insert(name, sql.clone());
+                }
+                None => {
+                    result.remove(&name);
+                }
+            }
+        }
+    }
+    result.into_iter().collect()
+}
+
 fn published_source_tail_witness(dispatch: bool) -> rusqlite::Connection {
     let expected = rusqlite::Connection::open_in_memory().expect("published source tail witness");
     expected.execute_batch(
@@ -571,7 +661,7 @@ pub(crate) fn within_fixture_savepoint(connection: &rusqlite::Connection, body: 
 }
 
 /// The published trigger `name` from one migration's own statements.
-fn published_trigger(migration: &str, name: &str) -> String {
+pub(crate) fn published_trigger(migration: &str, name: &str) -> String {
     let mut statements = migration
         .split("-- next statement")
         .filter(|statement| statement.contains(&format!("CREATE TRIGGER IF NOT EXISTS {name}\n")));
@@ -815,7 +905,8 @@ pub(crate) const SOURCE_LEASE_REWIND_SHAPE_SQL: &str = "SELECT type,name,sql FRO
  'background_storage_domain_holders','background_storage_domain_disturbed',
  'background_storage_domain_affected_jobs','background_source_pause_effects',
  'background_source_resume_effects','background_job_enqueue_command',
- 'background_job_maintenance_command')
+ 'background_job_maintenance_command','background_custody_retention_schema',
+ 'background_source_custody_owner_work')
  OR tbl_name IN (
  'background_job_required_resources','analysis_required_resources',
  'dispatch_turn_library_resources','dispatch_turn_contenders',
@@ -823,7 +914,8 @@ pub(crate) const SOURCE_LEASE_REWIND_SHAPE_SQL: &str = "SELECT type,name,sql FRO
  'background_storage_domain_holders','background_storage_domain_disturbed',
  'background_storage_domain_affected_jobs','background_source_pause_effects',
  'background_source_resume_effects','background_job_enqueue_command',
- 'background_job_maintenance_command')) ORDER BY type,name";
+ 'background_job_maintenance_command','background_custody_retention_schema',
+ 'background_source_custody_owner_work')) ORDER BY type,name";
 
 fn source_lease_rewind_objects(connection: &rusqlite::Connection) -> Vec<(String, String, String)> {
     connection

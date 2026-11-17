@@ -310,6 +310,17 @@ pub mod watched_drain;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 pub use dv_conversion::validation_pre_provenance_admission_trigger;
+
+/// Canonical expanded generation and its generated contract for owned fixtures.
+#[cfg(feature = "hiqlite-contract-tests")]
+pub fn validation_expanded_source_lease_fixture(
+) -> Result<(rusqlite::Connection, Vec<String>), crate::error::StoreError> {
+    Ok((
+        sqlite::SqliteStore::open_migrated_through(source_leases::EXPANDED_VERSION)?,
+        source_leases::statements(source_leases::CONTRACT),
+    ))
+}
+
 pub use dv_conversion::{
     DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
     DvConversionProgressSnapshot, DvConversionQueueBatch, DvConversionState, DvConversionStore,
