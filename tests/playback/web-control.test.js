@@ -1,6 +1,7 @@
 "use strict";
 require("./control-final-exchange.test.js");
 require("./prepared-control-ownership.test.js");
+require("./native-forward-alignment.test.js");
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
