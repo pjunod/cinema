@@ -615,6 +615,9 @@ mod tests {
         active_elapsed: Duration,
         active_credited: Duration,
         active_charged: Duration,
+        used_elapsed: Duration,
+        used_credited: Duration,
+        used_charged: Duration,
     }
     #[cfg(target_os = "linux")]
     async fn quota_held_scanner(retain_read_activity: bool) -> (Duration, QuotaChildTiming) {
@@ -716,6 +719,9 @@ mod tests {
                                 active_elapsed: timeout.elapsed,
                                 active_credited: timeout.credited,
                                 active_charged: timeout.charged,
+                                used_elapsed: timeout.used_elapsed,
+                                used_credited: timeout.used_credited,
+                                used_charged: timeout.used_charged,
                             });
                         result
                     };
@@ -775,6 +781,13 @@ mod tests {
         assert!(
             child_finished.active_charged >= Duration::from_millis(1200),
             "actual run_group timeout must retain 1200ms charged active allowance before kill/reap: total={elapsed:?}, child={child_finished:?}"
+        );
+        assert_eq!(
+            child_finished.used_charged,
+            child_finished
+                .used_elapsed
+                .saturating_sub(child_finished.used_credited),
+            "used-decision diagnostic, separate from actual pre-error clock: {child_finished:?}"
         );
         assert_eq!(
             child_finished.active_charged,

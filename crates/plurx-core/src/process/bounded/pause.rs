@@ -55,6 +55,9 @@ pub struct SourceChildActiveTimeout {
     pub child_id: u64,
     pub process_id: u32,
     pub active_budget: Duration,
+    pub used_elapsed: Duration,
+    pub used_credited: Duration,
+    pub used_charged: Duration,
     pub elapsed: Duration,
     pub credited: Duration,
     pub charged: Duration,
@@ -176,21 +179,37 @@ impl SourcePauseController {
         process_id: u32,
         active_budget: Duration,
         started: Instant,
-        decision: Instant,
-        paused: Duration,
+        decision: (Instant, Duration),
+        paused_before: Duration,
     ) {
-        // These are the exact timer start, timeout-decision instant and
-        // relative credit snapshot used by that decision. No clock or credit
-        // is sampled after entering this helper or waiting for its lock.
-        let elapsed = decision.duration_since(started);
+        // Preserve the exact decision/credit inputs used by the timer.
+        let (decision, used_credited) = decision;
+        let used_elapsed = decision.duration_since(started);
+        // Also observe actual child lifetime BEFORE returning its error to
+        // outer kill/reap. One clock sample under the existing credit lock
+        // subtracts all confirmed credit, including credit added while the
+        // select waited. Lock wait is still pre-cleanup child lifetime.
+        let state = self.state();
+        let now = Instant::now();
+        let total_credited = state.credited_total.saturating_add(
+            state
+                .credited_since
+                .map_or(Duration::ZERO, |since| now.duration_since(since)),
+        );
+        let elapsed = now.duration_since(started);
+        let credited = total_credited.saturating_sub(paused_before);
         let observation = SourceChildActiveTimeout {
             child_id,
             process_id,
             active_budget,
+            used_elapsed,
+            used_credited,
+            used_charged: used_elapsed.saturating_sub(used_credited),
             elapsed,
-            credited: paused,
-            charged: elapsed.saturating_sub(paused),
+            credited,
+            charged: elapsed.saturating_sub(credited),
         };
+        drop(state);
         self.0
             .active_timeouts
             .lock()
@@ -452,8 +471,8 @@ impl ChildPauseGuard {
                         process_id,
                         active_budget,
                         started,
-                        decision,
-                        paused,
+                        (decision, paused),
+                        paused_before,
                     );
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
@@ -466,7 +485,7 @@ impl ChildPauseGuard {
                         #[cfg(any(test, feature = "fixtures"))]
                         {
                             let decision = Instant::now();
-                            controller.record_child_active_timeout(self.child, process_id, active_budget, started, decision, paused);
+                            controller.record_child_active_timeout(self.child, process_id, active_budget, started, (decision, paused), paused_before);
                         }
                         return Err(io::Error::new(io::ErrorKind::TimedOut,"source child active execution timed out"));
                     },
