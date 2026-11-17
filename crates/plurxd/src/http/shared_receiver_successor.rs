@@ -813,6 +813,7 @@ impl ReceiverStartActor {
                         .clone();
                     response.action = ControlAction::Prepare {
                         enhancement: start.enhancement.clone().map(Box::new),
+                        delivered_dolby_vision_profile: start.delivered_dolby_vision_profile,
                         action_id,
                         session_id: start.session_id.clone(),
                         playlist_url: start.playlist_url.clone(),
