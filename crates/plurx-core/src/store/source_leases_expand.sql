@@ -989,16 +989,22 @@ LEFT JOIN offline_packages package ON held.owner_kind='offline' AND package.id=h
 LEFT JOIN files file ON file.id=COALESCE(json_extract(held.owner_json,'$.file_id'),json_extract(job.payload_json,'$.file_id'),analysis.file_id,package.file_id)
 LEFT JOIN items item ON item.id=file.item_id;
 -- next statement
+-- Capture once per physical lease. Grant UPSERT replay must not attempt a
+-- duplicate insert under the outer update conflict policy or rewrite provenance.
 CREATE TRIGGER source_lease_receipt_insert AFTER INSERT ON background_source_service_grants
 BEGIN
- INSERT OR IGNORE INTO source_lease_receipt_sources(receipt_id,lease_id,library_id,source_path)
+ INSERT INTO source_lease_receipt_sources(receipt_id,lease_id,library_id,source_path)
  SELECT NEW.receipt_id,scope.lease_id,scope.library_id,scope.source_path FROM source_lease_service_scopes scope
- WHERE json_extract(scope.result_json,'$.receipt_id')=NEW.receipt_id;
+ WHERE json_extract(scope.result_json,'$.receipt_id')=NEW.receipt_id
+ AND NOT EXISTS(SELECT 1 FROM source_lease_receipt_sources recorded
+   WHERE recorded.receipt_id=NEW.receipt_id AND recorded.lease_id=scope.lease_id);
 END;
 -- next statement
 CREATE TRIGGER source_lease_receipt_update AFTER UPDATE ON background_source_service_grants
 BEGIN
- INSERT OR IGNORE INTO source_lease_receipt_sources(receipt_id,lease_id,library_id,source_path)
+ INSERT INTO source_lease_receipt_sources(receipt_id,lease_id,library_id,source_path)
  SELECT NEW.receipt_id,scope.lease_id,scope.library_id,scope.source_path FROM source_lease_service_scopes scope
- WHERE json_extract(scope.result_json,'$.receipt_id')=NEW.receipt_id;
+ WHERE json_extract(scope.result_json,'$.receipt_id')=NEW.receipt_id
+ AND NOT EXISTS(SELECT 1 FROM source_lease_receipt_sources recorded
+   WHERE recorded.receipt_id=NEW.receipt_id AND recorded.lease_id=scope.lease_id);
 END;
