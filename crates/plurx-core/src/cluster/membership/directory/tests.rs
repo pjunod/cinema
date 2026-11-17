@@ -544,10 +544,14 @@ fn an_unclustered_process_has_no_peers_and_is_the_one_voter() {
 
 #[test]
 fn the_roster_read_names_exactly_its_tables() {
-    // The production mark registers no roster table yet (see ROSTER_TABLES),
-    // so its stamp is the applied index; it must still fit the mark.
-    assert!(crate::store::applied_mark_tables().count() <= hiqlite::APPLIED_MARK_MAX_TABLES);
+    let registered: Vec<_> = crate::store::applied_mark_tables().collect();
+    assert!(registered.len() <= hiqlite::APPLIED_MARK_MAX_TABLES);
+    assert_eq!(
+        registered.iter().copied().collect::<BTreeSet<_>>().len(),
+        registered.len()
+    );
     for table in ROSTER_TABLES {
+        assert_eq!(registered.iter().filter(|name| **name == table).count(), 1);
         assert!(ROSTER_SQL.contains(&format!("{table} ")), "{table}");
     }
 }

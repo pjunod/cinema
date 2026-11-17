@@ -18,6 +18,7 @@ failures.
 | [CLUSTER-FACADE-SLICE-7-BUILD.md](CLUSTER-FACADE-SLICE-7-BUILD.md) | The serialized final ownership migrations and evidence required for honest zero. | open |
 | [CLUSTER-FACADE-SLICE-6-BUILD.md](CLUSTER-FACADE-SLICE-6-BUILD.md) | How sharing, Source and receiver custody retain fresh typed witnesses through the facade. | open |
 | [CLUSTER-FACADE-SLICE-5-BUILD.md](CLUSTER-FACADE-SLICE-5-BUILD.md) | How typed peer-call ownership and stamped owner lookup replace raw transports and the Live TV TTL. | open |
+| [ROSTER-APPLIED-MARK-BUILD.md](ROSTER-APPLIED-MARK-BUILD.md) | How bounded table revisions make directory cache invalidation selective. | open |
 | [SHARING-AUTHORITY-A6-BUILD.md](SHARING-AUTHORITY-A6-BUILD.md) | How shared-library monitors stop proving their own authority: classified observations, one outage policy through `SessionGrace`, a cached advisory member floor, then change-driven re-observation (audit A6). | built |
 | [ASYNC-STORE-REFINEMENT-STATUS.md](ASYNC-STORE-REFINEMENT-STATUS.md) | Why the exhaustive async driver/Store refinement proof is parked, the state it reached, where the work is preserved and what restarting it needs. | open |
 | [RUST-ADMISSION-REFINEMENT-STATUS.md](RUST-ADMISSION-REFINEMENT-STATUS.md) | Production admission/start refinement pilot: scope, ownership, verifier feasibility, proof obligations and current delivery state. | built |

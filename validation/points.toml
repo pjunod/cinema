@@ -779,6 +779,7 @@ paths = [
   "docs/cluster/CLUSTER-FACADE-SLICE-6-BUILD.md",
   "docs/cluster/CLUSTER-FACADE-SLICE-7-BUILD.md",
   "docs/cluster/CLUSTER-FACADE-BOUNDARY-DECISION.md",
+  "docs/cluster/ROSTER-APPLIED-MARK-BUILD.md",
   "crates/plurxd/src/http/test_agents.rs",
   "crates/plurxd/src/http/tests.rs",
   "crates/plurx-core/src/cluster/membership.rs",
