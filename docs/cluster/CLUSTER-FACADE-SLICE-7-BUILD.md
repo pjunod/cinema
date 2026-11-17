@@ -1,6 +1,6 @@
 # Cluster facade slice 7 — close ownership and prove honest zero
 
-**Status:** open — 7a is implemented in a preparatory checkpoint; current-base integration, final review and gates remain. The plan preceded implementation. **Owner:** Codex.
+**Status:** open — 7a and 7b are implemented in preparatory checkpoints; current-base integration, final review and gates remain. The plan preceded implementation. **Owner:** Codex.
 
 Companion to [slice 6](CLUSTER-FACADE-SLICE-6-BUILD.md),
 [the facade contract](CLUSTER-FACADE-BUILD.md), and
@@ -192,3 +192,34 @@ protected runtime-directory rules and desktop shutdown algorithm stay intact.
 Extend `http/analysis_reconcile.rs`'s existing departed-target regression with
 an unknown-membership negative control before its known-membership positive
 case, proving that no queued request is retired or replaced from ignorance.
+
+## 7b preparatory delivery ledger
+
+Implementation checkpoint `fea8f2b93` passed the isolated daemon all-target
+check and 35 focused tests: backup current-log/anchor/deadline behavior, five
+analysis reconciliation cases including the added unknown-membership control,
+clock proof/enforcement followers, settings/takeover watch behavior and learner
+job refusal. These exercise the existing algorithms and helper boundaries;
+they do not constitute a full production backup/copy or fleet qualification.
+The first compile found one remaining desktop fixture argument and was fixed
+without changing runtime-directory validation. The initial external harness
+expected six reconciliation cases; source and execution contain five. Its
+receipt failed, the inventory was corrected, and the complete batch passed
+without deleting a test or changing a source assertion.
+
+The unchanged census measured 242 → 204 raw sites (38 removed). Updated pins
+and ceiling retain all matchers, raw-method inventories and exemptions. All
+14 ownership/ratchet checks passed, with no task, timer or process inventory
+changes. Nine source-mapping entries were reviewed: eight unique 42-line
+windows are unchanged; the other contains only two neighboring typed job
+authority injections, with the modeled worker spawn/ownership unchanged.
+All three source-mapping checks pass after hash-only repins. No new model
+execution is claimed.
+
+Strict daemon all-target Clippy remains red on the same six inherited
+unused-item groups: `claim_skipped`, `demand_renewed`, `ProcessedTrialAdmission`'s
+claim and two methods, `mark_admitted`, and playback qualification waiters.
+No suppressions or unrelated owner changes were made. Final current-base
+integration must resolve this debt; a passing all-target check is not a
+Clippy pass. The new committed census pins/format still require their archive
+checks. Final review, effort gate, landing and promotion remain outstanding.

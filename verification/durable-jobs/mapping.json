@@ -541,31 +541,31 @@
       },
       {
         "anchor": "    async fn run_targeted(",
-        "sha256": "26652921ba77906725b5aac5db0ce63775cf097eab526c0b456aac314d934da3",
+        "sha256": "7b2dd027be0b42b4b2ca4b2f2ed279ac7e573380b9d69b506820eb45d5cfb9f3",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5172"
       },
       {
         "anchor": "        };\n        let Some(lease) = self.acquire_job(\"provider:artwork\".to_owned()).await? else {\n            return Err(StoreError::Task(",
-        "sha256": "26652921ba77906725b5aac5db0ce63775cf097eab526c0b456aac314d934da3",
+        "sha256": "7b2dd027be0b42b4b2ca4b2f2ed279ac7e573380b9d69b506820eb45d5cfb9f3",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5478"
       },
       {
         "anchor": "    async fn run_scan(",
-        "sha256": "26652921ba77906725b5aac5db0ce63775cf097eab526c0b456aac314d934da3",
+        "sha256": "7b2dd027be0b42b4b2ca4b2f2ed279ac7e573380b9d69b506820eb45d5cfb9f3",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5856"
       },
       {
         "anchor": "        match self.acquire_job(\"provider:artwork\".to_owned()).await {",
-        "sha256": "26652921ba77906725b5aac5db0ce63775cf097eab526c0b456aac314d934da3",
+        "sha256": "7b2dd027be0b42b4b2ca4b2f2ed279ac7e573380b9d69b506820eb45d5cfb9f3",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:6430"
       },
       {
         "anchor": "        let lease = match self.acquire_job(\"provider:genres\".to_owned()).await {",
-        "sha256": "26652921ba77906725b5aac5db0ce63775cf097eab526c0b456aac314d934da3",
+        "sha256": "7b2dd027be0b42b4b2ca4b2f2ed279ac7e573380b9d69b506820eb45d5cfb9f3",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:6517"
       },
@@ -757,7 +757,7 @@
       },
       {
         "anchor": "crate::source_custody::configure_recovery_backend(",
-        "sha256": "fc226c6162eb6fb01526aea4a2bea9ad8f4db84b712ce665f265bc065a6f8d6c",
+        "sha256": "a94b611bc8eaaca5b227882789f5485be126b88348799eaa7d0440c4ef2b9eec",
         "source": "crates/plurxd/src/main.rs",
         "table": "recovery dependency outside model: startup before source producers"
       }

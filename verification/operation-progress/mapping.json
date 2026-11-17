@@ -255,19 +255,19 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "26652921ba77906725b5aac5db0ce63775cf097eab526c0b456aac314d934da3"
+        "sha256": "7b2dd027be0b42b4b2ca4b2f2ed279ac7e573380b9d69b506820eb45d5cfb9f3"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "26652921ba77906725b5aac5db0ce63775cf097eab526c0b456aac314d934da3"
+        "sha256": "7b2dd027be0b42b4b2ca4b2f2ed279ac7e573380b9d69b506820eb45d5cfb9f3"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "fc226c6162eb6fb01526aea4a2bea9ad8f4db84b712ce665f265bc065a6f8d6c"
+        "sha256": "a94b611bc8eaaca5b227882789f5485be126b88348799eaa7d0440c4ef2b9eec"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
