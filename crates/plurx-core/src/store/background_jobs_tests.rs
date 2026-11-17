@@ -89,7 +89,7 @@ async fn completed_job_with_unreleased_reader_keeps_origin_and_raises_recovery_g
     assert_eq!(held.phase.as_deref(), Some("cleanup_pending"));
     assert_eq!(
         held.counts_against.as_deref(),
-        Some("node"),
+        Some("unrooted"),
         "within its grace"
     );
     let metrics = store

@@ -2089,63 +2089,46 @@ mod source_tests {
         );
     }
     #[tokio::test]
-    async fn node_readers_conflict_whatever_keys_they_hold() {
-        // One background reader per node plus the live slot: readers on one
-        // node share its capacity whether their keys are mapped or global.
-        for (held_keys, target_key) in [
-            (["source_io", "source_io:disk-a"], "source_io"),
-            (["source_io", "source_io"], "source_io:disk-a"),
-        ] {
-            let store = fixture();
-            store
-                .0
-                .lock()
-                .expect("connection")
-                .execute(
-                    "INSERT INTO settings VALUES('jobs.source_readers_per_root','1')",
-                    [],
-                )
-                .expect("one reader per node");
-            let first = seed_job(&store);
-            let second = seed_job(&store);
-            let target = seed_job(&store);
-            {
-                let connection = store.0.lock().expect("connection");
-                connection
-                    .execute(
-                        "UPDATE background_job_reservations SET resource_key=?1 WHERE job_id=?2",
-                        rusqlite::params![held_keys[0], first.job_id],
-                    )
-                    .expect("first domain");
-                connection
-                    .execute(
-                        "UPDATE background_job_reservations SET resource_key=?1 WHERE job_id=?2",
-                        rusqlite::params![held_keys[1], second.job_id],
-                    )
-                    .expect("second domain");
-                connection
-                    .execute(
-                        "UPDATE background_job_reservations SET resource_key=?1 WHERE job_id=?2",
-                        rusqlite::params![target_key, target.job_id],
-                    )
-                    .expect("target domain");
-            }
-            pause_background(&store, target.clone(), 1000)
+    async fn generic_source_io_fallback_is_node_local_and_bounded() {
+        // Only unrooted source_io uses a node-local fallback. Rooted resources
+        // get independent budgets unless an aggregate domain cap is configured.
+        let store = fixture();
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute(
+                "INSERT INTO settings VALUES('jobs.source_readers_per_root','1')",
+                [],
+            )
+            .expect("one generic fallback reader");
+        let first = seed_job(&store);
+        let second = seed_job(&store);
+        let target = seed_job(&store);
+        pause_background(&store, target.clone(), 1000)
+            .await
+            .expect("verified target pause");
+        assert!(
+            !resume_background(&store, target.clone(), 1001)
                 .await
-                .expect("verified target pause");
-            assert!(
-                !resume_background(&store, target.clone(), 1001)
-                    .await
-                    .expect("shared source capacity"),
-                "{target_key} must conflict with both {held_keys:?}"
-            );
-            pause_background(&store, first, 1002)
+                .expect("generic source capacity"),
+            "two generic maintenance readers exceed the one-reader cap"
+        );
+        pause_background(&store, first, 1002)
+            .await
+            .expect("first generic reader stops");
+        assert!(
+            !resume_background(&store, target.clone(), 1003)
                 .await
-                .expect("one active reader stops");
-            assert!(resume_background(&store, target, 1003)
-                .await
-                .expect("source credit reacquired after confirmed pause"));
-        }
+                .expect("remaining generic source capacity"),
+            "the remaining maintenance reader fills the configured fallback"
+        );
+        pause_background(&store, second, 1004)
+            .await
+            .expect("second generic reader stops");
+        assert!(resume_background(&store, target, 1005)
+            .await
+            .expect("generic source credit reacquired after both readers stop"));
     }
     #[tokio::test]
     async fn same_epoch_unlimited_receipt_is_capped_after_foreground_pressure_without_resetting_identity(
@@ -2424,6 +2407,13 @@ mod source_tests {
                         [],
                     )
                     .expect("domain");
+                    if domain_full {
+                        db.execute(
+                            "INSERT INTO settings VALUES('jobs.domain_source_readers.disk','1')",
+                            [],
+                        )
+                        .expect("explicit aggregate-domain cap");
+                    }
                     let count = if domain_full { 2 } else { 3 };
                     for index in 0..count {
                         let id = format!("viewer-{index}");
@@ -2433,9 +2423,11 @@ mod source_tests {
                             "worker".into()
                         };
                         let keys = if domain_full {
+                            // A mapped domain is capped only by the explicit setting above.
                             r#"["source_io:disk"]"#
                         } else {
-                            r#"["source_io:other"]"#
+                            // The exact generic key exercises the bounded node-local fallback.
+                            r#"["source_io"]"#
                         };
                         db.execute("INSERT INTO source_leases VALUES(?1,'analysis',?2,1,?3,'{}',?4,'active',NULL,1000,1000,200000)",rusqlite::params![format!("analysis:{id}:1"),id,node,keys]).expect("live holder");
                         db.execute("INSERT INTO background_job_waiters(request_scope,request_id,state,job_id,deadline_ms) VALUES('playback-analysis',?1,'pending',?1,200000)", [&id]).expect("live interest, no maintenance occupancy");
