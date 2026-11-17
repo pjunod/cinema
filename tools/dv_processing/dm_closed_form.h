@@ -438,7 +438,7 @@ typedef struct {
   double rgb2lms[3][3], lms2rgb[3][3], ipt2lms[3][3], to_t[3][3], from_t[3][3];
   double native_black, native_span, decode_black, decode_span;
   double grid_origin, cube_min;             /* stock gamut cube and resolved output black */
-  const uint16_t *gamut;                    /* measured native vertices for an exact target, otherwise NULL */
+  const uint16_t *gamut;                    /* measured vertices for a qualified target domain, otherwise NULL */
 } dm_cm29_state;
 
 typedef struct { double ipt[3], C, I, Ib, Io; } dm_cm29_pix;
@@ -531,7 +531,8 @@ DM_STATIC void dm_cm29_pixel_pre(const dm_cm29_state *s, const double rgb[3], dm
   p->Io = s->tr.cw != 0 ? dm_cm29_tc(s, p->I + 0.5 * s->tr.cw * p->C) : p->Ib;
 }
 /* The gamut operation is trilinear in target-peak-normalized IPT. An exactly
- * measured target uses its supported 16-bit native vertices; unsupported vertices
+ * measured peak/gamut within the qualified black range uses supported 16-bit
+ * native vertices; unsupported vertices
  * retain inverse IPT, PQ EOTF, target matrix/cube and native encoding. The measured
  * data includes the target's gray-axis gain and highlight desaturation, without
  * altering the tone curve. The zero-intensity plane is black. BT.1886 uses the
