@@ -249,19 +249,19 @@
         "table": "41 fragment admission try-only",
         "source": "crates/plurxd/src/transcode/manager/construct.rs",
         "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-        "sha256": "22f2f67ce5bf29622f1ea6b5a10e5dedd3f095d4d8c8b54e31c45381b87706de"
+        "sha256": "3e42a421670e3ae904d477a475590ab021046e9e235513ee2a323a0c134c1019"
       },
       {
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "4d163640b7e384df517f966aa72f47ec9253b06a76fdadafdca8bc8945373df9"
+        "sha256": "03fdecbad6acbc89d4f7b1f6d0836b4fcd22ce77f32f4811b20b3cfea109ff8a"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "4d163640b7e384df517f966aa72f47ec9253b06a76fdadafdca8bc8945373df9"
+        "sha256": "03fdecbad6acbc89d4f7b1f6d0836b4fcd22ce77f32f4811b20b3cfea109ff8a"
       },
       {
         "table": "44 main worker spawn no shutdown arg",

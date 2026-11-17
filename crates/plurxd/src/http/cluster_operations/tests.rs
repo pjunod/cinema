@@ -1148,7 +1148,7 @@ async fn mutation_preflight_refreshes_roster_directory_and_bounded_peer_observat
     assert!(current_collector.contains(".fresh_targets()"));
     let capability = include_str!("../../cluster.rs");
     assert!(capability.contains("self.cluster.membership.operations_peers().await"));
-    assert!(current_collector.contains("PeerTransport::new"));
+    assert!(current_collector.contains("state.cluster.calls()"));
     assert!(current_collector.contains("collect_peer_statuses("));
     let restart = source
         .split_once("pub(crate) async fn prepare_restart(")

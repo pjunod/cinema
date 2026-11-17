@@ -661,7 +661,7 @@ async fn pass(
 }
 
 pub(crate) async fn run(state: AppState) {
-    let transport = PeerTransport::new(state.membership.clone());
+    let transport = state.cluster.calls();
     let boot = uuid::Uuid::new_v4().to_string();
     let mut cursor = None;
     let mut pacing = crate::background_jobs::IdlePoll::new();

@@ -368,7 +368,7 @@ pub(crate) async fn collect_current_aggregate(
     let deadline = deadline_after(AGGREGATE_TIMEOUT);
     let operations_for_status = state.cluster.operations();
     let operations_for_directory = state.cluster.operations();
-    let transport = PeerTransport::new(state.membership.clone());
+    let transport = state.cluster.calls();
     let observations = state.cluster.observations();
     collect_current_aggregate_with_sources(
         &state.node_id,
@@ -1784,7 +1784,7 @@ pub(crate) async fn peer_status_cache_loop(
     loop {
         let refresh_started = tokio::time::Instant::now();
         let operations = state.cluster.operations();
-        let transport = PeerTransport::new(state.membership.clone());
+        let transport = state.cluster.calls();
         let observations = state.cluster.observations();
         if let Err(error) = refresh_peer_status_cache_with(
             &state.peer_status_cache,

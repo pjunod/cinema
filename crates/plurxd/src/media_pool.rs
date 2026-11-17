@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{stream, StreamExt};
-use plurx_core::cluster::membership::{ActivityPeer, MembershipManager};
+use plurx_core::cluster::membership::ActivityPeer;
+#[cfg(test)]
+use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::MediaFile;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1077,12 +1079,9 @@ impl MediaPool {
             },
         );
     }
-    pub(crate) fn new(
-        membership: MembershipManager,
-        directory: crate::cluster::Directory,
-    ) -> Arc<Self> {
+    pub(crate) fn new(transport: PeerTransport, directory: crate::cluster::Directory) -> Arc<Self> {
         Arc::new(Self {
-            transport: PeerTransport::new(membership),
+            transport,
             directory,
             snapshots: Arc::new(RwLock::new(BTreeMap::new())),
             root_readability: Arc::new(RwLock::new(BTreeMap::new())),
@@ -2815,7 +2814,7 @@ mod tests {
     #[tokio::test]
     async fn retained_receipt_receiver_requires_fresh_actual_peer_advertisement() {
         let pool = MediaPool::new(
-            MembershipManager::unavailable(),
+            crate::cluster::test_calls(MembershipManager::unavailable()),
             crate::cluster::Directory::new(MembershipManager::unavailable()),
         );
         assert!(!pool.retained_output_receiver("worker").await);
@@ -3472,7 +3471,7 @@ mod tests {
     #[tokio::test]
     async fn deadline_fencing_retains_children_and_rejects_delayed_success() {
         let pool = MediaPool::new(
-            MembershipManager::unavailable(),
+            crate::cluster::test_calls(MembershipManager::unavailable()),
             crate::cluster::Directory::new(MembershipManager::unavailable()),
         );
         let running_root = PathBuf::from("/media/running");
@@ -3625,7 +3624,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn snapshots_expire_after_fifteen_seconds() {
         let pool = MediaPool::new(
-            MembershipManager::unavailable(),
+            crate::cluster::test_calls(MembershipManager::unavailable()),
             crate::cluster::Directory::new(MembershipManager::unavailable()),
         );
         pool.snapshots.write().await.insert(
@@ -3665,7 +3664,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn receipt_cannot_restart_an_old_snapshots_full_ttl() {
         let pool = MediaPool::new(
-            MembershipManager::unavailable(),
+            crate::cluster::test_calls(MembershipManager::unavailable()),
             crate::cluster::Directory::new(MembershipManager::unavailable()),
         );
         let mut old = snapshot("peer", &["h264"], 1080);
@@ -3684,7 +3683,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn root_readability_is_specific_and_age_bounded() {
         let pool = MediaPool::new(
-            MembershipManager::unavailable(),
+            crate::cluster::test_calls(MembershipManager::unavailable()),
             crate::cluster::Directory::new(MembershipManager::unavailable()),
         );
         let observed_at = tokio::time::Instant::now();
@@ -3739,7 +3738,7 @@ mod tests {
     #[tokio::test]
     async fn a_single_node_poll_performs_no_peer_http_work() {
         let pool = MediaPool::new(
-            MembershipManager::unavailable(),
+            crate::cluster::test_calls(MembershipManager::unavailable()),
             crate::cluster::Directory::new(MembershipManager::unavailable()),
         );
         pool.poll_once().await.expect("empty membership is a no-op");

@@ -266,7 +266,7 @@ mod cached_owner_delivery_tests {
             })
             .await
             .expect("actual sampled owner becomes eligible before relay");
-            let clock = super::super::super::peer_transport::PeerTransport::new(
+            let clock = crate::cluster::test_calls(
                 ingress.membership.clone(),
             )
             .clock_request(&owner.state.node_id, &source_config.cluster.join_url)

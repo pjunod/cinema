@@ -840,7 +840,7 @@ pub struct AppState {
     /// five-second memory of the owner's address. Signing, expected-node
     /// binding and response verification stay per request inside the
     /// transport; nothing about a credential is held here.
-    pub(crate) live_tv_peers: Arc<crate::http::live_tv::LiveTvPeers>,
+    pub(crate) live_tv_peers: crate::cluster::calls::PeerTransport,
     pub(crate) subtitle_models: Arc<crate::subtitle_models::Runtime>,
     pub server_name: String,
     /// Items whose review-site scores this node is fetching right now.
@@ -1077,7 +1077,7 @@ impl AppState {
             &self.runtime_cache_dir,
         )
         .on_node(Some(&self.node_id))
-        .with_membership(self.membership.clone(), self.cluster.directory())
+        .with_cluster(self.cluster.calls(), self.cluster.directory())
         .with_jobs(Arc::clone(&self.jobs))
     }
 
@@ -1238,7 +1238,7 @@ impl AppState {
         let live_tv_scratch = transcode_dir.join(crate::transcode::LIVE_TV_WORK_DIR_NAME);
         let system = Arc::new(system);
         let peer_activity = crate::http::internal_activity::PeerActivityClient::new(
-            membership.clone(),
+            cluster.calls(),
             cluster.directory(),
         );
         let jobs = Arc::new(
@@ -1255,7 +1255,7 @@ impl AppState {
             )
             .with_dv_disk_capabilities(system.dv_disk.clone())
             .with_applied_view(applied.clone())
-            .with_membership(membership.clone(), cluster.directory())
+            .with_membership(membership.clone(), cluster.calls(), cluster.directory())
             .with_peer_activity(peer_activity.clone()),
         );
         let sharing = Arc::new(crate::sharing::SharingManager::new(
@@ -1296,7 +1296,7 @@ impl AppState {
             shared_cache_id,
             &cluster_id,
             node_id.clone(),
-            membership.clone(),
+            cluster.calls(),
             cluster.directory(),
             Arc::clone(&store),
         );
@@ -1339,7 +1339,7 @@ impl AppState {
                 renditions,
                 system.ffmpeg_version.clone().unwrap_or_default(),
                 node_id.clone(),
-                Some(membership.clone()),
+                Some(cluster.calls()),
                 Some(cluster.directory()),
             )
             .with_subtitle_jobs(Arc::clone(&jobs))
@@ -1388,16 +1388,16 @@ impl AppState {
             node_id.clone(),
             serving.clone(),
         );
-        let media_pool = crate::media_pool::MediaPool::new(membership.clone(), cluster.directory());
+        let media_pool = crate::media_pool::MediaPool::new(cluster.calls(), cluster.directory());
         let media_sessions = crate::media_sessions::MediaSessionCoordinator::with_directory(
-            membership.clone(),
+            cluster.calls(),
             cluster.directory(),
             Arc::clone(&store),
             Arc::new(applied.clone()),
         );
         let cache_only_admin_proofs =
             crate::http::CacheOnlyAdminProofCache::new(membership.is_replicated());
-        let live_tv_peers = crate::http::live_tv::LiveTvPeers::new(membership.clone());
+        let live_tv_peers = cluster.calls();
         let live_tv = crate::live_tv::LiveTvManager::new(
             Arc::clone(&store),
             Arc::clone(&system),
@@ -1501,6 +1501,7 @@ impl AppState {
             self.replication.clone(),
             self.applied.applied_mark(),
         );
+        self.live_tv_peers = self.cluster.calls();
         self.membership = membership;
     }
 
@@ -1849,9 +1850,10 @@ pub struct JobManager {
     /// than sampled once, because committed membership moves under a running
     /// daemon: a learner may be promoted, and a voter may be removed.
     job_authority: Arc<dyn ClusterJobAuthority>,
-    /// Exact committed membership and internal addressing for optional peer
-    /// hydration. Tests and recovery-only construction deliberately omit it.
+    /// Existing membership evidence for analysis reconciliation. Hydration
+    /// separately owns bounded peer calls and the stamped directory.
     membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    peer_calls: Option<crate::cluster::calls::PeerTransport>,
     directory: Option<crate::cluster::Directory>,
     artwork_dir: PathBuf,
     scan_prune_percent: u8,
@@ -4077,6 +4079,7 @@ impl JobManager {
             coordinator,
             job_authority,
             membership: None,
+            peer_calls: None,
             directory: None,
             artwork_dir,
             scan_prune_percent,
@@ -4135,9 +4138,11 @@ impl JobManager {
     fn with_membership(
         mut self,
         membership: plurx_core::cluster::membership::MembershipManager,
+        peer_calls: crate::cluster::calls::PeerTransport,
         directory: crate::cluster::Directory,
     ) -> Self {
         self.membership = Some(membership);
+        self.peer_calls = Some(peer_calls);
         self.directory = Some(directory);
         self
     }
@@ -11788,7 +11793,7 @@ impl JobManager {
             .flatten();
         if let Some(artifact) = &published {
             let hydrated = tokio::select! {
-                result = crate::fragment_index_cluster::hydrate_for_job(self.store.as_ref(), self.membership.as_ref(), self.directory.as_ref(),
+                result = crate::fragment_index_cluster::hydrate_for_job(self.store.as_ref(), self.peer_calls.as_ref(), self.directory.as_ref(),
                     &node_id, &worker.cache_root, artifact) => matches!(result, Ok(Some(_))),
                 () = lost.cancelled() => false,
             };

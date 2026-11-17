@@ -6,8 +6,7 @@ use super::{
     error::ApiError,
     extract::{authenticate_token_digest, authenticate_user_token},
     peer_transport::{
-        exact_auth_from_headers, signed_response_payload, PeerAuthMode, PeerTransport,
-        RESPONSE_SIGNATURE_HEADER,
+        exact_auth_from_headers, signed_response_payload, PeerAuthMode, RESPONSE_SIGNATURE_HEADER,
     },
 };
 use crate::state::AppState;
@@ -202,7 +201,9 @@ async fn route(state: &AppState, dispatch: Dispatch) -> Result<(u16, Value), Api
                 .ok_or_else(|| fail(503, "unavailable"))?;
             let base = peer.http_base.ok_or_else(|| fail(503, "unavailable"))?;
             let body = serde_json::to_vec(&dispatch).map_err(|_| fail(400, "invalid"))?;
-            let response = PeerTransport::new(state.membership.clone())
+            let response = state
+                .cluster
+                .calls()
                 .request(
                     &peer.node_id,
                     &base,
@@ -247,7 +248,7 @@ async fn listings(state: &AppState, d: &Dispatch) -> Result<Value, ApiError> {
         .await
         .map_err(|_| fail(503, "unavailable"))?
         .map_err(|_| fail(503, "unavailable"))?;
-    let transport = PeerTransport::new(state.membership.clone());
+    let transport = state.cluster.calls();
     let body = serde_json::to_vec(&Dispatch {
         request: Request::ListSessions {
             version: Version::V1,

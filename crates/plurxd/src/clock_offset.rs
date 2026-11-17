@@ -256,8 +256,8 @@ impl ClockObserver {
     pub(crate) fn new(membership: MembershipManager) -> Self {
         let (requests, receiver) = mpsc::channel(1);
         let (completion, _) = watch::channel(Completion::default());
-        let transport = crate::http::peer_transport::PeerTransport::new(membership.clone());
         let clock = crate::cluster::startup_clock(membership);
+        let transport = clock.calls();
         Self(Arc::new(ObserverInner {
             transport,
             roster: RosterProof::for_clock(&clock),

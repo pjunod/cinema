@@ -2,7 +2,7 @@
 use crate::{
     http::{
         extract::AuthUser,
-        peer_transport::{deadline_after, PeerAuthMode, PeerTransport},
+        peer_transport::{deadline_after, PeerAuthMode},
     },
     state::AppState,
 };
@@ -528,7 +528,7 @@ async fn collect(
         .collect::<BTreeSet<_>>();
     let omitted = nodes.len() > 8;
     let peers = state.cluster.voter_targets().await.unwrap_or_default();
-    let transport = PeerTransport::new(state.membership.clone());
+    let transport = state.cluster.calls();
     let requests: Vec<_> = remote
         .iter()
         .cloned()

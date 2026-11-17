@@ -6051,7 +6051,6 @@ pub(crate) struct MetricsState {
     cluster_observations: crate::cluster::Observations,
     blocked_gets: Arc<crate::waitpool::BlockedGetMetrics>,
     live_tv: Arc<crate::live_tv::LiveTvMetrics>,
-    live_tv_peers: Arc<crate::http::live_tv::LiveTvPeerMetrics>,
     backup: Arc<crate::backup::BackupMetrics>,
     plex_census: Arc<super::PlexCensus>,
     start_attempts: Arc<crate::playstart::StartAttempts>,
@@ -6076,7 +6075,6 @@ impl FromRef<AppState> for MetricsState {
             // this node is actually serving from.
             blocked_gets: state.transcode.blocked_get_metrics_handle(),
             live_tv: state.live_tv.metrics_handle(),
-            live_tv_peers: state.live_tv_peers.metrics_handle(),
             backup: state.backup.metrics(),
             plex_census: Arc::clone(&state.plex_census),
             start_attempts: Arc::clone(&state.start_attempts),
@@ -6706,7 +6704,7 @@ pub(crate) async fn metrics(
         crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &crate::background_jobs::analysis_reconcile::prometheus() + &crate::state::analysis_completed_prometheus(&state.node_id) + &state.clock.prometheus() + &crate::source_custody::launch_prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
-    let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();
+    let live_tv_metrics = state.live_tv.prometheus();
     let backup_metrics = state.backup.prometheus();
     let codec_qualification_metrics = state.transcode.codec_qualification_prometheus();
 

@@ -1380,7 +1380,7 @@ struct Shared {
     encoded_generation_scanner: Arc<StdMutex<EncodedGenerationScanner>>,
     cluster_node_id: Option<String>,
     cluster_index_root: Option<PathBuf>,
-    cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    cluster_calls: Option<crate::cluster::calls::PeerTransport>,
     cluster_directory: Option<crate::cluster::Directory>,
     /// The cluster's catalogue identity (`instance.id`), read once: it never
     /// changes, and v3 copy-index source keys are derived from it per start.

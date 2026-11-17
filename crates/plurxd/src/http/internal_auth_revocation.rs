@@ -314,7 +314,7 @@ impl ClusterCacheRevocation {
         let mut membership_exclusion =
             CacheAdminMembershipExclusion::prepare(state, operation_guard)?;
         membership_exclusion.commit().await?;
-        let transport = PeerTransport::new(state.membership.clone());
+        let transport = state.cluster.calls();
         // The wire operation ID is the exact replicated claim. A peer only
         // acknowledges Begin after this same row is visible in its local
         // applied SQL, causally ordering any later absence after the acquire.

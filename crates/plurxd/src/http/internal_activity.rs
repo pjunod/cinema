@@ -323,12 +323,9 @@ pub struct PeerActivityClient {
 #[allow(dead_code)]
 impl PeerActivityClient {
     #[must_use]
-    pub fn new(
-        membership: plurx_core::cluster::membership::MembershipManager,
-        directory: crate::cluster::Directory,
-    ) -> Self {
+    pub fn new(transport: PeerTransport, directory: crate::cluster::Directory) -> Self {
         Self {
-            transport: PeerTransport::new(membership.clone()),
+            transport,
             directory,
             reads: Arc::new(tokio::sync::Mutex::new(PeerActivityReadGate::default())),
             owner_reads: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -1121,7 +1118,9 @@ mod tests {
     #[tokio::test]
     async fn reachable_peer_without_activity_origin_is_unsupported_not_unreachable() {
         let client = PeerActivityClient::new(
-            plurx_core::cluster::membership::MembershipManager::unavailable(),
+            crate::cluster::test_calls(
+                plurx_core::cluster::membership::MembershipManager::unavailable(),
+            ),
             crate::cluster::Directory::new(
                 plurx_core::cluster::membership::MembershipManager::unavailable(),
             ),

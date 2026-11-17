@@ -4,7 +4,7 @@ use super::super::{
     INTERNAL_PATH,
 };
 use super::*;
-use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
+use crate::http::peer_transport::PeerAuthMode;
 use futures_util::{stream, StreamExt};
 use plurx_core::remote_control::{Target, Version as RemoteVersion};
 use serde::Deserialize;
@@ -79,7 +79,7 @@ async fn inner(state: &AppState, user: i64, digest: &str) -> Result<Vec<Snapshot
         &state.node_id,
     )?;
     let body = serde_json::to_vec(&dispatch).map_err(|_| fail(503, "unavailable"))?;
-    let transport = PeerTransport::new(state.membership.clone());
+    let transport = state.cluster.calls();
     let replies = stream::iter(peers.into_iter().map(|peer| {
         let transport = transport.clone();
         let body = body.clone();

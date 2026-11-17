@@ -1,6 +1,6 @@
 # Cluster facade slice 5 — own bounded peer calls and fresh owner lookup
 
-**Status:** open — plan committed before implementation. **Owner:** Codex.
+**Status:** open — implemented with focused local regressions passed; integration, final checks, review and qualification remain pending. **Owner:** Codex.
 
 Companion to [the facade contract](CLUSTER-FACADE-BUILD.md) and
 [slice 4](CLUSTER-FACADE-SLICE-4-BUILD.md). This task follows slice 4's
@@ -84,4 +84,38 @@ actual environment limitations without suppressions or weakened tests.
 After integration, obtain one adversarial whole-diff review, fix findings,
 run the Effort gate once on its exact head and land only on a pass with
 regression trailers. Main promotion and deployment/acceptance are separate.
-No implementation, build, review or qualification is claimed by this plan.
+Implementation and local checkpoint evidence follow; review, gate and
+qualification remain pending.
+
+## Local checkpoint — 2026-11-17
+
+The pinned Rust 1.97.1 baseline all-target check passed before Rust edits.
+The transport implementation and tests now live in inline `cluster::calls`;
+construction is cluster-private and the old HTTP module only re-exports
+names. The production code differs only in constructor visibility, the
+relocated clock module path and a rustfmt signature comma. Behavioral
+security tests remain the execution evidence.
+
+Transport-only handles in subtitle access, transcode and VOD are typed call
+capabilities. Job-manager reconciliation retains its membership evidence
+and hydration gets a separate call capability. Replacing AppState's fixture
+membership also rebuilds its plain Live TV call handle. The extra owner TTL
+and obsolete cache metrics are removed; every lookup takes the current
+stamped voter roster.
+
+All 22 relocated transport/security and Live TV cases pass, including clock
+T4 rejection, exact nonce parsing, redirect/body limits, fresh address
+lookup, identity/removal/reachability and retry after unreadable lookup.
+Thirteen copy-index, subtitle cancellation/timeout and operation collector
+regressions pass. Strict census passes ten cases at 369, down from 430;
+matchers/exemptions are unchanged. Ratchet seven and ownership inventory
+seven pass without inventory changes. Three formal source mappings pass
+after eight unique unchanged 42-line anchor windows were reviewed; this
+claims source correspondence only, not new model execution.
+
+The first pin rewrite damaged its declaration header; the local compiler
+and parser caught it, and both passed after correction. That failed attempt
+is not evidence of a census pass. Real feature-enabled clock causality and
+remaining static checks are still pending at this checkpoint. Integrate
+the actual current effort/C7 source before final review and qualification.
+No gate, landing, deployment or fleet acceptance is claimed.

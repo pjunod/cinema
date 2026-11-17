@@ -384,7 +384,7 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
                     "desired voter must still be a committed learner at observation entry"
                 );
                 self.owner.start(membership, node_id.clone()).await?;
-                let response = crate::http::peer_transport::PeerTransport::new(self.source.clone())
+                let response = crate::cluster::test_calls(self.source.clone())
                     .clock_request(&node_id, &self.origin)
                     .await
                     .map_err(|error| {
