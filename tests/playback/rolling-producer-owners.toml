@@ -4039,7 +4039,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # token: live_tv/tests.rs spawns dvr_loop twice and reminder_loop once;
 # sharing.rs's idle-loop test spawns run and claim_loop. No production
 # task owner is added.
-expected_occurrences = 1171
+# Recovery fixture union: +1 request task held at Source preparation.
+# The fixture awaits this exact task before inspecting its Direct response.
+expected_occurrences = 1172
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5987,7 +5989,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # an applied-view read with timeout on the caller's task (+2); the rest are
 # test-only waits in live_tv/tests.rs (5) and sharing.rs (2). No new task or
 # timer owner.
-expected_occurrences = 2256
+# Recovery fixture union: +2, the Store-wall lease-expiry sleep and bounded
+# Source-factory retirement observation. These matches are test-only; the
+# actual Instant::now credit samples do not match this constructor pattern.
+expected_occurrences = 2258
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -7246,7 +7251,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # processed_stream_format_reports_the_attached_carrier_not_its_pq_base.
 # It reads the existing VOD owner's status_publication snapshot: no child
 # launch, lease renewal, or ownership transfer. The broad matcher is unchanged.
-expected_occurrences = 940
+# Recovery fixture union: +1 Direct-start HTTP Response::status() read.
+# This observes the returned response and launches no process.
+expected_occurrences = 941
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7567,7 +7574,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Change-driven sharing monitors (A6 M3): +1 closed.wait() in the receiver
 # connection monitor's one-second floor wait, beside its change wait. No
 # process is involved.
-expected_occurrences = 400
+# Recovery fixture union: +1 retained Source factory entry.wait() observer.
+# It observes the actual factory owner, not a new OS-child reaper.
+expected_occurrences = 401
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
