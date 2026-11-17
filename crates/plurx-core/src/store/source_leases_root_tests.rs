@@ -949,10 +949,12 @@ async fn source_resource_point_lookups_do_not_scan_owner_catalogs() {
         .await
         .expect("explain source resource lookups");
 
+    let all_plans = format!("{plans:#?}");
+
     for (name, plan) in &plans {
         assert!(
             plan.contains("SEARCH"),
-            "{name} lookup has no keyed search:\n{plan}"
+            "{name} lookup has no keyed search:\n{plan}\nAll plans:\n{all_plans}"
         );
         for scan in [
             "SCAN source_file",
@@ -965,7 +967,7 @@ async fn source_resource_point_lookups_do_not_scan_owner_catalogs() {
         ] {
             assert!(
                 !plan.contains(scan),
-                "{name} lookup scans owner catalog `{scan}`:\n{plan}"
+                "{name} lookup scans owner catalog `{scan}`:\n{plan}\nAll plans:\n{all_plans}"
             );
         }
     }
@@ -983,7 +985,7 @@ async fn source_resource_point_lookups_do_not_scan_owner_catalogs() {
             .as_str();
         assert!(
             plan.contains(&format!("SEARCH {alias}")),
-            "{name} lookup does not search by owner key:\n{plan}"
+            "{name} lookup does not search by owner key:\n{plan}\nAll plans:\n{all_plans}"
         );
     }
 }

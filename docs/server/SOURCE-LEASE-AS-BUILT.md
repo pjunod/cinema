@@ -32,6 +32,13 @@ again. The focused plan regression requires primary-key owner searches on the
 store's bundled SQLite; system-SQLite diagnostic plans are supporting evidence,
 not a qualification claim for a different engine.
 
+The bundled-engine regression exposed one further fallback scan: correlating
+the DISTINCT file-root view still scanned the file catalogue. Fallback now
+tests matching roots directly against the already selected file's item and
+path. Any root match is sufficient for existence; the positive resource branch
+continues to choose the longest root. This preserves missing-item and unmatched
+file fallback without expanding all file owners.
+
 The Python dispatch fixture consumes the current contender view generated
 from the same Rust claim macros. `scripts/source-dispatch-fixture` emits the
 standalone Rust exporter; compiling it in the normal bounded compiler loop

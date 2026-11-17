@@ -741,13 +741,13 @@
         "table": "source lease root identity outside model",
         "source": "crates/plurx-core/src/store/source_roots.sql",
         "anchor": "CREATE VIEW source_lease_roots AS",
-        "sha256": "dc1baa8342f03e57148222dc829aa1ce3de70da2351e6d5617243fd9f5891def"
+        "sha256": "f01e795d1db3d250f3538385a587222e0d8012876123fe1939a9cdb4fedd8254"
       },
       {
         "table": "source lease concrete capacity outside model",
         "source": "crates/plurx-core/src/store/source_roots.sql",
         "anchor": "CREATE VIEW source_lease_limits AS",
-        "sha256": "dc1baa8342f03e57148222dc829aa1ce3de70da2351e6d5617243fd9f5891def"
+        "sha256": "f01e795d1db3d250f3538385a587222e0d8012876123fe1939a9cdb4fedd8254"
       },
       {
         "table": "source lease concrete resource assignment outside model",

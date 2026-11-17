@@ -45,7 +45,14 @@ SELECT DISTINCT matched_file.file_id,resource.resource_key FROM source_lease_fil
 JOIN source_lease_root_resources resource ON resource.library_id=matched_file.library_id AND resource.root_id=matched_file.root_id
 UNION
 SELECT fallback_file.id,'source_io' FROM files fallback_file
-WHERE NOT EXISTS(SELECT 1 FROM source_lease_file_roots root WHERE root.file_id=fallback_file.id);
+-- Existence needs any matching root, not a second expansion of the DISTINCT
+-- file-root view. Correlating that view can scan the entire files catalogue.
+WHERE NOT EXISTS(SELECT 1 FROM items fallback_item
+JOIN source_lease_roots root ON root.library_id=fallback_item.library_id
+WHERE fallback_item.id=fallback_file.item_id
+ AND (fallback_file.path=root.root_path OR (root.root_path='/' AND substr(fallback_file.path,1,1)='/')
+  OR (substr(fallback_file.path,1,length(root.root_path))=root.root_path
+    AND substr(fallback_file.path,length(root.root_path)+1,1)='/')));
 -- next statement
 -- Root capacity is primary. Domains impose an aggregate limit only when
 -- explicitly configured; merely mapping roots to the same disk adds no cap.
