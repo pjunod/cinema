@@ -13162,7 +13162,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
             "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
-            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,5)".to_owned()),
+            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,6)".to_owned()),
             "translation-marker" => ("DELETE FROM subtitle_translation_schema".to_owned(), "INSERT INTO subtitle_translation_schema VALUES(1,1)".to_owned()),
             "text-marker" => ("DELETE FROM subtitle_text_translation_schema".to_owned(), "INSERT INTO subtitle_text_translation_schema VALUES(1,1)".to_owned()),
             "caption-marker" => ("DELETE FROM shared_caption_schema".to_owned(), "INSERT INTO shared_caption_schema VALUES(1,1)".to_owned()),
@@ -13227,11 +13227,11 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
 }
 
 /// Review #1405 (4): a replicated cluster at managed v4 (the v125 release)
-/// upgrades to v5 on bootstrap — the exact v5 view and marker, with its
+/// upgrades to current v6 on bootstrap — the exact v6 view and marker, with its
 /// managed receipts kept — and a later bootstrap is a no-op.
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_managed_v4_upgrades_to_v5_and_a_restart_is_a_no_op() {
+async fn replicated_managed_v4_upgrades_to_v6_and_a_restart_is_a_no_op() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -13244,12 +13244,29 @@ async fn replicated_managed_v4_upgrades_to_v5_and_a_restart_is_a_no_op() {
     )
     .await
     .expect("managed upgrade client");
-    let telemetry = cluster._root.path().join("managed-v5-upgrade.db");
+    let telemetry = cluster._root.path().join("managed-v6-upgrade.db");
     drop(
         HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
             .await
             .expect("bootstrap current"),
     );
+    // Restore the pre-lease generation before selecting a historical managed
+    // generation; a contracted lease catalogue requires its live root overlay.
+    let rewind = replicated_source_lease_rewind(&client)
+        .await
+        .expect("empty current lease tail");
+    for result in client
+        .txn(
+            rewind
+                .into_iter()
+                .map(|sql| (sql, hiqlite::params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("pre-lease managed fixture")
+    {
+        result.expect("exact pre-lease statement");
+    }
     // Return exactly the managed view and marker to published v4.
     let statements = include_str!("../src/store/subtitle_managed_resources_v4.sql")
         .split("-- next statement")
@@ -13282,11 +13299,11 @@ async fn replicated_managed_v4_upgrades_to_v5_and_a_restart_is_a_no_op() {
                 .await
                 .unwrap_or_else(|error| panic!("{round} bootstrap: {error}")),
         );
-        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 6).await;
         assert_eq!(
             replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
-            queue_fixture::managed_fixture_shape(5),
-            "{round}: exact managed v5 view, marker and guards"
+            queue_fixture::current_managed_fixture_shape(),
+            "{round}: exact current managed v6 view, marker and guards"
         );
         let receipts: Vec<I64Value> = client
             .query_consistent_map(
@@ -13369,7 +13386,7 @@ async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exact
             "bootstrap exact published shape"
         );
     }
-    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
+    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 6).await;
     require_replicated_fixture_marker(&client, "subtitle_translation_schema", 1).await;
     for marker in queue_fixture::CURRENT_TAIL_FIXTURE_MARKERS {
         require_replicated_fixture_marker(&client, marker, 1).await;
@@ -13426,7 +13443,8 @@ async fn replicated_fixture_shape(client: &Client, sql: &str) -> Vec<(String, St
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn replicated_source_lease_rewind(client: &Client) -> Option<Vec<String>> {
     use queue_fixture::source_extensions_fixture::{
-        source_lease_rewind_plan, CLAIM_EFFECTS_V1, SOURCE_LEASE_UNOWNED_SQL,
+        current_source_lease_rewind_shape, source_lease_rewind_plan, CLAIM_EFFECTS_V1,
+        SOURCE_LEASE_REWIND_SHAPE_SQL, SOURCE_LEASE_UNOWNED_SQL,
     };
     let present: Vec<I64Value> = client
         .query_consistent_map(
@@ -13439,6 +13457,24 @@ async fn replicated_source_lease_rewind(client: &Client) -> Option<Vec<String>> 
         return None;
     }
     require_replicated_fixture_marker(client, "source_lease_schema", 3).await;
+    let shape = client
+        .query_consistent(SOURCE_LEASE_REWIND_SHAPE_SQL.to_owned(), hiqlite::params!())
+        .await
+        .expect("replicated current lease catalogue")
+        .iter_mut()
+        .map(|row| {
+            (
+                row.get::<String>("type"),
+                row.get::<String>("name"),
+                row.get::<String>("sql"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shape.as_slice(),
+        current_source_lease_rewind_shape(),
+        "exact current lease catalogue required before replicated rewind"
+    );
     let unowned: Vec<I64Value> = client
         .query_consistent_map(SOURCE_LEASE_UNOWNED_SQL, hiqlite::params!())
         .await
@@ -13465,8 +13501,8 @@ async fn replicated_source_lease_rewind(client: &Client) -> Option<Vec<String>> 
 /// keeps the v1 two-slot claim effects unless the expand replaces them. A
 /// populated v1 store: the first open expands and carries the live holder,
 /// the contract waits for every node's lease capability, a later open
-/// contracts, and repeated opens change nothing. Then three nodes each hold
-/// a source reader of the one unmapped key.
+/// contracts, and repeated opens change nothing. The carried reader and one
+/// new reader then fill the root's two maintenance slots across all nodes.
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v1_source_store_expands_carries_holders_and_contracts_when_every_node_is_ready()
@@ -13650,14 +13686,14 @@ async fn replicated_v1_source_store_expands_carries_holders_and_contracts_when_e
         .expect("restart a contracted store");
     assert_eq!(text(&client, catalogue).await, contracted, "a no-op");
     let reopened: Arc<dyn Store> = Arc::new(reopened);
-    for (index, node) in [(1, "node-b"), (2, "node-c")] {
+    for (index, node, expected) in [(1, "node-b", true), (2, "node-c", false)] {
         let id = {
             let request = job(index);
             let id = request.id.clone();
             reopened.enqueue_job(request).await.expect("enqueue");
             id
         };
-        assert!(
+        assert_eq!(
             matches!(
                 reopened
                     .claim_job(claim(&id, node, 2_000))
@@ -13665,7 +13701,8 @@ async fn replicated_v1_source_store_expands_carries_holders_and_contracts_when_e
                     .unwrap_or_else(|error| panic!("{node}: {error}")),
                 ClaimOutcome::Claimed { .. }
             ),
-            "{node} takes a reader of the one key"
+            expected,
+            "{node}: the carried reader and new readers share two root maintenance slots"
         );
     }
     assert_eq!(
@@ -13674,8 +13711,8 @@ async fn replicated_v1_source_store_expands_carries_holders_and_contracts_when_e
             "SELECT node_id AS value FROM source_leases ORDER BY node_id"
         )
         .await,
-        ["node-a", "node-b", "node-c"],
-        "three readers of the unmapped source on three nodes"
+        ["node-a", "node-b"],
+        "the carried v1 reader and one new reader fill the rooted budget across nodes"
     );
 }
 
@@ -13860,7 +13897,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     require_replicated_fixture_marker(client, "dv_title_jobs_schema", 2).await;
     require_replicated_fixture_marker(client, "library_annotations_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_translation_schema", 1).await;
-    require_replicated_fixture_marker(client, "subtitle_managed_schema", 5).await;
+    require_replicated_fixture_marker(client, "subtitle_managed_schema", 6).await;
     let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
     let title_marker: Vec<I64Value> = client
         .query_consistent_map(
@@ -13897,7 +13934,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     let annotations_drops =
         queue_fixture::validated_empty_annotations_rewind(&annotations_shape, &annotations_counts);
     let rows: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=5) AS value",
+        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=6) AS value",
         hiqlite::params!(),
     ).await.expect("current managed fixture marker");
     assert_eq!(rows.len(), 1);
@@ -13928,8 +13965,16 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         "partial managed fixtures cannot be rewound"
     );
     let managed_shape = extension_shape(client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await;
+    assert_eq!(
+        managed_shape,
+        queue_fixture::current_managed_fixture_shape(),
+        "exact live managed shape with source-lease root overlay required before rewind"
+    );
+    // The source-lease rewind is queued first in the same transaction and
+    // restores the frozen v6 view before these validated managed drops run.
+    let frozen_managed_v6 = queue_fixture::managed_fixture_shape(6);
     let managed_drops =
-        queue_fixture::validated_empty_managed_rewind(&managed_shape, 5, managed_data_count);
+        queue_fixture::validated_empty_managed_rewind(&frozen_managed_v6, 6, managed_data_count);
     // The historical queue teardown also removes translation triggers that
     // reference background_jobs. Remove the entire exact empty extension,
     // never leave its marker/tables advertising a partial current shape.
@@ -14536,7 +14581,7 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         ),
         (
             "SELECT COUNT(*) AS value FROM subtitle_managed_schema \
-             WHERE singleton = 1 AND version = 5",
+             WHERE singleton = 1 AND version = 6",
             1,
         ),
         (
@@ -14563,11 +14608,11 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
             assert_eq!(rows.len(), 1, "{round}: {sql}");
             assert_eq!(rows[0].value, expected, "{round}: {sql}");
         }
-        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 6).await;
         assert_eq!(
             replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
-            queue_fixture::managed_fixture_shape(5),
-            "{round}: exact current managed v5 view, marker and guards",
+            queue_fixture::current_managed_fixture_shape(),
+            "{round}: exact current managed v6 view, marker and guards",
         );
         let views: Vec<SchemaText> = client
             .query_consistent_map(
@@ -18102,7 +18147,7 @@ mod managed_bootstrap_regressions {
             ),
             (
                 "DELETE FROM subtitle_managed_schema",
-                "INSERT INTO subtitle_managed_schema VALUES(1,5)".into(),
+                "INSERT INTO subtitle_managed_schema VALUES(1,6)".into(),
                 "marker missing",
             ),
         ]

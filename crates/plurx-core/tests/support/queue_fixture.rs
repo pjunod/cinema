@@ -1284,6 +1284,17 @@ pub(crate) fn managed_fixture_shape(version: i64) -> Vec<(String, String)> {
     managed_fixture_rows(&managed_fixture_connection(version))
 }
 
+/// Canonical live managed objects after the current SQLite bootstrap, including
+/// the source-lease root overlay on background_job_required_resources. Frozen
+/// published generations continue to use managed_fixture_shape(version).
+pub(crate) fn current_managed_fixture_shape() -> Vec<(String, String)> {
+    let directory = tempfile::tempdir().expect("current managed fixture witness");
+    let path = directory.path().join("current.db");
+    drop(plurx_core::store::SqliteStore::open(&path).expect("current managed fixture"));
+    let connection = rusqlite::Connection::open(path).expect("current managed catalogue");
+    managed_fixture_rows(&connection)
+}
+
 /// Published managed generations each require their own exact DDL and marker.
 /// This pure plan cannot discard accepted work or silently repair schema drift.
 pub(crate) fn validated_empty_managed_rewind(

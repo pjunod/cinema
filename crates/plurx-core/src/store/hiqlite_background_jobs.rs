@@ -107,7 +107,9 @@ async fn managed_bootstrap_layout(
 
 async fn install_probe_and_managed_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     let (version, observed_view) = managed_bootstrap_layout(client).await?;
-    if matches!(version, Some(1..=5)) {
+    // The layout reader already verified a known canonical shape and its
+    // marker. Keep version recognition there, rather than duplicating its range.
+    if version.is_some() {
         // Reinstall only idempotent probe objects; never replace a managed view.
         let prefix = super::background_jobs_probe::SCHEMA
             .split_once("-- next statement\nDROP VIEW")
@@ -145,7 +147,8 @@ async fn install_probe_and_managed_schema(client: &hiqlite::Client) -> Result<()
                 .map_err(database_error)
         });
     let (settled, _) = managed_bootstrap_layout(client).await?;
-    if matches!(settled, Some(1..=5)) {
+    // The read-back applies the same strict shape and marker validation.
+    if settled.is_some() {
         return Ok(());
     }
     attempt?;

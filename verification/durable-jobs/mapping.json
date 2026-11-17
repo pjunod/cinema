@@ -253,7 +253,7 @@
       },
       {
         "anchor": "impl QueueSql for HiqliteAuthStore {",
-        "sha256": "6c5b7ec7ff4bd1234f7506d8c6f408119855496eb4fb771c8a3d82f46259f29e",
+        "sha256": "f95ea402ff1cb9b5519b3854b38eaa357bd1e12cef1fa28de1472f4c8ab7be2c",
         "source": "crates/plurx-core/src/store/hiqlite_background_jobs.rs",
         "table": "proposal \u00a74.1 Hiqlite queue adapter"
       },
@@ -451,7 +451,7 @@
       },
       {
         "anchor": "#[path = \"store_contract/formal_publication.rs\"]\nmod formal_publication;",
-        "sha256": "063dae126a0fdea5bc91fa334a0798143251f82e85f67e9c4eb79e40b62ec386",
+        "sha256": "7c03f7056973a0d65d1c99d6888a4e2ad748147dae2f71f860b2d6f8965d7f55",
         "source": "crates/plurx-core/tests/store_contract.rs",
         "table": "M2 conformance parent module registration"
       },

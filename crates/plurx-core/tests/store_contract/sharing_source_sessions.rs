@@ -263,12 +263,13 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     for id in 1_i64..=3 {
         client
             .execute(
-                "INSERT INTO cluster_node_capabilities VALUES($1,$2,$3),($1,$4,$3)",
+                "INSERT INTO cluster_node_capabilities VALUES($1,$2,$3),($1,$4,$3),($1,$5,$3)",
                 hiqlite::params!(
                     format!("node-{id}"),
                     plurx_core::cluster::membership::SHARING_INGRESS_CUSTODY_CAPABILITY,
                     now,
-                    "sharing_ingress_boot_v1:01a1128a-944d-4f11-9bf2-c7599d355213"
+                    "sharing_ingress_boot_v1:01a1128a-944d-4f11-9bf2-c7599d355213",
+                    plurx_core::store::analysis_coordination::SOURCE_COPY_COORDINATION_CAPABILITY
                 ),
             )
             .await

@@ -805,7 +805,7 @@ fn published_statement(migration: &str, opening: &str) -> String {
 // Inventory every lease-owned object (including foreign-named indexes/triggers)
 // and every existing object the rewind replaces. Validate before any DROP can
 // hide hostile drift from the older extensions' own strict validators.
-const SOURCE_LEASE_REWIND_SHAPE_SQL: &str = "SELECT type,name,sql FROM sqlite_master
+pub(crate) const SOURCE_LEASE_REWIND_SHAPE_SQL: &str = "SELECT type,name,sql FROM sqlite_master
  WHERE sql IS NOT NULL AND (
  name GLOB 'source_lease*' OR tbl_name GLOB 'source_lease*'
  OR name IN (
@@ -835,19 +835,28 @@ fn source_lease_rewind_objects(connection: &rusqlite::Connection) -> Vec<(String
         .expect("complete source lease rewind inventory")
 }
 
-fn verify_current_source_lease_rewind_shape(connection: &rusqlite::Connection) {
+pub(crate) fn current_source_lease_rewind_shape() -> &'static [(String, String, String)] {
     static EXPECTED: std::sync::OnceLock<Vec<(String, String, String)>> =
         std::sync::OnceLock::new();
-    let expected = EXPECTED.get_or_init(|| {
-        let directory = tempfile::tempdir().expect("current lease rewind witness");
-        let path = directory.path().join("current.db");
-        drop(plurx_core::store::SqliteStore::open(&path).expect("canonical current SQLite store"));
-        let witness = rusqlite::Connection::open(&path).expect("current lease rewind catalogue");
-        source_lease_rewind_objects(&witness)
-    });
+    EXPECTED
+        .get_or_init(|| {
+            let directory = tempfile::tempdir().expect("current lease rewind witness");
+            let path = directory.path().join("current.db");
+            drop(
+                plurx_core::store::SqliteStore::open(&path)
+                    .expect("canonical current SQLite store"),
+            );
+            let witness =
+                rusqlite::Connection::open(&path).expect("current lease rewind catalogue");
+            source_lease_rewind_objects(&witness)
+        })
+        .as_slice()
+}
+
+fn verify_current_source_lease_rewind_shape(connection: &rusqlite::Connection) {
     assert_eq!(
-        &source_lease_rewind_objects(connection),
-        expected,
+        source_lease_rewind_objects(connection).as_slice(),
+        current_source_lease_rewind_shape(),
         "exact current source lease and overlaid catalogue required before rewind"
     );
     let marker: (i64, i64) = connection

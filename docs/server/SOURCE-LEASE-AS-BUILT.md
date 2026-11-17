@@ -43,6 +43,17 @@ row.
 Historical fixture rewind verifies all current lease-owned objects and
 overlaid resource definitions before replacing them, so a rewind cannot erase
 hostile schema drift and then accept the rewritten catalogue.
+
+Replicated qualification also exposed a stale bootstrap installer ceiling:
+the canonical managed-layout validator accepted v6, while two installer paths
+recognized only v1–v5. A repeated bootstrap then entered the legacy-only guard
+and failed with SQLite's intentional malformed-JSON refusal. The installer
+now trusts the strict validator's successful result for both initial read and
+lost-acknowledgement readback. Unknown shapes and incorrect markers still
+refuse; the legacy bootstrap guard is unchanged. Historical tests distinguish
+published managed DDL from the current root overlay, and both backend rewind
+helpers validate that overlay before any replacement.
+
 The unused intermediate file-root view is removed. Every captured owner
 plan remains subject to the same no-catalogue-scan assertion.
 
