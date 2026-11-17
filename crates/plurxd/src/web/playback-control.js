@@ -311,6 +311,7 @@
       // the visible media changes or its live capture becomes unavailable.
       this.terminalCapture = null;
       this.finalAccepted = false;
+      this.acceptingCapture = null;
       this.capture = () => this.terminalCapture || value.capture();
       this.send = value.send;
       // Wrapped, not assigned. `setTimeout` and `clearTimeout` are
@@ -355,7 +356,13 @@
     // (commit then end), but ordinary notifications cannot extend its life.
     finish(value) {
       if (this.stopped) return null;
-      if (!this.terminalCapture || this.finalAccepted) {
+      // An accepted earlier request may already have settled the ACK at the
+      // queued final's head. Only its synchronous success callback can replace
+      // that still-unsent final; external callers cannot overwrite it.
+      const acceptedBeforeFinal = this.acceptingCapture !== null
+        && this.acceptingCapture !== this.terminalCapture
+        && this.pending === this.terminalCapture;
+      if (!this.terminalCapture || this.finalAccepted || acceptedBeforeFinal) {
         const finalCapture = value && capture(value.snapshot, value.intentGeneration, value.owner);
         if (!finalCapture) return null;
         this.terminalCapture = finalCapture;
@@ -478,10 +485,12 @@
         }
         const acceptedFinal = requestCapture === this.terminalCapture;
         if (acceptedFinal) this.finalAccepted = true;
+        this.acceptingCapture = requestCapture;
         try {
           this.onExchange({ request, response, error: null, capture:requestCapture,
             intentGeneration:requestCapture.intentGeneration });
         } finally {
+          this.acceptingCapture = null;
           if (acceptedFinal && requestCapture === this.terminalCapture) this.stop();
         }
         if (this.stopped) return;

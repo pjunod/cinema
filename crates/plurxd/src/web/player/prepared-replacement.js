@@ -227,9 +227,13 @@ function settlePlaybackControlAcknowledgement(p,request){
   const pending=p.preparedControlPending,reporter=p.controlReporter;
   // An older staging may still owe an abort/progress ACK ahead of this
   // commit. Chain only explicit settlements, all on the frozen media turn.
-  // An in-flight earlier ACK can already have spent the queue entry before
-  // its final replay arrives, so this is intentionally outside `at !== -1`.
-  if(pending?.controlSnapshot&&reporter?.finalAccepted&&queue.length){
+  // An accepted in-flight head is also spent: advance its unsent final
+  // before allocating another sequence. Never depend on duplicate settlement.
+  const finalAck=reporter?.terminalCapture?.snapshot.acknowledgement;
+  const acceptedQueuedHead=finalAck&&sent.action_id===finalAck.action_id&&sent.state===finalAck.state;
+  if(pending?.controlSnapshot&&queue.length&&(reporter?.finalAccepted||acceptedQueuedHead)){
+    // If an earlier in-flight request already settled the queued head, skip
+    // that unsent final. Repeating an abort at a NEW sequence is not replay.
     const snapshot=Object.assign({},pending.controlSnapshot,{acknowledgement:queue[0]});
     reporter.finish(PlurxPlaybackControl.capture(snapshot,pending.intentGeneration,p.controlOwner));
   }

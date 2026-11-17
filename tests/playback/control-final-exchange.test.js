@@ -169,3 +169,39 @@ test("an accepted final stays stopped if the consumer callback throws", async ()
   await h.advance(60000);
   assert.equal(h.sent.length, 1);
 });
+
+for (const lost of [false, true]) test(`accepted earlier ACK skips its unsent final copy${lost ? " after exact retry" : ""}`, async () => {
+  const held = deferred();
+  const aborted = capture(4000, { action_id: actionId, state: "aborted" });
+  let h;
+  h = harness((request, attempt) => attempt === 1 ? held.promise : Promise.resolve(answer(request)), event => {
+    if (event.response && event.request.acknowledgement?.state === "aborted") {
+      assert.strictEqual(h.reporter.acceptingCapture, event.capture);
+      assert.equal(h.reporter.finalAccepted, false, "the accepted request predates the queued final");
+      assert.ok(h.reporter.finish(committed(4000)));
+    }
+  });
+  h.reporter.notify(aborted);
+  h.reporter.finish(aborted);
+  const queued = h.reporter.terminalCapture;
+  h.reporter.finish(committed(99000));
+  assert.strictEqual(h.reporter.terminalCapture, queued, "outside acceptance, an explicit finish cannot overwrite the queue");
+  if (lost) held.reject(Object.assign(new Error("response lost"), {
+    status: 429, code: "control_rate_limited", retryAfterMs: 250,
+  }));
+  else held.resolve(answer(h.sent[0].request));
+  await flush();
+  if (lost) {
+    assert.equal(h.reporter.acceptingCapture, null);
+    await h.advance(250);
+    assert.strictEqual(h.sent[0].request, h.sent[1].request);
+  }
+  await h.advance(250);
+  const requests = h.sent.map(item => item.request);
+  assert.deepEqual(requests.map(request => request.acknowledgement.state),
+    lost ? ["aborted", "aborted", "committed"] : ["aborted", "committed"]);
+  assert.equal(requests.at(-1).sequence, 2);
+  assert.equal(requests.at(-1).position_ms, 4000);
+  assert.equal(h.reporter.acceptingCapture, null);
+  assert.equal(h.reporter.stopped, true);
+});

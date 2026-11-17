@@ -410,3 +410,44 @@ test("paused source keeps hold and zero rate through an older ACK and final comm
   assert.equal(h.p.controlAcknowledgements.length, 0);
   assert.equal(h.reporter.stopped, true);
 });
+
+for (const lost of [false, true]) for (const closing of [false, true])
+  test(`Shared in-flight ABORT settles once before commit${closing ? " then close" : ""}${lost ? " with exact retry" : ""}`, async () => {
+    const held = deferred();
+    let abortedSequence = null, abortedSends = 0;
+    const h = harness({ shared: true, send: request => {
+      if (request.acknowledgement?.state === "aborted") {
+        if (abortedSequence !== null && request.sequence !== abortedSequence)
+          return Promise.reject(Object.assign(new Error("duplicate ABORT at new sequence"), { status: 409, code: "stale_control" }));
+        abortedSequence = request.sequence;
+        if (++abortedSends === 1) return held.promise;
+      }
+      return Promise.resolve(answer(request));
+    } });
+    await flush();
+    h.context.queuePlaybackControlAcknowledgement(h.p,
+      "66666666-6666-4666-8666-666666666666", "aborted");
+    await h.advance(250);
+    const earlier = h.sent.at(-1).request;
+    assert.equal(earlier.acknowledgement.state, "aborted");
+    h.expose(); h.prove(); h.retire();
+    if (closing) {
+      h.context.stopPlaybackControl(h.p);
+      h.p.mediaAttachment = null; h.p.sessionId = null;
+    }
+    if (lost) held.reject(Object.assign(new Error("ABORT answer lost"), {
+      status: 429, code: "control_rate_limited", retryAfterMs: 250,
+    }));
+    else held.resolve(answer(earlier));
+    await flush();
+    for (let turn = 0; turn < 4; turn++) await h.advance(250);
+    const requests = h.sent.slice(1).map(item => item.request);
+    const expected = lost ? ["aborted", "aborted", "committed"] : ["aborted", "committed"];
+    if (closing) expected.push("end");
+    assert.deepEqual(requests.map(request => request.acknowledgement?.state || "end"), expected);
+    assert.equal(new Set(requests.filter(request => request.acknowledgement?.state === "aborted")
+      .map(request => request.sequence)).size, 1, "Shared never receives a second ABORT sequence");
+    if (lost) assert.strictEqual(requests[0], requests[1]);
+    assert.equal(h.recovered.length, 0);
+    assert.equal(h.reporter.stopped, true);
+  });
