@@ -125,6 +125,14 @@ impl ActivePhase {
             return Err("copy phase sequence is invalid".into());
         }
         let attempted_owner = claim.physical_owner();
+        let phase_sequence = expected_sequence
+            .checked_add(1)
+            .ok_or("copy phase sequence exhausted")?;
+        let lease_id = format!(
+            "{}:{phase_sequence}",
+            plurx_core::store::background_jobs_resources::background_owner_key(&attempted_owner)
+                .map_err(|error| error.to_string())?
+        );
         let attempted = AnalysisPhysicalPhase {
             claim,
             source: source.clone(),
@@ -132,7 +140,7 @@ impl ActivePhase {
                 .checked_add(1)
                 .ok_or("copy phase sequence exhausted")?,
             custody: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken {
-                custody_id: uuid::Uuid::new_v4().to_string(),
+                custody_id: lease_id,
                 owner: attempted_owner,
             },
         };
@@ -142,7 +150,6 @@ impl ActivePhase {
                 attempted.claim.clone(),
                 source.clone(),
                 expected_sequence,
-                attempted.custody.custody_id.clone(),
                 began_at_ms,
             )
             .await
@@ -156,18 +163,6 @@ impl ActivePhase {
                 return Err(error.to_string());
             }
         };
-        if let Err(error) =
-            crate::source_custody::activate_background_with_journal(store, phase.custody.clone())
-                .await
-        {
-            // This operation has not created a budget or exposed an Input. The
-            // activation helper resolves its own exact activation-id abort before
-            // returning Err; durable release still refuses an armed Input row.
-            crate::background_jobs::settle_no_reader_source_custody(store, phase.custody.clone())
-                .await;
-            finish_exact_phase(store, &phase).await;
-            return Err(error);
-        }
         let cancel = lost.child_token();
         let budget = crate::background_jobs::SourceReadBudget::from_analysis_phase(
             Arc::clone(store),
@@ -185,20 +180,14 @@ impl ActivePhase {
     pub(super) async fn finish(self, store: &Arc<dyn Store>) {
         self.cancel.cancel();
         self.budget.invalidate_grant();
-        crate::background_jobs::settle_joined_source_custody(store, self.phase.custody.clone())
-            .await;
+        // Closing the phase deletes its lease in the same transaction.
         finish_exact_phase(store, &self.phase).await;
     }
 }
 
 /// Close the physical phase a dead predecessor of this node left open on a
-/// coordinator, through the same two steps a phase that never exposed an
-/// Input is closed with: the custody receipt is released as having no
-/// reader (the process that could have read is gone), and the role's phase
-/// is finished once that receipt is absent. A receipt the durable release
-/// refuses, because its Input was armed, stays for the source-custody
-/// recovery that owns it, and the role stays closed to a new phase until
-/// then.
+/// coordinator. The process that could have read is gone, so the phase is
+/// closed, and its lease deleted, exactly as its owner would have.
 pub(super) async fn settle_dead_phase(store: &Arc<dyn Store>, role: &AnalysisCoordination) {
     let (Some(custody_id), Some(node_id), Some(fence)) = (
         role.active_custody_id.as_ref(),
@@ -221,7 +210,6 @@ pub(super) async fn settle_dead_phase(store: &Arc<dyn Store>, role: &AnalysisCoo
         source: role.source.clone(),
         phase_sequence: role.phase_sequence,
     };
-    crate::background_jobs::settle_no_reader_source_custody(store, phase.custody.clone()).await;
     finish_exact_phase(store, &phase).await;
 }
 
@@ -406,13 +394,7 @@ async fn resolve_unstarted_phase(
                 if let Some(custody) = custody {
                     phase.custody = custody;
                 }
-                // No activation/Input has been exposed; durable DELETE still
-                // requires NoReader. Owner closure does not settle an Input.
-                crate::background_jobs::settle_no_reader_source_custody(
-                    store,
-                    phase.custody.clone(),
-                )
-                .await;
+                // No Input was exposed; closing the phase deletes its lease.
                 finish_exact_phase(store, &phase).await;
                 return;
             }
@@ -434,8 +416,9 @@ async fn resolve_unstarted_phase(
     }
 }
 
-/// This runs only after joined/no-reader settlement. A false deletion or a
-/// lost finish acknowledgement never releases the operation's pending state.
+/// Closes the exact phase (its lease, reservations and role) once every read
+/// joined. A store error retries the same atomic close; `false` returns only
+/// once a successor phase has fenced this one out and its lease is gone.
 async fn finish_exact_phase(store: &Arc<dyn Store>, phase: &AnalysisPhysicalPhase) {
     loop {
         match store.finish_analysis_source_phase(phase.clone()).await {

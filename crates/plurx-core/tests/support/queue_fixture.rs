@@ -2053,7 +2053,7 @@ fn source_extension_fixture_preserves_managed_work_and_receipts() {
 fn source_extension_fixture_refuses_retained_source_or_unowned_objects_without_mutation() {
     for injection in [
         "INSERT INTO background_source_service_epochs VALUES('source_io',1,1);",
-        "CREATE INDEX unowned_fixture_index ON foreground_source_owners(lease_expires_at_ms);",
+        "CREATE INDEX unowned_fixture_index ON background_source_pauses(paused_at_ms);",
     ] {
         let directory = tempfile::tempdir().expect("source refusal directory");
         let path = directory.path().join("current.sqlite");

@@ -1,9 +1,9 @@
-//! Source recovery observes every production child launch before input escapes.
-//! An access declaration preserves witnesses only after the actual command and
-//! the single builder's pinned descriptor manifest pass fail-closed checks.
+//! Source access declarations for every production child launch. A
+//! declaration is verified against the actual command and the single
+//! builder's pinned descriptor manifest; launches are counted by class.
 use std::future::Future;
 use std::io;
-use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex};
 
 mod arguments;
 mod descriptors;
@@ -18,7 +18,6 @@ pub use policy::{
     set_daemon_roots, BrokerRegistration,
 };
 
-static ADMISSION: RwLock<()> = RwLock::new(());
 const DESCRIPTOR_HANDOFF: &str = "PLURX_INTERNAL_SOURCE_DESCRIPTOR_HANDOFF";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
@@ -44,32 +43,6 @@ impl Declaration {
     }
 }
 tokio::task_local! { static ACCESS: Declaration; static MANIFEST: Arc<DescriptorManifest>; }
-
-/// Access at admission. `mediated` is the compatibility safety bit consumed
-/// by the existing reader observer: true only for a verified non-raw launch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LaunchObservation {
-    pub mediated: bool,
-    pub descriptor_handoff: bool,
-    pub purpose: &'static str,
-    pub launch: bool,
-    pub declared: SourceAccess,
-    pub verified: bool,
-    pub reason: Option<&'static str>,
-}
-impl LaunchObservation {
-    pub const fn unknown(purpose: &'static str, descriptor_handoff: bool, launch: bool) -> Self {
-        Self {
-            mediated: false,
-            descriptor_handoff,
-            purpose,
-            launch,
-            declared: SourceAccess::Unknown,
-            verified: false,
-            reason: Some("undeclared"),
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct UnknownLaunch {
@@ -104,13 +77,13 @@ pub fn launch_snapshot() -> LaunchSnapshot {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
-fn record_launch(observation: &LaunchObservation) {
+fn record_launch(purpose: &'static str, declared: SourceAccess, verified: bool) {
     let mut snapshot = LAUNCHES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if observation.verified {
+    if verified {
         snapshot.verified = snapshot.verified.saturating_add(1);
-        let count = match observation.declared {
+        let count = match declared {
             SourceAccess::NoSource => &mut snapshot.no_source,
             SourceAccess::MetadataOnly => &mut snapshot.metadata_only,
             SourceAccess::Brokered => &mut snapshot.brokered,
@@ -120,11 +93,11 @@ fn record_launch(observation: &LaunchObservation) {
         snapshot.mediated = snapshot.brokered;
     } else {
         snapshot.unknown = snapshot.unknown.saturating_add(1);
-        if observation.declared != SourceAccess::Unknown {
+        if declared != SourceAccess::Unknown {
             snapshot.unverified = snapshot.unverified.saturating_add(1);
         }
         snapshot.latest_unknown = Some(UnknownLaunch {
-            purpose: observation.purpose,
+            purpose,
             observed_at_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -133,18 +106,6 @@ fn record_launch(observation: &LaunchObservation) {
                 .unwrap_or(u64::MAX),
         });
     }
-}
-
-type Observer = fn(&LaunchObservation) -> io::Result<()>;
-static OBSERVER: OnceLock<Observer> = OnceLock::new();
-pub fn install_observer(observer: Observer) -> io::Result<()> {
-    let installed = OBSERVER.get_or_init(|| observer);
-    if !std::ptr::fn_addr_eq(*installed, observer) {
-        return Err(io::Error::other(
-            "source child observer already configured differently",
-        ));
-    }
-    Ok(())
 }
 
 pub async fn no_source<T>(work: impl Future<Output = T>) -> T {
@@ -247,27 +208,7 @@ pub fn prepare_stdio_std(
     Ok(manifest)
 }
 
-pub fn unmediated_descriptor() -> io::Result<()> {
-    OBSERVER.get().map_or(Ok(()), |observer| {
-        observer(&LaunchObservation::unknown(
-            "descriptor handoff",
-            true,
-            false,
-        ))
-    })
-}
-pub fn registration() -> io::Result<RwLockWriteGuard<'static, ()>> {
-    ADMISSION
-        .write()
-        .map_err(|_| io::Error::other("source registration barrier poisoned"))
-}
-pub(super) fn before_spawn(
-    command: &mut std::process::Command,
-    purpose: &'static str,
-) -> io::Result<RwLockReadGuard<'static, ()>> {
-    let guard = ADMISSION
-        .read()
-        .map_err(|_| io::Error::other("source spawn barrier poisoned"))?;
+pub(super) fn before_spawn(command: &mut std::process::Command, purpose: &'static str) {
     let declaration = ACCESS
         .try_with(|value| *value)
         .unwrap_or(Declaration::new(SourceAccess::Unknown));
@@ -299,21 +240,7 @@ pub(super) fn before_spawn(
     {
         command.env_clear().env("LANG", "C").env("LC_ALL", "C");
     }
-    let observation = LaunchObservation {
-        mediated: verdict.is_ok(),
-        descriptor_handoff: has_descriptor_handoff(command),
-        purpose,
-        launch: true,
-        declared: declaration.access,
-        verified: verdict.is_ok(),
-        reason: verdict.as_ref().err().map(|error| error.check),
-    };
-    record_launch(&observation);
-    // Poison before any debug refusal. No failed declaration can retain a
-    // clean witness, even if a caller catches the debug panic.
-    if let Some(observer) = OBSERVER.get() {
-        observer(&observation)?;
-    }
+    record_launch(purpose, declaration.access, verdict.is_ok());
     if let Err(refusal) = verdict {
         if declaration.access != SourceAccess::Unknown {
             tracing::error!(
@@ -329,7 +256,6 @@ pub(super) fn before_spawn(
             }
         }
     }
-    Ok(guard)
 }
 
 pub fn tag_descriptor_handoff(command: &mut tokio::process::Command) {

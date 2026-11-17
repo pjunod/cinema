@@ -10,13 +10,15 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 
 | File | Answers | |
 |---|---|---|
-| [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md) | Plan: lease expiry alone frees source capacity — why the physical-proof custody model is retired, the 60 s grace, and the removal steps. | open |
-| [SOURCE-CUSTODY-RECOVERY.md](SOURCE-CUSTODY-RECOVERY.md) | P42 physical recovery: same-kernel macOS/Linux reader witnesses, legacy evidence limits, and validation ledger. | open |
+| [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md) | Plan: lease expiry alone frees source capacity — why the physical-proof custody model is retired, the 60 s grace, and the removal steps. | built; qualification pending |
+| [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) | Build plan and as-built record for source-lease steps 3 and 4: one `source_leases` table, per-node and per-domain source readers. | built |
+| [SOURCE-LEASE-AS-BUILT.md](SOURCE-LEASE-AS-BUILT.md) | As-built record of source-lease steps 3 and 4: every place the build differs from its plan, and why. | built |
+| [SOURCE-LEASES-OPERATIONS.md](SOURCE-LEASES-OPERATIONS.md) | Operator guide: how source leases count per node and per storage domain, the reader settings, how to read Activity, and the metrics. | current |
 | [JOB-QUEUE-ROOT-CAUSE-AND-FIX.md](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md) | November queue incident, recovered scan requests, cross-type scheduling, Activity completion rates, and remaining acceptance milestones. | open |
 | [STORAGE-DOMAINS-DEFERRED-APPLY-STATUS.md](STORAGE-DOMAINS-DEFERRED-APPLY-STATUS.md) | Deferred storage-domain implementation, ownership, review and qualification state. | built |
 | [STORAGE-DOMAINS-DEFERRED-APPLY-PLAN.md](STORAGE-DOMAINS-DEFERRED-APPLY-PLAN.md) | Plan: a storage-domain save always succeeds and applies once no live holder or library job depends on the changed keys; Settings shows it pending. | built |
-| [PLAYBACK-READER-WITNESS-STATUS.md](PLAYBACK-READER-WITNESS-STATUS.md) | Playback witness ownership, phase execution, census safety findings and remaining qualification. | open |
-| [PLAYBACK-READER-WITNESS-PLAN.md](PLAYBACK-READER-WITNESS-PLAN.md) | Plan: every child launch declares its source access, checked fail-closed at spawn, so playback witnesses stay valid and a daemon restart releases its readers with no host step. | proposed |
+| [PLAYBACK-READER-WITNESS-STATUS.md](PLAYBACK-READER-WITNESS-STATUS.md) | Playback witness ownership, phase execution, census safety findings and remaining qualification, as they stood before lease expiry replaced the witness model. | superseded |
+| [PLAYBACK-READER-WITNESS-PLAN.md](PLAYBACK-READER-WITNESS-PLAN.md) | Plan: every child launch declares its source access, checked fail-closed at spawn, so playback witnesses stay valid and a daemon restart releases its readers with no host step. Phases B0–B3 superseded by the source lease release plan. | superseded |
 | [HTTPS-IMPLEMENTATION.md](HTTPS-IMPLEMENTATION.md) | Optional public HTTPS, certificate ownership and administration contract; physical acceptance open. | built |
 | [HTTPS-BUILD.md](HTTPS-BUILD.md) | HTTPS implementation built, physical acceptance open; qualification receipts and merge outcome tracked by [promotion PR #1134](http://forge.lan:3000/noirr/plurx/pulls/1134). | built |
 | [HTTPS-EVIDENCE-LEDGER.md](HTTPS-EVIDENCE-LEDGER.md) | The HTTPS build's checkpoint-by-checkpoint evidence ledger (section 5 of HTTPS-BUILD). | built |

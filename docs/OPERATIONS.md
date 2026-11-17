@@ -4624,8 +4624,9 @@ generations. It does not encode them. The generation identity includes the
 requested encoder and rate-control policy plus normalized audio language,
 subtitle language, and subtitle mode. Every eligible voter or ready learner with a configured local
 cache then competes for a compatible durable artifact job. Whole-title preparation and
-fragment indexing share one ownership queue, one heavy worker per node and two
-reader slots per shared storage domain. Unmapped roots use one global domain. Spare nodes can prepare different titles
+fragment indexing share one ownership queue, one heavy worker per node and its
+background source readers ([source leases](server/SOURCE-LEASES-OPERATIONS.md)).
+Spare nodes can prepare different titles
 without duplicating the same computation or multiplying NAS reads by node count.
 
 Settings → Libraries → Shared storage budgets assigns the same domain name to
@@ -6037,8 +6038,7 @@ sample.
 
 A node no longer stops indexing because one of its encoders is in use. The
 analysis worker claims requests one after another for as long as the claim's
-source-capacity rule admits one (two readers per storage domain; without a live
-viewer, a background read takes only a domain no other reader holds), and the
+source-capacity rule admits one ([source leases](server/SOURCE-LEASES-OPERATIONS.md)), and the
 rule is asked again before the read starts, while it reads (every 2 s; the
 node-local "viewer queuing" check every 0.5 s) and before the result is
 submitted — a foreground stream that takes the source in between makes

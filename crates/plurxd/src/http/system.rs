@@ -2668,6 +2668,15 @@ pub struct SettingsDto {
     /// meets the number.
     pub transcode_max_hw_sessions: i64,
     pub transcode_software_pool_threads: i64,
+    /// Background (maintenance) source readers each node may run at once
+    /// (`jobs.source_readers_per_node`, default 2). One more is always kept
+    /// for live demand; playback is never counted.
+    pub source_readers_per_node: i64,
+    /// Per-node overrides of [`Self::source_readers_per_node`], by node id.
+    pub source_readers_node_overrides: std::collections::BTreeMap<String, i64>,
+    /// Each mapped storage domain's `source_readers`, by domain id; a domain
+    /// not listed uses 1. Charged across the cluster beside the node limit.
+    pub storage_domain_source_readers: std::collections::BTreeMap<String, i64>,
     /// App-managed offline preparation has a separate reservation budget from
     /// the opportunistic playback cache above.
     pub offline_enabled: bool,
@@ -2881,6 +2890,9 @@ async fn settings_dto(
         setting(keys::MAX_HW_SESSIONS),
         crate::admission::DEFAULT_MAX_HW_SESSIONS,
     );
+    let source_readers_per_node = crate::source_custody::capacity::readers_per_node(&settings);
+    let source_readers_node_overrides = crate::source_custody::capacity::node_overrides(&settings);
+    let storage_domain_source_readers = crate::source_custody::capacity::domain_readers(&settings);
     let transcode_software_pool_threads = transcode_stored(
         setting(keys::SW_POOL_THREADS),
         crate::admission::software_budget(),
@@ -3143,6 +3155,9 @@ async fn settings_dto(
         playback_display_mode_match,
         transcode_max_hw_sessions,
         transcode_software_pool_threads,
+        source_readers_per_node,
+        source_readers_node_overrides,
+        storage_domain_source_readers,
         offline_enabled,
         offline_max_gb,
         offline_max_gb_per_user,
@@ -3451,6 +3466,14 @@ pub struct UpdateSettings {
     /// stored rather than what this API would have accepted.
     pub transcode_max_hw_sessions: Option<i64>,
     pub transcode_software_pool_threads: Option<i64>,
+    /// Background source readers per node, 1-16. Lowering it never refuses
+    /// and never stops a reader: claims on a node above it wait until its
+    /// readers finish.
+    pub source_readers_per_node: Option<i64>,
+    /// Per-node overrides, 1-16; `null` returns a node to the default.
+    pub source_readers_node_overrides: Option<std::collections::BTreeMap<String, Option<i64>>>,
+    /// Per-domain `source_readers`, 1-16; `null` returns a domain to 1.
+    pub storage_domain_source_readers: Option<std::collections::BTreeMap<String, Option<i64>>>,
     pub offline_enabled: Option<bool>,
     pub offline_max_gb: Option<i64>,
     pub offline_max_gb_per_user: Option<i64>,
@@ -3592,6 +3615,9 @@ impl UpdateSettings {
             || self.playback_display_mode_match.is_some()
             || self.transcode_max_hw_sessions.is_some()
             || self.transcode_software_pool_threads.is_some()
+            || self.source_readers_per_node.is_some()
+            || self.source_readers_node_overrides.is_some()
+            || self.storage_domain_source_readers.is_some()
             || self.offline_enabled.is_some()
             || self.offline_max_gb.is_some()
             || self.offline_max_gb_per_user.is_some()
@@ -4029,6 +4055,57 @@ pub async fn update_settings(
                 )));
             }
         }
+    }
+    // Source reader limits. Only malformed input is refused: a value below
+    // what a node is running now saves at once and applies as readers finish.
+    let readers_range = crate::source_custody::capacity::READERS_RANGE;
+    let reader_id = |id: &str| {
+        !id.is_empty()
+            && id.len() <= 64
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    };
+    let mut source_reader_values: Vec<(String, String)> = Vec::new();
+    if let Some(value) = req.source_readers_per_node {
+        if !readers_range.contains(&value) {
+            return Err(ApiError::BadRequest(
+                "source_readers_per_node must be between 1 and 16".into(),
+            ));
+        }
+        source_reader_values.push((
+            keys::JOB_SOURCE_READERS_PER_NODE.to_owned(),
+            value.to_string(),
+        ));
+    }
+    for (label, prefix, values) in [
+        (
+            "source_readers_node_overrides",
+            keys::JOB_SOURCE_READERS_NODE_PREFIX,
+            &req.source_readers_node_overrides,
+        ),
+        (
+            "storage_domain_source_readers",
+            keys::JOB_DOMAIN_SOURCE_READERS_PREFIX,
+            &req.storage_domain_source_readers,
+        ),
+    ] {
+        for (id, value) in values.iter().flatten() {
+            if !reader_id(id) || value.is_some_and(|value| !readers_range.contains(&value)) {
+                return Err(ApiError::BadRequest(format!(
+                    "{label}: ids are 1-64 of [A-Za-z0-9._-] and values are 1-16 or null"
+                )));
+            }
+            source_reader_values.push((
+                format!("{prefix}{id}"),
+                value.map(|value| value.to_string()).unwrap_or_default(),
+            ));
+        }
+    }
+    if source_reader_values.len() > 256 {
+        return Err(ApiError::BadRequest(
+            "at most 256 source reader limits per save".into(),
+        ));
     }
     let stream_readrate = if let Some(raw) = req.stream_readrate.as_deref() {
         let parsed: f64 = raw
@@ -4817,6 +4894,13 @@ pub async fn update_settings(
         let borrowed = capacity_values
             .iter()
             .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        state.store.put_settings(&borrowed).await?;
+    }
+    if !source_reader_values.is_empty() {
+        let borrowed = source_reader_values
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
             .collect::<Vec<_>>();
         state.store.put_settings(&borrowed).await?;
     }
@@ -6506,13 +6590,34 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
         "# HELP plurx_background_resource_reservations Unexpired shared admission reservations.\n\
          # TYPE plurx_background_resource_reservations gauge\n\
          plurx_background_resource_reservations{{resource_class=\"source_io\"}} {}\n\
-         # HELP plurx_background_source_recovery_pending Source owners still holding capacity well after their authority lapsed (the expiry sweep is not running).\n\
+         # HELP plurx_background_source_recovery_pending Source leases still present 180 s after their expiry (the lease sweep is not running).\n\
          # TYPE plurx_background_source_recovery_pending gauge\n\
          plurx_background_source_recovery_pending {}\n\
          # HELP plurx_background_legacy_pending Sealed legacy interests awaiting bounded import.\n\
          # TYPE plurx_background_legacy_pending gauge\n\
          plurx_background_legacy_pending {}\n",
         sample.background_jobs.source_io_reservations, sample.background_jobs.source_recovery_pending, sample.background_jobs.legacy_pending,
+    ));
+    out.push_str(
+        "# HELP plurx_source_leases This node's source leases (readers of original media) by holder kind.\n\
+         # TYPE plurx_source_leases gauge\n",
+    );
+    for (kind, count) in plurx_core::store::background_jobs::SOURCE_LEASE_KINDS
+        .iter()
+        .zip(sample.background_jobs.source_leases)
+    {
+        // Every Store gauge here is this node's (the scrape target names it).
+        out.push_str(&format!("plurx_source_leases{{kind=\"{kind}\"}} {count}\n"));
+    }
+    out.push_str(&format!(
+        "# HELP plurx_source_readers_per_node Background source readers this node may run (its override or the cluster default).\n\
+         # TYPE plurx_source_readers_per_node gauge\n\
+         plurx_source_readers_per_node {}\n\
+         # HELP plurx_source_lease_schema_version Source lease schema: 2 expanded (v1 objects kept for older binaries), 3 contracted.\n\
+         # TYPE plurx_source_lease_schema_version gauge\n\
+         plurx_source_lease_schema_version {}\n",
+        sample.background_jobs.source_readers_per_node,
+        sample.background_jobs.source_lease_schema_version,
     ));
     let analysis = sample.analysis;
     out.push_str(

@@ -257,6 +257,7 @@ mod placeholder_census;
 #[cfg(all(test, feature = "hiqlite-store"))]
 mod consistent_read_census;
 
+#[macro_use]
 pub mod background_jobs;
 pub use background_jobs::{AnalysisViewerInterest, ArtifactViewerInterest, BackgroundJobStore};
 mod background_job_turns;
@@ -296,6 +297,9 @@ pub mod offline_claim;
 pub mod offline_expiry;
 pub mod replicated;
 pub mod scan_request_v2;
+mod source_leases;
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod source_leases_tests;
 mod storage_domain_pending;
 pub(crate) mod storage_domain_pending_api;
 mod subtitle_managed_schema;
@@ -2357,6 +2361,19 @@ pub mod keys {
     /// right number is a property of the silicon: a discrete card with two
     /// NVENC chips is not a NUC.
     pub const MAX_HW_SESSIONS: &str = "transcode.max_hw_sessions";
+    /// Background (maintenance) source readers each node may run at once,
+    /// cluster default (2; 1-16). One more is always kept for live demand;
+    /// playback is never counted. The claim statement reads it under the Raft
+    /// writer, so every node decides from the same value. Lowering it never
+    /// refuses a save or stops a reader: claims wait until readers finish.
+    pub const JOB_SOURCE_READERS_PER_NODE: &str = "jobs.source_readers_per_node";
+    /// Per-node override of [`JOB_SOURCE_READERS_PER_NODE`]: this prefix and
+    /// the node id. An empty value means "use the default".
+    pub const JOB_SOURCE_READERS_NODE_PREFIX: &str = "jobs.source_readers_per_node.";
+    /// A mapped storage domain's `source_readers` (default 1; 1-16): this
+    /// prefix and the domain id. Charged across the cluster, beside the
+    /// per-node limit. An empty value means the default.
+    pub const JOB_DOMAIN_SOURCE_READERS_PREFIX: &str = "jobs.domain_source_readers.";
     /// Threads the software-encoder CPU pool may hand out at once. Defaults
     /// to every core but one (plurxd derives it from the machine); an admin
     /// sets it lower on a box whose CPU has other jobs, or higher at their

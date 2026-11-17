@@ -2380,7 +2380,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 .map_err(database_error)?;
         }
         for _ in 0..8 {
-            let capacity = super::fragment_index_cluster::analysis_source_capacity_clause("$3");
+            let capacity =
+                super::fragment_index_cluster::analysis_source_capacity_clause("$3", "$1");
             let viewer = if viewer_only {
                 super::fragment_index_cluster::analysis_live_viewer_clause("$3")
             } else {

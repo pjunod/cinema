@@ -309,7 +309,7 @@ This activation came from a build that wrote neither: no v1 identity and no
 v2 witness. `verified` (`:462`) needs a valid prior identity and a
 different current boot, so it can never pass, and lab3's host has not
 rebooted since 2026-10-12. This is the finite legacy case that
-[SOURCE-CUSTODY-RECOVERY.md §1.2](../server/SOURCE-CUSTODY-RECOVERY.md)
+[SOURCE-CUSTODY-RECOVERY.md §1.2](../archive/SOURCE-CUSTODY-RECOVERY.md)
 handles with host-admin physical-stop proof, and that proof was never run
 on lab3: `/run/plurx-physical-stop` does not exist there, and the container
 has no bind for it.
@@ -340,7 +340,7 @@ still uses the exact host-admin stop proof above. For replicated Linux startup,
 PR #1570 requires actual-host machine and boot identity binds and checks the
 bound boot against the running kernel before the daemon serves. Native macOS
 recovery and non-authoritative SQLite startup remain unchanged; see the
-[startup contract in the recovery ledger §1.5](../server/SOURCE-CUSTODY-RECOVERY.md#15-linux-replicated-startup-requires-actual-host-identity).
+[startup contract in the recovery ledger §1.5](../archive/SOURCE-CUSTODY-RECOVERY.md#15-linux-replicated-startup-requires-actual-host-identity).
 
 ### 5.1 Missing host identity let a replicated Linux daemon start without reboot recovery
 
@@ -372,7 +372,7 @@ PR #1570 adds that fail-closed startup requirement and the mandatory read-only
 Compose/systemd mounts. The four audited hosts had valid matching mount inputs
 at 19:03:52 UTC, but their running revision 882 does not include the startup
 guard; rollout remains pending. The historical owner was recovered through
-the existing [exact-custody census path in ledger §1.3](../server/SOURCE-CUSTODY-RECOVERY.md#13-a-dead-owners-poisoned-witness-uses-a-host-source-open-census).
+the existing [exact-custody census path in ledger §1.3](../archive/SOURCE-CUSTODY-RECOVERY.md#13-a-dead-owners-poisoned-witness-uses-a-host-source-open-census).
 No alternate recovery path was added. Broader fleet and playback acceptance
 remain open.
 

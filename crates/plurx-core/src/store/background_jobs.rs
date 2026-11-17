@@ -27,10 +27,10 @@ pub use super::background_jobs_migration::JobMigrationStatus;
 pub use super::background_jobs_observation::{
     BackgroundJobMetrics, JobAttemptObservation, JobCount, JobLabel, NodeJobCompletions,
     SourceIoHolder, JOB_METRIC_KINDS, JOB_METRIC_SLOTS, JOB_METRIC_STATES,
-    JOB_PROCESSING_WINDOW_MS,
+    JOB_PROCESSING_WINDOW_MS, SOURCE_LEASE_KINDS,
 };
 use super::background_jobs_observation::{
-    ATTEMPTS_SQL, COUNTS_SQL, LABELS_SQL, NODE_COMPLETIONS_SQL, SOURCE_IO_HOLDERS_SQL,
+    ATTEMPTS_SQL, COUNTS_SQL, LABELS_SQL, NODE_COMPLETIONS_SQL,
 };
 pub use super::background_jobs_offline::JoinOfflineJob;
 use super::background_jobs_publication::PUBLISH_TRANSCODE_SQL;
@@ -160,6 +160,118 @@ macro_rules! translation_admission {
         (op.asset_id=json_extract("#,$payload,r#",'$.recipe.asset_id') AND EXISTS (
           SELECT 1 FROM subtitle_translation_assets a WHERE a.id=op.asset_id AND a.retired_at_ms IS NULL
           AND a.source_json=op.source_json AND a.profile_json=op.profile_json))))"#) };
+}
+
+// Source capacity (source-lease plan steps 3 and 4). Every claim path reads
+// these same texts: `CLAIM_SQL` through the macros, everything formatted at
+// run time through `source_leases::{foreground_window, source_holders,
+// maintenance_reader}`, which format these macros. `$node` and `$now` are SQL
+// expressions; playback is never counted, only its window refuses.
+
+/// Live demand on job `$job`: the claim's existing interest rule, unchanged.
+/// `$fence` is the job's fence where a translation continuity is fenced.
+macro_rules! live_job_interest {
+    ($job:literal, $fence:literal, $now:literal) => { concat!(r#"EXISTS (SELECT 1 FROM background_job_waiters interest
+          WHERE interest.job_id = "#, $job, r#"
+            AND interest.state IN ('pending','awaiting_hydration')
+            AND (interest.deadline_ms IS NULL OR interest.deadline_ms > "#, $now, r#")
+            AND (interest.consumer_kind IN ('playback_fragment','playback_qualification')
+              OR (interest.consumer_kind = 'background_delivery' AND EXISTS (
+                  SELECT 1 FROM background_job_waiters viewer
+                  WHERE viewer.job_id = interest.consumer_ref
+                    AND viewer.target_node_id = interest.target_node_id
+                    AND viewer.consumer_kind = 'playback_fragment'
+                    AND viewer.state IN ('pending','awaiting_hydration')
+                    AND viewer.deadline_ms > "#, $now, r#"))
+              OR (interest.consumer_kind IN ('subtitle_translation','subtitle_translation_range') AND EXISTS (
+                  SELECT 1 FROM background_jobs live_range WHERE live_range.id=interest.job_id
+                    AND ((interest.consumer_kind='subtitle_translation_range' AND live_range.kind='subtitle_translation_range')
+                      OR (interest.consumer_kind='subtitle_translation' AND live_range.kind='subtitle_translation_prepare')) AND ("#,
+    translation_admission!("live_range.payload_json", $now, "live_range.id", $fence),
+    r#")))
+              OR (interest.consumer_kind = 'subtitle_source' AND EXISTS (
+                  SELECT 1 FROM analysis_requests request
+                  WHERE request.request_id = interest.consumer_ref
+                    AND request.component = 'subtitle_source'
+                    AND request.trigger = 'playback'
+                    AND request.state IN ('queued','running')))))"#) };
+}
+
+/// Lease `held` still holds source capacity at `$now`.
+macro_rules! lease_counted {
+    ($now:literal) => {
+        concat!(
+            "(held.owner_kind!='playback' AND held.phase!='paused' AND held.expires_at_ms>",
+            $now,
+            "-60000)"
+        )
+    };
+}
+
+/// Lease `held` serves live demand: a job with live interest, or an analysis
+/// a viewer is waiting on. Read attestations and offline packages never do.
+macro_rules! lease_live {
+    ($now:literal) => { concat!("((held.owner_kind='job' AND ",
+        live_job_interest!("held.work_id", "live_range.fence", $now),
+        ") OR (held.owner_kind='analysis' AND EXISTS (SELECT 1 FROM background_job_waiters viewer WHERE viewer.request_scope='playback-analysis' AND viewer.job_id=held.work_id AND viewer.state='pending' AND viewer.deadline_ms>", $now, ")))") };
+}
+
+/// Background readers node `$node` may run: its override, else the cluster
+/// default (`jobs.source_readers_per_node`), else 2. A value outside 1..=16
+/// (an override saved as "use default" is empty) reads as absent.
+macro_rules! node_source_readers {
+    ($node:literal) => { concat!("COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node.'||", $node, " AND CAST(value AS INTEGER) BETWEEN 1 AND 16),(SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node' AND CAST(value AS INTEGER) BETWEEN 1 AND 16),2)") };
+}
+
+/// Background readers storage domain key `$key` (`source_io:<domain>`) may
+/// serve across the cluster: its `source_readers`, else 1. A value outside
+/// 1..=16 reads as absent.
+macro_rules! domain_source_readers {
+    ($key:literal) => { concat!("COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.domain_source_readers.'||substr(", $key, ",11) AND CAST(value AS INTEGER) BETWEEN 1 AND 16),1)") };
+}
+
+/// Current source keys for a file, shared by independent registration,
+/// offline re-admission and the temporary v1 grant compatibility path.
+macro_rules! source_file_resources {
+    ($file:literal) => { concat!("SELECT DISTINCT COALESCE('source_io:'||mapping.domain_id,'source_io') AS resource_key FROM files file JOIN items item ON item.id=file.item_id LEFT JOIN libraries library ON library.id=item.library_id LEFT JOIN json_each(CASE WHEN json_valid(library.paths) THEN library.paths ELSE '[]' END) root LEFT JOIN background_storage_domains mapping ON mapping.library_id=library.id AND mapping.root_path=root.value WHERE file.id=", $file) };
+}
+
+/// A playback lease overlapping `$key` is outside its permission window:
+/// live and not permitting, or just lapsed (within the grace) while its
+/// source was still being read. Any node, as v1.
+macro_rules! claim_foreground_window {
+    ($key:literal, $now:literal) => {
+        concat!(
+            "EXISTS(SELECT 1 FROM source_lease_permissions fg WHERE (fg.resource_key=",
+            $key,
+            " OR fg.resource_key='source_io' OR ",
+            $key,
+            "='source_io') AND ((fg.expires_at_ms>",
+            $now,
+            " AND COALESCE(fg.permits_through_ms,0)<=",
+            $now,
+            ") OR (fg.expires_at_ms<=",
+            $now,
+            " AND fg.expires_at_ms>",
+            $now,
+            "-60000 AND fg.source_quiescent=0)))"
+        )
+    };
+}
+
+/// The node, or the mapped storage domain `$key`, is full: every reader
+/// slot including the one kept for live demand is taken. `$extra` narrows
+/// the counted leases (a re-asked admission leaves its own lease out).
+macro_rules! claim_source_holders {
+    ($key:literal, $node:literal, $now:literal) => { claim_source_holders!($key, $node, $now, "") };
+    ($key:literal, $node:literal, $now:literal, $extra:expr) => { concat!("((SELECT COUNT(*) FROM source_leases held WHERE held.node_id=", $node, " AND ", lease_counted!($now), $extra, ")>=", node_source_readers!($node), "+1 OR (", $key, "!='source_io' AND (SELECT COUNT(*) FROM source_leases held,json_each(held.resource_keys_json) held_key WHERE held_key.value=", $key, " AND ", lease_counted!($now), $extra, ")>=", domain_source_readers!($key), "+1))") };
+}
+
+/// Maintenance readers already fill the node, or the mapped storage domain
+/// `$key`. Applied only when the claimant serves no live demand.
+macro_rules! claim_maintenance_reader {
+    ($key:literal, $node:literal, $now:literal) => { claim_maintenance_reader!($key, $node, $now, "") };
+    ($key:literal, $node:literal, $now:literal, $extra:expr) => { concat!("((SELECT COUNT(*) FROM source_leases held WHERE held.node_id=", $node, " AND ", lease_counted!($now), $extra, " AND NOT ", lease_live!($now), ")>=", node_source_readers!($node), " OR (", $key, "!='source_io' AND (SELECT COUNT(*) FROM source_leases held,json_each(held.resource_keys_json) held_key WHERE held_key.value=", $key, " AND ", lease_counted!($now), $extra, " AND NOT ", lease_live!($now), ")>=", domain_source_readers!($key), "))") };
 }
 
 pub(super) const ENQUEUE_SQL: &str = concat!(
@@ -469,8 +581,7 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
           AND json_extract(remaining.snapshot_json, '$.cache_key') = json_extract(job.payload_json, '$.cache_key'))
         AND NOT EXISTS (SELECT 1 FROM background_job_waiters
           WHERE job_id = job.id AND state IN ('pending','awaiting_hydration'))
-        AND NOT EXISTS (SELECT 1 FROM background_source_custody custody
-          WHERE custody.owner_kind = 'job' AND custody.work_id = job.id)) THEN 'queue_full'
+) THEN 'queue_full'
     WHEN active_job IS NULL AND (SELECT COUNT(*) FROM background_jobs
       WHERE state IN ('queued','running','cancelling')) >=
         CASE WHEN json_extract(body, '$.priority') >= 2 THEN 4096 ELSE 3840 END THEN 'queue_full'
@@ -629,115 +740,36 @@ macro_rules! claim_attempt_ledger {
     };
 }
 
-/// A foreground owner of the source either still holds custody after its
-/// lease lapsed, or holds a live lease outside its permission window.
-macro_rules! claim_foreground_window {
-    ($job:literal) => {
-        concat!(
-        r#"NOT EXISTS (SELECT 1 FROM background_job_required_resources required
-    JOIN foreground_source_permissions fg ON required.resource_key LIKE 'source_io%'
-      AND (fg.resource_key=required.resource_key OR fg.resource_key='source_io' OR required.resource_key='source_io')
-    WHERE required.job_id="#, $job, r#" AND (fg.lease_expires_at_ms>json_extract($1,'$.now_ms') OR fg.custody_held=1)
-      AND (fg.lease_expires_at_ms<=json_extract($1,'$.now_ms') OR COALESCE(fg.permits_through_ms,0)<=json_extract($1,'$.now_ms')))"#
-    )
-    };
+/// The foreground permission group for a claim or candidate listing.
+macro_rules! claim_foreground_admission {
+    ($job:literal) => { concat!(
+        "NOT EXISTS (SELECT 1 FROM background_job_required_resources required WHERE required.job_id=", $job,
+        " AND required.resource_key LIKE 'source_io%' AND ",
+        claim_foreground_window!("required.resource_key", "json_extract($1,'$.now_ms')"), ")") };
 }
 
-/// Two distinct holders already occupy the source.
-macro_rules! claim_source_holders {
-    ($job:literal) => {
-        concat!(
-        r#"NOT EXISTS (SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = "#, $job, r#" AND (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
-      WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.active_occupancy=1
-        AND (held.expires_at_ms>json_extract($1,'$.now_ms') OR held.custody_id IS NOT NULL)
-        AND (held.work_id!="#, $job, r#" OR held.custody_id IS NOT NULL))>=2)"#
-    )
-    };
+/// Per-node and per-domain holder caps, plus the unchanged provider slots.
+/// A claimant excludes only its own job's prior fences; other jobs still
+/// count those leases through expiry plus grace.
+macro_rules! claim_holder_admission {
+    ($job:literal) => { concat!(
+        "NOT EXISTS (SELECT 1 FROM background_job_required_resources required WHERE required.job_id=", $job,
+        " AND required.resource_key LIKE 'source_io%' AND ",
+        claim_source_holders!("required.resource_key", "json_extract($1,'$.node_id')", "json_extract($1,'$.now_ms')",
+            concat!(" AND NOT (held.owner_kind='job' AND held.work_id=", $job, ")")),
+        ") AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required WHERE required.job_id=", $job,
+        " AND required.resource_key NOT LIKE 'source_io%' AND (SELECT COUNT(*) FROM background_job_reservations held WHERE held.resource_key=required.resource_key AND held.expires_at_ms>json_extract($1,'$.now_ms') AND held.job_id!=background_jobs.id)>=2)") };
 }
 
-/// The second source reader is reserved for live demand.
-macro_rules! claim_maintenance_reader {
-    ($job:literal) => {
-        concat!(
-        r#"NOT EXISTS (SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = "#, $job, r#"
-      AND required.resource_key LIKE 'source_io%'
-      AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest
-          WHERE interest.job_id = background_jobs.id
-            AND interest.state IN ('pending','awaiting_hydration')
-            AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))
-            AND (interest.consumer_kind IN ('playback_fragment','playback_qualification')
-              OR (interest.consumer_kind = 'background_delivery' AND EXISTS (
-                  SELECT 1 FROM background_job_waiters viewer
-                  WHERE viewer.job_id = interest.consumer_ref
-                    AND viewer.target_node_id = interest.target_node_id
-                    AND viewer.consumer_kind = 'playback_fragment'
-                    AND viewer.state IN ('pending','awaiting_hydration')
-                    AND viewer.deadline_ms > json_extract($1, '$.now_ms')))
-              OR (interest.consumer_kind IN ('subtitle_translation','subtitle_translation_range') AND EXISTS (
-                  SELECT 1 FROM background_jobs live_range WHERE live_range.id=interest.job_id
-                    AND ((interest.consumer_kind='subtitle_translation_range' AND live_range.kind='subtitle_translation_range')
-                      OR (interest.consumer_kind='subtitle_translation' AND live_range.kind='subtitle_translation_prepare')) AND ("#,
-    translation_admission!(
-        "live_range.payload_json",
-        "json_extract($1,'$.now_ms')",
-        "live_range.id"
-    ),
-    r#")))
-              OR (interest.consumer_kind = 'subtitle_source' AND EXISTS (
-                  SELECT 1 FROM analysis_requests request
-                  WHERE request.request_id = interest.consumer_ref
-                    AND request.component = 'subtitle_source'
-                    AND request.trigger = 'playback'
-                    AND request.state IN ('queued','running')))))
-      AND ((SELECT COUNT(*) FROM background_job_reservations held
-          WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
-            AND held.expires_at_ms > json_extract($1, '$.now_ms')
-            AND held.job_id != background_jobs.id
-            AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest
-                WHERE interest.job_id = held.job_id
-                  AND interest.state IN ('pending','awaiting_hydration')
-                  AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))
-                  AND (interest.consumer_kind IN ('playback_fragment','playback_qualification')
-                    OR (interest.consumer_kind = 'background_delivery' AND EXISTS (
-                        SELECT 1 FROM background_job_waiters viewer
-                        WHERE viewer.job_id = interest.consumer_ref
-                          AND viewer.target_node_id = interest.target_node_id
-                          AND viewer.consumer_kind = 'playback_fragment'
-                          AND viewer.state IN ('pending','awaiting_hydration')
-                          AND viewer.deadline_ms > json_extract($1, '$.now_ms')))
-                    OR (interest.consumer_kind IN ('subtitle_translation','subtitle_translation_range') AND EXISTS (
-                        SELECT 1 FROM background_jobs live_range WHERE live_range.id=interest.job_id
-                          AND ((interest.consumer_kind='subtitle_translation_range' AND live_range.kind='subtitle_translation_range')
-                      OR (interest.consumer_kind='subtitle_translation' AND live_range.kind='subtitle_translation_prepare')) AND ("#,
-    translation_admission!(
-        "live_range.payload_json",
-        "json_extract($1,'$.now_ms')",
-        "live_range.id",
-        "live_range.fence"
-    ),
-    r#")))
-                    OR (interest.consumer_kind = 'subtitle_source' AND EXISTS (
-                        SELECT 1 FROM analysis_requests request
-                        WHERE request.request_id = interest.consumer_ref
-                          AND request.component = 'subtitle_source'
-                          AND request.trigger = 'playback'
-                          AND request.state IN ('queued','running'))))))
-        + (SELECT COUNT(*) FROM analysis_source_reservations held
-            WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
-              AND held.expires_at_ms > json_extract($1, '$.now_ms')
-              AND NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
-                  WHERE viewer.request_scope = 'playback-analysis'
-                    AND viewer.job_id = held.request_id
-                    AND viewer.state = 'pending'
-                    AND viewer.deadline_ms > json_extract($1, '$.now_ms')))
-        + (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
-          WHERE held.owner_kind IN ('lease','offline') AND held.active_occupancy=1
-            AND (held.resource_key=required.resource_key OR held.resource_key='source_io' OR required.resource_key='source_io')
-            AND (held.expires_at_ms>json_extract($1,'$.now_ms') OR held.custody_id IS NOT NULL)) >= 1))"#
-    )
-    };
+/// Reserve the last node/domain reader for live demand, on every claim path.
+macro_rules! claim_maintenance_admission {
+    ($job:literal) => { concat!(
+        "NOT EXISTS (SELECT 1 FROM background_job_required_resources required WHERE required.job_id=", $job,
+        " AND required.resource_key LIKE 'source_io%' AND NOT ",
+        live_job_interest!("background_jobs.id", "background_jobs.fence", "json_extract($1,'$.now_ms')"),
+        " AND ",
+        claim_maintenance_reader!("required.resource_key", "json_extract($1,'$.node_id')", "json_extract($1,'$.now_ms')",
+            concat!(" AND NOT (held.owner_kind='job' AND held.work_id=", $job, ")")), ")") };
 }
 
 pub(super) const CLAIM_SQL: &str = concat!(
@@ -763,17 +795,16 @@ WHERE "#,
   -- The outer CAS already fixes id to this request. Bind resource lookup to
   -- that same value so SQLite pushes the identity into every UNION branch
   -- of the resource view instead of scanning all jobs under the Raft writer.
-  -- A lapsed custody counts as one ordinary reader below until the sweep
-  -- releases it; it no longer refuses every source claim on its own.
+  -- Lease capacity counts until expiry plus grace, without waiting for a sweep.
   AND "#,
-    claim_foreground_window!("json_extract($1,'$.job_id')"),
+    claim_foreground_admission!("json_extract($1,'$.job_id')"),
     "\n  AND ",
-    claim_source_holders!("json_extract($1, '$.job_id')"),
+    claim_holder_admission!("json_extract($1, '$.job_id')"),
     r#"
   -- A second source reader is reserved for live demand. Classification uses
   -- durable consumer ownership, never the job's caller-supplied priority.
   AND "#,
-    claim_maintenance_reader!("json_extract($1, '$.job_id')"),
+    claim_maintenance_admission!("json_extract($1, '$.job_id')"),
     "\n"
 );
 
@@ -787,12 +818,11 @@ pub enum ClaimBlock {
     State,
     /// The kind's own demand or configuration admission.
     KindDemand,
-    /// A foreground owner of the source does not permit background reads now,
-    /// or still holds custody after its lease lapsed.
+    /// Playback does not permit background reads, including its expiry grace.
     ForegroundWindow,
-    /// Two holders already occupy the source.
+    /// The node/domain holder cap or provider slots are full.
     SourceHolders,
-    /// The second reader is reserved for live demand.
+    /// The last node/domain reader is reserved for live demand.
     MaintenanceReader,
 }
 
@@ -848,13 +878,13 @@ const CLAIM_VERDICT_SQL: &str = concat!(
     claim_kind_demand!(),
     r#"), 0) AS kind_ok,
   COALESCE(("#,
-    claim_foreground_window!("json_extract($1,'$.job_id')"),
+    claim_foreground_admission!("json_extract($1,'$.job_id')"),
     r#"), 0) AS foreground_ok,
   COALESCE(("#,
-    claim_source_holders!("json_extract($1, '$.job_id')"),
+    claim_holder_admission!("json_extract($1, '$.job_id')"),
     r#"), 0) AS holders_ok,
   COALESCE(("#,
-    claim_maintenance_reader!("json_extract($1, '$.job_id')"),
+    claim_maintenance_admission!("json_extract($1, '$.job_id')"),
     r#"), 0) AS reader_ok
 FROM background_jobs
 WHERE id = json_extract($1, '$.job_id')
@@ -885,11 +915,11 @@ const CANDIDATE_ADMISSION_SQL: &str = concat!(
     "\n  AND ",
     claim_state!(),
     "\n  AND ",
-    claim_foreground_window!("background_jobs.id"),
+    claim_foreground_admission!("background_jobs.id"),
     "\n  AND ",
-    claim_source_holders!("background_jobs.id"),
+    claim_holder_admission!("background_jobs.id"),
     "\n  AND ",
-    claim_maintenance_reader!("background_jobs.id"),
+    claim_maintenance_admission!("background_jobs.id"),
     ")"
 );
 
@@ -2853,7 +2883,6 @@ pub trait BackgroundJobStore: Send + Sync {
         claim: super::analysis_coordination::AnalysisCoordinationClaim,
         source: super::analysis_coordination::AnalysisCoordinationSource,
         expected_sequence: i64,
-        custody_id: String,
         now_ms: i64,
     ) -> Result<Option<super::analysis_coordination::AnalysisPhysicalPhase>, StoreError>;
     async fn finish_analysis_source_phase(
@@ -3238,43 +3267,10 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         token: super::background_jobs_resources::ForegroundSourceToken,
     ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError>;
-    async fn activate_foreground_source_custody(
-        &self,
-        token: super::background_jobs_resources::ForegroundSourceToken,
-        activation_id: String,
-    ) -> Result<bool, StoreError>;
-    async fn abort_foreground_source_activation(
-        &self,
-        token: super::background_jobs_resources::ForegroundSourceToken,
-        activation_id: String,
-    ) -> Result<bool, StoreError>;
-    async fn mark_foreground_source_settled(
-        &self,
-        token: super::background_jobs_resources::ForegroundSourceToken,
-    ) -> Result<bool, StoreError>;
-    async fn reap_settled_source_custody(&self, now_ms: i64) -> Result<(), StoreError>;
-    async fn settled_foreground_source_custody(
-        &self,
-    ) -> Result<Vec<super::background_jobs_resources::ForegroundSourceToken>, StoreError>;
-    async fn activate_background_source_custody(
-        &self,
-        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
-        activation_id: String,
-    ) -> Result<bool, StoreError>;
-    async fn abort_background_source_activation(
-        &self,
-        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
-        activation_id: String,
-    ) -> Result<bool, StoreError>;
-    async fn mark_background_source_settled(
-        &self,
-        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
-    ) -> Result<bool, StoreError>;
-    async fn settled_background_source_custody(
-        &self,
-    ) -> Result<Vec<super::background_jobs_resources::BackgroundSourceCustodyToken>, StoreError>;
-    /// Authoritative exact-owner lookup; absence may reconcile cleanup, but
-    /// neither a present row nor an expired lease proves physical termination.
+    /// Collects expired source leases (garbage collection; capacity already
+    /// freed at expiry plus the grace).
+    async fn reap_expired_source_leases(&self, now_ms: i64) -> Result<(), StoreError>;
+    /// Authoritative lookup of the owner's source lease by its id.
     async fn resolve_background_source_custody(
         &self,
         token: super::background_jobs_resources::BackgroundSourceCustodyToken,
@@ -3837,18 +3833,10 @@ impl<T: QueueSql> BackgroundJobStore for T {
         claim: super::analysis_coordination::AnalysisCoordinationClaim,
         source: super::analysis_coordination::AnalysisCoordinationSource,
         expected_sequence: i64,
-        custody_id: String,
         now_ms: i64,
     ) -> Result<Option<super::analysis_coordination::AnalysisPhysicalPhase>, StoreError> {
-        super::analysis_coordination::begin_phase(
-            self,
-            claim,
-            source,
-            expected_sequence,
-            custody_id,
-            now_ms,
-        )
-        .await
+        super::analysis_coordination::begin_phase(self, claim, source, expected_sequence, now_ms)
+            .await
     }
     async fn finish_analysis_source_phase(
         &self,
@@ -3904,8 +3892,10 @@ impl<T: QueueSql> BackgroundJobStore for T {
         if !identifier(request_id) || now_ms < 0 {
             return Err(invalid("invalid analysis preparation observation"));
         }
+        // Advisory: a claimed request is judged on its owner's node.
         let capacity = super::fragment_index_cluster::analysis_source_capacity_clause(
             "json_extract($1, '$.now_ms')",
+            "analysis_requests.owner_node_id",
         );
         let viewer = super::fragment_index_cluster::analysis_live_viewer_clause(
             "json_extract($1, '$.now_ms')",
@@ -5444,7 +5434,7 @@ LIMIT 1
             return Err(invalid("invalid queue observation time"));
         }
         self.queue_sql(
-            SOURCE_IO_HOLDERS_SQL.into(),
+            super::background_jobs_observation::source_io_holders_sql(),
             encode(&serde_json::json!({"now_ms": now_ms}))?,
             false,
             false,
@@ -5514,70 +5504,8 @@ LIMIT 1
     ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError> {
         super::background_jobs_resources::resolve_foreground(self, token).await
     }
-    async fn activate_foreground_source_custody(
-        &self,
-        token: super::background_jobs_resources::ForegroundSourceToken,
-        activation_id: String,
-    ) -> Result<bool, StoreError> {
-        queue_method(
-            "activate_foreground_source_custody",
-            super::background_jobs_resources::activate_foreground_custody(
-                self,
-                token,
-                activation_id,
-            ),
-        )
-        .await
-    }
-    async fn abort_foreground_source_activation(
-        &self,
-        token: super::background_jobs_resources::ForegroundSourceToken,
-        activation_id: String,
-    ) -> Result<bool, StoreError> {
-        super::background_jobs_resources::abort_foreground_activation(self, token, activation_id)
-            .await
-    }
-    async fn mark_foreground_source_settled(
-        &self,
-        token: super::background_jobs_resources::ForegroundSourceToken,
-    ) -> Result<bool, StoreError> {
-        super::background_jobs_resources::mark_foreground_settled(self, token).await
-    }
-    async fn reap_settled_source_custody(&self, now_ms: i64) -> Result<(), StoreError> {
-        super::background_jobs_resources::reap_settled_source_custody(self, now_ms).await
-    }
-    async fn settled_foreground_source_custody(
-        &self,
-    ) -> Result<Vec<super::background_jobs_resources::ForegroundSourceToken>, StoreError> {
-        super::background_jobs_resources::settled_foreground_custody(self).await
-    }
-    async fn activate_background_source_custody(
-        &self,
-        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
-        activation_id: String,
-    ) -> Result<bool, StoreError> {
-        super::background_jobs_resources::activate_background_custody(self, token, activation_id)
-            .await
-    }
-    async fn abort_background_source_activation(
-        &self,
-        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
-        activation_id: String,
-    ) -> Result<bool, StoreError> {
-        super::background_jobs_resources::abort_background_activation(self, token, activation_id)
-            .await
-    }
-    async fn mark_background_source_settled(
-        &self,
-        token: super::background_jobs_resources::BackgroundSourceCustodyToken,
-    ) -> Result<bool, StoreError> {
-        super::background_jobs_resources::mark_background_settled(self, token).await
-    }
-    async fn settled_background_source_custody(
-        &self,
-    ) -> Result<Vec<super::background_jobs_resources::BackgroundSourceCustodyToken>, StoreError>
-    {
-        super::background_jobs_resources::settled_background_custody(self).await
+    async fn reap_expired_source_leases(&self, now_ms: i64) -> Result<(), StoreError> {
+        super::background_jobs_resources::reap_expired_source_leases(self, now_ms).await
     }
     async fn resolve_background_source_custody(
         &self,

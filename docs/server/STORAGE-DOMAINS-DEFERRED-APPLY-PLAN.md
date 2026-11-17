@@ -9,11 +9,11 @@ Settings → Libraries → **Shared storage budgets** cannot be saved on a busy
 cluster. The save is refused with HTTP 409 whenever any background lease,
 analysis reservation, background custody, unsettled playback owner or live
 pause exists. Playback is almost always active, and a stuck custody row
-(the separate bug in [source custody recovery](SOURCE-CUSTODY-RECOVERY.md))
+(the separate bug in [source custody recovery](../archive/SOURCE-CUSTODY-RECOVERY.md))
 blocks it permanently. This plan makes the save a pure configuration write
 and moves the safety rule to the point where the configuration is applied.
 
-Companion documents: [source custody recovery](SOURCE-CUSTODY-RECOVERY.md)
+Companion documents: [source custody recovery](../archive/SOURCE-CUSTODY-RECOVERY.md)
 (why stuck custody exists), [job queue RCA](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md)
 (the storage-domain arbiter), [API](../API.md) rows for
 `/api/v1/cluster/work/storage-domains`.
@@ -428,7 +428,7 @@ skew guard bounds disagreement between them.
    `apply_pending_storage_domains(clock_ms())`. Log `applied` and
    `superseded` at info with the revision; nothing for `waiting`.
 3. **At daemon start.** Once, after migration and before the scheduler
-   loop, beside the first `replay_settled_source_custody` (≈6590), if
+   loop, beside the first `collect_expired_source_leases` (≈6590), if
    `may_run_cluster_jobs()`.
 
 Latency after the last blocker finishes is at most one scheduler tick. No

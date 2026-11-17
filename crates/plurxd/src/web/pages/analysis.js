@@ -240,12 +240,29 @@ function analysisSummaryCard(value,context="activity"){
 function analysisSourceHolders(value){
   const holders=value&&value.source_io_holders;
   if(!Array.isArray(holders)) return "";
-  if(!holders.length) return `<div class="analysis-sub">No shared source readers currently hold a slot.</div>`;
-  return `<details class="analysis-sub"><summary>${holders.length} shared source reader${holders.length===1?"":"s"} holding I/O slots</summary><ul>${holders.map(holder=>{
-    const phase=holder.phase?` · ${holder.phase.replace(/_/g," ")}`:"";
-    const progress=holder.last_phase_at_ms?` · phase changed ${fmtAgo(Math.floor(holder.last_phase_at_ms/1000))}`:" · useful progress unavailable";
-    return `<li><b>${esc(holder.priority)}</b> ${esc(holder.kind.replace(/_/g," "))} · ${esc(holder.resource_key)} · ${esc(holder.work_id)} · started ${fmtAgo(Math.floor(holder.started_at_ms/1000))}${esc(phase)}${esc(progress)}</li>`;
-  }).join("")}</ul></details>`;
+  if(!holders.length) return `<div class="analysis-sub">No source readers currently hold a lease.</div>`;
+  // Every lease is one reader on one node: group by node, under that node's
+  // background readers against its limit, and say why each row holds.
+  const capacity=(value.source_capacity&&value.source_capacity.nodes)||[];
+  const names=value.node_hostnames||{};
+  const byNode=new Map();
+  for(const holder of holders){const node=holder.origin_node_id||"";if(!byNode.has(node))byNode.set(node,[]);byNode.get(node).push(holder);}
+  const now=Number(value.now_ms)||Date.now();
+  const groups=[...byNode.keys()].sort().map(node=>{
+    const c=capacity.find(row=>String(row.node_id)===node);
+    const head=c?`${esc(names[node]||node)} — ${esc(c.maintenance)} of ${esc(c.readers)} background readers${c.live?` · ${esc(c.live)} live`:""}${c.playback?` · ${esc(c.playback)} playback`:""}${c.waiting_to_apply?" · above its limit, applies as readers finish":""}`:esc(names[node]||node||"Unknown node");
+    const rows=byNode.get(node).map(holder=>{
+      const why=holder.priority==="foreground"?`playback${holder.phase?` (${holder.phase.replace(/_/g," ")})`:""}`:holder.priority==="viewer"?"live demand":"maintenance";
+      const phase=holder.phase&&holder.priority!=="foreground"?` · ${holder.phase.replace(/_/g," ")}`:"";
+      const progress=holder.last_phase_at_ms?` · phase changed ${fmtAgo(Math.floor(holder.last_phase_at_ms/1000))}`:" · useful progress unavailable";
+      const age=Number.isFinite(Number(holder.lease_expires_at_ms))?(holder.lease_expires_at_ms>now?` · lease ${Math.ceil((holder.lease_expires_at_ms-now)/1000)}s left`:` · lease expired ${Math.floor((now-holder.lease_expires_at_ms)/1000)}s ago`):"";
+      const counted=holder.counts_against==="none"?" · not counted":holder.counts_against==="domain"?" · counts on its node and storage domain":"";
+      const work=holder.origin_job_kind?`<a href="#/activity/jobs/${esc(encodeURIComponent(holder.work_id))}" title="Open the job to cancel it">${esc(holder.kind.replace(/_/g," "))}</a>`:esc(holder.kind.replace(/_/g," "));
+      return `<li><b>${esc(why)}</b> ${work} · ${esc(holder.resource_key)} · ${esc(holder.work_id)} · started ${fmtAgo(Math.floor(holder.started_at_ms/1000))}${esc(phase)}${esc(age)}${esc(counted)}${esc(progress)}</li>`;
+    }).join("");
+    return `<li data-source-node="${esc(node)}"><b>${head}</b><ul>${rows}</ul></li>`;
+  }).join("");
+  return `<details class="analysis-sub"><summary>${holders.length} source lease${holders.length===1?"":"s"} across ${byNode.size} node${byNode.size===1?"":"s"}</summary><ul>${groups}</ul></details>`;
 }
 // The index pass is also keeping this file's PGS tracks for the stored
 // subtitle tracks: the row says so, with what it has written, and links to the

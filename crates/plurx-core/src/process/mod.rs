@@ -83,7 +83,7 @@ pub fn spawn_job_owned(
     work: ChildWork,
 ) -> io::Result<(tokio::process::Child, ChildJob)> {
     let descriptor_handoff = source_lifetime::has_descriptor_handoff(command.as_std());
-    let _reader_admission = source_lifetime::before_spawn(command.as_std_mut(), work.purpose)?;
+    source_lifetime::before_spawn(command.as_std_mut(), work.purpose);
     priority::apply(command, work.class);
     configure_suspended(command);
     source_lifetime::strip_descriptor_handoff(command.as_std_mut());
@@ -220,7 +220,7 @@ pub fn output_job_owned_blocking(
     work: ChildWork,
 ) -> io::Result<std::process::Output> {
     let descriptor_handoff = source_lifetime::has_descriptor_handoff(command);
-    let reader_admission = source_lifetime::before_spawn(command, work.purpose)?;
+    source_lifetime::before_spawn(command, work.purpose);
     priority::apply_policy(command, work.class.policy());
     command
         .stdout(std::process::Stdio::piped())
@@ -236,7 +236,6 @@ pub fn output_job_owned_blocking(
         source_lifetime::restore_descriptor_handoff(command);
     }
     let mut child = spawned?;
-    drop(reader_admission);
     let mut job = match ChildJob::attach_pid(child.id()) {
         Ok(job) => job,
         Err(error) => {
@@ -446,90 +445,8 @@ mod tests {
 
     const TEST_WORK: ChildWork = ChildWork::background("process test");
 
-    static SOURCE_OBSERVATIONS: std::sync::Mutex<Vec<source_lifetime::LaunchObservation>> =
-        std::sync::Mutex::new(Vec::new());
-
-    fn observe_source_launch(observation: &source_lifetime::LaunchObservation) -> io::Result<()> {
-        if observation.purpose.starts_with("source observation ")
-            || observation.purpose == "descriptor handoff"
-        {
-            SOURCE_OBSERVATIONS
-                .lock()
-                .expect("observations")
-                .push(*observation);
-        }
-        Ok(())
-    }
-
     #[tokio::test]
-    async fn source_observer_attributes_launches_and_separates_descriptor_invalidation() {
-        use source_lifetime::{mediated, LaunchObservation, SourceAccess};
-
-        source_lifetime::install_observer(observe_source_launch).expect("observer");
-        let before = source_lifetime::launch_snapshot();
-        let ordinary = "source observation ordinary";
-        let brokered = "source observation brokered";
-        let inherited = "source observation inherited descriptor";
-        let after_scope = "source observation after scope";
-        for (purpose, declare_mediated, descriptor_handoff) in [
-            (ordinary, false, false),
-            (brokered, true, false),
-            (inherited, true, true),
-            (after_scope, false, false),
-        ] {
-            let mut command = child("echo");
-            if descriptor_handoff {
-                source_lifetime::tag_descriptor_handoff(&mut command);
-            }
-            let output =
-                async { output_job_owned(&mut command, ChildWork::background(purpose)).await };
-            let output = if declare_mediated {
-                mediated(output).await
-            } else {
-                output.await
-            }
-            .expect("observed child");
-            assert!(output.status.success());
-        }
-        source_lifetime::unmediated_descriptor().expect("descriptor invalidation");
-        let after = source_lifetime::launch_snapshot();
-        // Other tests may launch concurrently: only monotonic lower bounds
-        // are stable in this process, and the purpose list below is local.
-        assert!(after.mediated >= before.mediated);
-        assert!(after.unknown >= before.unknown.saturating_add(4));
-        assert!(after.latest_unknown.is_some());
-        let observed = SOURCE_OBSERVATIONS.lock().expect("observations");
-        for expected in [
-            LaunchObservation::unknown(ordinary, false, true),
-            LaunchObservation {
-                declared: SourceAccess::Brokered,
-                reason: Some("roots_unconfigured"),
-                ..LaunchObservation::unknown(brokered, false, true)
-            },
-            LaunchObservation {
-                declared: SourceAccess::Brokered,
-                reason: Some("roots_unconfigured"),
-                ..LaunchObservation::unknown(inherited, true, true)
-            },
-            LaunchObservation::unknown(after_scope, false, true),
-            LaunchObservation::unknown("descriptor handoff", true, false),
-        ] {
-            assert!(
-                observed.contains(&expected),
-                "missing {expected:?}: {observed:?}"
-            );
-        }
-        assert_eq!(
-            observed
-                .iter()
-                .filter(|event| event.launch && event.purpose.starts_with("source observation "))
-                .count(),
-            4
-        );
-    }
-
-    #[tokio::test]
-    async fn source_snapshot_counts_failed_startup_attempts_without_descriptor_double_count() {
+    async fn source_snapshot_counts_failed_startup_attempts() {
         let output = output_job_owned(&mut child("source-snapshot"), TEST_WORK)
             .await
             .expect("snapshot subprocess");
@@ -541,7 +458,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_invalid_source_declaration_is_observed_before_debug_refusal() {
+    async fn an_invalid_source_declaration_is_counted_before_debug_refusal() {
         let output = output_job_owned(&mut child("source-verification-refusal"), TEST_WORK)
             .await
             .expect("refusal subprocess");
@@ -641,7 +558,7 @@ mod tests {
                     &[program.parent().expect("tool root").to_path_buf()],
                 )
                 .expect("roots");
-                source_lifetime::install_observer(observe_source_launch).expect("observer");
+                let before = source_lifetime::launch_snapshot();
                 let mut command = std::process::Command::new(program);
                 command.current_dir(data).arg(path);
                 let manifest = prepare_stdio_std(&mut command, StdioFacts::CAPTURED)
@@ -653,24 +570,24 @@ mod tests {
                                 &mut command,
                                 "source observation refusal",
                             )
-                            .map(drop)
                         })
                     })
                 }));
                 assert_eq!(admitted.is_err(), cfg!(debug_assertions));
-                let observations = SOURCE_OBSERVATIONS.lock().expect("observations");
-                let observed = observations
-                    .iter()
-                    .find(|event| event.purpose == "source observation refusal")
-                    .expect("observer precedes refusal");
-                assert!(!observed.verified);
-                assert!(!observed.mediated);
-                assert_eq!(observed.declared, source_lifetime::SourceAccess::NoSource);
-                assert_eq!(observed.reason, Some("path_outside_daemon_roots"));
+                let after = source_lifetime::launch_snapshot();
+                assert_eq!(after.verified, before.verified, "refused, never verified");
+                assert_eq!(after.unverified, before.unverified + 1);
+                assert_eq!(
+                    after
+                        .latest_unknown
+                        .expect("counted before refusal")
+                        .purpose,
+                    "source observation refusal"
+                );
             }
             Ok("source-snapshot") => {
-                // A fresh subprocess proves startup attribution before any
-                // observer exists, and failed attempts still count once.
+                // A fresh subprocess proves startup attribution, and failed
+                // attempts still count once.
                 assert_eq!(
                     source_lifetime::launch_snapshot(),
                     source_lifetime::LaunchSnapshot::default()
@@ -693,8 +610,6 @@ mod tests {
                     snapshot.latest_unknown.expect("latest attempt").purpose,
                     "snapshot failed launch"
                 );
-                source_lifetime::unmediated_descriptor().expect("invalidation without launch");
-                assert_eq!(source_lifetime::launch_snapshot(), snapshot);
             }
             Ok("echo") => {
                 std::io::stdout().write_all(b"out-bytes").expect("stdout");

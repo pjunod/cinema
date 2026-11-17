@@ -278,8 +278,8 @@ transitions or an eventual-recovery guarantee.
 
 The mapping refreshes 17 existing rows and adds four explicit dependency pins
 for startup, [custody integration](../../crates/plurxd/src/source_custody.rs),
-[recovery](../../crates/plurxd/src/source_custody/recovery.rs), and the
-[host helper](../../scripts/source-custody-recovery). Those pins expose future
+recovery (`crates/plurxd/src/source_custody/recovery.rs`, removed), and the
+host helper (`scripts/source-custody-recovery`, removed). Those pins expose future
 drift; they do not map physical reboot proof into `DurableJobs`. Same-machine
 boot identity, descendant termination, fsync durability, aborted-activation
 reconciliation, exact-Store isolation and safe legacy challenge preparation
@@ -769,7 +769,7 @@ A newly acquired higher domain fence may temporarily have no matching binding.
 |---|---|---|---|
 | Enqueue / demand | `store/background_jobs.rs::enqueue_job`, `ENQUEUE_SQL`, `background_jobs_retention.sql::background_job_enqueue_command` | Accepted demand creates or joins a queued job; request identity differs from job identity | Library id, kind and payload-v1 validation are fixed valid; waiter priorities and payload data are abstracted |
 | Claim read, then CAS | `background_jobs.rs::claim_job`, `CLAIM_SQL` | First read can return the same live claim; otherwise exact observed revision CAS claims eligible queued/expired work, increments fence/revision, installs attempt and both required reservations atomically | Read and CAS are separate transitions; capability/kind predicates fixed to selected kinds; no Raft implementation |
-| Claim eligibility | `CLAIM_SQL` and resource triggers in `background_jobs_resources.sql` | Valid demand, not-before reached, retry budget, owner not removed, dispatch window, fresh identity, reservation slots available; live reservations of other jobs compete | Finite identities never recycle; counter exhaustion is an exploration boundary, not a production terminal state |
+| Claim eligibility | `CLAIM_SQL` and resource triggers in `background_job_claim_effects.sql` and `background_jobs_resources.sql` | Valid demand, not-before reached, retry budget, owner not removed, dispatch window, fresh identity, reservation slots available; live reservations of other jobs compete | Finite identities never recycle; counter exhaustion is an exploration boundary, not a production terminal state |
 | Replay / resolution | `background_jobs.rs::claim_job` and `resolve_claim` | Same identity returns existing current token only with matching node/boot, running state, live expiry and actual resource coverage or the exact paused source substitute; absent history gives expired/pruned, never a new attempt | Resolve without fence additionally checks dispatch window; per-operation caller `now_ms` is retained |
 | Queue renewal | `RENEW_SQL`, `background_jobs_schema.sql::background_job_renew_command` | Exact predecessor, running state, live lease, no removed owner, covering reservations or exact paused source substitute; increments revision and updates reservation expiry | Cancellation changes revision as well as state; replay is not a new renewal |
 | Cancellation / settlement | `cancel_job`, `SETTLE_SQL`, cancellation/settlement triggers | Queued→cancelled, running→cancelling; exact live settlement clears owner and reservations; yield preserves demand and installs not-before; failure consumes retry budget | S5 checks no revival of cancelling by modeled actions; cancelling is absorbing here, with no modeled completion/settlement from that state. New requests and general cancellation/completion precedence are outside this fragment |
@@ -1062,14 +1062,14 @@ reader witness is armed only after that acknowledgement. Recovery uses the
 same typed settlement and release selectors as normal cleanup. A lost Store
 reply leaves evidence for retry. Physical-stop evidence cannot grant a new
 activation or stand in for a worker join.
-[Activation](../../crates/plurxd/src/source_custody.rs) ·
-[Settlement](../../crates/plurxd/src/source_custody/recovery.rs)
+Activation journal (`activate_background_with_journal`, removed) ·
+Settlement (`crates/plurxd/src/source_custody/recovery.rs`, removed)
 
 The model takes reader termination as a premise. Separate runtime tests cover
 the native same-kernel witness and the Linux host census for one audited
 legacy DV activation. An unknown reader or inconclusive witness keeps custody
-held. [Native witness tests](../../crates/plurxd/src/source_custody/recovery/reader/tests.rs) ·
-[Legacy custody tests](../../crates/plurxd/src/source_custody/recovery/physical_stop/tests.rs)
+held. Native witness tests (`crates/plurxd/src/source_custody/recovery/reader/tests.rs`, removed) ·
+Legacy custody tests (`crates/plurxd/src/source_custody/recovery/physical_stop/tests.rs`, removed)
 
 ## Pipeline-v2 and HDR integration — source correspondence, 2026-11-09
 
@@ -1080,3 +1080,49 @@ bodies retain both parents' source. The Store parent registers both sets of
 conformance tests. Refresh only those whole-file source hashes after checking
 the existing anchors; model/configuration bytes and qualification identities
 are unchanged. This is source correspondence, not model execution evidence.
+
+## Source lease step 2 — proof machinery removed, 2026-11-15
+
+[SOURCE-LEASE-RELEASE-PLAN.md](../../docs/server/SOURCE-LEASE-RELEASE-PLAN.md)
+step 2 deletes the reader-witness, census and physical-stop recovery module,
+the background completion ledger and the host recovery helper. Lease expiry
+is the release: the store sweep deletes an owner whose authority lapsed
+60 s ago. The three recovery dependency pins (exact-Store boot replay, the
+prepared host-reboot challenge and the startup configuration call) are
+removed with their sources; the activation pin and the refreshed rows stay.
+Links above to the removed files are kept as plain text for history. No
+modeled transition changes.
+
+## Source lease steps 3+4 — one lease table, per-node capacity, 2026-11-16
+
+[SOURCE-LEASE-AS-BUILT.md](../../docs/server/SOURCE-LEASE-AS-BUILT.md):
+source readers are rows of `source_leases`, counted per node and per mapped
+storage domain inside the claim's own statement. Repinned after review of
+each anchored item (rows keep narrow item anchors; the runner also requires
+a digest of each containing source file, so unchanged items in edited files
+were repinned without a model note):
+
+- `proposal §4.1 resource claim effects` is re-anchored to
+  `background_job_claim_effects.sql`, where the trigger now lives (the base
+  job schema and the lease expand both install it). Non-source resources
+  keep their two reservation slots; a source reservation is only the job's
+  bundle record (next free slot). Source capacity, which the model
+  abstracts as the resource cap, is decided by `CLAIM_SQL`'s lease counts
+  in the same statement, so the claim stays all-or-none.
+- The queue protocol trait and shared adapter lose `begin_analysis_source_phase`'s
+  caller custody id and gain the node in the analysis capacity clause; no
+  modeled transition reads either.
+- The M2 conformance test raises the per-node reader setting so earlier
+  scenarios' leases do not refuse later claims; its assertions are unchanged.
+- `recovery dependency outside model: custody activation and cleanup`
+  (`activate_background_with_journal`) is removed: the activation journal
+  is deleted and no dependency remains.
+- Registration checks total capacity and maintenance state in the same atomic
+  Store write. An offline source resumes after lease expiry through the
+  existing grant write; full re-admission adds no RPC. Delayed v1 metadata
+activation cannot recreate or renew an expired offline lease; only an admitted
+service grant renews offline capacity. The rolling legacy
+  projection is temporary and is removed at the contract boundary.
+
+These source details change no modeled transition and establish no liveness
+claim.

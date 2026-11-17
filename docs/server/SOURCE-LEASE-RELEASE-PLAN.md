@@ -1,9 +1,11 @@
 # Source lease release — lease expiry frees source capacity, nothing else does
 
-**Status:** step 1 open (PR #1597) · steps 2–4 proposed · **Owner:** Claude
-Opus 5.5 (session_01BCWLA1BAXKSuq2TLMK9Zna) · **Written:** 2026-11-14
+**Status:** step 1 merged (#1597); steps 2–4 built on
+`claude/source-lease-steps-2-4`, [PR #1728](http://forge.lan:3000/noirr/plurx/pulls/1728) records qualification and landing ([as built](SOURCE-LEASE-AS-BUILT.md)) · **Owner:** GPT-6 Codex,
+session `01a1e5c0-d4b1-7740-93b4-a0e0123a79cf`, continuing Claude Opus 5.5 ·
+**Written:** 2026-11-14 · **Updated:** 2026-11-16
 
-Companion to [SOURCE-CUSTODY-RECOVERY.md](SOURCE-CUSTODY-RECOVERY.md), which
+Companion to [SOURCE-CUSTODY-RECOVERY.md](../archive/SOURCE-CUSTODY-RECOVERY.md), which
 records the physical-proof model this plan retires, and
 [JOB-QUEUE-ROOT-CAUSE-AND-FIX.md](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md), which owns
 the wider queue work. Read §1 for why, §2 for the rule, and §4 for the steps.
@@ -134,7 +136,7 @@ Two schema texts still describe the old model and change with step 3:
 **Acceptance:** `cargo clippy --all-targets -D warnings` is clean; the fast
 lane is green; Activity shows no recovery panel after a restart.
 
-### 4.3 Step 3 — one lease table
+### 4.3 Step 3 — one lease table (built)
 
 Replace `background_source_custody`, `foreground_source_owners` and the
 `source_io_occupancy` union with one table:
@@ -146,7 +148,7 @@ source_leases(owner, node_id, resource_key, expires_at_ms)
 The claim checks it, and the holder's heartbeat renews it. This needs a
 source-arbitration extension v2 with an explicit upgrade from v1.
 
-### 4.4 Step 4 — capacity per node, not one cluster slot (decision for Paul)
+### 4.4 Step 4 — capacity per node, not one cluster slot (built; Paul decided 2026-11-15)
 
 Today, with no storage domains, the whole cluster shares **one**
 `source_io` slot. A per-node default (for example two background readers per
@@ -161,7 +163,7 @@ one node from serialising the cluster.
 - **#1561** (census recovery for playback owners) is on a merge train owned
   by another session. It becomes unnecessary after step 1 and is removed in
   step 2.
-- [SOURCE-CUSTODY-RECOVERY.md](SOURCE-CUSTODY-RECOVERY.md) is retired to
+- [SOURCE-CUSTODY-RECOVERY.md](../archive/SOURCE-CUSTODY-RECOVERY.md) is retired to
   `archive/` in step 2.
 
 ## Execution log
@@ -171,3 +173,5 @@ one node from serialising the cluster.
 | 2026-11-14 | Claude Opus 5.5 · session_01BCWLA1BAXKSuq2TLMK9Zna | Incident | Custody `7c92c813` released on its voter via the fresh-namespace restart |
 | 2026-11-14 | Claude Opus 5.5 · session_01BCWLA1BAXKSuq2TLMK9Zna | Step 1 | PR #1597 opened as a draft |
 | 2026-11-14 | Claude Opus 5.5 · session_01BCWLA1BAXKSuq2TLMK9Zna | Step 1 review | Fable review: 5 should-fix, 3 nits, all addressed (stamped grace, veto removed, witness retirement, role unpinning, shared lapse expression) |
+| 2026-11-15 | Claude Opus 5.5 · session_01BCWL9zn5U4msvhC85BdESw | Step 2 | proof machinery removed (branch claude/source-lease-steps-2-4) |
+| 2026-11-15 | Claude Opus 5.5 · session_01BCWL9zn5U4msvhC85BdESw | Steps 3–4 | one `source_leases` table; per-node readers (default 2, per-node override) and per-domain `source_readers` (default 1); built on claude/source-lease-steps-2-4 |

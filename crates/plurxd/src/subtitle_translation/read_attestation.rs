@@ -256,14 +256,6 @@ impl ReadAttestations {
                     return;
                 }
             };
-            if crate::source_custody::activate_background_with_journal(&store, custody.clone())
-                .await
-                .is_err()
-            {
-                settle_read_owner(&store, &source_owner, Some(custody), false).await;
-                finish(&owner, &key, Status::Paused(work));
-                return;
-            }
             if cancel.is_cancelled()
                 || shutdown.is_cancelled()
                 || crate::state::clock_ms() >= lease.expires_at_unix_ms
@@ -384,7 +376,7 @@ async fn settle_read_owner(
             if physical_joined {
                 crate::background_jobs::settle_joined_source_custody(store, held).await;
             } else {
-                crate::background_jobs::settle_no_reader_source_custody(store, held).await;
+                crate::background_jobs::release_unread_source_lease(store, held).await;
             }
             return;
         } else {
@@ -667,14 +659,6 @@ mod tests {
             BackgroundSourceRegistration::Registered(receipt) => receipt,
             other => panic!("expected custody receipt, got {other:?}"),
         };
-        assert!(store
-            .activate_background_source_custody(receipt.clone(), uuid::Uuid::new_v4().to_string())
-            .await
-            .expect("activation"));
-        assert!(!store
-            .release_background_source_custody(receipt.clone(), crate::state::clock_ms())
-            .await
-            .expect("armed receipt must stay charged"));
         let cancelled = CancellationToken::new();
         cancelled.cancel();
         assert!(cancelled.is_cancelled(), "cancel before any read starts");
@@ -682,7 +666,7 @@ mod tests {
         let connection = rusqlite::Connection::open(&database).expect("inspect store");
         let remaining: i64 = connection
             .query_row(
-                "SELECT count(*) FROM background_source_custody WHERE custody_id=?1",
+                "SELECT count(*) FROM source_leases WHERE lease_id=?1",
                 [&receipt.custody_id],
                 |row| row.get(0),
             )

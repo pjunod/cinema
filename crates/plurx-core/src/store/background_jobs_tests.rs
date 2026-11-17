@@ -69,9 +69,9 @@ async fn completed_job_with_unreleased_reader_keeps_origin_and_raises_recovery_g
         [&id],
     )
     .expect("completed work");
-    let owner = serde_json::json!({"kind":"job","token":{"node_id":"previous-worker","job_id":id,"fence":1}});
-    db.execute("INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,owner_kind,work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms,settlement_proof)
-        VALUES ('reader','owner',?1,'[\"source_io\"]','job',?2,1,'active',1000,1000,2000,NULL)",rusqlite::params![owner.to_string(),id]).expect("retained physical reader");
+    // Its reader's lease expired at 2 s; nothing has collected it.
+    db.execute("INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,started_at_ms,renewed_at_ms,expires_at_ms)
+        VALUES ('job:'||?1||':1','job',?1,1,'previous-worker','{\"kind\":\"job\",\"job_kind\":\"fragment_index_build\"}','[\"source_io\"]','active',1000,1000,2000)",rusqlite::params![id]).expect("an uncollected lease");
     let holders = store
         .source_io_holders(3000)
         .await
@@ -87,33 +87,26 @@ async fn completed_job_with_unreleased_reader_keeps_origin_and_raises_recovery_g
     );
     assert_eq!(held.origin_job_state.as_deref(), Some("succeeded"));
     assert_eq!(held.phase.as_deref(), Some("cleanup_pending"));
-    // Not yet seen by the expiry sweep: no lapse time, so not overdue.
-    let metrics = store
-        .prometheus_store_snapshot("observer", 1000)
-        .await
-        .expect("sample");
-    assert_eq!(metrics.background_jobs.source_io_reservations, 0);
-    assert_eq!(metrics.background_jobs.source_recovery_pending, 0);
-    // The sweep stamped it at 1 s and it is still charged at 1000 s: the
-    // sweep is not releasing it, which is what the gauge reports.
-    db.execute(
-        "UPDATE background_source_custody SET phase='cleanup_pending',updated_at_ms=1000 WHERE custody_id='reader'",
-        [],
-    )
-    .expect("stamped by the sweep");
-    let metrics = store
-        .prometheus_store_snapshot("observer", 1000)
-        .await
-        .expect("sample");
-    assert_eq!(metrics.background_jobs.source_recovery_pending, 1);
+    assert_eq!(
+        held.counts_against.as_deref(),
+        Some("node"),
+        "within its grace"
+    );
     let metrics = store
         .prometheus_store_snapshot("observer", 100)
         .await
         .expect("sample");
+    assert_eq!(metrics.background_jobs.source_io_reservations, 0);
     assert_eq!(
         metrics.background_jobs.source_recovery_pending, 0,
-        "inside the grace plus a sweep tick the release is still on its way"
+        "inside the grace plus a sweep tick the collection is still on its way"
     );
+    // Still present 180 s after its expiry: the sweep is not running.
+    let metrics = store
+        .prometheus_store_snapshot("observer", 183)
+        .await
+        .expect("sample");
+    assert_eq!(metrics.background_jobs.source_recovery_pending, 1);
 }
 
 #[tokio::test]
@@ -541,6 +534,11 @@ async fn background_jobs_priority_edits_preserve_renewal_and_takeover_rejects_ol
 #[tokio::test]
 async fn background_jobs_reservations_bound_distinct_jobs_and_yield_releases_capacity() {
     let store = SqliteStore::open_in_memory().expect("store");
+    // One maintenance reader per node plus the live slot: the numbers this
+    // contract was written against (one cluster-wide slot before step 4).
+    super::SettingsStore::put_setting(&store, super::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+        .await
+        .expect("source readers per node");
     let mut tokens = Vec::new();
     let mut third = None;
     for index in 0..3 {
@@ -871,6 +869,11 @@ async fn background_jobs_unknown_payloads_remain_visible_and_cancellable() {
 #[tokio::test]
 async fn background_jobs_repeated_crashes_exhaust_budget_without_automatic_reset() {
     let store = SqliteStore::open_in_memory().expect("store");
+    // Each crashed attempt's lease still charges its grace; this contract is
+    // about the attempt budget, not source capacity.
+    super::SettingsStore::put_setting(&store, super::keys::JOB_SOURCE_READERS_PER_NODE, "16")
+        .await
+        .expect("source readers per node");
     let request = enqueue(1_000);
     store.enqueue_job(request.clone()).await.expect("enqueue");
     for crash in 0..5 {
@@ -1765,10 +1768,12 @@ fn receipt_pressure_literals_match_constants() {
         .map(|(index, _)| index)
         .collect();
     // v129 replaces it once more, adding only the custody clause (pinned in
-    // custody_retention's own test); nothing after it redefines it.
+    // custody_retention's own test); v134 (the source-lease expand) restores
+    // the v86 text (pinned in source_leases' own test); nothing after it
+    // redefines it.
     assert_eq!(
         creators.len(),
-        4,
+        5,
         "another migration redefines the maintenance trigger"
     );
     assert!(std::ptr::eq(
@@ -1778,6 +1783,10 @@ fn receipt_pressure_literals_match_constants() {
     assert!(std::ptr::eq(
         super::sqlite::MIGRATIONS[creators[3]],
         super::custody_retention::SCHEMA
+    ));
+    assert!(std::ptr::eq(
+        super::sqlite::MIGRATIONS[creators[4]],
+        super::source_leases::EXPAND
     ));
 }
 
@@ -2106,7 +2115,7 @@ async fn artifact_job_source_registration_is_not_required_during_foreground_star
     let store = SqliteStore::open_in_memory().expect("real migrated store");
     // Simulate an already-admitted global original reader. An artifact-only
     // job must neither depend on that source file nor acquire source credit.
-    store.queue_sql("INSERT INTO foreground_source_owners(owner_id,identity_json,resource_keys_json,fence,phase,projection_json,started_at_ms,updated_at_ms,lease_expires_at_ms) VALUES('active-original','{}','[\"source_io\"]',1,'startup','{\"source_quiescent\":false}',1000,1000,30000) RETURNING CASE WHEN json_valid($1) THEN 'true' ELSE 'false' END AS result_json".into(),"{}".into(),true,true).await.expect("foreground pressure fixture");
+    store.queue_sql("INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,projection_json,started_at_ms,renewed_at_ms,expires_at_ms) VALUES('active-original','playback','active-original',1,'node-a','{}','[\"source_io\"]','startup','{\"source_quiescent\":false}',1000,1000,30000) RETURNING CASE WHEN json_valid($1) THEN 'true' ELSE 'false' END AS result_json".into(),"{}".into(),true,true).await.expect("foreground pressure fixture");
     let mut request = enqueue(1000);
     request.payload = JobPayload::ArtifactHydrate {
         artifact_key: format!("fragment:{}", "a".repeat(64)),
@@ -2156,6 +2165,11 @@ async fn advertised_manual_scan_wins_cross_type_claim_and_expiry_releases_the_tu
     use super::LibraryStore;
     use crate::domain::{LibraryKind, NewLibrary};
     let store = SqliteStore::open_in_memory().expect("store");
+    // One maintenance reader per node plus the live slot: the numbers this
+    // contract was written against (one cluster-wide slot before step 4).
+    super::SettingsStore::put_setting(&store, super::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+        .await
+        .expect("source readers per node");
     let library = store
         .create_library(&NewLibrary {
             name: "Movies".into(),
@@ -2458,88 +2472,17 @@ async fn busy_scan_voter_keeps_its_local_turn_without_blocking_a_free_remote_dis
 }
 
 #[tokio::test]
-async fn retention_keeps_a_job_that_still_owns_charged_source_custody() {
-    // 2026-11-12: custody 4170fe8e outlived its dead owner, and
-    // retention then deleted the owner's settled job row. That row was the
-    // custody's only exact source binding, so the host census could no longer
-    // release it. A job is retained while any custody it owns is charged.
-    let store = SqliteStore::open_in_memory().expect("store");
-    let owner = enqueue(1_000);
-    let other = enqueue(1_000);
-    for job in [&owner, &other] {
-        store.enqueue_job(job.clone()).await.expect("enqueue");
-        store
-            .cancel_job(CancelJob {
-                job_id: job.id.clone(),
-                now_ms: 1_001,
-            })
-            .await
-            .expect("settle");
-    }
-    let custody = |sql: &'static str| {
-        QueueSql::queue_sql(
-            &store,
-            sql.into(),
-            serde_json::json!({"job": owner.id}).to_string(),
-            true,
-            true,
-        )
-    };
-    custody(
-        "INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,
-            owner_kind,work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms)
-         VALUES('4170fe8e-c89f-462e-a68e-6b8726958640','dead-owner','{}','[\"source_io\"]',
-            'job',json_extract($1,'$.job'),1,'active',1000,1000,2000)",
-    )
-    .await
-    .expect("charged custody");
-    // Eight days later both jobs are past the seven-day receipt window.
-    let later = 1_001 + 8 * 86_400_000;
-    let mut passes = 0;
-    while store.maintain_jobs(later + passes).await.expect("upkeep") {
-        passes += 1;
-        assert!(passes < 8, "upkeep converges");
-    }
-    assert!(
-        store
-            .background_job(&owner.id)
-            .await
-            .expect("read")
-            .is_some(),
-        "the custody owner's job keeps its source binding"
-    );
-    assert!(
-        store
-            .background_job(&other.id)
-            .await
-            .expect("read")
-            .is_none(),
-        "ordinary settled history still expires"
-    );
-    custody("DELETE FROM background_source_custody WHERE work_id=json_extract($1,'$.job')")
-        .await
-        .expect("release");
-    while store.maintain_jobs(later + passes).await.expect("upkeep") {
-        passes += 1;
-        assert!(passes < 16, "upkeep converges");
-    }
-    assert!(
-        store
-            .background_job(&owner.id)
-            .await
-            .expect("read")
-            .is_none(),
-        "a released owner's job expires like any other"
-    );
-}
-
-#[tokio::test]
 async fn a_viewer_waiting_on_its_titles_measurement_reads_beside_background_work() {
     // 2026-11-12: Twilight's FEL measurement sat queued for five days behind
     // library and subtitle work, because only playback demand may read
     // alongside the one background source reader and a viewer waiting on a
     // measurement was not counted as playback demand.
     let store = SqliteStore::open_in_memory().expect("store");
+    // One maintenance reader per node plus the live slot: the numbers this
+    // contract was written against (one cluster-wide slot before step 4).
+    super::SettingsStore::put_setting(&store, super::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+        .await
+        .expect("source readers per node");
     let job = |index: usize, viewer: Option<i64>| {
         let mut request = enqueue(1_000);
         request.dedupe_key = format!("fragment:{index}");

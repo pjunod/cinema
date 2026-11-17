@@ -1,7 +1,6 @@
 """Authenticate a partial Cargo run, leaving the current Rust CI job required."""
 from __future__ import annotations
 
-import ast
 import os
 from pathlib import Path
 import re
@@ -41,15 +40,20 @@ TIMEOUT_180_JOB = '5ed443546bfbd4d4cfea28aeccd3add213f3dcc61a1be65f99a4a65822478
 # every general lane job now uses. Checkout, toolchain, Cargo flags, job/test
 # threads, timeout and resource limits are unchanged. Passes recorded under
 # the previous image stay historical and are not current evidence.
-IMAGE_6A989B4D_JOB = 'ea8ae633cfe0e1b489dfa9295b7ab83a8b0b1d54564ac8c9312197be16df5e77'
-# Reviewed test-thread stack only (2026-11-16): match rust-units.yml's 8 MiB
-# floor for debug source-actor futures (docs/ci/RUST-UNIT-FANOUT.md).
-# Checkout, image, toolchain, Cargo flags, thread counts and resource caps
-# are unchanged. Prior recipes remain historical; failed or unrun bodies
-# still require execution, and current admission accepts only this recipe.
-CURRENT_JOB = '89fcea13dc18711bb02021fcd414e2489a07ce51831e0322fbc9940637e0fd3b'
-HISTORICAL_JOBS = (ORIGINAL_JOB, PRE_NONVOTER_JOB, NONVOTER_JOB, CGROUP_PARSE_JOB, TIMEOUT_180_JOB, IMAGE_6A989B4D_JOB, CURRENT_JOB)
-ROOT_SOURCES = {'tests/operations/test_source_custody_recovery.py', 'scripts/source-custody-recovery'}
+IMAGE_PIN_JOB = 'ea8ae633cfe0e1b489dfa9295b7ab83a8b0b1d54564ac8c9312197be16df5e77'
+# Reviewed step removal only (source lease plan step 2, 2026-11-15): the
+# root-container source recovery ownership step goes with the host recovery
+# helper it exercised. Checkout, image, toolchain, Cargo flags, job/test
+# threads, timeout and resource limits are unchanged.
+SOURCE_LEASE_STEP2_JOB = '08fba8ecb9f3b70c10cc18defaf2a7d6eb18d126464062ab504df6c1481bd08b'
+# PR #1718 independently reviewed the eight MiB stack before the legacy
+# recovery step was removed. Preserve both parent recipes as historical.
+STACK_8M_JOB = '89fcea13dc18711bb02021fcd414e2489a07ce51831e0322fbc9940637e0fd3b'
+# This exact combined job keeps that stack and removes only the retired step.
+# It is the sole current recipe; historical jobs cannot satisfy admission.
+CURRENT_JOB = 'd5ab64d11a15bc00aedfb2c6d099bd079f94091a4dcedef585aaa1384cda1fd6'
+HISTORICAL_JOBS = (ORIGINAL_JOB, PRE_NONVOTER_JOB, NONVOTER_JOB, CGROUP_PARSE_JOB, TIMEOUT_180_JOB,
+                   IMAGE_PIN_JOB, SOURCE_LEASE_STEP2_JOB, STACK_8M_JOB, CURRENT_JOB)
 PROTECTED = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'Makefile'}
 NATIVE_ACTIONS = ('.cargo/', '.github/actions/rust-native-deps/', '.github/actions/ffmpeg/',
                   '.github/actions/cargo-cache/', '.github/actions/cargo-cache-finalize/')
@@ -145,8 +149,6 @@ def authenticate(api, descriptor, binding, candidate):
     retained = {target: [name for name, status in row['outcomes'].items()
                          if status == 'pass' and target + '::' + name not in invalidated]
                 for target, row in targets.items()}
-    root_ok = not (ROOT_SOURCES & set(record['changes'])) and root_prerequisite(source, retention.git_bytes(prior,
-        'tests/operations/test_source_custody_recovery.py'))
     observed = {target: sorted(row['outcomes']) for target, row in targets.items()}
     must_pass = {target: [name for name, status in row['outcomes'].items()
                           if status == 'fail' or (status == 'pass' and name not in retained[target])]
@@ -156,22 +158,7 @@ def authenticate(api, descriptor, binding, candidate):
             observed[target].append(row['interrupted_test'])
             must_pass[target].append(row['interrupted_test'])
     return {'candidate':candidate,'prior':prior,'digest':digest,'retained':retained,
-            'observed':observed,'must_pass':must_pass,'root_ownership_passed':root_ok}
-
-
-def root_prerequisite(raw, test_source):
-    classes = [n for n in ast.parse(test_source).body if isinstance(n, ast.ClassDef)]
-    if len(classes) != 1 or classes[0].name != 'RecoveryHelperTests':
-        return False
-    expected = {n.name for n in classes[0].body if isinstance(n,ast.FunctionDef) and n.name.startswith('test_')}
-    lines = native.clean_lines(raw)
-    section = lines[:lines.index('cargo fmt --all --check')]
-    rows = re.compile(r'(test_\w+) \(test_source_custody_recovery\.RecoveryHelperTests\.(test_\w+)\) \.\.\. ok')
-    matches = [m.groups() for line in section if (m := rows.fullmatch(line))]
-    return bool(matches and all(a == b for a, b in matches) and len(matches) == len(expected)
-                and {a for a, _ in matches} == expected
-                and any(re.fullmatch(r'Ran ' + str(len(matches)) + r' tests in [0-9.]+s', line) for line in section)
-                and section.count('OK') == 1)
+            'observed':observed,'must_pass':must_pass}
 
 
 def main():
@@ -184,8 +171,6 @@ def main():
     destination = Path('target/validation/workspace-rust-selection.json')
     receipts.atomic_json(destination,proof)
     print('Verified prior Rust passes for', sum(map(len, proof['retained'].values())), 'named target bodies')
-    with open(os.environ['GITHUB_OUTPUT'],'a') as output:
-        print('root_retained=' + str(proof['root_ownership_passed']).lower(),file=output)
 
 
 if __name__ == '__main__':

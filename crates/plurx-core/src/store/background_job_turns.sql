@@ -1,3 +1,5 @@
+-- Frozen v124 history; superseded by source_leases_expand.sql. Change nothing
+-- here: this text is the installed catalogue the expand replaces.
 -- A worker has checked the library paths locally. This is demand, never
 -- permission to read; the ordinary physical custody and claim rules still run.
 CREATE TABLE dispatch_turn_ready (

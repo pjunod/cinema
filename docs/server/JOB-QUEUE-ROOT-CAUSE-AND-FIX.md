@@ -16,12 +16,12 @@ Nine manual Movies requests shared a scan, completed at 18:19:41 UTC. TV complet
 
 A completed subtitle job retained a reader. A second failure at library completion held the job-fence lock while a source-pressure check waited for it. The repair verifies the immutable claim identity in the Store. The active Dolby Vision scan finished its pass.
 
-Refused claims create no running attempts. The incident changes identify the blocking reader in both Activity views and monitoring, flag manual library requests after five eligible minutes, and report five-minute successful and failed attempts per minute for the cluster and each worker. Ready manual requests get the next eligible source turn across job types, subject to playback and bounded maintenance service. These incident changes are live; all four workers report capacity. [Activity API](../API.md#56-activity) · [Recovery ledger](SOURCE-CUSTODY-RECOVERY.md)
+Refused claims create no running attempts. The incident changes identify the blocking reader in both Activity views and monitoring, flag manual library requests after five eligible minutes, and report five-minute successful and failed attempts per minute for the cluster and each worker. Ready manual requests get the next eligible source turn across job types, subject to playback and bounded maintenance service. These incident changes are live; all four workers report capacity. [Activity API](../API.md#56-activity) · [Recovery ledger](../archive/SOURCE-CUSTODY-RECOVERY.md)
 
 November 8: same-kernel reader witnesses cover native macOS/Linux and containers.
 Seven Mac and eleven Linux cases pass; legacy migration is pending.
-Cinema recovery needs no host reboot. M1 proof and acceptance remain
-in the [recovery ledger](SOURCE-CUSTODY-RECOVERY.md).
+Cinema recovery needs no host reboot; lease expiry now releases custody
+([ledger](../archive/SOURCE-CUSTODY-RECOVERY.md), archived).
 
 ## 1. The immediate failure is an abandoned shared reader
 
@@ -134,6 +134,12 @@ claim refused ──▶ release local capacity ──▶ poll again
 
 ### 2.2 A successful activation removes the only pre-read journal
 
+> Superseded (2026-11-16): the activation journal, `activate_background_with_journal`
+> and settlement proofs were removed by the source-lease build; a reader is one
+> `source_leases` row with an expiry. See
+> [SOURCE-LEASE-AS-BUILT.md](SOURCE-LEASE-AS-BUILT.md). The text below is the
+> record of the defect as it was.
+
 The [activation helper](../../crates/plurxd/src/source_custody.rs)
 `activate_background_with_journal` writes an activation intent, activates the
 exact custody, then clears that journal on success before the reader runs.
@@ -182,83 +188,78 @@ custody and must not bypass physical safety.
 This is a proposed recovery procedure, not an executable SQL workaround.
 Existing rows lack the physical identity needed for automatic crash recovery.
 
-1. Capture the exact custody identity, immutable owner, activation, resource
-   keys, authority expiry, and related request state. Preserve a rollback and
-   audit receipt outside compiler/cache storage. Re-read before acting because
-   another successful settlement may already have removed the obstruction.
-2. Identify the owning daemon and every way it could delegate reads: daemon
-   threads, probe/encoder children, process groups, and source bridges. An
-   absent job row or a new daemon start time is insufficient evidence.
-3. Quiesce the owner through a controlled recovery path, prevent concurrent
-   reader activation while proving termination, and verify the former
-   service's descendants and reads are stopped. A proven drained container or
-   service cgroup, or a verified intervening OS reboot for that owner, can be
-   evidence; a reused PID, peer timeout, or membership removal cannot.
-4. Through the authoritative Store path, bind the proof to the exact old
-   custody/activation and mark settlement before release. Do not edit one
-   replica's SQLite state, resurrect the old lease, or release an unrelated
-   replacement owner. The legacy recovery adapter and its authorization,
-   proof format, and idempotency tests must exist before this step is run.
-5. Resume normal admission and observe the already-accepted Movies/TV requests
-   acquire fences, publish newly discovered media, and reach terminal results.
-   Record remaining blockers rather than deleting queued work to reduce totals.
+1. Record the exact custody, immutable owner, activation, resource keys,
+   authority expiry, and request state with a rollback/audit receipt outside
+   compiler/cache storage. Re-read before recovery in case another settlement
+   already removed the obstruction.
+2. Identify the owner and every read-delegating path: daemon threads,
+   probe/encoder children, process groups, and source bridges. An absent job
+   row or new daemon start time does not prove reads stopped.
+3. Quiesce the owner, block new readers, and verify descendants and reads
+   stopped. A drained container/service cgroup or verified intervening OS
+   reboot for that owner can prove this; PID reuse, peer timeout, and
+   membership removal cannot.
+4. Through the authoritative Store, bind proof to the exact custody and
+   activation, then settle before release. Do not edit replica SQLite state,
+   resurrect the old lease, or release a replacement owner. Require an
+   authorized legacy adapter, proof format, and idempotency tests first.
+5. Resume admission and confirm accepted Movies/TV requests acquire fences,
+   publish newly discovered media, and reach terminal results. Record
+   blockers instead of deleting queued work.
 
-If physical termination cannot be proved, keep the record held and show an
-explicit recovery-required error. There is no unrestricted “force unlock.”
+Without proof of physical termination, keep the record held and show a
+recovery-required error. There is no unrestricted “force unlock.”
 
 ### 4.2 Retain recovery identity for foreground and background readers
 
-**Proposed record:** persist the exact custody token and activation identity,
-node identity, daemon-instance identity, OS boot identity, and verified
-process/container/cgroup identity before the first read can begin. Track
-activation intent, active reading, stop requested, joined proof, and released
-states. These are design fields, not an existing schema or API.
+**Proposed record:** persist the custody token and activation, node, daemon,
+and OS boot identities, plus verified process/container/cgroup identity
+before the first read. Track activation intent, active reading, stop requested,
+joined proof, and released states. These are design fields, not an existing
+schema or API.
 
-Apply this protocol to both foreground and background custody, including
-background job, analysis, lease, and offline owner variants. The
+Apply the protocol to foreground and background custody, including job,
+analysis, lease, and offline owner variants. The
 [foreground activation helper](../../crates/plurxd/src/source_custody.rs)
-also deletes its intent on successful activation, and expired foreground
-custody independently refuses background claims. A background-job-only fix
-does not close the recovery gap. Preserve each variant's existing ownership
-and publication identity; a generic receipt must not weaken those selectors.
+deletes its intent on successful activation; expired foreground custody also
+refuses background claims. A background-only fix leaves this gap open. Preserve
+each variant’s ownership and publication identity; a generic receipt must not
+weaken those selectors.
 
-The record must survive successful activation until the exact reader and all
-delegated reads are joined and authoritative release is acknowledged. Every
-crash window must leave either proof that no reader could have started or
-enough physical identity to fence an old reader. Do not merely retain the
-old activation-intent file: its abort semantics assume a pre-read operation.
+Retain the record until the exact reader and delegated reads are joined and
+Store release is acknowledged. Every crash window must leave pre-read proof
+or enough identity to fence an old reader; the old activation-intent file
+alone is insufficient because its abort semantics assume no read began.
 
-Recovery requires exclusive ownership of the node's daemon instance and a
-platform-specific termination verifier. Establish or verify that exclusivity
-at startup; this proposal does not assume the present daemon lock already
-provides the required guarantee. On duplicate startup, lost authority, unknown
-process identity, missing journal, corrupt evidence, or unreachable owner,
-refuse release and retain a visible recovery state.
+Recovery needs exclusive ownership of the node daemon and a platform-specific
+termination verifier. Verify exclusivity at startup; the existing daemon lock
+is not assumed to provide it. On duplicate startup, lost authority, unknown
+identity, missing or corrupt evidence, or unreachable owner, refuse release
+and retain a visible recovery state.
 
-Use the existing exact-owner settlement and release operations through Store;
-expiry of the queue fence must not require reviving the old job. Settlement
-must be idempotent across lost acknowledgements, repeated restarts, and peer
-replay. A legacy row without trusted physical identity needs §4.1 rather than
-an invented startup proof. Linux, macOS, and other supported worker platforms
-each need explicit evidence; a Linux cgroup test proves no other platform.
+Use exact-owner Store settlement and release; queue-fence expiry must not
+revive the old job. Settlement must be idempotent across lost acknowledgements,
+restarts, and peer replay. Legacy rows without trusted physical identity need
+§4.1, not an invented startup proof. Each supported worker OS needs explicit
+evidence; a Linux cgroup test proves no other platform.
 
 **Format and rollout boundary:** use a versioned recovery record distinct from
-all existing activation and settlement receipt types. Existing replay treats
-activation as abortable before reads and settlement as proof of completed
-join. Never encode active-reader evidence as either one. Keep new records in
-a separately versioned namespace; unsupported versions retain ownership and
-surface an error. Update the recovery-aware reader before enabling creation
-of the new record, and test old/new replay against each crash state.
+activation and settlement receipts. Existing replay treats activation as
+abortable before reads and settlement as proof of completed join. Never encode
+active-reader evidence as either one. Keep records in a separately versioned
+namespace; unsupported versions retain ownership and surface an error. Update
+the recovery-aware reader before enabling new records, and test old/new replay
+against each crash state.
 
-Enable cluster arbitration only after every admitted worker advertises its
-required protocol capability. During a mixed-version rollout, use the existing
-policy without claiming M2 priority guarantees, or fence incompatible workers
+Enable cluster arbitration only after every admitted worker advertises the
+required protocol capability. During a mixed-version rollout, use existing
+policy without claiming M2 priority guarantees or fence incompatible workers
 from the contested lane. An older try-acquire consumer cannot remain a bypass.
-Before downgrade, stop new activations and drain/join/release the affected
+Before downgrade, stop activations and drain, join, and release affected
 owners. If that cannot finish, retain the recovery-capable binary and journal
 until proof is settled; do not start an old binary on unresolved new-format
-state or promise a safe arbitrary binary rollback. Migration and legacy-row
-recovery remain independently testable and idempotent.
+state or promise arbitrary rollback safety. Migration and legacy-row recovery
+remain independently testable and idempotent.
 
 ### 4.3 Give every refusal an observable reason
 
@@ -456,8 +457,8 @@ polling, and test mixed-version, partial-cluster, and non-admin responses.
 ## 7. Build and accept the repair in separate milestones
 
 **Execution:** Codex owns the initial independent main-bound incident recovery
-fix on `codex/source-custody-recovery`; see [the task ledger](SOURCE-CUSTODY-RECOVERY.md)
-for its narrower proof boundary. Remaining containment and M2–M4 use
+fix on `codex/source-custody-recovery` (archived
+[ledger](../archive/SOURCE-CUSTODY-RECOVERY.md)). Remaining containment and M2–M4 use
 `effort/cinema-job-queue`; reviewed task branches target that effort.
 Shared store, scanner, worker, and UI files make the independent
 file-ownership exception inappropriate. Follow

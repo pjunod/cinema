@@ -2816,12 +2816,16 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     // intent shape's separate `record_desired_selection` write is gone (9 ->
     // 8), and the claim answers the recorded row by one authority read that
     // replaces the `desired_row` read-back that write made (21 stays 21).
+    // Source leases: the playback lease is written once, by
+    // `register_foreground_source`; the separate
+    // `activate_foreground_source_custody` write is gone from the three
+    // shapes that read source (8/9/8 -> 7/8/7).
     let expected: [(&str, (u64, u64, u64)); 5] = [
         ("first play, VOD index", (23, 2, 6)),
         ("reopen, new position", (30, 2, 8)),
-        ("Auto encode, VOD", (19, 2, 8)),
-        ("index miss, rolling copy", (20, 2, 9)),
-        ("caps-v2 Auto, intent", (21, 2, 8)),
+        ("Auto encode, VOD", (19, 2, 7)),
+        ("index miss, rolling copy", (20, 2, 8)),
+        ("caps-v2 Auto, intent", (21, 2, 7)),
     ];
     let observed = measured
         .iter()
@@ -2858,9 +2862,9 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     // The queue bridge now carries the Store method its create-path callers
     // name (D3b, D3a review S5): the copy-index consumer's two reads are
     // `copy_index_v3_variant` and `copy_index_source_attestation`, and the
-    // writes `queue_sql` used to hide are `register_foreground_source`,
-    // `activate_foreground_source_custody` and, on the rolling fallback,
-    // `suspend_playback_analysis_interest`. Any other queue statement keeps
+    // writes `queue_sql` used to hide are `register_foreground_source` and,
+    // on the rolling fallback, `suspend_playback_analysis_interest` (the
+    // source-lease build removed the separate activation write). Any other queue statement keeps
     // the label `queue_sql`, and none is on this path.
     // Layout reads: `session_layout` is its own label. Its reads (the
     // `cluster_meta` marker and guard reads) are paid only by a store whose
@@ -2920,7 +2924,6 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         (
             "Auto encode, VOD",
             &[
-                ("activate_foreground_source_custody", (0, 0, 1)),
                 ("activate_media_session", (2, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
                 ("claim_media_session_request", (1, 0, 1)),
@@ -2939,7 +2942,6 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         (
             "index miss, rolling copy",
             &[
-                ("activate_foreground_source_custody", (0, 0, 1)),
                 ("activate_media_session", (2, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
                 ("claim_media_session_request", (1, 0, 1)),
@@ -2961,7 +2963,6 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         (
             "caps-v2 Auto, intent",
             &[
-                ("activate_foreground_source_custody", (0, 0, 1)),
                 ("activate_media_session", (2, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
                 // The claim's one transaction carries the ask (D3c); its

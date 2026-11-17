@@ -831,15 +831,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "foreground_source_pressure",
     "list_foreground_source_owners",
     "resolve_foreground_source",
-    "activate_foreground_source_custody",
-    "abort_foreground_source_activation",
-    "mark_foreground_source_settled",
-    "reap_settled_source_custody",
-    "settled_foreground_source_custody",
-    "activate_background_source_custody",
-    "abort_background_source_activation",
-    "mark_background_source_settled",
-    "settled_background_source_custody",
+    "reap_expired_source_leases",
     "resolve_background_source_custody",
     "register_background_source_custody",
     "claim_background_source_service",
@@ -1234,8 +1226,22 @@ where
 async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
     for_each_backend(|store, backend| async move {
         let mut requests = Vec::new();
+        let mut mappings = Vec::new();
         for (index, node) in ["source-a", "source-b", "source-c"].into_iter().enumerate() {
             let (_, file_id) = seed_file(&store, node).await;
+            let file = store.get_file(file_id).await.expect("file").expect("file");
+            let item = store
+                .get_item(file.item_id)
+                .await
+                .expect("item")
+                .expect("item");
+            // One NAS behind all three: its storage domain keeps one
+            // background reader and the live slot across the cluster.
+            mappings.push(StorageDomainMapping {
+                library_id: item.library_id,
+                root_path: format!("/{node}"),
+                domain_id: "shared-nas".to_owned(),
+            });
             let request = NewAnalysisRequest {
                 request_id: format!("viewer-source-{}-{index}", backend),
                 file_id,
@@ -1258,6 +1264,12 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
                 .unwrap_or_else(|error| panic!("{backend}: enqueue {node}: {error}"));
             requests.push(row);
         }
+        assert!(
+            set_storage_domains(store.as_ref(), mappings, 1_002)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: storage domain: {error}")),
+            "{backend}"
+        );
         let first = store
             .claim_analysis_request("source-a", 1_003, 31_003)
             .await
@@ -1373,14 +1385,36 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
             .settle_analysis_requests(31_010)
             .await
             .unwrap_or_else(|error| panic!("{backend}: settle expired owner: {error}"));
+        // The dead owner's lease still charges its 60 s grace.
+        assert!(
+            store
+                .claim_analysis_request("source-c", 31_011, 61_011)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim inside the grace: {error}"))
+                .is_none(),
+            "{backend}: a lease charges until its expiry plus the grace"
+        );
+        assert!(
+            store
+                .renew_analysis_request(
+                    &second.request_id,
+                    "source-b",
+                    second.fence,
+                    61_000,
+                    121_000
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: owner renew: {error}")),
+            "{backend}"
+        );
         let third = store
-            .claim_analysis_request("source-c", 31_011, 61_011)
+            .claim_analysis_request("source-c", 91_011, 121_011)
             .await
             .unwrap_or_else(|error| panic!("{backend}: third claim after owner death: {error}"))
             .expect("a demand reader may use the released slot");
         assert_eq!(third.request_id, requests[2].request_id, "{backend}");
         let holders = store
-            .source_io_holders(31_012)
+            .source_io_holders(91_012)
             .await
             .unwrap_or_else(|error| panic!("{backend}: observe replacement: {error}"));
         assert!(
@@ -1392,8 +1426,9 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
         assert!(
             holders
                 .iter()
-                .all(|holder| holder.work_id != first.request_id),
-            "{backend}: expired reader disappears"
+                .filter(|holder| holder.work_id == first.request_id)
+                .all(|holder| holder.counts_against.as_deref() == Some("none")),
+            "{backend}: the expired reader no longer counts"
         );
     })
     .await;
@@ -1403,8 +1438,22 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
 async fn concurrent_viewers_keep_cancelled_reader_reservation_until_expiry() {
     for_each_backend(|store, backend| async move {
         let mut requests = Vec::new();
+        let mut mappings = Vec::new();
         for (index, node) in ["reader-a", "reader-b", "reader-c"].into_iter().enumerate() {
             let (_, file_id) = seed_file(&store, node).await;
+            let file = store.get_file(file_id).await.expect("file").expect("file");
+            let item = store
+                .get_item(file.item_id)
+                .await
+                .expect("item")
+                .expect("item");
+            // One NAS behind all three: one background reader and the live
+            // slot across the cluster.
+            mappings.push(StorageDomainMapping {
+                library_id: item.library_id,
+                root_path: format!("/{node}"),
+                domain_id: "shared-nas".to_owned(),
+            });
             requests.push(
                 store
                     .enqueue_analysis_request(&NewAnalysisRequest {
@@ -1427,6 +1476,9 @@ async fn concurrent_viewers_keep_cancelled_reader_reservation_until_expiry() {
                     .expect("enqueue"),
             );
         }
+        assert!(set_storage_domains(store.as_ref(), mappings, 1_000)
+            .await
+            .expect("storage domain"));
         let maintenance = store
             .claim_analysis_request("reader-a", 1_001, 31_001)
             .await
@@ -1487,8 +1539,9 @@ async fn concurrent_viewers_keep_cancelled_reader_reservation_until_expiry() {
                 .any(|holder| holder.work_id == occupied.request_id),
             "{backend}: cancelled reader remains charged until its lease expires"
         );
+        // Free once its lease is past expiry plus the 60 s grace.
         let replacement = store
-            .claim_analysis_request(waiting_node, 31_004, 61_004)
+            .claim_analysis_request(waiting_node, 91_004, 121_004)
             .await
             .expect("claim after expiry")
             .expect("replacement reader");
@@ -9969,6 +10022,12 @@ async fn artwork_repair_publication_fails_closed_without_a_job_lease() {
 #[tokio::test]
 async fn distributed_pretranscode_contract_runs_through_dyn_store() {
     for_each_backend(|store, backend| async move {
+        // Each retried attempt's lease still charges its 60 s grace; this contract
+        // is about the attempt budget, not source capacity.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "16")
+            .await
+            .expect("source readers per node");
         let library = store
             .create_library(&NewLibrary {
                 name: "Pretranscode Contract Library".to_owned(),
@@ -10332,14 +10391,18 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: deleted-source completion: {error}")),
             "{backend}: deleted source work became ready"
         );
+        // The predecessor lease (expired at tick 700) still charges its
+        // source domain for the 60 s lease grace, so the takeover and every
+        // later step runs one grace (600 ticks) later.
+        let late_time = |tick: i64| queue_time(tick.saturating_add(600));
 
         let successor = store
             .fixture_claim_pretranscode_job(
                 "node-d",
                 &capable,
                 &[],
-                queue_time(701),
-                queue_time(1_000),
+                late_time(701),
+                late_time(1_000),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: expired takeover: {error}"))
@@ -10372,7 +10435,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                     8_192,
                     None,
                     &"a".repeat(64),
-                    queue_time(702),
+                    late_time(702),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: stale completion: {error}")),
@@ -10399,7 +10462,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                     8_192,
                     None,
                     &"d".repeat(64),
-                    queue_time(703),
+                    late_time(703),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: successor completion: {error}")),
@@ -10454,15 +10517,15 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 "node-e",
                 &capable,
                 &[],
-                queue_time(705),
-                queue_time(1_005),
+                late_time(705),
+                late_time(1_005),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim re-enqueued job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: re-enqueued job was not claimable"));
         assert_eq!(refused.dedupe_key, retry.dedupe_key, "{backend}");
         assert!(store
-            .fixture_yield_pretranscode_job(&refused, queue_time(706), queue_time(706))
+            .fixture_yield_pretranscode_job(&refused, late_time(706), late_time(706))
             .await
             .unwrap_or_else(|error| panic!("{backend}: unreadable-node yield: {error}")));
         assert!(
@@ -10471,8 +10534,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                     "node-e",
                     &capable,
                     std::slice::from_ref(&refused.id),
-                    queue_time(706),
-                    queue_time(1_006),
+                    late_time(706),
+                    late_time(1_006),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: local refusal claim: {error}"))
@@ -10484,8 +10547,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 "node-f",
                 &capable,
                 &[],
-                queue_time(706),
-                queue_time(1_006),
+                late_time(706),
+                late_time(1_006),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: mounted peer claim: {error}"))
@@ -10498,7 +10561,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
 
         let mut failing = reclaimed;
         for attempt in 1..=5 {
-            let failed_at = queue_time(710 + attempt * 2);
+            let failed_at = late_time(710 + attempt * 2);
             assert!(
                 store
                     .fixture_fail_pretranscode_job(
@@ -10579,8 +10642,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 "node-pagination",
                 &capable,
                 &[],
-                queue_time(950),
-                queue_time(1_250),
+                late_time(950),
+                late_time(1_250),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: paged capability claim: {error}"))
@@ -10590,7 +10653,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: claim did not preserve highest-compatible ordering across pages"
         );
         assert!(store
-            .fixture_cancel_pretranscode_job(&paged_claim, "fixture_done", queue_time(951))
+            .fixture_cancel_pretranscode_job(&paged_claim, "fixture_done", late_time(951))
             .await
             .unwrap_or_else(|error| panic!("{backend}: retire pagination claim: {error}")));
 
@@ -10642,8 +10705,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 "node-legacy",
                 &capable,
                 &[],
-                queue_time(1_251),
-                queue_time(1_551),
+                late_time(1_251),
+                late_time(1_551),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim legacy reuse: {error}"))
@@ -10658,7 +10721,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 16_896,
                 Some(16_384),
                 &adopted_digest,
-                queue_time(1_252),
+                late_time(1_252),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: bind legacy manifest: {error}")));
@@ -10694,7 +10757,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         let wrong_digest = "f".repeat(64);
-        let verification_now = queue_time(1_253);
+        let verification_now = late_time(1_253);
         let location = store
             .transcode_verification_candidates("node-legacy", None)
             .await
@@ -10813,8 +10876,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 "node-collision",
                 &capable,
                 &[],
-                queue_time(1_253),
-                queue_time(1_553),
+                late_time(1_253),
+                late_time(1_553),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim collision job: {error}"))
@@ -10830,7 +10893,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                     4_096,
                     None,
                     &"9".repeat(64),
-                    queue_time(1_254),
+                    late_time(1_254),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: conflicting completion: {error}")),
@@ -11005,6 +11068,11 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
     backend: &str,
 ) {
     let seed = &stores[0];
+    // Three handles, one node: its one background reader is the contended
+    // resource (readers are counted per node since source-lease step 4).
+    seed.put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+        .await
+        .expect("one background reader");
     let library = seed
         .create_library(&NewLibrary {
             name: "Separate Queue Claim Library".to_owned(),
@@ -11113,15 +11181,15 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
         let (a, b, c) = tokio::join!(
             claim(
                 Arc::clone(&stores[0]),
-                format!("separate-a-{round}"),
+                format!("separate-{round}"),
                 Arc::clone(&start)
             ),
             claim(
                 Arc::clone(&stores[1]),
-                format!("separate-b-{round}"),
+                format!("separate-{round}"),
                 Arc::clone(&start)
             ),
-            claim(Arc::clone(&stores[2]), format!("separate-c-{round}"), start),
+            claim(Arc::clone(&stores[2]), format!("separate-{round}"), start),
         );
         let claims = [a, b, c]
             .into_iter()
@@ -13309,14 +13377,277 @@ async fn replicated_fixture_shape(client: &Client, sql: &str) -> Vec<(String, St
         .collect()
 }
 
+/// A current replicated store has the contracted source-lease tail; a
+/// historical fixture needs the published v1 source owners and the v1
+/// claim effects instead. The statements that rewind it, to run first in
+/// the caller's one transaction; `None` for a store without a lease tail.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_source_lease_rewind(client: &Client) -> Option<Vec<String>> {
+    use queue_fixture::source_extensions_fixture::{
+        source_lease_rewind_plan, CLAIM_EFFECTS_V1, SOURCE_LEASE_UNOWNED_SQL,
+    };
+    let present: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM sqlite_master WHERE name='source_lease_schema'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("replicated source lease inventory");
+    if present.first().is_none_or(|row| row.value == 0) {
+        return None;
+    }
+    require_replicated_fixture_marker(client, "source_lease_schema", 3).await;
+    let unowned: Vec<I64Value> = client
+        .query_consistent_map(SOURCE_LEASE_UNOWNED_SQL, hiqlite::params!())
+        .await
+        .expect("replicated source lease data inventory");
+    assert_eq!(
+        unowned.first().map(|row| row.value),
+        Some(0),
+        "historical fixture must not discard source leases"
+    );
+    Some(
+        source_lease_rewind_plan()
+            .iter()
+            .flat_map(|text| text.split("-- next statement"))
+            .chain(CLAIM_EFFECTS_V1)
+            .map(str::trim)
+            .filter(|statement| !statement.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+/// Review of source-lease steps 2-4, M1: a replicated store installs its
+/// base job schema only when the cluster is created, so an upgraded cluster
+/// keeps the v1 two-slot claim effects unless the expand replaces them. A
+/// populated v1 store: the first open expands and carries the live holder,
+/// the contract waits for every node's lease capability, a later open
+/// contracts, and repeated opens change nothing. Then three nodes each hold
+/// a source reader of the one unmapped key.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v1_source_store_expands_carries_holders_and_contracts_when_every_node_is_ready()
+{
+    use plurx_core::store::background_jobs::{
+        ClaimJob, ClaimOutcome, EnqueueJob, JobKind, JobPayload, JobRequest,
+    };
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("source lease upgrade client");
+    let telemetry = cluster._root.path().join("source-lease-upgrade.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current replicated store");
+    current
+        .validation_reset_contract_state()
+        .await
+        .expect("empty owned fixture");
+    let store: Arc<dyn Store> = Arc::new(current);
+    let (_, file_id) = seed_file(&store, "source-lease-upgrade").await;
+    let job = |index: usize| EnqueueJob {
+        id: uuid::Uuid::new_v4().to_string(),
+        payload: JobPayload::FragmentIndexBuild {
+            file_id,
+            source_generation: format!("source:{file_id}"),
+            source_size: 100,
+            source_mtime: 1,
+            source_sha256: "d".repeat(64),
+            cache_key: format!("{index:064}"),
+            pipeline_digest: "a".repeat(64),
+        },
+        dedupe_key: format!("lease-upgrade:{index}"),
+        priority: 1,
+        not_before_ms: 1_000,
+        now_ms: 1_000,
+        request: JobRequest {
+            scope: "user:1".to_owned(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            request_digest: "b".repeat(64),
+            consumer_kind: "analysis".to_owned(),
+            consumer_ref: format!("analysis:{index}"),
+            target_node_id: None,
+            deadline_ms: None,
+            retain_identity: false,
+        },
+    };
+    let claim = |id: &str, node: &str, now_ms: i64| ClaimJob {
+        job_id: id.to_owned(),
+        expected_revision: 0,
+        node_id: node.to_owned(),
+        boot_id: uuid::Uuid::new_v4().to_string(),
+        claim_id: uuid::Uuid::new_v4().to_string(),
+        kind: JobKind::FragmentIndexBuild,
+        payload_version: 1,
+        now_ms,
+        dispatched_at_ms: now_ms,
+    };
+    let enqueue = |index: usize| {
+        let store = Arc::clone(&store);
+        async move {
+            let request = job(index);
+            let id = request.id.clone();
+            store.enqueue_job(request).await.expect("enqueue");
+            id
+        }
+    };
+    let held = enqueue(0).await;
+    assert!(matches!(
+        store
+            .claim_job(claim(&held, "node-a", 1_001))
+            .await
+            .expect("claim the v1 holder"),
+        ClaimOutcome::Claimed { .. }
+    ));
+    // The v1 store: v1 source owners, the two-slot claim effects, and a
+    // live job reader recorded only by its job and its reservation.
+    let rewind = replicated_source_lease_rewind(&client)
+        .await
+        .expect("current store has a lease tail");
+    client
+        .txn(
+            rewind
+                .into_iter()
+                .map(|sql| (sql, hiqlite::params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("v1 source fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("atomic v1 source fixture");
+    client
+        .txn([
+            ("CREATE TABLE cluster_nodes(node_id TEXT PRIMARY KEY,last_seen_at INTEGER,removed_at INTEGER)", hiqlite::params!()),
+            ("CREATE TABLE cluster_node_join_staging(node_id TEXT PRIMARY KEY)", hiqlite::params!()),
+            ("CREATE TABLE cluster_node_capabilities(node_id TEXT,capability TEXT,last_seen_at INTEGER,PRIMARY KEY(node_id,capability))", hiqlite::params!()),
+            ("INSERT INTO cluster_nodes VALUES('node-a',10,NULL),('node-b',20,NULL),('node-c',30,NULL)", hiqlite::params!()),
+            ("INSERT INTO cluster_node_capabilities VALUES('node-a','source_leases_v2',10),('node-c','source_leases_v2',30)", hiqlite::params!()),
+        ])
+        .await
+        .expect("membership fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("membership fixture applied");
+    async fn text(client: &Client, sql: &str) -> Vec<String> {
+        client
+            .query_consistent(sql.to_owned(), hiqlite::params!())
+            .await
+            .expect("fixture inventory")
+            .iter_mut()
+            .map(|row| row.get::<String>("value"))
+            .collect()
+    }
+    let claim_effects =
+        "SELECT sql AS value FROM sqlite_master WHERE name='background_job_claim_effects'";
+    let lease_version =
+        "SELECT CAST(COALESCE((SELECT version FROM source_lease_schema),0) AS TEXT) AS value";
+    let catalogue = "SELECT type||' '||name||' '||COALESCE(sql,'') AS value FROM sqlite_master ORDER BY type,name";
+    let leases = "SELECT lease_id AS value FROM source_leases ORDER BY lease_id";
+    assert!(
+        text(&client, claim_effects).await[0].contains("SELECT 0 AS slot UNION ALL SELECT 1"),
+        "the fixture has the v1 two-slot claim effects"
+    );
+
+    let opened = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("first lease-aware start");
+    drop(opened);
+    assert_eq!(text(&client, lease_version).await, ["2"], "expanded");
+    assert!(
+        text(&client, claim_effects).await[0].contains("NOT LIKE 'source_io%'"),
+        "the expand replaced the v1 claim effects"
+    );
+    assert_eq!(
+        text(&client, leases).await,
+        [format!("job:{held}:1")],
+        "the live v1 reader is carried as a lease"
+    );
+    let expanded = text(&client, catalogue).await;
+    drop(
+        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+            .await
+            .expect("restart while node-b runs the v1 binary"),
+    );
+    assert_eq!(
+        text(&client, catalogue).await,
+        expanded,
+        "the contract waits for node-b; nothing else changes"
+    );
+    client
+        .execute(
+            "INSERT INTO cluster_node_capabilities VALUES('node-b','source_leases_v2',20)",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("node-b runs a lease-aware binary");
+    drop(
+        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+            .await
+            .expect("start after every node is ready"),
+    );
+    assert_eq!(text(&client, lease_version).await, ["3"], "contracted");
+    let contracted = text(&client, catalogue).await;
+    assert!(
+        !contracted
+            .iter()
+            .any(|row| row.contains(" foreground_source_owners ")),
+        "the v1 source owners are gone"
+    );
+    let reopened = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("restart a contracted store");
+    assert_eq!(text(&client, catalogue).await, contracted, "a no-op");
+    let reopened: Arc<dyn Store> = Arc::new(reopened);
+    for (index, node) in [(1, "node-b"), (2, "node-c")] {
+        let id = {
+            let request = job(index);
+            let id = request.id.clone();
+            reopened.enqueue_job(request).await.expect("enqueue");
+            id
+        };
+        assert!(
+            matches!(
+                reopened
+                    .claim_job(claim(&id, node, 2_000))
+                    .await
+                    .unwrap_or_else(|error| panic!("{node}: {error}")),
+                ClaimOutcome::Claimed { .. }
+            ),
+            "{node} takes a reader of the one key"
+        );
+    }
+    assert_eq!(
+        text(
+            &client,
+            "SELECT node_id AS value FROM source_leases ORDER BY node_id"
+        )
+        .await,
+        ["node-a", "node-b", "node-c"],
+        "three readers of the unmapped source on three nodes"
+    );
+}
+
+/// The validated drops of the published source tail. A current store's
+/// contracted lease tail is rewound to it first, in the same statements.
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn replicated_source_tail_drops(
     client: &Client,
     remove: impl Fn(&str) -> bool,
 ) -> Vec<String> {
     use queue_fixture::source_extensions_fixture::{
-        validated_source_tail_drops, SOURCE_TAIL_SHAPE,
+        current_source_tail, published_source_tail, validated_source_tail_drops, SOURCE_TAIL_SHAPE,
     };
+    let rewind = replicated_source_lease_rewind(client).await;
     let source_shape: Vec<_> = client
         .query_consistent(SOURCE_TAIL_SHAPE.to_owned(), hiqlite::params!())
         .await
@@ -13343,8 +13674,33 @@ async fn replicated_source_tail_drops(
         assert_eq!(rows.len(), 1);
         source_counts.push((name.clone(), rows[0].value));
     }
-    require_replicated_fixture_marker(client, "background_source_schema", 1).await;
-    validated_source_tail_drops(&source_shape, &source_counts, true, remove)
+    let Some(rewind) = rewind else {
+        require_replicated_fixture_marker(client, "background_source_schema", 1).await;
+        return validated_source_tail_drops(&source_shape, &source_counts, true, remove);
+    };
+    // The current tail exactly, holding no grants, checkpoints or dispatch
+    // demand; the rewind leaves the published tail with only its marker.
+    assert_eq!(
+        source_shape,
+        current_source_tail(),
+        "exact current source tail required"
+    );
+    assert!(
+        source_counts.iter().all(|(_, count)| *count == 0),
+        "source grants, checkpoints or dispatch demand must not be discarded: {source_counts:?}"
+    );
+    let published = published_source_tail(true);
+    let counts = published
+        .iter()
+        .filter(|(kind, _, _)| kind == "table")
+        .map(|(_, name, _)| (name.clone(), i64::from(name == "background_source_schema")))
+        .collect::<Vec<_>>();
+    rewind
+        .into_iter()
+        .chain(validated_source_tail_drops(
+            &published, &counts, true, remove,
+        ))
+        .collect()
 }
 
 /// The v125 scan request sidecar, validated like the source tail: exact
@@ -14731,6 +15087,62 @@ fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
     );
 }
 
+/// Start the store once more over an empty membership roster (every node
+/// ready), so an expanded source-lease tail contracts; the roster tables
+/// are the cluster layer's and are removed again.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn contract_source_leases_with_an_empty_roster(client: &Client, telemetry: &std::path::Path) {
+    let roster = [
+        "cluster_nodes(node_id TEXT PRIMARY KEY,last_seen_at INTEGER,removed_at INTEGER)",
+        "cluster_node_join_staging(node_id TEXT PRIMARY KEY)",
+        "cluster_node_capabilities(node_id TEXT,capability TEXT,last_seen_at INTEGER)",
+    ];
+    client
+        .txn(
+            roster
+                .iter()
+                .map(|table| (format!("CREATE TABLE {table}"), hiqlite::params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("empty roster")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("empty roster applied");
+    drop(
+        HiqliteAuthStore::open_or_migrate(client.clone(), telemetry)
+            .await
+            .expect("start with every node ready"),
+    );
+    client
+        .txn(
+            roster
+                .iter()
+                .map(|table| {
+                    let name = table.split('(').next().expect("table name");
+                    (format!("DROP TABLE {name}"), hiqlite::params!())
+                })
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("remove roster")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("roster removed");
+    let version: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT version AS value FROM source_lease_schema",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("source lease marker");
+    assert_eq!(
+        version.iter().map(|row| row.value).collect::<Vec<_>>(),
+        [3],
+        "contracted"
+    );
+}
+
 /// Bootstrap installs every schema object directly and stamps
 /// `AUTH_SCHEMA_VERSION`; the daemon's `open_or_migrate` never reruns a step
 /// the stamp says has happened. So bootstrap is a second copy of the
@@ -14825,6 +15237,11 @@ async fn fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree() {
             reached.iter().map(|row| row.value).collect::<Vec<_>>(),
             vec![AUTH_SCHEMA_BASELINE_VERSION]
         );
+        // An upgraded cluster keeps the source-lease expand until every node
+        // runs a lease-aware binary; a fresh one contracts at once. Compare
+        // the chain after its contract: with a roster in which every node is
+        // ready (none listed), the next start contracts.
+        contract_source_leases_with_an_empty_roster(&client, &telemetry).await;
         assert_migrated_fragment_prune_budget(&client).await;
         store_schema_snapshot(&client).await
     };
@@ -19371,7 +19788,6 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "background_predictions",
             "background_provider_budgets",
             "background_scan_request_v2",
-            "background_source_custody",
             "background_source_pauses",
             "background_source_service_epochs",
             "background_source_service_grants",
@@ -19397,7 +19813,6 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "dvr_rules",
             "file_grants",
             "files",
-            "foreground_source_owners",
             "items",
             "jellyfin_entity_ids",
             "jellyfin_login_tokens",
@@ -19451,6 +19866,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "sharing_rotations",
             "sharing_viewers",
             "sharing_watch",
+            "source_leases",
             "timeline_annotation_sets",
             "timeline_manual_overrides",
             "tokens",
@@ -21535,7 +21951,8 @@ fn contract_inventory_matches_every_store_method() {
     // by `media_session_a_committed_successor_can_renew_and_outlives_its_preparation`.
     // +2: claim_job_attempt and claim_verdict, the claim local verdict
     // (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md), in BACKGROUND_JOB_METHODS.
-    assert_eq!(declared.len(), 599, "review the Store method count");
+    // -8: source leases remove the foreground/background custody proof methods.
+    assert_eq!(declared.len(), 591, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -23216,6 +23633,12 @@ async fn rendition_plan_contract_runs_through_dyn_store() {
 #[tokio::test]
 async fn fragment_index_attempt_history_survives_every_charged_attempt() {
     for_each_backend(|store, backend| async move {
+        // Each retried attempt's lease still charges its 60 s grace; this contract
+        // is about the attempt budget, not source capacity.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "16")
+            .await
+            .expect("source readers per node");
         let (_, file_id) = seed_file(&store, "attempt-history").await;
         let source_sha256 = "a".repeat(64);
         let pipeline_sha256 = "b".repeat(64);
@@ -24875,6 +25298,12 @@ async fn timeline_annotation_contract_runs_through_dyn_store() {
 #[tokio::test]
 async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
     for_each_backend(|store, backend| async move {
+        // One background reader per node beside the live slot: the numbers this
+        // contract was written against.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+            .await
+            .expect("source readers per node");
         let (_, file_id) = seed_file(&store, "analysis-admin-control").await;
         let request_id = uuid::Uuid::new_v4().to_string();
         store
@@ -24932,22 +25361,23 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
                 .is_none(),
             "{backend}: a cancelled reader still owns its source slot"
         );
+        // Its old lease expired at 20 ms and charges the 60 s grace.
         let current = store
-            .claim_analysis_request("analysis-node", 21, 30)
+            .claim_analysis_request("analysis-node", 60_021, 60_100)
             .await
             .unwrap_or_else(|error| panic!("{backend}: reclaim analysis request: {error}"))
             .unwrap_or_else(|| panic!("{backend}: replacement analysis claim"));
         assert_eq!(current.request_id, retried.request_id, "backend {backend}");
         assert!(
             !store
-                .complete_analysis_request(&stale, "generation-stale", 22)
+                .complete_analysis_request(&stale, "generation-stale", 60_022)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: replay old publication: {error}")),
             "backend {backend}: a reclaimed request must refuse its old worker"
         );
         assert!(
             store
-                .complete_analysis_request(&current, "generation-current", 22)
+                .complete_analysis_request(&current, "generation-current", 60_022)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: publish current generation: {error}")),
             "backend {backend}"
@@ -26171,13 +26601,7 @@ async fn analysis_phase_retries_after_storage_domain_apply_without_losing_claim(
         }
 
         let blocked = store
-            .begin_analysis_source_phase(
-                claim.clone(),
-                source.clone(),
-                0,
-                uuid::Uuid::new_v4().to_string(),
-                1_005,
-            )
+            .begin_analysis_source_phase(claim.clone(), source.clone(), 0, 1_005)
             .await
             .expect("capacity refusal is retryable");
         assert!(
@@ -26219,13 +26643,7 @@ async fn analysis_phase_retries_after_storage_domain_apply_without_losing_claim(
             );
         }
         let phase = store
-            .begin_analysis_source_phase(
-                claim.clone(),
-                source.clone(),
-                0,
-                uuid::Uuid::new_v4().to_string(),
-                1_007,
-            )
+            .begin_analysis_source_phase(claim.clone(), source.clone(), 0, 1_007)
             .await
             .expect("retry physical phase")
             .expect("retry succeeds");
@@ -27834,6 +28252,12 @@ async fn the_prometheus_snapshot_answers_what_the_queue_verdict_asks() {
 #[tokio::test]
 async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store() {
     for_each_backend(|store, backend| async move {
+        // Each retried attempt's lease still charges its 60 s grace; this contract
+        // is about the attempt budget, not source capacity.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "16")
+            .await
+            .expect("source readers per node");
         let (_, file_id) = seed_file(&store, "analysis-terminal-identity").await;
         let request = NewAnalysisRequest {
             request_id: "terminal-analysis-request".to_owned(),
@@ -28335,6 +28759,12 @@ async fn requeue_through_the_no_holder_arm_preserves_exhausted_lease_terminality
 #[tokio::test]
 async fn analysis_admin_retry_resets_attempt_budget_through_dyn_store() {
     for_each_backend(|store, backend| async move {
+        // Each retried attempt's lease still charges its 60 s grace; this contract
+        // is about the attempt budget, not source capacity.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "16")
+            .await
+            .expect("source readers per node");
         let (_, file_id) = seed_file(&store, "analysis-retry-budget").await;
         let request_id = uuid::Uuid::new_v4().to_string();
         store

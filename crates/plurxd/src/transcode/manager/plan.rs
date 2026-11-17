@@ -1194,9 +1194,6 @@ impl TranscodeManager {
                                 let owner=BackgroundSourceOwner::Offline{package_id,node_id,claim_generation};
                                 match store.register_background_source_custody(owner,crate::state::clock_ms()).await {
                                     Ok(BackgroundSourceRegistration::Registered(token)) => {
-                                        if crate::source_custody::activate_background_with_journal(&store, token.clone()).await.is_err() {
-                                            return crate::ffmpeg::DoviPixelProof::Inconclusive("offline source proof activation unavailable".into());
-                                        }
                                         let budget=crate::background_jobs::SourceReadBudget::from_existing_custody(Arc::clone(&store),&token,cancel);
                                         custody=Some(token);Some(budget)
                                     }

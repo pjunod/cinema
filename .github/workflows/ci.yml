@@ -647,14 +647,6 @@ jobs:
           PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}
           WORKSPACE_RUST_EVIDENCE: ${{ inputs.workspace_rust_evidence }}
         run: python3 -m validation.workspace_rust_continuation
-      - name: Verify source recovery ownership in the root Linux unit container
-        if: steps.workspace-continuation.outputs.root_retained != 'true'
-        run: |
-          # This container is already the root-capable pinned Linux unit
-          # surface. Exercise real UID/GID handoff instead of counting the
-          # non-root operations lane's ownership-case skip as coverage.
-          python3 -c 'import os; assert os.geteuid() == 0, "source recovery ownership regression requires the root unit container"'
-          python3 -m unittest discover -s tests/operations -p test_source_custody_recovery.py -v
       - name: Run format, Clippy, unit, and SQLite contracts
         if: inputs.workspace_rust_evidence == ''
         run: make ci-rust-gate

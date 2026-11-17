@@ -151,6 +151,12 @@ async fn the_verdict_and_the_admissible_listing_agree_with_the_claim_statement()
     }
     drop(store);
     let db = rusqlite::Connection::open(&path).expect("connection");
+    // Preserve v1's two total source slots: one maintenance reader plus the live-demand slot.
+    db.execute(
+        "INSERT OR REPLACE INTO settings(key,value) VALUES('jobs.source_readers_per_node','1')",
+        [],
+    )
+    .expect("one maintenance reader");
     let target = jobs[0].clone();
     let others = &jobs[1..];
     let mut rng = Rng(0x5EED_CAFE_F00D_0001);
@@ -221,31 +227,27 @@ async fn the_verdict_and_the_admissible_listing_agree_with_the_claim_statement()
             "UPDATE background_job_waiters SET state='{waiter_state}', consumer_kind='{consumer}', \
              deadline_ms={deadline} WHERE job_id='{target}'"),
         );
-        // Other readers of the source: none, live, expired, or expired with custody.
-        for (slot, other) in others.iter().enumerate() {
+        // Other source holders: live, expired within grace, or past grace.
+        for other in others {
             if rng.chance(30) {
                 exec(&db, &mut state, format!(
                     "UPDATE background_job_waiters SET consumer_kind='playback_fragment', deadline_ms=NULL WHERE job_id='{other}'"));
             }
-            match *rng.pick(&["none", "none", "live", "expired", "custody"]) {
-                "live" => exec(&db, &mut state, format!(
-                    "INSERT INTO background_job_reservations(resource_key,slot,job_id,fence,expires_at_ms) \
-                     VALUES('source_io',{},'{other}',1,{})", slot + 10, now + 60_000)),
-                "expired" => exec(&db, &mut state, format!(
-                    "INSERT INTO background_job_reservations(resource_key,slot,job_id,fence,expires_at_ms) \
-                     VALUES('source_io',{},'{other}',1,{})", slot + 10, now - 1)),
-                "custody" => {
-                    exec(&db, &mut state, format!(
-                        "INSERT INTO background_job_reservations(resource_key,slot,job_id,fence,expires_at_ms) \
-                         VALUES('source_io',{},'{other}',1,{})", slot + 10, now - 1));
-                    exec(&db, &mut state, format!(
-                        "INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,owner_kind,\
-                         work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms) VALUES('custody-{slot}',\
-                         'owner-{slot}','{{}}','[\"source_io\"]','job','{other}',1,'active',{},{},{})",
-                        now - 5_000, now - 5_000, now - 1));
-                }
-                _ => {}
-            }
+            let expires_at_ms = match *rng.pick(&["none", "none", "live", "grace", "past_grace"]) {
+                "live" => now + 60_000,
+                "grace" => now - 1,
+                "past_grace" => now - 60_001,
+                _ => continue,
+            };
+            exec(
+                &db,
+                &mut state,
+                format!(
+                    r#"INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,
+                 started_at_ms,renewed_at_ms,expires_at_ms) VALUES('job:{other}:1','job','{other}',1,'node-a',
+                 '{{"kind":"job","job_kind":"fragment_index_build"}}','["source_io"]','active',{now},{now},{expires_at_ms})"#
+                ),
+            );
         }
         // A foreground owner.
         match *rng.pick(&[
@@ -335,9 +337,9 @@ async fn the_verdict_and_the_admissible_listing_agree_with_the_claim_statement()
 
 fn foreground(phase: &str, projection: &str, lease_expires_at_ms: i64, now: i64) -> String {
     format!(
-        "INSERT INTO foreground_source_owners(owner_id,identity_json,resource_keys_json,fence,phase,projection_json,\
-         started_at_ms,updated_at_ms,lease_expires_at_ms) VALUES('viewer','{{}}','[\"source_io\"]',1,'{phase}',\
-         '{projection}',{},{},{lease_expires_at_ms})",
+        "INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,\
+         projection_json,started_at_ms,renewed_at_ms,expires_at_ms) VALUES('playback:viewer:1','playback','viewer',1,\
+         'node-a','{{}}','[\"source_io\"]','{phase}','{projection}',{},{},{lease_expires_at_ms})",
         now - 1_000,
         now - 1_000
     )

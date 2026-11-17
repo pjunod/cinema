@@ -1,14 +1,14 @@
 # Source custody recovery — settle abandoned readers with physical proof
 
-**Status:** open · reviewed PR #1570 guard incorporated into the playback scheduling batch; combined qualification and rollout pending; the lab4 exact-owner recovery completed 2026-11-13 · **Updated:** 2026-11-13
+**Status:** done · retired 2026-11-15 by [SOURCE-LEASE-RELEASE-PLAN.md](../server/SOURCE-LEASE-RELEASE-PLAN.md) step 2, which deleted the witness, census and physical-stop machinery and the host helpers this ledger describes · **Updated:** 2026-11-15
 
-> **Superseded for capacity (2026-11-14):** source capacity is now released by
-> lease expiry alone — see [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md).
-> Nothing below is needed to unblock queued work any more; this document is
-> retired to `archive/` when that plan's step 2 removes the machinery.
+> **Retired (2026-11-15):** source capacity is released by lease expiry
+> alone — see [SOURCE-LEASE-RELEASE-PLAN.md](../server/SOURCE-LEASE-RELEASE-PLAN.md).
+> The code, scripts and binds below were removed in that plan's step 2; this
+> ledger is kept for history only. Links to removed files no longer resolve.
 
 Executes the first independently useful recovery portion of
-[P42's RCA and proposed fix](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). That document
+[P42's RCA and proposed fix](../server/JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). That document
 owns the larger scheduling and queue-management project. This is the bounded
 implementation ledger and recovery procedure for expired physical custody.
 Do not use it to infer that a dead lease proves a dead reader.

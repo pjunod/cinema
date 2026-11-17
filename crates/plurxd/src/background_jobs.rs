@@ -34,9 +34,7 @@ pub(crate) use metrics::{accepted_claims, claim_skipped, prometheus};
 pub(crate) mod analysis_reconcile;
 #[path = "background_jobs/source.rs"]
 mod source;
-pub(crate) use source::{
-    budgeted, source_budget, RawRetirement, SourceHolder, SourcePacingClock, SourceReadBudget,
-};
+pub(crate) use source::{budgeted, source_budget, SourcePacingClock, SourceReadBudget};
 
 const PUBLICATION_MARGIN: Duration = Duration::from_secs(3);
 
@@ -266,14 +264,11 @@ struct Inner {
     lost: CancellationToken,
     /// Historical acknowledged completion only; never artifact authority.
     copy_output_completed: AtomicBool,
-    /// Retained independently of the renewable/retired job token. Only an
-    /// explicit finish after physical join may settle this source custody.
+    /// Retained independently of the renewable/retired job token. `finish`
+    /// releases it; otherwise the store sweep does once its authority lapses.
     source_custody:
         Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken>,
     source_budget: Arc<SourceReadBudget>,
-    /// Opened only by `finish` after retirement; authorizes the live
-    /// completion ledger. Drop never opens it.
-    settle: CancellationToken,
 }
 
 #[derive(Clone)]
@@ -419,64 +414,32 @@ async fn claim_with_resolution_inner(
     Ok(None)
 }
 
-/// Called by the operation owner only after its read/child join, or before
-/// input was ever exposed. The proof write is durable before the exact row is
-/// deleted, so restart replay can finish an unacknowledged DELETE.
+/// Called by the operation owner after its read/child join, or before input
+/// was ever exposed: deletes its source lease so the capacity frees now. A
+/// lost delete costs nothing more than waiting for the lease's expiry.
 pub(crate) async fn settle_joined_source_custody(
     store: &Arc<dyn Store>,
     receipt: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
 ) {
-    let _receipt_owner = crate::source_custody::lock_background_settlement(&receipt).await;
-    loop {
-        match crate::source_custody::persist_background_settlement(&receipt) {
-            Ok(()) => break,
-            Err(error) => tracing::warn!(custody_id=%receipt.custody_id,%error,
-                "joined source journal remains pending"),
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    loop {
-        match store.mark_background_source_settled(receipt.clone()).await {
-            Ok(false) => {
-                if let Err(error) =
-                    crate::source_custody::clear_background_settlement(store, &receipt)
-                {
-                    tracing::warn!(%error,"background source journal cleanup will replay");
-                }
-                return;
-            }
-            Ok(true) => break,
-            Err(error) => tracing::warn!(custody_id=%receipt.custody_id,%error,
-                "joined source proof remains pending"),
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    loop {
+    for attempt in 0..3 {
         let deleted = store
             .release_background_source_custody(receipt.clone(), unix_ms().unwrap_or_default())
             .await;
         #[cfg(test)]
         let deleted = faults::after_commit(faults::SOURCE_RELEASE, deleted);
         match deleted {
-            Ok(_) => {
-                if let Err(error) =
-                    crate::source_custody::clear_background_settlement(store, &receipt)
-                {
-                    tracing::warn!(%error,"background source journal cleanup will replay");
-                }
-                return;
-            }
-            Err(error) => tracing::warn!(custody_id=%receipt.custody_id,%error,
-                "joined source deletion remains pending"),
+            Ok(_) => return,
+            Err(error) => tracing::warn!(lease_id=%receipt.custody_id,%error,attempt,
+                "source lease release failed; it frees at expiry"),
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
-/// Initial registration itself carries a durable no-reader proof. DELETE is
-/// conditional on that proof, so a duplicate or ambiguously armed reader stays
-/// charged instead of being mistaken for this unstarted operation.
-pub(crate) async fn settle_no_reader_source_custody(
+/// Deletes the source lease of an operation that never exposed input, and
+/// retries until the store answers: nothing else ends a lease whose owner
+/// registered it and then never started reading.
+pub(crate) async fn release_unread_source_lease(
     store: &Arc<dyn Store>,
     receipt: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
 ) {
@@ -557,7 +520,7 @@ async fn settle_unstarted_job_source(
     }
     loop {
         if let Some(held) = receipt.take() {
-            settle_no_reader_source_custody(store, held).await;
+            release_unread_source_lease(store, held).await;
             return;
         }
         match store.register_background_source_custody(owner.clone(), unix_ms().unwrap_or_default()).await {
@@ -611,26 +574,14 @@ impl ActiveBackgroundJob {
                 "source custody registration exceeded the claim deadline".into(),
             ));
         }
-        if let Some(receipt) = &source_custody {
-            if let Err(error) =
-                crate::source_custody::activate_background_with_journal(&store, receipt.clone())
-                    .await
-            {
-                settle_unstarted_job_source(&store, owner, source_custody).await;
-                return Err(StoreError::Task(error));
-            }
-        }
         let lost = CancellationToken::new();
-        let settle = CancellationToken::new();
-        let source_budget = match &source_custody {
-            Some(receipt) => SourceReadBudget::with_completion(
-                Arc::clone(&store),
-                receipt,
-                lost.clone(),
-                settle.clone(),
-            ),
-            None => SourceReadBudget::new(Arc::clone(&store), owner, lost.clone()),
-        };
+        let source_budget = SourceReadBudget::new(
+            Arc::clone(&store),
+            source_custody
+                .as_ref()
+                .map_or(owner, |receipt| receipt.owner.clone()),
+            lost.clone(),
+        );
         let (deadline, _) = watch::channel(deadline);
         let fence = JobFence(Arc::new(Inner {
             kind,
@@ -646,7 +597,6 @@ impl ActiveBackgroundJob {
             copy_output_completed: AtomicBool::new(false),
             source_custody,
             source_budget,
-            settle,
         }));
         let stop = CancellationToken::new();
         let heartbeat_stop = stop.clone();
@@ -717,16 +667,10 @@ impl ActiveBackgroundJob {
             tracing::warn!(%error, "background retirement remains ambiguous");
         }
         if let Some(custody) = self.fence.0.source_custody.clone() {
-            // `lost` is cancelled above, so enrollment is closed. An enrolled
-            // producer's File clones, InputState holders and declared raw
-            // children may outlive this call (a planning error can return while
-            // a blocking read still runs); only the ledger may publish the
-            // joined proof, after they physically retire.
-            if self.fence.0.source_budget.completion_owns_settlement() {
-                self.fence.0.settle.cancel();
-            } else {
-                settle_joined_source_custody(&self.fence.0.store, custody).await;
-            }
+            // Finish releases directly. A read that outlives this call (a
+            // planning error can return while a blocking read still runs)
+            // costs one extra concurrent reader, never correctness.
+            settle_joined_source_custody(&self.fence.0.store, custody).await;
         }
         metrics::execution(self.fence.0.kind, self.fence.0.started.elapsed());
     }
@@ -736,9 +680,9 @@ impl Drop for ActiveBackgroundJob {
     fn drop(&mut self) {
         self.fence.0.lost.cancel();
         self.stop.cancel();
-        // Do not release a durable reservation here: a dropped caller is not
-        // proof that its child exited. Physical custody survives expiry until
-        // explicit join+finish. Dropping JoinHandle does not abort writes.
+        // A dropped job does not release its source custody here; the store
+        // sweep releases it once its authority lapses. Dropping JoinHandle
+        // does not abort writes.
     }
 }
 
@@ -3228,6 +3172,11 @@ pub(crate) mod tests {
         };
         use plurx_core::store::NewClusterFragmentIndexJob;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        // One background reader per node beside the live slot.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+            .await
+            .expect("one background reader");
         let library = store
             .create_library(&NewLibrary {
                 name: "co-claim".into(),
@@ -3396,7 +3345,7 @@ pub(crate) mod tests {
             [keys[0][2].0.clone()],
             "only the lead file's asked-for sibling"
         );
-        // While that claim holds the storage domain's background source
+        // While that claim holds the node's background source
         // slot, the preserved sibling cannot be claimed beside it — the
         // second slot is the store's for live demand. That is why the worker
         // claims and settles siblings one at a time.
@@ -3726,21 +3675,6 @@ pub(crate) mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let (id, active) = claimed_on(Arc::clone(&store), local_deadline, authority).await;
         (store, id, active)
-    }
-
-    /// The exact source custody a fixture job registered.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn source_custody(
-        active: &ActiveBackgroundJob,
-    ) -> Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken> {
-        active.fence.0.source_custody.clone()
-    }
-
-    /// A real claimed job on a caller-configured Store (e.g. one whose exact
-    /// source-custody backend is enabled).
-    #[cfg(target_os = "linux")]
-    pub(crate) async fn active_on(store: Arc<dyn Store>) -> (String, ActiveBackgroundJob) {
-        claimed_on(store, None, Arc::new(UnclusteredJobAuthority)).await
     }
 
     async fn claimed_on(
@@ -4269,11 +4203,6 @@ pub(crate) mod tests {
             .expect("source custody");
         let ((), dropped) = faults::dropping(faults::SOURCE_RELEASE, active.finish()).await;
         assert_eq!(dropped, faults::SOURCE_RELEASE);
-        assert!(store
-            .settled_background_source_custody()
-            .await
-            .expect("proof rows")
-            .is_empty());
         assert!(!store
             .release_background_source_custody(receipt, unix_ms().expect("clock"))
             .await

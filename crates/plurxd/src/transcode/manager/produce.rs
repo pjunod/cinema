@@ -1045,18 +1045,6 @@ impl TranscodeManager {
         publication_fence: Option<PublicationFence>,
         pretranscode_fence: Option<PretranscodeFence>,
     ) -> Result<PretranscodeProduceOutcome, String> {
-        // This scope retains the operation registration until the future is
-        // destroyed. File Arc clones in detached collectors remain separately
-        // owned capabilities; the completion actor closes its last original.
-        let _source_operation = match (
-            crate::background_jobs::source_budget(),
-            bound_source.as_ref(),
-        ) {
-            (Some(budget), Some(source)) => {
-                budget.enroll_preparation(Arc::clone(&source.handle))?
-            }
-            _ => None,
-        };
         if cancelled.is_cancelled() {
             return Ok(PretranscodeProduceOutcome::Yielded("ownership_lost"));
         }
@@ -3212,15 +3200,6 @@ impl TranscodeManager {
                 .map_err(|error| error.to_string())?;
             match registered {
                 BackgroundSourceRegistration::Registered(token) => {
-                    if crate::source_custody::activate_background_with_journal(
-                        &self.store,
-                        token.clone(),
-                    )
-                    .await
-                    .is_err()
-                    {
-                        return Err("offline source custody activation was not acknowledged".into());
-                    }
                     let budget = crate::background_jobs::SourceReadBudget::from_existing_custody(
                         Arc::clone(&self.store),
                         &token,

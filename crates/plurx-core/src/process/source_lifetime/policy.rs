@@ -825,7 +825,7 @@ fn verify_state(
         .collect::<Result<Vec<_>, _>>()?;
     // The final launcher replaces the environment of an approved probe. An
     // absolute executable keeps that isolation from changing PATH resolution.
-    // Relative/custom launches still run, without retaining recovery proof.
+    // Relative/custom launches still run, counted as unverified.
     if !Path::new(command.get_program()).is_absolute() {
         return Err(Refusal::unavailable("probe_program_not_absolute"));
     }
@@ -926,7 +926,7 @@ fn verify_state(
     // A live URL proves current ownership, not what a demuxer can open after
     // reading its bytes. Auto-probed lists, external tracks and redirects need
     // an artifact-bound positive input profile; none is qualified yet. This
-    // refusal affects recovery proof only and is not a playback enable gate.
+    // refusal only counts the launch as unverified; it is not an enable gate.
     if access == SourceAccess::Brokered {
         return Err(Refusal::unavailable("broker_confinement_unqualified"));
     }

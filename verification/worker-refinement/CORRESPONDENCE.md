@@ -5,6 +5,21 @@ machine-readable [correspondence.json](correspondence.json) binds 57 TLA
 `Next` actions and 18 source boundaries to Rust anchors and selected tests.
 It is a source-drift and gap receipt, not a refinement proof.
 
+
+## Source lease steps 3+4 — scoped correspondence review on 2026-11-16
+
+gpt-6-luna authored this review; independent review is pending. This records
+source correspondence only, not execution evidence. It supersedes the
+historical custody-journal and reboot-wait descriptions below for current
+source behavior; those sections remain historical and do not describe the
+current lease path.
+
+| Source change | Correspondence | Model or liveness impact |
+|---|---|---|
+| Exact-source leases replace the custody activation path | `activate_background_with_journal` and its activation-journal cleanup are removed. Release is bounded; owner expiry remains the recovery fallback. | Existing source lease actions remain descriptive. No new model or liveness proof. |
+| Coordinated phase lease close | The current close is atomic in the Store. | No new model transition or liveness claim. |
+| Review scope | Source correspondence for these lease changes only. | Configurations, action inventory, and model properties are unchanged. |
+
 The action inventory is `DispatchRejected`, `DetachedReleaseApply`,
 `RenewalLostAck`, `ProbeReturn`, `Admission`, `ClaimSend`, `DomainSend`,
 `BindSend`, `ItemSend`, `CompleteSend`, `ReleaseSend`, `SettleSend`,
@@ -207,9 +222,10 @@ retains post-retirement physical settlement and journal cleanup outside the
 modeled transition and its liveness result.
 
 [Custody integration](../../crates/plurxd/src/source_custody.rs) and
-[recovery](../../crates/plurxd/src/source_custody/recovery.rs) additionally
-persist active-reader evidence, reconcile aborts against the exact Store,
-and settle only after independently verified host reboot. They are external
+recovery (`source_custody/recovery.rs`, removed by source-lease step 2) additionally
+persisted active-reader evidence, reconciled aborts against the exact Store,
+and settled only after independently verified host reboot; source leases now
+replace both (`docs/server/SOURCE-LEASE-AS-BUILT.md`). They are external
 source dependencies, not extra actions in this closed correspondence inventory.
 The [durable contract](../durable-jobs/CONTRACT.md#verified-host-reboot-recovery--scoped-source-audit-on-2026-11-04)
 and [operation wait map](../operation-progress/WAIT-MAP.md#verified-host-reboot-recovery--scoped-source-audit-on-2026-11-04)

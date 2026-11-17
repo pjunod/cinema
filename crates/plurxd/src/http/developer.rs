@@ -1390,43 +1390,6 @@ async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
     }
 }
 
-/// Two source-I/O resource keys contend when they are the same domain or
-/// either is the whole-source wildcard `source_io` -- the overlap rule of the
-/// claim's `domain_readers_full` term.
-fn source_domains_overlap(a: &str, b: &str) -> bool {
-    a == b
-        || (a.starts_with("source_io")
-            && b.starts_with("source_io")
-            && (a == "source_io" || b == "source_io"))
-}
-
-/// Readers per storage domain as the claim counts them: every distinct
-/// active reader (kind and work id, however many rows it holds) whose key
-/// overlaps the domain, a wildcard reader counting against every domain.
-fn domain_readers(
-    holders: &[plurx_core::store::background_jobs::SourceIoHolder],
-) -> std::collections::BTreeMap<String, usize> {
-    let active = holders
-        .iter()
-        .filter(|holder| holder.active_occupancy)
-        .collect::<Vec<_>>();
-    active
-        .iter()
-        .map(|holder| holder.resource_key.clone())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .map(|domain| {
-            let readers = active
-                .iter()
-                .filter(|holder| source_domains_overlap(&holder.resource_key, &domain))
-                .map(|holder| (holder.kind.as_str(), holder.work_id.as_str()))
-                .collect::<std::collections::BTreeSet<_>>()
-                .len();
-            (domain, readers)
-        })
-        .collect()
-}
-
 /// How many measured switches each platform needs before the processed
 /// Dolby Vision upgrade leaves the Developer tab (Paul, 2026-11-07).
 const PROCESSED_UPGRADE_SWITCHES: u64 = 20;
@@ -1579,27 +1542,40 @@ async fn indexing_while_serving(state: &AppState) -> DeveloperEnableItem {
     )
     .await
     {
-        Ok(Ok(holders)) => {
-            let domains = domain_readers(&holders);
-            let full = domains.values().any(|readers| *readers >= 2);
-            let listed = if domains.is_empty() {
-                "No storage domain has an active source reader".to_owned()
-            } else {
-                domains
-                    .iter()
-                    .take(8)
-                    .map(|(domain, readers)| format!("{domain}: {readers} of 2"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            (
-                if full { Unmet } else { Met },
-                format!(
-                    "{listed}. Each domain admits two source readers; without a live viewer a \
-                     background read takes only a domain no other reader holds"
-                ),
-            )
-        }
+        Ok(Ok(holders)) => match state.applied.settings_snapshot().await {
+            Err(error) => (
+                Unavailable,
+                format!("The settings snapshot could not be read: {error}"),
+            ),
+            Ok(snapshot) => {
+                let settings = snapshot.values;
+                let capacity = crate::source_custody::capacity::summary(
+                    &settings,
+                    &holders,
+                    [state.node_id.clone()],
+                );
+                let this = capacity["nodes"]
+                    .as_array()
+                    .and_then(|nodes| {
+                        nodes
+                            .iter()
+                            .find(|node| node["node_id"] == state.node_id.as_str())
+                    })
+                    .cloned()
+                    .unwrap_or_default();
+                let readers = this["readers"].as_i64().unwrap_or_default();
+                let maintenance = this["maintenance"].as_i64().unwrap_or_default();
+                let live = this["live"].as_i64().unwrap_or_default();
+                (
+                    if maintenance >= readers { Unmet } else { Met },
+                    format!(
+                        "This node runs {maintenance} of {readers} background source readers, and \
+                     {live} for live demand (one slot is always kept for it). Without a live \
+                     viewer a background read takes one of the {readers}"
+                    ),
+                )
+            }
+        },
         Ok(Err(error)) => (
             Unavailable,
             format!("The source-reader ledger could not be read: {error}"),
@@ -3740,64 +3716,28 @@ async fn display_target_hdr10(
     }
 }
 
-/// Node-local observations only. No enable or recovery path reads this route.
-static SOURCE_RECOVERY_SCAN: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
-    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
-
-fn unavailable_source_recovery(node_name: &str, launches: serde_json::Value) -> serde_json::Value {
-    local_source_diagnostics(
-        serde_json::json!({"error": "unavailable", "poisoned": null}),
-        node_name,
-        launches,
-        crate::source_custody::access_roots_fact(),
-    )
-}
-
-/// Process-local readings every answer carries, including an unavailable one.
+/// Node-local launch-verification readings. Advisory: nothing reads this
+/// route to allow or refuse work.
 fn local_source_diagnostics(
-    mut reading: serde_json::Value,
     node_name: &str,
     launches: serde_json::Value,
     roots: serde_json::Value,
 ) -> serde_json::Value {
-    reading["node_name"] = serde_json::json!(node_name);
-    reading["launches"] = launches;
+    let mut reading = serde_json::json!({"node_name": node_name, "launches": launches});
     for key in ["roots_configured", "roots_unconfigured_reason"] {
         reading[key] = roots[key].clone();
     }
     reading
 }
 
-pub async fn source_recovery(
+pub async fn source_launch(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Json<serde_json::Value> {
-    let node_name = state
-        .node_hostname
-        .as_deref()
-        .unwrap_or(&state.node_id)
-        .to_owned();
-    let launches = serde_json::json!(plurx_core::process::source_lifetime::launch_snapshot());
-    let permit = match SOURCE_RECOVERY_SCAN.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            return Json(unavailable_source_recovery(&node_name, launches));
-        }
-    };
-    let store = std::sync::Arc::clone(&state.store);
-    let reading = match tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        crate::source_custody::recovery_status(&store)
-    })
-    .await
-    {
-        Ok(reading) => reading,
-        Err(_) => return Json(unavailable_source_recovery(&node_name, launches)),
-    };
+    let node_name = state.node_hostname.as_deref().unwrap_or(&state.node_id);
     Json(local_source_diagnostics(
-        reading,
-        &node_name,
-        launches,
+        node_name,
+        serde_json::json!(plurx_core::process::source_lifetime::launch_snapshot()),
         crate::source_custody::access_roots_fact(),
     ))
 }
@@ -3807,70 +3747,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unavailable_source_recovery_preserves_local_diagnostics_without_a_poison_count() {
-        let launches = serde_json::json!({"total": 3});
-        let response = unavailable_source_recovery("media1", launches.clone());
-        assert_eq!(response["error"], "unavailable");
-        assert!(response["poisoned"].is_null());
-        assert_eq!(response["node_name"], "media1");
-        assert_eq!(response["launches"], launches);
-        assert!(response["roots_configured"].is_boolean());
-    }
-
-    #[test]
-    fn source_recovery_names_unconfigured_roots_and_their_reason() {
+    fn source_launch_names_unconfigured_roots_and_their_reason() {
         let roots = serde_json::json!({
             "roots_configured": false,
             "roots_unconfigured_reason": "reader roots cannot be empty",
         });
-        let response = local_source_diagnostics(
-            serde_json::json!({"supported": true}),
-            "media1",
-            serde_json::json!({"unverified": 2}),
-            roots,
-        );
-        assert_eq!(response["supported"], true);
+        let launches = serde_json::json!({"unverified": 2});
+        let response = local_source_diagnostics("media1", launches.clone(), roots);
+        assert_eq!(response["node_name"], "media1");
+        assert_eq!(response["launches"], launches);
         assert_eq!(response["roots_configured"], false);
         assert_eq!(
             response["roots_unconfigured_reason"],
             "reader roots cannot be empty"
         );
-    }
-
-    /// Review 2 of C1 (S9): the row counts readers the way the claim does --
-    /// a whole-source (`source_io`) reader contends with every domain, and a
-    /// reader holding several rows is one reader.
-    #[test]
-    fn domain_readers_follow_the_claims_overlap_and_distinct_reader_rules() {
-        use plurx_core::store::background_jobs::SourceIoHolder;
-        let holder = |key: &str, work: &str, active: bool| SourceIoHolder {
-            active_occupancy: active,
-            resource_key: key.to_owned(),
-            work_id: work.to_owned(),
-            kind: "analysis_source".to_owned(),
-            priority: "maintenance".to_owned(),
-            started_at_ms: 0,
-            lease_expires_at_ms: 0,
-            phase: None,
-            last_phase_at_ms: None,
-            origin_node_id: None,
-            origin_job_kind: None,
-            origin_job_state: None,
-        };
-        let readers = domain_readers(&[
-            holder("source_io:nas-a", "one", true),
-            holder("source_io:nas-a", "one", true),
-            holder("source_io", "everything", true),
-            holder("source_io:nas-b", "two", true),
-            holder("source_io:nas-b", "paused", false),
-        ]);
-        assert_eq!(readers.get("source_io:nas-a"), Some(&2), "{readers:?}");
-        assert_eq!(readers.get("source_io:nas-b"), Some(&2), "{readers:?}");
-        assert_eq!(readers.get("source_io"), Some(&3), "{readers:?}");
-        assert!(!source_domains_overlap(
-            "source_io:nas-a",
-            "source_io:nas-b"
-        ));
     }
 
     #[test]
