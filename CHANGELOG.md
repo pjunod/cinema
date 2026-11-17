@@ -22,6 +22,9 @@ bump may break compatibility and a **patch** bump never does.
   media source through exposure, so a transient successor wait cannot cancel
   its own preparation. The first visible frame freezes the final commit;
   retries and close preserve that exact settlement before changing reporters.
+- Guarded runner VM starts pin instance UUID/generation under the target-host
+  admission lock, retain pause and restart-budget checks, and cannot become
+  an in-service daemon repair when the VM is already running.
 
 - Dolby Vision titles the server reconstructs from the base layer alone no
   longer have their black level raised: Profile 5, Profile 8, and Profile 7
