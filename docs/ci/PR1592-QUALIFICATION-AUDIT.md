@@ -1,12 +1,21 @@
 # PR #1592: landing and qualification evidence
 
-**Status:** open — historical evidence audited; positive coverage closure belongs to PR #1640 · **Updated:** 2026-11-16
+**Status:** open — historical evidence audited; positive coverage closure belongs to PR #1640 · **Updated:** 2026-11-17
 
 PR #1592 landed through a direct API merge with the train off after its final
 source run failed. The account recorded by Forgejo identifies the credential,
 not the person or agent that used it. No rationale for overriding this failed
 gate was found in the preserved PR discussion. A later history repair recorded
 the landing accurately but expressly supplied no test execution evidence.
+
+A subsequently recovered Claude status record describes this landing as part
+of eleven direct merges with the train off, attributes the batch to “Paul’s
+order,” and explicitly records no per-head unit lanes followed by testing on
+landed main. This is Claude’s stated rationale, not authenticated evidence of
+the underlying human instruction or permission to waive qualification. The
+preserved source record has SHA-256
+`418301967a9bc54c8ff6e531094e456e04d3a8b3b6e7cf719a6f008cc4506074`.
+It supplies no green train qualification receipt for the merged tree.
 
 ## 1. Exact source and landing
 
