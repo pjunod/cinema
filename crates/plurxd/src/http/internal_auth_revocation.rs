@@ -805,8 +805,24 @@ mod tests {
             .expect("revocation peer directory end")
             .0;
         assert!(source.contains(".claim_roster(claim_id)"));
-        let facade = include_str!("../cluster.rs");
-        assert!(facade.contains("self.manager.cache_admin_revocation_peers(claim_id).await"));
+        let facade = include_str!("../cluster.rs")
+            .split_once("pub(crate) async fn claim_roster(")
+            .expect("daemon revocation claim roster capability")
+            .1
+            .split_once("pub(crate) async fn blockers(")
+            .expect("daemon revocation claim roster capability end")
+            .0;
+        assert!(facade.contains("self.protocol.claim_roster(claim_id).await"));
+        let core_capability = include_str!("../../../plurx-core/src/cluster/membership/access.rs")
+            .split_once("pub fn claim_roster<'a>(")
+            .expect("core revocation claim roster capability")
+            .1
+            .split_once("pub fn blockers(")
+            .expect("core revocation claim roster capability end")
+            .0;
+        assert!(core_capability.contains("self.manager.cache_admin_revocation_peers(claim)"));
+        assert!(!core_capability.contains("operations_peers()"));
+        assert!(!core_capability.contains("snapshot("));
         assert!(!source.contains("operations_peers()"));
     }
 
