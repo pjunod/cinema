@@ -3,10 +3,10 @@
 **Updated:** 2026-11-13 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
-- **2026-11-16 · Native prepared forward rendezvous:** owner GPT. New Moon's
-  native seeks trailed 90–97 ms; buffered forward aim+existing hold preserves the guard.
-  Astra review and 103 focused tests pass; Safari acceptance, seam and deadline
-  follow-up remain open ([build plan](docs/streaming/PLAYBACK-START-BUILD.md)).
+- **2026-11-18 · Safari prepared Dolby Vision upgrades:** #1754 landed the
+  forward rendezvous for New Moon. Twilight then entered its hold with 785 ms
+  of successor buffer. The follow-up warms the muted successor before holding.
+  Replay acceptance, seam and deadline work remain open ([build plan](docs/streaming/PLAYBACK-START-BUILD.md)).
 
 - **2026-11-17 · Web prepared-switch ownership:** owner GPT. New Moon's exposed
   successor could report Waiting under its predecessor's control generation,

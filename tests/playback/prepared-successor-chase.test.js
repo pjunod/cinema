@@ -239,11 +239,12 @@ test("alignment telemetry distinguishes seek timeout, buffer loss, and residual 
 test("native hold warms the replay's 496ms own runway without a backward seek",async()=>{
   const h=nativeHoldHarness();h.incumbent.currentTime=2191.821;h.spare.currentTime=2195.663;
   h.spare.buffered=ranges([[2188,2196.159]]);h.start();
-  assert.equal(h.spare.paused,true,"thin native runway must enter the hold, not a backward seek");
+  assert.equal(h.spare.paused,false,"thin native runway warms while playing muted");
   assert.equal(h.seeks.length,0);assert.equal(h.failed.length,0);assert.equal(h.exposed.length,0);
   await h.advance(1000);
-  assert.equal(h.failed.length,0,"initial thin buffer is allowed to warm while paused");
+  assert.equal(h.failed.length,0,"initial thin buffer is allowed to warm under the incumbent");
   h.spare.buffered=ranges([[2188,2199]]);await h.advance(10);
+  assert.equal(h.spare.paused,true);
   await h.arrive(0,2195.663);
   assert.equal(h.spare.paused,false);assert.equal(h.seeks.length,0);
   assert.equal(h.exposed.length,0,"warm buffer and resume still need decoded frame proof");
@@ -264,7 +265,7 @@ test("native hold freezes the completed seek position rather than its requested 
 });
 
 test("native hold waits for future-data readiness without seeking back",async()=>{
-  const h=nativeHoldHarness();h.spare.readyState=2;h.start();await h.advance(10);
+  const h=nativeHoldHarness();h.spare.readyState=2;h.spare.paused=true;h.start();await h.advance(10);
   assert.equal(h.spare.paused,true);assert.equal(h.failed.length,0);assert.equal(h.seeks.length,0);
   h.spare.readyState=3;await h.advance(10);await h.arrive();h.prove();
   assert.equal(h.exposed.length,1);assert.equal(h.failed.length,0);
@@ -272,7 +273,7 @@ test("native hold waits for future-data readiness without seeking back",async()=
 
 test("native hold refuses thin buffer at crossing and bounds an unfinished seek",async()=>{
   const thin=nativeHoldHarness();thin.spare.buffered=ranges([[1032,1039.235]]);thin.start();
-  await thin.arrive();assert.match(thin.failed[0],/not ready at rendezvous/);
+  await thin.arrive();assert.match(thin.failed[0],/lost its lead while warming/);
   assert.equal(thin.exposed.length,0);assert.equal(thin.incumbent.muted,false);
   assert.equal(thin.seeks.length,0);assert.equal(thin.timers.size,0);
   const seeking=nativeHoldHarness();seeking.spare.seeking=true;seeking.start();

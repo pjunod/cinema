@@ -9,8 +9,9 @@ async function flush(){for(let turn=0;turn<8;turn++)await Promise.resolve();}
 // alignment, seek waiter, hold and paired-frame proof run without replacement.
 // Only the final physical exposure and transport-independent ACK sink are seams.
 function harness({origin=0,rate=1,latency=97,warmAfter=150,landingOffset=0,
-  neverSeek=false,staleSeeked=false,mse=false,growAtWarm=0,buffer=[[1890,1913.876]]}={}){
-  let now=0,next=0,attached=true,runway=40,sparePosition=1894.851;
+  neverSeek=false,staleSeeked=false,mse=false,growAtWarm=0,buffer=[[1890,1913.876]],
+  incumbentTime=1911.813,successorTime=1894.851,readyState=4}={}){
+  let now=0,next=0,attached=true,runway=40,sparePosition=successorTime;
   const timers=new Map(),seeks=[],failed=[],exposed=[],logs=[];
   const timer=(fn,ms)=>{const id=++next;timers.set(id,{fn,at:now+ms});return id;};
   const element=time=>Object.assign(new EventTarget(),{currentTime:time,paused:false,seeking:false,
@@ -21,7 +22,8 @@ function harness({origin=0,rate=1,latency=97,warmAfter=150,landingOffset=0,
     requestVideoFrameCallback(fn){const id=++next;this.callbacks.set(id,fn);return id;},
     cancelVideoFrameCallback(id){this.callbacks.delete(id);},
     removeAttribute(){},setAttribute(){},load(){},emit(name){this.dispatchEvent(new Event(name));}});
-  const incumbent=element(1911.813+origin/1000),spare=element(sparePosition);incumbent.muted=false;
+  const incumbent=element(incumbentTime+origin/1000),spare=element(sparePosition);
+  incumbent.muted=false;spare.readyState=readyState;
   Object.defineProperty(spare,"currentTime",{get:()=>sparePosition,set(wanted){
     seeks.push({wanted,at:now,paused:spare.paused});
     spare.seeking=true;spare.readyState=2;spare.emit("seeking");
@@ -50,7 +52,7 @@ function harness({origin=0,rate=1,latency=97,warmAfter=150,landingOffset=0,
   let settled=false,result;
   const start=()=>{ctx.alignPreparedReplacement(player,state,incumbent,spare).then(value=>{settled=true;result=value;});};
   const move=ms=>{if(!incumbent.paused&&!incumbent.seeking&&!incumbent.starved)incumbent.currentTime+=ms*incumbent.playbackRate/1000;
-    if(!spare.paused&&!spare.seeking)sparePosition+=ms*spare.playbackRate/1000;now+=ms;};
+    if(!spare.paused&&!spare.seeking&&!spare.starved)sparePosition+=ms*spare.playbackRate/1000;now+=ms;};
   async function advance(ms){
     const end=now+ms;let iterations=0;
     while(true){const entry=[...timers].filter(([,t])=>t.at<=end).sort((a,b)=>a[1].at-b[1].at)[0];
@@ -77,6 +79,102 @@ function harness({origin=0,rate=1,latency=97,warmAfter=150,landingOffset=0,
     teardown(){ctx.freePreparedReplacement(player,state);},
     position(value){sparePosition=value;}};
 }
+
+// The deployed Twilight trace had 2.082s past the incumbent but only 785ms
+// past the successor. Model a browser that appends the next range while playing.
+function twilightHarness(options={}){
+  return harness({incumbentTime:13.895,successorTime:15.192,
+    buffer:[[8,15.977]],readyState:3,...options});
+}
+
+test("native successor warms its own runway before pausing for the rendezvous",async()=>{
+  for(const options of [{},{origin:500000},{rate:0.5},{rate:2}]){
+    const h=twilightHarness(options);h.start();await flush();
+    assert.equal(h.seeks.length,0);
+    await h.advance(300);
+    assert.equal(h.spare.paused,false,"thin successor must remain playing while it warms");
+    assert.equal(h.spare.muted,true);
+    assert.equal(h.exposed.length,0);
+    h.spare.buffered=ranges([[8,24]]);
+    await h.advance(10);
+    assert.equal(h.spare.paused,true);
+    assert.ok(h.spare.currentTime>15.192,"hold uses the warmed moving playhead");
+    await h.until(()=>h.state.overlapPhase==="video"||h.failed.length);
+    assert.equal(h.failed.length,0);
+    assert.equal(h.exposed.length,0);
+    await h.prove();
+    assert.equal(h.exposed.length,1);
+    assert.equal(h.seeks.length,0);
+    assert.equal(h.incumbent.pauseCalls,0);
+    assert.equal(h.timers.size,0);
+  }
+});
+
+test("native warmup spends the original hold budget",async()=>{
+  const h=twilightHarness();h.start();h.incumbent.starved=true;await h.advance(1600);
+  h.spare.buffered=ranges([[8,24]]);
+  await h.advance(10);
+  assert.equal(h.spare.paused,true);
+  await h.advance(1200);
+  assert.match(h.failed[0],/deadline/);
+  assert.equal(h.exposed.length,0);
+  assert.equal(h.seeks.length,0);
+  assert.equal(h.incumbent.muted,false);
+});
+
+test("native warmup refuses if pausing invalidates its observed runway",async()=>{
+  const h=twilightHarness();h.start();await h.advance(300);
+  const pause=h.spare.pause.bind(h.spare);
+  h.spare.pause=()=>{pause();h.spare.buffered=ranges([[8,16]]);};
+  h.spare.buffered=ranges([[8,24]]);
+  await h.advance(10);
+  assert.match(h.failed[0],/lost runway while pausing/);
+  assert.equal(h.exposed.length,0);
+  assert.equal(h.incumbent.muted,false);
+  assert.equal(h.timers.size,0);
+});
+
+test("a native successor with sufficient runway holds immediately without a seek",async()=>{
+  const h=twilightHarness();h.spare.buffered=ranges([[8,24]]);h.start();await flush();
+  assert.equal(h.state.overlapPhase,"native-align-hold");
+  assert.equal(h.spare.paused,true);
+  assert.equal(h.seeks.length,0);
+  await h.until(()=>h.state.overlapPhase==="video");
+  await h.prove();
+  assert.equal(h.exposed.length,1);
+});
+
+for(const [reason,change] of Object.entries({
+  pause:h=>{h.incumbent.paused=true;h.incumbent.emit("pause");},
+  rate:h=>{h.incumbent.playbackRate=2;h.incumbent.emit("ratechange");},
+  seek:h=>{h.spare.seeking=true;},
+  unmute:h=>{h.spare.muted=false;},
+  stall:h=>{h.spare.starved=true;},
+  supersede:h=>h.supersede(),
+  teardown:h=>h.teardown(),
+})){
+  test(`native warmup cancels on ${reason} without exposing the successor`,async()=>{
+    const h=twilightHarness();h.start();await flush();
+    assert.equal(h.state.overlapPhase,"native-align-warm");
+    change(h);
+    await h.advance(1400);
+    assert.equal(h.failed.length,["supersede","teardown"].includes(reason)?0:1);
+    assert.equal(h.exposed.length,0);
+    assert.equal(h.seeks.length,0);
+    assert.equal(h.incumbent.muted,false);
+    assert.equal(h.timers.size,0);
+    assert.equal(h.state.overlapListeners,null);
+  });
+}
+
+test("native warmup without observed buffer growth ends at the original deadline",async()=>{
+  const h=twilightHarness();h.start();
+  await h.advance(2800);
+  assert.match(h.failed[0],/deadline/);
+  assert.equal(h.exposed.length,0);
+  assert.equal(h.seeks.length,0);
+  assert.equal(h.timers.size,0);
+});
 
 for(const options of [{},{origin:500000},{rate:0.5},{rate:2}])
   test(`native forward seek survives97ms latency and warms before unchanged paired proof ${JSON.stringify(options)}`,async()=>{

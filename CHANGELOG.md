@@ -18,6 +18,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Safari keeps a prepared upgrade playing muted when it is ahead but has too
+  little buffer beyond its own playhead. It pauses for the handoff once it has
+  runway for the decoded frame check, within the existing alignment deadline.
+
 - Safari prepared upgrades that have buffered the current picture but still
   play behind it now seek to a buffered forward rendezvous and hold there.
   Seek latency no longer leaves both exact-current attempts behind the moving
