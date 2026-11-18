@@ -96,16 +96,13 @@ B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; sim
 
 **Source built and reviewed on `effort/desktop-tray`; [PR #1213](http://forge.lan:3000/noirr/plurx/pulls/1213) records main promotion; not deployed.** The [implementation ledger](docs/features/DESKTOP-TRAY-IMPLEMENTATION.md) tracks macOS and Linux desktop controls, separate server/tray startup choices, and signed GitHub artifact upgrades. Astra completed the PR #1220 review; root addresses all eight findings and owns passing unit tests and merge gates. Controller, daemon, native UI and packaging source is built in cohort PR #1220. The [qualification ledger](docs/features/DESKTOP-TRAY-QUALIFICATION.md) distinguishes passing review regressions, repository merge evidence and remaining native distribution acceptance.
 
-## Playback startup path: the per-read stall and the web scrim
-
-**Branch `effort/startup-read-path`, in a draft pull request; not deployed.** Two fixes: consistent reads on a cluster no longer wait 40 ms each on a delayed ACK (44.0 ms to 1.7 ms per read on three-voter TLS loopback; a start makes about forty), and the web scrim clears about two frames after playback starts instead of 500 to 1000 ms later. Fleet effect unmeasured. The remaining waits, ranked with owners, are in [PLAYBACK-STARTUP-PATH-FINDINGS.md](docs/streaming/PLAYBACK-STARTUP-PATH-FINDINGS.md); its §5 client waits are unowned.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19, 2026-10-26, 2026-11-07 and 2026-11-15 into the status history of their subject folder. One row per section, newest first.
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19, 2026-10-26, 2026-11-07, 2026-11-15 and 2026-11-18 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| Undated | Playback startup path: the per-read stall and the web scrim | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-11 | Startup and tone-map: fewer create-path reads, a tone-map census, lab arms | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-10 | HDR tone-map on Apple Silicon runs on the GPU, held to CPU parity | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-04 | Live TV station logos on Apple TV, iOS and Android | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
