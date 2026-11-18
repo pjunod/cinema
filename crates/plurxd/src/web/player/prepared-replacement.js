@@ -161,7 +161,25 @@ function queuePlaybackControlAcknowledgement(p,actionId,state,extra){
   // goes first: a settlement nobody has managed to send in four preparations
   // is one the server's deadline has already reaped.
   while(queue.length>PREPARED_ACK_QUEUE_MAX) queue.shift();
-  notifyPlaybackControl();
+  const reporter=p.controlReporter;
+  if(state==="committed"&&p.preparedControlPending?.actionId===actionId
+    &&typeof reporter?.finish==="function"){
+    // Capture before decoder retirement. Later transport events may neither
+    // replace this commit nor author ordinary predecessor observations.
+    const observed=reporter.capture();
+    if(observed){
+      // A terminal predecessor may still owe older settlements before this
+      // commit. Publish the commit before end, even when it is not queue head.
+      const snapshot=observed.snapshot.demand==="end"
+        ?Object.assign({},observed.snapshot,{demand:"active",
+          playback_rate:Math.max(0.25,observed.snapshot.playback_rate||0)})
+        :observed.snapshot;
+      const captured=PlurxPlaybackControl.capture(snapshot,observed.intentGeneration,observed.owner);
+      p.preparedControlPending.controlSnapshot=captured.snapshot;
+      p.preparedControlPending.intentGeneration=captured.intentGeneration;
+      reporter.finish(captured);
+    }
+  }else notifyPlaybackControl();
   return ack;
 }
 
@@ -185,6 +203,9 @@ function settlePlaybackControlAcknowledgement(p,request){
     const pending=p.preparedControlPending;
     if(sent.state==="committed"&&pending&&pending.actionId===sent.action_id){
       p.preparedControlPending=null;
+      // The old reporter must not publish another ordinary capture while the
+      // successor reporter waits for its next event-loop turn.
+      if(p.controlReporter){p.controlReporter.stop();p.controlReporter=null;}
       // Only B's acceptance of the commit makes a Shared successor the
       // player's session: progress, status and any later reopen now name its
       // bound context. The predecessor is not released here; B supersedes it
@@ -203,17 +224,30 @@ function settlePlaybackControlAcknowledgement(p,request){
       }
     }
   }
+  const pending=p.preparedControlPending,reporter=p.controlReporter;
+  // An older staging may still owe an abort/progress ACK ahead of this
+  // commit. Chain only explicit settlements, all on the frozen media turn.
+  // An accepted in-flight head is also spent: advance its unsent final
+  // before allocating another sequence. Never depend on duplicate settlement.
+  const finalAck=reporter?.terminalCapture?.snapshot.acknowledgement;
+  const acceptedQueuedHead=finalAck&&sent.action_id===finalAck.action_id&&sent.state===finalAck.state;
+  if(pending?.controlSnapshot&&queue.length&&(reporter?.finalAccepted||acceptedQueuedHead)){
+    // If an earlier in-flight request already settled the queued head, skip
+    // that unsent final. Repeating an abort at a NEW sequence is not replay.
+    const snapshot=Object.assign({},pending.controlSnapshot,{acknowledgement:queue[0]});
+    reporter.finish(PlurxPlaybackControl.capture(snapshot,pending.intentGeneration,p.controlOwner));
+  }
 }
 
-// A visible Shared switch whose commit is refused or lost has two possible
-// server owners. Reopen under the accepted predecessor context and then end
-// both old sessions; the fresh Start owns the viewer's current selection.
+// A definitively refused visible commit has two possible server owners.
+// Reopen through the authoritative Start path, then end both old sessions.
+// Transport ambiguity keeps retrying the exact commit instead of reopening.
 function recoverSharedCommittedReplacement(p,pending){
   if(PLAYER!==p||p.preparedControlPending!==pending) return false;
   p.preparedControlPending=null;
   stopPlaybackControl(p);
   const accountToken=TOKEN;
-  const predecessor=p.fileContext?.session_id;
+  const predecessor=pending.predecessorSessionId||p.fileContext?.session_id;
   const successor=pending.sessionId;
   const position=positionForPlaybackIntent(document.getElementById("video"),p);
   const reopening=play(p.fileId,p.title||"",Math.round(position*1000),p.knownDur||0,p.meta);
@@ -894,8 +928,10 @@ function commitPreparedReplacement(p,state){
 //
 // Chase deliberately aims ahead. Native HLS must retain that decoded position:
 // seeking backward can restart Safari's decoder and spend both seek bounds.
-// Hold the muted successor until the incumbent reaches it instead. Other
-// corrective seeks retain their two-attempt bound and post-seek buffer check.
+// Hold the muted successor until the incumbent reaches it instead. If native
+// playback is behind despite covering the incumbent in its buffer, first seek
+// forward to a buffered fixed point: seeking to the moving clock always leaves
+// seek latency behind. MSE keeps its two corrective seeks and buffer checks.
 async function alignPreparedReplacement(p,state,v,spare){
   const live=()=>PLAYER===p&&preparedState(p)===state
     &&document.getElementById("video")===v&&preparedVideoElement()===spare
@@ -904,8 +940,47 @@ async function alignPreparedReplacement(p,state,v,spare){
   // Native readiness chooses WHEN to resume, never whether to seek backward.
   // Incumbent-relative buffer_ready can leave less than a second past the
   // successor itself (the Safari replay had only 496ms). Pause and warm it.
-  if(!state.hls&&(spare.currentTime-target)*1000>preparedClockAlignmentSlackMs(p)){
-    if(!await holdPreparedNativeSuccessor(p,state,v,spare)||!live()) return false;
+  if(!state.hls){
+    let deadlineAtMs=Infinity;
+    if((target-spare.currentTime)*1000>preparedClockAlignmentSlackMs(p)){
+      const rate=Number(v.playbackRate),startedAt=performance.now();
+      if(!live()) return false;
+      if(v.paused||v.seeking||p.wantsPlayback===false||!Number.isFinite(rate)||!(rate>0)){
+        failPreparedReplacement(p,state,"native forward alignment: viewer-intent");return false;
+      }
+      // Only the range containing the incumbent can supply this aim. Keep
+      // the existing post-seek runway through the advancing-frame proof,
+      // plus landing/poll tolerance. Those frames consume media time at every
+      // playback rate; a later disjoint range is not buffered evidence here.
+      const reserve=(PREPARED_BUFFER_LEAD_MS/2
+        +(PREPARED_MONOTONIC_FRAME_STEPS+2)*preparedClockAlignmentSlackMs(p))/1000;
+      let wanted=null;
+      try{
+        for(let i=0;i<spare.buffered.length;i++){
+          if(spare.buffered.start(i)<=target&&spare.buffered.end(i)>=target){
+            const lead=Math.min(PREPARED_CHASE_LEAD_MS/1000,spare.buffered.end(i)-target-reserve);
+            if(lead*1000>preparedClockAlignmentSlackMs(p)) wanted=target+lead;
+            break;
+          }
+        }
+      }catch(e){}
+      if(wanted==null){
+        failPreparedReplacement(p,state,"native forward alignment has insufficient contiguous buffer");return false;
+      }
+      deadlineAtMs=startedAt+(wanted-target)*1000/rate+PREPARED_ALIGN_SEEK_MS;
+      try{ spare.pause(); }catch(e){ failPreparedReplacement(p,state,"could not pause native successor");return false; }
+      const landed=await preparedAlignSeek(spare,wanted);
+      if(!live()) return false;
+      if(v.paused||v.seeking||p.wantsPlayback===false||Number(v.playbackRate)!==rate){
+        failPreparedReplacement(p,state,"native forward alignment: viewer-intent");return false;
+      }
+      clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"align_forward",
+        message:`prepared ${state.sessionId} native forward alignment seeked=${landed} `+
+          `elapsed_ms=${Math.round(performance.now()-startedAt)} wanted_ms=${Math.round(wanted*1000)} `+
+          `landed_ms=${Math.round(spare.currentTime*1000)} seeking=${spare.seeking} ready_state=${spare.readyState}`},playbackContext()));
+      if(!landed){ failPreparedReplacement(p,state,"native forward alignment seek timed out");return false; }
+    }
+    if(!await holdPreparedNativeSuccessor(p,state,v,spare,deadlineAtMs)||!live()) return false;
     try{
       spare.playbackRate=v.playbackRate;
       const started=spare.play();
@@ -954,7 +1029,7 @@ async function alignPreparedReplacement(p,state,v,spare){
 // A bounded rendezvous, driven by the incumbent rather than the paused spare.
 // Reuse the exposure timer/listener ownership so supersede and teardown cancel
 // the wait. No seek, element swap, or audio transfer occurs during the hold.
-function holdPreparedNativeSuccessor(p,state,v,spare){
+function holdPreparedNativeSuccessor(p,state,v,spare,deadlineAtMs=Infinity){
   return new Promise((resolve)=>{
     const live=()=>PLAYER===p&&preparedState(p)===state
       &&document.getElementById("video")===v&&preparedVideoElement()===spare
@@ -978,7 +1053,9 @@ function holdPreparedNativeSuccessor(p,state,v,spare){
     if(!Number.isFinite(requested)||bufferRunway(v)*1000<aheadMs+PREPARED_BUFFER_LEAD_MS){
       finish(false,"insufficient incumbent runway");return;
     }
-    const budgetMs=Math.min(aheadMs,PREPARED_CHASE_LEAD_MS*2**(PREPARED_CHASE_ATTEMPTS-1))/rate+PREPARED_ALIGN_SEEK_MS;
+    const budgetMs=Math.min(
+      Math.min(aheadMs,PREPARED_CHASE_LEAD_MS*2**(PREPARED_CHASE_ATTEMPTS-1))/rate+PREPARED_ALIGN_SEEK_MS,
+      deadlineAtMs-startedAt);
     let held=null, warmed=false;
     state.overlapPhase="native-align-hold";
     const through=preparedBufferedThroughMs(state,spare);
@@ -1353,6 +1430,16 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     presentationAdvancedAt:p.presentationAdvancedAt,
     muted:intent.muted,volume:intent.volume,playbackRate:intent.playbackRate,
     defaultPlaybackRate:intent.defaultPlaybackRate};
+  // Only source-owned observation fields are retained. This is not a second
+  // player: current viewer intent, selection and ACK queue remain on p.
+  const context={};
+  for(const key of ["sessionId","offset","hls","started","waitAt","controlSeek",
+    "_seekPreview","controlPositionHintSec","bookOffset","durMs","knownDur",
+    "controlRenderOverride","controlObservationOverride"])
+    context[key]=p[key];
+  context.controlSeek=p.controlSeek?{...p.controlSeek}:null;
+  context.mediaAttachment={nativePositionPending:!!p.mediaAttachment?.nativePositionPending};
+  state.predecessor.controlObservation={element:retired,context};
   // Authoritative before visible, so anything that reads PLAYER.hls during the
   // swap reads the instance that owns the picture.
   clearEffectiveProcessing(p);
@@ -1456,12 +1543,13 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
       p.directedChange.committedActionId=state.actionId;
     p.preparedControlPending={actionId:state.actionId,sessionId:state.sessionId,
       predecessorSessionId:state.predecessor?.sessionId||null,
-      bootstrap:state.controlBootstrap,sharedContext:state.sharedContext};
+      bootstrap:state.controlBootstrap,sharedContext:state.sharedContext,
+      controlObservation:state.predecessor?.controlObservation};
     settleDirectedChange(p,p.directedChange,"committed",
       Math.round(performance.now()-((p.directedChange&&p.directedChange.tappedAt)||performance.now())));
-    deferPreparedPredecessorRetirement(p,state,spare);
     queuePlaybackControlAcknowledgement(p,state.actionId,"committed",
       {first_frame_unix_ms:unixMs,committed_media_origin_ms:state.offeredOriginMs});
+    deferPreparedPredecessorRetirement(p,state,spare);
     reportPreparedSeamAfterWindow(p,state,"committed");
     const committedAtMs=performance.now();
     clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"committed",

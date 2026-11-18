@@ -760,11 +760,12 @@ function startPlaybackControl(v,p,bootstrap){
     const generationOwner=/** @type {typeof startPlaybackControl & {captureGeneration?:number}} */ (startPlaybackControl);
     const owner=Object.freeze({lifecycleId:CONTROL_CLIENT_ID,
       attachmentGeneration:generationOwner.captureGeneration=(generationOwner.captureGeneration||0)+1});
-    // A prepared commit swaps the DOM video while retaining this reporter to
-    // deliver the acknowledgement on the predecessor's control session.
-    // Sample the visible successor after that swap, never the retired node.
+    // Keep observations on this control generation's physical source through
+    // exposure. First-frame proof freezes its final commit before retirement.
     const capture=()=>p.mediaAttachment===attachment&&playbackOwnsAttachedMedia(p,true)
-      ?PlurxPlaybackControl.capture(playbackControlSnapshot(document.getElementById("video"),p),
+      ?PlurxPlaybackControl.capture(playbackControlSnapshot(document.getElementById("video"),p,
+        p.preparedCommitting?.predecessor?.controlObservation
+          ||p.preparedControlPending?.controlObservation),
         p.controlIntentGeneration||0,owner):null;
     // A Shared session also names B's successor transaction; dual-player
     // preparation stays the Developer switch every session honours.
@@ -779,6 +780,30 @@ function startPlaybackControl(v,p,bootstrap){
         if(!playbackOwnsAttachedMedia(p,true)||p.controlReporter!==reporter
           ||p.mediaAttachment!==attachment||captured.owner.lifecycleId!==owner.lifecycleId
           ||captured.owner.attachmentGeneration!==owner.attachmentGeneration) return;
+        const switching=!!(p.preparedCommitting||p.preparedControlPending);
+        // Old progress/commit responses settle protocol work only. Their
+        // delivery reports and actions cannot describe the visible successor.
+        if(switching){
+          settlePlaybackControlWaiters(p,request,response,error);
+          const pending=p.preparedControlPending;
+          const status=Number(error?.status);
+          const definitive=error&&(error.name==="PlaybackControlProtocolError"
+            ||(Number.isFinite(status)&&status>=400
+              &&![408,425,429,503].includes(status)));
+          const terminal=!!response&&(response.action?.type==="terminal"||request.demand==="end");
+          if((definitive||terminal)&&pending)
+            recoverSharedCommittedReplacement(p,pending);
+          else if((definitive||terminal)&&p.preparedCommitting){
+            // No first frame may earn a commit after its reporter has lost
+            // authority. Restore the retained incumbent before normal error
+            // handling below records that source's terminal verdict.
+            cancelPreparedFirstFrame(p);
+          }else{
+            if(response) settlePlaybackControlAcknowledgement(p,request);
+            return;
+          }
+          if(pending) return;
+        }
         if(captured.intentGeneration===(p.controlIntentGeneration||0)){
           const processing=effectiveHdrProcessing(response?.effective_processing,
             reporter.bootstrap.generation,p.deliveredRange);
