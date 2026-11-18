@@ -6889,7 +6889,20 @@ pub(crate) async fn prepare_source_playback<
     let processed_upgrade_ask = crate::transcode::ProcessedUpgradeAsk {
         canonical_caps: Some(caps.clone()),
         target_height: u32::try_from(resolved.height).map_err(|_| refused("processed_height"))?,
-        grade: if resolved.request.hdr10 || decision.decision.delivered_dynamic_range == "hdr10" {
+        // The grade of the ordinary output this Source will actually run —
+        // the resolved request's own shape, the same rule its Start reports
+        // as `delivered_dynamic_range` — not the separate planning decision,
+        // which may plan a transcode the resolved copy never performs.
+        grade: if session_delivered_dynamic_range(
+            Some(&file),
+            &resolved.request.kind,
+            if resolved.request.hdr10 {
+                plurx_core::transcode::OutputGrade::Hdr10
+            } else {
+                plurx_core::transcode::OutputGrade::Sdr
+            },
+        ) == Some("hdr10")
+        {
             plurx_core::transcode::OutputGrade::Hdr10
         } else {
             plurx_core::transcode::OutputGrade::Sdr
