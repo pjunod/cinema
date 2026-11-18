@@ -1052,11 +1052,10 @@ fn seam_census_of_the_workspace() {
         routes.is_empty(),
         "the HLS route group keeps no test-only site: {routes:?}"
     );
-    // The manager keeps three cfg(test)-gated observation families: six
-    // normalized-catalog omission records, one processed-upgrade eligibility
-    // record and the Source Activity record.
+    // The manager keeps two cfg(test)-gated observation families: six
+    // normalized-catalog omission records and the Source Activity record.
     // Pin exact files, owners, classes and multiplicity so no other manager
-    // seam passes as these families. All records are absent from production.
+    // seam passes as either family. All records are absent from production.
     // The test-build decoder fallback remains deleted; its test names the
     // decoder through `with_decoders`.
     let manager: Vec<&Site> = sites
@@ -1066,11 +1065,6 @@ fn seam_census_of_the_workspace() {
     let expected_catalog_record = Site {
         file: "crates/plurxd/src/transcode/manager/candidates.rs".to_owned(),
         owner: "TranscodeManager::quality_catalog_from_snapshot_progress".to_owned(),
-        seam: Seam::Record,
-    };
-    let expected_upgrade_record = Site {
-        file: "crates/plurxd/src/transcode/manager/create.rs".to_owned(),
-        owner: "TranscodeManager::processed_upgrade_gates_with_ask".to_owned(),
         seam: Seam::Record,
     };
     let expected_record = Site {
@@ -1087,10 +1081,9 @@ fn seam_census_of_the_workspace() {
             &expected_catalog_record,
             &expected_catalog_record,
             &expected_catalog_record,
-            &expected_upgrade_record,
             &expected_record,
         ],
-        "manager seams are exactly the test-only catalog, processed-upgrade eligibility and Source Activity records: {manager:?}"
+        "manager seams are exactly the test-only catalog and Source Activity records: {manager:?}"
     );
     let source_actor =
         std::fs::read_to_string(workspace.join("crates/plurxd/src/transcode/source_actor.rs"))
