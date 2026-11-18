@@ -505,7 +505,7 @@
       },
       {
         "anchor": "struct JobFence",
-        "sha256": "3a2a2e3939c0aa8ee68a42dd8adee2beda150acf7de75f18f2b83757a943ab56",
+        "sha256": "9f028c181f31f96955ff339eb424a34d7d082796c3c0b5f5ac5657dcd84c8ed3",
         "source": "crates/plurxd/src/background_jobs.rs",
         "table": "proposal \u00a74.1 runtime fence"
       },
@@ -517,7 +517,7 @@
       },
       {
         "anchor": "async fn process_library_requests(",
-        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5",
+        "sha256": "a3a3a45b0a46614964e6a12ed2aff7d925ed04476f502d5a74746c589944ed05",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "proposal \u00a74.1 library worker"
       },
@@ -535,7 +535,7 @@
       },
       {
         "anchor": "                let scan = self",
-        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5",
+        "sha256": "a3a3a45b0a46614964e6a12ed2aff7d925ed04476f502d5a74746c589944ed05",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:434"
       },
