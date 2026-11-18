@@ -5048,10 +5048,21 @@ fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
 #[test]
 fn a_dead_raft_core_drains_like_a_signal_and_exits_non_zero() {
     assert!(
-        exit_after_drain(None).is_ok(),
+        exit_after_drain(None, Ok(())).is_ok(),
         "a signal's drain exits zero"
     );
-    let error = exit_after_drain(Some(&"database or disk is full".to_owned()))
+    let serving = exit_after_drain(None, Err(anyhow::anyhow!("listener failed")))
+        .expect_err("a serving error still fails a signal's drain");
+    assert!(!drained_a_dead_core(&Err(serving)));
+    let both = exit_after_drain(
+        Some(&"database or disk is full".to_owned()),
+        Err(anyhow::anyhow!("listener failed")),
+    );
+    assert!(
+        drained_a_dead_core(&both),
+        "a dead core's verdict survives a serving error in the same drain"
+    );
+    let error = exit_after_drain(Some(&"database or disk is full".to_owned()), Ok(()))
         .expect_err("a dead core's drain exits non-zero");
     assert!(format!("{error:#}").contains("database or disk is full"));
     let drained = Err(error.context("serving"));
@@ -5102,7 +5113,7 @@ fn a_dead_raft_core_drains_like_a_signal_and_exits_non_zero() {
     assert!(arm.contains("raft_core_fatal_drain.set(error)"));
     assert_eq!(source.matches("state.cluster.core_failure()").count(), 1);
     assert!(
-        source.contains("exit_after_drain(raft_core_fatal.get())"),
+        source.contains("exit_after_drain(raft_core_fatal.get(), served)"),
         "the drained boot ends with the recorded verdict"
     );
     assert!(
