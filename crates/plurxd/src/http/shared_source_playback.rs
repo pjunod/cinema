@@ -2930,7 +2930,11 @@ async fn build_real_source_start_fixture(
         // scan, the held probe and the Source's grade all read actual facts.
         generate
             .arg(format!("testsrc2=s={width}x{height}:r=24"))
+            // Matroska's stream colour metadata follows the input frames.
+            // The x265 VUI alone leaves these fields absent with FFmpeg 8.
             .args([
+                "-vf",
+                "setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc",
                 "-t",
                 "2",
                 "-c:v",
@@ -2946,10 +2950,8 @@ async fn build_real_source_start_fixture(
                 "-colorspace",
                 "bt2020nc",
                 "-x265-params",
-                // The colour description in the VUI too. FFmpeg 8 tags the
-                // encode from the (untagged) lavfi frames, not the -color_*
-                // options, so without it the source is not PQ there and the
-                // copy's muxer drops its HDR10-compatible Dolby Vision record.
+                // Keep the bitstream VUI explicit too, matching the frame
+                // metadata the container muxer receives.
                 "log-level=error:hdr10=1:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc",
             ]);
         if !native {
