@@ -1,8 +1,23 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-11-15 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-11-18 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
-- **2026-11-15 · Custom tags and tag-driven Home rows:** Owner Claude (claude-opus-5-5, session 01BCWLA1; Sonnet sub-agents build the Apple and Android parts). Effort branch `effort/custom-tags`, PR #1660. Household/private tags on titles (grantable `manage_tags`), tag filter, `tag:` search, suggestions review queue from TMDB keywords, saved rows, and a per-user Home order where every row can be moved or hidden. Store (both backends), API and web built and tested; native clients in progress. [Plan](docs/features/CUSTOM-TAGS-PLAN.md), [client contract](docs/features/CUSTOM-TAGS-CLIENTS.md).
+
+- **2026-11-16 · Native prepared forward rendezvous:** owner GPT. New Moon's
+  native seeks trailed 90–97 ms; buffered forward aim+existing hold preserves the guard.
+  Astra review and 103 focused tests pass; Safari acceptance, seam and deadline
+  follow-up remain open ([build plan](docs/streaming/PLAYBACK-START-BUILD.md)).
+
+- **2026-11-17 · Web prepared-switch ownership:** owner GPT. New Moon's exposed
+  successor could report Waiting under its predecessor's control generation,
+  causing the server to cancel the prepared stream. Actual-source reproduction
+  confirms the mechanism; Astra reviewed the root cause and repair direction.
+  Generation-bound observation and immutable final commit are implemented;
+  33 focused regressions and independent Astra review pass. Runtime Safari
+  continuity after deployment and the preparation-deadline follow-up remain
+  open. Twilight's earlier Profile 8.1 FEL metadata upgrade was accepted.
+
+- **2026-11-15 · Custom tags and tag-driven Home rows:** Owner Claude (claude-opus-5-5, session 01BCWLA1; Sonnet sub-agents build the Apple and Android parts). Effort branch `effort/custom-tags`, PR #1660. Household/private tags on titles (grantable `manage_tags`), tag filter, `tag:` search, suggestions review queue from TMDB keywords, saved rows, and a per-user Home order where every row can be moved or hidden. Store (both backends), API and web built and tested; native clients implemented and focused tests recorded; current-main qualification pending. [Plan](docs/features/CUSTOM-TAGS-PLAN.md), [client contract](docs/features/CUSTOM-TAGS-CLIENTS.md).
 - **2026-11-13 · Optional Curator household login:** Owner Claude (claude-opus-5-5, taken over from Codex 2026-11-15). Independent account linking and household-only delegation; Astra production review cleared, local qualification passed; PR #1586 updated onto main and landing through the merge train. [Ledger](docs/features/CURATOR-LOGIN-STATUS.md). No deployment.
 - **2026-11-13 · CM4 trim fidelity:** Owner Codex. Implementation and bounded reference qualification complete; delivery PR #1591. Six-vector knots used a fixed BT.2020 palette and L8 MS was ignored. Real-frame and independent synthetic CPU comparisons remove all observed pixels above0.05dE; every worsening coordinate is retained. [Root cause, evidence and remaining work](docs/streaming/CM4-TRIM-FIDELITY.md).
 - **2026-11-13 · Linux player session control:** Owner Codex (Sol implementation). [Ledger](docs/clients/LINUX-PLAYER-CINEMA-UI.md#session-control-sequence-repair-051). Session replacement reused a run-wide counter despite the fresh-session sequence-1 contract, causing stale controls and lease expiry. Source repaired and independently reviewed; final affected validation recorded in the PR. DV reset interpretation, deployment and physical acceptance remain distinct.

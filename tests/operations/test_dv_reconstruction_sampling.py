@@ -126,6 +126,48 @@ class DvReconstructionSamplingTests(unittest.TestCase):
         self.assertIn("stage(AV_PIX_FMT_P010LE, 2, true);", control)
         self.assertIn("base_restage_software_planes(gpu, frame, &source);", control)
 
+    def test_master_reconstruction_is_one_colour_space_on_both_sides(self):
+        """Secondary guard, on source text. The behavioural gate is
+        controls/test_base_master_black.c, which the image build runs on a
+        software Vulkan device (test_dv_helper_ownership pins that wiring): it
+        renders Profile 5, Profile 8 and base-only Profile 7 frames through the
+        production base renderer and compares pixels. This test only keeps the
+        shape that makes the two sides equal: the base pass once kept the
+        stream's colour description on its source, and libplacebo tone-mapped
+        the master (black to 0.005 nits, dark chroma up with it)."""
+        shared = (TOOLS / "dv_metadata.h").read_text()
+        master = shared[shared.index("static inline void dv_master_frames("):]
+        master = master[:master.index("\n}\n")]
+        self.assertIn("source->color = destination->color = master;", master)
+        # The description the native player reconstructs with.
+        player = (PLAYER / "patches/mpv/0006-vo_gpu_next-normalize-DV-reconstruction-metadata.patch").read_text()
+        for line in ("struct pl_color_space color = pl_color_space_hdr10;",
+                     "color.hdr.min_luma = 0.005;", "color.hdr.max_luma = 10000;"):
+            self.assertIn("+    " + line, player)
+        self.assertIn("struct pl_color_space master = pl_color_space_hdr10;", master)
+        self.assertIn("master.hdr.min_luma = 0.005;", master)
+        self.assertIn("master.hdr.max_luma = 10000;", master)
+        for name, entry in (("fel_renderer.h", "static void gpu_render_mapped("),
+                            ("base_dv_renderer.h", "static void base_gpu_render(")):
+            source = (TOOLS / name).read_text()
+            render = source[source.index(entry):]
+            render = render[:render.index("\n}\n")]
+            call = "dv_master_frames(&source, &destination);"
+            # One description, set once, after the last thing that maps a frame
+            # and before the render; neither side is described anywhere else.
+            self.assertEqual(render.count(call), 1, name)
+            self.assertLess(render.rindex("pl_map_avframe_ex("), render.index(call), name)
+            self.assertLess(render.index(call), render.index("pl_render_image("), name)
+            self.assertIsNone(re.search(r"(source|destination)\.color\b", render), name)
+            self.assertNotIn("hdr.min_luma", source, name)
+            self.assertNotIn("hdr.max_luma", source, name)
+        # The control is built with the others and run by a named test.
+        self.assertIn('"$source_dir/test_base_master_black.c"',
+                      (TOOLS / "controls/build_target_controls.sh").read_text())
+        runner = (TOOLS / "controls/test_base_master_black.py").read_text()
+        self.assertIn("raise RuntimeError(", runner)
+        self.assertNotIn("skip", runner.replace("never a skip", ""))
+
     def test_targeted_refusals_name_their_cause(self):
         target = (TOOLS / "display_target.h").read_text()
         render = target[target.index("static inline pl_tex dv_target_render("):]

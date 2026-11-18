@@ -827,6 +827,11 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "enqueue_job_fenced",
     "retry_background_job",
     "claim_job",
+    // The same claim, reporting proposed / settled / skipped on the local
+    // verdict: tests/claim_local_verdict.rs drives it on both backends.
+    "claim_job_attempt",
+    // The verdict alone, for dv_title_scan before it binds (same test file).
+    "claim_verdict",
     "claim_artifact_job",
     "resolve_claim",
     "job_labels",
@@ -21562,7 +21567,9 @@ fn contract_inventory_matches_every_store_method() {
     // +22: `CurationStore` (custom tags, rows, Home layouts, curation grants),
     // a new supertrait of `Store`, every method named in `CURATION_METHODS`
     // and exercised on both backends by `curation_contract_runs_through_dyn_store`.
-    assert_eq!(declared.len(), 619, "review the Store method count");
+    // +2: claim_job_attempt and claim_verdict, the claim local verdict
+    // (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md), in BACKGROUND_JOB_METHODS.
+    assert_eq!(declared.len(), 621, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

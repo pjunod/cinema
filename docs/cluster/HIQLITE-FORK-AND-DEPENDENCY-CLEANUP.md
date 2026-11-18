@@ -1,6 +1,6 @@
 # The hiqlite fork and what it drags in — decide the ownership, then cut the graph
 
-**Status:** implementation in progress (M1-M3 merged, M4 merged as far as candle allows; M0 measured and M5 (d) in [#558](http://forge.lan:3000/noirr/plurx/pulls/558), M5 (b)-(c) declined on M0's numbers); M6 two accepted mechanisms, ten generic rows pending as of 2026-11-14 · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
+**Status:** implementation in progress (M1-M3 merged, M4 merged as far as candle allows; M0 measured and M5 (d) in [#558](http://forge.lan:3000/noirr/plurx/pulls/558), M5 (b)-(c) declined on M0's numbers); M6 two accepted mechanisms, twelve generic rows pending as of 2026-11-15 · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
 F-build-ops-codehealth-5, -6, -7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -1178,6 +1178,12 @@ Hiqlite 1, 8, 9, 10, 11, 17, 19, 26 and 28, plus WAL 1, 2 and 3. Hiqlite 28
 (lease idle Raft client connections instead of dialing per `new_client`) is
 `pending M6`, so ten combined rows are pending; the eleven-row inventory above
 is historical.
+
+**Hiqlite 32 and WAL 7 added, 2026-11-15.** The ledgers now contain fourteen generic rows:
+Hiqlite 1, 8, 9, 10, 11, 17, 19, 26, 28 and 32, plus WAL 1, 2, 3 and 7. Hiqlite 32
+and WAL 7 (keep the SQLite writer and the WAL writer alive when a reply's
+receiver is gone) are `pending M6`, so twelve combined rows are pending; the
+twelve-row inventory above is historical.
 
 [Upstream PR 374](https://github.com/sebadob/hiqlite/pull/374) merged on
 2026-10-05 as

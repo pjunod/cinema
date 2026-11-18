@@ -1951,7 +1951,10 @@ pattern = "ServingAuthority"
 # Measured on the merge with main at 36: 36 + (-9) = 27.
 # PR1341: +3 in serving_fence.rs: the packed ready+generation word and
 # `admit_or_outage_baseline` project the same ServingAuthority.
-expected_occurrences = 31
+# 31 -> 33 with the cluster facade (B1 slice 1): `crate::cluster`'s import
+# and its `authority()` return type. The facade hands out the fence's own
+# authority; it projects nothing new and owns no producer.
+expected_occurrences = 33
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -7202,7 +7205,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # it reads listener state and launches nothing.
 # +1 with #1629: the sharing idle-loop test reads SharingManager::status()
 # to observe the listener state; it launches nothing.
-expected_occurrences = 936
+# Prepared delivery (#1736): +1 test-only `.vod.status()` observation in
+# processed_stream_format_reports_the_attached_carrier_not_its_pq_base.
+# It reads the existing VOD owner's status_publication snapshot: no child
+# launch, lease renewal, or ownership transfer. The broad matcher is unchanged.
+expected_occurrences = 937
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
