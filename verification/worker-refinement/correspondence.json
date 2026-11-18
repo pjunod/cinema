@@ -1467,7 +1467,7 @@
       "used_by": "claim_library",
       "scope": "item",
       "item": "fn claim_with_resolution",
-      "item_sha256": "93c92007cb7279f61dd4a7f25cdc7c1f526266578c8c5f7fb7dd864e85255f4b"
+      "item_sha256": "f66aa179abdfea4dd8974a5db7c1a9df2dd598cd3dade690fff7fcac34a8fc6a"
     },
     {
       "file": "crates/plurxd/src/background_jobs.rs",
@@ -1483,7 +1483,7 @@
       "used_by": "claim_library",
       "scope": "item",
       "item": "fn library_candidates",
-      "item_sha256": "a2fef838cdb87776fae160eca63ba819acb7a6495627f5ae1fab0cacb9dc5188"
+      "item_sha256": "6f201a4f95dfe0ef5f4537a72f4c2e8374dcc3832f2f75e949b2e4230b0c52e7"
     },
     {
       "file": "crates/plurxd/src/background_jobs.rs",

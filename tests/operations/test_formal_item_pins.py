@@ -456,6 +456,19 @@ class ReviewedEscapeTests(unittest.TestCase):
         # `may_execute_job` is a provided method of the authority trait.
         ("operation-progress", "crates/plurx-core/src/cluster/coordination.rs", "trait ClusterJobAuthority"),
         ("worker-refinement", "crates/plurx-core/src/cluster/coordination.rs", "trait ClusterJobAuthority"),
+        # Main extracted these from the formerly pinned claim statement/impl.
+        ("durable-jobs", "crates/plurx-core/src/store/background_jobs.rs", "const CLAIM_SQL"),
+        ("durable-jobs", "crates/plurx-core/src/store/background_jobs.rs", "fn claim_attempt"),
+        ("durable-jobs", "crates/plurx-core/src/store/background_jobs.rs", "fn local_claim_verdict"),
+        ("durable-jobs", "crates/plurx-core/src/store/background_jobs.rs", "const CLAIM_VERDICT_SQL"),
+        ("durable-jobs", "crates/plurx-core/src/store/background_jobs.rs", "macro_rules! claim_identity"),
+        ("durable-jobs", "crates/plurx-core/src/store/background_jobs.rs", "macro_rules! claim_subtitle_extract_demand"),
+        ("durable-jobs", "crates/plurx-core/src/store/background_jobs.rs", "macro_rules! claim_kind_demand"),
+        ("durable-jobs", "crates/plurx-core/src/store/background_jobs.rs", "macro_rules! claim_state"),
+        ("durable-jobs", "crates/plurx-core/src/store/background_jobs.rs", "macro_rules! claim_attempt_ledger"),
+        ("durable-jobs", "crates/plurx-core/src/store/background_jobs.rs", "macro_rules! claim_foreground_window"),
+        ("durable-jobs", "crates/plurx-core/src/store/background_jobs.rs", "macro_rules! claim_source_holders"),
+        ("durable-jobs", "crates/plurx-core/src/store/background_jobs.rs", "macro_rules! claim_maintenance_reader"),
         # Fixtures the conformance tests stand on.
         ("worker-refinement", "crates/plurxd/src/library_work.rs", "fn spawn_worker"),
         ("worker-refinement", "crates/plurx-core/tests/store_contract/formal_publication.rs", "fn enqueue_and_claim_library_work"),

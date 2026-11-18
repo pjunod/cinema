@@ -546,6 +546,8 @@ paths = [
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
   "crates/plurx-core/tests/store_contract/formal_publication.rs",
   "crates/plurx-core/tests/store_contract/claim_selection.rs",
+  "crates/plurx-core/tests/claim_local_verdict.rs",
+  "crates/plurx-core/tests/claim_verdict_property.rs",
   "crates/plurx-core/tests/store_contract/subtitle_text.rs",
   "crates/plurx-core/tests/support/queue_fixture.rs",
   "crates/plurx-core/tests/support/source_extensions_fixture.rs",

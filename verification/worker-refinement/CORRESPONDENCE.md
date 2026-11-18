@@ -29,6 +29,26 @@ The 18 source-boundary IDs are `select.queue_loss`, `select.domain_loss`,
 `release.retry`, `release.ambiguous_fallback`, `retire.claim`,
 `drop.admission`, and `sql.complete_library_work.trigger`.
 
+## Current-main item pin reconciliation — 2026-11-18
+
+PR1676 head `804633cb4` is integrated with main `965900224` without changing
+incoming Rust, SQL, model, configuration or toolchain bytes. Main moved
+claim execution into `claim_attempt` and `local_claim_verdict`, and split
+`CLAIM_SQL` into predicate macros. The former state-predicate anchor now
+selects `macro_rules! claim_state`; keeping only that item would lose the
+rest of the formerly pinned claim statement. Eleven additional dependency
+rows pin the statement/verdict constants, moved helpers and extracted
+predicate macros. The existing mutation checks exercise every moved item.
+
+The selected library candidate listing retains `admissible_only: false`.
+The daemon records the incoming Skipped/Settled/Proposed classification;
+claim acknowledgement and deadline resolution retain their existing wait
+and authority boundaries. The finite models do not establish local-replica
+application liveness or qualify the new title/artifact admission paths.
+Only the nine drifted item pins across the three packages are refreshed.
+Source correspondence is separate from affected formal smokes and full
+Main promotion qualification; historical receipts retain their identities.
+
 ## Item pins replace whole-file pins — 2026-11-15
 
 Paul ruled on 2026-11-15 that a mapping pins the anchored item, not the whole

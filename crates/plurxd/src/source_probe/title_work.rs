@@ -11,8 +11,8 @@ use plurx_core::{
     error::StoreError,
     store::{
         background_jobs::{
-            CandidateCursor, CandidateQuery, ClaimJob, EnqueueJob, EnqueueOutcome, JobKind,
-            JobPayload, JobRequest, JobSettlement,
+            CandidateCursor, CandidateQuery, ClaimJob, ClaimVerdict, EnqueueJob, EnqueueOutcome,
+            JobKind, JobPayload, JobRequest, JobSettlement,
         },
         dv_title_jobs::{TitleDemand, TitleOutput},
     },
@@ -216,6 +216,26 @@ impl TitleTask {
                     }
                 }
                 if !still_requested {
+                    continue;
+                }
+            }
+            // A queued job whose claim this node's replica shows the claim
+            // statement refusing is not bound or claimed this pass: neither
+            // write would let it through (CLAIM-LOCAL-VERDICT-BUILD.md §3.5).
+            // Its kind demand is what the bind repairs (and the bind rotates
+            // the scanner), so while that group fails it binds as before. The
+            // verdict reads the replica only: no quorum read on this path.
+            if let Some(id) = &demand.queued_job_id {
+                let verdict = state
+                    .store
+                    .claim_verdict(id, JobKind::DvTitleScan, &state.node_id, now_ms())
+                    .await?;
+                if let Some(ClaimVerdict {
+                    block: Some(block),
+                    kind_demand: true,
+                }) = verdict
+                {
+                    crate::background_jobs::claim_skipped(JobKind::DvTitleScan, block);
                     continue;
                 }
             }
@@ -440,6 +460,7 @@ impl TitleTask {
                 after: self.probe_after.clone(),
                 now_ms: now,
                 limit: 128,
+                admissible_only: false,
             })
             .await?;
         // Keep the keyset walk across scheduler ticks. A fixed first page can

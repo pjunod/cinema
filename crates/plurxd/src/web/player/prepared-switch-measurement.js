@@ -209,6 +209,7 @@ function rollbackPreparedReplacement(p,state,successor){
   p.qualityCandidateId=predecessor.qualityCandidateId;
   clearEffectiveProcessing(p);
   p.deliveredRange=predecessor.deliveredRange;
+  p.deliveredDvProfile=predecessor.deliveredDvProfile??null;
   p.enhancement=predecessor.enhancement||null;
   // Transport intent belongs to the viewer, including commands made while
   // the successor was awaiting its first frame. Rollback restores media only.
@@ -503,6 +504,8 @@ function stopPlaybackControl(p){
     // successor is accepted, `continueStoppingPlaybackControl` explicitly
     // queues the required end exchange before allowing the reporter to stop.
     reporter.plurxSettling=true;
+    // The detached reporter must drain its own ACKs after p is reused/cleared.
+    reporter.plurxSettlementQueue=(p.controlAcknowledgements||[]).slice();
     reporter.plurxSettlingUntil=reporter.now()+PREPARED_FINALIZATION_MS;
     reporter.plurxSettlingTimer=reporter.setTimer(
       ()=>finishStoppingPlaybackControl(reporter),PREPARED_FINALIZATION_MS);
@@ -552,8 +555,11 @@ function flushPreparedSettlement(p,reporter){
   if(!p.controlOwner||!window.PlurxPlaybackControl) return false;
   const queue=p.controlAcknowledgements;
   if(!queue||!queue.length) return false;
+  if(reporter.terminalCapture) return !!reporter.notify(reporter.terminalCapture);
   const v=document.getElementById("video");
-  let snapshot=playbackControlSnapshot(v,p);
+  let snapshot=playbackControlSnapshot(v,p,
+    p.preparedCommitting?.predecessor?.controlObservation
+      ||p.preparedControlPending?.controlObservation);
   if(!snapshot||!snapshot.acknowledgement) return false;
   // Failed and aborted settlements may close in the same exchange. A commit
   // may not; `playbackControlSnapshot` has already made that one active, and
@@ -602,12 +608,24 @@ function continueStoppingPlaybackControl(p,reporter,v,request,response,captured)
     return true;
   }
   const committed=request.acknowledgement&&request.acknowledgement.state==="committed";
-  if(committed){
-    const element=document.getElementById("video")||v;
-    const snapshot=endingPlaybackControlSnapshot(playbackControlSnapshot(element,p),false);
+  if(response&&reporter.terminalCapture&&!committed){
+    const sent=request.acknowledgement;
+    const remaining=reporter.plurxSettlementQueue||[];
+    const at=remaining.findIndex(ack=>ack.action_id===sent?.action_id&&ack.state===sent?.state);
+    if(at!==-1) remaining.splice(at,1);
+    if(remaining.length){
+      const frozen=reporter.terminalCapture.snapshot;
+      const snapshot=Object.assign({},frozen,{acknowledgement:remaining[0]},
+        frozen.demand==="end"?{demand:"active",playback_rate:Math.max(0.25,frozen.playback_rate||0)}:{});
+      reporter.finish(PlurxPlaybackControl.capture(snapshot,captured.intentGeneration,captured.owner));
+    }
+    return true;
+  }
+  if(committed&&response){
+    const snapshot=endingPlaybackControlSnapshot(captured.snapshot,false);
     const ending=snapshot&&PlurxPlaybackControl.capture(snapshot,
       captured.intentGeneration,captured.owner);
-    if(ending&&reporter.notify(ending)) return true;
+    if(ending&&(reporter.terminalCapture?reporter.finish(ending):reporter.notify(ending))) return true;
   }
   // stopPlaybackControl may have queued the settlement while an earlier
   // ordinary/progress exchange was already in flight. Its callback owns no
