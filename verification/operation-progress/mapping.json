@@ -201,7 +201,7 @@
         "table": "33 local raft metrics authority",
         "source": "vendor/hiqlite/src/client/mgmt.rs",
         "anchor": "pub async fn metrics_db(&self) -> Result<RaftMetrics<NodeId, Node>, Error> {",
-        "sha256": "17e286777816ed445d2eb10beef40745f0b6365a3a84c56c6421ea99c8bac667"
+        "sha256": "498668a2bfd303ed2df46e7991725a4f9e457a6810d844cbafa5957d8fb777a7"
       },
       {
         "table": "34 scanner page capacity",
@@ -267,7 +267,7 @@
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "1bb9afd8d60b2f0fd7934e62a148957b0e1fad1a9ad1b550e53f892f5b9bfef7"
+        "sha256": "46330080ef285f1cd3137df8a7e3b0610400fbc818725f5f6295dad4a07ad1b5"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
