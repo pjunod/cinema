@@ -5113,7 +5113,7 @@ fn a_dead_raft_core_drains_like_a_signal_and_exits_non_zero() {
     assert!(arm.contains("raft_core_fatal_drain.set(error)"));
     assert_eq!(source.matches("state.cluster.core_failure()").count(), 1);
     assert!(
-        source.contains("exit_after_drain(raft_core_fatal.get(), served)"),
+        source.contains("exit_after_drain(raft_core_fatal.get(), served.map(drop))"),
         "the drained boot ends with the recorded verdict"
     );
     assert!(

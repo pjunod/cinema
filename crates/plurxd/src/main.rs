@@ -2745,7 +2745,7 @@ async fn boot_observing(
     {
         tracing::warn!(%error, "could not record the Plex façade census at shutdown");
     }
-    exit_after_drain(raft_core_fatal.get(), served)
+    exit_after_drain(raft_core_fatal.get(), served.map(drop))
 }
 
 /// How a drained daemon ends: as serving ended after a signal or a leave,
