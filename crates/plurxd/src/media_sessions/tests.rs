@@ -4723,7 +4723,7 @@ fn the_start_envelope_round_trips_with_and_without_the_processed_upgrade_ask() {
     }
 }
 
-/// A recipe written before protocol 11 has no ask: it parses as none, so a
+/// A recipe written before protocol 12 has no ask: it parses as none, so a
 /// session created before the deploy simply gets no upgrade.
 #[test]
 fn an_older_recipe_without_the_ask_parses_with_none() {
@@ -4768,11 +4768,11 @@ fn a_channel_play_envelope_with_an_ask_is_invalid() {
 /// (an un-upgraded ingress), with or without an ask.
 #[test]
 fn the_ask_rides_a_protocol_bump_and_an_older_protocol_envelope_is_refused() {
-    assert_eq!(crate::media_pool::PROTOCOL_VERSION, 11);
+    assert_eq!(crate::media_pool::PROTOCOL_VERSION, 12);
     for ask in [None, Some(processed_upgrade_ask(true))] {
         let mut start = valid_start_request();
         start.processed_upgrade = ask;
-        start.protocol_version = 10;
+        start.protocol_version = 11;
         assert!(!start.is_valid());
         let json = serde_json::to_vec(&start).expect("serialize");
         assert!(serde_json::from_slice::<RemoteStartRequest>(&json)

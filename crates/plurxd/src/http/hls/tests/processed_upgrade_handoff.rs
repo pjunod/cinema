@@ -1,4 +1,4 @@
-// The processed upgrade of a session another node owns (protocol 11): the
+// The processed upgrade of a session another node owns (protocol 12): the
 // ingress decides and hands the verdict over in the start envelope, and the
 // owner registers it from the request it restored, through the same intent
 // builder a local create uses.
