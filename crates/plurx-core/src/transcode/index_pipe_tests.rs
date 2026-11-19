@@ -1081,7 +1081,22 @@ fn exact_packet_clock_is_scoped_to_a_third_output_on_the_same_input() {
         )
         .expect("distinct inherited outputs");
         assert_eq!(clocked.first().map(String::as_str), Some("-copyts"));
-        assert_eq!(&clocked[1..=measured.len()], measured.as_slice());
+        let playback_end = measured
+            .iter()
+            .position(|arg| arg == "pipe:1")
+            .expect("AV output");
+        let mut expected = measured.clone();
+        let timestamp_mode = expected[..playback_end]
+            .iter()
+            .rposition(|arg| arg == "make_zero")
+            .expect("AV timestamp mode");
+        expected[timestamp_mode] = "make_non_negative".into();
+        let movie_flags = expected[..playback_end]
+            .iter_mut()
+            .rfind(|arg| arg.contains("delay_moov"))
+            .expect("AV movflags");
+        movie_flags.push_str("+frag_discont");
+        assert_eq!(&clocked[1..=measured.len()], expected.as_slice());
         assert_eq!(clocked.iter().filter(|arg| arg.as_str() == "-i").count(), 1);
         let clock = &clocked[measured.len() + 1..];
         assert!(contains_run(

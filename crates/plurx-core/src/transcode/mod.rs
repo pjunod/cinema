@@ -2780,7 +2780,7 @@ pub fn copy_index_output_args(
         "-sn".into(),
     ];
     args.extend(strip_plurx_markers(&copy_video_args(source, video)));
-    append_copy_mp4_output(&mut args, url);
+    append_copy_mp4_output(&mut args, url, CopyMp4Clock::Zero);
     if trace && matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
         if let Some(index) = args.iter().position(|arg| arg == "-bsf:v") {
             args[index + 1] = format!("trace_headers,{}", args[index + 1]);
@@ -2793,14 +2793,33 @@ pub fn copy_index_output_args(
     args
 }
 
+#[derive(Clone, Copy)]
+enum CopyMp4Clock {
+    Zero,
+    PreserveTrackOffsets,
+}
+
 /// The common fragmented MP4 mux contract for playback and index outputs.
-fn append_copy_mp4_output(args: &mut Vec<String>, url: &str) {
+fn append_copy_mp4_output(args: &mut Vec<String>, url: &str, clock: CopyMp4Clock) {
+    let (avoid_negative_ts, movflags) = match clock {
+        CopyMp4Clock::Zero => (
+            "make_zero",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+        ),
+        // With edit lists disabled, make_zero can stretch the first video
+        // sample to fill a gap left by earlier audio. Encode the actual track
+        // starts in tfdt so the clock verifier can keep exact video durations.
+        CopyMp4Clock::PreserveTrackOffsets => (
+            "make_non_negative",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov+frag_discont",
+        ),
+    };
     args.extend(
         [
             "-avoid_negative_ts",
-            "make_zero",
+            avoid_negative_ts,
             "-movflags",
-            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            movflags,
             "-use_editlist",
             "0",
             "-f",
@@ -2889,7 +2908,7 @@ pub fn copy_pipe_args_with_audio_delivery(
         video,
         audio,
     );
-    append_copy_mp4_output(&mut args, "pipe:1");
+    append_copy_mp4_output(&mut args, "pipe:1", CopyMp4Clock::Zero);
     args
 }
 
@@ -2912,6 +2931,31 @@ pub fn copy_pipe_args_with_index_measurement(
     audio: Option<&crate::playback::audio::AudioDelivery>,
     measurement_url: &str,
 ) -> Result<Vec<String>, &'static str> {
+    copy_pipe_args_with_index_measurement_clock(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        video,
+        audio,
+        measurement_url,
+        CopyMp4Clock::Zero,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_pipe_args_with_index_measurement_clock(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+    measurement_url: &str,
+    av_clock: CopyMp4Clock,
+) -> Result<Vec<String>, &'static str> {
     let descriptor = measurement_url
         .strip_prefix("pipe:")
         .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
@@ -2930,7 +2974,7 @@ pub fn copy_pipe_args_with_index_measurement(
         audio,
         CopyAudioOffsetMode::SingleInputPacketTimestamps,
     );
-    append_copy_mp4_output(&mut args, "pipe:1");
+    append_copy_mp4_output(&mut args, "pipe:1", av_clock);
     if args.iter().filter(|arg| arg.as_str() == "-i").count() != 1 {
         return Err("index measurement requires a single production input");
     }
@@ -2947,9 +2991,9 @@ pub fn copy_pipe_args_with_index_measurement(
 
 /// Add a selected-video packet-clock observation output to the one-input
 /// playback/canonical-measurement recipe. Clock packets retain source decode
-/// timestamps with `-copyts`; MP4 outputs still request their existing
-/// `make_zero` mux normalization. This interaction, especially after seeking,
-/// requires media qualification before the observations can bind a range.
+/// timestamps with `-copyts`. The canonical output keeps its `make_zero`
+/// normalization. Playback retains the relative audio and video track starts
+/// in its fragment timestamps without changing video sample durations.
 ///
 /// Sizes/checksums describe packets after FFmpeg filters and before any Rust
 /// Dolby Vision rewrite. The caller must correlate packet order with samples
@@ -2972,7 +3016,7 @@ pub fn copy_pipe_args_with_index_and_packet_clock(
         .and_then(|value| value.parse::<i32>().ok())
         .filter(|descriptor| *descriptor >= 3)
         .ok_or("packet clock requires an inherited pipe descriptor >= 3")?;
-    let mut args = copy_pipe_args_with_index_measurement(
+    let mut args = copy_pipe_args_with_index_measurement_clock(
         source,
         start_seconds,
         audio_index,
@@ -2981,6 +3025,7 @@ pub fn copy_pipe_args_with_index_and_packet_clock(
         video,
         audio,
         measurement_url,
+        CopyMp4Clock::PreserveTrackOffsets,
     )?;
     let measurement_descriptor = measurement_url[5..]
         .parse::<i32>()
