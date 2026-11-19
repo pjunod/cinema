@@ -2663,7 +2663,10 @@ struct PlayerView: View {
         }
         .accessibilityLabel("Playback settings")
         .popover(isPresented: optionMenuBinding(.settings), arrowEdge: .bottom) {
-            optionMenuPanel("Playback settings") { autoplaySettingsButton }
+            optionMenuPanel("Playback settings") {
+                autoplaySettingsButton
+                retainOutputButton
+            }
         }
         #else
         Button {
@@ -2688,6 +2691,7 @@ struct PlayerView: View {
             VStack(alignment: .leading, spacing: 24) {
                 Text("Playback options").font(.title)
                 autoplaySettingsButton
+                retainOutputButton
                 DiagnosticReportButton(category: "playback", title: controller.diagnosticTitle, owner: "player-more")
                 Button("Close") { tvMoreOpen = false }
             }
@@ -2696,6 +2700,24 @@ struct PlayerView: View {
             .diagnosticReportHost(owner: "player-more")
         }
         #endif
+    }
+
+    private var retainOutputButton: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                controller.setRetainOutput(!controller.retainOutput)
+                revealControls()
+            } label: {
+                Label("Keep a reusable copy of this playback",
+                      systemImage: controller.retainOutput ? "checkmark.circle.fill" : "circle")
+            }
+            .accessibilityIdentifier("player-retain-output")
+            if controller.retainOutputFailed {
+                Text("Could not update this playback. Playback continues.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private var autoplaySettingsButton: some View {

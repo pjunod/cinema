@@ -8033,6 +8033,26 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(PlurxAPI.playbackPreparationTimeout, 180)
     }
 
+    func testRetainOutputOffRidesTheCreateBodyOnlyWhenTheViewerTurnedItOff() throws {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        func object(_ request: CreateSessionRequest) throws -> [String: Any] {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(request)) as? [String: Any])
+        }
+        let base = CreateSessionRequest(playbackId: "player-retain", start: 12.5)
+
+        let byDefault = try object(PlayerController.applyRetention(to: base, retainOutput: true))
+        XCTAssertNil(byDefault["overrides"])
+
+        let off = try object(PlayerController.applyRetention(to: base, retainOutput: false))
+        let overrides = try XCTUnwrap(off["overrides"] as? [String: Any])
+        XCTAssertEqual(overrides["retain_output"] as? Bool, false)
+        XCTAssertEqual(off["playback_id"] as? String, "player-retain")
+
+        let body = try JSONSerialization.jsonObject(with: encoder.encode(RetainOutputRequest())) as? [String: Any]
+        XCTAssertEqual(body?["retain_output"] as? Bool, false)
+    }
+
     func testNativeSubtitleRequestDoesNotAskForBurnOrQualityChange() throws {
         let request = CreateSessionRequest(
             playbackId: "player-native-subs",
