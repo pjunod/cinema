@@ -12,13 +12,10 @@ async fn token_proof_uses_the_authoritative_audience_and_policy_read_on_each_bac
         ], None).await.expect("initial policy"));
         let proof = store.authenticate_token_proof_for(&digest, TokenAudience::Native).await.expect("proof");
         assert!(matches!(proof.authentication, TokenAuthentication::Authenticated(ref found) if found.id == user.id));
-        if backend == "hiqlite-3-voter" {
-            let lease = proof.lease.expect("authoritative replicated witness");
-            assert!(lease.expires_at > lease.observed_at);
-            assert!(lease.expires_at - lease.observed_at <= plurx_core::auth::ACTIVITY_REFRESH_SECS);
-        } else {
-            assert!(proof.lease.is_none(), "local stores remain uncached");
-        }
+        // SQLite has no replicated writer fence, and this contract's
+        // Hiqlite client is remote (no known local image). Both authenticate
+        // correctly without claiming that a reusable local proof exists.
+        assert!(proof.lease.is_none(), "{backend}: unknown/local-unfenced source remains uncached");
         let wrong_audience = store.authenticate_token_proof_for(&digest, TokenAudience::JellyfinCompatibility).await.expect("wrong audience");
         assert!(matches!(wrong_audience.authentication, TokenAuthentication::Unknown));
         assert!(wrong_audience.lease.is_none());

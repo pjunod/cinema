@@ -433,10 +433,53 @@ pub struct TokenAuthenticationProof {
     pub lease: Option<TokenAuthenticationLease>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct TokenAuthenticationLease {
     pub observed_at: i64,
     pub expires_at: i64,
+    /// Embedded clients bind the same local SQLite image across the read and
+    /// every reuse. Backends without a known local image return no lease.
+    pub source_image: Option<TokenProofSource>,
+}
+
+/// An opaque local image witness; no database handle escapes to the daemon.
+#[derive(Clone)]
+pub struct TokenProofSource {
+    #[cfg(feature = "hiqlite-store")]
+    watch: std::sync::Arc<hiqlite::AppliedWatch>,
+    #[cfg(feature = "hiqlite-store")]
+    local: hiqlite::LocalDbRaftMetrics,
+}
+
+impl std::fmt::Debug for TokenProofSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TokenProofSource")
+            .finish_non_exhaustive()
+    }
+}
+
+impl TokenProofSource {
+    #[cfg(feature = "hiqlite-store")]
+    pub(crate) fn local(
+        mark: hiqlite::AppliedMarkHandle,
+        local: hiqlite::LocalDbRaftMetrics,
+    ) -> Self {
+        Self {
+            watch: std::sync::Arc::new(mark.watch(&[])),
+            local,
+        }
+    }
+    pub fn still_valid(&self) -> bool {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            self.local.membership_snapshot().running && self.watch.trusted() && !self.watch.moved()
+        }
+        #[cfg(not(feature = "hiqlite-store"))]
+        {
+            false
+        }
+    }
 }
 
 impl TokenAuthenticationProof {
@@ -471,6 +514,7 @@ impl TokenAuthenticationProof {
             lease: (expires_at > observed_at).then_some(TokenAuthenticationLease {
                 observed_at,
                 expires_at,
+                source_image: None,
             }),
         }
     }

@@ -77,13 +77,12 @@ Losing candidate futures, including best-effort exact stale-row deletions,
 are cancelled with the lookup; these deletions are idempotent catalogue
 cleanup, not authority or lease mutations.
 
-The pinned macOS daemon baseline at `259e1f06a` fails on the two inherited
-Linux-only `vodencode::dv_runtime` references in `state.rs`. No passing daemon
-build or regression execution is claimed. Linux compile qualification is
-being established. Source implementations of peer-authorizer reuse, passive
-outcome ranking and token-proof caching are now committed, but their complete
-combined-tree execution/review and admission-refusal classification remain
-open. A successful build or the bounded hydration change alone does not close
+The initial macOS daemon baseline at `259e1f06a` found two inherited
+Linux-only `vodencode::dv_runtime` references. The integration lane repaired
+that separate platform boundary and compiled its combined source. Earlier
+hydration, cache and backend controls passed there; the final image witness
+and refusal adapter still require their exact-source checks and review.
+A successful build or the bounded hydration change alone does not close
 B5 or B3a.
 
 ## 7. General token proof admission
@@ -94,6 +93,8 @@ committed token/policy witness from its existing joint statement. SQLite
 stays uncached because local Store writers do not carry the replicated
 rollback guards and have no quorum round to save. Its wall-clock expiry is the earlier of the policy's exact idle
 expiry and the next activity-refresh boundary (at most sixty seconds).
+The refresh predicate is strict (`now > last_seen + 60`); `+1` names its
+first representable Unix second, not a new grace interval.
 Monotonic cache age also caps that lifetime, and a backwards wall clock
 refuses reuse. Playback handoff tokens retain their own path and no cache.
 Audience is part of the key; native and compatibility proofs never cross.
@@ -148,8 +149,8 @@ role leases through the existing per-sender ownership map.
 
 Transport errors already have a typed `PeerTransportError` and media-session
 control has typed lifecycle errors; retain those paths rather than replacing
-them with strings. The remaining admission/refusal classification and health
-observations must describe call outcomes without treating an unauthenticated
+them with strings. Admission/refusal classification and health
+observations describe call outcomes without treating an unauthenticated
 response, a timeout or cancellation as committed removal or credential
 revocation. Health can rank candidate attempts; it cannot grant authority.
 
@@ -201,3 +202,58 @@ Unsigned refusal metadata cannot acknowledge a mutation, authenticate a
 response body, publish positive proof or supply clock timing. It never
 extends a deadline or triggers an automatic retry. Successful member/voter
 responses retain the same mandatory exact signature verification.
+
+## 11. Credential writers and source replacement
+
+The native `create_token` and password-CAS mint in
+[`store/hiqlite.rs`](../../crates/plurx-core/src/store/hiqlite.rs) are
+INSERT-only; their SQLite counterparts are also INSERT-only. The checked
+runtime paths contain no token-count pruning. `authenticate_token_for`
+returns `Expired` without touching or deleting an expired login. Handoff
+pruning deletes its separate `playback_handoffs_tokens` rows, and handoff
+authentication is never cached here. Read limits on token summaries are not
+credential deletion.
+
+Password reset, user deletion, role demotion and device-prefix revocation in
+[`http/users.rs`](../../crates/plurxd/src/http/users.rs) already bracket their
+claim-checked mutations with `begin_user`; promotion now uses that bracket
+too. The update API changes password/admin only; username is immutable after
+creation. Native logout uses `begin_digest`. Compatibility device replacement
+in [`http/auth.rs`](../../crates/plurxd/src/http/auth.rs) already uses
+`begin_user` and the exact mutation claim before retiring the old scoped
+login. Its compatibility switch changes admission generation, not token
+rows; that separate admission check is unchanged. API keys use their separate
+`ScopedKey` path and never enter this token map.
+
+The policy settings save now takes `begin_token_policy`, whose local target
+is explicitly All. Every peer Begin is already a global cache fence, so both
+native/compatibility audiences and every cached user are cleared, learners
+included. The actual singleton fixture installs an exclusion, activates the
+persisted guard, admits an exact policy write, and refuses wrong/released
+claims and legacy settings SQL. A two-user cache control verifies All, not
+one selected user. Low-level unclaimed credential Store methods remain
+bootstrap/owned-contract tools, not an alternative runtime invalidation
+protocol. The cluster checker's `exercise` uses a named owned-fixture
+instance and has no daemon token cache; contract resets are test-only.
+Persisted legacy-SQL guards do not replace the requirement that every new
+cache-bearing runtime writer use the all-member protocol.
+
+Offline restore in
+[`restore_cluster_backup_archive`](../../crates/plurx-core/src/cluster/migration.rs)
+takes the daemon's advisory lock and refuses an existing target. Initial
+schema/import work precedes listener/cache admission. A new Store object
+cannot reuse an old entry: the entry retains its original Arc and compares
+identity, preventing allocator ABA. An in-process Hiqlite snapshot can keep
+the same Arc, so embedded token witnesses additionally capture an opaque
+`TokenProofSource` before the authoritative read. It delegates to the
+existing applied-image generation guard and live local Raft watch; odd,
+moved or closed sources cannot publish or reuse a lease. The real local
+fixture checks a nonempty witness and its refusal after shutdown.
+
+An absent local mark is not proof of an immutable remote source. Hiqlite
+therefore declines reuse when a known local mark/watch pair is unavailable,
+including the remote client used by the three-voter Store contract. The
+user verdict still comes from the authoritative read. Cache-unit fixtures
+supply an immutable test witness to exercise lifetime/generation logic;
+they do not qualify unknown local sources. SQLite and generic backends
+remain uncached, with no manual feature switch.

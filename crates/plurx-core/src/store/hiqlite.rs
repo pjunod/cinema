@@ -1609,6 +1609,18 @@ impl TimedClient {
         }
     }
 
+    fn token_image_source(&self) -> Option<crate::store::TokenProofSource> {
+        match &self.inner {
+            TimedClientInner::Connected(client) => {
+                let mark = client.local_db_applied_mark().ok()?;
+                let local = client.local_db_raft_metrics().ok()?;
+                Some(crate::store::TokenProofSource::local(mark, local))
+            }
+            #[cfg(test)]
+            TimedClientInner::Disconnected | TimedClientInner::InjectedConsistentRead(_) => None,
+        }
+    }
+
     fn takeover_authority_read_metrics(&self) -> &TakeoverAuthorityReadMetrics {
         #[cfg(test)]
         if let TimedClientInner::InjectedConsistentRead(io) = &self.inner {
@@ -7748,6 +7760,9 @@ impl UserStore for HiqliteAuthStore {
                 None => TokenAuthentication::Unknown,
             }));
         }
+        // Capture before the authoritative read: an in-process snapshot may
+        // replace the SQLite image without replacing this Store's Arc.
+        let source_image = self.client().token_image_source();
         // The expiry policy rides the same consistent read as the token row:
         // no extra round trip per request, and every voter judges a token
         // against the committed policy rather than a node-local cache.
@@ -7798,12 +7813,23 @@ impl UserStore for HiqliteAuthStore {
         }
         self.refresh_token_activity_if_due(token_hash, row.last_seen_at, now)
             .await?;
-        Ok(crate::store::TokenAuthenticationProof::authenticated(
+        let mut proof = crate::store::TokenAuthenticationProof::authenticated(
             row.user.into(),
             now,
             row.last_seen_at,
             row.expiry,
-        ))
+        );
+        if source_image
+            .as_ref()
+            .is_none_or(|source| !source.still_valid())
+        {
+            // None does not distinguish an immutable remote client from an
+            // unknown local source. Preserve authentication, decline reuse.
+            proof.lease = None;
+        } else if let Some(lease) = proof.lease.as_mut() {
+            lease.source_image = source_image;
+        }
+        Ok(proof)
     }
 
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError> {

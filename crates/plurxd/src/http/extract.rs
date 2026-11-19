@@ -184,6 +184,7 @@ struct CachedAdminProof {
 struct CachedTokenProof {
     user: User,
     source: Arc<dyn plurx_core::store::Store>,
+    source_image: Option<plurx_core::store::TokenProofSource>,
     observed_at: i64,
     wall_expires_at: i64,
     expires_at: tokio::time::Instant,
@@ -433,14 +434,24 @@ impl CacheOnlyAdminProofCache {
         if !state.general_token_cache_enabled || state.revocation_active() {
             return None;
         }
-        state
-            .token_proofs
-            .retain(|_, proof| proof.expires_at > now && proof.wall_expires_at > wall);
+        state.token_proofs.retain(|_, proof| {
+            proof.expires_at > now
+                && proof.wall_expires_at > wall
+                && proof
+                    .source_image
+                    .as_ref()
+                    .is_none_or(|source| source.still_valid())
+        });
         let proof = state
             .token_proofs
             .get(&(token_digest.to_owned(), audience.as_str()))?;
-        (Arc::ptr_eq(&proof.source, source) && wall >= proof.observed_at)
-            .then(|| proof.user.clone())
+        (Arc::ptr_eq(&proof.source, source)
+            && wall >= proof.observed_at
+            && proof
+                .source_image
+                .as_ref()
+                .is_none_or(|source| source.still_valid()))
+        .then(|| proof.user.clone())
     }
 
     fn record_token_authenticated(
@@ -458,6 +469,10 @@ impl CacheOnlyAdminProofCache {
         if audience == plurx_core::store::TokenAudience::PlaybackHandoff
             || wall < lease.observed_at
             || wall >= lease.expires_at
+            || lease
+                .source_image
+                .as_ref()
+                .is_some_and(|source| !source.still_valid())
         {
             return;
         }
@@ -472,9 +487,14 @@ impl CacheOnlyAdminProofCache {
         {
             return;
         }
-        state
-            .token_proofs
-            .retain(|_, proof| proof.expires_at > now && proof.wall_expires_at > wall);
+        state.token_proofs.retain(|_, proof| {
+            proof.expires_at > now
+                && proof.wall_expires_at > wall
+                && proof
+                    .source_image
+                    .as_ref()
+                    .is_none_or(|source| source.still_valid())
+        });
         let key = (token_digest, audience.as_str());
         if !state.token_proofs.contains_key(&key) && state.token_proofs.len() >= MAX_TOKEN_PROOFS {
             let oldest = state
@@ -495,6 +515,7 @@ impl CacheOnlyAdminProofCache {
             CachedTokenProof {
                 user: user.clone(),
                 source,
+                source_image: lease.source_image,
                 observed_at: lease.observed_at,
                 wall_expires_at: lease.expires_at,
                 expires_at: now + Duration::from_secs(remaining),
@@ -1223,6 +1244,7 @@ mod tests {
             Some(plurx_core::store::TokenAuthenticationLease {
                 observed_at: now,
                 expires_at: now + 60,
+                source_image: None,
             }),
         );
     }
@@ -1291,6 +1313,7 @@ mod tests {
             Some(plurx_core::store::TokenAuthenticationLease {
                 observed_at: now,
                 expires_at: now + 60,
+                source_image: None,
             }),
         );
         assert!(cache.authenticated_token("late", Native, &source).is_none());
@@ -1312,6 +1335,33 @@ mod tests {
         assert!(cache
             .authenticated_token("token", Native, &source)
             .is_none());
+        record_token(&cache, source.clone(), "first-user", Native);
+        cache.record_token_authenticated(
+            cache.authentication_ticket(),
+            "second-user".into(),
+            Native,
+            source.clone(),
+            &user(2, true),
+            Some(plurx_core::store::TokenAuthenticationLease {
+                observed_at: now,
+                expires_at: now + 60,
+                source_image: None,
+            }),
+        );
+        assert!(cache
+            .authenticated_token("first-user", Native, &source)
+            .is_some());
+        assert!(cache
+            .authenticated_token("second-user", Native, &source)
+            .is_some());
+        let policy = cache.begin_global_revocation();
+        assert!(cache
+            .authenticated_token("first-user", Native, &source)
+            .is_none());
+        assert!(cache
+            .authenticated_token("second-user", Native, &source)
+            .is_none());
+        drop(policy);
     }
 
     #[tokio::test]
@@ -1332,6 +1382,7 @@ mod tests {
                 Some(plurx_core::store::TokenAuthenticationLease {
                     observed_at: observed,
                     expires_at: expires,
+                    source_image: None,
                 }),
             );
             assert!(cache.authenticated_token(digest, Native, &source).is_none());
@@ -1788,6 +1839,15 @@ mod tests {
             .expect("policy peer bracket end");
         assert!(begin < write && write < finish);
         assert!(policy.contains("proof_revocation.mutation_claim()"));
+        let policy_begin = include_str!("internal_auth_revocation.rs")
+            .split_once("pub(crate) async fn begin_token_policy(")
+            .expect("policy wrapper")
+            .1
+            .split_once("pub(crate) async fn begin_user(")
+            .expect("policy wrapper end")
+            .0;
+        assert!(policy_begin.contains(".begin_global_revocation()"));
+        assert!(policy_begin.contains("Self::begin(state, local, operation_guard).await"));
 
         let users = include_str!("users.rs");
         let update = users
