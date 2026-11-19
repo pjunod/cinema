@@ -6722,7 +6722,7 @@ pub(crate) async fn metrics(
     let decode_fact_metrics = state.transcode.decode_facts_prometheus();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
     let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot())
-        + &render_applied_view_metrics(&state.applied.observation(), &hiqlite::db_read_pool_wait())
+        + &render_applied_view_metrics(&state.applied.observation(), &crate::cluster::read_pool_wait())
         + &render_writer_abandoned_replies(&crate::cluster::writer_abandoned_replies())
         + &render_cluster_directory_metrics(state.cluster_directory.reads());
     let membership_metrics = render_passive_membership_metrics(state.passive_membership.snapshot());
