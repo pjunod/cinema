@@ -1251,7 +1251,9 @@ pub(crate) async fn processed_candidate_link_evidence(
             .candidate_link_prior(&source.candidate(candidate.recipe_digest, candidate.route))
             .await
             .map_err(|_| ())?;
-        Ok(!prior.is_some_and(|prior| prior.negative_active(crate::media_sessions::unix_ms())))
+        Ok::<_, ()>(
+            !prior.is_some_and(|prior| prior.negative_active(crate::media_sessions::unix_ms())),
+        )
     };
     let result = tokio::time::timeout_at(deadline, read).await;
     // Tokio polls the read first, so a ready result can arrive at the deadline.
