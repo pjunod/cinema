@@ -588,6 +588,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/hls/{session}/status"
         | "/api/v1/hls/{session}/quality-control"
         | "/api/v1/hls/{session}/quality-schedule"
+        | "/api/v1/hls/{session}/retain-output"
         | "/api/v1/hls/{session}/quality-family"
         | "/api/v1/hls/{session}/control"
         | "/api/v1/hls/{session}"
@@ -754,6 +755,7 @@ fn http_route_group(path: &str) -> usize {
         | crate::media_sessions::RELAY_PATH
         | hls::QUALITY_CONTROL_PATH
         | hls::QUALITY_SCHEDULE_PATH
+        | hls::RETAIN_OUTPUT_PATH
         | crate::media_sessions::CONTROL_PATH => 7,
         _ => 8,
     }
@@ -2300,6 +2302,10 @@ pub fn router(state: AppState) -> Router {
             post(hls::quality_schedule)
                 .layer(DefaultBodyLimit::max(hls::QUALITY_SCHEDULE_MAX_BYTES)),
         )
+        .route(
+            "/hls/{session}/retain-output",
+            post(hls::retain_output).layer(DefaultBodyLimit::max(hls::RETAIN_OUTPUT_MAX_BYTES)),
+        )
         // Capability auth (the session id is the credential) so a closing tab
         // can send this with `keepalive`, which cannot set headers.
         .route("/hls/{session}", delete(hls::delete))
@@ -2591,6 +2597,11 @@ pub fn router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(hls::QUALITY_SCHEDULE_MAX_BYTES)),
         )
         .route(
+            hls::RETAIN_OUTPUT_PATH,
+            post(internal_media_sessions::retain_output)
+                .layer(DefaultBodyLimit::max(hls::RETAIN_OUTPUT_MAX_BYTES)),
+        )
+        .route(
             crate::media_sessions::CONTROL_PATH,
             post(internal_media_sessions::control).layer(DefaultBodyLimit::max(
                 crate::playback_control::MAX_RELAY_BYTES,
@@ -2733,6 +2744,8 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 // node in maintenance keeps streaming it, so it must keep
                 // honouring the viewer's quality changes too.
                 | hls::QUALITY_SCHEDULE_PATH
+                // So is turning output retention off for one playback.
+                | hls::RETAIN_OUTPUT_PATH
         | crate::live_tv::RESOURCE_PATH
                 | crate::live_tv::STOP_PATH
                 // A retire is a stop plus a fence. Refusing it during
@@ -2766,7 +2779,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 "v1",
                 "hls",
                 _,
-                "control" | "quality-control" | "quality-schedule"
+                "control" | "quality-control" | "quality-schedule" | "retain-output"
             ]
         ))
         || (method == Method::DELETE
@@ -2883,6 +2896,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     // A learner can own a continuous session; every schedule
                     // relayed to it arrives here.
                     | hls::QUALITY_SCHEDULE_PATH
+                    | hls::RETAIN_OUTPUT_PATH
                     | crate::live_tv::RESOURCE_PATH
                     | crate::live_tv::STOP_PATH
             ))
@@ -2965,7 +2979,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                 // node-local, write-nothing POST as the caps-v2 decision.
                 | ["api", "v1", "files", _, "hls", "continuous-sessions" | "continuous-candidates"]
                 | ["api", "v1", "files", _, "publication"]
-                | ["api", "v1", "hls", _, "control" | "quality-control" | "quality-schedule"]
+                | ["api", "v1", "hls", _, "control" | "quality-control" | "quality-schedule" | "retain-output"]
                 // The caps-v2 spelling of the decision read. It is a POST only
                 // because its capabilities are a JSON document rather than a
                 // query string — it writes nothing, and a learner that answers

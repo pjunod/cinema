@@ -3736,6 +3736,45 @@ async fn an_unconfigured_node_does_not_claim_the_conversion_key() {
     std::env::remove_var("PLURX_DV_CONVERT");
 }
 
+/// The always-on switches are written on once, overwriting an old `0`, so
+/// an older binary in a rolling deploy agrees with this one; a later boot
+/// (after an operator or old node wrote `0` again) changes nothing.
+#[tokio::test]
+async fn always_on_playback_settings_are_seeded_once() {
+    let store: Arc<dyn plurx_core::store::Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    store
+        .put_setting("playback.display_aware_auto", "0")
+        .await
+        .expect("an old operator choice");
+    seed_always_on_playback_settings(&store)
+        .await
+        .expect("seed");
+    for key in ALWAYS_ON_PLAYBACK_SETTINGS {
+        assert_eq!(
+            store.get_setting(key).await.expect("read").as_deref(),
+            Some("1"),
+            "{key}"
+        );
+    }
+    store
+        .put_setting("playback.auto_abr", "0")
+        .await
+        .expect("written after the seed");
+    seed_always_on_playback_settings(&store)
+        .await
+        .expect("reseed");
+    assert_eq!(
+        store
+            .get_setting("playback.auto_abr")
+            .await
+            .expect("read")
+            .as_deref(),
+        Some("0"),
+        "the seed runs once per cluster, not once per boot"
+    );
+}
+
 /// The settings page and every session read this record, so the encoder it
 /// names has to be the one the probe actually chose.
 #[test]

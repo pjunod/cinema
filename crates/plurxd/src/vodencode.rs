@@ -192,7 +192,12 @@ pub(crate) fn try_admit_frozen_bundle(
 /// claim (`crate::vodserve::IncumbentPermitClaim`) to admit with.
 #[derive(Default)]
 pub(crate) struct ProcessedTrialAdmission {
+    #[cfg(any(target_os = "linux", test))]
     claim: std::sync::Mutex<Option<Arc<crate::vodserve::TrialClaim>>>,
+    // Keep the same claim ownership until this scope drops even when the
+    // platform has no native admission path that reads the reservation.
+    #[cfg(not(any(target_os = "linux", test)))]
+    _retained_claim: std::sync::Mutex<Option<Arc<crate::vodserve::TrialClaim>>>,
     needed: std::sync::Mutex<Option<TranscodeResourceEstimate>>,
 }
 
@@ -203,7 +208,10 @@ tokio::task_local! {
 impl ProcessedTrialAdmission {
     pub(crate) fn with_claim(claim: Arc<crate::vodserve::TrialClaim>) -> Self {
         Self {
+            #[cfg(any(target_os = "linux", test))]
             claim: std::sync::Mutex::new(Some(claim)),
+            #[cfg(not(any(target_os = "linux", test)))]
+            _retained_claim: std::sync::Mutex::new(Some(claim)),
             needed: std::sync::Mutex::new(None),
         }
     }
@@ -213,10 +221,12 @@ impl ProcessedTrialAdmission {
         *self.needed.lock().expect("trial admission")
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn record_needed(&self, resources: TranscodeResourceEstimate) {
         *self.needed.lock().expect("trial admission") = Some(resources);
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn claim(&self) -> Option<Arc<crate::vodserve::TrialClaim>> {
         self.claim.lock().expect("trial admission").clone()
     }

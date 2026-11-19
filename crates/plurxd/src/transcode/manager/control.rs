@@ -1102,6 +1102,11 @@ impl TranscodeManager {
         vod_cause: crate::vodserve::Terminal,
         release: Option<crate::playback_control::RollingTerminalCause>,
     ) -> bool {
+        // An ended session has nothing left to opt out of.
+        self.retain_output
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .forget(session_id);
         if self.vod.end(session_id, vod_cause).await {
             return true;
         }

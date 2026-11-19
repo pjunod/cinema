@@ -165,6 +165,7 @@ impl TranscodeManager {
             cached_limits: std::sync::RwLock::new(None),
             playlist_wait_override_ms: std::sync::atomic::AtomicU64::new(0),
             output_enqueue: OutputEnqueueQueue::new(),
+            retain_output: std::sync::Mutex::new(RetainOutputLedger::default()),
         }
     }
 
@@ -1573,6 +1574,7 @@ impl TranscodeManager {
     /// no viewer waits, and it yields only when a viewer waits for capacity
     /// or an offline download does (decision F), or exact playback qualification
     /// needs the lane; an existing playing session alone does not preempt it.
+    #[cfg(target_os = "linux")]
     pub(crate) async fn admit_dv_refit(&self, threads: usize) -> Option<FragmentAdmission> {
         if *self.playback_qualification_waiters.borrow() > 0
             || self.admissions.live_is_waiting()
@@ -1757,48 +1759,6 @@ impl TranscodeManager {
         self.pretranscode_publication_yield_reason()
     }
 
-    /// What the Developer card reports about rolling retention on this node:
-    /// whether session scratch and the retained namespace share a filesystem
-    /// (hard links need it), the live headroom slack, and what the collector
-    /// still owes.
-    pub(crate) async fn rolling_retention_facts(&self) -> RollingRetentionFacts {
-        let base = self.vod.retained_base();
-        let same_filesystem = {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                // The namespace may not exist until the first collection;
-                // its parent is the filesystem it will be created on.
-                let probe = if base.exists() {
-                    base.clone()
-                } else {
-                    base.parent()
-                        .map(std::path::Path::to_path_buf)
-                        .unwrap_or(base.clone())
-                };
-                match (
-                    tokio::fs::metadata(&self.work_dir).await,
-                    tokio::fs::metadata(&probe).await,
-                ) {
-                    (Ok(work), Ok(namespace)) => Some(work.dev() == namespace.dev()),
-                    _ => None,
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                Some(false)
-            }
-        };
-        let headroom = self.scratch_ledger.headroom();
-        RollingRetentionFacts {
-            same_filesystem,
-            slack: headroom.slack(),
-            admits: headroom.admits(Duration::from_secs(60)),
-            rows: self.vod.retained_snapshot(),
-            cleanup_pending: self.vod.retained_cleanup_pending(),
-        }
-    }
-
     /// Rolling artifacts this node holds or is collecting, for Activity.
     pub(crate) fn retained_output_snapshot(
         &self,
@@ -1881,7 +1841,7 @@ impl TranscodeManager {
                 .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    #[cfg(test)]
+    #[cfg(all(target_os = "linux", test))]
     pub(crate) fn subscribe_playback_qualification_waiters(
         &self,
     ) -> tokio::sync::watch::Receiver<usize> {

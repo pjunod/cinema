@@ -1255,6 +1255,20 @@ pub(crate) async fn quality_schedule(
     .await
 }
 
+pub(crate) async fn retain_output(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(status) = authorize(&state, &headers, super::hls::RETAIN_OUTPUT_PATH, &body).await {
+        return status.into_response();
+    }
+    let Ok(request) = serde_json::from_slice::<super::hls::RetainOutputRelayRequest>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    super::hls::retain_output_relayed(&state, request).await
+}
+
 #[cfg(test)]
 pub(crate) fn output_capture_test_state() -> AppState {
     super::tests::test_app_with_state().1

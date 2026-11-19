@@ -168,6 +168,7 @@ impl TrialClaim {
 
     /// The trial took its bundle with the reservation: the request is then
     /// kept to its deadline rather than its short refresh lifetime.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn mark_admitted(&self) {
         self.admitted
             .store(true, std::sync::atomic::Ordering::Release);
@@ -377,12 +378,6 @@ pub struct VodSettings {
     /// Node-wide ceiling on blocked segment GETs, from
     /// `playback.vod_blocked_get_cap`.
     pub blocked_get_cap: usize,
-    /// `playback.sdr_master_codecs`: the value the HTTP create froze from its
-    /// planning snapshot when the request carries one, else read in the same
-    /// batch as the rest of this policy. Each session records it at create
-    /// (beside its block budget) so its master keeps one shape for that
-    /// incarnation.
-    pub sdr_master_codecs: bool,
     /// `playback.vod_index_cluster_cache`: whether a copy rendition may use a
     /// peer's fragment index. Absent means off.
     pub index_cluster_cache: bool,
@@ -564,8 +559,6 @@ pub struct VodHlsFacts {
     /// copy produces — `hvc1` plus `SUPPLEMENTAL-CODECS: dvh1.08.LL` — and
     /// the source's own Dolby Vision record says profile 7.
     pub convert_dolby_vision: bool,
-    /// The session's frozen `playback.sdr_master_codecs` choice.
-    pub sdr_master_codecs: bool,
     pub(crate) encoding: Option<Arc<crate::vodencode::Encoding>>,
     pub(crate) response_owner: ResponseOwner,
 }
