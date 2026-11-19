@@ -40,7 +40,6 @@ pub(crate) fn inject_current_publication_failure(path_snapshots: &str) {
 
 #[derive(Debug, Clone)]
 pub struct SQLiteSnapshotBuilder {
-    pub(crate) _storage_owner: crate::startup_cleanup::SqliteStorageOwner,
     // pub last_applied_log_id: Option<LogId<NodeId>>,
     // pub last_membership: StoredMembership<NodeId, Node>,
     #[cfg(feature = "backup")]
@@ -51,6 +50,8 @@ pub struct SQLiteSnapshotBuilder {
     pub write_tx: flume::Sender<WriterRequest>,
     pub(crate) snapshot_files: Arc<Mutex<SnapshotFileState>>,
     pub(crate) snapshot_recovery_pending: Arc<AtomicBool>,
+    // Keep the retirement notification after every owned field's destructor.
+    pub(crate) _storage_owner: crate::startup_cleanup::SqliteStorageOwner,
 }
 
 #[derive(Debug, Default)]

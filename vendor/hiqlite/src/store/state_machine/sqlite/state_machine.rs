@@ -307,7 +307,6 @@ pub struct StateMachineData {
 
 #[derive(Debug, Clone)]
 pub struct StateMachineSqlite {
-    pub(crate) storage_owner: crate::startup_cleanup::SqliteStorageOwner,
     // pub data: StateMachineData,
     this_node: NodeId,
     path_snapshots: String,
@@ -330,6 +329,9 @@ pub struct StateMachineSqlite {
 
     pub(crate) read_pool: SqlitePool,
     pub(crate) write_tx: flume::Sender<WriterRequest>,
+    // Fields drop in declaration order: retire only after owned pools and
+    // descriptors have finished their destructors.
+    pub(crate) storage_owner: crate::startup_cleanup::SqliteStorageOwner,
 }
 
 impl StateMachineSqlite {
@@ -403,7 +405,6 @@ impl StateMachineSqlite {
         })?;
 
         let mut slf = Self {
-            storage_owner: Default::default(),
             // data: state_machine_data,
             this_node,
             path_snapshots,
@@ -422,6 +423,7 @@ impl StateMachineSqlite {
             s3_config,
             read_pool,
             write_tx,
+            storage_owner: Default::default(),
         };
 
         slf.initialize_snapshot_pointer(db_exists).await?;
