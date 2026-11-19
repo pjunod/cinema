@@ -852,3 +852,137 @@ impl crate::prodrun::ProducerReapHooks for PrivateWaitFailure {
 
 #[tokio::test]
 async fn preparation_real_wait_and_unlink_failure_retries_preserve_capacity_and_cleanup_fairness() { prepared_copy_consumer(15).await; }
+
+/// The viewer's mid-playback opt-out cancels the preparation row its own start
+/// created while it is still queued, and never a row another session joined.
+#[tokio::test]
+async fn retain_output_off_cancels_only_an_unshared_queued_own_preparation() {
+    use plurx_core::store::background_jobs::*;
+    let base = crate::test_tempdir().expect("manual metadata");
+    let path = base.path().join("source.mkv");
+    std::fs::copy(fixture_file().path, &path).expect("owned source");
+    let file = media_file_at(path, 12_000);
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let library = store.create_library(&plurx_core::domain::NewLibrary {
+        name: "metadata".into(), kind: plurx_core::domain::LibraryKind::Movies,
+        paths: vec![base.path().to_owned()], anime: false,
+    }).await.expect("library");
+    let item = store.insert_item(&plurx_core::domain::NewItem {
+        library_id: library.id, kind: plurx_core::domain::ItemKind::Movie,
+        parent_id: None, title: "metadata".into(), year: None,
+        season_number: None, episode_number: None,
+    }).await.expect("item");
+    let probe = plurx_core::domain::ProbeResult {
+        duration_ms: file.duration_ms, container: file.container.clone(),
+        video_codec: file.video_codec.clone(), width: file.width, height: file.height,
+        bit_depth: file.bit_depth, video_profile: file.video_profile.clone(),
+        ..Default::default()
+    };
+    assert_eq!(store.upsert_file(item, &file.path.to_string_lossy(), file.size, file.mtime,
+        &probe).await.expect("file"), file.id);
+    let manager = crate::transcode::TranscodeManager::new(
+        Arc::clone(&store), base.path().join("work"),
+        plurx_core::transcode::EncoderCaps::default(), plurx_core::transcode::Pipeline::Cpu,
+    ).with_cache(base.path().join("cache"), "metadata-test".into(), "test-local".into());
+    let mut manual = request("metadata", 0.0);
+    manual.audio_claim = Some(plurx_core::playback::audio::AudioClaim {
+        decoders: vec!["aac".into()], sinks: vec![],
+    });
+    manual.audio_delivery = Some(plurx_core::playback::audio::resolve_audio(
+        None, &manual.audio_claim.as_ref().expect("claim").profile(),
+        plurx_core::playback::audio::AudioRoute::Progressive, 0,
+    ));
+    let job_state = |id: String| {
+        let store = Arc::clone(&store);
+        async move { store.background_job(&id).await.expect("job read").expect("job").state }
+    };
+    let (unshared, created) = manager.enqueue_copy_output(&manual, &file, &settings())
+        .await.expect("enqueue").expect("a row");
+    assert!(created, "the first start creates the row");
+    manager.record_queued_output("viewer-a", unshared.clone(), true).await;
+    manager.stop_output_retention("viewer-a").await;
+    assert_eq!(job_state(unshared).await, JobState::Cancelled);
+
+    let mut second = manual.clone();
+    second.playback_id = "metadata-second".into();
+    let (job_id, created) = manager.enqueue_copy_output(&second, &file, &settings())
+        .await.expect("new enqueue").expect("a row");
+    assert!(created, "new demand can prepare an output after cancellation");
+    let mut third = manual;
+    third.playback_id = "metadata-third".into();
+    let (joined, joined_created) = manager.enqueue_copy_output(&third, &file, &settings())
+        .await.expect("dedup enqueue").expect("a row");
+    assert_eq!((joined.as_str(), joined_created), (job_id.as_str(), false));
+    manager.record_queued_output("viewer-b", job_id.clone(), true).await;
+    // A peer viewer may join the replicated queue without appearing in this ledger.
+    manager.stop_output_retention("viewer-b").await;
+    assert_eq!(job_state(job_id.clone()).await, JobState::Queued,
+        "the other playback's durable waiter prevents cancellation");
+    manager.record_queued_output("viewer-c", joined, false).await;
+    manager.stop_output_retention("viewer-c").await;
+    assert_eq!(job_state(job_id).await, JobState::Queued,
+        "a dedup join is never the joiner's to cancel");
+}
+
+/// Once its executor has claimed it, a viewer's opt-out leaves the
+/// preparation running.
+#[tokio::test]
+async fn retain_output_off_never_cancels_a_running_preparation() {
+    use plurx_core::store::background_jobs::*;
+    let base = crate::test_tempdir().expect("manual metadata");
+    let path = base.path().join("source.mkv");
+    std::fs::copy(fixture_file().path, &path).expect("owned source");
+    let file = media_file_at(path, 12_000);
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let library = store.create_library(&plurx_core::domain::NewLibrary {
+        name: "metadata".into(), kind: plurx_core::domain::LibraryKind::Movies,
+        paths: vec![base.path().to_owned()], anime: false,
+    }).await.expect("library");
+    let item = store.insert_item(&plurx_core::domain::NewItem {
+        library_id: library.id, kind: plurx_core::domain::ItemKind::Movie,
+        parent_id: None, title: "metadata".into(), year: None,
+        season_number: None, episode_number: None,
+    }).await.expect("item");
+    let probe = plurx_core::domain::ProbeResult {
+        duration_ms: file.duration_ms, container: file.container.clone(),
+        video_codec: file.video_codec.clone(), width: file.width, height: file.height,
+        bit_depth: file.bit_depth, video_profile: file.video_profile.clone(),
+        ..Default::default()
+    };
+    assert_eq!(store.upsert_file(item, &file.path.to_string_lossy(), file.size, file.mtime,
+        &probe).await.expect("file"), file.id);
+    let manager = crate::transcode::TranscodeManager::new(
+        Arc::clone(&store), base.path().join("work"),
+        plurx_core::transcode::EncoderCaps::default(), plurx_core::transcode::Pipeline::Cpu,
+    ).with_cache(base.path().join("cache"), "metadata-test".into(), "test-local".into());
+    let mut manual = request("metadata", 0.0);
+    manual.audio_claim = Some(plurx_core::playback::audio::AudioClaim {
+        decoders: vec!["aac".into()], sinks: vec![],
+    });
+    manual.audio_delivery = Some(plurx_core::playback::audio::resolve_audio(
+        None, &manual.audio_claim.as_ref().expect("claim").profile(),
+        plurx_core::playback::audio::AudioRoute::Progressive, 0,
+    ));
+    let job_state = |id: String| {
+        let store = Arc::clone(&store);
+        async move { store.background_job(&id).await.expect("job read").expect("job").state }
+    };
+    let (job_id, created) = manager.enqueue_copy_output(&manual, &file, &settings())
+        .await.expect("enqueue").expect("a row");
+    assert!(created, "the first start creates the row");
+    let job = store.background_job(&job_id).await.expect("read").expect("job");
+    let now = crate::media_sessions::unix_ms();
+    match store.claim_job(ClaimJob {
+        job_id: job.id.clone(), expected_revision: job.revision,
+        node_id: "test-local".into(), boot_id: uuid::Uuid::new_v4().to_string(),
+        claim_id: uuid::Uuid::new_v4().to_string(), kind: JobKind::CopyOutputPrepare,
+        payload_version: 1, now_ms: now, dispatched_at_ms: now,
+    }).await.expect("claim") {
+        ClaimOutcome::Claimed { .. } => {}
+        other => panic!("claim {other:?}"),
+    }
+    manager.record_queued_output("viewer-d", job_id.clone(), true).await;
+    manager.stop_output_retention("viewer-d").await;
+    assert_eq!(job_state(job_id).await, JobState::Running,
+        "a running preparation is never cancelled by a viewer");
+}

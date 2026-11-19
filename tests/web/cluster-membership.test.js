@@ -2654,13 +2654,14 @@ test("Settings itself still turns a non-admin away before any of this loads", as
   assert.ok(viewSettings.endsWith("\n}"), "the shipped route function is complete");
   const execute = new Function("ME", "location", "settingsRouteTab", "viewLocalRemoteSettings", "api",
     `${viewSettings}; return viewSettings(1);`);
-  for (const tab of ["cluster", "maintenance", "developer"]) {
+  for (const tab of ["cluster", "maintenance", "remotes", "developer"]) {
     const location = { hash: `#/settings/${tab}` };
     const local = [];
     await execute({ is_admin: false }, location, () => tab,
       generation => local.push(generation), () => { throw new Error("non-admin must not load admin settings"); });
-    assert.equal(location.hash, tab === "developer" ? "#/settings/developer" : "#/");
-    assert.deepEqual(local, tab === "developer" ? [1] : []);
+    const local_tab = tab === "developer" || tab === "remotes";
+    assert.equal(location.hash, local_tab ? `#/settings/${tab}` : "#/");
+    assert.deepEqual(local, local_tab ? [1] : []);
   }
 });
 

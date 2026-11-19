@@ -202,23 +202,6 @@ pub(crate) fn advisory_deadline() -> tokio::time::Instant {
     crate::media_pool::create_advisory_deadline(ADVISORY_EVIDENCE_STAGE)
 }
 
-/// `playback.network_priors` decides only whether evidence is kept beyond the
-/// live attachment: the durable per-network rows (`network_priors`,
-/// `candidate_link_priors`) are written and read only while it is on. The
-/// in-memory receipts below are not network history — each is bound to one
-/// served attachment, dies with it, and expires after `NONCE_TTL` — so they
-/// prove a fresh transfer (and acknowledge a Link negative) with the setting
-/// either way (D6).
-pub(crate) async fn network_priors_enabled(state: &AppState) -> bool {
-    state
-        .applied
-        .setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
-        .await
-        .ok()
-        .flatten()
-        .is_some_and(|value| value.trim() == "1")
-}
-
 /// The request-scoped half of a [`CandidateLinkBinding`]: who is asking and
 /// which exact source object they are asking about. The source object version
 /// costs an `open` and an `fstat`, and it is a property of the request, not
@@ -429,23 +412,12 @@ impl LinkReceipts {
     /// ordinary diagnostics remain detached. This never mints from a cause
     /// label, renews EOF or turns an absent proof into a playback error.
     ///
-    /// What backs the acknowledgement depends on `playback.network_priors`:
+    /// The negative is folded into `candidate_link_priors` and only an exact
+    /// durable readback of this immutable completion acknowledges it. The
+    /// acknowledgement also carries the attributed measured-Link verdict for
+    /// this network's prior row, which the caller folds after answering.
     ///
-    /// - **On:** the negative is folded into `candidate_link_priors` and only
-    ///   an exact durable readback of this immutable completion acknowledges
-    ///   it (unchanged). The acknowledgement also carries the attributed
-    ///   measured-Link verdict for this network's prior row, which the caller
-    ///   folds after answering.
-    /// - **Off:** nothing durable is written or read. The owner's in-memory
-    ///   receipt is the record: `Receipt::claim` marks this exact nonce
-    ///   negative once, and [`Self::current_negative_until`] re-proves that
-    ///   claim against the live attachment with its original EOF. That is
-    ///   the same exactly-once, never-refreshed property the durable readback
-    ///   gives, scoped to the attachment instead of to the network, and it is
-    ///   what lets a link stall downshift for a display-aware client whose
-    ///   operator never opted into network history.
-    ///
-    /// Either way the acknowledgement needs the receipt the owner issued, so
+    /// The acknowledgement needs the receipt the owner issued, so
     /// a session placed on a peer, or a client without an IPv4 identity, is
     /// never acknowledged and keeps its ordinary unacknowledged reopen.
     pub(crate) async fn accept_negative_for_ack(
@@ -463,30 +435,27 @@ impl LinkReceipts {
         let deadline = advisory_deadline();
         tokio::time::timeout_at(deadline, async {
             let session = session?;
-            let priors = network_priors_enabled(state).await;
             let value = self.accept(state, network, Some(session), sample).await?;
-            if priors {
-                state
-                    .store
-                    .observe_candidate_link(&value, crate::media_sessions::unix_ms())
-                    .await
-                    .ok()?;
-                // Ok(()) also covers a refused/no-op fold. With priors on,
-                // only an exact durable readback can acknowledge this
-                // immutable completion's negative.
-                let saved = state
-                    .store
-                    .candidate_link_prior(&value.binding)
-                    .await
-                    .ok()??;
-                if saved.binding != value.binding
-                    || saved.body_bytes != value.body_bytes
-                    || saved.body_duration_ms != value.body_duration_ms
-                    || saved.completed_at_ms != value.completed_at_ms
-                    || saved.negative_at_ms != Some(value.completed_at_ms)
-                {
-                    return None;
-                }
+            state
+                .store
+                .observe_candidate_link(&value, crate::media_sessions::unix_ms())
+                .await
+                .ok()?;
+            // Ok(()) also covers a refused/no-op fold. Only an exact
+            // durable readback can acknowledge this
+            // immutable completion's negative.
+            let saved = state
+                .store
+                .candidate_link_prior(&value.binding)
+                .await
+                .ok()??;
+            if saved.binding != value.binding
+                || saved.body_bytes != value.body_bytes
+                || saved.body_duration_ms != value.body_duration_ms
+                || saved.completed_at_ms != value.completed_at_ms
+                || saved.negative_at_ms != Some(value.completed_at_ms)
+            {
+                return None;
             }
             let file = state.store.get_file(value.binding.file_id).await.ok()??;
             let route = crate::media_sessions::read_media_session_route(
@@ -514,11 +483,7 @@ impl LinkReceipts {
             proof.transfer()?;
             Some(AcceptedLinkNegative {
                 receipt: sample.receipt.clone(),
-                measured_prior: if priors {
-                    measured_link_prior(network, &value, sample, &route)
-                } else {
-                    None
-                },
+                measured_prior: measured_link_prior(network, &value, sample, &route),
             })
         })
         .await
@@ -577,8 +542,8 @@ impl LinkReceipts {
         if proposed_owner != Some(state.node_id.as_str()) {
             return None;
         }
-        // No `playback.network_priors` check: this reads only the live
-        // receipt and the current route, never a stored prior (D6).
+        // This reads only the live receipt and the current route, never a
+        // stored prior (D6).
         tokio::time::timeout_at(deadline, async {
             let nonce = incumbent_receipt?;
             if nonce.len() != 36 || uuid::Uuid::parse_str(nonce).is_err() {
@@ -1098,8 +1063,8 @@ impl LinkReceipts {
 }
 
 /// An acknowledged Link negative: the nonce the client awaits in
-/// `X-Plurx-Link-Accepted`, and — with `playback.network_priors` on only —
-/// the attributed measured-Link verdict to fold into this network's prior.
+/// `X-Plurx-Link-Accepted`, and the attributed measured-Link verdict to fold
+/// into this network's prior.
 pub(crate) struct AcceptedLinkNegative {
     pub(crate) receipt: String,
     pub(crate) measured_prior: Option<plurx_core::domain::NetworkPriorObservation>,
@@ -1170,7 +1135,7 @@ fn measured_link_prior(
 /// Cold-start consumer of the measured-Link verdict: a network whose prior
 /// says it starved at rung `H` on a completed transfer starts below `H`.
 ///
-/// `prior` is `None` whenever `playback.network_priors` is off (see
+/// `prior` is `None` when the network has no stored row (see
 /// `network::stored_prior`), so this is the identity then. A catalog with
 /// nothing below `H` is returned unchanged: the verdict narrows Auto's
 /// choice, it never refuses playback. Legacy, unattributed starvation
@@ -1231,9 +1196,6 @@ pub(crate) async fn filter_catalog(
     };
     let mut rejected = vec![false; catalog.len()];
     let _complete = tokio::time::timeout_at(deadline, async {
-        if !network_priors_enabled(state).await {
-            return;
-        }
         let Some(source) = SourceLinkIdentity::for_request(network, file).await else {
             return;
         };
@@ -1278,15 +1240,6 @@ pub(crate) async fn processed_candidate_link_evidence(
         return ProcessedLinkEvidence::Admissible;
     };
     let read = async {
-        let enabled = state
-            .applied
-            .setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
-            .await
-            .map_err(|_| ())?
-            .is_some_and(|value| value.trim() == "1");
-        if !enabled {
-            return Ok::<_, ()>(true);
-        }
         // Qualification may outlive the ordinary request-scoped advisory
         // snapshot. Fence the source again before granting this new recipe.
         let source = SourceLinkIdentity::capture(network, file).await.ok_or(())?;
@@ -1504,40 +1457,24 @@ mod tests {
 
     #[tokio::test]
     async fn a05_client_log_ack_header_is_exact_negative_only_and_never_batch_authority() {
-        client_log_ack_controls(false, false, true).await;
+        client_log_ack_controls(false, false).await;
     }
 
     #[tokio::test]
     async fn a05_client_log_ack_refuses_conflicting_durable_fold() {
-        client_log_ack_controls(true, false, true).await;
+        client_log_ack_controls(true, false).await;
     }
 
     #[tokio::test]
     async fn a05_client_log_ack_requires_exact_durable_completion_and_refuses_older_sample() {
-        client_log_ack_controls(false, true, true).await;
+        client_log_ack_controls(false, true).await;
     }
 
-    /// D6: with `playback.network_priors` off a link stall is still
-    /// acknowledged — from the owner's live receipt — so the native client
-    /// downshifts instead of reopening the same quality, and nothing is kept
-    /// as per-network history.
-    #[tokio::test]
-    async fn d6_client_log_ack_without_network_priors_is_backed_by_the_live_receipt() {
-        client_log_ack_controls(false, false, false).await;
-    }
-
-    async fn client_log_ack_controls(conflicting_fold: bool, exact_fold: bool, priors_on: bool) {
+    async fn client_log_ack_controls(conflicting_fold: bool, exact_fold: bool) {
         use axum::{extract::State, http::HeaderMap, Json};
         use plurx_core::domain::{MediaSessionActivation, MediaSessionActivationSettlement};
         use plurx_core::playback::candidate::{CandidateId, QualityCandidate};
         let (state, user, file, _root) = actual_intake_state().await;
-        if priors_on {
-            state
-                .store
-                .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
-                .await
-                .expect("setting");
-        }
         let mut headers = HeaderMap::new();
         headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
         let peer = "10.42.4.9:1234".parse().expect("socket");
@@ -1637,15 +1574,13 @@ mod tests {
             "session_id":session.session,"link_sample":{"receipt":nonce,"object_name":"seg00001.m4s","etag":"etag",
             "body_bytes":4096,"body_duration_ms":5000,"age_ms":0,"network_load":true,"from_cache":false,"producer_paced":false,
             "cause":"link","negative":false,"media_duration_ms":4000,"presenting":true,"stalled":true,"runway_ms":1000}});
-        if priors_on {
-            let raw: ClientLinkSample =
-                serde_json::from_value(body["link_sample"].clone()).expect("sample");
-            assert!(state
-                .link_receipts
-                .accept(&state, &network, Some(&session.session), &raw)
-                .await
-                .is_some());
-        }
+        let raw: ClientLinkSample =
+            serde_json::from_value(body["link_sample"].clone()).expect("sample");
+        assert!(state
+            .link_receipts
+            .accept(&state, &network, Some(&session.session), &raw)
+            .await
+            .is_some());
         async fn send(
             state: &AppState,
             user: &plurx_core::domain::User,
@@ -1665,26 +1600,7 @@ mod tests {
         let positive = send(&state, &user, &headers, peer, body.clone()).await;
         assert_eq!(positive.status(), 204);
         assert!(!positive.headers().contains_key("x-plurx-link-accepted"));
-        if !priors_on {
-            // D6's own claim: with priors off the ClientLog positive ALONE
-            // claims the owner's receipt — nothing above called `accept`.
-            // The claim runs detached, so wait for it (bounded) before the
-            // negative, which `Receipt::claim` refuses without a claimed
-            // positive. Re-adding the priors gate to that detached claim
-            // leaves `raw` empty and fails here.
-            let claimed = tokio::time::timeout(Duration::from_secs(10), async {
-                while !state.link_receipts.raw_claimed_for_test(&nonce) {
-                    tokio::time::sleep(Duration::from_millis(2)).await;
-                }
-            })
-            .await;
-            assert!(
-                claimed.is_ok(),
-                "the ClientLog positive must claim the live receipt with priors off"
-            );
-        }
-        // The fresh-transfer (upgrade) proof reads only the live receipt, so
-        // it holds whether or not network priors are kept (D6).
+        // The fresh-transfer (upgrade) proof reads only the live receipt (D6).
         assert!(
             state
                 .link_receipts
@@ -1699,7 +1615,7 @@ mod tests {
                 )
                 .await
                 .is_some(),
-            "live positive proof regardless of playback.network_priors"
+            "live positive proof from the receipt alone"
         );
         body["link_sample"]["negative"] = true.into();
         if conflicting_fold {
@@ -1747,12 +1663,6 @@ mod tests {
             ]))
             .is_err()
         );
-        // Priors off: a barrier on every detached task this acknowledged
-        // request spawns, so "nothing durable" below is checked after any
-        // late write could have landed, not after a guessed number of yields.
-        let accepted_detached = (!priors_on).then(|| {
-            crate::http::system::notify_when_client_log_detached_work_finishes("actual ack")
-        });
         let accepted = send(&state, &user, &headers, peer, body.clone()).await;
         assert_eq!(accepted.status(), 204);
         assert_eq!(
@@ -1769,9 +1679,6 @@ mod tests {
                 .expect("nonce"),
             nonce
         );
-        let duplicate_detached = (!priors_on).then(|| {
-            crate::http::system::notify_when_client_log_detached_work_finishes("actual ack")
-        });
         let duplicate = send(&state, &user, &headers, peer, body.clone()).await;
         assert_eq!(duplicate.status(), 204);
         assert!(!duplicate.headers().contains_key("x-plurx-link-accepted"));
@@ -1781,42 +1688,7 @@ mod tests {
             .expect("generation")
             .as_str()
             .to_owned();
-        if let Some(detached) = accepted_detached {
-            // Priors off: the acknowledgement above came from memory. Nothing
-            // per-network may exist — not the exact candidate row, not the
-            // coarse prior row — once every detached task of the acknowledged
-            // request and of the duplicate after it has run to completion.
-            for (what, barrier) in [
-                ("acknowledged", Some(detached)),
-                ("duplicate", duplicate_detached),
-            ] {
-                tokio::time::timeout(
-                    Duration::from_secs(10),
-                    barrier.expect("barrier registered with priors off"),
-                )
-                .await
-                .unwrap_or_else(|_| panic!("the {what} request's detached work finishes"))
-                .expect("the barrier fires when its last holder drops");
-            }
-            assert!(state
-                .store
-                .candidate_link_prior(&session.source)
-                .await
-                .expect("candidate read")
-                .is_none());
-            assert!(state
-                .store
-                .network_prior(
-                    &generation,
-                    &network.client_class,
-                    &network.network_fingerprint
-                )
-                .await
-                .expect("prior read")
-                .is_none());
-            return;
-        }
-        // Priors on: the acknowledged negative also feeds the network's
+        // The acknowledged negative also feeds the network's
         // attributed measured-Link verdict, folded after the answer.
         let mut folded = None;
         for _ in 0..1000 {
@@ -1902,11 +1774,6 @@ mod tests {
         };
         use plurx_core::domain::{MediaSessionActivation, MediaSessionActivationSettlement};
         let (state, user, file, _root) = actual_intake_state().await;
-        state
-            .store
-            .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
-            .await
-            .expect("Auto");
         let mut headers = HeaderMap::new();
         headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
         let remote = "10.42.4.9:1234".parse().expect("socket");
@@ -1947,7 +1814,7 @@ mod tests {
         let mut request = SessionRequest {
             source_telemetry: None,
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
             vod_only: false,
@@ -2261,11 +2128,6 @@ mod tests {
     async fn a05_negative_ack_requires_real_fold_and_exact_nonce_without_replay_refresh() {
         use plurx_core::domain::{MediaSessionActivation, MediaSessionActivationSettlement};
         let (state, user, file, _root) = actual_intake_state().await;
-        state
-            .store
-            .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
-            .await
-            .expect("setting");
         let now = crate::media_sessions::unix_ms();
         let activation = MediaSessionActivation {
             incarnation_id: uuid::Uuid::new_v4().to_string(),
@@ -2512,16 +2374,6 @@ mod tests {
             http::HeaderMap,
         };
         let (state, user, file, _root) = actual_intake_state().await;
-        state
-            .store
-            .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
-            .await
-            .expect("Auto setting");
-        state
-            .store
-            .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
-            .await
-            .expect("prior setting");
         let caps = serde_json::from_value(serde_json::json!({"v":2,
             "video":[{"codec":"h264","present":["sdr"]}],"containers":["mp4"]}))
         .expect("caps");
@@ -2693,9 +2545,9 @@ mod tests {
         );
     }
 
-    /// D6 consumer: the measured-Link verdict (SQLite v93 pair) a priors-on
+    /// D6 consumer: the measured-Link verdict (SQLite v93 pair) an
     /// acknowledgement persists moves the cold Auto start below the starved
-    /// rung; with priors off the same row is not read.
+    /// rung.
     #[tokio::test]
     async fn d6_cold_auto_decision_starts_below_a_measured_link_starvation() {
         super::super::tests::prepare_catalog_test_encoder().await;
@@ -2707,16 +2559,6 @@ mod tests {
             CompletedNetworkTransfer, MeasuredLinkObservation, NetworkPriorObservation,
         };
         let (state, user, file, _root) = actual_intake_state().await;
-        state
-            .store
-            .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
-            .await
-            .expect("Auto setting");
-        state
-            .store
-            .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
-            .await
-            .expect("prior setting");
         let caps = serde_json::from_value(serde_json::json!({"v":2,
             "video":[{"codec":"h264","present":["sdr"]}],"containers":["mp4"]}))
         .expect("caps");
@@ -2805,16 +2647,6 @@ mod tests {
                 .iter()
                 .any(|row| row.target_height >= starved),
             "the verdict narrows Auto only; the public menu is unchanged"
-        );
-        state
-            .store
-            .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "0")
-            .await
-            .expect("prior setting off");
-        let off = decide().await.expect("decision with priors off").0;
-        assert_eq!(
-            off.quality_candidate_id, cold.quality_candidate_id,
-            "priors off: the stored verdict is not consulted"
         );
     }
 
@@ -3602,11 +3434,6 @@ mod tests {
             http::HeaderMap,
         };
         let (state, user, file, _root) = actual_intake_state().await;
-        state
-            .store
-            .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
-            .await
-            .expect("Auto setting");
         let caps = serde_json::from_value(serde_json::json!({"v":2,
             "video":[{"codec":"h264","present":["sdr"]}],"containers":["mp4"]}))
         .expect("caps");
@@ -3659,6 +3486,19 @@ mod tests {
             );
         }
 
+        let before = filter_catalog(
+            &state,
+            Some(&network),
+            &file,
+            catalog.clone(),
+            advisory_deadline(),
+        )
+        .await;
+        assert_eq!(
+            before, catalog,
+            "no saved negative leaves the catalog intact"
+        );
+
         let now = crate::media_sessions::unix_ms();
         state
             .store
@@ -3675,22 +3515,6 @@ mod tests {
             .await
             .expect("exact negative");
 
-        // Priors off: the negative is not evidence yet, nothing is dropped.
-        let off = filter_catalog(
-            &state,
-            Some(&network),
-            &file,
-            catalog.clone(),
-            advisory_deadline(),
-        )
-        .await;
-        assert_eq!(off.len(), catalog.len());
-
-        state
-            .store
-            .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
-            .await
-            .expect("prior setting");
         let filtered = filter_catalog(
             &state,
             Some(&network),

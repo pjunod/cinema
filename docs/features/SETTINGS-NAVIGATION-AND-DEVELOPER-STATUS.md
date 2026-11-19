@@ -152,6 +152,32 @@ requested.
    need a migration that keeps an explicit stored `0`, and it is Paul's to
    choose.
 
+## Developer cleanup, 2026-11-18 (supersedes the lifecycle table below)
+
+Paul: an unrun acceptance protocol doesn't mean a feature isn't done and
+working. Developer now holds only features still in development, each as a
+name, one line and its switch, with any detail in a collapsed Details. The
+`devGraduation` "Leaves Developer when…" line is gone; the table and audit
+below are history. Per-item rulings and the Fable review are in
+[PLAN-developer-tab-cleanup-2026-11-18.md](../reviews/PLAN-developer-tab-cleanup-2026-11-18.md).
+
+| Where it is now | Items |
+|---|---|
+| Developer | Mac video processing · Mac HEVC output · Unverified HEVC copy |
+| Playback → Dolby Vision and HDR | Dolby Vision processing · Display-targeted HDR10-E / SDR · FEL preservation (P8.1) · F+ curves (with spool delete) |
+| Playback → Reusable output | Complete-output preparation (plus the player's per-playback "Keep a reusable copy" switch) |
+| Playback → Advanced server delivery | Reordered VOD frames |
+| Sharing | Cinema shared libraries switch |
+| Remotes & devices (new tab, also the non-admin device page) | Companion remotes · Background invitations · this device's CEC, receiver and companion preferences |
+| Integrations | Jellyfin client compatibility |
+| System | HTTPS · Playback restart recovery (read-only, collapsed) |
+| Always on, switch removed | Adaptive Auto quality · Fit Auto to display · Network priors · Rolling output retention · Content-aware encoding |
+| Removed | CODECS on SDR master playlists (feature and code deleted) · advisory-only cards: Indexing while serving, Applied view, Create plan, Processed DV upgrade, Diagnostic ZIP reports |
+
+Old `#/settings/developer/<anchor>` links redirect to the new section
+(`DEVELOPER_MOVED` in `web/pages/settings-panels.js`). The Apple and Android
+Developer screens are gone; their items moved the same way.
+
 ## Developer lifecycle — every card graduates
 
 Paul's rule, 2026-09-28: *"If it's a fully active option, then there's no

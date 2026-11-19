@@ -2833,7 +2833,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
     let resume_ms = accepted_film_time_ms;
     let staged_request = crate::transcode::SessionRequest {
         dv_processing_destination: candidate.dv_processing_destination,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: match candidate.kind {
             crate::transcode::SessionKind::Copy {
                 convert_dolby_vision: true,

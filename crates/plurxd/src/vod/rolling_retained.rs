@@ -722,6 +722,7 @@ impl VodServe {
     }
 
     /// Orphan directories and retired artifacts the collector still owes.
+    #[cfg(test)]
     pub(crate) fn retained_cleanup_pending(&self) -> usize {
         let state = self
             .shared
