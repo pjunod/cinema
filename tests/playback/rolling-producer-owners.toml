@@ -7360,7 +7360,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # All seven matches inspect HTTP replies and launch no processes.
 # Removing the retired parser-floor refusal drops one HTTP status read.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 955
+# The title scanner regression awaits the isolated test process with output().
+expected_occurrences = 956
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7932,7 +7933,8 @@ pattern = "kill_on_drop\\s*\\("
 # Union at 0d501cae6: 126 + 2 + 1 = 129, less 1 counted twice = 128; the spool
 # registration test adds one: 129.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 132
+# The isolated title scanner test process uses kill-on-drop for cancellation.
+expected_occurrences = 133
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
