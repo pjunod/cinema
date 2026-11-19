@@ -3,6 +3,14 @@ enforce_after = "e8a910f"
 
 # Await every submitted debounce task before counting tuner starts.
 [[fixes]]
+id = "apple.settings-details-rows-support-tvos"
+commits = ["a1e666719c3f54aaec7a1fc4cddbb78bdfb0e052"]
+source = "clients/apple/Sources/SettingsView.swift"
+source_anchor = "struct SettingsDisclosure<Content: View>: View {"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testDeveloperIsGoneAndItsCardsLiveInTheirOwnSections"
+
+[[fixes]]
 id = "android.retain-output-mid-playback-explicit-false"
 commits = ["ed051bacb3ddb899a667ea6b962b8526c79a0dc1"]
 source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
