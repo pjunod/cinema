@@ -7001,18 +7001,32 @@ async fn rate_control_settings_validate_publish_and_restore() {
         "{partial}"
     );
 
-    let (status, quality) = call(
-        &app,
-        put(
-            "/api/v1/settings",
-            Some(&admin),
-            json!({
-                "transcode_rate_mode": "quality",
-                "transcode_quality": 22
-            }),
-        ),
-    )
-    .await;
+    let save_quality = || {
+        call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "transcode_rate_mode": "quality",
+                    "transcode_quality": 22
+                }),
+            ),
+        )
+    };
+    // The real encoder probe may defer under runner load. Retry that response
+    // with the same request and still require a validated publication.
+    let (mut status, mut quality) = save_quality().await;
+    for _ in 0..2 {
+        if status != StatusCode::CONFLICT
+            || !quality["error"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("rate-control validation deferred"))
+        {
+            break;
+        }
+        (status, quality) = save_quality().await;
+    }
     assert_eq!(status, StatusCode::OK, "{quality}");
     assert_eq!(quality["transcode_rate_mode"], "quality");
     assert_eq!(quality["transcode_quality"], 22);

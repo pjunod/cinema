@@ -1122,7 +1122,10 @@ async fn sharing_source_bound_invocation_projects_the_complete_start_response() 
 }
 async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
     use std::time::{Duration, Instant};
-    let fixture = real_source_start_fixture_with(mode, None).await;
+    let mut fixture = real_source_start_fixture_with(mode, None).await;
+    if matches!(mode, SourceFixtureMode::BurnText) {
+        fixture.keep_fixture_membership_stable().await;
+    }
     let native = matches!(
         mode,
         SourceFixtureMode::NativeCopy | SourceFixtureMode::NativeEncoded
