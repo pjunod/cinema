@@ -1329,7 +1329,11 @@ jobs:
     runs-on: [ci-nonvoter-compile-amd64]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
-      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+      # Activation runs the real Linux daemon, including source recovery admission.
+      options: >-
+        --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+        --mount type=bind,src=/etc/machine-id,dst=/run/plurx-host-machine-id,readonly
+        --mount type=bind,src=/proc/sys/kernel/random/boot_id,dst=/run/plurx-host-boot-id,readonly
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}

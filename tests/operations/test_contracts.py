@@ -3371,6 +3371,20 @@ assert.equal(context.ACT_TIMER, null);
             makefile,
         )
 
+    def test_cluster_daemon_fixture_container_mounts_actual_host_identity(self):
+        job = workflow_job_blocks(".github/workflows/ci.yml")["cluster_daemon"]
+        options = job.split("      options: >-\n", 1)[1].split("      credentials:", 1)[0]
+        self.assertIn(
+            "--mount type=bind,src=/etc/machine-id,dst=/run/plurx-host-machine-id,readonly",
+            options,
+        )
+        self.assertIn(
+            "--mount type=bind,src=/proc/sys/kernel/random/boot_id,dst=/run/plurx-host-boot-id,readonly",
+            options,
+        )
+        self.assertIn("--memory 20g --memory-swap 20g --cpus 4", options)
+        self.assertIn("--cpuset-cpus 0-3 --pids-limit 4096", options)
+
     def test_full_unit_suite_has_dedicated_bounded_resident_capacity(self):
         job = workflow_job_blocks(".github/workflows/ci.yml")["check"]
         header = job.split("    steps:\n", 1)[0]
