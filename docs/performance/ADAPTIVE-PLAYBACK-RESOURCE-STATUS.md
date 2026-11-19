@@ -1,6 +1,6 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation active · updated 2026-11-08.
+**Status:** open · implementation active · updated 2026-11-19.
 Draft effort #1248; release qualification and deployment remain open.
 
 [Plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) ·
@@ -12,7 +12,37 @@ Draft effort #1248; release qualification and deployment remain open.
 [retained exit](ADAPTIVE-PLAYBACK-RETAINED-EXIT.md) ·
 [capture](ADAPTIVE-PLAYBACK-CAPTURE-CUSTODY.md).
 
-## Current continuation — source-bound task qualification
+## 2026-11-19 continuation — source integration, not acceptance
+
+The current-main merge `e54d5d3e` passed normal hooks. Production native v2
+`c4d87256` passed normal hooks, exact Linux production compilation with zero
+warnings, and the core fixture frontend at one job in 77 seconds under an
+8 GiB cap (5.84 GB actual peak, zero OOM counters). An earlier four-job
+SIGKILL remains recorded; its cause is unproven. No new Rust unit or runtime
+tests have run for this continuation.
+
+The selected unprivileged Linux x86-64 finite AVC path now integrates restricted
+entry with original domain/pidfd custody and partial-object cleanup. Delegation
+and common-ancestor permissions are verified before selection and pinned at
+preparation. Finite cgroup memory and task limits are charged, while unknown
+producer, executor and native peaks remain Unknown; no trial permit is minted.
+[Native entry](ADAPTIVE-PLAYBACK-NATIVE-ENTRY.md) records the exact boundary.
+
+Background reclaim `f59b00b0` and its display fix `3a54ed193` passed normal
+hooks and exact Linux production compilation; its physical fixture is unrun.
+Placement `2900a6ed` is committed but its binding follow-up, native composition
+and Linux checks remain pending. Named processed-peer `affa571a8` passed normal
+hooks; its predecessor passed the development C18 Linux binary check, while the
+later proof changes still need a combined check. Auto/staged work remains active.
+
+Physical kernel cases are authored but environment-required and ignored by
+default; qualification needs an isolated Linux environment with Landlock ABI 6
+or later. The inspected VM reports ABI 4 and is unsuitable. Full M0–M7,
+V1–V5, true local trials, all families, source/ingress accounting, diagnostics,
+independent Astra 6.2 review, qualification and promotion remain open. Handoff
+to Sol precedes unit execution. No deployment is claimed.
+
+## Earlier continuation — source-bound task qualification
 
 Pre-Winner ownership [PR #1429](http://forge.lan:3000/noirr/plurx/pulls/1429)
 merged at `4dabcb100` after all eight jobs in gate 6675 passed on `340b73b8`.

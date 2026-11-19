@@ -1,9 +1,28 @@
 # Native entry — what is protected before executable code runs?
 
-**Status:** open · restricted launcher primitive qualified locally · 2026-11-08.
+**Status:** open · selected production integration compiled · 2026-11-19.
 Companion to [owned containment](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md) and the
-[canonical ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md). Production graph
-integration, complete worker ownership, M0 and real trials remain open.
+[canonical ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md). Complete worker ownership, M0, real trials and production acceptance remain open.
+
+## 2026-11-19 selected production integration
+
+Production native v2 `c4d87256` integrates the unprivileged Linux x86-64
+restricted finite AVC path with its original domain, pidfd and partial-object
+cleanup. Effective cgroup2 delegation and common-ancestor permissions are
+verified before selection and pinned during preparation. The existing finite
+memory and pids limits are charged; unknown producer, executor and native
+peaks stay Unknown and cannot mint a trial permit. Unsupported authority before
+effects retains the trusted baseline; lost authority after effects remains held
+and refused. Known pre-clone setup uses typed exact-Arm settlement and native
+recovery is LiveOnly. Normal priority and PDEATHSIG are preserved.
+
+Normal hooks and exact Linux production compilation passed with zero warnings.
+The core fixture frontend passed at one job under an 8 GiB cap; no new Rust
+unit or runtime tests were executed. Physical kernel cases are authored but
+environment-required and ignored by default. Qualification requires an isolated
+Landlock ABI 6+ environment; the inspected ABI 4 VM does not qualify. The
+[resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) records the wider
+integration and outstanding acceptance.
 
 ## Restrictions precede the executable
 

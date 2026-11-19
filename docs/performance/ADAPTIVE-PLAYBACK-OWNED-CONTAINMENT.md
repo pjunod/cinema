@@ -1,13 +1,32 @@
 # Adaptive owned containment — what still stands before real trials
 
-**Status:** open · scoped implementation qualified; production coverage open ·
-2026-11-04. Companion to the [production policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md)
+**Status:** open · selected production integration compiled; coverage open ·
+2026-11-19. Companion to the [production policy](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md)
 and [canonical resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md).
 The [resource plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) remains normative.
 The [ordinary collector](ADAPTIVE-PLAYBACK-ORDINARY-COLLECTOR.md) records
 48 scoped passes; complete ownership and trial prerequisites remain open.
 The handoff's “M0 owned containment” includes native containment work; the
 plan's M0 also requires the complete affected-work inventory below.
+
+## 2026-11-19 production boundary
+
+The selected unprivileged Linux x86-64 finite AVC path integrates restricted
+native entry with the original domain, pidfd and partial-object cleanup.
+Selection verifies effective cgroup2 delegation and common-ancestor
+permissions; preparation pins that authority. Actual finite memory and pids
+limits remain charged. Unknown producer, executor and native peaks stay
+Unknown, so this integration does not authorize a trial permit. Unsupported
+authority before effects retains the trusted baseline; loss after effects stays
+held and refused. Known pre-clone setup uses typed exact-Arm settlement and
+native recovery is LiveOnly.
+
+The source passed normal hooks and exact Linux production compilation. The
+core fixture frontend passed at one job; no new Rust unit or runtime tests
+were executed. The authored physical kernel cases require an isolated Landlock
+ABI 6+ environment and are ignored by default. Complete graph coverage and
+trial qualification remain open; see the
+[resource ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md).
 
 ## Original kernel ownership precedes executable entry
 
@@ -17,16 +36,16 @@ an ordinary empty domain, exact finite limit readbacks, zero swap and grouped
 OOM handling. A regular directory, substituted mount, unsupported namespace,
 missing controller or uncertain setup cannot produce entry authority.
 
-The fixture launcher uses `clone3(CLONE_INTO_CGROUP | CLONE_PIDFD)`: the child
+The original fixture launcher uses `clone3(CLONE_INTO_CGROUP | CLONE_PIDFD)`: the child
 is born inside that original configured domain. There is no post-spawn PID
-migration or arbitrary `Command`/`pre_exec` callback. The sealed descriptor
-specification has no production constructor until its executable, syscall and
-filesystem profile are audited. Unsupported atomic entry refuses; it never
+migration or arbitrary `Command`/`pre_exec` callback. At that checkpoint the sealed descriptor
+specification had no production constructor pending executable, syscall and
+filesystem profile audit. Unsupported atomic entry refuses; it never
 falls back to execution outside the domain.
 
-Production FFmpeg still uses its existing launcher. Durable graph/recovery
-integration must retain the original domain identity before this backend can
-serve production work; the fixture path supplies no restart acceptance.
+The earlier fixture path supplied no restart acceptance. The selected
+production integration above retains the original domain; broader durable
+graph and recovery acceptance remains open.
 
 The original child owns its domain and pidfd. Dropping a waiter transfers
 those same objects to bounded cleanup custody. Root wait, exec-error reporting,
@@ -38,8 +57,8 @@ Identity or cleanup uncertainty retains custody instead of returning capacity.
 The delegated subtree is trusted controller authority. Pinning descriptors
 does not prevent another principal with that authority from raising limits or
 migrating tasks. A production child must have no controller-write, descriptor
-acquisition, namespace or privilege escape. The fixture-only profile does not
-claim that production sandbox.
+acquisition, namespace or privilege escape. The earlier fixture-only profile did not claim that production sandbox; the
+selected production boundary is described above.
 
 ## Kernel enforcement does not certify a complete producer peak
 
