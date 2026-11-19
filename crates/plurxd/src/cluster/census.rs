@@ -124,7 +124,7 @@ impl Class {
     }
 
     fn method(name: &str) -> Option<Self> {
-        Self::method_given(name, &manager_pub_fns_cached())
+        Self::method_given(name, manager_pub_fns_cached())
     }
 
     /// A role or roster name counts while the manager exposes its inherent
