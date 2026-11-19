@@ -134,7 +134,22 @@ class MainUnitReceiptsCase(unittest.TestCase):
                               side_effect=lambda commit, _row: orig_digest if commit == X else digest):
                 inputs = main.ReviewedInputs(Y)
                 self.assertIs(inputs.applicable(ONE, source, recorded), expected)
-                self.assertTrue(inputs.applicable(TWO, source, None))
+                self.assertEqual(inputs.applicable(TWO, source, None),
+                                 name not in ('unbound protocol reference', 'unreadable producer', 'ambiguous protocol'))
+
+        for protocol, recorded in (('', None), ('REVIEWED_INPUTS_PROTOCOL = 1', digest)):
+            for change, current_rows in (
+                ('removed', []),
+                ('narrowed', [dict(row, id_prefix=THREE)]),
+            ):
+                def read(_command, address):
+                    if address == X + ':' + main.PRODUCER:
+                        return protocol
+                    rows = [row] if address.startswith(X + ':') else current_rows
+                    return json.dumps({'version': 1, 'families': rows})
+                with self.subTest(protocol=protocol, change=change), \
+                     patch.object(main.adoption, 'git', side_effect=read):
+                    self.assertFalse(main.ReviewedInputs(Y).applicable(ONE, source, recorded))
 
     def test_reviewed_bindings_cannot_be_grafted_or_relabelled(self):
         digest = '0' * 64

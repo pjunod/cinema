@@ -194,17 +194,15 @@ class ReviewedInputs:
 
     def applicable(self, test, source, recorded):
         try:
-            row = self.witness(self.commit, test)
-            if row is None:
-                return True
             origin = source['commit']
-            protocol = self.origin_protocol(origin)
-            if recorded is None and protocol is not None:
-                return False
-            if recorded is not None and protocol is None:
-                return False
+            row = self.witness(self.commit, test)
             original = self.witness(origin, test)
+            protocol = self.origin_protocol(origin)
+            if row is None:
+                return original is None and recorded is None
             if original is None or original['id_prefix'] != row['id_prefix']:
+                return False
+            if (recorded is None) != (protocol is None):
                 return False
             origin_digest = adoption.input_digest(origin, original)
             return ((recorded is None or recorded == origin_digest)
