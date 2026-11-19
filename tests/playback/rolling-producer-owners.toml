@@ -4394,8 +4394,8 @@ expected_occurrences = 26
 
 [[module_structures]]
 id = "namespaced-time-constructor"
-# Four test-only timers wait for the artwork fixture identity and the offline
-# worker result. Each pair uses a bounded timeout around the positive condition.
+# Two test-only artwork timers bound observation of the fixture identity.
+# The offline failure fixture awaits one production claim pass without polling.
 # Source-budget audit (8ab61a779 -> bbc5c1664): +11 timer shapes. Group's
 # 100 ms failed-wait retry and 25 ms quiescence poll retain the owned children,
 # registrations and pause guard until positive reap; neither is settlement.
