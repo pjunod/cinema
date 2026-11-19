@@ -11,7 +11,9 @@ use super::{
 };
 
 mod adoption;
+mod staged_adoption;
 pub(crate) use adoption::{adopt, commit_adoption, publish, AdoptionPlan};
+pub(crate) use staged_adoption::stage;
 
 macro_rules! impl_attempt_store {
     ($store:ty) => {
@@ -60,6 +62,15 @@ macro_rules! impl_attempt_store {
                 crate::error::StoreError,
             > {
                 crate::store::adaptive_resource_attempts::transactions::adopt(self, input).await
+            }
+            async fn stage_adaptive_winner(
+                &self,
+                input: &crate::store::adaptive_resource_attempts::AdaptiveStagedAdoption,
+            ) -> Result<
+                crate::store::adaptive_resource_attempts::AttemptAdoption,
+                crate::error::StoreError,
+            > {
+                crate::store::adaptive_resource_attempts::transactions::stage(self, input).await
             }
             async fn publish_adaptive_adoption(
                 &self,

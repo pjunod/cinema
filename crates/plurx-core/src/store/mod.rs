@@ -595,6 +595,12 @@ pub(crate) const MEDIA_SESSION_PREPARATIONS_SCHEMA: &str =
         PRIMARY KEY (user_id, playback_id)
     ) STRICT;";
 
+// Common caps for ordinary and adaptive session preparation.
+pub(crate) const MEDIA_SESSION_MAX_CURRENT_PER_USER: i64 = 64;
+pub(crate) const MEDIA_SESSION_MAX_SESSION_ROWS_PER_USER: i64 = 4_096;
+pub(crate) const MEDIA_SESSION_MAX_OWNED: i64 = 4_096;
+pub(crate) const MEDIA_SESSION_MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
+
 /// The server-owned recovery epoch, on the session row that carries it.
 ///
 /// `media_session_producer_recovery` is keyed by `(user_id, playback_id,

@@ -7,7 +7,7 @@ pub(crate) struct AdoptionPlan {
     statements: Vec<String>,
 }
 
-fn route_json(alias: &str) -> String {
+pub(super) fn route_json(alias: &str) -> String {
     let fields = [
         "incarnation_id",
         "session_id",
@@ -121,6 +121,57 @@ fn exact_activation(input: &AdaptiveAdoption) -> Result<bool, StoreError> {
     )
 }
 
+pub(super) async fn check_open_winner<B: Backend>(
+    store: &B,
+    operation: &Operation<'_>,
+    worker: &WorkerBinding,
+) -> Result<Option<AttemptRefusal>, StoreError> {
+    let binding = operation.binding;
+    let key = operation.key;
+    let Some(current) = status(store, &binding.key, &binding.principal).await? else {
+        return Ok(Some(AttemptRefusal::StaleBinding));
+    };
+    if current.binding != *binding {
+        return Ok(Some(AttemptRefusal::Conflict));
+    }
+    if current.winner_attempt_id != Some(key.attempt_id)
+        || current.disposition != RequestDisposition::Open
+    {
+        return Ok(Some(AttemptRefusal::WinnerLost));
+    }
+    if current.sequence != operation.context.expected_request_sequence
+        || !current.attempts.iter().any(|a| {
+            a.key == *key
+                && a.sequence == operation.context.expected_attempt_sequence
+                && a.phase == AttemptPhase::Winner
+                && a.worker.as_ref() == Some(worker)
+        })
+    {
+        return Ok(Some(AttemptRefusal::StaleBinding));
+    }
+    if operation.context.now_ms >= worker.prepared_expires_at_ms {
+        return Ok(Some(AttemptRefusal::Expired));
+    }
+    Ok(None)
+}
+
+pub(super) fn open_winner_assertion(
+    operation: &Operation<'_>,
+    worker: &WorkerBinding,
+) -> Result<String, StoreError> {
+    let attempt = quote(&operation.key.attempt_id.to_string());
+    Ok(schema::assertion(&format!(
+        "({}) AND ({}) AND EXISTS(SELECT 1 FROM media_resource_requests r WHERE {}
+         AND r.disposition='open' AND r.winner_attempt_id={attempt})
+         AND EXISTS(SELECT 1 FROM media_resource_attempts WHERE attempt_id={attempt}
+         AND phase='winner' AND worker_json={})",
+        exact_request(operation)?,
+        exact_attempt(operation)?,
+        request_predicate(operation.binding, "r"),
+        quote(&encode(worker)?)
+    )))
+}
+
 pub(crate) async fn adopt<B: Backend>(
     store: &B,
     input: &AdaptiveAdoption,
@@ -146,34 +197,13 @@ pub(crate) async fn adopt<B: Backend>(
     let binding = &input.binding;
     let key = &input.key;
     let activation = &input.activation;
-    let Some(current) = status(store, &binding.key, &binding.principal).await? else {
-        return Ok(AttemptAdoption::Refused(AttemptRefusal::StaleBinding));
-    };
-    if current.binding != *binding {
-        return Ok(AttemptAdoption::Refused(AttemptRefusal::Conflict));
-    }
-    if current.winner_attempt_id != Some(key.attempt_id)
-        || current.disposition != RequestDisposition::Open
-    {
-        return Ok(AttemptAdoption::Refused(AttemptRefusal::WinnerLost));
-    }
-    if current.sequence != input.context.expected_request_sequence
-        || !current.attempts.iter().any(|a| {
-            a.key == *key
-                && a.sequence == input.context.expected_attempt_sequence
-                && a.phase == AttemptPhase::Winner
-                && a.worker.as_ref() == Some(&input.worker)
-        })
-    {
-        return Ok(AttemptAdoption::Refused(AttemptRefusal::StaleBinding));
-    }
-    if input.context.now_ms >= input.worker.prepared_expires_at_ms {
-        return Ok(AttemptAdoption::Refused(AttemptRefusal::Expired));
+    if let Some(reason) = check_open_winner(store, &operation, &input.worker).await? {
+        return Ok(AttemptAdoption::Refused(reason));
     }
     let layout = store.attempt_layout().await?;
     let user = binding.principal.local_user_id().ok_or_else(invalid)?;
     let mut statements = operation.open(layout, store.attempt_outage_fence())?;
-    statements.push(schema::assertion(&format!("({}) AND ({}) AND EXISTS(SELECT 1 FROM media_resource_requests r WHERE {} AND r.disposition='open' AND r.winner_attempt_id={}) AND EXISTS(SELECT 1 FROM media_resource_attempts WHERE attempt_id={} AND phase='winner' AND worker_json={})",exact_request(&operation)?,exact_attempt(&operation)?,request_predicate(binding,"r"),quote(&key.attempt_id.to_string()),quote(&key.attempt_id.to_string()),quote(&encode(&input.worker)?))));
+    statements.push(open_winner_assertion(&operation, &input.worker)?);
     let pointer_owner = layout.owner("pointer");
     let predecessor = binding
         .expected_predecessor_incarnation_id

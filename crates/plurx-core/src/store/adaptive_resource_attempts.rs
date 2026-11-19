@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    domain::{MediaSessionActivation, MediaSessionActivationOutcome},
+    domain::{MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionPreparation},
     error::StoreError,
     playback_principal::PlaybackPrincipal,
 };
@@ -133,6 +133,18 @@ pub struct AdaptiveAdoption {
     pub key: AttemptKey,
     pub worker: WorkerBinding,
     pub activation: MediaSessionActivation,
+}
+
+/// Transfer the exact winner into the existing pending successor slot.
+/// The active predecessor and its viewer commit authority stay in place.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdaptiveStagedAdoption {
+    pub context: MutationContext,
+    pub binding: RequestBinding,
+    pub key: AttemptKey,
+    pub worker: WorkerBinding,
+    pub preparation: MediaSessionPreparation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +291,12 @@ pub trait AdaptiveResourceAttemptStore: Send + Sync {
     async fn adopt_adaptive_winner(
         &self,
         adoption: &AdaptiveAdoption,
+    ) -> Result<AttemptAdoption, StoreError>;
+    /// Stage a winner without advancing the active playback pointer. The
+    /// prepared successor is governed by the existing actor commit/abort CAS.
+    async fn stage_adaptive_winner(
+        &self,
+        adoption: &AdaptiveStagedAdoption,
     ) -> Result<AttemptAdoption, StoreError>;
     /// The original worker publishes its own committed Adopt (BLOCKED -> 0)
     /// after attaching the Rendition, replaying the SAME retained DTO. `None`

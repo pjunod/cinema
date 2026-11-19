@@ -767,3 +767,273 @@ async fn adaptive_publication_refuses_mismatched_live_route_and_job_leases() {
     })
     .await;
 }
+
+async fn ready_staged_adoption(
+    store: &dyn Store,
+) -> (AdaptiveAdoption, AdaptiveStagedAdoption, MediaSessionRoute) {
+    let mut fixture = AttemptFixture::new(store).await;
+    let incumbent = store
+        .activate_media_session(&ordinary(&fixture))
+        .await
+        .expect("ordinary activation")
+        .expect("incumbent")
+        .route;
+    fixture.claim.binding.expected_predecessor_incarnation_id =
+        Some(Uuid::parse_str(&incumbent.incarnation_id).expect("incumbent identity"));
+    fixture.claim.binding.expected_predecessor_owner_epoch = Some(incumbent.owner_epoch);
+    let desired = store
+        .record_desired_selection(
+            &incumbent.principal,
+            &incumbent.playback_id,
+            &"1".repeat(64),
+            "{}",
+            10_001,
+        )
+        .await
+        .expect("actual viewer ask");
+    fixture.claim.binding.expected_desired_revision = Some(desired.revision);
+    let activation = ready_adoption(store, &fixture).await;
+    let staged = AdaptiveStagedAdoption {
+        context: activation.context.clone(),
+        binding: activation.binding.clone(),
+        key: activation.key.clone(),
+        worker: activation.worker.clone(),
+        preparation: plurx_core::domain::MediaSessionPreparation {
+            quality_cancellation_key: Some("e".repeat(64)),
+            incarnation_id: activation.activation.incarnation_id.clone(),
+            session_id: activation.activation.session_id.clone(),
+            principal: incumbent.principal.clone(),
+            playback_id: incumbent.playback_id.clone(),
+            expected_predecessor_incarnation_id: incumbent.incarnation_id.clone(),
+            expected_predecessor_owner_node_id: incumbent.owner_node_id.clone(),
+            expected_predecessor_owner_epoch: incumbent.owner_epoch,
+            request_fingerprint: activation.binding.request_fingerprint.clone(),
+            owner_node_id: activation.key.worker_node_id.clone(),
+            recipe_json: activation.activation.recipe_json.clone(),
+            response_json: activation.activation.response_json.clone(),
+            media_origin_ms: 0,
+            now_ms: activation.context.now_ms,
+            expected_desired_revision: Some(desired.revision),
+            deadline_ms: 25_000,
+        },
+    };
+    (activation, staged, incumbent)
+}
+
+#[tokio::test]
+async fn staged_adopt_keeps_incumbent_current_until_existing_viewer_commit() {
+    for_each_adaptive_backend(|store, _| async move {
+        let (ordinary, staged, incumbent) = ready_staged_adoption(store.as_ref()).await;
+        let p = &staged.preparation;
+        let applied = store
+            .stage_adaptive_winner(&staged)
+            .await
+            .expect("atomic stage");
+        let AttemptAdoption::Applied(applied) = applied else {
+            panic!("expected original staged route");
+        };
+        assert_eq!(applied.predecessor.as_ref(), Some(&incumbent));
+        assert_eq!(applied.route.owner_epoch, 1);
+        assert_eq!(applied.route.incarnation_id, p.incarnation_id);
+        assert_eq!(
+            applied.route.publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED
+        );
+        assert_eq!(applied.route.lease_expires_at_ms, p.deadline_ms);
+        assert_eq!(
+            store
+                .media_session_route_for_playback(&p.principal, &p.playback_id)
+                .await
+                .expect("active pointer"),
+            Some(incumbent.clone())
+        );
+        assert_eq!(
+            store
+                .staged_media_session_for_playback(&p.principal, &p.playback_id)
+                .await
+                .expect("pending ledger")
+                .expect("original staging")
+                .staged_incarnation_id,
+            p.incarnation_id
+        );
+        assert_eq!(
+            store
+                .stage_adaptive_winner(&staged)
+                .await
+                .expect("exact replay"),
+            AttemptAdoption::Replay(applied)
+        );
+        assert_eq!(
+            store
+                .adopt_adaptive_winner(&ordinary)
+                .await
+                .expect("other mode's receipt"),
+            AttemptAdoption::Refused(AttemptRefusal::Conflict)
+        );
+        let mut changed = staged.clone();
+        changed.preparation.deadline_ms += 1;
+        assert_eq!(
+            store
+                .stage_adaptive_winner(&changed)
+                .await
+                .expect("different replay"),
+            AttemptAdoption::Refused(AttemptRefusal::Conflict)
+        );
+        let current = store
+            .adaptive_request_status(&staged.binding.key, &staged.binding.principal)
+            .await
+            .expect("attempt ledger")
+            .expect("transferred original");
+        assert_eq!(current.disposition, RequestDisposition::Adopted);
+        let fence = AttemptFence {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: current.sequence,
+                expected_attempt_sequence: attempt_sequence(&current, &staged.key),
+                now_ms: p.now_ms + 1,
+            },
+            binding: staged.binding.clone(),
+            key: staged.key.clone(),
+            cancel_request: true,
+        };
+        assert_eq!(
+            store
+                .fence_adaptive_attempt(&fence)
+                .await
+                .expect("attempt Fence after transfer"),
+            AttemptMutation::Refused(AttemptRefusal::WinnerLost)
+        );
+        let commit = plurx_core::domain::MediaSessionPreparationCommitRequest {
+            staged_incarnation_id: p.incarnation_id.clone(),
+            expected_predecessor_owner_node_id: p.expected_predecessor_owner_node_id.clone(),
+            expected_predecessor_owner_epoch: p.expected_predecessor_owner_epoch,
+            expected_desired_revision: p.expected_desired_revision,
+            now_ms: p.now_ms + 2,
+            lease_expires_at_ms: 35_000,
+            control_receipt: None,
+        };
+        let committed = store
+            .commit_media_session_preparation(&p.principal, &p.playback_id, &commit)
+            .await
+            .expect("existing viewer transaction")
+            .expect("same successor");
+        assert_eq!(committed.route.incarnation_id, p.incarnation_id);
+        assert_eq!(
+            committed.route.lease_expires_at_ms,
+            commit.lease_expires_at_ms
+        );
+        assert_eq!(
+            store
+                .media_session_route_for_playback(&p.principal, &p.playback_id)
+                .await
+                .expect("advanced pointer")
+                .expect("new route")
+                .incarnation_id,
+            p.incarnation_id
+        );
+        assert!(store
+            .staged_media_session_for_playback(&p.principal, &p.playback_id)
+            .await
+            .expect("pending slot consumed")
+            .is_none());
+        let draining = store
+            .media_session_route_by_incarnation(&incumbent.incarnation_id)
+            .await
+            .expect("predecessor")
+            .expect("draining predecessor");
+        assert_eq!(draining.state, "active");
+        assert_eq!(draining.lease_expires_at_ms, incumbent.lease_expires_at_ms);
+        assert!(draining.drain_deadline_ms.is_some());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn staged_adopt_refuses_changed_ask_and_abort_keeps_native_debt() {
+    for_each_adaptive_backend(|store, _| async move {
+        let (_, staged, incumbent) = ready_staged_adoption(store.as_ref()).await;
+        let p = &staged.preparation;
+        let wrong_owner = {
+            let mut wrong = staged.clone();
+            wrong.preparation.expected_predecessor_owner_node_id = "another-owner".into();
+            wrong
+        };
+        assert!(store.stage_adaptive_winner(&wrong_owner).await.is_err());
+        let before = store
+            .adaptive_request_status(&staged.binding.key, &staged.binding.principal)
+            .await
+            .expect("before failed stage")
+            .expect("pending winner");
+        store
+            .record_desired_selection(
+                &p.principal,
+                &p.playback_id,
+                &"2".repeat(64),
+                "{}",
+                p.now_ms + 1,
+            )
+            .await
+            .expect("new viewer ask");
+        assert!(store.stage_adaptive_winner(&staged).await.is_err());
+        assert_eq!(
+            store
+                .adaptive_request_status(&staged.binding.key, &staged.binding.principal)
+                .await
+                .expect("CAS rollback"),
+            Some(before)
+        );
+        assert_eq!(
+            store
+                .media_session_route_for_playback(&p.principal, &p.playback_id)
+                .await
+                .expect("original pointer"),
+            Some(incumbent)
+        );
+        assert!(store
+            .staged_media_session_for_playback(&p.principal, &p.playback_id)
+            .await
+            .expect("empty preparation slot")
+            .is_none());
+
+        let (_, staged, incumbent) = ready_staged_adoption(store.as_ref()).await;
+        let p = &staged.preparation;
+        assert!(matches!(
+            store
+                .stage_adaptive_winner(&staged)
+                .await
+                .expect("fresh stage"),
+            AttemptAdoption::Applied(_)
+        ));
+        let abort = plurx_core::domain::MediaSessionPreparationAbortRequest {
+            staged_incarnation_id: p.incarnation_id.clone(),
+            expected_predecessor_owner_node_id: p.expected_predecessor_owner_node_id.clone(),
+            expected_predecessor_owner_epoch: p.expected_predecessor_owner_epoch,
+            now_ms: p.now_ms + 1,
+        };
+        let ended = store
+            .abort_media_session_preparation(&p.principal, &p.playback_id, &abort)
+            .await
+            .expect("existing abort")
+            .expect("exact staged route");
+        assert_eq!(ended.state, "ended");
+        assert_eq!(
+            store
+                .media_session_route_for_playback(&p.principal, &p.playback_id)
+                .await
+                .expect("aborted stage leaves active pointer"),
+            Some(incumbent)
+        );
+        let status = store
+            .adaptive_request_status(&staged.binding.key, &staged.binding.principal)
+            .await
+            .expect("retained status")
+            .expect("original winner");
+        assert_eq!(status.disposition, RequestDisposition::Adopted);
+        assert_eq!(status.attempts[0].phase, AttemptPhase::Winner);
+        assert!(matches!(
+            store.stage_adaptive_winner(&staged).await.expect("ended exact replay"),
+            AttemptAdoption::Replay(outcome) if outcome.route.state == "ended"
+        ));
+    })
+    .await;
+}
