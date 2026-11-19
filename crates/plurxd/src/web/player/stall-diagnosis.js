@@ -90,11 +90,12 @@ async function startTranscodeFallback(reason, note){
      &&hasPendingPlaybackOpen(PLAYER)) return false;
   if(hasPendingPlaybackOpen(PLAYER)
      &&reason!=="stall-manual"&&reason!=="stall-terminal") return false;
-  const startSec=positionForPlaybackIntent(v,PLAYER);
+  const me=PLAYER, startSec=positionForPlaybackIntent(v,me);
+  const viewerInitiated=reason==="stall-manual"||reason==="stall-terminal";
+  const originStart=me.hlsStartup?.transport==="native"&&!me.controlSeek&&Math.round(startSec*1000)===0;
   endWait(false);
-  beginPlaybackControlSeek(PLAYER,startSec,
-    reason==="stall-manual"||reason==="stall-terminal");
-  const me=PLAYER;
+  if(!originStart) beginPlaybackControlSeek(me,startSec,viewerInitiated);
+  else if(viewerInitiated) supersedePlaybackControlIntent(me);
   // Before the session is opened, because `transcodeOpts` reads it: a stream
   // the browser refused is not a stream it lacked the pixels for, so the
   // replacement keeps the source's resolution (see sessionHeight). Set only
@@ -111,6 +112,7 @@ async function startTranscodeFallback(reason, note){
   // in when this caller brought one.
   return requestPlaybackMediaChange(me,{method:'transcode',copyHls:false,
     reason:reason||"fallback",note:note||me.rescuedNote,
+    ...(originStart?{reopenPositionSec:0}:{}),
     automatic:reason==='decode-rescue'||reason==='auto-supply',
     from:reason==='auto-supply'?me.method:null,switchReason:"supply stalls"});
 }
@@ -901,12 +903,14 @@ function retryPlayback(){
     PENDING_ATTEMPT_REASON="retry";
     if(PLAYER?.fileId===retry.fileId){
       retry.wantsPlayback=PLAYER.wantsPlayback;
-      beginPlaybackControlSeek(PLAYER,retry.resumeMs/1000);
+      if(retry.resumeMs>0||PLAYER.controlSeek) beginPlaybackControlSeek(PLAYER,retry.resumeMs/1000);
     }
     return play(retry.fileId,retry.title,retry.resumeMs,retry.knownDurMs,retry.meta,null,retry);
   }
   if(!PLAYER) return;
-  const t=(PLAYER.stallFrom!=null)?PLAYER.stallFrom:pbPosSec();
+  const t=PLAYER.controlSeek?.targetMs!=null
+    ? (PLAYER.controlSeek.targetMs+(PLAYER.bookOffset||0))/1000
+    : PLAYER.stallFrom??pbPosSec();
   if(PLAYER.playPermissionDenied){
     // The stopped owner is already retired. Reset the SAME element within the
     // retry gesture, before play can await a replacement session. WebKit's
@@ -925,11 +929,19 @@ function retryPlayback(){
     return play(p.fileId,p.title||"",targetMs,p.knownDur||0,p.meta,null,retry);
   }
   raisePlaybackSurface("owner_recovery_step",{title:"Retrying…",detail:null});
-  seekTo(t,true);
+  return seekTo(t,true,null,true,null,{stallRetry:true});
 }
-async function stallDiagnose(){
+async function stallDiagnose(sourceOwner=null){
   const v=document.getElementById("video");
   const p=PLAYER;
+  // A terminal native request can fail before metadata, when the video
+  // clock still belongs to the previous source. Only the failed execution
+  // can authorize startup diagnosis while presentation ownership is pending.
+  const ownsDiagnosis=()=>sourceOwner
+    ? sourceOwner.player===p&&sourceOwner.video===v&&sourceOwner.episode===p?.hlsStartup
+      &&sourceOwner.episode.state==='exhausted'&&sourceOwner.current()
+    : playbackOwnsAttachedMedia(p);
+  if(sourceOwner&&!ownsDiagnosis()) return;
   // The native timer and this existing timer can mature in either order.
   // A fresh independent-progress diagnosis concludes only the sensor, never
   // the attached transport. Do this before generic stall reporting/effects.
@@ -952,10 +964,10 @@ async function stallDiagnose(){
   // not reinterpret that cancelled episode as a fresh generic source stall.
   if(playbackAttemptTerminallyStopped(p)) return;
   const hlsStartup=hlsStartupIncomplete(p);
-  if(!playbackOwnsAttachedMedia(p) || (!hlsStartup&&p.started)) return;
+  if(!ownsDiagnosis() || (!hlsStartup&&p.started)) return;
   if(hlsStartup&&p.hlsStartup.state==='paused') return;
   const generation=p._seekToken||0, action=p.controlIntentGeneration||0, attachment=p.mediaAttachment;
-  const current=()=>playbackOwnsAttachedMedia(p)&&(hlsStartupIncomplete(p)||!p.started)
+  const current=()=>ownsDiagnosis()&&(hlsStartupIncomplete(p)||!p.started)
     &&!playbackAttemptTerminallyStopped(p,attachment)
     &&p.mediaAttachment===attachment
     &&(p._seekToken||0)===generation
@@ -1005,10 +1017,11 @@ async function stallDiagnose(){
   }
   const episode=hlsStartup?p.hlsStartup:null;
   const now=performance.now();
+  const media=playbackOwnsAttachedMedia(p)?v:null;
   console.warn("[cinema] playback stall diagnosis",{method:p.method,
     resource_class:hlsStartup?"hls_startup":"playback_source",
-    networkState:v&&v.networkState,readyState:v&&v.readyState,
-    error:v&&v.error&&v.error.code,verdict});
+    networkState:media&&media.networkState,readyState:media&&media.readyState,
+    error:media&&media.error&&media.error.code,verdict});
   finishStallRecovery("failed",verdict);
   clientLog({level:"warn",event:"stall",
     resource_class:hlsStartup?"hls_startup":"playback_source",
