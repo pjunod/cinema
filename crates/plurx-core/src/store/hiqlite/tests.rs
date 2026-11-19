@@ -2705,8 +2705,8 @@ async fn an_unclaimed_scope_folds_into_the_background_table_when_dropped() {
 #[test]
 fn token_policy_write_checks_the_exact_claim_in_its_replicated_statement() {
     validate_sql(AUTH_TOKEN_POLICY_WRITE_SQL).expect("actual statement parameter order");
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
-    connection.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT,updated_at INTEGER);        CREATE TABLE cluster_credential_guard_activation(singleton INTEGER PRIMARY KEY);        CREATE TABLE cluster_cache_admin_revocation_leases(claim_id TEXT PRIMARY KEY);        INSERT INTO cluster_credential_guard_activation VALUES(1);        INSERT INTO cluster_cache_admin_revocation_leases VALUES('current-claim');").unwrap();
+    let connection = rusqlite::Connection::open_in_memory().expect("open policy claim SQL fixture");
+    connection.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT,updated_at INTEGER);        CREATE TABLE cluster_credential_guard_activation(singleton INTEGER PRIMARY KEY);        CREATE TABLE cluster_cache_admin_revocation_leases(claim_id TEXT PRIMARY KEY);        INSERT INTO cluster_credential_guard_activation VALUES(1);        INSERT INTO cluster_cache_admin_revocation_leases VALUES('current-claim');").expect("install exact policy exclusion fixture");
     for claim in ["", "retired-claim"] {
         assert_eq!(
             connection
@@ -2714,7 +2714,7 @@ fn token_policy_write_checks_the_exact_claim_in_its_replicated_statement() {
                     AUTH_TOKEN_POLICY_WRITE_SQL,
                     rusqlite::params![keys::AUTH_TOKEN_IDLE_DAYS, "1", 100, claim]
                 )
-                .unwrap(),
+                .expect("execute policy write under absent or wrong claim"),
             0
         );
     }
@@ -2724,19 +2724,19 @@ fn token_policy_write_checks_the_exact_claim_in_its_replicated_statement() {
                 AUTH_TOKEN_POLICY_WRITE_SQL,
                 rusqlite::params![keys::AUTH_TOKEN_IDLE_DAYS, "1", 100, "current-claim"]
             )
-            .unwrap(),
+            .expect("execute policy write under installed claim"),
         1
     );
     connection
         .execute("DELETE FROM cluster_cache_admin_revocation_leases", [])
-        .unwrap();
+        .expect("release installed policy exclusion");
     assert_eq!(
         connection
             .execute(
                 AUTH_TOKEN_POLICY_WRITE_SQL,
                 rusqlite::params![keys::AUTH_TOKEN_IDLE_DAYS, "30", 101, "current-claim"]
             )
-            .unwrap(),
+            .expect("execute policy write under released claim"),
         0
     );
     assert_eq!(
@@ -2746,7 +2746,7 @@ fn token_policy_write_checks_the_exact_claim_in_its_replicated_statement() {
                 [keys::AUTH_TOKEN_IDLE_DAYS],
                 |row| row.get::<_, String>(0)
             )
-            .unwrap(),
+            .expect("read policy after refused released-claim write"),
         "1"
     );
 }

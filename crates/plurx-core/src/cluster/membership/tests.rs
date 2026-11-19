@@ -10783,13 +10783,15 @@ mod floor_advisory {
 #[test]
 fn token_policy_guards_refuse_legacy_insert_update_delete_and_key_renaming() {
     let mut connection = rusqlite::Connection::open_in_memory().expect("sqlite");
-    connection.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER);        CREATE TABLE cluster_credential_guard_activation(singleton INTEGER PRIMARY KEY);        CREATE TABLE cluster_credential_mutation_intents(singleton INTEGER PRIMARY KEY);        INSERT INTO settings VALUES('auth.token_idle_days','30',1),('ordinary','x',1);        INSERT INTO cluster_credential_guard_activation VALUES(1);").unwrap();
+    connection.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER);        CREATE TABLE cluster_credential_guard_activation(singleton INTEGER PRIMARY KEY);        CREATE TABLE cluster_credential_mutation_intents(singleton INTEGER PRIMARY KEY);        INSERT INTO settings VALUES('auth.token_idle_days','30',1),('ordinary','x',1);        INSERT INTO cluster_credential_guard_activation VALUES(1);").expect("install activated policy guard fixture");
     for trigger in [
         REQUIRE_CURRENT_AUTH_POLICY_INSERT_SQL,
         REQUIRE_CURRENT_AUTH_POLICY_UPDATE_SQL,
         REQUIRE_CURRENT_AUTH_POLICY_DELETE_SQL,
     ] {
-        connection.execute_batch(trigger).unwrap();
+        connection
+            .execute_batch(trigger)
+            .expect("install actual policy trigger");
     }
     for sql in [
         "INSERT INTO settings VALUES('auth.token_expiry_enabled','0',2)",
@@ -10801,7 +10803,7 @@ fn token_policy_guards_refuse_legacy_insert_update_delete_and_key_renaming() {
         assert!(
             connection
                 .execute(sql, [])
-                .unwrap_err()
+                .expect_err("legacy policy mutation must be rejected")
                 .to_string()
                 .contains("requires current binary"),
             "{sql}"
@@ -10809,24 +10811,28 @@ fn token_policy_guards_refuse_legacy_insert_update_delete_and_key_renaming() {
     }
     connection
         .execute("UPDATE settings SET value='y' WHERE key='ordinary'", [])
-        .unwrap();
-    let transaction = connection.transaction().unwrap();
+        .expect("ordinary setting remains writable");
+    let transaction = connection
+        .transaction()
+        .expect("begin current policy mutation transaction");
     transaction
         .execute(
             "INSERT INTO cluster_credential_mutation_intents VALUES(1)",
             [],
         )
-        .unwrap();
+        .expect("install transaction-local credential intent");
     transaction
         .execute(
             "UPDATE settings SET value='1' WHERE key='auth.token_idle_days'",
             [],
         )
-        .unwrap();
+        .expect("write policy with current transaction intent");
     transaction
         .execute("DELETE FROM cluster_credential_mutation_intents", [])
-        .unwrap();
-    transaction.commit().unwrap();
+        .expect("clear transaction-local credential intent");
+    transaction
+        .commit()
+        .expect("commit current policy mutation");
     assert_eq!(
         connection
             .query_row(
@@ -10834,15 +10840,16 @@ fn token_policy_guards_refuse_legacy_insert_update_delete_and_key_renaming() {
                 [],
                 |row| row.get::<_, String>(0)
             )
-            .unwrap(),
+            .expect("read committed policy value"),
         "1"
     );
 }
 
 #[test]
 fn general_token_cache_protocol_refuses_a_fresh_v4_member_among_v5_members() {
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
-    connection.execute_batch("CREATE TABLE cluster_nodes(node_id TEXT PRIMARY KEY,raft_id INTEGER,last_seen_at INTEGER,removed_at INTEGER);        CREATE TABLE cluster_node_capabilities(node_id TEXT,capability TEXT,last_seen_at INTEGER);        CREATE TABLE cluster_credential_guard_activation(singleton INTEGER PRIMARY KEY);        CREATE TABLE cluster_cache_admin_revocation_leases(claim_id TEXT);        INSERT INTO cluster_nodes VALUES('voter',1,100,NULL),('learner',2,100,NULL);        INSERT INTO cluster_node_capabilities VALUES('voter','cache_admin_revocation_v5',100),('learner','cache_admin_revocation_v4',100);        INSERT INTO cluster_credential_guard_activation VALUES(1);").unwrap();
+    let connection =
+        rusqlite::Connection::open_in_memory().expect("open mixed-version protocol fixture");
+    connection.execute_batch("CREATE TABLE cluster_nodes(node_id TEXT PRIMARY KEY,raft_id INTEGER,last_seen_at INTEGER,removed_at INTEGER);        CREATE TABLE cluster_node_capabilities(node_id TEXT,capability TEXT,last_seen_at INTEGER);        CREATE TABLE cluster_credential_guard_activation(singleton INTEGER PRIMARY KEY);        CREATE TABLE cluster_cache_admin_revocation_leases(claim_id TEXT);        INSERT INTO cluster_nodes VALUES('voter',1,100,NULL),('learner',2,100,NULL);        INSERT INTO cluster_node_capabilities VALUES('voter','cache_admin_revocation_v5',100),('learner','cache_admin_revocation_v4',100);        INSERT INTO cluster_credential_guard_activation VALUES(1);").expect("install voter and learner capability fixture");
     let blocked = || {
         connection
             .query_row(
@@ -10850,21 +10857,21 @@ fn general_token_cache_protocol_refuses_a_fresh_v4_member_among_v5_members() {
                 rusqlite::params!["[1,2]"],
                 |row| row.get::<_, i64>(0),
             )
-            .unwrap()
+            .expect("read exact committed revocation readiness")
     };
     assert_eq!(
         blocked(),
         1,
         "a current v4 heartbeat cannot activate general authentication reuse"
     );
-    connection.execute("UPDATE cluster_node_capabilities SET capability='cache_admin_revocation_v5' WHERE node_id='learner'", []).unwrap();
+    connection.execute("UPDATE cluster_node_capabilities SET capability='cache_admin_revocation_v5' WHERE node_id='learner'", []).expect("advance learner to current v5 capability");
     assert_eq!(blocked(), 0);
     connection
         .execute(
             "UPDATE cluster_nodes SET last_seen_at=101 WHERE node_id='learner'",
             [],
         )
-        .unwrap();
+        .expect("advance learner heartbeat without its matching capability");
     assert_eq!(
         blocked(),
         1,
@@ -10906,7 +10913,7 @@ fn peer_proof_leases_never_cross_member_and_voter_roles() {
     );
     assert!(authority
         .lease(PeerAuthorityRole::CommittedMember)
-        .unwrap()
+        .expect("published member lease exists")
         .admits(&stamp, now, 10_000));
     assert!(authority.lease(PeerAuthorityRole::CommittedVoter).is_none());
     authority.publish(
@@ -10919,11 +10926,11 @@ fn peer_proof_leases_never_cross_member_and_voter_roles() {
     );
     assert!(!authority
         .lease(PeerAuthorityRole::CommittedVoter)
-        .unwrap()
+        .expect("published expired voter lease exists")
         .admits(&stamp, now, 10_000));
     assert!(authority
         .lease(PeerAuthorityRole::CommittedMember)
-        .unwrap()
+        .expect("member lease survives independent voter publication")
         .admits(&stamp, now, 10_000));
 }
 

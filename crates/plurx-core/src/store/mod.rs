@@ -540,9 +540,21 @@ mod token_authentication_proof_tests {
     #[test]
     fn reusable_authentication_never_postpones_an_activity_refresh() {
         let fresh = TokenAuthenticationProof::authenticated(user(), 100, 100, None);
-        assert_eq!(fresh.lease.unwrap().expires_at, 160);
+        assert_eq!(
+            fresh
+                .lease
+                .expect("fresh activity admits a bounded lease")
+                .expires_at,
+            160
+        );
         let nearly_due = TokenAuthenticationProof::authenticated(user(), 159, 100, None);
-        assert_eq!(nearly_due.lease.unwrap().expires_at, 161);
+        assert_eq!(
+            nearly_due
+                .lease
+                .expect("activity before refresh deadline admits a short lease")
+                .expires_at,
+            161
+        );
         let due = TokenAuthenticationProof::authenticated(user(), 161, 100, None);
         assert!(
             due.lease.is_none(),
@@ -556,7 +568,13 @@ mod token_authentication_proof_tests {
             since: 120,
         };
         let proof = TokenAuthenticationProof::authenticated(user(), 100, 100, Some(policy));
-        assert_eq!(proof.lease.unwrap().expires_at, 120);
+        assert_eq!(
+            proof
+                .lease
+                .expect("unexpired policy admits an exactly capped lease")
+                .expires_at,
+            120
+        );
         let expired = TokenAuthenticationProof::authenticated(user(), 120, 100, Some(policy));
         assert!(expired.lease.is_none());
         assert!(
