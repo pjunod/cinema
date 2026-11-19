@@ -4,6 +4,7 @@
 <!-- status: insert new efforts below this line -->
 
 - **2026-11-19 · Dolby Vision F+ curve fit (FEL RPU re-fit):** Owner Claude (claude-opus-5-5, from Codex 2026-11-18). Milestones 1–6 landed as #1565 (`8630ee431`) through `scripts/land` with the train off; all 50 Regression-Test lines carried. The nearest-Q12 production RPU passes all 48 native points and controls, and the full lane passed on `f8a7f5ab3`. The landed main merge ran preflight only (`Landed-Untested`, by Paul's order), so the combined tree has no lane run. Not deployed; physical playback and milestone 7 re-encode trials remain. [Ledger](docs/streaming/FEL-RPU-REFIT-BUILD.md).
+- **2026-11-18 · Settings → Cluster rebuilt:** owner Claude, branch `claude/cluster-settings-layout`. Status strip, alert slot, nodes table with per-node drawers, one settings list with advisory readiness chips, ledger, Maintenance, Backup, log; no folds or tabs. PR #1798. ([operator docs](docs/OPERATIONS.md))
 - **2026-11-18 · Developer tab cleanup:** Owner Claude (claude-opus-5-5); [PR #1802](http://forge.lan:3000/noirr/plurx/pulls/1802), [plan](docs/reviews/PLAN-developer-tab-cleanup-2026-11-18.md). Developer keeps three in-development switches; the rest moved, became always on or went.
 - **2026-11-16 · Native prepared forward rendezvous:** owner GPT. New Moon's
   native seeks trailed 90–97 ms; buffered forward aim+existing hold preserves the guard.
@@ -172,3 +173,4 @@ Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-0
 | 2026-09-02 | Everything a read-only cluster member could not do | [docs/cluster/STATUS-HISTORY.md](docs/cluster/STATUS-HISTORY.md) |
 | 2026-09-01 | Artwork repair-fence claim flake (same CI job) | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-09-01 | Exact-count cluster assertions (the `v0.3.0` release blocker) | [docs/cluster/STATUS-HISTORY.md](docs/cluster/STATUS-HISTORY.md) |
+| 2026-10-19 | Native server tray, startup policy and release upgrades | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |

@@ -4357,7 +4357,8 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
-expected_occurrences = 102
+# The owned voter fixture process is joined before a collision can retry.
+expected_occurrences = 103
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4390,6 +4391,8 @@ expected_occurrences = 26
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Four test-only timers wait for the artwork fixture identity and the offline
+# worker result. Each pair uses a bounded timeout around the positive condition.
 # Source-budget audit (8ab61a779 -> bbc5c1664): +11 timer shapes. Group's
 # 100 ms failed-wait retry and 25 ms quiescence poll retain the owned children,
 # registrations and pause guard until positive reap; neither is settlement.
@@ -6069,7 +6072,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # always on, so the priors-off client-log barriers and their timeouts in
 # link_receipts tests are gone; no production timer changed. Main 2266 - 4 = 2262.
 # PR #1802 adds a timeout and a 25 ms poll to the retained-copy reuse test.
-expected_occurrences = 2264
+# The owned voter fixture process is joined before a collision can retry.
+# Main adds bounded artwork, offline worker, voter and heartbeat fixture waits.
+expected_occurrences = 2269
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6607,7 +6612,8 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # source_probe/title_work_tests.rs +1.
 # Union at 0d501cae6: 349 + 13 + 3 = 365, less those 3 counted twice = 362; the spool
 # registration test adds one isolated test image: 363.
-expected_occurrences = 367
+# The owned voter fixture process is joined before a collision can retry.
+expected_occurrences = 368
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7352,7 +7358,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Main 945 + 3 = 948.
 # PR #1802 adds two relay response status reads and five route-test status reads.
 # All seven matches inspect HTTP replies and launch no processes.
-expected_occurrences = 955
+# The owned voter fixture process is joined before a collision can retry.
+expected_occurrences = 956
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7673,7 +7680,8 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Change-driven sharing monitors (A6 M3): +1 closed.wait() in the receiver
 # connection monitor's one-second floor wait, beside its change wait. No
 # process is involved.
-expected_occurrences = 400
+# The owned voter fixture process is joined before a collision can retry.
+expected_occurrences = 402
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -7922,7 +7930,8 @@ pattern = "kill_on_drop\\s*\\("
 # sleep child, killed and waited before the successor takes the lane).
 # Union at 0d501cae6: 126 + 2 + 1 = 129, less 1 counted twice = 128; the spool
 # registration test adds one: 129.
-expected_occurrences = 131
+# The owned voter fixture process is joined before a collision can retry.
+expected_occurrences = 132
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

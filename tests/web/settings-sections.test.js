@@ -11,6 +11,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const {shellSource} = require("./shell-source.js");
+// The cluster settings painters read the model the shell loads before them.
+require("../../crates/plurxd/src/web/cluster-panel.js");
 // The shipped app is a tree now, so the string these assertions slice is
 // the app's body rows, joined in served order. See tests/web/shell-source.js.
 const SHIPPED_UI = shellSource().bodyScript;
@@ -728,10 +730,8 @@ function developerPanels(){
       shippedSource("sourceRecoveryCard"),
       shippedSource("subtitleTranscriptionCard"),
       shippedSource("subtitleTranslationCard"),
-      shippedSource("clusterClockCard"),
       shippedSource("pgsOverlayCard"),
       shippedSource("subtitleStoredSourcesCard"),
-      shippedSource("subtitleClusterSourcesCard"),
       shippedSource("subtitleBackfillCard"),
       shippedSource("chapterThumbnailsCard"),
       shippedSource("liveTvGuideCard"), shippedSource("liveTvDeinterlaceCard"),
@@ -739,12 +739,15 @@ function developerPanels(){
       shippedSource("devReadinessRow"), shippedSource("devReadinessPill"),
       shippedSource("devReadinessEvidence"), shippedSource("devReq"),
       shippedSource("devStaticReq"),
-      shippedSource("clusterTransportRecoveryCard"),
+      "const PlurxClusterPanel=globalThis.PlurxClusterPanel;",
+      shippedSource("clusterSettingRows"), shippedSource("clusterBackupChecks"), shippedSource("clusterSettingChecks"),
+      shippedSource("clusterChecksChip"), shippedSource("clusterChecksMore"), shippedSource("clusterChecksHtml"),
+      shippedSource("clusterSettingRow"),
       // The fourth time (see above): `clusterBackupCard` shipped with the
       // portable backup and fenced restore and reached `developerPanel`
       // without being composed here, so this whole gate died on its name.
       shippedSource("clusterBackupCard"),
-      shippedSource("clusterPlacementCard"), shippedSource("boundedCatalogueCard"), shippedSource("cinemaSharingCard"), shippedSource("cinemaRemoteCard"), shippedSource("cinemaRemoteInvitationsCard"), "const cinemaRemoteLocalCards=()=>'LOCALCARDS';", shippedSource("remotesPanel"), shippedSource("integrationsPanel"), shippedSource("systemPanel"),
+      shippedSource("cinemaSharingCard"), shippedSource("cinemaRemoteCard"), shippedSource("cinemaRemoteInvitationsCard"), "const cinemaRemoteLocalCards=()=>'LOCALCARDS';", shippedSource("remotesPanel"), shippedSource("integrationsPanel"), shippedSource("systemPanel"),
 
       shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       // 2026-10-10: the graduated cards are drawn by their own sections.
@@ -768,7 +771,7 @@ function developerPanels(){
       "const SETTINGS_DATA=null,ME={is_admin:true},PLAYER=null;",
       shippedSource("developerPanel"),
       shippedSource("liveTvPanel"),
-      "return {server:SERVER,developerPanel,remotesPanel,integrationsPanel,systemPanel,jellyfinCompatibilityCard,cinemaSharingCard,cinemaRemoteCard,cinemaRemoteInvitationsCard,sourceRecoveryCard,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard,playbackPanel,metadataPanel,maintenancePanel,analysisSettingsPanel,clusterSettingsSection};",
+      "return {server:SERVER,developerPanel,remotesPanel,integrationsPanel,systemPanel,jellyfinCompatibilityCard,cinemaSharingCard,cinemaRemoteCard,cinemaRemoteInvitationsCard,sourceRecoveryCard,preparedQualityCard,clusterBackupCard,liveTvPanel,dvrCard,playbackPanel,metadataPanel,maintenancePanel,analysisSettingsPanel,clusterSettingsSection};",
     ].join("\n");
   const panels = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc", "window", "Hls",
@@ -849,25 +852,30 @@ test("Developer holds three switches; everything else keeps its saves in its own
   for (const gone of ["seekScratchReservationsCard", "subtitlePlaybackRangesCard"])
     assert.equal(shippedDeclares(gone), false, `${gone} had no switch and was removed outright`);
   // The clock guard is an operator switch, off by default, whose readiness
-  // rows are advisory: no hard gate in code. It lives in Cluster now.
+  // rows are advisory: no hard gate in code. It lives in Cluster now, on one
+  // list with the other cluster-wide switches and one Save for all of them.
   const clusterHtml = panels.clusterSettingsSection({ settings, developerReadiness: readiness });
-  const clocks = /Cluster clock guard[\s\S]*?(?=CARD\[|$)/.exec(clusterHtml);
-  assert.ok(clocks, "Cluster shows the clock guard switch");
-  assert.match(clocks[0], /TOG:cluster-clock-enforced\|[^|]*\|[^|]*\|checked=false/, "enforcement is off by default");
-  assert.match(clocks[0], /FOOT:saveClusterClockGuard/);
-  assert.match(clocks[0], /advisory and never prevent saving/);
+  assert.match(clusterHtml, /<input type="checkbox" id="cluster-clock-enforced">/, "enforcement is off by default");
+  assert.match(clusterHtml, /Requirements are advisory and never prevent saving, in either direction/);
   assert.doesNotMatch(clusterHtml, /Leaves Developer when/, "a graduated card no longer waits on anything");
   assert.match(
     panels.clusterSettingsSection({ settings: { ...settings, cluster_clock_guard_enforced: true }, developerReadiness: readiness }),
-    /TOG:cluster-clock-enforced\|[^|]*\|[^|]*\|checked=true/,
+    /<input type="checkbox" id="cluster-clock-enforced" checked>/,
   );
-  for (const [id, save] of [["cluster-placement-enabled", "saveClusterPlacement"], ["cluster-takeover-enabled", "saveClusterPlacement"],
-    ["bounded-catalogue-reads", "saveBoundedCatalogueReads"], ["subcluster", "saveSubtitleClusterSources"]]) {
-    assert.match(clusterHtml, new RegExp(`TOG:${id}\\|`), `Cluster owns ${id}`);
-    assert.match(clusterHtml, new RegExp(`FOOT:${save}`));
-  }
-  assert.match(clusterHtml, /id="backup-destination"/);
-  assert.match(clusterHtml, /FOOT:saveClusterBackup/);
+  for (const id of ["cluster-placement-enabled", "cluster-takeover-enabled", "bounded-catalogue-reads", "subcluster"])
+    assert.match(clusterHtml, new RegExp(`<input type="checkbox" id="${id}"`), `Cluster owns ${id}`);
+  assert.equal((clusterHtml.match(/FOOT:/g) || []).length, 1, "one Save for the whole list");
+  assert.match(clusterHtml, /FOOT:saveClusterSettings/);
+  // Readiness is advice: whatever it says, no switch and no Save is disabled.
+  assert.doesNotMatch(clusterHtml, /\bdisabled\b/);
+  const backup = panels.clusterBackupCard(settings, readiness);
+  // The ids and states the kept-mount list carries across a repaint.
+  assert.match(clusterHtml, /id="cluster-settings" data-state="ready"/);
+  assert.match(backup, /id="cluster-backup" data-state="ready"/);
+  assert.match(backup, /id="backup-destination"/);
+  assert.match(backup, /FOOT:saveClusterBackup/);
+  assert.doesNotMatch(backup, /\bdisabled\b/);
+  assert.match(panels.clusterBackupCard(undefined, readiness), /id="cluster-backup" data-state="loading"/);
   assert.match(panels.clusterSettingsSection({}), /id="cluster-settings"[\s\S]*Loading cluster settings/,
     "the board never waits for /settings: the cards fill their mount when it lands");
   // Moved cards keep their ids, saves and advisory readiness in their new panel.
@@ -945,7 +953,11 @@ test("Developer holds three switches; everything else keeps its saves in its own
   const optedInSettings = {...settings,subtitle_cluster_sources:true,subtitle_backfill:true};
   const optedIn = panels.clusterSettingsSection({ settings: optedInSettings, developerReadiness: unmet })
     + panels.analysisSettingsPanel(optedInSettings, null, unmet);
-  assert.match(optedIn, /TOG:subcluster\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(optedIn, /<input type="checkbox" id="subcluster" checked>/);
+  // The chip counts only what was reported, and the server's evidence is
+  // shown verbatim beside the requirement it belongs to.
+  assert.match(optedIn, /data-clchip="subcluster"[^>]*><span class="clchip warn">0 of 1 checks<\/span>/);
+  assert.match(optedIn, /<b>Analysis queue is enabled<\/b> <span>— Queue is off\.<\/span>/);
   assert.match(optedIn, /TOG:subbackfill\|[^|]*\|[^|]*\|checked=true/);
   assert.match(optedIn, /FOOT:saveSubtitleBackfill/);
   assert.match(optedIn, /Queue is off\./);
@@ -1000,12 +1012,14 @@ test("Developer holds three switches; everything else keeps its saves in its own
     playback_control_protocol_v1: false, prepared_quality_handoff: false}, readiness);
   assert.match(off, /TOG:pqh\|[^|]*\|[^|]*\|checked=false/);
   assert.match(off, /Control protocol<\/strong>[\s\S]*?<span class="pill warn">not met<\/span>/);
-  const cluster = panels.clusterTransportRecoveryCard(readiness);
-  assert.match(cluster, /No enable switch is required/);
-  assert.match(cluster, /Keep a ready voter majority/);
-  assert.match(cluster, /\/cluster\/transport\/sqlite/);
-  assert.match(cluster, /twenty learner plus twenty voter recovery cycles/);
-  assert.doesNotMatch(cluster, /TOG:/);
+  const cluster = panels.clusterSettingsSection({ settings, developerReadiness: readiness });
+  const transport = cluster.slice(cluster.indexOf('data-clchip="cluster-transport-recovery"'));
+  assert.match(transport, /no enable switch is required/i);
+  assert.match(transport, /keep a ready voter majority/i);
+  assert.match(transport, /\/cluster\/transport\/sqlite/);
+  assert.match(transport, /twenty learner plus twenty voter recovery cycles/);
+  assert.match(cluster, /Transport recovery<\/span>[\s\S]*?<span class="clauto">always on<\/span>/);
+  assert.doesNotMatch(cluster, /<input[^>]*id="cluster-transport-recovery"/);
   // Recording: one authoritative switch, the engine's settings beside it, and
   // readiness that is advice. A red row must never reach the control.
   const dvr = panels.dvrCard(settings, readiness);
@@ -1046,30 +1060,38 @@ test("Developer holds three switches; everything else keeps its saves in its own
   assert.match(live, /FOOT:saveLiveTvGuide/);
 });
 
-test("unmet subtitle readiness cannot refuse the saved cluster or backfill switches", async () => {
+test("unmet readiness cannot refuse the saved cluster or backfill switches", async () => {
   const writes=[];
+  const ids=["cluster-placement-enabled","cluster-takeover-enabled","bounded-catalogue-reads","cluster-clock-enforced","subcluster"];
   const nodes=new Map([
-    ["subcluster",{checked:true}], ["subbackfill",{checked:true}],
-    ["subclustererr",{textContent:""}], ["subbackfillerr",{textContent:""}],
-    ["subclustercard",{outerHTML:""}], ["subbackfillcard",{outerHTML:""}],
+    ...ids.map((id,index)=>[id,{checked:index%2===0}]), ["subbackfill",{checked:true}],
+    ["cluster-settings-error",{textContent:""}], ["subbackfillerr",{textContent:""}],
+    ["cluster-settings",{outerHTML:""}], ["subbackfillcard",{outerHTML:""}],
   ]);
   const document={getElementById:id=>nodes.get(id)};
   const api=async (_path,request)=>{writes.push(request.body);return request.body;};
   const save=new Function("document","api",
-    `const DEVELOPER_READINESS={items:[{id:"subtitle_cluster_sources",requirements:[{id:"analysis_queue",status:"unmet"}]}]};
+    `const DEVELOPER_READINESS={items:[{id:"subtitle_cluster_sources",requirements:[{id:"analysis_queue",status:"unmet"}]},
+       {id:"cluster_clock",requirements:[{id:"coverage",status:"unmet"}]}]};
      const cacheSettings=value=>value,toast=()=>{},setCardSaved=()=>{};
-     const subtitleClusterSourcesCard=s=>\`cluster: \${s.subtitle_cluster_sources}\`;
+     const clusterSettingsSection=d=>\`cluster: \${JSON.stringify(d.settings)}\`;
      const subtitleBackfillCard=s=>\`backfill: \${s.subtitle_backfill}\`;
-     ${shippedSource("saveSubtitleClusterSources")}
+     ${shippedSource("clusterSettingRows")}
+     ${shippedSource("saveClusterSettings")}
      ${shippedSource("saveSubtitleBackfill")}
-     return {saveSubtitleClusterSources,saveSubtitleBackfill};`,
+     return {saveClusterSettings,saveSubtitleBackfill};`,
   )(document,api);
-  await save.saveSubtitleClusterSources(null);
+  const button={disabled:false};
+  await save.saveClusterSettings(button);
   await save.saveSubtitleBackfill(null);
-  assert.deepEqual(writes,[{subtitle_cluster_sources:true},{subtitle_backfill:true}]);
-  assert.equal(nodes.get("subclustercard").outerHTML,"cluster: true");
+  // One PUT carrying every key on the list, exactly as the switches stand —
+  // an unmet requirement never changes what is sent.
+  const cluster={cluster_media_pool_enabled:true,cluster_session_takeover_enabled:false,bounded_replica_reads:true,
+    cluster_clock_guard_enforced:false,subtitle_cluster_sources:true};
+  assert.deepEqual(writes,[cluster,{subtitle_backfill:true}]);
+  assert.equal(nodes.get("cluster-settings").outerHTML,`cluster: ${JSON.stringify(cluster)}`);
   assert.equal(nodes.get("subbackfillcard").outerHTML,"backfill: true");
-  assert.equal(nodes.get("subclustererr").textContent,"");
+  assert.equal(nodes.get("cluster-settings-error").textContent,"");
   assert.equal(nodes.get("subbackfillerr").textContent,"");
 });
 
@@ -1091,13 +1113,13 @@ test("server guidance sends disabled Live TV features to their current settings"
 });
 
 test("late readiness success and failure update evidence without repainting moved settings", () => {
-  const updates=[];
-  const patch = new Function("applyDeveloperReadiness", "esc", `
+  const updates=[], chips=[];
+  const patch = new Function("applyDeveloperReadiness", "esc", "patchClusterReadiness", `
     ${shippedConst("SETTINGS_MANIFEST")}
     ${shippedSource("patchSettingsSecondary")}
     ${shippedSource("patchSettingsSecondaryError")}
     return {ok:patchSettingsSecondary,fail:patchSettingsSecondaryError};
-  `)(value=>updates.push(value),esc);
+  `)(value=>updates.push(value),esc,value=>chips.push(value));
   // No document or renderSettings stub: touching the surrounding panel would
   // throw instead of silently losing an edit when the diagnostics arrive.
   for(const tab of ["metadata","playback","livetv","analysis","maintenance","developer","cluster"]){
@@ -1108,30 +1130,44 @@ test("late readiness success and failure update evidence without repainting move
     assert.deepEqual(updates.at(-1),{unavailable:"offline"});
   }
   assert.equal(updates.length,14);
+  // Cluster's chips are redrawn in place from the same documents, and only
+  // Cluster's.
+  assert.deepEqual(chips,[updates[12],updates[13]]);
 });
 
 test("Cluster's settings cards fill their own mount when /settings lands, and say so when it cannot", () => {
-  const mount={outerHTML:"",innerHTML:""}, revealed=[];
-  const patch=new Function("applyDeveloperReadiness","esc","document","clusterSettingsSection","clusterSettingsUnavailable","revealSettingsAnchor","SETTINGS_DATA",`
+  const card=(state,dirty)=>({outerHTML:"",dataset:{state},classList:{contains:name=>name==="dirty"&&dirty}});
+  const mounts={"cluster-settings":card("loading",false),"cluster-backup":card("loading",false)}, revealed=[];
+  const patch=new Function("applyDeveloperReadiness","esc","document","clusterSettingsSection","clusterBackupCard","clusterSettingsUnavailable","revealSettingsAnchor","SETTINGS_DATA","DEVELOPER_READINESS",`
     ${shippedConst("SETTINGS_MANIFEST")}
     ${shippedSource("patchSettingsSecondary")}
     ${shippedSource("patchSettingsSecondaryError")}
     return {ok:patchSettingsSecondary,fail:patchSettingsSecondaryError};
-  `)(()=>{},esc,{getElementById:id=>id==="cluster-settings"?mount:null},d=>`cards:${d.settings.x}`,
-    message=>`unavailable:${message}`,tab=>revealed.push(tab),{settings:{x:1}});
-  // No renderSettings: the roster above is interactive while this lands, and
-  // repainting it would close an open drill-down or an election dialog.
+  `)(()=>{},esc,{getElementById:id=>mounts[id]||null},d=>`cards:${d.settings.x}`,s=>`backup:${s.x}`,
+    (message,id)=>`unavailable:${id||"cluster-settings"}:${message}`,tab=>revealed.push(tab),{settings:{x:1}},null);
+  // No renderSettings: the page above is interactive while this lands, and
+  // repainting it would close an open drawer or an election dialog.
   patch.ok("cluster","settings",{x:1});
-  assert.equal(mount.outerHTML,"cards:1");
+  assert.equal(mounts["cluster-settings"].outerHTML,"cards:1");
+  assert.equal(mounts["cluster-backup"].outerHTML,"backup:1");
   assert.deepEqual(revealed,["cluster"],"a link that named a card in here lands on it once it exists");
+  // A same-section reload (Refresh) carries a card with an unsaved edit across
+  // as the live node; the cached settings landing behind it never redraw it.
+  mounts["cluster-settings"]=card("ready",true); mounts["cluster-backup"]=card("ready",false);
+  patch.ok("cluster","settings",{x:1});
+  assert.equal(mounts["cluster-settings"].outerHTML,"", "an unsaved edit survives the settings read");
+  assert.equal(mounts["cluster-backup"].outerHTML,"backup:1", "a clean card takes the fresh values");
+  mounts["cluster-settings"]=card("loading",false); mounts["cluster-backup"]=card("loading",false);
   patch.fail("cluster","settings",new Error("offline <now>"));
-  assert.equal(mount.outerHTML,"unavailable:offline &lt;now&gt;");
+  assert.equal(mounts["cluster-settings"].outerHTML,"unavailable:cluster-settings:offline &lt;now&gt;");
+  assert.equal(mounts["cluster-backup"].outerHTML,"unavailable:cluster-backup:offline &lt;now&gt;");
   const unavailable=new Function(`${shippedSource("clusterSettingsUnavailable")} return clusterSettingsUnavailable;`)()("offline");
   assert.match(unavailable,/data-state="error"/);
-  assert.match(unavailable,/onclick="retryClusterSettings\(this\)"/,"the section retries its own read, not the board's");
+  assert.match(unavailable,/onclick="retryClusterSettings\(this\)"/,"the section retries its own read, not the page's");
   // Another tab's settings read never reaches the cluster mount.
-  mount.outerHTML="untouched"; patch.ok("playback","settings",{x:2});
-  assert.equal(mount.outerHTML,"untouched");
+  mounts["cluster-settings"]=card("loading",false); mounts["cluster-settings"].outerHTML="untouched";
+  patch.ok("playback","settings",{x:2});
+  assert.equal(mounts["cluster-settings"].outerHTML,"untouched");
 });
 
 test("a section repaint carries kept settings cards across as live nodes", () => {
@@ -1168,6 +1204,18 @@ test("a section repaint carries kept settings cards across as live nodes", () =>
   keep.restore(errorKeep); assert.equal(stillLoading.replaced,failed);
   const arrived=make("cluster-settings","ready"); dom={"cluster-settings":arrived};
   keep.restore(errorKeep); assert.equal(arrived.replaced,null);
+  // The Backup card shares the page and its repaints, and is kept the same
+  // way: an unsaved destination survives a status repaint like a switch does.
+  const settingsCard=make("cluster-settings","ready"), backupCard=make("cluster-backup","ready");
+  dom={"cluster-settings":settingsCard,"cluster-backup":backupCard}; active=backupCard.child;
+  const both=keep.capture("cluster");
+  assert.deepEqual(both.nodes,[settingsCard,backupCard]);
+  const freshSettings=make("cluster-settings","ready"), freshBackup=make("cluster-backup","ready");
+  dom={"cluster-settings":freshSettings,"cluster-backup":freshBackup};
+  keep.restore(both);
+  assert.equal(freshSettings.replaced,settingsCard);
+  assert.equal(freshBackup.replaced,backupCard);
+  assert.equal(backupCard.child.focused,1);
   // Analysis keeps the backfill card across its own panel's Save.
   const backfill=make("subbackfillcard"); dom={subbackfillcard:backfill}; active=null;
   assert.deepEqual(keep.capture("analysis").nodes,[backfill]);
@@ -2011,8 +2059,9 @@ test("a standalone server keeps every local switch; cluster switches live only i
   panels.server.cluster_enabled=true;
   panels.server.cluster_advertisement=false; // Persisted member without an explicit advertised host.
   const clustered=panels.clusterSettingsSection({settings,developerReadiness:{items:[]}});
-  assert.match(clustered,/Cluster media placement[\s\S]*Portable cluster backup/);
-  assert.match(clustered,/TOG:subcluster\|[^|]*\|[^|]*\|checked=true/,
+  assert.match(clustered,/Remote media placement[\s\S]*Shared subtitle tracks/);
+  assert.match(panels.clusterBackupCard(settings,{items:[]}),/id="backup-destination"/);
+  assert.match(clustered,/<input type="checkbox" id="subcluster" checked>/,
     "moving a control never changes its saved value");
 });
 
