@@ -32,12 +32,14 @@ class AppleTVModalWiringTests(unittest.TestCase):
 
     def test_native_style_acknowledgment_and_physical_activation_precede_choice_effect(self):
         self.assertIn("func remoteNativeFocus(_ actuallyFocused: Bool)", SOURCE)
-        # Choice rows use the house button, which reports actual native focus.
-        row = SOURCE.split("private struct RemoteChoiceRowStyle", 1)[1].split("private extension View", 1)[0]
-        self.assertIn("TVReadableButtonStyle(", row)
-        theme = (Path(__file__).resolve().parents[2] / "clients/apple/Sources/Theme.swift").read_text()
-        house = theme.split("struct TVReadableButtonStyle", 1)[1].split("struct LiveSurfacePillStyle", 1)[0]
-        self.assertIn(".remoteNativeFocus(isFocused)", house)
+        # On tvOS a choice row is the side-panel row, which reports actual
+        # native focus itself (it was the house button before the 2026-11-18
+        # redesign, #1801).
+        style, tv_row = SOURCE.split("private struct RemoteChoiceRowStyle", 1)[1].split(
+            "private extension View", 1
+        )[0].split("private struct RemoteChoiceTVRow", 1)
+        self.assertIn("RemoteChoiceTVRow(configuration: configuration)", style.split("#else", 1)[0])
+        self.assertIn(".remoteNativeFocus(isFocused)", tv_row)
         self.assertIn("ReportID(focused: focused, requestRevision: requestRevision,", SOURCE)
         self.assertIn("observesPhysicalActivation: false", SOURCE)
         self.assertIn("navigation.performPhysicalAction { commit(choice) }", SOURCE)
