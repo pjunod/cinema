@@ -1858,7 +1858,7 @@ pub(crate) async fn resolve_plan(
     review: Option<PlanReview>,
     body: CreateSession,
 ) -> Result<ResolvedPlan, ApiError> {
-    resolve_plan_with_continuous(inputs, review, body, None).await
+    resolve_plan_with_scope(inputs, review, body, PlanScope::default()).await
 }
 
 /// Preserve ordinary initial Auto's local incomplete-sweep fallback. A bounded
@@ -1893,6 +1893,9 @@ struct PlanScope<'a> {
     /// predecessor's own. A create resolves the ordinary plan and leaves
     /// processing to the upgrade after its first frame (plan ruling 3).
     processed_selectable: bool,
+    // The passive compatibility facade offers its own fixed media contract
+    // and applies the client's finite bitrate ceiling to that native recipe.
+    passive_compatibility: bool,
 }
 
 /// Internal preparation policy, never a create-body override. Ordinary creates
@@ -1922,25 +1925,7 @@ pub(super) async fn resolve_plan_for_preparation(
             continuous: None,
             auto_bootstrap_ceiling,
             processed_selectable: processed_predecessor,
-        },
-    )
-    .await
-}
-
-async fn resolve_plan_with_continuous(
-    inputs: PlanInputs<'_>,
-    review: Option<PlanReview>,
-    body: CreateSession,
-    continuous: Option<&ContinuousFamilyStart>,
-) -> Result<ResolvedPlan, ApiError> {
-    resolve_plan_with_scope(
-        inputs,
-        review,
-        body,
-        PlanScope {
-            continuous,
-            auto_bootstrap_ceiling: None,
-            processed_selectable: false,
+            ..PlanScope::default()
         },
     )
     .await
@@ -2021,6 +2006,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
         continuous,
         auto_bootstrap_ceiling,
         processed_selectable,
+        passive_compatibility,
     } = scope;
     if auto_bootstrap_ceiling.is_some_and(|ceiling| ceiling <= 0)
         || (auto_bootstrap_ceiling.is_some()
@@ -2134,10 +2120,11 @@ async fn resolve_plan_for_principal_with_local_evidence(
         let requested = continuous
             .map(|family| family.primary_candidate_id)
             .or(intent_candidate);
-        if auto_bootstrap_ceiling.is_some()
-            || requested.is_some()
-            || body.height == Some(1440)
-            || (body.quality_auto == Some(true) && body.copy != Some(true))
+        if !passive_compatibility
+            && (auto_bootstrap_ceiling.is_some()
+                || requested.is_some()
+                || body.height == Some(1440)
+                || (body.quality_auto == Some(true) && body.copy != Some(true)))
         {
             if requested.is_none() && body.candidate_auto_policy() {
                 // The fallback belongs to the actual negotiated catalog, not
@@ -2521,7 +2508,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
         .transpose()
         .map_err(|error| ApiError::BadRequest(error.to_owned()))?
         .flatten();
-    let candidate_auto_policy = body.candidate_auto_policy();
+    let candidate_auto_policy = !passive_compatibility && body.candidate_auto_policy();
     let mut request = body.into_request(file_id, height);
     request.audio_claim = audio_claim;
     request.candidate_context = candidate_context;
@@ -2934,7 +2921,7 @@ pub(crate) async fn preview_for_compatibility(
         false,
         unix_ms(),
     );
-    let mut resolved = resolve_plan(
+    let mut resolved = resolve_plan_with_scope(
         PlanInputs {
             network_identity: None,
             incumbent_receipt: None,
@@ -2947,6 +2934,10 @@ pub(crate) async fn preview_for_compatibility(
         },
         Some(review),
         body,
+        PlanScope {
+            passive_compatibility: true,
+            ..PlanScope::default()
+        },
     )
     .await?;
     validate_hevc_copy_transport(state, file, &caps, &resolved.request, None).await?;
@@ -3321,6 +3312,8 @@ async fn create_with_purpose_attempt(
         ServiceCreatePurpose::Continuous(family) => Some(family),
         _ => None,
     };
+    let passive_compatibility =
+        matches!(purpose, ServiceCreatePurpose::PassiveCompatibility { .. });
     if let Some(caps) = req.caps.as_ref() {
         super::super::stream::validate_device_caps(caps)?;
     }
@@ -3429,24 +3422,28 @@ async fn create_with_purpose_attempt(
     // Whose build this is, for every line below. The v2 document names
     // itself; a client that sends none leaves only its User-Agent, which is
     // exactly the population these lines exist to count down to zero.
-    let candidate_decoder_caps = req.caps.as_ref().and_then(|caps| {
-        crate::playback_control::DecoderCapsSnapshot::from_device_caps(
-            caps,
-            caps.display
-                .as_ref()
-                .and_then(|display| display.presentation_target)
-                .map_or(1, |target| target.revision),
-        )
-        .map_err(|cause| {
-            tracing::warn!(target: "plurxd::http::hls",
-                file_id = id,
-                video_entries = caps.video.len(),
-                cause,
-                "optional decoder snapshot unavailable; legacy playback admission preserved"
-            );
-        })
-        .ok()
-    });
+    let candidate_decoder_caps = req
+        .caps
+        .as_ref()
+        .filter(|_| !passive_compatibility)
+        .and_then(|caps| {
+            crate::playback_control::DecoderCapsSnapshot::from_device_caps(
+                caps,
+                caps.display
+                    .as_ref()
+                    .and_then(|display| display.presentation_target)
+                    .map_or(1, |target| target.revision),
+            )
+            .map_err(|cause| {
+                tracing::warn!(target: "plurxd::http::hls",
+                    file_id = id,
+                    video_entries = caps.video.len(),
+                    cause,
+                    "optional decoder snapshot unavailable; legacy playback admission preserved"
+                );
+            })
+            .ok()
+        });
     let candidate_target = req.caps.as_ref().and_then(|caps| {
         caps.display
             .as_ref()
@@ -3529,7 +3526,7 @@ async fn create_with_purpose_attempt(
                 ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
             })?;
     crate::media_pool::mark_create_phase("settings");
-    let resolved = resolve_plan_with_continuous(
+    let resolved = resolve_plan_with_scope(
         PlanInputs {
             snapshot: planning_snapshot,
             state: &state,
@@ -3542,7 +3539,11 @@ async fn create_with_purpose_attempt(
         },
         review,
         req,
-        continuous,
+        PlanScope {
+            continuous,
+            passive_compatibility,
+            ..PlanScope::default()
+        },
     )
     .await?;
     let candidate_auto_policy = resolved.candidate_auto_policy;
