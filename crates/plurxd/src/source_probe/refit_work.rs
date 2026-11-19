@@ -17,6 +17,8 @@
 #[cfg(test)]
 #[path = "refit_work_tests.rs"]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::seed_preparation_refit;
 
 use super::{
     dv_refit::{HelperRun, RunError, Spool, RESERVED_THREADS},

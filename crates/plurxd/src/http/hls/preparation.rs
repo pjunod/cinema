@@ -2318,6 +2318,21 @@ pub(super) async fn process_preparation_candidate(
         successor_owner
     };
     if let Some(successor_owner) = successor_owner {
+        if let Err(reason) = crate::dv_refit_serving::pin_for_session(
+            state.store.as_ref(),
+            source,
+            &mut candidate,
+            Some(platform),
+        )
+        .await
+        {
+            tracing::warn!(target: "plurxd::http::hls", %reason, "prepared successor could not resolve its F+ fit");
+            PreparationStageOutcome::refused(
+                &session_id,
+                PreparationStageRefusal::RefitUnavailable,
+            );
+            return;
+        }
         // Production always stages and primes. Hooks that decline priming (the
         // test hooks of `AppState::new` do, until a test calls
         // `prime_prepared_successors`) stage the durable row only, on this
@@ -2586,6 +2601,7 @@ pub(super) enum PreparationStageRefusal {
     RelocationSuperseded,
     NoLocalWorkerGate,
     SourceUnavailable,
+    RefitUnavailable,
     PrincipalUnsupported,
     RecipeSerialization,
     ResponseSerialization,
@@ -2818,7 +2834,13 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
     let staged_request = crate::transcode::SessionRequest {
         dv_processing_destination: candidate.dv_processing_destination,
         sdr_master_codecs: None,
-        dv_refit_digest: None,
+        dv_refit_digest: match candidate.kind {
+            crate::transcode::SessionKind::Copy {
+                convert_dolby_vision: true,
+                ..
+            } => candidate.dv_refit_digest.clone(),
+            _ => None,
+        },
         continuous_media: None,
         candidate_context: candidate.candidate_context.clone(),
         request_id: Some(staged_incarnation_id.clone()),

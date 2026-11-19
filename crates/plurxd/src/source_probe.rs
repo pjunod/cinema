@@ -10,6 +10,9 @@ mod refit_work;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod title_work;
 
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) use refit_work::seed_preparation_refit;
+
 /// The F+ statistics spool under a node's runtime cache (decision A):
 /// node-local, never replicated, listed and deleted from Developer.
 pub(crate) const REFIT_SPOOL_DIR: &str = "dv-refit";

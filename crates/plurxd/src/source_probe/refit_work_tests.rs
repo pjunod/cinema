@@ -309,22 +309,7 @@ async fn title(fx: &Fixture, name: &str, profile: i64, fel: bool) -> MediaFile {
         panic!("title job accepted");
     };
     let job = claim(store, &job_id, JobKind::DvTitleScan).await;
-    let stats = DvTitleStats {
-        schema: 1,
-        complete: true,
-        decoded_frames: 216,
-        valid_l1_frames: 216,
-        missing_l1_frames: 0,
-        invalid_l1_frames: 0,
-        max_l1_pq: Some(3900),
-        mastering_luminance: TitleConstant::Unknown,
-        mastering_primaries: TitleConstant::Unknown,
-        el_kind: if fel && profile == 7 {
-            TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Fel)
-        } else {
-            TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Mel)
-        },
-    };
+    let stats = complete_title_stats(fel && profile == 7);
     store
         .publish_dv_title_job(PublishTitleJob {
             token: job.token.expect("token"),
@@ -347,6 +332,81 @@ async fn title(fx: &Fixture, name: &str, profile: i64, fel: bool) -> MediaFile {
             .expect("FEL verdict"));
     }
     store.get_file(id).await.expect("file").expect("file")
+}
+
+fn complete_title_stats(fel: bool) -> DvTitleStats {
+    DvTitleStats {
+        schema: 1,
+        complete: true,
+        decoded_frames: 216,
+        valid_l1_frames: 216,
+        missing_l1_frames: 0,
+        invalid_l1_frames: 0,
+        max_l1_pq: Some(3900),
+        mastering_luminance: TitleConstant::Unknown,
+        mastering_primaries: TitleConstant::Unknown,
+        el_kind: if fel {
+            TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Fel)
+        } else {
+            TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Mel)
+        },
+    }
+}
+
+pub(crate) async fn seed_preparation_refit(store: &Arc<dyn Store>, file: &MediaFile) -> String {
+    use plurx_core::store::dv_title_jobs::{AnalysisTitleOutcome, AnalysisTitleOutput};
+
+    let file_id = store
+        .upsert_file(
+            file.item_id,
+            file.path.to_str().expect("fixture source path"),
+            file.size,
+            file.mtime,
+            &ProbeResult {
+                duration_ms: file.duration_ms,
+                height: Some(2160),
+                video_codec: Some("hevc".into()),
+                hdr: Some("dolby_vision".into()),
+                dolby_vision: DolbyVisionFacts {
+                    profile: Some(7),
+                    level: Some(6),
+                    bl_compat_id: Some(1),
+                    rpu_present: Some(true),
+                    el_present: Some(true),
+                },
+                raw_json: Some(
+                    serde_json::json!({"streams":[{"index":0,"codec_type":"video"}]}).to_string(),
+                ),
+                ..ProbeResult::default()
+            },
+        )
+        .await
+        .expect("Profile 7 source");
+    assert_eq!(file_id, file.id);
+    assert_eq!(
+        store
+            .publish_dv_title_from_analysis(AnalysisTitleOutput {
+                file_id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                scanner_digest: "a".repeat(64),
+                stats: complete_title_stats(true),
+            })
+            .await
+            .expect("publish title aggregate"),
+        AnalysisTitleOutcome::Published,
+    );
+    let found = demand(store, file_id).await.expect("F+ demand");
+    let source = source(&found, &helper());
+    let stats = dv_refit_title::parse(MICHAEL5400.as_bytes()).expect("recorded helper output");
+    let (_, settlement) = fit_with(store, &source, Ok(HelperRun::Stats(stats))).await;
+    assert!(
+        settlement.is_none(),
+        "the attempt published: {settlement:?}"
+    );
+    let table = table(store, file_id).await;
+    assert_eq!(table.title.verdict, RefitVerdict::Fitted);
+    table.title.curve_digest
 }
 
 async fn claim(store: &Arc<dyn Store>, id: &str, kind: JobKind) -> BackgroundJob {

@@ -89,6 +89,14 @@ A future complete v3 remains eligible. Ordinary Analysis declines fitted
 demand because its seal cannot produce that evidence; the dedicated fitted
 index builder retains ownership. No proof requirement or artifact is removed.
 
+The physical Apple TV identity-control run exposed a separate pinning gap.
+The accepted control exchange already carries its typed platform, but normal
+prepared quality handoffs dropped that context and reset the fitted digest.
+The final reconciled copy candidate now resolves its pin from that exact
+accepted platform; the durable successor preserves it for converting copy.
+Stall-reopen fields remain absent. No client capability or wire field is
+invented. Physical verification of this correction remains outstanding.
+
 The current host inventory sees a physical Apple TV 4K (3rd generation).
 That is availability, not playback evidence. The inspected learner service
 image is based on `254df39f7afb`, before the F+ merge; it cannot qualify this
