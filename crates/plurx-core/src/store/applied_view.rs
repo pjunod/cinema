@@ -110,9 +110,9 @@ pub fn applied_mark_tables() -> impl Iterator<Item = &'static str> {
     tables.copied()
 }
 
-/// A sharing monitor's wait for its next look (A6 M3). Armed before the
+/// A table observer's wait for its next look. Armed before the
 /// look it follows, so a change applied after arming always wakes it.
-pub enum SharingWatch {
+pub enum TableWatch {
     /// The local replica's applied mark: wakes on a watched table's change or
     /// an image replacement.
     #[cfg(feature = "hiqlite-store")]
@@ -126,7 +126,28 @@ pub enum SharingWatch {
     Notified(std::sync::Arc<tokio::sync::Notify>),
 }
 
-impl SharingWatch {
+impl TableWatch {
+    /// Arm before the read this watch follows. Unknown tables or an untrusted
+    /// image conservatively retain the existing one-second re-observation.
+    #[cfg(feature = "hiqlite-store")]
+    pub fn from_applied_mark(mark: Option<&hiqlite::AppliedMarkHandle>, tables: &[&str]) -> Self {
+        let Some(mark) = mark else {
+            return Self::Interval;
+        };
+        let Some(slots) = tables
+            .iter()
+            .map(|table| mark.slot(table))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Self::Interval;
+        };
+        let watch = mark.watch(&slots);
+        if watch.trusted() {
+            Self::Applied(watch)
+        } else {
+            Self::Interval
+        }
+    }
     /// Returns once the next look is due.
     pub async fn changed(&self) {
         match self {
@@ -138,6 +159,9 @@ impl SharingWatch {
         }
     }
 }
+
+/// Compatibility name for existing sharing monitor interfaces.
+pub use TableWatch as SharingWatch;
 
 /// One applied view, by the table it reads (and whose floor it keeps).
 ///
@@ -1087,23 +1111,18 @@ impl AppliedView {
     /// [`SHARING_WATCH_TABLES`] or [`APPLIED_VIEW_TABLES`]).
     #[must_use]
     pub fn sharing_watch(&self, tables: &[&str]) -> SharingWatch {
+        self.watch(tables)
+    }
+
+    /// General table-change wake source; a wake requests re-observation and
+    /// grants no serving or security authority.
+    #[must_use]
+    pub fn watch(&self, tables: &[&str]) -> TableWatch {
         match &self.mode {
-            Mode::Standalone | Mode::RemoteAuthority => SharingWatch::Interval,
+            Mode::Standalone | Mode::RemoteAuthority => TableWatch::Interval,
             #[cfg(feature = "hiqlite-store")]
             Mode::Replicated(replicated) => {
-                let Some(slots) = tables
-                    .iter()
-                    .map(|table| replicated.mark.slot(table))
-                    .collect::<Option<Vec<_>>>()
-                else {
-                    return SharingWatch::Interval;
-                };
-                let watch = replicated.mark.watch(&slots);
-                if watch.trusted() {
-                    SharingWatch::Applied(watch)
-                } else {
-                    SharingWatch::Interval
-                }
+                TableWatch::from_applied_mark(Some(&replicated.mark), tables)
             }
         }
     }

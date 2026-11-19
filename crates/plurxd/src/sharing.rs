@@ -749,7 +749,7 @@ impl SharingManager {
         let mut span = UnknownSpan::default();
         let mut wake = ListenerWake::new(
             state.cluster.subscribe_authority(),
-            Box::new(|| state.applied.sharing_watch(LISTENER_WATCH)),
+            Box::new(|| state.cluster.watch(LISTENER_WATCH)),
         );
         loop {
             if let Ok((pin, expiry)) = identity.status() {
