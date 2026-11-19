@@ -477,6 +477,16 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     // schema marker is installed locally, like the annotations marker.
     assert!(names.contains(&"background_scan_request_v2"));
     assert!(!names.contains(&"background_scan_request_v2_schema"));
+    // F+ curve tables, their scenes and fit outcomes are durable job
+    // results; their schema marker is installed locally.
+    for name in [
+        "background_dv_refit_titles",
+        "background_dv_refit_scenes",
+        "background_dv_refit_outcomes",
+    ] {
+        assert!(names.contains(&name), "durable F+ table: {name}");
+    }
+    assert!(!names.contains(&"background_dv_refit_schema"));
     // Scoped login state is durable account state, imported with its users;
     // its schema marker is installed locally, like the scan request marker.
     for name in [
@@ -488,7 +498,7 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     }
     assert!(!names.contains(&"delegation_schema"));
     // Person-curated tags, rows, Home layouts and grants are durable account
-    // state (v134); their schema marker is installed locally.
+    // state (v135); their schema marker is installed locally.
     for name in [
         "library_curation_grants",
         "library_curation_tags",
@@ -503,9 +513,10 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     // 104 with the source arbitration tables (SQLite v122), 105 with the scan
     // request sidecar (SQLite v125), 106 with pending storage-domain changes
     // (SQLite v131), 109 with the scoped login clients, codes and grants
-    // (SQLite v133; their schema marker is installed locally), 115 with the
-    // six curation tables (SQLite v134).
-    assert_eq!(names.len(), 115, "review every imported durable table");
+    // (SQLite v133; their schema marker is installed locally), 112 with the
+    // F+ curve titles, scenes and outcomes (SQLite v134), 118 with the
+    // six curation tables (SQLite v135).
+    assert_eq!(names.len(), 118, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its
@@ -1095,6 +1106,9 @@ async fn background_jobs_import_distinguishes_v70_legacy_from_v71_queue() {
                 | "background_source_service_epochs"
                 | "background_source_service_grants" => 122,
                 "background_scan_request_v2" => 125,
+                "background_dv_refit_titles"
+                | "background_dv_refit_scenes"
+                | "background_dv_refit_outcomes" => 134,
                 _ => 71,
             };
             assert_eq!(table.minimum_schema, introduced, "{}", table.name);

@@ -39,7 +39,7 @@ Fresh non-author Fable 5.1 (`claude-fable-5-1`), Hermes task `t_09b0b514`, appro
 
 | Comment | Disposition |
 |---|---|
-| C1 · dependency drift | Retain whole-file lockfile pin; document deliberate mapping review on dependency changes. |
+| C1 · dependency drift | Retain whole-file lockfile pin; document deliberate mapping review on dependency changes. Superseded 2026-11-15: the lockfile row pins Tokio's own `[[package]]` entry ([item pins](../../verification/durable-jobs/README.md#source-pins-cover-the-anchored-item)). |
 | C2 · temporal translator | Confirmed by both completed positive configurations; no syntax rewrite needed. |
 | C3 · local revocation abstraction | Disclose omitted late-commit timing; local revocation is not a durable backend check. |
 | C4 · effort compile-only | Explicitly name the existing pilot behavior change below. |
@@ -75,6 +75,6 @@ The nine required outcomes comprise **two exhaustive positives, four deliberate 
 
 The first positive establishes eventual durable result and eventual attempt cleanup under the stated finite model and dependency premises. The contention positive establishes selected-attempt cleanup/retirement, not per-job starvation freedom. The controls and witnesses verify the model's sensitivity and reachable paths; they are not additional exhaustive positives. Always-enabled Tick makes global deadlock detection vacuous: temporal progress properties are the actual acceptance checks.
 
-Existing tests remain. There is no cluster-wide deadlock theorem, Rust refinement, Raft-liveness proof, numeric deadline or general graceful-shutdown guarantee. Whole-file dependency pins deliberately require mapping review after lockfile changes. Normal main qualification uses affected smokes; effort compile-only validates both mappings while skipping toolchain fetch and both smokes.
+Existing tests remain. There is no cluster-wide deadlock theorem, Rust refinement, Raft-liveness proof, numeric deadline or general graceful-shutdown guarantee. Source rows pin the mapped item, so only a change to Tokio's own lockfile entry requires mapping review (item pins, Paul's ruling of 2026-11-15). Normal main qualification uses affected smokes; effort compile-only validates both mappings while skipping toolchain fetch and both smokes.
 
 The PR carries the exact current candidate, authenticated CI artifacts, formal receipt/input equivalence, full independent review and final landing receipt. Keeping that live state in the PR avoids claiming a future merge hash in this immutable source snapshot.

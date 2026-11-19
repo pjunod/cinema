@@ -9,7 +9,7 @@ mod analysis;
 mod analysis_reconcile;
 pub(crate) mod annotations;
 mod auth;
-mod background_jobs;
+pub(crate) mod background_jobs;
 pub(crate) mod curation;
 mod preparation;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
@@ -658,6 +658,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/subtitle-transcription/jobs/{id}"
         | "/api/v1/subtitle-provider"
         | "/api/v1/developer/readiness"
+        | "/api/v1/developer/dv-refit/spool"
         | "/api/v1/developer/source-recovery"
         | "/api/v1/developer/macos-video-processing/reprobe"
         | "/api/v1/system/video-processing/reprobe"
@@ -1701,6 +1702,10 @@ pub fn router(state: AppState) -> Router {
         // process can currently observe. Nothing reads it to decide
         // whether a switch may be flipped.
         .route("/developer/readiness", get(developer::readiness))
+        .route(
+            "/developer/dv-refit/spool",
+            get(developer::refit_spool).delete(developer::clear_refit_spool),
+        )
         .route(
             "/developer/source-recovery",
             get(developer::source_recovery),

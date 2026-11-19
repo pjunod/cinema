@@ -1768,20 +1768,18 @@ mod tests {
             // v129: the shared queue helper drops every background_* object,
             // the replaced triggers and their marker among them.
             "CREATE TABLE IF NOT EXISTS background_custody_retention_schema",
-            // v130: offload's `items.offloaded_at` and its two clearing
-            // triggers; the shared source-extension fixture rewinds them
-            // first, so both fixtures reach v129 before the tails above.
+            // v130: offload's `items.offloaded_at` and its two clearing triggers.
             "ADD COLUMN offloaded_at",
-            // v131: the shared queue helper drops every background_* object,
-            // including the pending storage-domain table, views and marker.
+            // v131: storage-domain pending tables, views and marker.
             "CREATE TABLE IF NOT EXISTS background_storage_domain_pending",
             // v132: exact title-v2 triggers and marker are removed by the shared title teardown.
             "INSERT INTO dv_title_jobs_schema VALUES(1,2)",
             // v133: the empty delegation tail is removed first by the shared title rewind.
             "CREATE TABLE IF NOT EXISTS delegation_schema",
-            // v134: the empty library curation tail is removed by the shared
-            // source-extension rewind, ahead of the delegation tail.
+            // v135: remove the exact empty curation extension before the F+ tail.
             "CREATE TABLE library_curation_schema",
+            // v134: the shared title rewind removes the exact empty F+ curve extension.
+            "CREATE TABLE IF NOT EXISTS background_dv_refit_schema",
         ];
 
         assert!(

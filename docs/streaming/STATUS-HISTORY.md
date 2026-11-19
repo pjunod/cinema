@@ -12,6 +12,10 @@ describes the state on the day it was written, and
 merged-pull-request rule it held in `STATUS.md`.
 
 
+## 2026-10-11 · Playback startup path: the per-read stall and the web scrim
+
+**Branch `effort/startup-read-path`, in a draft pull request; not deployed.** Two fixes: consistent reads on a cluster no longer wait 40 ms each on a delayed ACK (44.0 ms to 1.7 ms per read on three-voter TLS loopback; a start makes about forty), and the web scrim clears about two frames after playback starts instead of 500 to 1000 ms later. Fleet effect unmeasured. The remaining waits, ranked with owners, are in [PLAYBACK-STARTUP-PATH-FINDINGS.md](PLAYBACK-STARTUP-PATH-FINDINGS.md); its §5 client waits are unowned.
+
 ## 2026-10-11 · Startup and tone-map: fewer create-path reads, a tone-map census, lab arms
 
 **Branch `effort/startup-tone-map`.** Executes [STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md](STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md)

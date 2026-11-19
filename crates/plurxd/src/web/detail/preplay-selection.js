@@ -576,7 +576,8 @@ function dvConversionStateHtml(file,snapshot){
       ${retry}</div>`;
   }
   const labels={queued:"Queued for on-disk conversion",running:"Converting Profile 7",verified:"Replacement verified; publishing"};
-  return `<div class="muted" style="margin-top:8px">${esc(labels[state]||state)}${bytes}${dvRecoveryGuardStatusHtml(conversion.recovery_guard)}</div>`;
+  const waiting=state==="queued"&&snapshot.waiting_reason?` · ${esc(snapshot.waiting_reason)}`:"";
+  return `<div class="muted" style="margin-top:8px">${esc(labels[state]||state)}${waiting}${bytes}${dvRecoveryGuardStatusHtml(conversion.recovery_guard)}</div>`;
 }
 async function hydrateDvFileActions(files,generation=PAGE_RENDER_GENERATION){
   if(!ME||!ME.is_admin) return false;
@@ -605,10 +606,11 @@ async function hydrateDvFileActions(files,generation=PAGE_RENDER_GENERATION){
       snapshots.push(await api(`/dv-conversions?file_ids=${encodeURIComponent(batch.join(","))}`));
     }
     if(generation!==PAGE_RENDER_GENERATION) return false;
-    const conversions={}, eligibility={};
+    const conversions={}, eligibility={}, waitingReasons={};
     for(const snapshot of snapshots){
       Object.assign(conversions,snapshot.conversions_by_file||{});
       Object.assign(eligibility,snapshot.eligible_by_file||{});
+      Object.assign(waitingReasons,snapshot.waiting_reasons_by_file||{});
     }
     // Tool capability and configured library modes are process-wide; choosing
     // the first input-ordered batch makes the result independent of later
@@ -624,6 +626,7 @@ async function hydrateDvFileActions(files,generation=PAGE_RENDER_GENERATION){
       anyActive=anyActive||active;
       mount.innerHTML=dvConversionStateHtml(file,{
         conversion,
+        waiting_reason:waitingReasons[id]||null,
         eligible:eligibility[id]===true,
         capabilities,
         library_modes:libraryModes,

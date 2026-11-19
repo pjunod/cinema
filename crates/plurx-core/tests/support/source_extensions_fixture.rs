@@ -566,7 +566,59 @@ fn published_trigger(migration: &str, name: &str) -> String {
     statement
 }
 
+/// Rewind v134 (F+ curve fits) to v133: the exact marker is required and
+/// stored fits refuse; the extension's own objects go.
+pub(crate) fn rewind_dv_refit_to_v133(connection: &rusqlite::Connection) {
+    rewind_empty_curation_to_v134(connection);
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture F+ ordinal");
+    if version != 134 {
+        return;
+    }
+    let marker: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM background_dv_refit_schema WHERE singleton=1 AND version=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("F+ marker");
+    assert_eq!(marker, 1, "F+ curve fits require their exact marker");
+    let rows: i64 = connection
+        .query_row(
+            "SELECT (SELECT count(*) FROM background_dv_refit_titles)
+              + (SELECT count(*) FROM background_dv_refit_scenes)
+              + (SELECT count(*) FROM background_dv_refit_outcomes)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("F+ fixture data");
+    assert_eq!(rows, 0, "stored F+ fits cannot be rewound");
+    let objects: Vec<(String, String)> = connection
+        .prepare(
+            "SELECT type,name FROM sqlite_master WHERE name GLOB 'background_dv_refit_*'
+              AND type IN ('trigger','table') ORDER BY type DESC,name",
+        )
+        .expect("F+ objects")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("F+ object rows")
+        .collect::<Result<_, _>>()
+        .expect("F+ object inventory");
+    let mut plan: Vec<String> = objects
+        .iter()
+        .map(|(kind, name)| format!("DROP {} {name};", kind.to_ascii_uppercase()))
+        .collect();
+    plan.push("PRAGMA user_version=133;".into());
+    connection
+        .execute_batch(&plan.join("\n"))
+        .expect("published F+ rewind");
+}
+
+/// The title-v2 extension is removed by the shared exact title teardown.
+/// First validate its complete published shape and absence of accepted work;
+/// keep the objects until that teardown while lowering the unrelated tail.
 pub(crate) fn rewind_title_v2_to_v131(connection: &rusqlite::Connection) {
+    rewind_dv_refit_to_v133(connection);
     rewind_empty_delegation_to_v132(connection);
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -762,7 +814,7 @@ fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
         .expect("published custody retention rewind");
 }
 
-/// Rewind an owned, empty v127-v132 coordination tail to published v126;
+/// Rewind an owned, empty v127-v135 coordination tail to published v126;
 /// a fixture already at or below v126 is left alone. The caller owns
 /// atomicity (see [`within_fixture_savepoint`]).
 pub(crate) fn rewind_empty_coordination_tail_to_v126(connection: &rusqlite::Connection) {
@@ -792,18 +844,18 @@ pub(crate) fn rewind_empty_source_extensions_to_v121(connection: &rusqlite::Conn
     });
 }
 
-/// Remove only the exact, entirely empty v134 curation extension (custom
+/// Remove only the exact, entirely empty v135 curation extension (custom
 /// tags, rows, Home layouts, grants) before older tails. Validates the whole
 /// shape, the marker and that every table is empty before dropping anything.
 #[allow(dead_code)]
-pub(crate) fn rewind_empty_curation_to_v133(conn: &rusqlite::Connection) {
+pub(crate) fn rewind_empty_curation_to_v134(conn: &rusqlite::Connection) {
     let ordinal: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .expect("curation ordinal");
-    if ordinal < 134 {
+    if ordinal < 135 {
         return;
     };
-    assert_eq!(ordinal, 134, "only published curation tail can rewind");
+    assert_eq!(ordinal, 135, "only published curation tail can rewind");
     const QUERY: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'library_curation*' OR tbl_name GLOB 'library_curation*') AND sql IS NOT NULL ORDER BY name";
     let shape = |db: &rusqlite::Connection| {
         db.prepare(QUERY)
@@ -850,7 +902,7 @@ pub(crate) fn rewind_empty_curation_to_v133(conn: &rusqlite::Connection) {
         "DROP TABLE library_curation_home;DROP TABLE library_curation_rows;\
          DROP TABLE library_curation_rejections;DROP TABLE library_curation_item_tags;\
          DROP TABLE library_curation_tags;DROP TABLE library_curation_grants;\
-         DROP TABLE library_curation_schema;PRAGMA user_version=133;",
+         DROP TABLE library_curation_schema;PRAGMA user_version=134;",
     )
     .expect("empty curation rewind");
 }
@@ -859,7 +911,7 @@ pub(crate) fn rewind_empty_curation_to_v133(conn: &rusqlite::Connection) {
 /// Read and validate the complete removal plan before changing any object.
 #[allow(dead_code)]
 pub(crate) fn rewind_empty_delegation_to_v132(conn: &rusqlite::Connection) {
-    rewind_empty_curation_to_v133(conn);
+    rewind_dv_refit_to_v133(conn);
     let ordinal: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .expect("delegation ordinal");

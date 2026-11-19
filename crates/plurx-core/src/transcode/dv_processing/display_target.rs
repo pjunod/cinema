@@ -816,6 +816,7 @@ mod tests {
             max_l1_pq: Some(4095),
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
+            el_kind: TitleConstant::Unknown,
         }
     }
     #[test]
