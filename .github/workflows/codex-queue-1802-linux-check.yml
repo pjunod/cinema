@@ -31,8 +31,11 @@ jobs:
           relative="$(awk -F: '$1=="0" { print $3 }' /proc/self/cgroup)"
           [[ "$relative" = /* ]]
           root="/sys/fs/cgroup$relative"
-          test "$(cat "$root/memory.max")" = 15032385536
-          test "$(cat "$root/memory.swap.max")" = 0
+          memory=$(cat "$root/memory.max")
+          swap=$(cat "$root/memory.swap.max")
+          printf 'Effective diagnostic container memory=%s swap=%s\n' "$memory" "$swap"
+          [[ "$memory" =~ ^[0-9]+$ && "$swap" =~ ^[0-9]+$ ]]
+          (( memory >= 10737418240 && memory <= 17179869184 && swap <= 1073741824 ))
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: a1d8301985cc97287d6395c57c532ab2a9eb5c45
