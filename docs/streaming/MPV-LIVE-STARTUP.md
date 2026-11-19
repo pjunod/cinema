@@ -130,7 +130,8 @@ Sharing-control failures now collect bounded, sanitized fixture observations
 through existing APIs. Requests, assertions, authority checks and deadlines are
 unchanged. The [manual exact-case selector](../ci/RUST-UNIT-FANOUT.md#5-re-running)
 permits focused diagnosis; its partial passes do not replace full merge coverage.
-These changes await source review and execution before runtime qualification.
+Source review closed its findings; focused execution and runtime qualification
+remain pending.
 
 ## Acceptance
 

@@ -10,18 +10,23 @@ async fn sharing_source_actor_adapters_actual_h1_h2_control_and_private_metrics(
 async fn sharing_source_actor_adapters_actual_encoded_h1_h2_control_and_private_metrics() {
     Box::pin(actual_actor_adapters(true)).await;
 }
+struct ActorControlRequestContext {
+    index: usize,
+    h2: bool,
+    phase: &'static str,
+    sequence: usize,
+}
+
 // Failure-only observations: never renew authority or issue another control.
 async fn actor_control_failure_context(
     response: &mut axum::response::Response,
     fixture: &RealSourceStartFixture,
     actor: &crate::transcode::source_actor::SourceViewerActor,
     session_id: &str,
-    index: usize,
-    h2: bool,
-    phase: &str,
-    sequence: usize,
+    context: ActorControlRequestContext,
 ) -> String {
     use futures_util::FutureExt;
+    let ActorControlRequestContext { index, h2, phase, sequence } = context;
     let status = response.status().as_u16();
     let snapshot = std::panic::AssertUnwindSafe(async {
         let body = std::mem::replace(response.body_mut(), axum::body::Body::empty());
@@ -262,7 +267,9 @@ async fn actual_actor_adapters(encoded: bool) {
         let failure_context = if response.status() != StatusCode::OK {
             actor_control_failure_context(
                 &mut response, &fixture, &owned.actor, &decoded.response().session_id,
-                index, h2, "control", index + 1,
+                ActorControlRequestContext {
+                    index, h2, phase: "control", sequence: index + 1,
+                },
             ).await
         } else {
             String::new()
@@ -300,7 +307,9 @@ async fn actual_actor_adapters(encoded: bool) {
         let failure_context = if response.status() != StatusCode::OK {
             actor_control_failure_context(
                 &mut response, &fixture, &owned.actor, &decoded.response().session_id,
-                index, h2, "foreign_control", index + 1,
+                ActorControlRequestContext {
+                    index, h2, phase: "foreign_control", sequence: index + 1,
+                },
             ).await
         } else {
             String::new()
