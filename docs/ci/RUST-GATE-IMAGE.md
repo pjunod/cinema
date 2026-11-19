@@ -86,7 +86,7 @@ The verification step refuses that container, as it should, so routing the
 gate there would only turn every run that lands on media1 red. No existing
 label selects lab5's high-CPU runners without also selecting media1.
 
-The gate therefore stays on `ci-nonvoter-compile-amd64` and gains from the
+The gate therefore stays on `ci-nonvoter-heavy-amd64` and gains from the
 image, the single type-check and `-j4`. Using the high-CPU runners needs a
 host-side change first: their runner or Docker has to apply the job's
 `--cpus`, `--pids-limit` and `--memory-swap`. Once a probe there prints

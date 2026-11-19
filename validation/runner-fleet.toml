@@ -69,7 +69,7 @@ voter_hosts = ["lab6", "lab3", "lab4", "media1"]
 # `lab1`, `lab5` and `lab2`. Store workflows now request `ci-nonvoter-store`;
 # legacy labels grant no eligibility for that alias. Record its two physical
 # nonvoter carriers only after actual registration and Store qualification.
-# See `gha-lab2-android-01` below for what a false eligibility claim cost.
+# The earlier lab2 Android registration required a passing Store workload.
 host_exclusive_labels = ["ci-nonvoter-store", "ci-topology"]
 
 # --- lab1: Incus guest host, non-voter -------------------------------------
@@ -93,77 +93,22 @@ labels = ["ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-s
 # `lab1`'s same 20 GiB `plurx-heavy.slice` with -01, so it added no independent
 # host capacity. The stopped registration and its cache are retained.
 
-# --- lab2: Incus guest host, non-voter --------------------------------------
-# A `ci-store` slot, and the entry to read before adding or removing one.
-#
-# It carried the label earlier on 2026-09-02 and failed `replicated Store
-# contracts (legacy)` three runs in a row — 2840, 2842 and 2845 — about twelve
-# seconds into each job, before compiling anything:
-#
-#   warning: failed to write cache, path: /home/runner/.cargo/registry/index/
-#   index.crates.io-1949cf8c6b5b557f/.cache/as/yn/async-trait,
-#   error: Permission denied (os error 13)
-#   Permission denied (os error 13)
-#   ##[error]Process completed with exit code 2.
-#
-# The label was revoked and the shard count dropped to two. The cause was on
-# the host and not in the lane: `/home/runner/.cargo` was owned `root:root` and
-# `/home/runner/.cargo/registry` did not exist at all, because the runner role
-# seeds only the `bin` subdirectory and leaves the root-owned parent alone. Both
-# are now `runner:runner`, matching the actions-runner service user (uid 1000,
-# gid 1001), and a write probe as that user succeeds.
-#
-# The label came back only after the lane itself was proved here: run 2840
-# attempt 3 was re-run while both other slots were busy, so it had to land on
-# this runner, and it passed in 27.9 minutes — in family with
-# `gha-lab1-general-01` (25.7-29.1 min) and `gha-lab5-general-02` (21.8-22.7
-# min) on the same lane.
-#
-# That sequence is the standing rule: **a runner is not a slot until the lane
-# passes on it.** An ownership fix, a successful write probe and a convincing
-# explanation are not together evidence that a 27-minute three-voter hiqlite
-# test will run here. One green run of that test is.
+# --- lab2: Incus guest host, nonvoter ---------------------------------------
+# The former Android guests no longer provide live Android/Store capacity.
+# Registration 63 reuses the second guest and its existing cache. It is on a
+# different physical host from the first heavy worker. Older job revisions
+# still select the compile alias, including some Incus-specific experiments.
 [[runners]]
-name = "gha-lab2-android-01"
+name = "gha-lab2-plurx-heavy-01"
 host = "lab2"
-os = "Linux"
-arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "android-kvm", "ci-store", "ci-nonvoter-store"]
-
-[[runners]]
-name = "gha-lab2-android-02"
-host = "lab2"
-os = "Linux"
-arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "android-kvm"]
-
-# Retired from CI eligibility 2026-11-13: Forgejo registration 63's service
-# advertised 20 GiB inside the Android guest, whose actual memory is about
-# 10 GiB. The stopped registration, cache, and Android runner remain intact.
-
-# --- lab5 (`asus` in the ansible inventory): baremetal, non-voter ---------
-# lab5 is not a plurx voter (it is absent from `voter_hosts`; this header
-# called it "active voter" until 2026-11-11, which was wrong). Do not place
-# uncapped SDK builds here; nightly media jobs use lab1/lab2 VMs.
-#
-# `gha-lab5-plurx-compile-01` is the second carrier of the nonvoter compile
-# pool (`ci-nonvoter-compile-amd64`). That pool runs only the jobs whose
-# container the workflow itself bounds (`--memory 20g --cpus 4
-# --cpuset-cpus 0-3 --pids-limit 4096`, re-checked by each job's first
-# step), so a job gets the same box on lab1 or here. Host-mode jobs, every
-# publishing job and the disk-gated `web_layout`/`vod_web` pair stay on
-# `ci-nonvoter-heavy-amd64`, which only lab1 carries: a release image must not
-# change build host with queue order. Registered 2026-11-11 (Forgejo runner
-# id 61); its worker adds `--oom-score-adj=500` so lab5's `plurxd` outlives a
-# CI container under memory pressure.
-[[runners]]
-name = "gha-lab5-plurx-compile-01"
-host = "lab5"
 os = "Linux"
 arch = "X64"
 implicit_labels = false
-labels = ["ci-nonvoter-compile-amd64"]
+labels = ["ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-store", "incus"]
 
+# --- lab5: baremetal -------------------------------------------------------
+# The compile-only registration is held after a host OOM and a live voter
+# report. It does not count toward this pool's physical capacity.
 [[runners]]
 name = "gha-lab5-general-01"
 host = "lab5"
@@ -176,7 +121,7 @@ name = "gha-lab5-general-02"
 host = "lab5"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "baremetal", "ubuntu-26.04", "ci-store"]
+labels = ["lab", "baremetal", "ubuntu-26.04", "general"]
 
 [[runners]]
 name = "gha-lab5-general-03"
@@ -222,15 +167,14 @@ name = "gha-lab6-general-02"
 host = "lab6"
 os = "Linux"
 arch = "X64"
-# Reserved diagnostic VM. No general/high-cpu label: coverage never occupies
-# a merge slot. One daemon per 8 GiB guest; duplicate services are disabled.
-labels = ["lab", "incus", "ubuntu-24.04", "ci-coverage"]
+# General work in the existing 8 GiB guest with a 6 GiB / two CPU default.
+labels = ["lab", "incus", "ubuntu-24.04", "general"]
 
 # lab3 runners are retired (2026-10-11): observability and production share
 # its disk. boot.autostart=false and no recovery allowlist entry keep them off.
 
 # The former lab6 general and lab4 guests are retired; recovery must not
-# recreate the obsolete FFmpeg capability. The diagnostic guest remains.
+# recreate the obsolete FFmpeg capability. The second lab6 guest serves general jobs.
 
 # --- media1: baremetal, production plurx voter -------------------------------
 [[runners]]

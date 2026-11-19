@@ -22,7 +22,7 @@ jobs:
     if: ${{ !inputs.fuzz_only }}
     name: playback, recovery, bounds, clients, UI, and packaging
     # SDK builds stay inside hard-bounded VMs on verified non-voter hosts.
-    runs-on: [incus, ci-nonvoter-heavy-amd64]
+    runs-on: [ci-nonvoter-heavy-amd64]
     env:
       CARGO_BUILD_JOBS: "1"
       RUST_TEST_THREADS: "2"
@@ -317,7 +317,7 @@ jobs:
     if: ${{ !inputs.fuzz_only }}
     name: report-only weekly mutation spot-check
     # Mutants execute against the same shipping media package as the app.
-    runs-on: [incus, ci-nonvoter-heavy-amd64]
+    runs-on: [ci-nonvoter-heavy-amd64]
     env:
       CARGO_BUILD_JOBS: "1"
       RUST_TEST_THREADS: "2"

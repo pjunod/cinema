@@ -33,7 +33,7 @@ The stage is six jobs (names are part of receipt authentication):
    base (§3). A crate is *due* when they differ. For each due crate it then
    looks up authenticated receipts under the head key (§4) and drops the tests
    that already passed. If nothing is left, no other job does any work.
-2. **`Rust units: build archive`** (`ci-nonvoter-compile-amd64`, the bounded
+2. **`Rust units: build archive`** (`ci-nonvoter-heavy-amd64`, the bounded
    20 GiB/4 CPU container in the private `plurx-ci` image ci.yml's full Rust lane
    uses). Builds `cargo nextest archive --workspace --exclude plurx-cluster-check`
    — the whole unit workspace, so feature unification is exactly `make unit`'s

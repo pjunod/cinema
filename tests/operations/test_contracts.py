@@ -1895,7 +1895,7 @@ assert.equal(context.ACT_TIMER, null);
         )[0]
         self.assertIn("name: fast Rust gate", fast_rust)
         self.assertIn("timeout-minutes: 60", fast_rust)
-        compiler_pool = "runs-on: [ci-nonvoter-compile-amd64]"
+        compiler_pool = "runs-on: [ci-nonvoter-heavy-amd64]"
         for compiler_job in (
             metadata_jobs["rust_compile"],
             workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
@@ -3397,53 +3397,47 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("CARGO_PROFILE_", job)
         self.assertNotIn("continue-on-error", job)
         fleet = runner_fleet()
-        carriers = [row for row in fleet["runners"] if "ci-nonvoter-heavy-amd64" in row["labels"]]
-        self.assertTrue(carriers, "the heavy lane needs a carrier")
+        shared_roles = {
+            "ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64",
+            "ci-nonvoter-store", "incus",
+        }
+        carriers = [
+            row for row in fleet["runners"] if "ci-nonvoter-heavy-amd64" in row["labels"]
+        ]
+        hosts = {row["host"] for row in carriers}
+        self.assertGreaterEqual(len(hosts), 2, "heavy capacity needs two independent hosts")
+        self.assertEqual(len(hosts), len(carriers), "one heavy runner per physical host")
         for row in carriers:
             self.assertNotIn(row["host"], fleet["voter_hosts"])
             self.assertIs(row.get("implicit_labels"), False)
             self.assertEqual((row["os"], row["arch"]), ("Linux", "X64"))
-            # Every heavy slot also serves the bounded compile pool.
-            self.assertIn("ci-nonvoter-compile-amd64", row["labels"])
-        # Exactly one heavy worker shares the Store role, on lab1.
-        primary = [row for row in carriers if "ci-nonvoter-store" in row["labels"]]
-        self.assertEqual(len(primary), 1, "one capacity-one worker must share heavy and Store roles")
-        self.assertEqual(primary[0]["host"], "lab1", "the heavy Store worker is bound to its verified physical nonvoter")
-        self.assertEqual(set(primary[0]["labels"]),
-                         {"ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-store", "incus"})
-        compile_pool = [row for row in fleet["runners"] if "ci-nonvoter-compile-amd64" in row["labels"]]
-        self.assertIn("lab5", {row["host"] for row in compile_pool})
-        self.assertTrue(all(row["host"] not in fleet["voter_hosts"] for row in compile_pool))
-        self.assertTrue(all(row.get("implicit_labels") is False for row in compile_pool))
-        self.assertTrue(all((row["os"], row["arch"]) == ("Linux", "X64") for row in compile_pool))
-        store = [row for row in fleet["runners"] if "ci-nonvoter-store" in row["labels"]]
-        self.assertEqual(len(store), 2, "two actual nonvoter Store carriers are required")
-        self.assertEqual({row["host"] for row in store}, {"lab1", "lab2"})
-        self.assertTrue(all(row["host"] not in fleet["voter_hosts"] for row in store))
-        self.assertTrue(all((row["os"], row["arch"]) == ("Linux", "X64") for row in store))
+            self.assertTrue(shared_roles <= set(row["labels"]))
 
-    def test_new_role_carriers_reject_singleton_voter_and_swapped_physical_owners(self):
-        # Unit fixtures exercise the new aliases' affirmative host boundary;
-        # they are not enrollment evidence for an actually registered worker.
-        heavy = {"name": "fixture-heavy", "host": "lab1", "os": "Linux", "arch": "X64",
-                 "labels": ["ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-store", "incus"],
-                 "implicit_labels": False}
-        compile_carrier = {"name": "fixture-compile", "host": "lab5", "os": "Linux", "arch": "X64",
-                           "labels": ["ci-nonvoter-compile-amd64"], "implicit_labels": False}
-        store = {"name": "fixture-store", "host": "lab2", "os": "Linux", "arch": "X64",
-                 "labels": ["ci-nonvoter-store"]}
+    def test_heavy_pool_rejects_missing_duplicate_or_voter_carriers(self):
+        # These fixtures check physical placement and the compatibility labels.
+        lab1 = {
+            "name": "fixture-heavy-lab1", "host": "lab1", "os": "Linux", "arch": "X64",
+            "labels": ["ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-store", "incus"],
+            "implicit_labels": False,
+        }
+        lab2 = {**lab1, "name": "fixture-heavy-lab2", "host": "lab2"}
         protected = ["media1", "lab3", "lab4", "lab6"]
-        def check_carriers(first, second):
-            fixture = {"voter_hosts": protected, "runners": [first, second, compile_carrier]}
+
+        def check_carriers(runners, voters=protected):
+            fixture = {"voter_hosts": voters, "runners": runners}
             with mock.patch(__name__ + ".runner_fleet", return_value=fixture):
                 self.test_full_unit_suite_has_dedicated_bounded_resident_capacity()
-        check_carriers(heavy, store)
-        for first, second in (({**heavy, "host": "lab5"}, store),
-                              (heavy, {**store, "host": "lab5"}),
-                              ({**heavy, "host": "lab2"}, {**store, "host": "lab1"}),
-                              (heavy, {**store, "host": "lab1"})):
-            with self.subTest(heavy=first["host"], store=second["host"]), self.assertRaises(AssertionError):
-                check_carriers(first, second)
+
+        check_carriers([lab1, lab2])
+        for invalid in (
+            [lab1],
+            [lab1, {**lab2, "host": "lab1"}],
+            [lab1, {**lab2, "labels": ["ci-nonvoter-heavy-amd64", "incus"]}],
+        ):
+            with self.subTest(runners=invalid), self.assertRaises(AssertionError):
+                check_carriers(invalid)
+        with self.assertRaises(AssertionError):
+            check_carriers([lab1, lab2], [*protected, "lab2"])
 
     def test_web_layout_budget_covers_cold_build_and_all_browser_stages(self):
         job = workflow_job_blocks(".github/workflows/ci.yml")["web_layout"]
@@ -4738,7 +4732,7 @@ assert.equal(context.ACT_TIMER, null);
                 elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":
                     # The pinned image retains shipped FFmpeg 8; placement is
                     # the bounded nonvoter compile pool.
-                    expected = "    runs-on: [ci-nonvoter-compile-amd64]"
+                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/ci.yml" and name in {
                     "web_layout", "vod_web"
                 }:
@@ -4785,7 +4779,7 @@ assert.equal(context.ACT_TIMER, null);
                     }
                     and name == "rust_compile"
                 ):
-                    expected = "    runs-on: [ci-nonvoter-compile-amd64]"
+                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif path == ".github/workflows/ci.yml" and name in {
                     "android_jvm",
                     "android_device",
@@ -4800,7 +4794,7 @@ assert.equal(context.ACT_TIMER, null);
                     path == ".github/workflows/validation-nightly.yml"
                     and name in {"deep-validation", "mutation"}
                 ):
-                    expected = "    runs-on: [incus, ci-nonvoter-heavy-amd64]"
+                    expected = "    runs-on: [ci-nonvoter-heavy-amd64]"
                 elif (
                     path == ".github/workflows/validation-nightly.yml"
                     and name == "ffmpeg8-pacing"
@@ -4857,14 +4851,14 @@ assert.equal(context.ACT_TIMER, null);
         }
         for workflow in ("effort-ci", "main-fast-lane"):
             job = workflow_job_blocks(f".github/workflows/{workflow}.yml")["rust_compile"]
-            self.assertEqual(self_hosted_label_sets(job), [("ci-nonvoter-compile-amd64",)])
+            self.assertEqual(self_hosted_label_sets(job), [("ci-nonvoter-heavy-amd64",)])
             self.assertNotIn("Install Rust gate prerequisites", workflow_step_blocks(job))
         image = read("Dockerfile.rust-gate")
         self.assertIn(f"node-v22.23.4-linux-x64.tar.xz", image)
         self.assertIn(checksums["amd64"][1], image)
         for workflow in ("ci",):
             job = workflow_job_blocks(f".github/workflows/{workflow}.yml")["rust_compile"]
-            self.assertEqual(self_hosted_label_sets(job), [("ci-nonvoter-compile-amd64",)])
+            self.assertEqual(self_hosted_label_sets(job), [("ci-nonvoter-heavy-amd64",)])
             bootstrap = workflow_step_blocks(job)["Install Rust gate prerequisites"]
             selector = re.search(r'(?ms)^          case "\$\(dpkg --print-architecture\)" in.*?^          esac$', bootstrap)
             self.assertIsNotNone(selector)

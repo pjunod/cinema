@@ -117,7 +117,7 @@ jobs:
     name: "Rust units: build archive"
     needs: select
     if: needs.select.outputs.build == 'true'
-    runs-on: [ci-nonvoter-compile-amd64]
+    runs-on: [ci-nonvoter-heavy-amd64]
     # The same private CI image as ci.yml's full Rust lane: Rust 1.97.1, the
     # Jellyfin FFmpeg 8 build and the native libraries. Its digest is part of
     # every crate's key through this file.
@@ -477,7 +477,7 @@ jobs:
     # A named-test probe is judged by the train against main-alone probes: a
     # failure there is never excused by this stage's own merge-base check.
     if: always() && needs.verdict.outputs.failures == 'true' && inputs.tests == ''
-    runs-on: [ci-nonvoter-compile-amd64]
+    runs-on: [ci-nonvoter-heavy-amd64]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096

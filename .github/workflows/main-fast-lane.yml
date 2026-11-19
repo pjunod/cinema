@@ -476,7 +476,7 @@ jobs:
     # 2026-11-12 probe there (media1) got memory.max but no cpu.max,
     # pids.max or swap limit from these options, so a voter would carry an
     # unbounded, swapping build. docs/ci/RUST-GATE-IMAGE.md.
-    runs-on: [ci-nonvoter-compile-amd64]
+    runs-on: [ci-nonvoter-heavy-amd64]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-rust-gate@sha256:9bb5c1d51f8b0269a1b58c7d8d2bfa8cab9610707453ff21cd6a2d54324ecac3
       options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096

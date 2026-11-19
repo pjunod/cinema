@@ -17,6 +17,10 @@ placements; the fleet collector maps live host names through its private alias
 configuration. Keep the existing registration IDs and UUIDs when reconciling
 names.
 
+The lab6 coverage VM, lab5 Store-only slot and media1 effort-compile worker
+now serve bounded `general` jobs under their existing registration IDs.
+Lab5 caps this runner and its containers together at 8 GiB and three CPUs.
+
 On `maca`, `gha-maca-linux-arm-01` serves `release-arm64`. CI packaging uses
 `gha-maca-linux-arm-02` with `ci-arm64`, one slot, four vCPUs, 8 GiB RAM,
 9 GiB persistent swap and a 48 GiB sparse disk. The native release compiler
@@ -34,7 +38,7 @@ imports no proof workflow, activates no proof session and grants no proof
 credit. Removing the label because main has no requesting workflow would break
 its existing branch consumer.
 
-`unit-memory-12g`, `ci-coverage`, `primary` and `backup` also retain their
+`unit-memory-12g`, `primary` and `backup` also retain their
 documented compatibility, diagnostic or operational roles. A current workflow
 scan alone does not establish that a label is obsolete.
 
@@ -51,7 +55,7 @@ general/high-cpu pool while six more measurements waited behind it.
 | Host user workloads | `user-1000.slice`: `MemoryHigh=4G`, `MemoryMax=6G`, `MemorySwapMax=4G`; this limits all operator processes in that slice, including direct compiles. On `lab4`, `MemoryHigh=3G`, `MemoryMax=4G` leaves room for its separate image builder. Docker production services have separate cgroups. |
 | `lab4` swap | The existing 8 GiB swap file is activated and restored in fstab; no new disk allocation. |
 | General VM jobs | Runner container options: `--cpus 3 --memory 7g --memory-swap 14g --pids-limit 4096`; one Cargo job and two Rust test threads. Host-mode runner services also have a 7 GiB cgroup cap and 300% CPU quota. |
-| Coverage | Reserved `lab6` second VM, `ci-coverage` label only, two CPUs and 6 GiB memory. Manual dispatch replaces push-triggered coverage. |
+| Former coverage VM | The second `lab6` guest serves `general` jobs with its existing two-CPU and 6 GiB defaults. The current manual coverage workflow uses `unit-memory-16g`. |
 | `lab3` | Both runner VMs retired, `boot.autostart=false`; neither belongs to a recovery allowlist. Production and observability retain its disk. |
 | Apple janitor | Fixed 25 GiB job reserve, no reset for a cache below 1 GiB, verified bounded bootstrap retries, unloaded-daemon recovery before cache inspection, five-minute checks. Intentional `launchctl disable` is respected. |
 
@@ -72,32 +76,31 @@ increasing host resident allocations.
 
 ### Dedicated nonvoter compiler capacity
 
-Heavy host-mode jobs and AMD package and release builds use the
-repository-only `gha-lab1-plurx-heavy-01` worker with `ci-nonvoter-heavy-amd64`.
-Forgejo registrations 62 (`gha-lab1-plurx-heavy-02`) and 63
-(`gha-lab2-plurx-heavy-01`) left CI eligibility on 2026-11-13: 62 shared
-`lab1`'s 20 GiB parent slice with 01; 63's service had a 20 GiB bound inside
-an Android guest with ~10 GiB actual memory. Both are stopped and disabled;
-registrations and caches remain. The capacity-one lab1 worker and existing
-lab2 Store worker remain the two physical `ci-nonvoter-store` carriers.
-The older `lab1` organization registration stays under maintenance labels,
-and its three previous GitHub/Forgejo schedulers remain stopped. Preserve
-those registrations and their private rollback backups.
+Lab1 and lab2 each serve one heavy job at a time in bounded compiler VMs.
+Both workers carry the heavy selector and the Store selector. They also
+retain the prior compile selector so already-queued workflow revisions can
+use either host. Registration 62 stays retired because it shared lab1's
+physical budget with the active worker.
 
-#### Compile pool: `ci-nonvoter-compile-amd64`
+Lab2 keeps the original registration 63 in the second former Android
+guest, increased from 10 GiB to 24 GiB. The old Android services and the
+first guest are parked with their disks, registration data and settings
+available for rollback. Lab5 supplies Android CI during the cutover. The
+two Lab2 VM allocations must never run concurrently at those sizes.
 
-The three `rust_compile` gates and `cluster_daemon` request this pool. Their `container.options` and first-step cgroup check pin the same
-4-CPU / 20 GiB box on any carrier: lab1's heavy worker (which carries both
-labels) and the capacity-one `gha-lab5-plurx-compile-01` (lab5 is a
-nonvoter). Host-mode, package, publish and release-image jobs, the
-receipt-pinned unit suite `check` (its job block digest is
-`validation/workspace_rust_continuation.py` `CURRENT_JOB`) and the disk-gated
-`web_layout`/`vod_web` pair stay on lab1-only
-`ci-nonvoter-heavy-amd64`. lab5 shares 30 GiB and cores 0-3 with other runners
-and a `plurxd`; its worker adds `--oom-score-adj=500` so the kernel picks a CI
-container before `plurxd`. Watch lab5 memory and root disk.
+#### Heavy Rust dispatch
 
-The compiler VM has 24 GiB. Its `plurx-heavy.slice` enforces a **shared**
+Fast Rust gates, unit archive builds and merge-base checks, daemon contracts,
+and the full Rust suite use `ci-nonvoter-heavy-amd64`. Containerized builds
+still verify their 4-CPU and 20 GiB limits before starting tools. Heavy
+host-mode packaging, publishing and the disk-gated web jobs verify the
+worker's effective limits. The former compile label remains available on
+the workers for jobs queued from earlier workflow revisions.
+
+Lab5's compile registration was paused after an OOM and a live voter
+report. Verify host role and headroom before admitting heavy work there.
+
+Each compiler VM has 24 GiB. Its `plurx-heavy.slice` enforces a **shared**
 20 GiB resident limit, zero swap, four CPUs (0–3) and 4096 PIDs. The runner
 service, Docker and external containerd belong to that aggregate. The runner
 leaf and default job containers carry the same explicit limits. Both default
@@ -108,7 +111,7 @@ AMD package, automatic-publisher and explicit media-runtime actions use the
 inspected named builder. Manual main publication selects its inspected builder
 through `BUILDX_BUILDER` and loads the result before its existing push and smoke.
 
-The 31.22 GiB physical host leaves 7.22 GiB outside the VM. The other owner's
+Lab1's 31.22 GiB physical host leaves 7.22 GiB outside the VM. The other owner's
 source-only compiler container stays stopped, with autostart disabled and
 Incus start protection enabled. Its source, cache and configuration are
 preserved. Reusing it requires coordinated CI drain and VM downsizing first;
@@ -129,9 +132,9 @@ smokes and BuildKit probes prove only their stated runtime boundaries.
 
 Before maintenance, drain actual assignments and descendants, preserve the
 exact registration and private configuration backups, and verify physical
-headroom. Restore the same repository-only three labels at capacity one
-only after kernel and executor checks pass. Keep the worker available after
-qualification: removing its only registration strands the workflows.
+headroom. Restore the same repository-only labels at capacity one
+only after kernel and executor checks pass. Keep both hosts available so a
+single job cannot occupy all of the pool’s capacity.
 Rollback must restore VM, slice, service and child limits together before
 removing the other owner's start protection. The source contract is
 [`test_full_unit_suite_has_dedicated_bounded_resident_capacity`](../../tests/operations/test_contracts.py).

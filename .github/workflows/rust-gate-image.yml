@@ -71,7 +71,7 @@ jobs:
   probe:
     name: fast Rust gate on the published image
     needs: publish
-    runs-on: [ci-nonvoter-compile-amd64]
+    runs-on: [ci-nonvoter-heavy-amd64]
     container:
       image: ${{ needs.publish.outputs.image }}
       options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096

@@ -219,9 +219,6 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
     WORKFLOWS = (".github/workflows/ci.yml", ".github/workflows/effort-ci.yml",
                  ".github/workflows/main-fast-lane.yml")
     ROUTE = "[ci-nonvoter-heavy-amd64]"
-    # Jobs whose container the workflow bounds run on the two-carrier
-    # compile pool; host-mode and publishing jobs stay on the heavy host.
-    COMPILE_ROUTE = "[ci-nonvoter-compile-amd64]"
     COMPILE_JOBS = frozenset({"rust_compile", "cluster_daemon", "probe", "rust_units_archive",
                               "rust_units_baseline"})
     # Jobs that size Cargo from their verified container instead of pinning
@@ -260,7 +257,7 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
         jobs.append((".github/workflows/rust-gate-image.yml", "probe",
                      self.job(".github/workflows/rust-gate-image.yml", "probe")))
         # The PR-time Rust unit stage compiles its archive and its merge-base
-        # check on the same bounded compile pool.
+        # check on the same bounded heavy pool.
         jobs.extend((".github/workflows/rust-units.yml", name,
                      self.job(".github/workflows/rust-units.yml", name))
                     for name in ("rust_units_archive", "rust_units_baseline"))
@@ -296,28 +293,19 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                                     env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
             return result, marker.exists()
 
-    def test_every_compile_pool_job_runs_in_an_exactly_bounded_container(self):
-        # The pool spans two hosts, so its only resource bound is the job's own
-        # container; a host-mode job on this label would escape it.
-        found = set()
-        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
-            text = path.read_text()
-            for match in re.finditer(r"(?ms)^  ([A-Za-z0-9_-]+):\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)", text):
-                name, block = match.groups()
-                header = block.split("    steps:\n", 1)[0]
-                if "ci-nonvoter-compile-amd64" not in header:
-                    continue
-                found.add((path.name, name))
-                with self.subTest(workflow=path.name, job=name):
-                    self.assertEqual(re.findall(r"(?m)^    runs-on: (.+)$", header), [self.COMPILE_ROUTE])
-                    self.assertIn("    container:\n", header)
-                    options = re.findall(r"(?m)^      options: (.+)$", header)
-                    self.assertEqual(len(options), 1)
-                    argv = shlex.split(options[0])
-                    self.assertEqual(dict(zip(argv[::2], argv[1::2])), self.CAPS)
-                    self.assertEqual(len(argv), len(self.CAPS) * 2)
-                    self.verifier(block)
-        self.assertEqual({name for _, name in found}, self.COMPILE_JOBS)
+    def test_compile_jobs_run_in_exactly_bounded_containers(self):
+        for path, name, job in self.guarded_jobs():
+            if name not in self.COMPILE_JOBS:
+                continue
+            with self.subTest(workflow=path, job=name):
+                header = job.split("    steps:\n", 1)[0]
+                self.assertIn("    container:\n", header)
+                options = re.findall(r"(?m)^      options: (.+)$", header)
+                self.assertEqual(len(options), 1)
+                argv = shlex.split(options[0])
+                self.assertEqual(dict(zip(argv[::2], argv[1::2])), self.CAPS)
+                self.assertEqual(len(argv), len(self.CAPS) * 2)
+                self.verifier(job)
 
     def test_only_dedicated_nonvoter_jobs_declare_exact_limits_and_verify_before_tools(self):
         scripts = []
@@ -327,9 +315,7 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                 if name in {"package_smoke", "image", "platform"}:
                     self.assertIn("runs_on: '[\"ci-nonvoter-heavy-amd64\"]'", header)
                 else:
-                    expected_route = ("[incus, ci-nonvoter-heavy-amd64]" if name in {"deep-validation", "mutation"}
-                                      else self.COMPILE_ROUTE if name in self.COMPILE_JOBS else self.ROUTE)
-                    self.assertEqual(re.findall(r"(?m)^    runs-on: (.+)$", header), [expected_route])
+                    self.assertEqual(re.findall(r"(?m)^    runs-on: (.+)$", header), [self.ROUTE])
                     if "    container:\n" in header:
                         options = re.findall(r"(?m)^      options: (.+)$", header)
                         self.assertEqual(len(options), 1)
