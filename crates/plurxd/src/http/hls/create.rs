@@ -4964,7 +4964,6 @@ async fn create_with_purpose_attempt(
                     activation_state,
                     activation,
                     activation_predecessor,
-                    expected_predecessor_incarnation_id,
                     activation_authority,
                     owner_activation_generation,
                     guard,
@@ -5420,12 +5419,15 @@ pub(in crate::http) async fn activate_session_under_authority(
     state: AppState,
     activation: MediaSessionActivation,
     reconciled_predecessor: Option<MediaSessionRoute>,
-    predecessor_incarnation: Option<String>,
     authority: crate::serving_fence::ServingAuthority,
     admitted_generation: u64,
     guard: Option<StartedSessionGuard>,
     lease_deadline: tokio::time::Instant,
 ) -> Result<MediaSessionActivationOutcome, ApiError> {
+    // Both ingress paths already carry this exact identity in the validated
+    // activation. Derive it here so settlement cannot receive a second,
+    // potentially divergent predecessor while retaining the captured deadline.
+    let predecessor_incarnation = activation.expected_predecessor_incarnation_id.clone();
     let serving_transition = authority
         .commit_guard_before(admitted_generation, lease_deadline.into_std())
         .await

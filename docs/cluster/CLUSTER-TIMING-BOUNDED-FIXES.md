@@ -104,3 +104,13 @@ Focused Python validation: startup-budget suite plus connected Pi readiness
 case (33 tests), connected Docker contract (1 test), full formal item-pin suite
 (18 tests), and all three formal mapping checks passed. No Rust compiler was
 started for this tooling repair; combined integration remains root-owned.
+
+## 5. Activation API follow-through
+
+Strict daemon Clippy identified eight activation-owner arguments after passing
+the captured deadline. Remove the redundant predecessor identity argument: the
+local constructor copies that exact identity into the activation record, and
+the remote caller clones the same record field. The owner will derive it from
+its activation once, retaining the original captured monotonic deadline input
+and all predecessor settlement, exact epoch and expiry behavior. This removes
+two independently supplied copies of one identity without a lint exemption.

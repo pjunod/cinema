@@ -539,10 +539,6 @@ pub(crate) async fn activate(
     {
         return StatusCode::CONFLICT.into_response();
     }
-    let predecessor_incarnation = request
-        .activation
-        .expected_predecessor_incarnation_id
-        .clone();
     let activation = request.activation.clone();
     let activation_state = state.clone();
     let mut activation_task = tokio::spawn(async move {
@@ -551,7 +547,6 @@ pub(crate) async fn activate(
             activation_state,
             request.activation,
             None,
-            predecessor_incarnation,
             authority,
             request.target_generation,
             None,
