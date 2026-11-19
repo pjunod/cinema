@@ -1011,8 +1011,7 @@ impl Session {
             // to the fixed bank; native/unknown admission already paid its
             // media bank and retains the old post-publication deadline rules.
             let initial_capacity_due = !end_list
-                && (clock.served.is_none()
-                    || clock.initial_capacity_pending_after_short_admission)
+                && (clock.served.is_none() || clock.initial_capacity_pending_after_short_admission)
                 && !held_for_scratch
                 && end_ms >= rolling_initial_runway_ms(playback_rate);
             let initial_insufficient = initial_capacity_due
@@ -1377,10 +1376,10 @@ impl Session {
             return Ok(());
         }
         if clock.served.is_none() {
-            clock.initial_capacity_pending_after_short_admission =
-                initial_admission_policy == RollingStartupPolicy::MpvReloadWindow
-                    && !clock.initial_capacity_checked
-                    && served_end_ms < rolling_initial_runway_ms(playback_rate);
+            clock.initial_capacity_pending_after_short_admission = initial_admission_policy
+                == RollingStartupPolicy::MpvReloadWindow
+                && !clock.initial_capacity_checked
+                && served_end_ms < rolling_initial_runway_ms(playback_rate);
             tracing::info!(
                 target: "plurxd::transcode",
                 session = %session_log_id(session_id),

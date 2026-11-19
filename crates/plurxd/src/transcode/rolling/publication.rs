@@ -221,9 +221,8 @@ pub(super) fn rolling_mpv_reload_runway_ms(rate: f64) -> i64 {
     let target_ms = ROLLING_PUBLICATION_TARGET.as_millis() as f64;
     let spacing_ms = f64::from(plurx_core::transcode::SEGMENT_SECONDS) * 1_000.0;
     let poll_ms = ROLLING_PUBLICATION_POLL.as_millis() as f64;
-    let endpoint_age_ms = (ROLLING_SEGMENT_MAX_MS as f64 / rate)
-        .max(2.0 * spacing_ms + poll_ms)
-        + poll_ms;
+    let endpoint_age_ms =
+        (ROLLING_SEGMENT_MAX_MS as f64 / rate).max(2.0 * spacing_ms + poll_ms) + poll_ms;
     // Do not truncate a required floor to the reserve cap and claim coverage.
     // All supported 0.25x..4x rates fit; an unsupported larger floor stays
     // unready within the ordinary bounded publication allowance.
