@@ -2385,24 +2385,27 @@ async fn fixture_start(
     ))
 }
 #[cfg(test)]
-pub(super) struct SourceFixtureMembershipOwner(tokio::task::JoinHandle<()>);
+pub(super) struct SourceFixtureMembershipOwner(Option<tokio::task::JoinHandle<()>>);
 #[cfg(test)]
 impl SourceFixtureMembershipOwner {
     pub(super) fn start(membership: plurx_core::cluster::membership::MembershipManager) -> Self {
-        Self(tokio::spawn(membership.heartbeat_loop()))
+        Self(Some(tokio::spawn(membership.heartbeat_loop())))
     }
     pub(super) fn start_replication(
         replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     ) -> Self {
         // Main owns this sampler alongside heartbeat. Peer placement requires
         // its actual local/quorum watermark, not heartbeat rows alone.
-        Self(tokio::spawn(
+        Self(Some(tokio::spawn(
             replication.passive_metrics_loop(std::future::pending()),
-        ))
+        )))
     }
     pub(super) async fn finish(&mut self) {
-        self.0.abort();
-        let stopped = tokio::time::timeout(std::time::Duration::from_secs(15), &mut self.0)
+        let Some(mut task) = self.0.take() else {
+            return;
+        };
+        task.abort();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(15), &mut task)
             .await
             .expect("finite production membership owner join");
         assert!(stopped.is_err_and(|error| error.is_cancelled()));
@@ -2411,7 +2414,9 @@ impl SourceFixtureMembershipOwner {
 #[cfg(test)]
 impl Drop for SourceFixtureMembershipOwner {
     fn drop(&mut self) {
-        self.0.abort();
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
     }
 }
 #[cfg(test)]
@@ -2475,6 +2480,21 @@ impl RealSourceStartFixture {
             secret: plurx_core::secrets::Secret::from_cleartext(self.invitation.secret.expose()),
             expires_at_ms: self.invitation.expires_at_ms,
         })
+    }
+    async fn keep_fixture_membership_stable(&mut self) {
+        // The request assertions use real, fresh membership without racing
+        // its periodic write. The production clock and authority checks run.
+        self.membership_owner.finish().await;
+        let membership = self.state.cluster.test_membership();
+        membership
+            .heartbeat()
+            .await
+            .expect("publish the real fixture roster");
+        assert!(membership
+            .observe_source_admission_members()
+            .await
+            .expect("read the fresh fixture roster")
+            .is_some());
     }
     pub async fn shutdown(self) {
         drop(self.shutdown_retaining_fixture_budget().await);
