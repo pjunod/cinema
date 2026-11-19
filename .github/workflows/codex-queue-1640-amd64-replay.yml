@@ -12,7 +12,7 @@ env:
   NEXTEST_SHA256: 1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4
 jobs:
   replay:
-    name: Replay three tests from the original artifact
+    name: Replay four tests from the original artifact
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -102,6 +102,7 @@ jobs:
               'cluster::migration::tests::cancelled_pre_client_startup_keeps_root_lease_until_actual_storage_drains',
               'process::bounded::tests::owned_group_pause_preserves_active_budget_and_cancel_reaps_the_stopped_group',
               'http::shared_source_playback::tests::sharing_source_http_native_encoded_h1_h2_vtt_and_held_body_end',
+              'offline::tests::queue_marks_a_changed_source_failed_and_keeps_the_typed_reason',
           )
           rust_units.require_test_disk()
           rust_units.bound_cpus()
@@ -111,7 +112,7 @@ jobs:
           results = []
           for attempt in range(1, 6):
               print(f'Exact sample {attempt} of 5', flush=True)
-              command = rust_units.nextest_command(archive, filters, ['--test-threads', '2', '--retries', '0'])
+              command = rust_units.nextest_command(archive, filters, ['--test-threads', '2'])
               code, outcomes = rust_units.run_nextest(command)
               observed = {key.split(' ', 1)[1]: value for key, value in outcomes.items()}
               assert code in (0, 100) and set(observed) == set(cases), (code, observed)
