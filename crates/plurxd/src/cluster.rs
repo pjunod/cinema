@@ -2877,7 +2877,8 @@ pub(crate) mod calls {
                             let _ = observe_authorization(result);
                         }
                         if kind == "fallback" {
-                            assert!(observe_authorization(Ok(true)).unwrap());
+                            assert!(observe_authorization(Ok(true))
+                                .expect("successful fallback authorization preserves its verdict"));
                         }
                         let mut headers = axum::http::HeaderMap::new();
                         // A business handler/proxy cannot spoof the private metadata.
@@ -2914,7 +2915,7 @@ pub(crate) mod calls {
                             .uri(format!("/{kind}"))
                             .header(AUTH_REFUSAL_HEADER, "rate_limited")
                             .body(Body::empty())
-                            .unwrap(),
+                            .expect("build peer refusal adapter request"),
                     )
                     .await
                     .unwrap();
@@ -2937,13 +2938,14 @@ pub(crate) mod calls {
                 assert!(
                     axum::body::to_bytes(response.into_body(), 1024)
                         .await
-                        .unwrap()
+                        .expect("read unchanged refusal response body")
                         .is_empty(),
                     "the original empty response body is unchanged"
                 );
             }
             assert!(
-                !observe_authorization(Ok(false)).unwrap(),
+                !observe_authorization(Ok(false))
+                    .expect("non-HTTP refusal keeps its original denial"),
                 "non-HTTP callers keep the original result without panic"
             );
         }
@@ -2974,14 +2976,17 @@ pub(crate) mod calls {
                 axum::http::Request::builder()
                     .uri(path)
                     .body(Body::empty())
-                    .unwrap()
+                    .expect("build concurrent peer or user request")
             };
             let (peer, user) = tokio::join!(
                 app.clone().oneshot(request("/peer")),
                 app.oneshot(request("/user"))
             );
             assert_eq!(
-                peer.unwrap().headers().get(AUTH_REFUSAL_HEADER).unwrap(),
+                peer.unwrap()
+                    .headers()
+                    .get(AUTH_REFUSAL_HEADER)
+                    .expect("actual peer refusal publishes its bounded classification"),
                 "authority_unavailable"
             );
             assert!(!user.unwrap().headers().contains_key(AUTH_REFUSAL_HEADER));
@@ -3017,8 +3022,10 @@ pub(crate) mod calls {
             }
             for value in [
                 HeaderValue::from_static("unknown"),
-                HeaderValue::from_str(&"x".repeat(33)).unwrap(),
-                HeaderValue::from_bytes(&[0xff]).unwrap(),
+                HeaderValue::from_str(&"x".repeat(33))
+                    .expect("construct oversized but HTTP-valid refusal value"),
+                HeaderValue::from_bytes(&[0xff])
+                    .expect("construct opaque HTTP-valid refusal bytes"),
             ] {
                 headers.insert(AUTH_REFUSAL_HEADER, value);
                 assert_eq!(
@@ -3070,7 +3077,14 @@ pub(crate) mod calls {
                     PeerCallOutcome::Responded(200),
                 );
             }
-            assert!(outcomes.0.lock().unwrap().len() <= 64);
+            assert!(
+                outcomes
+                    .0
+                    .lock()
+                    .expect("read bounded passive outcome receipts")
+                    .len()
+                    <= 64
+            );
         }
 
         #[tokio::test]
@@ -3096,7 +3110,12 @@ pub(crate) mod calls {
                 Err(PeerTransportError::LocalUnavailable)
             ));
             assert!(
-                transport.outcomes.0.lock().unwrap().is_empty(),
+                transport
+                    .outcomes
+                    .0
+                    .lock()
+                    .expect("read outcomes after local signing failure")
+                    .is_empty(),
                 "local signing failed before any peer call"
             );
             transport.client = Err("local client construction failed".to_owned());
@@ -3115,7 +3134,12 @@ pub(crate) mod calls {
                     .await,
                 Err(PeerTransportError::LocalUnavailable)
             ));
-            assert!(transport.outcomes.0.lock().unwrap().is_empty());
+            assert!(transport
+                .outcomes
+                .0
+                .lock()
+                .expect("read outcomes after missing local client")
+                .is_empty());
             assert_eq!(
                 PeerCallOutcome::failure(PeerTransportError::LocalUnavailable),
                 None
@@ -3129,14 +3153,21 @@ pub(crate) mod calls {
         #[tokio::test]
         async fn an_actual_stalled_peer_body_keeps_its_typed_timeout() {
             use tokio::io::AsyncWriteExt;
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind stalled-response fixture listener");
+            let address = listener
+                .local_addr()
+                .expect("read fixture listener address");
             let server = tokio::spawn(async move {
-                let (mut socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept fixture peer connection");
                 socket
                     .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
                     .await
-                    .unwrap();
+                    .expect("write fixture response headers");
                 std::future::pending::<()>().await;
             });
             let response = tokio::time::timeout(
@@ -3146,8 +3177,8 @@ pub(crate) mod calls {
                     .send(),
             )
             .await
-            .unwrap()
-            .unwrap();
+            .expect("peer response headers arrive within fixture budget")
+            .expect("receive fixture response headers");
             let result =
                 read_bounded(response, deadline_after(Duration::from_millis(50)), 1024).await;
             server.abort();

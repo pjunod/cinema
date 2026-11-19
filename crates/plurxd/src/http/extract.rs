@@ -1267,7 +1267,7 @@ mod tests {
         assert_eq!(
             cache
                 .authenticated_token("native", Native, &source)
-                .unwrap()
+                .expect("same-source native token proof remains reusable")
                 .id,
             1
         );
@@ -1303,7 +1303,7 @@ mod tests {
             .authenticated_token("token", Native, &source)
             .is_none());
         drop(revoke);
-        let now = super::unix_seconds().unwrap();
+        let now = super::unix_seconds().expect("read fixture wall clock before stale publication");
         cache.record_token_authenticated(
             ticket,
             "late".into(),
@@ -1318,11 +1318,15 @@ mod tests {
         );
         assert!(cache.authenticated_token("late", Native, &source).is_none());
         record_token(&cache, source.clone(), "token", Native);
-        cache.begin_remote_revocation("peer-operation").unwrap();
+        cache
+            .begin_remote_revocation("peer-operation")
+            .expect("install remote token-proof revocation fence");
         assert!(cache
             .authenticated_token("token", Native, &source)
             .is_none());
-        cache.end_remote_revocation("peer-operation").unwrap();
+        cache
+            .end_remote_revocation("peer-operation")
+            .expect("finish remote token-proof revocation fence");
         assert!(cache
             .authenticated_token("token", Native, &source)
             .is_none());
@@ -1369,7 +1373,8 @@ mod tests {
         use plurx_core::store::TokenAudience::Native;
         let cache = token_cache();
         let source = token_source();
-        let now = super::unix_seconds().unwrap();
+        let now =
+            super::unix_seconds().expect("read fixture wall clock for bounded proof witnesses");
         for (digest, observed, expires) in
             [("expired", now - 1, now), ("future", now + 1, now + 60)]
         {
@@ -1402,11 +1407,21 @@ mod tests {
             record_token(&cache, source.clone(), &format!("token-{n}"), Native);
         }
         assert_eq!(
-            cache.inner.lock().unwrap().token_proofs.len(),
+            cache
+                .inner
+                .lock()
+                .expect("read bounded token proof map")
+                .token_proofs
+                .len(),
             super::MAX_TOKEN_PROOFS
         );
         let revoke = cache.begin_global_revocation();
-        assert!(cache.inner.lock().unwrap().token_proofs.is_empty());
+        assert!(cache
+            .inner
+            .lock()
+            .expect("read token proof map after global invalidation")
+            .token_proofs
+            .is_empty());
         drop(revoke);
     }
 
