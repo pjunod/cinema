@@ -316,9 +316,11 @@ final class MeridianTests: XCTestCase {
             hosting.view.setNeedsLayout(); hosting.view.layoutIfNeeded()
             settle()
             XCTAssertTrue(tabs.selectedViewController === settings)
-            model.layout = .standard
             window.frame.size.width = 1024
             hosting.view.setNeedsLayout(); hosting.view.layoutIfNeeded()
+            settle(until: { tabs.view.bounds.width > 900 })
+            XCTAssertGreaterThan(tabs.view.bounds.width, 900, "Restore the wide Meridian geometry before switching layouts")
+            model.layout = .standard
             settleChrome(until: { !tabs.isTabBarHidden && tabs.sidebar.isHidden == sidebarHidden })
             XCTAssertTrue(tabs.selectedViewController === settings)
             XCTAssertTrue(findTabs(hosting) === tabs)
