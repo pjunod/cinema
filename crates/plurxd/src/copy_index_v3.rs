@@ -152,6 +152,7 @@ struct Consumer<'a> {
     root: std::path::PathBuf,
     file: &'a MediaFile,
     identity: SourceIdentity,
+    needs_refit_proofs: bool,
     object_version: String,
     /// Where a defective healthy head is reported. None reports nothing.
     defects: Option<&'a CopyAnalysisRegistry>,
@@ -193,6 +194,7 @@ pub(crate) async fn resolve(
         root: crate::copy_analysis::v3_root(runtime_cache),
         file,
         identity,
+        needs_refit_proofs: video.dolby_vision_refit().is_some(),
         object_version,
         defects,
     };
@@ -335,6 +337,17 @@ impl Consumer<'_> {
                 return Ok(None);
             }
         };
+        // The v3 decoder has already checked proof encoding, row coverage and
+        // the planning digest. A fitted rendition requires both optional
+        // evidence fields; ordinary copy observations do not supply them.
+        if self.needs_refit_proofs
+            && (index.dv_refit_proofs.is_none()
+                || index
+                    .dv_refit_origin
+                    .is_none_or(|origin| origin.time_base_num == 0 || origin.time_base_den == 0))
+        {
+            return Ok(None);
+        }
         index.source = self.identity.clone();
         if let Some(proof) = index.promotion.hevc_configuration.as_mut() {
             if !proof.bind_equivalent_source(

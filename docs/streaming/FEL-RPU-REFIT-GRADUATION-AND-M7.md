@@ -80,6 +80,15 @@ silent duration from indexed video and gives corrected silent plans a new
 rendition identity, preserving real-audio tail behavior. Qualification of that
 correction and actual fitted physical playback remain open.
 
+A new rendition also exposed a shared-index mismatch: ordinary Analysis had
+published a v3 index under the fitted recipe identity without the canonical
+pre-conversion proofs and source-clock origin. The existing complete local
+index retained both. Fitted resolution now requires those fields before
+preferring a v3 candidate and otherwise retains the exact local/v2 fallback.
+A future complete v3 remains eligible. Ordinary Analysis declines fitted
+demand because its seal cannot produce that evidence; the dedicated fitted
+index builder retains ownership. No proof requirement or artifact is removed.
+
 The current host inventory sees a physical Apple TV 4K (3rd generation).
 That is availability, not playback evidence. The inspected learner service
 image is based on `254df39f7afb`, before the F+ merge; it cannot qualify this

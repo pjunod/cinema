@@ -4,7 +4,8 @@ use plurx_core::segplan::{IndexRow, SourceIdentity};
 use plurx_core::store::{
     cluster_fragment_index_blob_sha256, cluster_fragment_index_output_identity,
     cluster_fragment_index_v3_key, copy_index_v3_source_key, encode_cluster_fragment_index_blob_v3,
-    BackgroundJobStore, FragmentIndexEngineProvenance, SettingsStore, SqliteStore,
+    BackgroundJobStore, FragmentIndexEngineProvenance, FragmentIndexStore, SettingsStore,
+    SqliteStore,
 };
 use std::path::PathBuf;
 
@@ -401,6 +402,60 @@ async fn the_origin_plans_from_its_exact_head_and_local_blob() {
     assert!(fixture.resolve().await.is_some());
     refuse_on_this_engine(&resolved.rendition_cache_key);
     assert!(fixture.resolve().await.is_none());
+}
+
+#[tokio::test]
+async fn fitted_copy_prefers_v3_only_when_it_carries_the_complete_fitted_proof() {
+    for v3_has_proofs in [false, true] {
+        let mut fixture = fixture().await;
+        fixture.file.hdr = Some("dolby_vision".into());
+        fixture.video = CopyVideoOptions::new(true, false)
+            .with_dolby_vision_conversion(true)
+            .with_dolby_vision_refit(Some([7; 32]));
+        let source_sha256 = hex64('5');
+        let mut local = sealed_index(&source_sha256, true);
+        local.source = crate::fragindex::identity_for(&fixture.file, fixture.video);
+        local.dv_refit_origin = Some(plurx_core::segplan::DvRefitOrigin {
+            first_dts: 0,
+            first_pts: 0,
+            time_base_num: 1,
+            time_base_den: 90_000,
+        });
+        let proof = serde_json::from_value(serde_json::json!("ab".repeat(72)))
+            .expect("well-formed fitted proof fixture");
+        local.dv_refit_proofs = Some(vec![proof; local.rows.len()]);
+        fixture
+            .store
+            .put_fragment_index(fixture.file.id, &local)
+            .await
+            .expect("existing exact local index");
+
+        let v3 = if v3_has_proofs {
+            local.clone()
+        } else {
+            sealed_index(&source_sha256, true)
+        };
+        let (artifact, blob) = variant(&fixture.namespace, fixture.file.id, &v3, &source_sha256);
+        fixture.publish(NODE, &fixture.object_version, &artifact);
+        fixture.install(&artifact, &blob).await;
+
+        // The serving path prefers the shared resolution and keeps the
+        // existing exact local index when the shared resolution misses.
+        let resolved = fixture.resolve().await;
+        assert_eq!(resolved.is_some(), v3_has_proofs);
+        let selected = match resolved {
+            Some(resolved) => resolved.index,
+            None => fixture
+                .store
+                .fragment_index(fixture.file.id, &local.source)
+                .await
+                .expect("exact local lookup")
+                .expect("local fitted fallback"),
+        };
+        assert_eq!(selected.dv_refit_origin, local.dv_refit_origin);
+        assert_eq!(selected.dv_refit_proofs, local.dv_refit_proofs);
+        assert!(fixture.reported().is_empty(), "no defect or quarantine");
+    }
 }
 
 /// Another origin's head describes this node's bytes only when this node's
