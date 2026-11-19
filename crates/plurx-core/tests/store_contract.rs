@@ -13368,17 +13368,24 @@ async fn replicated_fixture_shape(client: &Client, sql: &str) -> Vec<(String, St
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_custody_retention_rewind(client: &Client) -> [String; 6] {
+    use queue_fixture::source_extensions_fixture::{
+        validated_custody_retention_rewind, CUSTODY_RETENTION_FIXTURE_SHAPE_SQL,
+    };
+    let shape = replicated_fixture_shape(client, CUSTODY_RETENTION_FIXTURE_SHAPE_SQL).await;
+    require_replicated_fixture_marker(client, "background_custody_retention_schema", 1).await;
+    validated_custody_retention_rewind(&shape)
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
 async fn replicated_source_tail_drops(
     client: &Client,
     remove: impl Fn(&str) -> bool,
 ) -> Vec<String> {
     use queue_fixture::source_extensions_fixture::{
-        validated_custody_retention_rewind, validated_source_tail_drops,
-        CUSTODY_RETENTION_FIXTURE_SHAPE_SQL, SOURCE_TAIL_SHAPE,
+        validated_source_tail_drops, SOURCE_TAIL_SHAPE,
     };
-    let custody_shape = replicated_fixture_shape(client, CUSTODY_RETENTION_FIXTURE_SHAPE_SQL).await;
-    require_replicated_fixture_marker(client, "background_custody_retention_schema", 1).await;
-    let custody_rewind = validated_custody_retention_rewind(&custody_shape);
+    let custody_rewind = replicated_custody_retention_rewind(client).await;
     let source_shape: Vec<_> = client
         .query_consistent(SOURCE_TAIL_SHAPE.to_owned(), hiqlite::params!())
         .await
