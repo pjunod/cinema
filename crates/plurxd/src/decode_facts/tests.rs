@@ -3648,6 +3648,7 @@ async fn packaged_static_ffprobe_uses_supported_bounded_source_read_syscalls() {
 #[tokio::test]
 async fn tracked_raw_probe_retires_joined_worker_despite_source_service_error() {
     use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
 
     let root = crate::test_tempdir().expect("probe fixture");
     let probe_path = root.path().join("static-ffprobe");
