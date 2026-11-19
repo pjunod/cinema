@@ -989,8 +989,6 @@ impl RetainOutputLedger {
             .retain(|_, at| now.duration_since(*at) < RETAIN_OUTPUT_LEDGER_TTL);
         self.queued
             .retain(|_, row| now.duration_since(row.at) < RETAIN_OUTPUT_LEDGER_TTL);
-        evict_oldest(&mut self.refused, RETAIN_OUTPUT_LEDGER_MAX, |at| *at);
-        evict_oldest(&mut self.queued, RETAIN_OUTPUT_LEDGER_MAX, |row| row.at);
     }
 
     /// The job `session_id` may cancel: one its own start created, that no
@@ -1009,6 +1007,7 @@ impl RetainOutputLedger {
         let now = Instant::now();
         self.prune(now);
         self.refused.insert(session_id.to_owned(), now);
+        evict_oldest(&mut self.refused, RETAIN_OUTPUT_LEDGER_MAX, |at| *at);
         let row = self.queued.remove(session_id)?;
         self.cancellable(session_id, &row)
     }
@@ -1031,6 +1030,7 @@ impl RetainOutputLedger {
             return self.cancellable(session_id, &row);
         }
         self.queued.insert(session_id.to_owned(), row);
+        evict_oldest(&mut self.queued, RETAIN_OUTPUT_LEDGER_MAX, |row| row.at);
         None
     }
 
@@ -1084,6 +1084,19 @@ mod retain_output_ledger_tests {
         assert!(ledger.refused(&format!("s{RETAIN_OUTPUT_LEDGER_MAX}")));
         ledger.forget(&format!("s{RETAIN_OUTPUT_LEDGER_MAX}"));
         assert!(!ledger.refused(&format!("s{RETAIN_OUTPUT_LEDGER_MAX}")));
+
+        for index in 0..=RETAIN_OUTPUT_LEDGER_MAX {
+            ledger.record_queued(&format!("q{index}"), format!("job-{index}"), true);
+        }
+        assert_eq!(ledger.queued.len(), RETAIN_OUTPUT_LEDGER_MAX);
+        assert!(
+            !ledger.queued.contains_key("q0"),
+            "the oldest row goes first"
+        );
+        let newest = format!("q{RETAIN_OUTPUT_LEDGER_MAX}");
+        assert!(ledger.queued.contains_key(&newest));
+        ledger.forget(&newest);
+        assert!(!ledger.queued.contains_key(&newest));
     }
 }
 
