@@ -566,6 +566,150 @@ pub(crate) struct VerifiedWindow {
 }
 
 #[cfg(target_os = "linux")]
+impl VerifiedWindow {
+    fn package_splice_window(
+        &self,
+        format: &plurx_core::fmp4::video_splice::SpliceVideoFormat,
+        times: &[plurx_core::fmp4::video_splice::CopyPictureTime],
+        copy_timescale: u32,
+        decode_start: u64,
+        sequence: u32,
+    ) -> Result<plurx_core::fmp4::Fragment, String> {
+        use plurx_core::fmp4::{
+            track_projection::CopyTrackProjection, video_splice::SpliceBoundary, FragmentReader,
+            Unit,
+        };
+        let proof = self
+            .receipt
+            .as_ref()
+            .ok_or("FEL splice has no processing receipt")?;
+        if proof.counts().el_accepted == 0 || proof.counts().el_accepted != proof.counts().emitted {
+            return Err("FEL splice window did not apply the enhancement layer throughout".into());
+        }
+        let media_error = |error: plurx_core::fmp4::Fmp4Error| error.to_string();
+        let mut reader = FragmentReader::new();
+        reader.reject_reinitialization();
+        reader.push(&self.bytes);
+        let Some(Unit::Init(init)) = reader.next_unit().map_err(media_error)? else {
+            return Err("FEL splice window has no init".into());
+        };
+        let Some(Unit::Fragment(fragment)) = reader.next_unit().map_err(media_error)? else {
+            return Err("FEL splice window has no media".into());
+        };
+        if matches!(
+            reader.next_unit().map_err(media_error)?,
+            Some(Unit::Init(_) | Unit::Fragment(_))
+        ) || reader.buffered() != 0
+        {
+            return Err("FEL splice window contains unexpected objects".into());
+        }
+        let (video_init, video) = if init.tracks.len() == 1 {
+            (init, fragment)
+        } else {
+            let split = CopyTrackProjection::new(init).map_err(media_error)?;
+            let video = split
+                .segment(&fragment.bytes, sequence)
+                .map_err(media_error)?
+                .video;
+            (split.video_init().clone(), video)
+        };
+        format
+            .admit(&video_init)
+            .map_err(media_error)?
+            .fragment_at_copy_times(
+                &video,
+                times,
+                copy_timescale,
+                decode_start,
+                sequence,
+                SpliceBoundary::ProducerChange,
+            )
+            .map_err(media_error)
+    }
+}
+
+/// Author a replacement for one entire unpublished rolling segment. The
+/// caller owns all windows under one exact verified source and processing
+/// recipe and must recheck the producer and media sequence before publication.
+#[cfg(target_os = "linux")]
+pub(crate) fn package_fel_segment(
+    windows: &[VerifiedWindow],
+    ordinary: &plurx_core::fmp4::Fragment,
+    ordinary_video: &plurx_core::fmp4::Track,
+    ordinary_output_extent: &plurx_core::fmp4::Fragment,
+    format: &plurx_core::fmp4::video_splice::SpliceVideoFormat,
+    sequence: u32,
+) -> Result<Vec<u8>, String> {
+    let output = format
+        .init()
+        .video()
+        .ok_or("FEL splice format has no video track")?;
+    let copy_extent = ordinary_output_extent
+        .track(output.id)
+        .ok_or("FEL splice has no corresponding ordinary video extent")?;
+    let mut decode_start = copy_extent.base_decode_time;
+    let mut digests = Vec::new();
+    let mut previous: Option<&plurx_core::transcode::dv_processing::DvFrameKey> = None;
+    for picture in windows.iter().flat_map(|window| &window.observed.pictures) {
+        if let Some(old) = previous {
+            let key = &picture.key;
+            if old.absolute_video_index != key.absolute_video_index
+                || old.continuity_epoch != key.continuity_epoch
+                || old.display_ordinal.checked_add(1) != Some(key.display_ordinal)
+            {
+                return Err("FEL splice windows do not cover consecutive source pictures".into());
+            }
+        }
+        previous = Some(&picture.key);
+        let witness = picture
+            .base_vcl_sha256
+            .as_ref()
+            .ok_or("FEL source witness unavailable")?;
+        let mut bytes = [0; 32];
+        hex::decode_to_slice(witness.as_str(), &mut bytes)
+            .map_err(|_| "invalid FEL source witness")?;
+        digests.push(bytes);
+    }
+    if digests.len() != copy_extent.sample_count() {
+        return Err("FEL windows do not cover the whole ordinary video segment".into());
+    }
+    let times =
+        plurx_core::fmp4::video_splice::match_splice_pictures(ordinary, ordinary_video, &digests)
+            .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    let mut consumed = 0;
+    for (subwindow, window) in windows.iter().enumerate() {
+        let end = consumed + window.observed.pictures.len();
+        let ordinal = u32::try_from(subwindow).map_err(|_| "FEL fragment sequence overflows")?;
+        let fragment = window.package_splice_window(
+            format,
+            &times[consumed..end],
+            ordinary_video.timescale,
+            decode_start,
+            sequence
+                .checked_add(ordinal)
+                .ok_or("FEL fragment sequence overflows")?,
+        )?;
+        let encoded = fragment
+            .track(output.id)
+            .ok_or("FEL splice output track missing")?;
+        decode_start = decode_start
+            .checked_add(encoded.duration())
+            .ok_or("FEL decode clock overflows")?;
+        bytes.extend_from_slice(&fragment.bytes);
+        consumed = end;
+    }
+    if copy_extent
+        .base_decode_time
+        .checked_add(copy_extent.duration())
+        != Some(decode_start)
+    {
+        return Err("FEL replacement moved the ordinary decode end".into());
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
 impl PrivateWindow {
     /// The encoder maps original source pictures to the generation-local
     /// AAC preroll lattice. Original keys and the global grid remain in
@@ -1917,6 +2061,8 @@ struct CodedRow {
     duration_ticks: i64,
     packet_sha256: String,
     rpu_sha256: String,
+    #[serde(default)]
+    base_vcl_sha256: Option<String>,
 }
 #[cfg(target_os = "linux")]
 #[derive(Deserialize, serde::Serialize)]
@@ -1951,6 +2097,7 @@ struct WindowComplete {
 #[cfg(target_os = "linux")]
 pub(crate) struct ObservedPicture {
     pub(crate) key: plurx_core::transcode::dv_processing::DvFrameKey,
+    pub(crate) base_vcl_sha256: Option<DvDigest>,
     pub(crate) duration: plurx_core::transcode::dv_processing::DvDuration,
     pub(crate) rpu: Vec<u8>,
     pub(crate) bl_shape: (u32, u32),
@@ -2367,6 +2514,16 @@ impl PrivateWindow {
             trace.extend_from_slice(&source.duration_ticks.to_be_bytes());
             trace.extend_from_slice(source.packet_sha256.as_bytes());
             trace.extend_from_slice(source.rpu_sha256.as_bytes());
+            let base_vcl_sha256 = source
+                .base_vcl_sha256
+                .as_ref()
+                .map(|digest| DvDigest::new(digest.clone()))
+                .transpose()
+                .map_err(|error| error.to_string())?;
+            if let Some(digest) = &source.base_vcl_sha256 {
+                trace.extend_from_slice(b"base-vcl:");
+                trace.extend_from_slice(digest.as_bytes());
+            }
             observed_timing.push_str(&format!("{}\t{}\n", pair.pts, pair.duration));
             let optional_digest = |value: Option<String>| {
                 value
@@ -2376,6 +2533,7 @@ impl PrivateWindow {
             };
             pictures.push(ObservedPicture {
                 key,
+                base_vcl_sha256,
                 duration,
                 rpu,
                 bl_shape: (pair.bl_width, pair.bl_height),

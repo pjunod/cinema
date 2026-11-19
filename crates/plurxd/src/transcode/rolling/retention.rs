@@ -262,6 +262,7 @@ pub(super) async fn gc_expired_segments(session: &Session) {
     }
     let sweep = RETENTION_SWEEP_ID.fetch_add(1, Relaxed);
     let mut moved = Vec::with_capacity(expired.len());
+    let mut split_garbage = Vec::new();
     for (name, indexed_bytes) in expired {
         let garbage = session.dir.join(format!(
             ".plurx-retention-{producer_attempt}-{sweep}-{name}"
@@ -282,6 +283,41 @@ pub(super) async fn gc_expired_segments(session: &Session) {
                         indexed_bytes
                     }
                 };
+                if let Some((split, index)) = session
+                    .native_split
+                    .as_ref()
+                    .zip(segment_index(&name).and_then(|index| u64::try_from(index).ok()))
+                {
+                    let mut removed = true;
+                    let children = [format!("split-audio-{name}"), format!("split-video-{name}")];
+                    for child in children
+                        .into_iter()
+                        .chain(split.fel_object(index, producer_attempt))
+                    {
+                        let retired = session.dir.join(format!(
+                            ".plurx-retention-{producer_attempt}-{sweep}-{child}"
+                        ));
+                        match tokio::fs::rename(session.dir.join(&child), &retired).await {
+                            Ok(()) => {
+                                let bytes = tokio::fs::metadata(&retired)
+                                    .await
+                                    .map(|metadata| {
+                                        i64::try_from(metadata.len()).unwrap_or(i64::MAX)
+                                    })
+                                    .unwrap_or(0);
+                                split_garbage.push((retired, bytes));
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(error) => {
+                                removed = false;
+                                tracing::warn!(%error, %child, index, "split rendition remains in retired scratch");
+                            }
+                        }
+                    }
+                    if removed {
+                        split.remove(index);
+                    }
+                }
                 moved.push((name, garbage, measured_bytes.max(indexed_bytes)));
             }
             Err(error) => tracing::warn!(
@@ -304,7 +340,7 @@ pub(super) async fn gc_expired_segments(session: &Session) {
         .map(|(name, path, bytes)| (name.as_str(), (path, *bytes)))
         .collect();
     let mut index = session.segments.lock().await;
-    let mut garbage = Vec::with_capacity(moved.len());
+    let mut garbage = split_garbage;
     for seg in index.segs.iter_mut() {
         if let Some((path, bytes)) = moved_paths.get(seg.name.as_str()) {
             garbage.push(((*path).clone(), *bytes));
@@ -331,7 +367,14 @@ pub(super) async fn gc_expired_segments(session: &Session) {
             .store(garbage_bytes, Release);
         // Rename changes served ownership, not disk use. Keep every handed-off
         // byte charged until detached cleanup confirms the path is absent.
-        let live = index.total_bytes().saturating_add(garbage_bytes);
+        let split_bytes = session
+            .native_split
+            .as_ref()
+            .map_or(0, |split| split.bytes());
+        let live = index
+            .total_bytes()
+            .saturating_add(garbage_bytes)
+            .saturating_add(split_bytes);
         session.live_bytes.store(live, Relaxed);
         // And say so in the ledger in the same breath. The periodic walk
         // would find these files anyway -- they are regular files in the same
