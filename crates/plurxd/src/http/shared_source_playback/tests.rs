@@ -1122,11 +1122,14 @@ async fn sharing_source_bound_invocation_projects_the_complete_start_response() 
 }
 async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
     use std::time::{Duration, Instant};
-    let fixture = real_source_start_fixture_with(mode, None).await;
+    let mut fixture = real_source_start_fixture_with(mode, None).await;
     let native = matches!(
         mode,
         SourceFixtureMode::NativeCopy | SourceFixtureMode::NativeEncoded
     );
+    if native {
+        fixture.keep_fixture_membership_stable().await;
+    }
     let mut unsupported: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     unsupported["session"]["previous_session_id"] = json!(Uuid::new_v4());
     unsupported["session"]["request_id"] = json!(Uuid::new_v4());
