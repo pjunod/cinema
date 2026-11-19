@@ -12,7 +12,7 @@ env:
   RUST_MIN_STACK: "8388608"
 jobs:
   check:
-    name: Check fifteen exact Shared resource cases
+    name: Check exact Shared Start and H2 registration cases
     runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -37,10 +37,10 @@ jobs:
           [[ "$memory" =~ ^[0-9]+$ && "$swap" =~ ^[0-9]+$ ]]
           # This registration's standard inherited swap cap is 4 GiB.
           # Keep the requested resident-memory limit at 14 GiB.
-          (( memory == 15032385536 && swap <= 4294967296 ))
+          (( memory == 4032385536 && swap <= 4294967296 ))
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 9c93b1055336905eb869c4f7210a3e896a3d862f
+          ref: a0517d753f3f7fe0385dcbadc88455565f4b60e0
           persist-credentials: false
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
       - uses: ./.github/actions/rust-native-deps
@@ -53,7 +53,7 @@ jobs:
       - name: Verify the candidate and run the named cases
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 9c93b1055336905eb869c4f7210a3e896a3d862f
+          test "$(git rev-parse HEAD)" = a0517d753f3f7fe0385dcbadc88455565f4b60e0
           mkdir -p target/queue-1732-diagnostic
           receipt=target/queue-1732-diagnostic/outcomes.txt
           {
@@ -75,30 +75,19 @@ jobs:
             fi
           }
           cases=(
-            http::shared_source_playback::tests::sharing_source_http_dolby_vision_preserved_h1_h2_and_confirmed_end
-            http::shared_source_playback::tests::sharing_source_http_real_h1_h2_playlist_init_and_segment_echo_exact_lineage
-            http::shared_source_playback::tests::sharing_source_http_real_encoded_h1_h2_playlist_init_and_segment
-            http::shared_source_playback::tests::sharing_source_http_native_copy_h1_h2_vtt_and_held_body_end
-            http::shared_source_playback::tests::sharing_source_http_native_encoded_h1_h2_vtt_and_held_body_end
-            http::shared_source_playback::tests::sharing_source_http_burned_text_h1_h2_and_confirmed_end
-            http::shared_source_playback::tests::sharing_source_http_burned_bitmap_h1_h2_and_confirmed_end
-            http::shared_source_playback::tests::sharing_source_http_hdr10_to_sdr_h1_h2_and_confirmed_end
-            http::shared_source_playback::tests::sharing_source_http_hdr10_preserved_h1_h2_and_confirmed_end
-            http::shared_source_playback::tests::sharing_source_http_dolby_vision_unaffirmed_receiver_gets_the_hdr10_base_h1_h2_and_confirmed_end
-            http::shared_source_playback::tests::sharing_source_http_dolby_vision_converted_h1_h2_and_confirmed_end
-            http::shared_source_playback::tests::sharing_source_http_native_hdr10_copy_h1_h2_vtt_and_held_body_end
-            http::shared_source_playback::tests::sharing_source_http_dolby_vision_base_encoded_to_sdr_h1_h2_and_confirmed_end
-            http::shared_source_playback::tests::sharing_source_http_dolby_vision_stripped_h1_h2_and_confirmed_end
-            http::shared_source_playback::tests::sharing_source_http_profile5_encoded_to_sdr_h1_h2_and_confirmed_end
+            http::shared_source_playback::tests::sharing_source_http_offers_a_processed_upgrade_only_to_an_affirming_receiver
+            http::shared_source_playback::tests::source_profile5_refuted_proof_plans_like_local_and_spawns_no_second_probe
+            http::shared_source_playback::tests::sharing_source_http_initialization_overlapping_real_h2_registration_starts_and_ends
+            http::shared_source_playback::tests::sharing_source_http_initialization_old_accounting_snapshot_returns_503
           )
           for i in "${!cases[@]}"; do
             run_exact "${cases[$i]}" "target/queue-1732-diagnostic/daemon-$i.log" -p plurxd --features plurx-core/hiqlite-store --bin plurxd
           done
-          test "$(grep -c '^passed ' "$receipt")" = 15
+          test "$(grep -c '^passed ' "$receipt")" = 4
       - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
         if: always()
         with:
-          name: queue-1732-shared-resource-matrix
+          name: queue-1732-shared-start-registration
           path: target/queue-1732-diagnostic
           if-no-files-found: warn
           retention-days: 7

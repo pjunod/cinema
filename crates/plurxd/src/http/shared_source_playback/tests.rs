@@ -201,7 +201,8 @@ async fn actual_source_initialization_interleave(assertion_case: InitializationA
     use plurx_core::store::sharing_source_ingress_custody::pause_source_ingress_initialization_for_fixture;
     use std::time::{Duration, Instant};
 
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::NativeCopy, None).await;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::NativeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
     let mut recipe: Value =
         serde_json::from_slice(&fixture.request).expect("complete native recipe");
     let request_id = recipe["session"]["request_id"]
@@ -1061,8 +1062,9 @@ async fn sharing_source_http_offers_a_processed_upgrade_only_to_an_affirming_rec
         PROCESSED_UPGRADE_RECEIVER_HEADER, PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
     };
 
-    let fixture =
+    let mut fixture =
         real_source_start_fixture_with(SourceFixtureMode::DolbyVisionUnaffirmed, None).await;
+    fixture.keep_fixture_membership_stable().await;
     fixture
         .state
         .store
@@ -1253,8 +1255,9 @@ async fn sharing_source_http_profile5_encoded_to_sdr_h1_h2_and_confirmed_end() {
 async fn source_profile5_refuted_proof_plans_like_local_and_spawns_no_second_probe() {
     use axum::response::IntoResponse;
     use std::sync::atomic::Ordering;
-    let fixture =
+    let mut fixture =
         real_source_start_fixture_with(SourceFixtureMode::DolbyVisionProfile5Encoded, None).await;
+    fixture.keep_fixture_membership_stable().await;
     let hooks = fixture.state.transcode.test_hooks();
     hooks
         .dovi_pixel_proof_script
