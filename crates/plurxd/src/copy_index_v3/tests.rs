@@ -707,7 +707,10 @@ async fn holder_race_selects_verified_bytes_after_a_fast_corrupt_answer() {
             }
         }
     });
-    let responses = crate::cluster::calls::race_holders(requests);
+    let responses = crate::cluster::calls::race_holders(
+        requests,
+        crate::cluster::calls::deadline_after(PEER_DEADLINE),
+    );
     futures_util::pin_mut!(responses);
     let mut refused = 0;
     let selected = loop {

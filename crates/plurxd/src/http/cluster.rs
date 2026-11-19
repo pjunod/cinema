@@ -6,8 +6,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use plurx_core::cluster::membership::{
-    FinalizeJoinRequest, IssuedJoinToken, MembershipError, MembershipStatus, ProtocolChange,
-    RedeemJoinRequest,
+    FinalizeJoinRequest, IssuedJoinToken, MembershipError, MembershipStatus,
+    PeerAuthAdmissionRefusal, ProtocolChange, RedeemJoinRequest,
 };
 use serde::Deserialize;
 
@@ -499,6 +499,12 @@ pub async fn finalize_learner_join(
 
 pub(crate) fn api_error(error: MembershipError) -> ApiError {
     let status = match error {
+        // Peer authorization normally normalizes these to its original denial
+        // before this admin adapter. If propagated here, report unavailable
+        // local admission capacity, never a new admin authentication failure.
+        MembershipError::PeerAuthenticationAdmission(
+            PeerAuthAdmissionRefusal::RateLimited | PeerAuthAdmissionRefusal::ReplayCapacity,
+        ) => StatusCode::SERVICE_UNAVAILABLE,
         MembershipError::ClockUnbounded(_) => StatusCode::SERVICE_UNAVAILABLE,
         MembershipError::Unavailable => StatusCode::CONFLICT,
         MembershipError::InvalidToken
@@ -567,6 +573,28 @@ mod tests {
     use plurx_core::store::SqliteStore;
 
     use super::*;
+
+    #[test]
+    fn propagated_peer_admission_refusals_are_service_unavailable_with_exact_codes() {
+        for (refusal, expected_code) in [
+            (
+                PeerAuthAdmissionRefusal::RateLimited,
+                "cluster_peer_auth_rate_limited",
+            ),
+            (
+                PeerAuthAdmissionRefusal::ReplayCapacity,
+                "cluster_peer_auth_replay_capacity",
+            ),
+        ] {
+            match api_error(MembershipError::PeerAuthenticationAdmission(refusal)) {
+                ApiError::Typed { status, code, .. } => {
+                    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                    assert_eq!(code, expected_code);
+                }
+                other => panic!("unexpected propagated admission error: {other:?}"),
+            }
+        }
+    }
 
     fn state() -> AppState {
         let root = crate::test_temp_path(format!("plurx-cluster-route-{}", uuid::Uuid::new_v4()));
