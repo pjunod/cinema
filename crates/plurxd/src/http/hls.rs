@@ -214,7 +214,7 @@ pub use segment::*;
 // split: begin hls-tests
 #[cfg(test)]
 #[path = "hls/tests.rs"]
-mod tests;
+pub(super) mod tests;
 // split: end hls-tests
 
 #[path = "hls/quality_schedule.rs"]
