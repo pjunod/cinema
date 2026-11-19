@@ -21,6 +21,7 @@ enum DeliveryFixtureKind {
     Hooked,
     Unhooked,
     ProcessFree,
+    NativeSplit,
 }
 
 #[cfg(test)]
@@ -169,6 +170,44 @@ impl HlsDeliveryFixture {
         session_id: &str,
     ) -> Self {
         Self::publish_with_takeover(dir, session_id, None, true, true).await
+    }
+
+    pub(crate) async fn publish_native_split_actor_managed(
+        dir: &std::path::Path,
+        session_id: &str,
+    ) -> (Self, crate::copyseg::NativeSplitInitIds) {
+        let fixture = Self::publish_with_takeover_and_state_root(
+            dir,
+            dir,
+            session_id,
+            None,
+            true,
+            true,
+            DeliveryFixtureKind::NativeSplit,
+        )
+        .await;
+        fixture.mark_started().await;
+        let ids = fixture
+            .session
+            .native_split
+            .as_ref()
+            .expect("split fixture")
+            .seed_for_http_test(13);
+        let mut raw = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n".to_owned();
+        use std::fmt::Write as _;
+        for index in 0..12 {
+            let _ = writeln!(raw, "#EXTINF:4.0,\nseg{index:05}.m4s");
+        }
+        fixture
+            .session
+            .publication
+            .lock()
+            .await
+            .served
+            .as_mut()
+            .expect("split served window")
+            .raw = Arc::from(raw.into_bytes());
+        (fixture, ids)
     }
 
     pub(crate) async fn publish_takeover(
@@ -325,6 +364,10 @@ impl HlsDeliveryFixture {
             !matches!(fixture_kind, DeliveryFixtureKind::ProcessFree),
         );
         raw_session.takeover = takeover;
+        if matches!(fixture_kind, DeliveryFixtureKind::NativeSplit) {
+            raw_session.native_split =
+                Some(Arc::new(crate::copyseg::NativeSplitInventory::default()));
+        }
         raw_session.file_id = file_id;
         if copy {
             raw_session.kind = SessionKind::Copy {

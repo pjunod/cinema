@@ -531,6 +531,32 @@ pub(crate) struct NativeSplitEntry {
 }
 
 impl NativeSplitInventory {
+    #[cfg(test)]
+    pub(crate) fn seed_for_http_test(&self, count: u64) -> NativeSplitInitIds {
+        let ids = NativeSplitInitIds {
+            video: "a".repeat(64),
+            audio: "b".repeat(64),
+        };
+        self.init_ids
+            .set(ids.clone())
+            .expect("test split initialization");
+        self.segments
+            .lock()
+            .expect("test split inventory")
+            .extend((0..count).map(|index| {
+                (
+                    index,
+                    NativeSplitEntry {
+                        bytes: 1,
+                        audio_ticks: 192_000,
+                        first_source_frame: 0,
+                        samples: 0,
+                    },
+                )
+            }));
+        ids
+    }
+
     pub(crate) fn choose(&self, range: Option<(u64, u64)>) -> Option<NativeSplitInitIds> {
         let enabled = self.chosen.get_or_init(|| {
             self.init_ids.get().is_some()
