@@ -460,6 +460,14 @@ final class SharedBoundedRangeTimelineTests: XCTestCase {
             incumbentFilmPositionMs: 0, mediaOriginMs: -83, playbackRate: 1,
             overlapRemainingMs: 12_000, loadedItemRanges: [0...10]))
         XCTAssertEqual(loadedRendezvous.itemPositionMs - loadedRendezvous.filmPositionMs, 83)
+        XCTAssertNil(PreparedCommitRendezvous.planLoaded(stagedFilmPositionMs: 0,
+            incumbentFilmPositionMs: 0, mediaOriginMs: -83, playbackRate: 1,
+            overlapRemainingMs: 5_000, loadedItemRanges: [0...10]))
+        let loaded = PreparedCommitRendezvous.planLoaded(stagedFilmPositionMs: 0,
+            incumbentFilmPositionMs: 0, mediaOriginMs: -83, playbackRate: 1,
+            overlapRemainingMs: 6_000, loadedItemRanges: [0...10])
+        XCTAssertEqual(loaded?.filmPositionMs, 1_900)
+        XCTAssertEqual(loaded?.itemPositionMs, 1_983)
         XCTAssertEqual(PlayerController.seekRoute(targetMs: 0, baseMs: -83,
             usesDirectTimeline: false, isVOD: false, isChangingStream: false,
             seekableRangesMs: [0...5_000]), .native(itemMs: 83))

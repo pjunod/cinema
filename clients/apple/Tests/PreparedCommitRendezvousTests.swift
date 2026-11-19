@@ -727,7 +727,8 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         XCTAssertFalse(prime.contains("await item.seek"), "AVFoundation completion is not a readiness bound")
         XCTAssertTrue(prime.contains("coordinator.readinessRemainingMs()"))
         XCTAssertTrue(prime.contains(
-            "guard await alignPrepared(item, to: preparedTimeline.itemPositionMs(filmPositionMs: preparedFilmPositionMs), boundMs: remaining)"
+            "guard await alignPrepared(item, to: preparedTimeline.itemPositionMs(filmPositionMs: preparedFilmPositionMs), " +
+            "boundMs: remaining)"
         ), "Parking converts the shared film position into the successor item clock within the same bound")
         XCTAssertTrue(prime.contains("coordinator.abandonWithoutFallback(.aborted)"))
         XCTAssertTrue(prime.contains("coordinator.abandon(.failed)"))
