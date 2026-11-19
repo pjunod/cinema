@@ -94,16 +94,15 @@ impl Registry {
                 value.gap_sum_seconds += gap.as_secs_f64();
                 value.gap_max_seconds = value.gap_max_seconds.max(gap.as_secs_f64());
             }
-        } else if self.rows.len() >= CAPACITY {
-            if let Some(key) = self
+        } else if self.rows.len() >= CAPACITY
+            && let Some(key) = self
                 .rows
                 .iter()
                 .min_by_key(|(_, row)| row.last)
                 .map(|(key, _)| *key)
-            {
-                self.rows.remove(&key);
-                self.evictions = self.evictions.saturating_add(1);
-            }
+        {
+            self.rows.remove(&key);
+            self.evictions = self.evictions.saturating_add(1);
         }
         value.samples = value.samples.saturating_add(1);
         value.heartbeats = value.heartbeats.saturating_add(u64::from(empty));
