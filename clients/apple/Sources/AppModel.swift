@@ -1340,6 +1340,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Throws on failure; the caller keeps playback going and shows a small notice.
+    func retainHlsOutputOff(_ sessionId: String) async throws {
+        do { try await requireAPI().retainHlsOutputOff(sessionId: sessionId) }
+        catch { noteAuthFailure(error); throw error }
+    }
+
     /// Best-effort — the stream is over either way.
     func endHlsSession(_ sessionId: String) async {
         await requireAPI().endHlsSession(sessionId)

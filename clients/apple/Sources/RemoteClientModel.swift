@@ -644,7 +644,7 @@ final class RemoteClientModel: ObservableObject {
     var localGrants: [RemoteSecretStorage.Grant] { storage?.grants ?? [] }
     var localReceiverID: UUID? { receiver?.id ?? storage?.receiver?.id }
     func refreshGrants() async {
-        guard let api else { managementStatus = "Enable Cinema remotes in Developer settings to manage pairings."; return }
+        guard let api else { managementStatus = "Enable Cinema remotes in Remotes & devices settings to manage pairings."; return }
         let generation = lifecycle
         do {
             let result = try await api.grants()

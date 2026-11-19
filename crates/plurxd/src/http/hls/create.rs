@@ -695,7 +695,9 @@ impl CreateSession {
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            // The player's per-playback choice; `SessionRequest` never
+            // serializes it.
+            retain_output: self.overrides.as_ref().and_then(|o| o.retain_output),
             dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
@@ -810,6 +812,14 @@ pub struct CreateOverrides {
     /// badge deserves to see the two facts next to each other.
     #[serde(default)]
     pub force: Option<String>,
+    /// The player's per-playback output-retention choice. `Some(false)`
+    /// turns it off for this playback only: no complete-output preparation
+    /// is queued and the rolling producer retains nothing. `None` or
+    /// `Some(true)` follows the server's settings. Read from the create body
+    /// only: never serialized into the durable planning overrides, so a
+    /// takeover or resurrected session falls back to the server setting.
+    #[serde(default, skip_serializing)]
+    pub retain_output: Option<bool>,
 }
 
 /// What create decided about the plan the client echoed, and what to say
@@ -1848,7 +1858,7 @@ pub(crate) async fn resolve_plan(
     review: Option<PlanReview>,
     body: CreateSession,
 ) -> Result<ResolvedPlan, ApiError> {
-    resolve_plan_with_continuous(inputs, review, body, None).await
+    resolve_plan_with_scope(inputs, review, body, PlanScope::default()).await
 }
 
 /// Preserve ordinary initial Auto's local incomplete-sweep fallback. A bounded
@@ -1883,6 +1893,9 @@ struct PlanScope<'a> {
     /// predecessor's own. A create resolves the ordinary plan and leaves
     /// processing to the upgrade after its first frame (plan ruling 3).
     processed_selectable: bool,
+    // The passive compatibility facade offers its own fixed media contract
+    // and applies the client's finite bitrate ceiling to that native recipe.
+    passive_compatibility: bool,
 }
 
 /// Internal preparation policy, never a create-body override. Ordinary creates
@@ -1912,25 +1925,7 @@ pub(super) async fn resolve_plan_for_preparation(
             continuous: None,
             auto_bootstrap_ceiling,
             processed_selectable: processed_predecessor,
-        },
-    )
-    .await
-}
-
-async fn resolve_plan_with_continuous(
-    inputs: PlanInputs<'_>,
-    review: Option<PlanReview>,
-    body: CreateSession,
-    continuous: Option<&ContinuousFamilyStart>,
-) -> Result<ResolvedPlan, ApiError> {
-    resolve_plan_with_scope(
-        inputs,
-        review,
-        body,
-        PlanScope {
-            continuous,
-            auto_bootstrap_ceiling: None,
-            processed_selectable: false,
+            ..PlanScope::default()
         },
     )
     .await
@@ -2011,6 +2006,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
         continuous,
         auto_bootstrap_ceiling,
         processed_selectable,
+        passive_compatibility,
     } = scope;
     if auto_bootstrap_ceiling.is_some_and(|ceiling| ceiling <= 0)
         || (auto_bootstrap_ceiling.is_some()
@@ -2107,20 +2103,6 @@ async fn resolve_plan_for_principal_with_local_evidence(
         let prefer_hevc = continuous.is_none()
             && state.transcode.macos_hevc_output_enabled()
             && explicit_hls_hevc_claim(caps);
-        let enabled = continuous.is_some()
-            || prefer_hevc
-            || if let Some(snapshot) = snapshot {
-                snapshot
-                    .settings
-                    .get(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-                    .is_some_and(|value| value.trim() == "1")
-            } else {
-                state
-                    .applied
-                    .setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-                    .await?
-                    .is_some_and(|value| value.trim() == "1")
-            };
         let intent_candidate =
             body.intent
                 .as_ref()
@@ -2138,10 +2120,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
         let requested = continuous
             .map(|family| family.primary_candidate_id)
             .or(intent_candidate);
-        if requested.is_some() && !enabled {
-            return Err(ApiError::BadRequest("candidate_route_disabled".to_owned()));
-        }
-        if enabled
+        if !passive_compatibility
             && (auto_bootstrap_ceiling.is_some()
                 || requested.is_some()
                 || body.height == Some(1440)
@@ -2529,7 +2508,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
         .transpose()
         .map_err(|error| ApiError::BadRequest(error.to_owned()))?
         .flatten();
-    let candidate_auto_policy = body.candidate_auto_policy();
+    let candidate_auto_policy = !passive_compatibility && body.candidate_auto_policy();
     let mut request = body.into_request(file_id, height);
     request.audio_claim = audio_claim;
     request.candidate_context = candidate_context;
@@ -2542,18 +2521,6 @@ async fn resolve_plan_for_principal_with_local_evidence(
     request.quality_catalog = retained_catalog
         .as_ref()
         .map(|catalog| Arc::new(catalog.clone()));
-    // Frozen here, from the planning snapshot this create already holds, so
-    // the rolling start pays no extra Store read for it. Without a snapshot
-    // the start reads the switch itself.
-    request.sdr_master_codecs = snapshot.map(|snapshot| {
-        plurx_core::store::stored_switch(
-            snapshot
-                .settings
-                .get(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS)
-                .map(String::as_str),
-            false,
-        )
-    });
     if request
         .request_id
         .as_ref()
@@ -2954,7 +2921,7 @@ pub(crate) async fn preview_for_compatibility(
         false,
         unix_ms(),
     );
-    let mut resolved = resolve_plan(
+    let mut resolved = resolve_plan_with_scope(
         PlanInputs {
             network_identity: None,
             incumbent_receipt: None,
@@ -2967,6 +2934,10 @@ pub(crate) async fn preview_for_compatibility(
         },
         Some(review),
         body,
+        PlanScope {
+            passive_compatibility: true,
+            ..PlanScope::default()
+        },
     )
     .await?;
     validate_hevc_copy_transport(state, file, &caps, &resolved.request, None).await?;
@@ -3341,6 +3312,8 @@ async fn create_with_purpose_attempt(
         ServiceCreatePurpose::Continuous(family) => Some(family),
         _ => None,
     };
+    let passive_compatibility =
+        matches!(purpose, ServiceCreatePurpose::PassiveCompatibility { .. });
     if let Some(caps) = req.caps.as_ref() {
         super::super::stream::validate_device_caps(caps)?;
     }
@@ -3449,24 +3422,28 @@ async fn create_with_purpose_attempt(
     // Whose build this is, for every line below. The v2 document names
     // itself; a client that sends none leaves only its User-Agent, which is
     // exactly the population these lines exist to count down to zero.
-    let candidate_decoder_caps = req.caps.as_ref().and_then(|caps| {
-        crate::playback_control::DecoderCapsSnapshot::from_device_caps(
-            caps,
-            caps.display
-                .as_ref()
-                .and_then(|display| display.presentation_target)
-                .map_or(1, |target| target.revision),
-        )
-        .map_err(|cause| {
-            tracing::warn!(target: "plurxd::http::hls",
-                file_id = id,
-                video_entries = caps.video.len(),
-                cause,
-                "optional decoder snapshot unavailable; legacy playback admission preserved"
-            );
-        })
-        .ok()
-    });
+    let candidate_decoder_caps = req
+        .caps
+        .as_ref()
+        .filter(|_| !passive_compatibility)
+        .and_then(|caps| {
+            crate::playback_control::DecoderCapsSnapshot::from_device_caps(
+                caps,
+                caps.display
+                    .as_ref()
+                    .and_then(|display| display.presentation_target)
+                    .map_or(1, |target| target.revision),
+            )
+            .map_err(|cause| {
+                tracing::warn!(target: "plurxd::http::hls",
+                    file_id = id,
+                    video_entries = caps.video.len(),
+                    cause,
+                    "optional decoder snapshot unavailable; legacy playback admission preserved"
+                );
+            })
+            .ok()
+        });
     let candidate_target = req.caps.as_ref().and_then(|caps| {
         caps.display
             .as_ref()
@@ -3542,17 +3519,14 @@ async fn create_with_purpose_attempt(
             &user.password_hash,
         ));
     }
-    let network_prior = super::super::network::stored_prior(
-        state.store.as_ref(),
-        &state.applied,
-        identity.as_ref(),
-    )
-    .await
-    .map_err(|error| {
-        ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
-    })?;
+    let network_prior =
+        super::super::network::stored_prior(state.store.as_ref(), identity.as_ref())
+            .await
+            .map_err(|error| {
+                ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
+            })?;
     crate::media_pool::mark_create_phase("settings");
-    let resolved = resolve_plan_with_continuous(
+    let resolved = resolve_plan_with_scope(
         PlanInputs {
             snapshot: planning_snapshot,
             state: &state,
@@ -3565,7 +3539,11 @@ async fn create_with_purpose_attempt(
         },
         review,
         req,
-        continuous,
+        PlanScope {
+            continuous,
+            passive_compatibility,
+            ..PlanScope::default()
+        },
     )
     .await?;
     let candidate_auto_policy = resolved.candidate_auto_policy;
@@ -4154,15 +4132,7 @@ async fn create_with_purpose_attempt(
         request.source_telemetry = None;
     }
 
-    let quality_enabled = continuous.is_some()
-        || planning_snapshot
-            .and_then(|snapshot| {
-                snapshot
-                    .settings
-                    .get(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-            })
-            .is_some_and(|value| value.trim() == "1");
-    if quality_enabled && candidate_decoder_caps.is_some() && quality_catalog.is_none() {
+    if candidate_decoder_caps.is_some() && quality_catalog.is_none() {
         if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
             quality_catalog = Some(
                 state
@@ -4763,7 +4733,7 @@ async fn create_with_purpose_attempt(
     remote_request.retained_output = info.retained_output.clone();
     recipe_json = serde_json::to_string(&remote_request)?;
     let measured_candidate_outputs = if let (true, Some(source), Some(caps), Some(catalog)) = (
-        quality_enabled && quality_negotiated,
+        quality_negotiated,
         source.as_ref(),
         candidate_decoder_caps.as_ref(),
         quality_catalog.as_ref(),
@@ -4983,6 +4953,11 @@ async fn create_with_purpose_attempt(
     } else {
         let activation_state = state.clone();
         let activation_owner = owner_node_id.clone();
+        // `SessionRequest::retain_output` never crosses the worker wire, so a
+        // playback that opted out at create tells its remote owner once the
+        // session is confirmed, over the same relay the mid-playback switch
+        // uses.
+        let retain_output_off = request.retain_output == Some(false);
         tokio::spawn(plurx_core::store::scope_http_store_operations(
             activation_counts,
             async move {
@@ -5027,6 +5002,14 @@ async fn create_with_purpose_attempt(
                 activation_state.media_sessions.cache_route(route).await;
                 if let Some(guard) = guard.as_mut() {
                     guard.disarm();
+                }
+                if retain_output_off {
+                    relay_retain_output_off(
+                        &activation_state,
+                        &activation_owner,
+                        &request.activation.session_id,
+                    )
+                    .await;
                 }
                 Ok(())
             },

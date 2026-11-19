@@ -798,7 +798,6 @@ fn takeover_authority_attribution_selects_only_the_exact_pair_and_fixed_series()
         (keys::MONARR_URL, keys::MONARR_API_KEY),
         (keys::TRANSCODE_RATE_MODE, keys::TRANSCODE_QUALITY),
         (keys::BACKUP_SCHEDULE_UTC, keys::BACKUP_DESTINATION),
-        (keys::TELEMETRY_RETAIN_DAYS, keys::PLAYBACK_NETWORK_PRIORS),
         (keys::MAX_HW_SESSIONS, keys::SW_POOL_THREADS),
         (
             keys::CLUSTER_MEDIA_POOL_ENABLED,
