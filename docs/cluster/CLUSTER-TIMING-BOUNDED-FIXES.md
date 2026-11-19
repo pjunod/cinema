@@ -91,3 +91,16 @@ Formal negative controls must separately distinguish an unchanged anchor with
 an edited item from a removed or duplicated anchor; a declaration-only alias
 anchor must still reject body drift. Run the focused Python controls without
 starting another compiler.
+
+Implemented follow-through: the source reader checks each exact migration
+alias and one canonical startup definition, refusing missing/duplicate aliases,
+wrong domains, direct local literals, ambiguous modules and unsupported
+expressions. The Docker contract uses that reader without removing its separate
+health-grace arithmetic. Formal escape controls verify the exact item-drift
+diagnostic when an anchor survives and independently reject removed/duplicated
+anchors. No mapping hashes or matching rules were changed.
+
+Focused Python validation: startup-budget suite plus connected Pi readiness
+case (33 tests), connected Docker contract (1 test), full formal item-pin suite
+(18 tests), and all three formal mapping checks passed. No Rust compiler was
+started for this tooling repair; combined integration remains root-owned.

@@ -1190,24 +1190,16 @@ assert.equal(context.ACT_TIMER, null);
             r"(?m)^pub const MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = ([\d_]+);$",
             config_source,
         )
-        migration_source = read("crates/plurx-core/src/cluster/migration.rs")
-        phase_names = (
+        phases = dict(checker["load_source_limits"]().phase_seconds)
+        self.assertEqual(set(phases), {
             "HIQLITE_HEALTH_TIMEOUT",
             "MEMBERSHIP_ADMISSION_TIMEOUT",
             "SNAPSHOT_CATCHUP_GRACE",
-        )
-        phases = {
-            name: re.search(
-                rf"(?m)^const {name}: Duration = Duration::from_secs\((\d+)\);$",
-                migration_source,
-            )
-            for name in phase_names
-        }
+        })
         self.assertIsNotNone(default_transfer)
         self.assertIsNotNone(default_install)
         self.assertIsNotNone(source_max_transfer)
         self.assertIsNotNone(source_max_install)
-        self.assertTrue(all(value is not None for value in phases.values()))
         assert default_transfer is not None and default_install is not None
         assert source_max_transfer is not None and source_max_install is not None
 
@@ -1217,7 +1209,7 @@ assert.equal(context.ACT_TIMER, null);
             default_transfer.group(1).replace("_", "")
         ) + int(
             default_install.group(1).replace("_", "")
-        ) + sum(int(value.group(1)) for value in phases.values() if value)
+        ) + sum(phases.values())
         self.assertGreaterEqual(
             start_period_seconds, supported_default_startup_seconds
         )
@@ -1250,7 +1242,7 @@ assert.equal(context.ACT_TIMER, null);
         supported_rollout_startup_seconds = (
             rollout_transfer_seconds
             + rollout_install_seconds
-            + sum(int(value.group(1)) for value in phases.values() if value)
+            + sum(phases.values())
         )
         self.assertGreaterEqual(
             rollout_health_seconds, supported_rollout_startup_seconds
@@ -1258,9 +1250,7 @@ assert.equal(context.ACT_TIMER, null);
 
         supported_max_startup_seconds = int(
             source_max_transfer.group(1).replace("_", "")
-        ) + int(source_max_install.group(1).replace("_", "")) + sum(
-            int(value.group(1)) for value in phases.values() if value
-        )
+        ) + int(source_max_install.group(1).replace("_", "")) + sum(phases.values())
         self.assertEqual(supported_max_startup_seconds, 18135)
         self.assertIn("`5h3m`", read("docs/OPERATIONS.md"))
 
