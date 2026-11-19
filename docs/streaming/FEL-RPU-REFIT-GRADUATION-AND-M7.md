@@ -1,7 +1,7 @@
 # F+ graduation and NP1 trials — remaining acceptance
 
-**Status:** open — preparation in progress; no physical graduation or M7
-trial claimed. **Owner:** Codex. **Updated:** 2026-11-19.
+**Status:** open — isolated fit and served baseline acquisition complete;
+physical graduation and M7 candidate trials remain open. **Owner:** Codex. **Updated:** 2026-11-19.
 
 Companion to [the build ledger](FEL-RPU-REFIT-BUILD.md): that records the
 merged implementation; this records physical graduation and the next trial.
@@ -67,6 +67,18 @@ metadata associations agree. The new production helper matched every base
 and composed code over 6,036,480 fit and 6,036,480 held-out lattice samples
 across all 48 frames, with zero position errors or mismatches. The retired M3 raw/NP1 archive was not found externally. These
 new acquisitions are inputs, not replacement M6 or M7 quality passes.
+
+The isolated native instance has now fitted its fixture through ordinary
+jobs. A backend session with accepted typed Web control and a bound successor
+served the fitted table; all 48 baseline frames read back against the source
+clock and identical coded BL pictures. This acquisition is not a physical
+playback pass. The in-app browser completed 310 frames without drops or
+buffering interruptions as an HDR10 fallback control. Native Safari selected
+Profile 8.1 but stalled after the video ended: the copy plan had advertised a
+125 ms audio-only tail for a source with no audio. The correction derives
+silent duration from indexed video and gives corrected silent plans a new
+rendition identity, preserving real-audio tail behavior. Qualification of that
+correction and actual fitted physical playback remain open.
 
 The current host inventory sees a physical Apple TV 4K (3rd generation).
 That is availability, not playback evidence. The inspected learner service
@@ -156,8 +168,8 @@ is replaced or upgraded.
 |---|---|---|
 | Original native M6 | Pass retained | No repeat of the 48-point M3 experiment |
 | M5 migration | Source recovered; exact helper/master binding passes all 48 frames | Served F+ baseline from isolated instance |
-| Physical matrix | Open; isolated M5 instance preparation authorized | Client/device receipts from actual sessions |
-| M7 baseline | Open | Current-method publication and paired four-model F+ scores |
+| Physical matrix | Open; isolated instance running; HDR10 control and native DV failure retained | Corrected native run and fitted client/device receipts |
+| M7 baseline | Actual fitted-copy bytes and 48-frame readback acquired | Paired four-model F+ scores and separate evaluation/calibration coverage |
 | Numeric margin | Awaiting baseline calibration | Protocol frozen before new NP1 candidate scores |
 | NP1 trials/integration | Not yet run/built | Bound baseline/protocol; focused new-arm evidence |
 
