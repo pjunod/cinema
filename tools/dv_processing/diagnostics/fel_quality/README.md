@@ -34,6 +34,8 @@ locations. Media, decoded frames and binaries stay outside Git.
 | `grain_ratio.py` | Report-only grain proxy: high-pass luma energy of the decode over the encoder input on 1–100 nit blocks. |
 | `rpu_refit_eval.py` | RPU re-fit: fits single-layer 8.1 mapping curves (luma polynomial, chroma MMR; the safe monotone, continuous, ridge-regularised form is what ships) to the FEL composition on the untouched BL and scores them, plus the parsed-back curves of real RPUs, through the frozen four models. |
 | `compare_composed.py` | Checks `segment_decode_render --dump-composed` (the production F+ composition and lattice) against the frozen `sample_codes`/`composition12` on the layer captures; exact equality or failure. |
+| `segment_decode_render --export-composed-topleft` | Writes one 48-frame CPU Model B TopLeft 4:2:0 raw export and a clock-, RPU-, and frame-hash JSONL sidecar for the admitted Michael source domain. |
+| `verify_topleft_export.py` | Binds the exact source, bundle, capture and sidecar, independently checks source color and every output code in relative frames 0 and 24, and verifies all 48 frame clocks and hashes. |
 | `rpu_refit_write/` | Rust (dolby_vision 3.3.1): converts each source RPU to 8.1, writes the re-fitted curves (and, for decoder checks only, an optional L1 override), and prints them as parsed back from the written bytes. |
 | `inject_rpu.py` | Puts one RPU NAL at the end of each access unit of an Annex B HEVC stream without B-frames (test clips only). |
 | `dv_display_check.swift` | macOS: renders an AVPlayerLayer offscreen and reports mean linear RGB (optionally dumping the texture), to check whether the platform display path applies an 8.1 RPU's mapping. |
@@ -81,6 +83,40 @@ measurement repeatability justify the improvement margin. The earlier
 Z6 threshold belongs to the earlier comparison. The
 [M7 plan](../../../../docs/streaming/FEL-RPU-REFIT-GRADUATION-AND-M7.md#milestone-7-sequence)
 governs evaluation and full-title promotion.
+
+## CPU TopLeft encode input
+
+The `plurx-composed-model-b-topleft-v1` export applies the current FEL
+composition at every luma site, then packs Model B's PQ RGB16 through
+the BT.2020 NCL limited-range equations. The integer divisions round to
+nearest with ties upward for Y, Cb and Cr. The RGB16 computation retains
+Model B's signed floor shift. Chroma uses the even/even luma coordinates
+without a smoothing filter. The output is full-raster little-endian
+Y, Cb, Cr with ten significant bits per sample. The JSONL sidecar carries
+PQ, BT.2020, NCL, video range, TopLeft and original source clock metadata.
+
+This version requires the calibrated Michael source's stream declarations,
+identity mapping, linear NLQ, exact YCC and LMS matrices and EOTF marker.
+The codec declarations and source RPUs jointly bound the color
+interpretation. Any incompatible source is refused. The author and encoder
+must carry the output metadata explicitly. A raw export has no container
+or bitstream color signaling.
+
+Use a separate helper bundle and an empty output path. For the new
+calibration window, use inclusive source ordinals 96 through 143.
+
+```bash
+"$HELPER" --export-composed-topleft "$SOURCE" 0 96 143 "$OUT/calibration.yuv" \
+  >"$OUT/export.jsonl"
+python3 verify_topleft_export.py "$OUT/request.json" "$OUT/verification.json" \
+  --scratch-root "$TASK_TMP"
+```
+
+The verifier's request binds the source, the bundle and the unchanged
+capture inputs by hash. It independently checks all 48 clocks, RPU
+associations and raw hashes, and exact output codes on source ordinals
+96 and 120. This establishes the new CPU representation. The earlier
+native shader export remains separate historical evidence.
 
 ## Source deltas stay experimental
 

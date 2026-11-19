@@ -30,7 +30,7 @@ static int source_profile;
 static int expected_w[2], expected_h[2], frame_cap, emitted;
 static bool debug_frames, initialized, window_mode, window_done, first_pair;
 static bool source_eof, discover_el;
-// --refit-stats / --dump-composed (refit_mode.h): CPU-only F+ statistics.
+// CPU-only statistics and diagnostics (refit_mode.h).
 // Decoded pairs go to refit_pairs instead of the renderer.
 static bool refit_mode;
 // Frame workers per layer decoder in --refit-stats (--threads N).
@@ -835,7 +835,8 @@ static void send_layer(struct layer *layer, AVPacket *packet) {
 }
 #include "refit_mode.h"
 int main(int argc, char **argv) {
-  if (argc >= 2 && (!strcmp(argv[1], "--refit-stats") || !strcmp(argv[1], "--dump-composed")))
+  if (argc >= 2 && (!strcmp(argv[1], "--refit-stats") || !strcmp(argv[1], "--dump-composed") ||
+                    !strcmp(argv[1], "--export-composed-topleft")))
     return refit_main(argc, argv);
   bool held_origin = argc >= 3 && !strcmp(argv[argc - 2], "--held-source-origin");
   struct rational supplied_origin = {0, 1};

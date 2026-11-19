@@ -50,10 +50,12 @@ pub(crate) struct ToolSet {
 /// until it is bumped and re-pinned.
 pub(crate) const REFIT_MODE_VERSION: &str = "plurx-refit-mode-v2";
 /// sha256 of `refit_mode.h` followed by `refit_compose.h`, as
-/// [`REFIT_MODE_VERSION`] was last reviewed against.
+/// [`REFIT_MODE_VERSION`] was last reviewed against. The diagnostic-only
+/// TopLeft export addition preserves the v2 statistics, samples and pooling;
+/// its independent representation has its own version in `refit_topleft.h`.
 #[cfg(test)]
 pub(crate) const REFIT_MODE_SOURCES: &str =
-    "37bc7f9cf0f7a2ea9cf660f624875ea42ffe0fc158b3db09461b2f796f0e6f4e";
+    "de639eb4bc1d59caaa0c7b05db667f6d7ff6862ac84f2af03ba52592cd6a2019";
 
 #[cfg(test)]
 impl ToolSet {
@@ -172,6 +174,10 @@ fn renderer_source_identity() -> String {
         (
             "refit_mode.h",
             include_bytes!("../../../tools/dv_processing/refit_mode.h"),
+        ),
+        (
+            "refit_topleft.h",
+            include_bytes!("../../../tools/dv_processing/refit_topleft.h"),
         ),
         (
             "rgb48.h",

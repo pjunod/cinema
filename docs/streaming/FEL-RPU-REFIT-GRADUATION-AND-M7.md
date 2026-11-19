@@ -95,10 +95,17 @@ prepared quality handoffs dropped that context and reset the fitted digest.
 The final reconciled copy candidate now resolves its pin from that exact
 accepted platform; the durable successor preserves it for converting copy.
 Stall-reopen fields remain absent. No client capability or wire field is
-invented. Physical verification of this correction remains outstanding.
+invented. An agent-operated physical tvOS run now committed the fitted
+successor and continued to the end on the existing client. The client commit
+requires a decoded successor frame at the boundary; source, daemon, fitted
+digest and durable route transition are bound in the private receipt. An
+earlier attempt was confounded by diagnostic media requests during staging;
+the successful observation used metadata only. This scoped result does not
+establish optical mapping, seeking, dropped frames, audio behavior or the
+remaining platform coverage. Physical graduation remains open.
 
 The current host inventory sees a physical Apple TV 4K (3rd generation).
-That is availability, not playback evidence. The inspected learner service
+Its scoped playback result is recorded above. The inspected learner service
 image is based on `254df39f7afb`, before the F+ merge; it cannot qualify this
 feature. Paul authorized a fresh isolated M5 test instance on 2026-11-19, with its
 own store and listeners and no production cluster join. No service, client app or processing bundle is installed,
@@ -179,15 +186,25 @@ is replaced or upgraded.
    does not publish a full-title replacement or remove an original. The
    existing nonzero-video-origin disk refusal remains a separate open finding.
 
+The historical calibrated native TopLeft encoder input has not been recovered.
+A new bounded CPU diagnostic export is being built from the already bound FEL
+composition. It will declare its colour conversion, quantization, TopLeft
+sampling, source RPU and exact frame clocks as a distinct representation.
+Independent code and clock validation must precede its use by an encoder;
+this input will not inherit historical native byte identity or quality wins.
+The four reference models remain distinct and unchanged. Calibration windows
+0–47 and96–143 are retained; evaluation192–239 remains reserved. No candidate
+score can inform the representation or margin choices.
+
 ## Execution ledger
 
 | Item | State | Next evidence |
 |---|---|---|
 | Original native M6 | Pass retained | No repeat of the 48-point M3 experiment |
-| M5 migration | Source recovered; exact helper/master binding passes all 48 frames | Served F+ baseline from isolated instance |
-| Physical matrix | Open; isolated instance running; HDR10 control and native DV failure retained | Corrected native run and fitted client/device receipts |
-| M7 baseline | Actual fitted-copy bytes and 48-frame readback acquired | Paired four-model F+ scores and separate evaluation/calibration coverage |
-| Numeric margin | Awaiting baseline calibration | Protocol frozen before new NP1 candidate scores |
+| M5 migration | Source and exact helper/master binding retained | Preserve source/device identities |
+| Physical matrix | tvOS fitted handoff/completion retained; full matrix open | Seek, mapping, drops and remaining client/device scopes |
+| M7 baseline | Two disjoint48-frame calibration windows bound and scored once in all four models | Retain scores; evaluation192–239 reserved |
+| Numeric margin | Awaiting new encoder-input representation calibration | Protocol frozen before new NP1 candidate scores |
 | NP1 trials/integration | Not yet run/built | Bound baseline/protocol; focused new-arm evidence |
 
 Adversarial review happens when the change is ready to merge. Afterwards run

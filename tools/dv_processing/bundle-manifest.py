@@ -21,6 +21,7 @@ INPUTS = (
     'nut_timing.h',
     'refit_compose.h',
     'refit_mode.h',
+    'refit_topleft.h',
     'rgb48.h',
     'scan_title.c',
     'segment_decode_render.c',
