@@ -36,8 +36,6 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     ("media_pool.rs", "diagnostics", 2, true),
     // The playback request path: preference reads.
     ("http/chapter_thumbs.rs", "enabled", 1, true),
-    // Network priors decide optional processed output, after owner placement.
-    ("http/hls/create.rs", "handed_over_ask", 1, true),
     (
         "http/internal_media.rs",
         "subtitle_cluster_source_enabled",
@@ -80,12 +78,6 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
 /// The direct callers of each helper above, `(helper file, helper,
 /// caller file, caller)`.
 const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
-    (
-        "http/hls/create.rs",
-        "handed_over_ask",
-        "http/hls/create.rs",
-        "create_with_purpose_attempt",
-    ),
     (
         "http/chapter_thumbs.rs",
         "enabled",

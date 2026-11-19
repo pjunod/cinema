@@ -865,9 +865,8 @@ pub(super) fn processing_declined_note(reason: &str) -> String {
 
 /// The ask a start sends to `owner`: none for this node, which registers its
 /// own; otherwise this create's verdict, and for Auto what the viewer's link
-/// evidence says. With nothing to consult (no network identity, or network
-/// priors off) the link memory admits any recipe, so the ask says so and the
-/// owner admits its trial's recipe; nothing is read. With evidence to
+/// evidence says. Without a network identity the ask allows the owner to
+/// admit its trial's recipe without reading link memory. With evidence to
 /// consult, the ingress admits the owner's described processed row as the
 /// last word. An Auto ask with neither still travels, so the owner records
 /// the named skip the client's enhancement details show.
@@ -893,16 +892,7 @@ pub(super) async fn handed_over_ask(
     if !ask.auto_policy {
         return Some(ask);
     }
-    // An unreadable setting is not "off": the admission below reads the
-    // evidence and, as the last word, refuses what it cannot read.
-    let priors_on = !matches!(
-        state
-            .applied
-            .setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
-            .await,
-        Ok(value) if value.as_deref().is_none_or(|value| value.trim() != "1")
-    );
-    if evidence.network.is_none() || !priors_on {
+    if evidence.network.is_none() {
         ask.link_unconsulted = true;
         return Some(ask);
     }

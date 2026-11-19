@@ -968,13 +968,7 @@ async fn the_ingress_hands_over_its_verdict_and_admits_auto_for_the_chosen_owner
     .expect("the ask travels");
     assert!(unconsulted.link_unconsulted && unconsulted.admitted.is_none());
 
-    // A viewer with a network identity, and network priors on: the link
-    // memory is consulted, for the chosen owner's described row only.
-    fixture
-        .store
-        .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
-        .await
-        .expect("priors on");
+    // An identified viewer consults link memory for the chosen owner's described row.
     let identified = super::processed_upgrade::ViewerEvidence {
         network: Some(crate::telemetry::NetworkIdentity {
             client_class: "web".to_owned(),
