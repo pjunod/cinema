@@ -4,6 +4,9 @@
 #[path = "dv_runtime.rs"]
 pub(crate) mod dv_runtime;
 
+#[path = "disk_refit_tools.rs"]
+pub(crate) mod disk_refit_tools;
+
 #[cfg(any(target_os = "linux", test))]
 #[path = "dv_report_lifetime.rs"]
 pub(crate) mod dv_report_lifetime;
