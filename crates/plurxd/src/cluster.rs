@@ -14,7 +14,7 @@
 //! | Is this node a voter, a learner, standalone or fenced? | `role()` | 1 |
 //! | Who can help, for this purpose? | `peers(purpose)` | 1 |
 //! | Read this, applied or linearizable? | `read(class)` | B3, reserved |
-//! | Tell me when this table changes | `watch(table)` | B4, reserved |
+//! | Tell me when this table changes | `watch(tables)` | B4 |
 //! | Call that peer | `call(peer, ..)` | A5/B5, reserved |
 //!
 //! The reserved names have no body yet. A feature that needs one of them
@@ -668,6 +668,7 @@ pub(crate) struct Cluster {
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     jobs: Jobs,
     access: plurx_core::cluster::membership::ClusterAccess,
+    mark: Option<hiqlite::AppliedMarkHandle>,
 }
 
 impl Cluster {
@@ -738,8 +739,9 @@ impl Cluster {
         let access = membership.cluster_access();
         Self {
             directory: Directory {
-                inner: access.directory(mark),
+                inner: access.directory(mark.clone()),
             },
+            mark,
             jobs: access.jobs(),
             access,
             fence,
@@ -973,6 +975,12 @@ impl Cluster {
             raft: self.replication.metrics_handle(),
             members: self.membership.metrics_handle(),
         }
+    }
+
+    /// Arm before observing the tables. This wake is advisory, not authority;
+    /// unknown tables and unavailable images retain conservative polling.
+    pub(crate) fn watch(&self, tables: &[&str]) -> plurx_core::store::TableWatch {
+        plurx_core::store::TableWatch::from_applied_mark(self.mark.as_ref(), tables)
     }
 
     /// Change notification over the same local applied membership as role().

@@ -13379,8 +13379,16 @@ impl MembershipManager {
     /// the asking node cannot reach into a peer's filesystem and a probe is
     /// only useful if somebody is listening when it is asked.
     pub async fn answer_offline_source_probes(&self) -> Result<u64, MembershipError> {
+        self.answer_offline_source_probe_pass()
+            .await
+            .map(|(answered, _)| answered)
+    }
+
+    /// The bool names an empty replica hint, not merely zero successful
+    /// answers: filesystem failures still need the original retry cadence.
+    async fn answer_offline_source_probe_pass(&self) -> Result<(u64, bool), MembershipError> {
         let Some(inner) = self.inner.as_ref() else {
-            return Ok(0);
+            return Ok((0, true));
         };
         let now = unix_seconds()?;
         // An idle pass is this replica's word that nothing is addressed to
@@ -13394,7 +13402,7 @@ impl MembershipManager {
             .local_pending_offline_source_probes(&inner.identity.node_id, now - PROBE_REQUEST_TTL)
             .await;
         if !probe_hint_owes_authority(&hint) {
-            return Ok(0);
+            return Ok((0, true));
         }
         let pending = inner
             .store
@@ -13421,7 +13429,7 @@ impl MembershipManager {
                 answered += 1;
             }
         }
-        Ok(answered)
+        Ok((answered, false))
     }
 
     /// Poll for source probes far more often than the heartbeat ticks.
@@ -13436,9 +13444,18 @@ impl MembershipManager {
         }
         loop {
             tokio::time::sleep(PROBE_POLL).await;
-            match self.answer_offline_source_probes().await {
-                Ok(0) => {}
-                Ok(answered) => {
+            let mark = self
+                .inner
+                .as_ref()
+                .and_then(|inner| inner.client.local_applied_mark());
+            let watch = crate::store::TableWatch::from_applied_mark(
+                mark.as_ref(),
+                &["offline_source_probes", "offline_packages"],
+            );
+            match self.answer_offline_source_probe_pass().await {
+                Ok((_, true)) if watch.unchanged() => watch.changed().await,
+                Ok((0, _)) => {}
+                Ok((answered, _)) => {
                     tracing::info!(
                         answered,
                         "answered offline source probes for a node removal"

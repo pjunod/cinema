@@ -1384,7 +1384,7 @@ impl ReceiverStartActor {
                     () = tokio::time::sleep_until(looked + Duration::from_secs(1)) => {}
                 }
                 // Re-armed before the look it follows.
-                watch = state.applied.sharing_watch(RECEIVER_CONNECTION_WATCH);
+                watch = state.cluster.watch(RECEIVER_CONNECTION_WATCH);
                 looked = tokio::time::Instant::now();
                 // Original B login and exact delivery binding remain required
                 // while a writer has queued bytes, including after Body EOF.

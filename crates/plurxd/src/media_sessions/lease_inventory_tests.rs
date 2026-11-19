@@ -65,8 +65,15 @@ async fn an_idle_lease_tick_takes_no_inventory_and_an_owned_row_still_does() {
     );
     let now_ms = unix_ms();
 
+    let idle_watch = selected.applied_view().watch(&["media_sessions"]);
+    assert!(
+        idle_watch.unchanged(),
+        "fixture must exercise a real trusted mark"
+    );
+
     // Idle: no worker, no remembered lease, no seed, no owned row.
-    let (routes, authority) = authority_reads_of(lease_tick_inventory(&state, true, now_ms)).await;
+    let (routes, authority) =
+        authority_reads_of(lease_tick_inventory(&state, true, now_ms, None)).await;
     assert_eq!(routes.expect("an idle inventory").len(), 0);
     assert_eq!(
         authority,
@@ -74,9 +81,27 @@ async fn an_idle_lease_tick_takes_no_inventory_and_an_owned_row_still_does() {
         "an idle tick must not read the authority"
     );
 
+    // A quiet table eliminates even the repeat local hint SQL. Other table
+    // writes are irrelevant; a session row below invalidates this same watch.
+    let counts = plurx_core::store::HttpStoreOperationCounts::default();
+    let quiet = plurx_core::store::scope_http_store_operations(
+        counts.clone(),
+        lease_tick_inventory(&state, true, now_ms, Some(&idle_watch)),
+    )
+    .await
+    .expect("quiet empty inventory");
+    assert!(quiet.is_empty());
+    assert!(counts
+        .method_snapshot()
+        .into_iter()
+        .all(
+            |(method, _)| method != "owned_media_sessions" && method != "owned_media_sessions_hint"
+        ));
+
     // A lease the loop remembers always takes the inventory: loss of a
     // remembered generation is only seen there.
-    let (routes, authority) = authority_reads_of(lease_tick_inventory(&state, false, now_ms)).await;
+    let (routes, authority) =
+        authority_reads_of(lease_tick_inventory(&state, false, now_ms, None)).await;
     assert_eq!(routes.expect("a remembered lease's inventory").len(), 0);
     assert!(
         authority
@@ -129,7 +154,14 @@ async fn an_idle_lease_tick_takes_no_inventory_and_an_owned_row_still_does() {
         .await
         .expect("confirm")
         .expect("confirmed route");
-    let (routes, authority) = authority_reads_of(lease_tick_inventory(&state, true, now_ms)).await;
+    assert!(!idle_watch.unchanged(), "the new session invalidates quiet");
+    let (routes, authority) = authority_reads_of(lease_tick_inventory(
+        &state,
+        true,
+        now_ms,
+        Some(&idle_watch),
+    ))
+    .await;
     let routes = routes.expect("an owned row's inventory");
     assert!(
         routes
