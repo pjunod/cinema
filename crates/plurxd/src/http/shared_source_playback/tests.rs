@@ -1130,7 +1130,7 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
     if native
         || matches!(
             mode,
-            SourceFixtureMode::Encoded | SourceFixtureMode::Hdr10Sdr
+            SourceFixtureMode::Encoded | SourceFixtureMode::Hdr10Sdr | SourceFixtureMode::BurnText
         )
     {
         fixture.keep_fixture_membership_stable().await;

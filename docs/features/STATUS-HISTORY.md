@@ -11,6 +11,10 @@ describes the state on the day it was written, and
 `tests/operations/test_status_pr_claims.py` keeps holding it to the same
 merged-pull-request rule it held in `STATUS.md`.
 
+## 2026-10-19 · Native server tray, startup policy and release upgrades
+
+**Source built and reviewed on `effort/desktop-tray`; [PR #1213](http://forge.lan:3000/noirr/plurx/pulls/1213) records main promotion; not deployed.** The [implementation ledger](DESKTOP-TRAY-IMPLEMENTATION.md) tracks macOS and Linux desktop controls, separate server/tray startup choices, and signed GitHub artifact upgrades. Astra completed the PR #1220 review; root addresses all eight findings and owns passing unit tests and merge gates. Controller, daemon, native UI and packaging source is built in cohort PR #1220. The [qualification ledger](DESKTOP-TRAY-QUALIFICATION.md) distinguishes passing review regressions, repository merge evidence and remaining native distribution acceptance.
+
 ## 2026-10-04 · Live TV station logos on Apple TV, iOS and Android
 
 **Branch `fix/live-tv-station-logos-native`, issue

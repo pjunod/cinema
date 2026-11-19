@@ -4365,6 +4365,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
+# The owned voter fixture process is joined before a collision can retry.
 expected_occurrences = 103
 # Promotion union: final count is measured after architectural conflict resolution.
 
@@ -4398,6 +4399,8 @@ expected_occurrences = 26
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Four test-only timers wait for the artwork fixture identity and the offline
+# worker result. Each pair uses a bounded timeout around the positive condition.
 # Source-budget audit (8ab61a779 -> bbc5c1664): +11 timer shapes. Group's
 # 100 ms failed-wait retry and 25 ms quiescence poll retain the owned children,
 # registrations and pause guard until positive reap; neither is settlement.
@@ -6075,7 +6078,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Union 2212 + 20 + 39 = 2271, less those 11 counted twice = 2260.
 # Remote processed upgrades add one fixture-only wait between relayed
 # control exchanges so the second exchange uses the real control cadence.
-expected_occurrences = 2268
+# The owned voter fixture process is joined before a collision can retry.
+# Main adds the bounded wait for the artwork rewrite timestamp to advance.
+expected_occurrences = 2272
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6613,6 +6618,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # source_probe/title_work_tests.rs +1.
 # Union at 0d501cae6: 349 + 13 + 3 = 365, less those 3 counted twice = 362; the spool
 # registration test adds one isolated test image: 363.
+# The owned voter fixture process is joined before a collision can retry.
 expected_occurrences = 368
 # Promotion union: final count is measured after architectural conflict resolution.
 
@@ -7355,6 +7361,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # ownership. Preserve both reviewed contributions: main 937 + F+ 5 = 942.
 # Remote processed upgrade relay tests inspect two HTTP response status
 # values. Neither match starts a process.
+# The owned voter fixture process is joined before a collision can retry.
 expected_occurrences = 948
 
 [[module_structures]]
@@ -7676,6 +7683,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Change-driven sharing monitors (A6 M3): +1 closed.wait() in the receiver
 # connection monitor's one-second floor wait, beside its change wait. No
 # process is involved.
+# The owned voter fixture process is joined before a collision can retry.
 expected_occurrences = 402
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
@@ -7925,6 +7933,7 @@ pattern = "kill_on_drop\\s*\\("
 # sleep child, killed and waited before the successor takes the lane).
 # Union at 0d501cae6: 126 + 2 + 1 = 129, less 1 counted twice = 128; the spool
 # registration test adds one: 129.
+# The owned voter fixture process is joined before a collision can retry.
 expected_occurrences = 132
 # Promotion union: final count is measured after architectural conflict resolution.
 

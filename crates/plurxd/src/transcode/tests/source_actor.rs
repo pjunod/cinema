@@ -3219,7 +3219,11 @@ async fn source_resource_init_open_job_retains_actual_fd_and_guard_after_waiter_
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_resource_media_open_job_retains_actual_fd_and_guard_after_waiter_cancellation() {
-    Box::pin(source_copy_preadmission_fixture(43)).await;
+    source_voter_fixture::run(
+        "transcode::source_actor::tests::source_resource_media_open_job_retains_actual_fd_and_guard_after_waiter_cancellation",
+        Box::pin(source_copy_preadmission_fixture(43)),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
