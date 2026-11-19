@@ -1463,9 +1463,16 @@ impl SharingManager {
             }
             // Known only after a pass that read the imports; otherwise the
             // loop sleeps the bounded poll, never on a stale schedule.
+            let idle_watch = state.cluster.watch(&["settings", "sharing_imports"]);
+            let mut known_empty = false;
             let mut next_due = None;
-            if matches!(loop_enabled(&state.applied).await, Ok(true)) {
+            let enabled = loop_enabled(&state.applied).await;
+            if matches!(enabled, Ok(false)) {
+                known_empty = true;
+            }
+            if matches!(enabled, Ok(true)) {
                 if let Ok(imports) = state.store.sharing_imports().await {
+                    known_empty = imports.is_empty();
                     self.status
                         .write()
                         .expect("sharing status lock")
@@ -1577,6 +1584,14 @@ impl SharingManager {
                     }
                     next_due = retry.values().map(|(_, due, _)| *due).min();
                 }
+            }
+            if known_empty && idle_watch.unchanged() {
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    () = idle_watch.changed() => {},
+                    () = self.wake.claims.notified() => {},
+                }
+                continue;
             }
             if !self.claims_idle(next_due, &shutdown).await {
                 return;

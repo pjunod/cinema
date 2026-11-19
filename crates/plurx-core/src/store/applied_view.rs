@@ -102,12 +102,15 @@ pub const SHARING_WATCH_TABLES: &[&str] = &[
 /// ends a recipient's authority (its idle expiry is a time term).
 pub const APPLIED_MARK_DELETES_ONLY: &[&str] = &["tokens"];
 
+/// Work-arrival tables, appended after the original slots.
+pub const WORK_WATCH_TABLES: &[&str] = &["offline_source_probes", "offline_packages"];
+
 /// Every table the applied mark registers, in slot order.
 pub fn applied_mark_tables() -> impl Iterator<Item = &'static str> {
     let tables = APPLIED_VIEW_TABLES.iter().chain(SHARING_WATCH_TABLES);
     #[cfg(feature = "hiqlite-store")]
     let tables = tables.chain(crate::cluster::membership::directory::ROSTER_TABLES.iter());
-    tables.copied()
+    tables.chain(WORK_WATCH_TABLES).copied()
 }
 
 /// A table observer's wait for its next look. Armed before the
@@ -1694,6 +1697,32 @@ impl AppliedViewMetrics {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn work_watch_tables_are_registered_after_the_original_slots() {
+        let tables = super::applied_mark_tables().collect::<Vec<_>>();
+        assert_eq!(
+            tables
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            tables.len()
+        );
+        #[cfg(feature = "hiqlite-store")]
+        {
+            assert_eq!(tables.len(), 19);
+            assert_eq!(
+                &tables[17..],
+                &["offline_source_probes", "offline_packages"]
+            );
+        }
+        assert!(tables.len() <= 32, "fork applied mark slot capacity");
+        assert!(
+            !super::TableWatch::Interval.unchanged(),
+            "fallback cannot prove quiet"
+        );
+    }
+
     use super::*;
 
     #[test]
