@@ -128,7 +128,8 @@ pub(crate) async fn start_raft_db(
 
     let is_startup_finished = Arc::new(AtomicBool::new(false));
     let sql_writer = state_machine_store.write_tx.clone();
-    startup_owner.protect_writer(sql_writer.clone());
+    let storage_drain = state_machine_store.storage_owner.drain();
+    startup_owner.protect_sqlite_writer(sql_writer.clone(), Some(storage_drain.clone()));
     let read_pool = state_machine_store.read_pool.clone();
 
     let network = NetworkStreaming {
@@ -172,6 +173,7 @@ pub(crate) async fn start_raft_db(
         shutdown_handle,
         wal_status,
         sql_writer,
+        storage_drain,
         read_pool,
         applied_mark,
         log_statements: node_config.log_statements,

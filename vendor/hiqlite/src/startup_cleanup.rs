@@ -6,6 +6,39 @@ use std::time::Duration;
 
 pub(crate) type Keepalive = Option<std::sync::Arc<dyn Send + Sync>>;
 
+/// OpenRaft 0.9 joins its core without joining the state-machine worker or
+/// its detached snapshot builders. Each actual SQL producer owns a sender;
+/// receivers observe retirement only after the last producer has dropped.
+#[cfg(feature = "sqlite")]
+#[derive(Debug, Clone)]
+pub(crate) struct SqliteStorageOwner(tokio::sync::watch::Sender<()>);
+
+#[cfg(feature = "sqlite")]
+impl Default for SqliteStorageOwner {
+    fn default() -> Self {
+        Self(tokio::sync::watch::channel(()).0)
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl SqliteStorageOwner {
+    pub(crate) fn drain(&self) -> SqliteStorageDrain {
+        SqliteStorageDrain(self.0.subscribe())
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(Debug, Clone)]
+pub(crate) struct SqliteStorageDrain(tokio::sync::watch::Receiver<()>);
+
+#[cfg(feature = "sqlite")]
+impl SqliteStorageDrain {
+    pub(crate) async fn wait(&self) {
+        let mut retired = self.0.clone();
+        while retired.changed().await.is_ok() {}
+    }
+}
+
 /// An unconfirmed owner must never release the caller's directory lease.
 #[derive(Default)]
 pub(crate) struct CompletionClaim(Keepalive);
@@ -126,8 +159,20 @@ impl StartupStorageOwner {
         &mut self,
         writer: flume::Sender<crate::store::state_machine::sqlite::writer::WriterRequest>,
     ) {
+        self.protect_sqlite_writer(writer, None);
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn protect_sqlite_writer(
+        &mut self,
+        writer: flume::Sender<crate::store::state_machine::sqlite::writer::WriterRequest>,
+        producers: Option<SqliteStorageDrain>,
+    ) {
         if self.enabled {
             self.protect(async move {
+                if let Some(producers) = producers {
+                    producers.wait().await;
+                }
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 if writer
                     .send_async(
@@ -155,6 +200,7 @@ impl StartupStorageOwner {
         let raft = state.raft.clone();
         let wal = state.shutdown_handle.clone();
         let writer = state.sql_writer.clone();
+        let producers = state.storage_drain.clone();
         self.protect(async move {
             stopped.store(true, Ordering::Relaxed);
             snapshots.request_shutdown();
@@ -170,6 +216,9 @@ impl StartupStorageOwner {
                 );
                 return Err(());
             }
+            // RaftCore termination is not state-machine termination. Keep
+            // storage live through every accepted apply and snapshot build.
+            producers.wait().await;
             if let Err(error) = wal.shutdown().await {
                 tracing::error!(
                     ?error,
@@ -424,6 +473,99 @@ where
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    #[tokio::test]
+    async fn sqlite_retirement_waits_for_detached_snapshot_builder_before_writer_and_root_release()
+    {
+        use crate::store::state_machine::sqlite::{
+            state_machine::StateMachineSqlite, writer::WriterRequest,
+        };
+        use openraft::{RaftSnapshotBuilder, RaftStateMachine};
+        use std::future::Future as _;
+
+        let root =
+            std::env::temp_dir().join(format!("sqlite-producer-drain-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let lock = root.join("root.lock");
+        let lease = std::fs::File::create(&lock).unwrap();
+        lease.lock().unwrap();
+        let probe = std::fs::File::open(&lock).unwrap();
+        let data = root.join("data").to_string_lossy().into_owned();
+        let mut state = StateMachineSqlite::new(
+            &data,
+            "state.db",
+            1,
+            false,
+            16,
+            1,
+            std::time::Duration::from_secs(600),
+            #[cfg(feature = "s3")]
+            None,
+            false,
+            #[cfg(feature = "backup")]
+            30,
+            false,
+            crate::applied_mark::AppliedMark::new::<&str>(&[]),
+        )
+        .await
+        .unwrap();
+        let writer = state.write_tx.clone();
+        let mut owner = super::StartupStorageOwner::new(true);
+        owner.retain(Some(std::sync::Arc::new(lease)));
+        owner.protect_sqlite_writer(writer.clone(), Some(state.storage_owner.drain()));
+        let builder = state.get_snapshot_builder().await;
+        let mut detached = builder.clone();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let build = tokio::spawn(async move {
+            entered.send(()).unwrap();
+            released.await.unwrap();
+            // This is the actual writer-backed builder, after its parent
+            // state machine retired, as in OpenRaft's detached build task.
+            detached.build_snapshot().await.unwrap()
+        });
+        started.await.unwrap();
+        drop(state);
+        let super::StorageCleanup {
+            mut work,
+            mut claim,
+        } = owner.cleanup.pop().unwrap();
+        drop(owner);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(work.as_mut().poll(cx).is_pending()))
+                .await,
+            "a live snapshot builder still owns storage after the worker retires"
+        );
+        drop(builder);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(work.as_mut().poll(cx).is_pending()))
+                .await,
+            "the detached builder clone retains its own producer lifetime"
+        );
+        assert!(probe.try_lock().is_err(), "actual root lease remains held");
+        let (metadata, read) = tokio::sync::oneshot::channel();
+        writer
+            .send_async(WriterRequest::MetadataRead(metadata))
+            .await
+            .unwrap();
+        read.await
+            .expect("the real SQL writer remains live for accepted work");
+        release.send(()).unwrap();
+        drop(build.await.unwrap());
+        assert!(
+            probe.try_lock().is_err(),
+            "producer retirement is not a writer ACK"
+        );
+        assert!(work.await.is_ok(), "the real writer confirms its shutdown");
+        claim.confirmed();
+        assert!(writer.is_disconnected());
+        assert!(!root.join("data/state_machine/lock").exists());
+        probe
+            .try_lock()
+            .expect("only confirmed drainage releases the root");
+        drop(probe);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn k06_handed_off_tls_drain_retains_lease_until_real_writer_and_connections_stop() {
         use crate::store::state_machine::sqlite::writer::WriterRequest;
@@ -668,7 +810,9 @@ mod tests {
         let mut owner = super::StartupStorageOwner::new(true);
         owner.retain(Some(std::sync::Arc::new(lease)));
         let (writer, requests) = flume::unbounded();
-        owner.protect_writer(writer);
+        let producer = super::SqliteStorageOwner::default();
+        owner.protect_sqlite_writer(writer, Some(producer.drain()));
+        drop(producer);
         let super::StorageCleanup { work, claim } = owner.cleanup.pop().unwrap();
         drop(owner);
         let receiver = tokio::spawn(async move {

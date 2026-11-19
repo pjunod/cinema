@@ -101,6 +101,9 @@ pub struct StateRaftDB {
     pub shutdown_handle: hiqlite_wal::ShutdownHandle,
     pub wal_status: hiqlite_wal::WalStatusHandle,
     pub sql_writer: flume::Sender<WriterRequest>,
+    /// The state-machine worker and detached snapshot builders must retire
+    /// before shutdown closes the writer they can still use.
+    pub(crate) storage_drain: crate::startup_cleanup::SqliteStorageDrain,
     pub read_pool: SqlitePool,
     /// Plurx patch 27: shared with the writer and the state machine.
     pub(crate) applied_mark: Arc<crate::applied_mark::AppliedMark>,

@@ -307,6 +307,7 @@ pub struct StateMachineData {
 
 #[derive(Debug, Clone)]
 pub struct StateMachineSqlite {
+    pub(crate) storage_owner: crate::startup_cleanup::SqliteStorageOwner,
     // pub data: StateMachineData,
     this_node: NodeId,
     path_snapshots: String,
@@ -402,6 +403,7 @@ impl StateMachineSqlite {
         })?;
 
         let mut slf = Self {
+            storage_owner: Default::default(),
             // data: state_machine_data,
             this_node,
             path_snapshots,
@@ -1380,6 +1382,7 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
         // TODO clean up possibly existing restore files inside snapshot builder upon success
 
         SQLiteSnapshotBuilder {
+            _storage_owner: self.storage_owner.clone(),
             #[cfg(feature = "backup")]
             path_backups: self.path_backups.clone(),
             path_snapshots: self.path_snapshots.clone(),
@@ -1502,6 +1505,7 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
         let path_snapshots = self.path_snapshots.clone();
         let snapshot_recovery_pending = self.snapshot_recovery_pending.clone();
         let applied_mark = Arc::clone(&self.applied_mark);
+        let storage_owner = self.storage_owner.clone();
         #[cfg(feature = "backup")]
         let path_backups = self.path_backups.clone();
         snapshot_recovery_pending.store(true, Ordering::Release);
@@ -1554,6 +1558,7 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
                 #[cfg(feature = "backup")]
                 path_backups,
                 snapshot_files,
+                storage_owner,
             ));
             Ok::<(), StorageError<NodeId>>(())
         })

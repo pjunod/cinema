@@ -40,6 +40,7 @@ pub(crate) fn inject_current_publication_failure(path_snapshots: &str) {
 
 #[derive(Debug, Clone)]
 pub struct SQLiteSnapshotBuilder {
+    pub(crate) _storage_owner: crate::startup_cleanup::SqliteStorageOwner,
     // pub last_applied_log_id: Option<LogId<NodeId>>,
     // pub last_membership: StoredMembership<NodeId, Node>,
     #[cfg(feature = "backup")]
@@ -168,6 +169,7 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
             #[cfg(feature = "backup")]
             self.path_backups.clone(),
             snapshot_files,
+            self._storage_owner.clone(),
         ));
         timer.success();
         Ok(snapshot)
@@ -232,6 +234,7 @@ pub(crate) async fn snapshots_cleanup(
     path_snapshots: String,
     #[cfg(feature = "backup")] path_backups: String,
     snapshot_files: Arc<Mutex<SnapshotFileState>>,
+    _storage_owner: crate::startup_cleanup::SqliteStorageOwner,
 ) -> Result<(), StorageError<NodeId>> {
     let mut snapshot_files = snapshot_files.lock().await;
     // The pointer is the durable publication boundary. Process-local state can
@@ -580,6 +583,7 @@ mod snapshot_metrics_cleanup_contract {
                 .expect("UTF-8 backup cleanup root")
                 .to_owned(),
             snapshot_files,
+            crate::startup_cleanup::SqliteStorageOwner::default(),
         )
         .await
         .expect("clean old snapshots");
