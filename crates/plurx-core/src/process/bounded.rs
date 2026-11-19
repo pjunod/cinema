@@ -905,17 +905,33 @@ mod tests {
             bound: Duration,
             mut observed: impl AsyncFnMut() -> bool,
         ) {
-            let began = std::time::Instant::now();
-            loop {
-                if observed().await {
-                    return;
+            let deadline = std::time::Instant::now() + bound;
+            let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+            let (expire, expired) = tokio::sync::oneshot::channel();
+            let timer = tokio::task::spawn_blocking(move || {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if cancelled.recv_timeout(remaining)
+                    == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                {
+                    let _ = expire.send(());
                 }
-                assert!(
-                    began.elapsed() < bound,
-                    "{label} was not observed within {bound:?}"
-                );
-                tokio::task::yield_now().await;
-            }
+            });
+            let reached = tokio::select! {
+                biased;
+                _ = expired => false,
+                reached = async {
+                    while std::time::Instant::now() < deadline {
+                        if observed().await {
+                            return std::time::Instant::now() < deadline;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                    false
+                } => reached,
+            };
+            drop(cancel);
+            timer.await.expect("join wall observation timer");
+            assert!(reached, "{label} was not observed within {bound:?}");
         }
 
         const ACTIVE_BUDGET: Duration = Duration::from_secs(2);
@@ -950,7 +966,11 @@ mod tests {
             .await
         });
         wait_for_fixture("owned group progress", Duration::from_secs(5), async || {
-            leader.exists() && helper.exists() && progress.exists()
+            tokio::fs::try_exists(&leader).await.expect("leader path")
+                && tokio::fs::try_exists(&helper).await.expect("helper path")
+                && tokio::fs::try_exists(&progress)
+                    .await
+                    .expect("progress path")
         })
         .await;
         let pid: i32 = tokio::fs::read_to_string(&leader)
