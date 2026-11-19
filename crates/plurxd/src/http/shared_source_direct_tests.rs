@@ -190,7 +190,18 @@ async fn assert_matches_local(
             )
             .await;
             let label = format!("{method} {values:?} if_range={if_range} h2={h2}");
-            assert_eq!(source.status(), local.status(), "{label}");
+            let source_status = source.status();
+            let local_status = local.status();
+            if source_status != local_status {
+                let bytes = axum::body::to_bytes(source.into_body(), 4 * 1024 * 1024)
+                    .await
+                    .expect("bounded Source refusal");
+                panic!(
+                    "{label}: Source status {source_status}, Local status {local_status}; Source refusal: {}",
+                    String::from_utf8_lossy(&bytes)
+                );
+            }
+            assert_eq!(source_status, local_status, "{label}");
             for name in [
                 header::CONTENT_TYPE,
                 header::ACCEPT_RANGES,
@@ -280,6 +291,11 @@ async fn sharing_source_direct_start_requires_actual_direct_decision() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_direct_counts_grant_and_source_slots() {
+    // Retain the production refusal stage when this real Source start fails.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("plurx::sharing=warn")
+        .with_test_writer()
+        .try_init();
     let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
     let recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     for n in 0..4 {

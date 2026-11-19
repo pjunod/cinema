@@ -1437,7 +1437,13 @@ impl TranscodeManager {
                 Arc::clone(&self.store),
                 Arc::clone(&self.source_workers.index_hooks),
             )
-            .map_err(|_| SourceWorkerError::Unsupported)?,
+            .map_err(|error| {
+                #[cfg(test)]
+                eprintln!("actual Source cold index setup refused: {error}");
+                #[cfg(not(test))]
+                let _ = error;
+                SourceWorkerError::Unsupported
+            })?,
         );
         let built = work
             .as_ref()

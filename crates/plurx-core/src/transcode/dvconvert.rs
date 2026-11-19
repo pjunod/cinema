@@ -82,6 +82,8 @@ use dolby_vision::rpu::dovi_rpu::DoviRpu;
 use dolby_vision::rpu::rpu_data_nlq::DoviELType;
 use dolby_vision::rpu::ConversionMode;
 
+use super::dv_refit::{apply_to_rpu, RefitError, ServableCurves};
+
 /// The NAL type an RPU travels in (`unspec62`).
 const RPU_NAL_TYPE: u8 = 62;
 
@@ -136,6 +138,9 @@ pub struct Converted {
     /// The source profile the first RPU declared. 7 for the case this exists
     /// for; anything else is worth reporting rather than silently converting.
     pub source_profile: Option<u8>,
+    /// RPUs that were handed F+ curves and now carry them. An RPU that reuses
+    /// the previous RPU's mapping carries none of its own and is not counted.
+    pub refitted: u64,
 }
 
 impl Default for Converted {
@@ -144,6 +149,7 @@ impl Default for Converted {
             rpus: 0,
             enhancement_layer: EnhancementLayer::None,
             source_profile: None,
+            refitted: 0,
         }
     }
 }
@@ -169,6 +175,15 @@ pub enum DvConvertError {
         frame: u64,
         offset: usize,
         detail: String,
+    },
+    /// The converted RPU refused its F+ curves. Never answered by serving
+    /// the identity mapping instead: the stream's identity says it carries
+    /// the curves, and bytes that did not would make that a lie.
+    #[error("the Dolby Vision RPU at frame {frame} (byte {offset}) would not take its F+ curves: {error}")]
+    Refit {
+        frame: u64,
+        offset: usize,
+        error: RefitError,
     },
     /// The RPU declared a profile this conversion has no correct answer for.
     ///
@@ -217,14 +232,19 @@ pub enum DvConvertError {
 /// held, and the caller owns the consequences of the size change — a shorter
 /// sample has to be declared shorter, which is the size-fixup chain in
 /// [`crate::fmp4`].
+///
+/// `curves` are the F+ curves of the sample's scene (FEL-RPU-REFIT-BUILD.md
+/// §3.5), written after `To81`; `None` keeps the identity mapping `To81`
+/// leaves. An RPU that reuses the previous RPU's mapping is left as it is.
 pub fn convert_length_prefixed(
     sample: &[u8],
     nal_length_size: u8,
+    curves: Option<&ServableCurves>,
     out: &mut Vec<u8>,
 ) -> Result<Converted, DvConvertError> {
     out.clear();
     out.reserve(sample.len());
-    match convert_length_prefixed_into(sample, nal_length_size, out) {
+    match convert_length_prefixed_into(sample, nal_length_size, curves, out) {
         Ok(report) => Ok(report),
         Err(error) => {
             out.clear();
@@ -236,6 +256,7 @@ pub fn convert_length_prefixed(
 fn convert_length_prefixed_into(
     sample: &[u8],
     nal_length_size: u8,
+    curves: Option<&ServableCurves>,
     out: &mut Vec<u8>,
 ) -> Result<Converted, DvConvertError> {
     let width = usize::from(nal_length_size);
@@ -328,6 +349,21 @@ fn convert_length_prefixed_into(
                 offset: at,
                 detail: format!("{error:#}"),
             })?;
+        if let Some(curves) = curves {
+            match apply_to_rpu(&mut rpu, curves) {
+                Ok(()) => report.refitted += 1,
+                // `use_prev_vdr_rpu_flag`: the decoder applies the previous
+                // RPU's mapping, which is the same scene's curves.
+                Err(RefitError::NoMapping) => {}
+                Err(error) => {
+                    return Err(DvConvertError::Refit {
+                        frame: report.rpus,
+                        offset: at,
+                        error,
+                    })
+                }
+            }
+        }
         // `write_hevc_unspec62_nalu` emits the Annex B spelling: the NAL with
         // its type byte, ready for a start code. Inside a sample the same
         // bytes take a length prefix instead, so the payload is identical and
@@ -421,7 +457,7 @@ mod tests {
 
         let input = sample(&[&rpu], 4);
         let mut out = Vec::new();
-        let report = convert_length_prefixed(&input, 4, &mut out).expect("convert");
+        let report = convert_length_prefixed(&input, 4, None, &mut out).expect("convert");
 
         assert_eq!(report.rpus, 1);
         assert_eq!(report.source_profile, Some(7));
@@ -455,7 +491,7 @@ mod tests {
 
         let input = sample(&[vps, sps, &rpu, slice], 4);
         let mut out = Vec::new();
-        let report = convert_length_prefixed(&input, 4, &mut out).expect("convert");
+        let report = convert_length_prefixed(&input, 4, None, &mut out).expect("convert");
         assert_eq!(report.rpus, 1);
 
         let units = units_of(&out, 4);
@@ -486,7 +522,7 @@ mod tests {
             };
             let input = sample(&[unit], width);
             let mut out = Vec::new();
-            let report = convert_length_prefixed(&input, width as u8, &mut out)
+            let report = convert_length_prefixed(&input, width as u8, None, &mut out)
                 .unwrap_or_else(|error| panic!("width {width}: {error}"));
             assert_eq!(report.rpus, u64::from(width != 1));
         }
@@ -497,7 +533,7 @@ mod tests {
         // rewrite whatever it found in the middle of a frame.
         let mut out = Vec::new();
         for width in [0u8, 3, 5, 8] {
-            let error = convert_length_prefixed(&[0, 0, 0], width, &mut out)
+            let error = convert_length_prefixed(&[0, 0, 0], width, None, &mut out)
                 .expect_err("not an hvcC width");
             assert!(error.to_string().contains("legal hvcC value"), "{error}");
         }
@@ -515,13 +551,13 @@ mod tests {
 
         let mut overrun = 999u32.to_be_bytes().to_vec();
         overrun.extend_from_slice(&[0x26, 0x01]);
-        let error = convert_length_prefixed(&overrun, 4, &mut out).expect_err("must refuse");
+        let error = convert_length_prefixed(&overrun, 4, None, &mut out).expect_err("must refuse");
         assert!(error.to_string().contains("does not carry"), "{error}");
         assert!(out.is_empty(), "a refusal leaves nothing to forward");
 
         // A prefix that is itself cut short, which is the other half of the
         // same mistake.
-        let error = convert_length_prefixed(&[0, 0], 4, &mut out).expect_err("must refuse");
+        let error = convert_length_prefixed(&[0, 0], 4, None, &mut out).expect_err("must refuse");
         assert!(error.to_string().contains("past the end"), "{error}");
         assert!(out.is_empty());
 
@@ -529,7 +565,7 @@ mod tests {
         // does not end on a boundary, so the caller's framing is wrong.
         let mut trailing = sample(&[&[0x26, 0x01, 0xaf]], 4);
         trailing.push(0xff);
-        assert!(convert_length_prefixed(&trailing, 4, &mut out).is_err());
+        assert!(convert_length_prefixed(&trailing, 4, None, &mut out).is_err());
         assert!(out.is_empty());
     }
 
@@ -542,7 +578,7 @@ mod tests {
     fn a_sample_with_no_rpus_is_returned_verbatim() {
         let input = sample(&[&[0x40, 0x01, 0x0c], &[0x26, 0x01, 0xaf, 0x00]], 4);
         let mut out = Vec::new();
-        let report = convert_length_prefixed(&input, 4, &mut out).expect("convert");
+        let report = convert_length_prefixed(&input, 4, None, &mut out).expect("convert");
         assert_eq!(report.rpus, 0);
         assert_eq!(report.source_profile, None);
         assert_eq!(report.enhancement_layer, EnhancementLayer::None);
@@ -552,7 +588,7 @@ mod tests {
         // zero-length samples, but `rewrite_video_samples` hands over whatever
         // the `trun` declared and a zero there must not be a crash.
         let mut empty = Vec::new();
-        let report = convert_length_prefixed(&[], 4, &mut empty).expect("convert");
+        let report = convert_length_prefixed(&[], 4, None, &mut empty).expect("convert");
         assert_eq!(report.rpus, 0);
         assert!(empty.is_empty());
     }
@@ -573,7 +609,7 @@ mod tests {
         }
         let input = sample(&[&broken], 4);
         let mut out = Vec::new();
-        let error = convert_length_prefixed(&input, 4, &mut out).expect_err("must refuse");
+        let error = convert_length_prefixed(&input, 4, None, &mut out).expect_err("must refuse");
         assert!(
             matches!(error, DvConvertError::Unreadable { frame: 0, .. }),
             "{error}"
@@ -609,7 +645,7 @@ mod tests {
         assert_eq!(&hostile[..2], &rpu_bytes()[..2], "still routed as an RPU");
         let input = sample(&[&hostile], 4);
         let mut out = Vec::new();
-        let error = convert_length_prefixed(&input, 4, &mut out).expect_err("must refuse");
+        let error = convert_length_prefixed(&input, 4, None, &mut out).expect_err("must refuse");
         assert!(
             matches!(error, DvConvertError::Unreadable { frame: 0, .. }),
             "{error}"
@@ -640,7 +676,7 @@ mod tests {
         assert_eq!(&hostile[..2], &rpu_bytes()[..2], "still routed as an RPU");
         let input = sample(&[&hostile], 4);
         let mut out = Vec::new();
-        let error = convert_length_prefixed(&input, 4, &mut out).expect_err("must refuse");
+        let error = convert_length_prefixed(&input, 4, None, &mut out).expect_err("must refuse");
         assert!(
             matches!(error, DvConvertError::Unreadable { frame: 0, .. }),
             "{error}"
@@ -671,7 +707,7 @@ mod tests {
         assert_eq!(&hostile[..2], &rpu_bytes()[..2], "still routed as an RPU");
         let input = sample(&[&hostile], 4);
         let mut out = Vec::new();
-        let error = convert_length_prefixed(&input, 4, &mut out).expect_err("must refuse");
+        let error = convert_length_prefixed(&input, 4, None, &mut out).expect_err("must refuse");
         assert!(
             matches!(error, DvConvertError::Unreadable { frame: 0, .. }),
             "{error}"
@@ -694,7 +730,7 @@ mod tests {
         oversized.resize(MAX_RPU_NAL_BYTES + 1, 0);
         let input = sample(&[&oversized], 4);
         let mut out = Vec::new();
-        let error = convert_length_prefixed(&input, 4, &mut out).expect_err("must refuse");
+        let error = convert_length_prefixed(&input, 4, None, &mut out).expect_err("must refuse");
         assert!(
             matches!(error, DvConvertError::Unreadable { frame: 0, .. })
                 && error.to_string().contains("larger than any real one"),
@@ -708,7 +744,7 @@ mod tests {
         let mut at_limit = rpu_bytes();
         at_limit.resize(MAX_RPU_NAL_BYTES, 0);
         let input = sample(&[&at_limit], 4);
-        if let Err(error) = convert_length_prefixed(&input, 4, &mut out) {
+        if let Err(error) = convert_length_prefixed(&input, 4, None, &mut out) {
             assert!(
                 !error.to_string().contains("larger than any real one"),
                 "{error}"
@@ -735,7 +771,7 @@ mod tests {
         // both non-empty and plausible-looking.
         let input = sample(&[good, &rpu_bytes(), &broken], 4);
         let mut out = vec![0xab; 64];
-        convert_length_prefixed(&input, 4, &mut out).expect_err("must refuse");
+        convert_length_prefixed(&input, 4, None, &mut out).expect_err("must refuse");
         assert!(
             out.is_empty(),
             "a refused conversion published {} bytes",
@@ -750,7 +786,8 @@ mod tests {
             .expect("write");
         let mixed = sample(&[&rpu_bytes(), &p81], 4);
         let mut out = Vec::new();
-        convert_length_prefixed(&mixed, 4, &mut out).expect_err("a spliced stream is refused");
+        convert_length_prefixed(&mixed, 4, None, &mut out)
+            .expect_err("a spliced stream is refused");
         assert!(out.is_empty());
     }
 
@@ -770,7 +807,7 @@ mod tests {
         let expected = 4 + filler.len();
 
         let mut out = Vec::new();
-        let error = convert_length_prefixed(&input, 4, &mut out).expect_err("must refuse");
+        let error = convert_length_prefixed(&input, 4, None, &mut out).expect_err("must refuse");
         let DvConvertError::Unreadable { offset, .. } = error else {
             panic!("wrong variant: {error}");
         };
@@ -833,7 +870,7 @@ mod tests {
         ] {
             let input = sample(&[nal], 4);
             let mut out = Vec::new();
-            let error = convert_length_prefixed(&input, 4, &mut out).expect_err(why);
+            let error = convert_length_prefixed(&input, 4, None, &mut out).expect_err(why);
             let DvConvertError::UnsupportedProfile {
                 frame: 0,
                 profile: got,
@@ -872,7 +909,7 @@ mod tests {
 
         let input = sample(&[&fel, &mel], 4);
         let mut out = Vec::new();
-        let report = convert_length_prefixed(&input, 4, &mut out).expect("convert");
+        let report = convert_length_prefixed(&input, 4, None, &mut out).expect("convert");
 
         assert_eq!(report.rpus, 2, "both units are rewritten");
         assert_eq!(report.source_profile, Some(7));
@@ -886,7 +923,7 @@ mod tests {
         // FEL-wins.
         let reversed = sample(&[&mel, &fel], 4);
         let mut out = Vec::new();
-        let report = convert_length_prefixed(&reversed, 4, &mut out).expect("convert");
+        let report = convert_length_prefixed(&reversed, 4, None, &mut out).expect("convert");
         assert_eq!(report.enhancement_layer, EnhancementLayer::Minimum);
     }
 
@@ -904,7 +941,8 @@ mod tests {
         for width in [2usize, 4] {
             let input = sample(&[&rpu_bytes(), tail], width);
             let mut out = Vec::new();
-            let report = convert_length_prefixed(&input, width as u8, &mut out).expect("convert");
+            let report =
+                convert_length_prefixed(&input, width as u8, None, &mut out).expect("convert");
             assert_eq!(report.rpus, 1);
 
             let declared = out[..width]
@@ -932,10 +970,10 @@ mod tests {
         let input = sample(&[&rpu_bytes()], 4);
 
         let mut fresh = Vec::new();
-        convert_length_prefixed(&input, 4, &mut fresh).expect("convert");
+        convert_length_prefixed(&input, 4, None, &mut fresh).expect("convert");
 
         let mut reused = vec![0xab; 4096];
-        convert_length_prefixed(&input, 4, &mut reused).expect("convert");
+        convert_length_prefixed(&input, 4, None, &mut reused).expect("convert");
 
         assert_eq!(reused, fresh, "the second call starts from nothing");
     }
@@ -946,7 +984,7 @@ mod tests {
     fn the_enhancement_layer_type_is_reported_for_the_badge() {
         let input = sample(&[&rpu_bytes()], 4);
         let mut out = Vec::new();
-        let report = convert_length_prefixed(&input, 4, &mut out).expect("convert");
+        let report = convert_length_prefixed(&input, 4, None, &mut out).expect("convert");
 
         // Which one, not merely that one was named. The badge tells a viewer
         // whether the conversion cost them picture detail, so getting MEL and
@@ -966,6 +1004,39 @@ mod tests {
         assert!(
             EnhancementLayer::Minimum.reason().contains("near-lossless"),
             "…and a MEL source must not be"
+        );
+    }
+
+    /// The curves a sample is handed are what its converted RPU carries, and
+    /// everything that is not the mapping is the plain conversion's.
+    #[test]
+    fn curves_handed_to_a_sample_are_written_after_to81() {
+        use crate::transcode::dv_refit::{servable, RefitCurves};
+        use crate::transcode::dv_refit_serve::{curves_match, written_curves};
+        let mut lifted = RefitCurves::identity();
+        for piece in &mut lifted.luma {
+            piece[0] += 3.0 / 4095.0;
+        }
+        let curves = servable(&lifted).expect("servable");
+        let input = sample(&[&rpu_bytes()], 4);
+
+        let mut plain = Vec::new();
+        let v1 = convert_length_prefixed(&input, 4, None, &mut plain).expect("convert");
+        assert_eq!(v1.refitted, 0);
+        let mut fitted = Vec::new();
+        let v2 = convert_length_prefixed(&input, 4, Some(&curves), &mut fitted).expect("convert");
+        assert_eq!((v2.rpus, v2.refitted), (1, 1));
+        assert_ne!(plain, fitted);
+
+        let plain = DoviRpu::parse_unspec62_nalu(&units_of(&plain, 4)[0]).expect("v1 parses");
+        let fitted = DoviRpu::parse_unspec62_nalu(&units_of(&fitted, 4)[0]).expect("v2 parses");
+        assert_eq!(fitted.dovi_profile, 8);
+        let written = written_curves(&fitted).expect("the F+ shape");
+        assert!(curves_match(&written, curves.curves()));
+        assert_eq!(
+            format!("{:?}", fitted.vdr_dm_data),
+            format!("{:?}", plain.vdr_dm_data),
+            "only the mapping differs from the plain conversion"
         );
     }
 }

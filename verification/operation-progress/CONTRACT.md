@@ -36,6 +36,25 @@ record change here. Model, configuration, property, fairness and historical
 receipt bytes remain unchanged. This review adds no observer-liveness,
 byte-service, scheduling-fairness or physical-stop guarantee to the model.
 
+## Current-main item pin reconciliation — 2026-11-18
+
+PR1676 head `804633cb4` is integrated with main `965900224` without changing
+incoming Rust, SQL, model, configuration or toolchain bytes. Main moved
+claim execution into `claim_attempt` and `local_claim_verdict`, and split
+`CLAIM_SQL` into predicate macros. The former state-predicate anchor now
+selects `macro_rules! claim_state`; keeping only that item would lose the
+rest of the formerly pinned claim statement. Eleven additional dependency
+rows pin the statement/verdict constants, moved helpers and extracted
+predicate macros. The existing mutation checks exercise every moved item.
+
+The selected library candidate listing retains `admissible_only: false`.
+The daemon records the incoming Skipped/Settled/Proposed classification;
+claim acknowledgement and deadline resolution retain their existing wait
+and authority boundaries. The finite models do not establish local-replica
+application liveness or qualify the new title/artifact admission paths.
+Only the nine drifted item pins across the three packages are refreshed.
+Source correspondence is separate from affected formal smokes and full
+Main promotion qualification; historical receipts retain their identities.
 
 ## Source-budget recipe requests — source review on 2026-11-09
 
@@ -407,3 +426,40 @@ bodies retain both parents' source. The Store parent registers both sets of
 conformance tests. Refresh only those whole-file source hashes after checking
 the existing anchors; model/configuration bytes and qualification identities
 are unchanged. This is source correspondence, not model execution evidence.
+
+## Item pins replace whole-file pins — 2026-11-15
+
+Paul ruled on 2026-11-15 that a mapping pins the anchored item, not the whole
+source file. Each row now records the item its anchor selects (`scope`,
+`item`, `item_sha256`);
+[the README](../durable-jobs/README.md#source-pins-cover-the-anchored-item)
+defines the items and the hash. The migration ran at main `40cc6460d`, where
+every whole-file pin matched, so each pin records source already reviewed.
+
+**Coverage changed, and this is what it is now.** The 60 original rows pin
+named items. Two anchor a match arm (`Request::AcquireDomain => {` in
+`perform`, and row 27's `Query::Transaction(req) => {` in the vendored
+writer); each pins its function without the bodies of the other arms, so
+row 27 still sees the writer's loop, the scrutinee and every arm's pattern in
+order, which is where "serial" lives.
+
+70 `same-file dependency of …` rows pin what those items read in their own
+file and that carries part of the claim: `decide_cluster_job_authority`,
+`local_node_is_committed_voter` and the other membership reads behind rows 31
+and 32; `RELEASE_ATTEMPTS`, `RELEASE_RETRY_DELAY`, `lease_time_remaining` and
+`revoke` behind rows 13 to 15; `claim_with_resolution`, `library_candidates`,
+`settle` and the other helpers of rows 01 to 07; `publish_then_send`,
+`send_reply` and the source-layout guards of row 27; the publication helpers
+of rows 19 and 20; the timed client's `inner`, `validate_sql` and timeout
+error; the walker's page size and cancellation check; and the scheduler and
+worker loop bodies behind rows 42 and 43. `trait ClusterJobAuthority` in
+`coordination.rs` has a row because `may_execute_job` is its provided method.
+
+**Accepted loss.** No dependency rows for the rows recorded as outside the
+model (caption migration, managed-resource views, source-custody recovery),
+for `main.rs` startup, for the snapshot, backup and migration helpers of the
+writer, or for the scanner's naming and reporting helpers. Nothing in another
+file is followed except the trait above, and nothing more than one call away.
+
+No source, anchor, model, configuration or property changes. This is a change
+to the drift check, not review or execution evidence.

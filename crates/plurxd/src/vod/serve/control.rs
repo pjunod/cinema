@@ -1,6 +1,19 @@
 use super::*;
 
 impl VodServe {
+    /// An accepted control snapshot, never the diagnostic capability string.
+    pub(crate) async fn client_platform_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::playback_control::ClientPlatform> {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        let platform = session.control.lock().ok()?.client_platform();
+        platform
+    }
+}
+
+impl VodServe {
     #[cfg(test)]
     pub(crate) async fn source_control_observation_for_test(
         &self,

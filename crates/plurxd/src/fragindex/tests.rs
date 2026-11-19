@@ -2,6 +2,199 @@ use super::*;
 use plurx_core::segplan::{self, SEGPLAN_VERSION};
 use plurx_core::testfixtures;
 
+/// A source with a nonzero start and reordered pictures exercises both parts
+/// of the fitted clock: the source DTS origin removed by the copy muxer and
+/// each sample's signed composition offset. This compares the real ffprobe
+/// packet census with the real ffmpeg index pipe, not a synthetic timeline.
+#[cfg(unix)]
+#[tokio::test]
+async fn fitted_index_clock_matches_nonzero_start_b_frame_packet_pts() {
+    use plurx_core::segplan::ranges::{normalize_to_index_ticks, SourceTimestamp};
+    use plurx_core::transcode::dv_refit_serve::SourceClock;
+    use std::process::Command;
+
+    testfixtures::require_ffmpeg();
+    let temp = crate::test_tempdir().expect("clock fixture directory");
+    let source = temp.path().join("nonzero-bframes.mkv");
+    let mut encode = Command::new(testfixtures::ffmpeg());
+    encode.args(["-y", "-v", "error", "-f", "lavfi", "-i",
+        "testsrc2=size=160x96:rate=24:duration=3", "-vf", "setpts=PTS+7/TB",
+        "-c:v", "libx265", "-preset", "ultrafast", "-x265-params",
+        "keyint=24:min-keyint=24:open-gop=0:bframes=3:repeat-headers=1:scenecut=0:log-level=none:pools=1",
+        "-an"])
+        .arg(&source);
+    testfixtures::run(&mut encode);
+    let probe = Command::new(testfixtures::ffprobe())
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_packets",
+            "-show_streams",
+            "-show_entries",
+            "packet=dts,pts:stream=time_base",
+            "-of",
+            "json",
+        ])
+        .arg(&source)
+        .output()
+        .expect("ffprobe packet census");
+    assert!(
+        probe.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&probe.stdout).expect("ffprobe JSON");
+    let packets = document["packets"].as_array().expect("video packets");
+    let (num, den) = parse_time_base(
+        document["streams"][0]["time_base"]
+            .as_str()
+            .expect("source time base"),
+    )
+    .expect("rational time base");
+    let (num, den) = (
+        u32::try_from(num).expect("num"),
+        u32::try_from(den).expect("den"),
+    );
+    let packet_time = |packet: &serde_json::Value, key: &str| -> i64 {
+        packet[key].as_i64().expect("integer packet timestamp")
+    };
+    let first_pts = packet_time(&packets[0], "pts");
+    assert!(first_pts > 0, "fixture must retain its nonzero start");
+    assert!(
+        packets.iter().any(|packet| packet["dts"]
+            .as_i64()
+            .is_some_and(|dts| packet_time(packet, "pts") != dts)),
+        "fixture must contain reordered B frames"
+    );
+
+    // Matroska may omit the reordered head's DTS. Bind the measured first
+    // PTS to the exact same independently hashed packet before resolving it
+    // from the muxer's signed composition offset, as the production pass does.
+    let mut identity_probe = Command::new(testfixtures::ffmpeg());
+    identity_probe.args(filtered_packet_hash_args(
+        source.to_str().expect("fixture path"),
+        0,
+        false,
+    ));
+    let identity = testfixtures::run(&mut identity_probe);
+    let origin_probe = RefitPacketOrigin {
+        first_dts: packets[0]["dts"].as_i64(),
+        first_pts,
+        time_base_num: num,
+        time_base_den: den,
+        first_sample_sha256: Some(
+            filtered_packet_hash(&identity, first_pts, (num, den))
+                .expect("independent first packet"),
+        ),
+    };
+
+    let mut command = Command::new(testfixtures::ffmpeg());
+    command
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(&source)
+        .args([
+            "-map_chapters",
+            "-1",
+            "-map",
+            "0:v:0?",
+            "-an",
+            "-sn",
+            "-c:v",
+            "copy",
+            "-tag:v",
+            "hvc1",
+            "-bsf:v",
+            "filter_units=remove_types=32-34",
+            "-avoid_negative_ts",
+            "make_zero",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "-use_editlist",
+            "0",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]);
+    let output = testfixtures::run(&mut command);
+    let mut reader = FragmentReader::new();
+    reader.push(&output);
+    let Some(Unit::Init(init)) = reader.next_unit().expect("index init") else {
+        panic!("index init missing");
+    };
+    let video = init.video().expect("video track");
+    let mut observed = Vec::new();
+    let mut first_fragment = None;
+    while let Some(unit) = reader.next_unit().expect("index fragment") {
+        if let Unit::Fragment(fragment) = unit {
+            first_fragment.get_or_insert_with(|| fragment.clone());
+            let track = fragment.track(video.id).expect("video fragment");
+            let mut dts = track.base_decode_time;
+            for sample in track.samples() {
+                observed.push((dts, sample.cto));
+                dts += u64::from(sample.duration);
+            }
+        }
+    }
+    assert_eq!(
+        observed.len(),
+        packets.len(),
+        "copy must preserve every video packet"
+    );
+    let output_origin = observed[0].0;
+    let resolved = origin_probe
+        .resolve(&init, &first_fragment.expect("first copy fragment"))
+        .expect("exact matched packet clock");
+    let first_dts = resolved.first_dts;
+    assert!(
+        first_dts > 0,
+        "the derived decode origin must retain the nonzero start"
+    );
+    let origin = SourceTimestamp {
+        dts: first_dts,
+        time_base_num: num,
+        time_base_den: den,
+    };
+    let clock = SourceClock {
+        track_timescale: video.timescale,
+        track_ticks: i128::from(output_origin),
+        source_pts: first_dts,
+        source_time_base: (num, den),
+    };
+    let mut known_decode_times = 0;
+    for ((dts, cto), packet) in observed.iter().zip(packets) {
+        let source_pts = packet_time(packet, "pts");
+        if let Some(source_dts) = packet["dts"].as_i64() {
+            let indexed_dts = normalize_to_index_ticks(
+                SourceTimestamp {
+                    dts: source_dts,
+                    time_base_num: num,
+                    time_base_den: den,
+                },
+                origin,
+                output_origin,
+                video.timescale,
+            )
+            .expect("exact source DTS normalization");
+            assert_eq!(
+                *dts, indexed_dts,
+                "known source DTS and copy fragment diverged"
+            );
+            known_decode_times += 1;
+        }
+        assert_eq!(
+            clock.source_pts(i128::from(*dts) + i128::from(*cto)),
+            Ok(source_pts),
+            "source packet PTS and copy composition offset diverged"
+        );
+    }
+    assert!(
+        known_decode_times > 0,
+        "later known DTS values independently check the resolved head"
+    );
+}
+
 #[tokio::test]
 async fn changing_content_light_keeps_indexed_copy_and_scans_nonkey_samples() {
     let input = index_pipe_bytes("closed-gop");
@@ -1047,7 +1240,7 @@ async fn a_shared_pass_that_runs_out_of_budget_fails_every_identity() {
     }
 }
 
-fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
+pub(super) fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
     MediaFile {
         downloaded_subtitles: Vec::new(),
         id: 77,

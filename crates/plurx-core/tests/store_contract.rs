@@ -112,6 +112,8 @@ mod background_jobs;
 mod claim_selection;
 #[path = "store_contract/delegation.rs"]
 mod delegation;
+#[path = "store_contract/dv_refit_jobs.rs"]
+mod dv_refit_jobs;
 #[path = "store_contract/dv_title_jobs.rs"]
 mod dv_title_jobs;
 #[path = "store_contract/formal_publication.rs"]
@@ -711,6 +713,17 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "publish_dv_title_job",
     "publish_dv_title_from_analysis",
     "probe_can_preempt_title",
+    // F+ curve fits: demand, the one-write fenced publication, the current
+    // and digest-addressed curve tables, the generation rebind, retention
+    // and the Developer card's counts, on every backend in
+    // store_contract/dv_refit_jobs.rs.
+    "dv_refit_demands",
+    "publish_dv_refit_job",
+    "dv_refit_curves",
+    "dv_refit_curves_by_digest",
+    "rebind_dv_refit",
+    "prune_dv_refit",
+    "dv_refit_progress",
     // Contract v2 targeted-scan sidecar: admission with its sidecar, reads by
     // request and by creating key, and the later report/waiting writes. All
     // six run on every backend in store_contract/scan_request_v2.rs.
@@ -21533,9 +21546,12 @@ fn contract_inventory_matches_every_store_method() {
     // of a superset of `owned_media_sessions`'s predicate that decides only
     // whether the lease loop takes that inventory; covered on both backends
     // by `media_session_a_committed_successor_can_renew_and_outlives_its_preparation`.
+    // +7: F+ curve-fit demand, publication, current and by-digest curves,
+    // rebind, prune and progress remain named in BACKGROUND_JOB_METHODS
+    // and covered by store_contract/dv_refit_jobs.rs on both backends.
     // +2: claim_job_attempt and claim_verdict, the claim local verdict
     // (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md), in BACKGROUND_JOB_METHODS.
-    assert_eq!(declared.len(), 599, "review the Store method count");
+    assert_eq!(declared.len(), 606, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

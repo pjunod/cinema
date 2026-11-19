@@ -2042,6 +2042,15 @@ async fn a_follower_whose_raft_core_dies_exits_non_zero_and_rejoins_after_restar
         log.contains("the database Raft core stopped with a fatal error"),
         "the exit names the dead core:\n{log}"
     );
+    // The drained store closed its SQL writer, which removes the lock file;
+    // a lock left behind would make auto-heal rebuild the state machine on
+    // the restart below, and the rejoin would still pass.
+    let lock = snapshots.with_file_name("lock");
+    assert!(
+        !lock.exists(),
+        "a dead core's drain releases the state machine lock {}",
+        lock.display()
+    );
     let others = (0..3)
         .filter(|index| *index != follower)
         .collect::<Vec<_>>();

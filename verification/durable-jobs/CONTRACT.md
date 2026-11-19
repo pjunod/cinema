@@ -9,7 +9,7 @@ locally; CI and promotion qualification separate ·
 Companion to [README.md](README.md), which gives the reproducible commands,
 and the [pilot proposal](../../docs/cluster/FORMAL-VERIFICATION-PILOT-PROPOSAL.md),
 which owns acceptance. The transition correspondence below is a **reviewed
-source mapping**, not an automatic refinement proof. Source hashes in
+source mapping**, not an automatic refinement proof. Item hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
@@ -36,6 +36,61 @@ operation-progress, the producer citation, and these review records change.
 Model, configuration, property, fairness and historical receipt bytes remain
 unchanged. Anchor uniqueness detects ambiguity, not semantic correspondence.
 
+## Current-main item pin reconciliation — 2026-11-18
+
+PR1676 head `804633cb4` is integrated with main `965900224` without changing
+incoming Rust, SQL, model, configuration or toolchain bytes. Main moved
+claim execution into `claim_attempt` and `local_claim_verdict`, and split
+`CLAIM_SQL` into predicate macros. The former state-predicate anchor now
+selects `macro_rules! claim_state`; keeping only that item would lose the
+rest of the formerly pinned claim statement. Eleven additional dependency
+rows pin the statement/verdict constants, moved helpers and extracted
+predicate macros. The existing mutation checks exercise every moved item.
+
+The selected library candidate listing retains `admissible_only: false`.
+The daemon records the incoming Skipped/Settled/Proposed classification;
+claim acknowledgement and deadline resolution retain their existing wait
+and authority boundaries. The finite models do not establish local-replica
+application liveness or qualify the new title/artifact admission paths.
+Only the nine drifted item pins across the three packages are refreshed.
+Source correspondence is separate from affected formal smokes and full
+Main promotion qualification; historical receipts retain their identities.
+
+## Item pins replace whole-file pins — 2026-11-15
+
+Paul ruled on 2026-11-15 that a mapping pins the anchored item, not the whole
+source file. Each row now records the item its anchor selects (`scope`,
+`item`, `item_sha256`); [the README](README.md#source-pins-cover-the-anchored-item)
+defines the items and the hash. The migration ran at main `40cc6460d`, where
+every whole-file pin matched, so each pin records source already reviewed.
+
+**Coverage changed, and this is what it is now.** A whole-file pin caught any
+edit to a mapped file. An item pin catches an edit to the item, so the 126
+original rows were reviewed for claims that live outside their item:
+
+| What | Rows |
+|---|---|
+| Every original row pins a named item. The one match-arm anchor (`Request::Bind => {`) pins `fn perform` without the bodies of the other arms. The `artwork_retry_pass` and `genre_backfill_pass` citations pin their whole function, because the publisher is taken after the anchored `match`. | 126 |
+| Same-file functions and constants an authority row reads: the claim/renewal windows and codecs of the queue protocol, `ATOMIC_PUBLICATION_TTL_MS`, `fence_rejected`, `publication_row_id`, `lease_i64` and the seam hooks of fenced insertion, the lease SQL helpers of both backends, `with_conn`, the worker's request helpers, `acquire_job`, the producer's fenced publication path, and the fixtures the `formal_publication` conformance tests stand on. | 57 new `same-file dependency of …` rows |
+
+**Accepted loss, by row class.** These rows keep their item pin and get no
+dependency rows; an edit to something they call is no longer drift:
+
+- `review §3 citation` rows on callers that pass `PublicationStore::unfenced`
+  (`book.rs`, `genres.rs`, `local.rs`, `metadata/mod.rs`, `scan/mod.rs`,
+  `run_scan`, `run_targeted`): the claim is which publisher the caller
+  passes, and that is in the pinned function.
+- Rows recorded as isolation or exclusion boundaries outside the model (DV
+  title jobs, caption migration and continuity, managed-resource views,
+  source-custody recovery, `main.rs` startup, the schema migration lists):
+  they are tripwires on one item.
+- The `trait BackgroundJobStore` and `impl … BackgroundJobStore for T` rows
+  pin the whole trait and impl; the SQL constants they dispatch are pinned by
+  their own citation rows where a claim cites them.
+- Anything in another file, and anything more than one call away.
+
+No source, anchor, model, configuration or property changes. This is a change
+to the drift check, not review or execution evidence.
 
 ## Pipeline v2 probe and schedule (T5) — scoped correspondence review on 2026-11-08
 

@@ -512,6 +512,8 @@ of never storing it.
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
 | GET | `/api/v1/developer/source-recovery` | admin | Node-local reader support, bounded launch attempts and first-poisoning purposes, plus `roots_configured` and, when false, `roots_unconfigured_reason` (launches then run unverified; nothing is blocked). Diagnostic only; no field authorizes settlement. `poisoned: null` or `error` means unavailable, never a healthy zero. |
 | GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Analysis, Maintenance, Cluster and Developer settings; never gates controls |
+| GET | `/api/v1/developer/dv-refit/spool` | admin | Lists this node's F+ statistics spool (`entries`: `key`, `complete`, `bytes`, `modified_ms`; total `bytes`). Node-local; never replicated |
+| DELETE | `/api/v1/developer/dv-refit/spool` | admin | Deletes this node's F+ statistics spool and returns `removed`; stored curve tables are unaffected, and a later fit of a title decodes it again |
 | POST | `/api/v1/developer/macos-video-processing/reprobe` | admin | Returns 202 with the current report and requests a bounded worker-local compatibility observation; saved preference and running plans stay unchanged |
 | POST | `/api/v1/client-log` | bearer | Files one client-side playback error into the server log |
 | GET | `/api/v1/scan/status` | bearer | Per-library scan status |
