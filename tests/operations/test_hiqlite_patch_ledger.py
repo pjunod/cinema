@@ -10,11 +10,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LEDGERS = (
-    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 32),
+    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 34),
     (ROOT / "vendor/hiqlite-wal/PLURX-PATCH.md", 7),
 )
 
-NUMBER_WORDS = {7: "seven", 32: "thirty-two"}
+NUMBER_WORDS = {7: "seven", 34: "thirty-four"}
 
 # A path a row bullet names, relative to the vendored crate root, written in
 # backticks: `src/writer.rs`, `Cargo.toml`. A repository path such as
@@ -124,7 +124,7 @@ class HiqlitePatchLedgerCase(unittest.TestCase):
             for row in table_rows(path.read_text(encoding="utf-8"))
             if row[2] == "generic bug"
         }
-        self.assertEqual(len(generic), 14)
+        self.assertEqual(len(generic), 15)
         self.assertEqual(
             {key: url for key, url in generic.items() if url != "pending M6"},
             {
@@ -135,13 +135,13 @@ class HiqlitePatchLedgerCase(unittest.TestCase):
         self.assertEqual(
             {key for key, url in generic.items() if url == "pending M6"},
             {
-                ("hiqlite", number) for number in (1, 8, 9, 10, 11, 17, 19, 28, 32)
+                ("hiqlite", number) for number in (1, 8, 9, 10, 11, 17, 19, 28, 32, 34)
             } | {("hiqlite-wal", 1), ("hiqlite-wal", 3), ("hiqlite-wal", 7)},
         )
         plan = (ROOT / "docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("M6 two accepted mechanisms, twelve generic rows pending", plan)
+        self.assertIn("M6 two accepted mechanisms, thirteen generic rows pending", plan)
         self.assertIn("fourteen generic rows", plan)
         self.assertIn("https://github.com/sebadob/hiqlite/pull/374", plan)
 
