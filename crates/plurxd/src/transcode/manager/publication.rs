@@ -1830,6 +1830,7 @@ impl TranscodeManager {
             changed.as_mut().enable();
             if cancellation.is_cancelled()
                 || session.control.is_retired()
+                || session.failed.load(Relaxed)
                 || session.control.current_producer_attempt() != attempt
                 || !runtime.source.unchanged()
             {
@@ -1871,9 +1872,23 @@ impl TranscodeManager {
                     .map(|pair| pair[0]);
             }
             let Some((index, entry)) = target else {
+                if session
+                    .published_producer_ended_before(
+                        attempt,
+                        Instant::now() + Duration::from_secs(1),
+                    )
+                    .await
+                    .is_some()
+                {
+                    return Ok(had_commit);
+                }
                 tokio::select! {
                     () = cancellation.cancelled() => return Ok(had_commit),
                     () = changed => continue,
+                    // Actor expiry or a closed writer can leave no future
+                    // inventory change. Recheck their lifecycle without
+                    // pinning a renderer permit to an abandoned session.
+                    () = tokio::time::sleep(Duration::from_secs(1)) => continue,
                 }
             };
             last_attempted = index;
