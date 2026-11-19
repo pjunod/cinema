@@ -29,6 +29,7 @@ import urllib.request
 import zipfile
 import zlib
 
+from validation.apple_simulator_runtime import runtime_identifier
 from validation.main_preflight_adoption import (
     UNADOPTABLE, api_context, bind_event, commit_available, git, input_digest,
     matches_input, reason, terminal_status,
@@ -41,7 +42,7 @@ JOB = 'Apple compile and native TV navigation'
 WORKFLOW = '.github/workflows/main-fast-lane.yml'
 RUNS_ON = ['self-hosted', 'macOS', 'ARM64', 'lab', 'apple', 'xcode-27.2']
 XCODE = 'Xcode 27.2\nBuild version 27B52'
-RUNTIME = 'com.apple.CoreSimulator.SimRuntime.tvOS-26-5'
+RUNTIME = runtime_identifier('tvOS', XCODE.split()[1])
 # Reviewed schema-1 producer: unconditional pinned-tool checks; native make
 # commands conditional only on affected scope; failure-preserving artifacts.
 CASE_LEGACY_JOB_SHA256 = '2543b6deb3f55e0743422125cff95f0fb3d7ecee18c4d9e07cd322b7d4e831d8'
@@ -91,17 +92,20 @@ BUILD_SPECS = {
     # still bind fingerprints and case compatibility. Resource, script, or flag
     # changes require a newly reviewed boundary, not counter normalization.
     'clients/apple/project.yml': 'e7d701cd716173e28559d4f4104f0c38046ba48ecbb992878c5fe3747f94bce7',
+    'validation/apple_simulator_runtime.py': '76b4169a6c3dab2dbf32c28ee5f765f0c0b09a24ca9d83abce5cfa2e7ec95a32',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
     # PR #1552: the tray build accepts --arch arm64 only (Intel Macs dropped).
     'clients/server-tray/macos/build': 'c39dcb201d45bbace9cd3bb59dd4ea47620c031b6f4468472978bf3be4fd48ea',
 }
 FAMILY_SPECS = {
-    'tv_navigation': ['Makefile', 'clients/apple/project.yml', 'scripts/apple-tv-navigation-test'],
+    'tv_navigation': ['Makefile', 'clients/apple/project.yml', 'scripts/apple-tv-navigation-test',
+        'validation/apple_simulator_runtime.py'],
     'desktop_macos': ['Makefile', 'clients/server-tray/macos/Package.swift', 'clients/server-tray/macos/build'],
 }
 INPUTS = {
     'tv_navigation': COMMON + ['clients/apple/**', 'scripts/apple-tv-navigation-test',
+        'validation/apple_simulator_runtime.py',
         *APPLE_EXTERNAL_INPUTS],
     'desktop_macos': COMMON + ['clients/server-tray/macos/**', 'LICENSE', 'VERSION', 'Cargo.toml',
         'brand/export/icon*'],
@@ -462,8 +466,8 @@ TRANSITION_INVALIDATES = {
     'TVMeridianNavigationTests/testPanelOwnsNativeFocusAndBackPreservesLibraryRoute',
 }
 # Reviewed schema-2 runner; changes require another explicit producer review.
-# Reviewed required-journey addition: held timeline preview and release.
-CASE_RUNNER_SHA256 = '6462c5d3d4c6bb782181144f73233074732a0fc3abea805b56a291021e687604'
+# The current producer selects the standard simulator for the active SDK.
+CASE_RUNNER_SHA256 = '0b469d30a3de5d644db493f14da9aad4e22ce67ce2eeb5226daa6f02a7fb7316'
 
 
 def case_input_compatibility(commit, current):

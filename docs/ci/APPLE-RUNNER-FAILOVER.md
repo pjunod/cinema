@@ -16,8 +16,10 @@ This document owns Apple runner preference, outage detection and installation.
 The toolchain pin is Xcode 27.2 (`27B52`). The standby's Xcode updated itself
 from 27.1 to 27.2 on 2026-10-30, which removed 27.1, so no runner matched the old
 pin and every Apple job failed its toolchain check. It was observed on 2026-11-01
-with the iOS 27.2 and tvOS 27.2 SDKs and the iOS 26.5 and tvOS 26.5 simulator
-runtimes (the navigation journeys use tvOS 26.5). The primary was brought to the same pin on 2026-11-01 and its idle daemon
+with the iOS 27.2 and tvOS 27.2 SDKs. Apple test jobs resolve the standard
+simulators for those SDKs from the selected Xcode installation. Provision both
+current runtimes on each Apple runner. The primary was brought to the same
+Xcode pin on 2026-11-01 and its idle daemon
 restarted with capacity two. Its v13.1 configuration uses `runner.labels` in
 the runner account's `~/forgejo-runner/config.yml` and keeps its existing
 registration file. The standby v13.2 labels live in its `server.connections`
