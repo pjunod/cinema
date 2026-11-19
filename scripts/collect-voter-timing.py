@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Bounded read-only C4 timing collection; no fleet changes or fault injection."""
 import argparse
+from contextlib import contextmanager
 import datetime as dt
 import json
 import math
 from pathlib import Path
 import re
+import signal
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -89,15 +92,58 @@ def parse_metrics(body, node):
         reasons.append("term_unavailable")
     return {"node": node["name"], "expected_source": node["expected_source"], "build": build, "process_epoch": epoch, "values": values, "series": series, "valid": not reasons, "limitations": reasons}
 
-def fetch(node, opener):
+class DeadlineExceeded(TimeoutError):
+    """The absolute request/run budget expired, including body reads."""
+
+def require_deadline_support():
+    if not hasattr(signal, "setitimer") or not hasattr(signal, "SIGALRM") or threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("collection requires Unix ITIMER_REAL in the main thread")
+    if signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0):
+        raise RuntimeError("collection requires exclusive ITIMER_REAL ownership")
+
+@contextmanager
+def absolute_deadline(deadline):
+    require_deadline_support()
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise DeadlineExceeded("absolute collection deadline")
+    # Do not steal an embedding application's alarm or hide an independent
+    # timeout. The standalone collector owns its real-time timer explicitly.
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    if previous_timer != (0.0, 0.0):
+        raise RuntimeError("collection requires exclusive ITIMER_REAL ownership")
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    def expired(signum, frame):
+        raise DeadlineExceeded("absolute collection deadline")
+    signal.signal(signal.SIGALRM, expired)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, remaining)
+        yield
+        if time.monotonic() >= deadline:
+            raise DeadlineExceeded("absolute collection deadline")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+def fetch(node, opener, run_deadline):
     url = node["url"].rstrip("/") + "/metrics"
-    with opener.open(url, timeout=0.75) as response:
-        if response.status != 200 or response.geturl() != url:
-            raise ValueError("direct metrics response required")
-        data = response.read(MAX_BODY + 1)
-        if len(data) > MAX_BODY:
-            raise ValueError("metrics body bound exceeded")
-    return parse_metrics(data.decode("utf-8"), node)
+    deadline = min(run_deadline, time.monotonic() + 0.75)
+    # A socket timeout alone resets between operations and cannot bound a
+    # slow-drip body. The process alarm covers URL open/DNS/connect/TLS,
+    # response body and parsing together. No uncancellable worker is spawned.
+    try:
+        with absolute_deadline(deadline):
+            with opener.open(url, timeout=max(0.001, deadline-time.monotonic())) as response:
+                if response.status != 200 or response.geturl() != url:
+                    raise ValueError("direct metrics response required")
+                data = response.read(MAX_BODY + 1)
+                if len(data) > MAX_BODY:
+                    raise ValueError("metrics body bound exceeded")
+            return parse_metrics(data.decode("utf-8"), node)
+    except Exception:
+        if time.monotonic() >= deadline:
+            raise DeadlineExceeded("absolute collection deadline") from None
+        raise
 
 def write_record(output, record, limit):
     payload = (json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n").encode()
@@ -121,30 +167,42 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.duration_seconds <= 86400 or not 1024 * 1024 <= args.max_bytes <= MAX_BYTES:
         parser.error("duration 1..86400 and capacity 1..256 MiB required")
+    try:
+        require_deadline_support()
+    except RuntimeError as error:
+        parser.error(str(error))
     nodes = validate_nodes(json.loads(args.config.read_text()))
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
-    started = time.monotonic()
-    prior = {}
     # Exclusive create prevents overwriting an earlier observation receipt.
     with args.output.open("xb") as output:
-        write_record(output, {"kind": "start", "duration_seconds": args.duration_seconds, "max_bytes": args.max_bytes, "interval_seconds": 1, "semantics": "RPC attempts/receiver handlers and monitor wake lateness; not delivery or scheduler causation"}, args.max_bytes)
-        tick = 0
-        while time.monotonic() - started < args.duration_seconds:
-            for node in nodes:
-                begun = time.monotonic()
-                try:
-                    record = fetch(node, opener)
-                    mark_cohort(record, prior)
-                except Exception as error:
-                    # Exception class only: no response bodies, media, tokens or URLs.
-                    record = {"node": node["name"], "valid": False, "error": type(error).__name__}
-                record.update(kind="sample", utc=dt.datetime.now(dt.timezone.utc).isoformat(), elapsed_seconds=time.monotonic()-started, scrape_seconds=time.monotonic()-begun, tick=tick, poll_lateness_seconds=max(0, begun-started-tick))
-                if not write_record(output, record, args.max_bytes - 512):
-                    write_record(output, {"kind": "end", "reason": "capacity", "elapsed_seconds": time.monotonic()-started, "coverage_complete": False}, args.max_bytes)
-                    return 2
-            tick += 1
-            time.sleep(max(0, started + tick - time.monotonic()))
-        write_record(output, {"kind": "end", "reason": "duration", "elapsed_seconds": time.monotonic()-started, "duration_complete": True, "coverage_requires_sample_review": True}, args.max_bytes)
+        return collect(nodes, output, args.duration_seconds, args.max_bytes)
+
+def collect(nodes, output, duration_seconds, max_bytes):
+    require_deadline_support()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
+    started = time.monotonic()
+    run_deadline = started + duration_seconds
+    prior = {}
+    write_record(output, {"kind": "start", "duration_seconds": duration_seconds, "max_bytes": max_bytes, "interval_seconds": 1, "targets": [node["name"] for node in nodes], "semantics": "RPC attempts/receiver handlers and monitor wake lateness; not delivery or scheduler causation"}, max_bytes)
+    tick = 0
+    while time.monotonic() < run_deadline:
+        for node in nodes:
+            # The run boundary is checked per target, not merely per round.
+            if time.monotonic() >= run_deadline:
+                break
+            begun = time.monotonic()
+            try:
+                record = fetch(node, opener, run_deadline)
+                mark_cohort(record, prior)
+            except Exception as error:
+                # Exception class only: no response bodies, media, tokens or URLs.
+                record = {"node": node["name"], "valid": False, "error": type(error).__name__}
+            record.update(kind="sample", utc=dt.datetime.now(dt.timezone.utc).isoformat(), elapsed_seconds=time.monotonic()-started, scrape_seconds=time.monotonic()-begun, tick=tick, poll_lateness_seconds=max(0, begun-started-tick))
+            if not write_record(output, record, max_bytes - 512):
+                write_record(output, {"kind": "end", "reason": "capacity", "elapsed_seconds": time.monotonic()-started, "coverage_complete": False}, max_bytes)
+                return 2
+        tick += 1
+        time.sleep(min(max(0, started + tick - time.monotonic()), max(0, run_deadline-time.monotonic())))
+    write_record(output, {"kind": "end", "reason": "duration", "elapsed_seconds": time.monotonic()-started, "duration_complete": True, "coverage_requires_sample_review": True}, max_bytes)
     return 0
 
 if __name__ == "__main__":

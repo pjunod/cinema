@@ -33,3 +33,15 @@ Prepare private configuration from an observed roster, using the shape in `scrip
 The requested scrape cadence is one second; every sample records actual elapsed time, scrape duration and poll lateness. Slow/unavailable nodes may overrun that cadence and must be treated as missing coverage. Duration is at most24hours; output is at most256MiB (64MiB default), with an explicit incomplete end record if capacity ends the window. Only allowlisted timing/build/role/term data is persisted; redirects, embedded credentials and authenticated mutations are refused.
 
 The metrics are bounded summaries (counts, sums, maxima and age), not individual gap histories or quantiles. RPC-attempt gaps precede transport queueing; receive-completion duration includes Raft/store processing. Correlate them with monitor wake lateness and independent pressure observations; none alone attributes CPU starvation or proves physical heartbeat delivery. Fleet measurement acceptance remains open until the qualified source is deployed and representative windows are actually collected.
+
+## 7. Absolute collector deadlines
+
+The collector requires Unix `ITIMER_REAL` signal delivery in its main thread and exclusive ownership of that process timer; unsupported platforms/embedding contexts are refused explicitly. Every request's absolute alarm is the earlier of750ms or the remaining run deadline and covers open/DNS/connect/TLS/body parsing together. Socket-operation timeouts remain an additional bound, not the finite-request argument. The run deadline is rechecked before each target and bounds the final sleep. There are no uncancellable worker threads or subprocesses in the collector.
+
+Regression tests use an owned localhost TCP server that continuously drips bytes faster than the socket timeout, plus a one-second run with16slowtargets, a controlled resolver stall, and actual HTTP unknown-source/missing-telemetry controls. These tests do not contact the fleet. Output capacity and redirect bounds are unchanged.
+
+### Source-instance ownership verified against implementation
+
+`vendor/hiqlite/src/store/mod.rs::start_raft_db` constructs one `NetworkStreaming` with an `Arc<IdleConnections>` and moves that factory into `Raft::new`. `RaftNetworkFactory::new_client` calls `lease_or_dial(&self)`; both its reused-client and newly dialed-client branches downgrade that same factory Arc. The timing OnceLock therefore belongs to the stable factory/pool, not each read-confirm RPC, replication client or socket. A recreated Raft constructs a new pool/source epoch. Incoming AppState has a separately allocated epoch at its sole constructor in `start.rs`.
+
+The registry key includes `(local_node, remote_node, AppendTimingStage)`. Outbound `RpcAttempt`, inbound `ReceiveEntry` and inbound `ReceiveCompletion` thus have independent source ordering: a newer outbound-pool epoch cannot suppress the receiver AppState's earlier epoch. Each stage resets gaps on a newer source, term or endpoint; older source/term records are ignored. `since_last_seconds` remains visible during a continuing gap. No history is compared across a process epoch or exported source/term/endpoint cohort.
