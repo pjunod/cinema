@@ -82,7 +82,11 @@ CPU title scanning, F+ fitting and their fenced publication use portable tool
 validation. Linux keeps GPU qualification and its index piggyback scanner.
 The macOS scanner uses the ordinary source-work budget and leaves pending GPU
 recipes and exact playback waiters for their capable worker. Held sources use
-`/dev/fd/3` on macOS. No alternate fit algorithm or decoder signal is added.
+`/dev/fd/3` on macOS. Standalone and index-companion scanners share the
+existing checked descriptor-manifest launch path and a daemon-owned cwd.
+Native broker confinement remains an explicit unqualified recovery fact;
+this work does not claim a clean recovery witness. No alternate fit algorithm
+or decoder signal is added.
 
 `tools/dv_processing/build-macos-bundle.py` builds from explicit static FFmpeg,
 libdovi and libplacebo-387 prefixes. Supply `--provenance` with sources and

@@ -1772,7 +1772,12 @@ impl DvTitleRide {
     /// Start the scanner from the pass's held source capability. A budgeted
     /// scan reads exclusively through the shared source service bridge. The
     /// caller retains and joins this task through scanner and read cleanup.
-    fn spawn(&self, source: &std::fs::File, wall_time: Duration) -> Option<DvTitleScan> {
+    fn spawn(
+        &self,
+        source: &std::fs::File,
+        runtime_cache: &Path,
+        wall_time: Duration,
+    ) -> Option<DvTitleScan> {
         let held = match source.try_clone() {
             Ok(held) => held,
             Err(error) => {
@@ -1781,6 +1786,7 @@ impl DvTitleRide {
             }
         };
         let scanner = self.tools.scanner.clone();
+        let runtime_cache = runtime_cache.to_owned();
         let index = self.stream_index.to_string();
         let source_budget = crate::background_jobs::source_budget();
         let pause = plurx_core::process::bounded::source_pause_controller();
@@ -1790,7 +1796,6 @@ impl DvTitleRide {
         let worker_cancel = cancel.clone();
         let task = tokio::spawn(async move {
             let work = async move {
-                use std::os::fd::AsRawFd;
                 let input = match crate::background_jobs::source_budget() {
                     Some(budget) => Some(
                         crate::source_input::SourceInput::open_background_held(
@@ -1802,24 +1807,13 @@ impl DvTitleRide {
                     ),
                     None => None,
                 };
-                let mut command = tokio::process::Command::new(&scanner);
-                command.args([
-                    input
-                        .as_ref()
-                        .map_or("/proc/self/fd/3", |input| input.url()),
+                let output = crate::source_probe::launch_scanner(
+                    &scanner,
                     &index,
-                ]);
-                if input.is_none() {
-                    crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
-                        &mut command,
-                        &[(held.as_raw_fd(), 3)],
-                        None,
-                    );
-                }
-                let output = plurx_core::process::bounded::output_command_clean_env(
-                    &mut command,
+                    &held,
+                    input.as_ref(),
+                    &runtime_cache,
                     wall_time,
-                    64 * 1024,
                     plurx_core::process::ChildWork::background(
                         "complete-title Dolby Vision scan (content-analysis pass)",
                     ),
@@ -3160,7 +3154,9 @@ async fn build_attested_pass(
         };
         #[cfg(target_os = "linux")]
         let dv_title = match DvTitleRide::for_file(file, probed.expectation.stream_index).await {
-            Some(ride) => ride.spawn(source, budget).map(|task| (ride, task)),
+            Some(ride) => ride
+                .spawn(source, runtime_cache, budget)
+                .map(|task| (ride, task)),
             None => None,
         };
         let input = input_bridge

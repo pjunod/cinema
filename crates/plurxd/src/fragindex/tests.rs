@@ -2297,7 +2297,7 @@ exec /bin/sleep 60
         let source = std::fs::File::open(source_path).expect("source descriptor");
         let (_store, _job, active) = crate::background_jobs::tests::active().await;
         let task = crate::background_jobs::budgeted(active.fence().source_budget(), async {
-            ride.spawn(&source, Duration::from_secs(60))
+            ride.spawn(&source, directory.path(), Duration::from_secs(60))
                 .expect("owned companion")
         })
         .await;

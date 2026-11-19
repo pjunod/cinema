@@ -61,6 +61,9 @@ pub(crate) fn refit_spool_clear(root: &std::path::Path) -> std::io::Result<usize
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) use dv_title::launch_scanner;
+
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use dv_title::{publish_title_for_control, publish_title_with_tools_for_control};
 

@@ -722,7 +722,12 @@ async fn execute(
                         .ok()
                         == source_version
             },
-            super::dv_title::scan(&file, &demand.probe_json, &tools),
+            super::dv_title::scan(
+                &file,
+                &demand.probe_json,
+                &tools,
+                state.transcode.runtime_cache_dir(),
+            ),
         ),
         #[cfg(target_os = "linux")]
         qualify_owned(
