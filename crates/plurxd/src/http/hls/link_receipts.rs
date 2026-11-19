@@ -1947,6 +1947,7 @@ mod tests {
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             vod_only: false,
             passive_vod: false,

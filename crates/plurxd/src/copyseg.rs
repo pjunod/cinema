@@ -863,6 +863,8 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
                             ));
                         }
                     }
+                    // Legacy live copy has no exact source row clock. Keep
+                    // the historical v1 conversion even when F+ is enabled.
                     if video.converts_dolby_vision() {
                         match crate::dvpipe::Converter::for_init(&init) {
                             Ok(ready) => converter = Some(ready),

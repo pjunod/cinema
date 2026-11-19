@@ -713,6 +713,7 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 | `Device audio output` | – | ✓ | ✓ | ✓ | text | grid | all | always shown Speaker or HDMI output only when reported by the platform; never inferred from the audio track. |
 | `Dynamic range` | – | ✓ | ✓ | ✓ | text | notes | all | Mini shows source-to-delivered format ("DV P7 → HDR10"); the web ledger separates server delivery, browser HDR capability and unverified display output. |
 | `Enhancement` | – | ✓ | ✓ | ✓ | list | notes | all | Server-computed Dolby Vision enhancement: FEL / RPU / DYN pills for what is active, one neutral line per enhancement explaining it or why it is unused. Absent for non-DV sources. |
+| `F+ curves` | – | ✓ | ✓ | ✓ | text | notes | web · apple | Mapping curves carried by the served conversion: fitted gain is held-out squared code error against identity. Identity explains why these bytes carry no fitted mapping; a display may ignore mapping. |
 | `Stream audio track` | – | ✓ | ✓ | ✓ | list | notes | all | Selected stream audio track metadata; not a claim about speaker or HDMI output. |
 | `Frames` | – | ✓ | ✓ | ✓ | fraction | grid | web · android | dropped / total. AVPlayer does not expose it. |
 | `Frame rate` | – | – | – | ✓ | text | grid | web |  |

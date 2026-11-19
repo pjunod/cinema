@@ -28,6 +28,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
 | [FEL-PICTURE-QUALITY-INVESTIGATION.md](FEL-PICTURE-QUALITY-INVESTIGATION.md) | FEL quality findings. | open |
 | [FEL-RPU-REFIT-BUILD.md](FEL-RPU-REFIT-BUILD.md) | F+ curves: build plan. | open |
+| [M6 Q12 qualification](FEL-RPU-REFIT-M6-Q12-2026-11-16.json) · [Q23 history](FEL-RPU-REFIT-M6-2026-11-16.json) | Native evidence. | done |
 | [PLAYBACK-CACHE-BUDGET.md](PLAYBACK-CACHE-BUDGET.md) | Shared playback cache: reservations, eviction and protected readers. | built |
 | [WEB-PREPARED-SEEK-INCIDENT.md](WEB-PREPARED-SEEK-INCIDENT.md) | October 20 ROG seek failure: subtitle cancellation, Auto repair and qualification. | open |
 | [BROWSER-HDR-RESTART-LIFECYCLE-RCA.md](BROWSER-HDR-RESTART-LIFECYCLE-RCA.md) | Close/Resume HDR downgrade, lost DV cancellation, Safari intent, lifecycle. | open |
@@ -39,10 +40,10 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [COLD-PLAYBACK-STARTUP-FABLE-REVIEW.md](COLD-PLAYBACK-STARTUP-FABLE-REVIEW.md) | Historical Fable review of the consolidated startup proposal. | done |
 | [COLD-PLAYBACK-STARTUP-INCIDENT-20261102.json](COLD-PLAYBACK-STARTUP-INCIDENT-20261102.json) | Credential-free incident timings and observations. | done |
 | [COLD-PLAYBACK-STARTUP-RCA-AND-PROPOSAL.md](COLD-PLAYBACK-STARTUP-RCA-AND-PROPOSAL.md) | Cold startup root cause, proposal and 2 s ready / 5 s supported cold acceptance. | open |
-| [NATIVE-CALLBACK-WEBKIT-REPORT-DRAFT.md](NATIVE-CALLBACK-WEBKIT-REPORT-DRAFT.md) | Sanitized WebKit report and minimal native-HLS reproduction; prepared, not filed. | open |
-| [NATIVE-CALLBACK-DELIVERY-RCA.md](NATIVE-CALLBACK-DELIVERY-RCA.md) | Native callback root cause and revised per-element multiplexer repair contract. | open |
+| [WebKit report draft](NATIVE-CALLBACK-WEBKIT-REPORT-DRAFT.md) | Unfiled report and native-HLS reproducer. | open |
+| [Native callback RCA](NATIVE-CALLBACK-DELIVERY-RCA.md) | Root cause and per-element repair contract. | open |
 | [NATIVE-CALLBACK-FABLE-REVIEW.md](NATIVE-CALLBACK-FABLE-REVIEW.md) | Fable P2/P3 dispositions; implementation drafted, final review pending. | open |
-| [PLAYBACK-STARTUP-IMPLEMENTATION-STATUS.md](PLAYBACK-STARTUP-IMPLEMENTATION-STATUS.md) | Eight-lane owner, implementation, PR and final-candidate qualification ledger. | open |
+| [Startup implementation](PLAYBACK-STARTUP-IMPLEMENTATION-STATUS.md) | Owners, implementation and qualification. | open |
 | [PLAYBACK-STARTUP-ASTRA-IMPLEMENTATION-REVIEW.md](PLAYBACK-STARTUP-ASTRA-IMPLEMENTATION-REVIEW.md) | Astra's final implementation review of frozen candidate `2bc1e54e1`; seven findings and the request-changes verdict. | done |
 | [PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md](PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md) | Source dispositions and outstanding review and qualification evidence for Astra's seven startup findings. | open |
 | [PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md](PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md) | Bounded October 1 repair: periodic quorum-loss diagnosis, startup/retirement/recovery correctness, VOD delivery truth, agent/Opus review dispositions, one fast-lane PR. | open |
