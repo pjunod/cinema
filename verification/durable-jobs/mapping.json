@@ -1011,7 +1011,7 @@
         "table": "recovery dependency outside model: startup before source producers",
         "scope": "item",
         "item": "#![cfg_attr(plurx_dv_segment_probe, allow(dead_code))] #![cfg_attr(test, allow(clippy::disallowed_methods))] file > fn run",
-        "item_sha256": "a98f59ec55de135d5973c655d9c496f0fc9b48f117da1fc454dd21347164983d"
+        "item_sha256": "f207f4d70f445f48af6b414cae8b3c1f9092b8b378acebb82203699d85b2036c"
       },
       {
         "table": "same-file dependency of publication_successor: coordination.rs fn unix_ms",

@@ -342,8 +342,11 @@ impl StateMachineSqlite {
             PathSnapshots(path_snapshots),
             PathLockFile(path_lock_file),
         ) = Self::build_folders(data_dir, true).await;
-
         Self::check_set_lock_file(&path_lock_file, &path_db, &mut db_exists).await;
+        // Plurx patch 34: this process now owns the directory and nothing
+        // builds yet, so a build temporary here was abandoned by a crash or
+        // a full disk.
+        super::snapshot_builder::remove_abandoned_build_temps(&path_snapshots).await;
 
         // Always start the writer first! -> creates mandatory tables
         let conn = Self::connect(
@@ -2000,10 +2003,17 @@ mod snapshot_metrics_contracts {
                 .await
                 .is_err()
         );
+        // Plurx patch 34: the failed build removed its image and journal.
+        assert_eq!(
+            build_temporaries(&state.path_snapshots).await,
+            Vec::<String>::new(),
+            "a failed build leaves nothing behind"
+        );
         let current = state.get_current_snapshot().await.unwrap().unwrap();
         assert_eq!(current.meta.snapshot_id, before_id);
         drop(current);
         let database = format!("{}/{}", state.path_db, state.filename_db);
+        let expected_id = before_id.clone();
         task::spawn_blocking(move || {
             let conn = rusqlite::Connection::open(database).unwrap();
             assert_eq!(
@@ -2017,13 +2027,55 @@ mod snapshot_metrics_contracts {
                 })
                 .unwrap();
             let meta: StateMachineData = deserialize(&bytes).unwrap();
-            assert_eq!(meta.last_snapshot_id.as_deref(), Some(before_id.as_str()));
+            assert_eq!(meta.last_snapshot_id.as_deref(), Some(expected_id.as_str()));
         })
         .await
         .unwrap();
+        // A build a crash abandoned mid-copy: its image and journal stay on
+        // disk until the next start sweeps them.
+        let path_snapshots = state.path_snapshots.clone();
         shutdown_state(&state).await;
         drop(state);
+        let abandoned = format!("{path_snapshots}/{}.temp", Uuid::now_v7());
+        fs::copy(format!("{path_snapshots}/{before_id}"), &abandoned)
+            .await
+            .unwrap();
+        fs::write(format!("{abandoned}-journal"), b"journal")
+            .await
+            .unwrap();
+        assert_eq!(build_temporaries(&path_snapshots).await.len(), 2);
+        let mut restarted = new_test_state(root.to_str().unwrap(), "copy.db")
+            .await
+            .unwrap();
+        assert_eq!(
+            build_temporaries(&restarted.path_snapshots).await,
+            Vec::<String>::new(),
+            "startup removes what an abandoned build wrote"
+        );
+        let current = restarted.get_current_snapshot().await.unwrap().unwrap();
+        assert_eq!(current.meta.snapshot_id, before_id);
+        drop(current);
+        shutdown_state(&restarted).await;
+        drop(restarted);
         fs::remove_dir_all(root).await.unwrap();
+    }
+
+    /// Snapshot build temporaries (`<uuid>.temp`, `<uuid>.temp-journal`) in a
+    /// snapshots directory.
+    async fn build_temporaries(path_snapshots: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut list = fs::read_dir(path_snapshots).await.unwrap();
+        while let Some(entry) = list.next_entry().await.unwrap() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.contains(".temp")
+                && !name.starts_with("current")
+                && !name.starts_with("pending")
+            {
+                found.push(name);
+            }
+        }
+        found.sort();
+        found
     }
 
     #[tokio::test]
