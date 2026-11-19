@@ -1035,6 +1035,39 @@ async fn a_complete_spool_re_solves_without_decoding() {
     );
 }
 
+#[tokio::test]
+async fn refit_helper_reads_the_held_source_descriptor() {
+    let fx = fixture().await;
+    let file = title(&fx, "held-source", 7, true).await;
+    let script = fx.root.join("read-held-source.sh");
+    let data = fx.root.join("stats.jsonl");
+    std::fs::write(&data, MICHAEL5400).expect("recorded helper output");
+    executable(
+        &script,
+        &format!(
+            "#!/bin/sh\n[ \"$(/bin/cat \"$2\")\" = held-source ] || exit 66\n/bin/cat '{}'\n",
+            data.display()
+        ),
+    );
+    let tools = ToolSet::refit_fixture(script).expect("tools");
+    let spool = Spool::new(
+        Spool::root(&fx.root.join("runtime")),
+        file.id,
+        file.size,
+        file.mtime,
+        0,
+        &tools.refit_helper_identity(),
+    );
+    let run = super::super::dv_refit::run(&file, 0, &tools, &spool).await;
+    let Ok(HelperRun::Stats(output)) = run else {
+        panic!("{run:?}");
+    };
+    assert_eq!(
+        output,
+        dv_refit_title::parse(MICHAEL5400.as_bytes()).expect("recorded stats")
+    );
+}
+
 /// A node crash bypasses `settle_child`; the next attempt recovers whole
 /// initial or resumed lines before `open_run` truncates the old file.
 #[tokio::test]

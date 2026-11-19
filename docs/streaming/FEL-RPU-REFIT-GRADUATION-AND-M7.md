@@ -63,17 +63,38 @@ the narrower M3 instrument, or interpret a software render as optical proof.
 
 The M5 holds a hash-verified copy of the retained Michael source window and
 new 48-frame metadata/BL/EL acquisitions. Their byte hashes, offsets and
-metadata associations agree; independent decoded-source producer binding is
-still missing. The retired M3 raw/NP1 archive was not found externally. These
+metadata associations agree. The new production helper matched every base
+and composed code over 6,036,480 fit and 6,036,480 held-out lattice samples
+across all 48 frames, with zero position errors or mismatches. The retired M3 raw/NP1 archive was not found externally. These
 new acquisitions are inputs, not replacement M6 or M7 quality passes.
 
 The current host inventory sees a physical Apple TV 4K (3rd generation).
 That is availability, not playback evidence. The inspected learner service
 image is based on `254df39f7afb`, before the F+ merge; it cannot qualify this
-feature. An already-running suitable endpoint or an explicitly isolated test
-fixture is needed. No service, client app or processing bundle is installed,
+feature. Paul authorized a fresh isolated M5 test instance on 2026-11-19, with its
+own store and listeners and no production cluster join. No service, client app or processing bundle is installed,
 restarted or upgraded as part of this work. Test fixtures must be identified
 as fixtures and cannot alone satisfy real plurx session acceptance.
+
+## Native M5 test-instance prerequisites
+
+CPU title scanning, F+ fitting and their fenced publication use portable tool
+validation. Linux keeps GPU qualification and its index piggyback scanner.
+The macOS scanner uses the ordinary source-work budget and leaves pending GPU
+recipes and exact playback waiters for their capable worker. Held sources use
+`/dev/fd/3` on macOS. No alternate fit algorithm or decoder signal is added.
+
+`tools/dv_processing/build-macos-bundle.py` builds from explicit static FFmpeg,
+libdovi and libplacebo-387 prefixes. Supply `--provenance` with sources and
+notices and repeat `--dependency-prefix` for transitive library metadata. It
+relocates and signs the Mach-O dependency closure, then writes the same
+source/ABI/hash-bound manifest with bundle-relative loading and no loader
+environment override. Linux packaging retains its existing manifest behavior.
+Point the isolated daemon's `PLURX_DV_PROCESSING_DIR` at that bundle; verify it
+with `plurxd dv-helper-identity`. Keep HTTP, Raft and cluster API on distinct
+loopback ports, a fresh data directory and no join token. Physical devices
+may use an explicitly owned test proxy; no production service or client app
+is replaced or upgraded.
 
 ## Milestone 7 sequence
 
@@ -130,8 +151,8 @@ as fixtures and cannot alone satisfy real plurx session acceptance.
 | Item | State | Next evidence |
 |---|---|---|
 | Original native M6 | Pass retained | No repeat of the 48-point M3 experiment |
-| M5 migration | Source recovered; 48-frame metadata/BL/EL acquired and internally rehashed | Independent producer binding; NumPy/toolchain available |
-| Physical matrix | Open | Suitable existing endpoint and client/device receipts |
+| M5 migration | Source recovered; exact helper/master binding passes all 48 frames | Served F+ baseline from isolated instance |
+| Physical matrix | Open; isolated M5 instance preparation authorized | Client/device receipts from actual sessions |
 | M7 baseline | Open | Current-method publication and paired four-model F+ scores |
 | Numeric margin | Awaiting baseline calibration | Protocol frozen before new NP1 candidate scores |
 | NP1 trials/integration | Not yet run/built | Bound baseline/protocol; focused new-arm evidence |

@@ -24,8 +24,8 @@ use super::{
 };
 use crate::{
     background_jobs::{ActiveBackgroundJob, RefitPublication},
+    dv_tools::ToolSet,
     state::AppState,
-    vodencode::dv_runtime::ToolSet,
 };
 use plurx_core::{
     error::StoreError,
@@ -254,6 +254,7 @@ impl RefitTask {
             }
             // The local index pass and the title scan read this title next:
             // do not read it under them.
+            #[cfg(target_os = "linux")]
             if state.jobs.title_scan_awaits_index_pass(file.id) {
                 continue;
             }
@@ -356,7 +357,7 @@ impl RefitTask {
         Ok(None)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(super) fn owned_lane_fixture(
         work: Pin<Box<dyn Future<Output = bool> + Send>>,
         cancel: CancellationToken,

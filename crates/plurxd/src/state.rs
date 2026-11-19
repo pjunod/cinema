@@ -4983,7 +4983,7 @@ impl JobManager {
     ) -> Result<
         Option<(
             plurx_core::store::dv_refit_jobs::RefitCurveTable,
-            std::sync::Arc<crate::vodencode::dv_runtime::ToolSet>,
+            std::sync::Arc<crate::dv_tools::ToolSet>,
         )>,
         String,
     > {
@@ -5029,7 +5029,7 @@ impl JobManager {
             .await
             .map_err(|e| format!("reading F+ curves for disk conversion: {e}"))?
             .ok_or("waiting for a current F+ fit or recorded content refusal")?;
-        let tools = crate::vodencode::dv_runtime::ToolSet::capture()
+        let tools = crate::dv_tools::ToolSet::capture()
             .await
             .map_err(|e| format!("waiting for F+ helper: {e}"))?
             .ok_or("waiting for F+ helper installation")?;

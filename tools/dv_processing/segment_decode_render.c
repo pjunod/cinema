@@ -11,14 +11,18 @@
 #include <libavformat/avformat.h>
 #include <libavutil/dovi_meta.h>
 #include <libavutil/hwcontext.h>
+#ifdef __linux__
 #include <libavutil/hwcontext_vaapi.h>
+#endif
 #include <libavutil/opt.h>
 #include <libavutil/sha.h>
 #include <limits.h>
 #include <sys/stat.h>
 #include <pthread.h>
 #include <unistd.h>
+#ifdef __linux__
 #include <va/va.h>
+#endif
 
 #define PAIR_WINDOW 16
 static bool base_only;
@@ -725,6 +729,7 @@ static void receive(struct layer *layer) {
 }
 // The device must decode HEVC Main10 itself; otherwise every window would be
 // a single-threaded software decode behind a GPU device that does nothing.
+#ifdef __linux__
 static bool decodes_hevc_main10(AVBufferRef *device) {
   VADisplay display =
       ((AVVAAPIDeviceContext *)((AVHWDeviceContext *)device->data)->hwctx)->display;
@@ -746,6 +751,7 @@ static bool decodes_hevc_main10(AVBufferRef *device) {
   free(entrypoint);
   return main10 && decode;
 }
+#endif
 static enum AVPixelFormat hardware_format(AVCodecContext *context,
                                           const enum AVPixelFormat *offered) {
   (void)context;
@@ -1018,6 +1024,7 @@ int main(int argc, char **argv) {
   writer_start();
   const char *decode_device = getenv("PLURX_DV_DECODE_DEVICE");
   if (decode_device && *decode_device) {
+#ifdef __linux__
     if (av_hwdevice_ctx_create(&hw_device, AV_HWDEVICE_TYPE_VAAPI,
                                decode_device, NULL, 0) < 0) {
       hw_device = NULL;
@@ -1026,6 +1033,11 @@ int main(int argc, char **argv) {
       av_buffer_unref(&hw_device);
       software_reason = "no-hevc-main10-decode";
     }
+#else
+    // VA-API device admission belongs to Linux. CPU refit and software
+    // decode remain available without pretending to use a foreign device.
+    software_reason = "vaapi-unavailable-on-platform";
+#endif
   }
   layers[0] = open_layer(stream, 0);
   if (!base_only)

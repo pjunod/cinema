@@ -1,13 +1,13 @@
 //! Admitted leaf workers never mutate catalogue identity or scan completion.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod dv_refit;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod dv_title;
 #[cfg(target_os = "linux")]
 pub(crate) mod fel_qualification;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod refit_work;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod title_work;
 
 /// The F+ statistics spool under a node's runtime cache (decision A):
@@ -20,14 +20,14 @@ pub(crate) fn refit_spool_root(runtime_cache: &std::path::Path) -> std::path::Pa
 
 /// (complete, bytes) per spool file.
 pub(crate) fn refit_spool_list(root: &std::path::Path) -> Vec<(bool, u64)> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         dv_refit::list(root)
             .into_iter()
             .map(|e| (e.complete, e.bytes))
             .collect()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = root;
         Vec::new()
@@ -35,14 +35,14 @@ pub(crate) fn refit_spool_list(root: &std::path::Path) -> Vec<(bool, u64)> {
 }
 
 pub(crate) fn refit_spool_entries(root: &std::path::Path) -> Vec<serde_json::Value> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         dv_refit::list(root)
             .into_iter()
             .filter_map(|e| serde_json::to_value(e).ok())
             .collect()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = root;
         Vec::new()
@@ -50,11 +50,11 @@ pub(crate) fn refit_spool_entries(root: &std::path::Path) -> Vec<serde_json::Val
 }
 
 pub(crate) fn refit_spool_clear(root: &std::path::Path) -> std::io::Result<usize> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         dv_refit::clear(root)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = root;
         Ok(0)
@@ -134,33 +134,33 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     let boot = uuid::Uuid::new_v4().to_string();
     let mut cursor = None;
     let mut idle = crate::background_jobs::IdlePoll::new();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut title: Option<title_work::TitleTask> = None;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut title_after = 0;
     // The F+ fit shares the title lane: it starts only when no title scan
     // does, and either one yields to ordinary probes.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut refit: Option<refit_work::RefitTask> = None;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut refit_after = 0;
     #[cfg(target_os = "linux")]
     let mut live_title_after = 0;
     loop {
         if shutdown.is_cancelled() {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             if let Some(work) = title.take() {
                 work.stop().await;
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             if let Some(work) = refit.take() {
                 work.stop().await;
             }
             return;
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut yielded = false;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(work) = title.as_mut() {
             match work.should_yield(&state).await {
                 Ok(true) => {
@@ -195,7 +195,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 None => continue,
             }
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(work) = refit.as_mut() {
             match work.should_yield(&state).await {
                 Ok(true) => {
@@ -209,9 +209,9 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 Err(error) => tracing::warn!(%error,"F+ priority observation unavailable"),
             }
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let ordinary_idle = title.is_none() && refit.is_none();
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let ordinary_idle = true;
         let published = if ordinary_idle {
             let published = match pass(&state, &boot, &mut cursor, &shutdown).await {
@@ -225,7 +225,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
         } else {
             false
         };
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if title.is_none()
             && refit.is_none()
             && cursor.is_none()
@@ -237,7 +237,9 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 &state,
                 &boot,
                 &mut title_after,
+                #[cfg(target_os = "linux")]
                 &mut live_title_after,
+                #[cfg(target_os = "linux")]
                 false,
             )
             .await
@@ -252,7 +254,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 }
             }
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let title_poll = async {
                 match title.as_mut() {
@@ -273,7 +275,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 () = tokio::time::sleep(idle.after_completion(published)) => {},
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         tokio::select! {
             () = shutdown.cancelled() => return,
             () = tokio::time::sleep(idle.after_completion(published)) => {}

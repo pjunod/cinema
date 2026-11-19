@@ -27,8 +27,10 @@ pub(crate) mod subtitle_fixture;
 pub(crate) mod faults;
 #[path = "background_job_metrics.rs"]
 mod metrics;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use metrics::claim_skipped;
 use metrics::Event;
-pub(crate) use metrics::{accepted_claims, claim_skipped, prometheus};
+pub(crate) use metrics::{accepted_claims, prometheus};
 
 #[path = "background_jobs/analysis_reconcile.rs"]
 pub(crate) mod analysis_reconcile;
@@ -277,7 +279,7 @@ struct Inner {
 }
 
 /// What a fenced F+ publication did.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RefitPublication {
     /// The table is the file's current one and the job succeeded.
@@ -1667,7 +1669,7 @@ impl JobFence {
         Ok(published)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) async fn publish_dv_title(
         &self,
         output: plurx_core::store::dv_title_jobs::TitleOutput,
@@ -1718,7 +1720,7 @@ impl JobFence {
     /// I); rows that fail their own check are deterministic and are not
     /// sent. The claim lock is released between tries so the heartbeat can
     /// renew the lease.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) async fn publish_dv_refit(
         &self,
         title: plurx_core::store::dv_refit_jobs::RefitTitle,
