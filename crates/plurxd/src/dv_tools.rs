@@ -110,7 +110,7 @@ pub(crate) fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 22] = [
+    let inputs: &[(&str, &[u8])] = &[
         (
             "author_p81.c",
             include_bytes!("../../../tools/dv_processing/author_p81.c"),
