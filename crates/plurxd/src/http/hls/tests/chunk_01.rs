@@ -1692,6 +1692,81 @@
     }
 
     #[tokio::test]
+    async fn rolling_native_split_authorizes_both_renditions_and_holds_unpublished_video() {
+        let dir = crate::test_tempdir().expect("split session directory");
+        let session = uuid::Uuid::new_v4().to_string();
+        let feed = plurx_core::testfixtures::pipe("closed-gop");
+        let mut reader = plurx_core::fmp4::FragmentReader::new();
+        reader.push(&feed);
+        let Some(plurx_core::fmp4::Unit::Init(init)) = reader.next_unit().expect("fixture init") else {
+            panic!("HEVC fixture has no initialization");
+        };
+        let Some(plurx_core::fmp4::Unit::Fragment(fragment)) =
+            reader.next_unit().expect("fixture fragment")
+        else {
+            panic!("HEVC fixture has no first fragment");
+        };
+        for (name, bytes) in [
+            ("init.mp4", init.bytes.as_slice()),
+            ("seg00000.m4s", fragment.bytes.as_slice()),
+            ("split-audio.mp4", b"audio init"),
+            ("split-video.mp4", b"video init"),
+            ("split-audio-seg00000.m4s", b"audio segment"),
+            ("split-video-seg00000.m4s", b"video segment"),
+            ("split-video-seg00012.m4s", b"unpublished ordinary video"),
+        ] {
+            tokio::fs::write(dir.path().join(name), bytes).await.expect("seed split object");
+        }
+        let (fixture, ids) = HlsDeliveryFixture::publish_native_split_actor_managed(dir.path(), &session).await;
+        activate_fixture_route(&fixture, &session, "split-playback").await;
+
+        let master = master_playlist_response(
+            State(fixture.state.clone()), AxPath(session.clone()),
+            Query(PlaylistQuery { native: None, acquisition_start_ms: None, subtitle: None, diagnostic: None }),
+            HeaderMap::new(),
+        ).await.expect("authenticate split master");
+        let master = axum::body::to_bytes(master.into_body(), 16_384).await.expect("split master body");
+        let master = std::str::from_utf8(&master).expect("split master UTF-8");
+        assert!(master.contains("CODECS=\"hev1."));
+
+        for (role, id, init, bytes, renewal, fetched) in [
+            ("audio", &ids.audio, &b"audio init"[..], &b"audio segment"[..], "audio-media-segment", None),
+            ("video", &ids.video, &b"video init"[..], &b"video segment"[..], "split-video-media-segment", Some(0)),
+        ] {
+            assert!(master.contains(&format!("{role}/{id}/index.m3u8")));
+            let playlist = child_playlist(
+                State(fixture.state.clone()), AxPath((session.clone(), role.into(), id.clone())),
+                HeaderMap::new(),
+            ).await.expect("authenticate split child playlist");
+            let playlist = axum::body::to_bytes(playlist.into_body(), 16_384).await.expect("split playlist body");
+            let playlist = std::str::from_utf8(&playlist).expect("child playlist UTF-8");
+            assert!(playlist.contains(&format!("init/{id}.mp4")));
+            assert!(playlist.contains("segment/0.m4s"));
+            assert!(!playlist.contains("segment/12.m4s"));
+
+            for (kind, object, expected) in [("init", format!("{id}.mp4"), init), ("segment", "0.m4s".into(), bytes)] {
+                let response = child_segment(
+                    State(fixture.state.clone()),
+                    AxPath((session.clone(), role.into(), id.clone(), kind.into(), object)),
+                    HeaderMap::new(),
+                ).await.expect("authenticate split media object");
+                assert_eq!(
+                    axum::body::to_bytes(response.into_body(), 1024).await.expect("split media body").as_ref(),
+                    expected,
+                );
+            }
+            fixture.wait_for_delivery_projection(renewal, fetched).await;
+        }
+        let future = crate::vodserve::ChildMediaRequest {
+            role: "video".into(), rendition: ids.video, kind: "segment".into(), object: "12.m4s".into(),
+        };
+        let pending = fixture.state.transcode.segment_for_publication_role_before(
+            &session, "seg00012.m4s", Some(&future), Instant::now() + Duration::from_millis(20),
+        ).await.expect("resolve unpublished split object");
+        assert!(matches!(pending, crate::transcode::SegmentPublication::Pending(_)));
+    }
+
+    #[tokio::test]
     async fn rolling_status_authz_does_not_change_vod_status_publication() {
         let dir = crate::test_tempdir().expect("VOD status directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;

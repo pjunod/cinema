@@ -68,9 +68,8 @@ function hevcTiersSync(can, mse){
   });
 }
 
-// HLS/fMP4 is authorized by the selected hls.js MediaSource path, not a
-// progressive file decoder. Native HLS has no codec-specific API here and
-// therefore remains unclaimed until an actual playlist probe is available.
+// HLS/fMP4 claims follow the selected transport. The qualified Safari
+// split package uses a single in-band HEVC sample entry and separate AAC.
 async function hlsHevcSampleEntries(claimedTiers, claimedPqTiers, injected){
   const probe=injected||{};
   let video=probe.videoElement, mc=probe.mediaCapabilities, mse=probe.mediaSource;
@@ -78,9 +77,17 @@ async function hlsHevcSampleEntries(claimedTiers, claimedPqTiers, injected){
   if(mc===undefined){ try{ mc=navigator.mediaCapabilities; }catch(e){ mc=null; } }
   if(mse===undefined){ try{ mse=window.MediaSource||window.ManagedMediaSource; }catch(e){ mse=null; } }
   const native=probe.nativeHls===undefined?(!video||useNativeHls(video)):probe.nativeHls;
-  const hls=probe.hlsJsSupported===undefined?hlsJsSupported():probe.hlsJsSupported;
-  if(native||!hls||!mc||typeof mc.decodingInfo!=="function"||!mse||typeof mse.isTypeSupported!=="function") return [];
   const summary=hevcTierSummary(claimedTiers,claimedPqTiers);
+  if(native){
+    try{
+      const ua=probe.userAgent===undefined?navigator.userAgent:probe.userAgent;
+      const qualified=/Macintosh/.test(ua)&&/Version\/27\.2(?:[. ]|$)/.test(ua)&&/Safari\//.test(ua);
+      const playable=video&&video.canPlayType('video/mp4; codecs="hev1.2.4.L153.B0"');
+      return qualified&&summary.pq10&&playable?["hvc1","hev1"]:[];
+    }catch(e){ return []; }
+  }
+  const hls=probe.hlsJsSupported===undefined?hlsJsSupported():probe.hlsJsSupported;
+  if(!hls||!mc||typeof mc.decodingInfo!=="function"||!mse||typeof mse.isTypeSupported!=="function") return [];
   if(!summary.maxheight) return [];
   const required=HEVC_TIERS.filter(t=>t.height<=summary.maxheight&&(t.depth===8?summary.depth8:summary.depth10));
   // Include the lowest Main10 rung even when the shared ceiling is below it.
