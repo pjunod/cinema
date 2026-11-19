@@ -1506,6 +1506,7 @@ impl TranscodeManager {
             cache_location: None,
             control,
             publication: Mutex::new(RollingPublicationClock::default()),
+            native_split: None,
             publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
             file_id,
@@ -1773,6 +1774,7 @@ impl TranscodeManager {
             None,
             None,
             false,
+            false,
             None,
         )
         .await
@@ -1796,6 +1798,7 @@ impl TranscodeManager {
         audio_delivery: Option<&plurx_core::playback::audio::AudioDelivery>,
         retain_output: Option<bool>,
         source_telemetry: bool,
+        allow_native_split: bool,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<StartInfo, String> {
         // One Store read for the file, its probe and its settings (D4), or
@@ -1806,12 +1809,20 @@ impl TranscodeManager {
             settings,
             item_title,
         } = self.rolling_start_inputs(file_id, None, plan).await?;
-        // The server's cache budget governs both reuse of an existing retained
-        // copy and new collection. `retain_output: Some(false)` is the
-        // viewer's per-playback opt-out (`SessionRequest::retain_output`): it
-        // stops this session collecting, never its reuse of a copy that
-        // already exists.
-        let retained_budget = Self::rolling_retained_budget_from(&settings);
+        let native_split = allow_native_split
+            && start_seconds == 0.0
+            && audio_offset_ms == 0
+            && options.convert_dolby_vision
+            && takeover.is_none()
+            && replacement_deadline.is_none();
+        // A native split needs a fresh rendition inventory. The ordinary
+        // cache budget applies to both reuse and collection on the muxed path.
+        let retained_budget = if native_split {
+            None
+        } else {
+            Self::rolling_retained_budget_from(&settings)
+        };
+        // The viewer's opt-out only stops collection for this playback.
         let collect_retained = retain_output != Some(false);
         // Same make-before-break rule as the transcode path. A takeover
         // continues an existing incarnation and supersedes nothing.
@@ -2103,11 +2114,26 @@ impl TranscodeManager {
             .bitrate
             .filter(|rate| *rate > 0)
             .map(|rate| rate as f64);
-        let scratch_envelope = rolling_scratch_envelope(copy_bitrate, 1.0);
-        let scratch_reservation = self.reserve_rolling_scratch_with(
-            RollingScratchSizing::Startup(rolling_startup_bytes(copy_bitrate, 1.0)),
-            self.ahead_limits_for_start(&settings),
-        )?;
+        let limits = self.ahead_limits_for_start(&settings);
+        let startup_bytes = rolling_startup_bytes(copy_bitrate, 1.0);
+        // Keep the original mux and both role objects alive through their
+        // ordinary grace. Reserve startup for both copies before exposing the
+        // alternate layout so it cannot spend the incumbent's startup grant.
+        let ordinary_sizing = RollingScratchSizing::Startup(startup_bytes);
+        let split_sizing = RollingScratchSizing::Startup(startup_bytes.saturating_mul(2));
+        let split_startup_budget = split_sizing
+            .grant_bytes(limits)
+            .saturating_sub(ordinary_sizing.grant_bytes(limits));
+        let split_reservation = (native_split && segmenting && split_startup_budget > 0)
+            .then(|| self.reserve_rolling_scratch_with(split_sizing, limits))
+            .and_then(Result::ok);
+        let native_split = split_reservation.is_some();
+        let scratch_reservation = match split_reservation {
+            Some(reservation) => reservation,
+            None => self.reserve_rolling_scratch_with(ordinary_sizing, limits)?,
+        };
+        let scratch_envelope = rolling_scratch_envelope(copy_bitrate, 1.0)
+            .saturating_mul(if native_split { 2 } else { 1 });
 
         let session_id = takeover
             .as_ref()
@@ -2262,6 +2288,11 @@ impl TranscodeManager {
             cache_location: None,
             control,
             publication: Mutex::new(RollingPublicationClock::default()),
+            native_split: native_split.then(|| {
+                Arc::new(crate::copyseg::NativeSplitInventory::with_startup_budget(
+                    split_startup_budget as u64,
+                ))
+            }),
             publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
             file_id,
