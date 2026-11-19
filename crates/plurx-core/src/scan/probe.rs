@@ -1236,7 +1236,9 @@ pub(crate) mod tests {
             .file_name()
             .expect("test executable name")
             .to_string_lossy();
-        std::env::temp_dir().join(format!("plurx-scan-probe-{name}-{mode}.pid"))
+        // The real probe strips TMPDIR. Both processes can derive the same
+        // scratch path from the test binary without changing that policy.
+        executable.with_file_name(format!(".plurx-scan-probe-{name}-{mode}.pid"))
     }
 
     #[test]
