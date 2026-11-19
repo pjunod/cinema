@@ -960,7 +960,9 @@ mod tests {
             .parse()
             .expect("pid");
         let verified_pause = async |revision| {
-            wait_for_fixture("physical group stop", Duration::from_secs(5), async || {
+            let bound = Duration::from_secs(5);
+            let began = std::time::Instant::now();
+            wait_for_fixture("physical group stop", bound, async || {
                 source_group_quiescent(pid, true)
                     .await
                     .expect("whole group observation")
@@ -972,7 +974,7 @@ mod tests {
             tokio::time::advance(Duration::from_millis(300)).await;
             wait_for_fixture(
                 "owned pause acknowledgement",
-                Duration::from_secs(5),
+                bound.saturating_sub(began.elapsed()),
                 async || {
                     let observation = control.observation();
                     observation.phase == SourcePausePhase::Paused

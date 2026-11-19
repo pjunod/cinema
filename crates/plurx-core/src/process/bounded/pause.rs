@@ -47,6 +47,20 @@ impl State {
         }
     }
 }
+
+#[derive(Clone, Copy)]
+struct PauseCreditSnapshot {
+    at: Instant,
+    total: Duration,
+    accruing: bool,
+}
+
+impl PauseCreditSnapshot {
+    fn active_deadline(self, started: Self, active_budget: Duration) -> Instant {
+        started.at + active_budget.saturating_add(self.total.saturating_sub(started.total))
+    }
+}
+
 /// Test-only evidence captured by the actual child active-time deadline,
 /// before its error returns to the owner that kills and reaps the child.
 #[cfg(any(test, feature = "fixtures"))]
@@ -156,12 +170,23 @@ impl SourcePauseController {
     /// Active-time credit. A slot-gated owner earns this only after both
     /// physical quiescence and its pause RPC acknowledge a live finite hold.
     pub fn paused_duration(&self) -> Duration {
+        self.credit_snapshot().total
+    }
+
+    fn credit_snapshot(&self) -> PauseCreditSnapshot {
         let state = self.state();
-        state.credited_total.saturating_add(
-            state
-                .credited_since
-                .map_or(Duration::ZERO, |since| since.elapsed()),
-        )
+        // Elapsed time and the credit it earned must describe the same instant.
+        // Scheduling between separate reads during a hold can overcharge it.
+        let at = Instant::now();
+        PauseCreditSnapshot {
+            at,
+            total: state.credited_total.saturating_add(
+                state
+                    .credited_since
+                    .map_or(Duration::ZERO, |since| at.duration_since(since)),
+            ),
+            accruing: state.credited_since.is_some(),
+        }
     }
     /// Actual deadline observations for this controller only; never authority.
     #[cfg(any(test, feature = "fixtures"))]
@@ -189,15 +214,9 @@ impl SourcePauseController {
         // outer kill/reap. One clock sample under the existing credit lock
         // subtracts all confirmed credit, including credit added while the
         // select waited. Lock wait is still pre-cleanup child lifetime.
-        let state = self.state();
-        let now = Instant::now();
-        let total_credited = state.credited_total.saturating_add(
-            state
-                .credited_since
-                .map_or(Duration::ZERO, |since| now.duration_since(since)),
-        );
-        let elapsed = now.duration_since(started);
-        let credited = total_credited.saturating_sub(paused_before);
+        let current = self.credit_snapshot();
+        let elapsed = current.at.duration_since(started);
+        let credited = current.total.saturating_sub(paused_before);
         let observation = SourceChildActiveTimeout {
             child_id,
             process_id,
@@ -209,7 +228,6 @@ impl SourcePauseController {
             credited,
             charged: elapsed.saturating_sub(credited),
         };
-        drop(state);
         self.0
             .active_timeouts
             .lock()
@@ -223,9 +241,6 @@ impl SourcePauseController {
                 .verified_since
                 .map_or(Duration::ZERO, |since| since.elapsed()),
         )
-    }
-    fn pause_credit_active(&self) -> bool {
-        self.state().credited_since.is_some()
     }
     pub fn pause_budget_exhausted(&self) -> bool {
         self.verified_duration() >= self.0.max_paused
@@ -249,22 +264,16 @@ impl SourcePauseController {
     /// after this invocation are excluded; stop requests and D-state continue
     /// consuming active time. The existing owner's finite wall limit remains.
     pub async fn wait_active_budget(&self, active_budget: Duration) {
-        let started = Instant::now();
-        let paused_before = self.paused_duration();
+        let started = self.credit_snapshot();
         let wall = self.hard_deadline(active_budget);
         let mut changes = self.subscribe();
         loop {
-            let paused = self.paused_duration().saturating_sub(paused_before);
-            let deadline = (started + active_budget.saturating_add(paused)).min(wall);
-            let now = Instant::now();
-            if now >= wall || now >= deadline {
+            let observed = self.credit_snapshot();
+            let deadline = observed.active_deadline(started, active_budget).min(wall);
+            if observed.at >= deadline {
                 return;
             }
-            let sleep = if self.pause_credit_active() {
-                wall
-            } else {
-                deadline
-            };
+            let sleep = if observed.accruing { wall } else { deadline };
             tokio::select! {
                 ()=tokio::time::sleep_until(sleep)=>{},
                 result=changes.changed()=>{if result.is_err(){return;}},
@@ -415,84 +424,81 @@ impl ChildPauseGuard {
             let controller = &self.controller;
             let mut changes = controller.subscribe();
             let mut ticks = tokio::time::interval(Duration::from_millis(100));
-            let started = Instant::now();
-            let paused_before = controller.paused_duration();
+            let started = controller.credit_snapshot();
             let wall = controller.hard_deadline(active_budget);
             let mut stop_sent = false;
             let mut stop_revision = None;
             let mut acknowledged_revision = None;
             let mut stopped_observations = 0;
+            let mut inspect_group = true;
             tokio::pin!(work);
             loop {
-                let observation = controller.observation();
-                if observation.phase != SourcePausePhase::Running {
-                    // A Running watch update may coalesce with a newer pause.
-                    // The old stopped group is not an acknowledgement of the
-                    // new revision, even when it never observed SIGCONT.
-                    if stop_revision != Some(observation.revision) {
-                        signal_group(group, libc::SIGSTOP)?;
-                        stop_sent = true;
-                        stop_revision = Some(observation.revision);
+                if inspect_group {
+                    let observation = controller.observation();
+                    if observation.phase != SourcePausePhase::Running {
+                        // A Running watch update may coalesce with a newer pause.
+                        // The old stopped group is not an acknowledgement of the
+                        // new revision, even when it never observed SIGCONT.
+                        if stop_revision != Some(observation.revision) {
+                            signal_group(group, libc::SIGSTOP)?;
+                            stop_sent = true;
+                            stop_revision = Some(observation.revision);
+                            acknowledged_revision = None;
+                            stopped_observations = 0;
+                        }
+                        if acknowledged_revision != Some(observation.revision) {
+                            if verified_group(group, true).await.unwrap_or(false) {
+                                stopped_observations += 1;
+                                if stopped_observations >= 2
+                                    && self.acknowledge(observation.revision)
+                                {
+                                    acknowledged_revision = Some(observation.revision);
+                                }
+                            } else {
+                                stopped_observations = 0;
+                            }
+                        }
+                    } else if stop_sent {
+                        // resume(revision) is the slot-reacquisition CAS and has
+                        // already happened before the controller says Running.
+                        signal_group(group, libc::SIGCONT)?;
+                        stop_sent = false;
+                        stop_revision = None;
                         acknowledged_revision = None;
                         stopped_observations = 0;
                     }
-                    if acknowledged_revision != Some(observation.revision) {
-                        if verified_group(group, true).await.unwrap_or(false) {
-                            stopped_observations += 1;
-                            if stopped_observations >= 2 && self.acknowledge(observation.revision) {
-                                acknowledged_revision = Some(observation.revision);
-                            }
-                        } else {
-                            stopped_observations = 0;
-                        }
-                    }
-                } else if stop_sent {
-                    // resume(revision) is the slot-reacquisition CAS and has
-                    // already happened before the controller says Running.
-                    signal_group(group, libc::SIGCONT)?;
-                    stop_sent = false;
-                    stop_revision = None;
-                    acknowledged_revision = None;
-                    stopped_observations = 0;
                 }
                 // Credit comes only from aggregate verified quiescence. A
                 // stop request or an outstanding daemon read cannot extend it.
-                let paused = controller.paused_duration().saturating_sub(paused_before);
-                let active_deadline = started + active_budget.saturating_add(paused);
-                let aggregate_paused = controller.pause_credit_active();
+                let observed = controller.credit_snapshot();
+                let active_deadline = observed.active_deadline(started, active_budget);
                 // The owner may have awaited a store RPC while this future
                 // was not polled. A later finite hold cannot erase that spent
                 // active time merely because credit is active now.
-                let decision = Instant::now();
-                if decision >= active_deadline {
+                if observed.at >= active_deadline {
                     #[cfg(any(test, feature = "fixtures"))]
                     controller.record_child_active_timeout(
                         self.child,
                         process_id,
                         active_budget,
-                        started,
-                        (decision, paused),
-                        paused_before,
+                        started.at,
+                        (observed.at, observed.total.saturating_sub(started.total)),
+                        started.total,
                     );
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "source child active execution timed out",
                     ));
                 }
-                tokio::select! {
+                inspect_group = tokio::select! {
                     result=&mut work=>return result,
-                    ()=tokio::time::sleep_until(active_deadline),if !aggregate_paused=>{
-                        #[cfg(any(test, feature = "fixtures"))]
-                        {
-                            let decision = Instant::now();
-                            controller.record_child_active_timeout(self.child, process_id, active_budget, started, (decision, paused), paused_before);
-                        }
-                        return Err(io::Error::new(io::ErrorKind::TimedOut,"source child active execution timed out"));
-                    },
+                    // A timer built with older credit can wake after a hold
+                    // begins. Check fresh accounting before any group I/O.
+                    ()=tokio::time::sleep_until(active_deadline),if !observed.accruing=>false,
                     ()=tokio::time::sleep_until(wall)=>return Err(io::Error::new(io::ErrorKind::TimedOut,"source child paused wall age exhausted")),
-                    result=changes.changed()=>{result.map_err(io::Error::other)?;},
-                    _=ticks.tick()=>{},
-                }
+                    result=changes.changed()=>{result.map_err(io::Error::other)?; true},
+                    _=ticks.tick()=>true,
+                };
             }
         }
     }
@@ -717,6 +723,52 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), clock)
             .await
             .expect("active clock resumes");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn active_budget_rechecks_coherent_credit_after_the_original_deadline() {
+        const BUDGET: Duration = Duration::from_secs(2);
+        let control = SourcePauseController::new_slot_gated(Duration::from_secs(8));
+        let child = control
+            .enlist(&CancellationToken::new())
+            .await
+            .expect("enlist child");
+        let started = control.credit_snapshot();
+        let budget = control.wait_active_budget(BUDGET);
+        tokio::pin!(budget);
+        assert!(futures_util::poll!(budget.as_mut()).is_pending());
+
+        tokio::time::advance(Duration::from_millis(250)).await;
+        let revision = control.request_pause();
+        assert!(child.acknowledge(revision));
+        tokio::time::advance(Duration::from_millis(250)).await;
+        assert_eq!(control.paused_duration(), Duration::ZERO);
+        let quota = control.finite_quota_wait();
+        assert!(control.confirm_pause_slot(revision));
+        let earlier = control.credit_snapshot();
+
+        // Advance across the old timer while the owner has not polled it.
+        // Comparing this later instant with earlier credit would time out.
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let current = control.credit_snapshot();
+        assert!(current.at >= earlier.active_deadline(started, BUDGET));
+        assert!(earlier.at < earlier.active_deadline(started, BUDGET));
+        assert_eq!(current.total - earlier.total, Duration::from_secs(3));
+        assert_eq!(
+            current.active_deadline(started, BUDGET) - current.at,
+            Duration::from_millis(1500),
+        );
+        assert!(futures_util::poll!(budget.as_mut()).is_pending());
+
+        assert!(control.resume(revision));
+        drop(quota);
+        tokio::time::advance(Duration::from_millis(1499)).await;
+        assert!(futures_util::poll!(budget.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let current = control.credit_snapshot();
+        assert_eq!(current.active_deadline(started, BUDGET), current.at);
+        budget.await;
     }
 
     #[tokio::test]
