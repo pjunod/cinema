@@ -117,6 +117,7 @@ class MainUnitReceiptsCase(unittest.TestCase):
             ('legacy cannot attest stored metadata', [row], '', digest, digest, False),
             ('current exact digest', [row], 'REVIEWED_INPUTS_PROTOCOL = 1', digest, digest, True),
             ('current missing digest', [row], 'REVIEWED_INPUTS_PROTOCOL = 1', digest, None, False),
+            ('new producer deleted marker', [row], 'OTHER_PROTOCOL = 1', digest, None, False),
             ('current forged digest', [row], 'REVIEWED_INPUTS_PROTOCOL = 1', digest, '1' * 64, False),
             ('ambiguous witness', [row, row], '', digest, None, False),
             ('unbound protocol reference', [row], 'print(REVIEWED_INPUTS_PROTOCOL)', digest, None, False),
@@ -124,7 +125,10 @@ class MainUnitReceiptsCase(unittest.TestCase):
             ('ambiguous protocol', [row], 'REVIEWED_INPUTS_PROTOCOL = 1\nREVIEWED_INPUTS_PROTOCOL = 1',
              digest, None, False),
         ):
-            def read(_command, address):
+            def read(command, address):
+                if command == 'rev-parse':
+                    return ('9' * 40 if name == 'new producer deleted marker'
+                            else main.LEGACY_PRODUCER_BLOB)
                 if address == X + ':' + main.PRODUCER:
                     return orig_protocol
                 rows = original_rows if address.startswith(X + ':') else [row]
@@ -142,7 +146,9 @@ class MainUnitReceiptsCase(unittest.TestCase):
                 ('removed', []),
                 ('narrowed', [dict(row, id_prefix=THREE)]),
             ):
-                def read(_command, address):
+                def read(command, address):
+                    if command == 'rev-parse':
+                        return main.LEGACY_PRODUCER_BLOB
                     if address == X + ':' + main.PRODUCER:
                         return protocol
                     rows = [row] if address.startswith(X + ':') else current_rows

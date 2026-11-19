@@ -31,6 +31,9 @@ JOB = adoption.JOB
 PATH = Path('.main-python-unit-receipts/receipt.json')
 PRODUCER = 'validation/main_unit_receipts.py'
 REVIEWED_INPUTS_PROTOCOL = 1
+# The pre-binding producer is identified by its exact committed Git blob.
+# A markerless change to the producer is not a migration authority.
+LEGACY_PRODUCER_BLOB = '7c01dc4d52db00f39b0537d26fa6280c7cc75951'
 require = receipts.require
 
 
@@ -176,7 +179,11 @@ class ReviewedInputs:
                         and type(assignments[0].value.value) is int
                         and assignments[0].value.value == REVIEWED_INPUTS_PROTOCOL,
                         'Unknown or ambiguous reviewed-input producer protocol')
-            self.origin_protocols[commit] = REVIEWED_INPUTS_PROTOCOL if names else None
+                protocol = REVIEWED_INPUTS_PROTOCOL
+            else:
+                blob = receipts.sha(adoption.git('rev-parse', f'{commit}:{PRODUCER}'))
+                protocol = 0 if blob == LEGACY_PRODUCER_BLOB else None
+            self.origin_protocols[commit] = protocol
         return self.origin_protocols[commit]
 
     def witness(self, commit, test):
@@ -202,7 +209,7 @@ class ReviewedInputs:
                 return original is None and recorded is None
             if original is None or original['id_prefix'] != row['id_prefix']:
                 return False
-            if (recorded is None) != (protocol is None):
+            if protocol != (0 if recorded is None else REVIEWED_INPUTS_PROTOCOL):
                 return False
             origin_digest = adoption.input_digest(origin, original)
             return ((recorded is None or recorded == origin_digest)
