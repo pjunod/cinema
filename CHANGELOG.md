@@ -55,6 +55,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Shared Source resource requests distinguish a legitimate concurrent heartbeat
+  from lost ownership, retaining the existing guarded-write checks and retry bound.
+- Paused process budgets sample elapsed time and verified hold credit together,
+  so scheduler preemption cannot falsely exhaust an active-time budget.
 - Cancelled cluster startup retains directory custody until the state-machine
   worker and detached snapshot builders drain, before closing the SQL writer.
 - Rust qualification reads fresh, exit-checked nextest JUnit results and authenticates

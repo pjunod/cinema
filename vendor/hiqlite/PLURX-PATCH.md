@@ -614,6 +614,11 @@ made-up URL and prevents the fork from being declared fully tracked.
   detached snapshot builder before closing WAL and writer. OpenRaft shutdown
   joins its core and tick tasks, but not its separate state-machine worker;
   writer acknowledgement alone therefore cannot establish producer drainage.
+  A separate retirement request wakes snapshot builders still waiting for
+  storage admission; admitted writes and publication continue to terminal
+  drainage. The Raft constructor is owned through inline initial-snapshot
+  work even when its requester cancels. Writer acknowledgement follows
+  successful SQLite connection close and request-receiver retirement.
   Core retains the actual root daemon file through that boundary for every
   temporary import, active reopen and join, then transfers directly into its
   post-Client guard. A startup refusal preserves its incoming tree while
