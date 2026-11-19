@@ -542,7 +542,7 @@ function httpsSettingsCard(value,error){
     ${cert?`<p>Active identity: ${esc(cert.mode)} · expires ${esc(new Date(cert.expires_at_seconds*1000).toISOString())}<br>SHA-256 <code>${esc(cert.sha256)}</code><br>Names: ${esc(cert.sans.join(", "))}</p><button class="ghost sm" onclick="downloadHttpsCertificate(this)">Download active public certificate chain</button>`:"<p>No HTTPS identity is active in this process.</p>"}
     ${link?`<p><a href="${esc(link)}" target="_blank" rel="noopener noreferrer">Open unverified HTTPS address</a> · This uses the browser’s current hostname and active port. Verify this node’s identity and trust first; the new origin needs its own sign-in.</p>`:""}
     ${value.durability_confirmed===false?'<p class="err" role="alert">The settings were published, but directory sync could not confirm crash durability. This revision is current; reload before another save and check local storage.</p>':""}
-    
+
     <div class="err" id="https-error" role="alert"></div><button onclick="saveHttpsSettings(this)">Save HTTPS settings</button> <button class="ghost" onclick="reloadHttpsSettings(this)">Reload this node</button>`);
 }
 function applyHttpsSettings(value,error){
@@ -640,7 +640,7 @@ function sourceRecoveryCard(value,error=""){
     ${latest?`<p>Latest unknown launch: ${esc(latest.purpose)} · ${Number.isFinite(Number(latest.observed_at_ms))?esc(new Date(Number(latest.observed_at_ms)).toLocaleString()):"time unavailable"}</p>`:""}
     ${poisonUnavailable?'<p class="hint">Poisoned witness status is unavailable; no zero-count or healthy-state conclusion can be drawn.</p>':`<p><b>Poisoned witnesses:</b> ${count(poisonCount)}</p>${Number(poisonCount)>0?`<ul>${witnessRows}</ul>${Number(poisonCount)>32?`<p class="hint">Showing up to the first 32 witnesses.</p>`:""}<p class="hint">Poisoned witnesses await verified owner-stop proof, namespace teardown, or reboot. Confined-reader recovery is future work; this status does not make a playback census safe.</p>`:"<p class=\"hint\">No poisoned witnesses are currently reported.</p>"}`}`:""}
     <p class="hint">Verified counts mean the final program, arguments, working directory and inherited descriptors passed the launch access check. Unknown includes undeclared and failed declarations; explicitly unverified is a subset of unknown. This read-only status never gates playback.</p>
-    
+
     </div></details>
     <button type="button" class="ghost sm" onclick="reloadSourceRecovery(this)">${unavailable?"Retry":"Refresh this node"}</button>`);
 }

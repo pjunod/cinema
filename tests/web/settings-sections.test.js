@@ -719,12 +719,12 @@ function developerPanels(){
       "const DV_REFIT_PLATFORMS=[[\"web\",\"Web\"],[\"apple\",\"Apple\"],[\"android\",\"Android\"],[\"linux\",\"Linux (plurx Player)\"]];",
       shippedSource("dolbyVisionRefitCard"),
       shippedSource("displayTargetHdr10Card"),
-     
+
       // The main-merge defects build (2026-10-04): complete-output
       // preparation and rolling retention arrived with their Developer cards.
       shippedSource("outputPreparationCard"),
-     
-     
+
+
       shippedSource("sourceRecoveryCard"),
       shippedSource("subtitleTranscriptionCard"),
       shippedSource("subtitleTranslationCard"),
@@ -745,13 +745,13 @@ function developerPanels(){
       // without being composed here, so this whole gate died on its name.
       shippedSource("clusterBackupCard"),
       shippedSource("clusterPlacementCard"), shippedSource("boundedCatalogueCard"), shippedSource("cinemaSharingCard"), shippedSource("cinemaRemoteCard"), shippedSource("cinemaRemoteInvitationsCard"), "const cinemaRemoteLocalCards=()=>'LOCALCARDS';", shippedSource("remotesPanel"), shippedSource("integrationsPanel"), shippedSource("systemPanel"),
-     
+
       shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       // 2026-10-10: the graduated cards are drawn by their own sections.
       shippedSource("preparedHandoffBrowserCard"), shippedSource("clusterSettingsSection"),
       shippedSource("analysisSettingsPanel"),
       // D6 (2026-10-04): the network priors switch sits beside display Auto.
-     
+
       shippedSource("macosVideoProcessingCard"), shippedSource("macosHevcOutputCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
