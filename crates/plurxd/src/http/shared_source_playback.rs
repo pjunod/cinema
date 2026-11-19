@@ -2476,6 +2476,23 @@ impl RealSourceStartFixture {
             expires_at_ms: self.invitation.expires_at_ms,
         })
     }
+    async fn keep_fixture_membership_stable(&mut self) {
+        // The request assertions use real, fresh membership without racing
+        // its periodic write. The production clock and authority checks run.
+        self.membership_owner.finish().await;
+        self.state
+            .membership
+            .heartbeat()
+            .await
+            .expect("publish the real fixture roster");
+        assert!(self
+            .state
+            .membership
+            .observe_source_admission_members()
+            .await
+            .expect("read the fresh fixture roster")
+            .is_some());
+    }
     pub async fn shutdown(self) {
         drop(self.shutdown_retaining_fixture_budget().await);
     }
