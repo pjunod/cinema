@@ -2092,7 +2092,7 @@ test("every observation code the aggregator can emit has a sentence", () => {
 // so it could be reverted to "Admitted and catching up" by itself.
 test("the learner role pill says what the banner says", () => {
   const ui = sandbox();
-  const row = nodeRow(ui, 
+  const row = nodeRow(ui,
     node("node-b", 2, "learner", {
       bounded_read_ready: true,
       voter_storage_ready: true,
@@ -2253,7 +2253,7 @@ test("last_seen_at is read as milliseconds, not seconds", () => {
   const ui = sandbox();
   // The API documents Unix milliseconds. Feeding fmtAgo() — which takes seconds
   // — the raw field prints a node seen a minute ago as decades stale.
-  const html = nodeRow(ui, 
+  const html = nodeRow(ui,
     node("node-a", 1, "voter", { last_seen_at: Date.now() - 120_000 }),
   );
   assert.match(html, /2m ago/);
@@ -2277,7 +2277,7 @@ test("a roster row shows hostname and advertised host without listener ports", (
 
 test("a pending removal is visible and offers an idempotent retry", () => {
   const ui = sandbox();
-  const row = nodeRow(ui, 
+  const row = nodeRow(ui,
     node("node-b", 2, "voter", { removal_pending: true }),
     "node-a",
   );
@@ -2291,7 +2291,7 @@ test("a pending removal is visible and offers an idempotent retry", () => {
 
 test("hostname leads the identity while node id stays secondary", () => {
   const ui = sandbox();
-  const row = nodeRow(ui, 
+  const row = nodeRow(ui,
     node("550e8400-e29b-41d4-a716-446655440000", 7, "voter", {
       hostname: "living-room-plurx",
       advertised_host: "10.42.1.20",
@@ -2311,7 +2311,7 @@ test("hostname leads the identity while node id stays secondary", () => {
 
 test("the current leader is labeled beside its hostname", () => {
   const ui = sandbox();
-  const leader = nodeRow(ui, 
+  const leader = nodeRow(ui,
     node("node-b", 2, "voter", { is_leader: true }),
   );
   const follower = nodeRow(ui, node("node-a", 1, "voter"));
@@ -2340,7 +2340,7 @@ test("a stale node heartbeat says so rather than claiming a network probe", () =
 
 test("loopback is shown as localhost beside the short hostname", () => {
   const ui = sandbox();
-  const row = nodeRow(ui, 
+  const row = nodeRow(ui,
     node("node-local", 1, "voter", {
       hostname: "media-1",
       advertised_host: "localhost",
