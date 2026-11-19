@@ -843,6 +843,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     // The same claim, reporting proposed / settled / skipped on the local
     // verdict: tests/claim_local_verdict.rs drives it on both backends.
     "claim_job_attempt",
+    "cancel_unshared_output_job",
     // The verdict alone, for dv_title_scan before it binds (same test file).
     "claim_verdict",
     "claim_artifact_job",
@@ -21730,7 +21731,8 @@ fn contract_inventory_matches_every_store_method() {
     // and covered by store_contract/dv_refit_jobs.rs on both backends.
     // +2: claim_job_attempt and claim_verdict, the claim local verdict
     // (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md), in BACKGROUND_JOB_METHODS.
-    assert_eq!(declared.len(), 628, "review the Store method count");
+    // +1: cancel_unshared_output_job, the fenced retained-output cleanup.
+    assert_eq!(declared.len(), 629, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

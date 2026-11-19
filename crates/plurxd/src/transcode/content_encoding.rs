@@ -178,16 +178,6 @@ impl TranscodeManager {
         })
     }
 
-    pub async fn content_encoding_enabled(&self) -> bool {
-        self.store
-            .get_setting(keys::CONTENT_AWARE_ENCODING)
-            .await
-            .ok()
-            .flatten()
-            .as_deref()
-            == Some("1")
-    }
-
     async fn content_context(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -268,18 +258,10 @@ impl TranscodeManager {
         file: &plurx_core::domain::MediaFile,
         opts: &TranscodeOptions,
         encoder: Encoder,
-        enabled: bool,
         stored_probe: Option<&str>,
     ) -> Option<TranscodeOptions> {
-        self.measured_content_options_with(
-            file,
-            opts,
-            encoder,
-            true,
-            enabled,
-            HeldProbe::Held(stored_probe),
-        )
-        .await
+        self.measured_content_options_with(file, opts, encoder, true, HeldProbe::Held(stored_probe))
+            .await
     }
 
     async fn measured_content_options(
@@ -289,16 +271,8 @@ impl TranscodeManager {
         encoder: Encoder,
         cache_only: bool,
     ) -> Option<TranscodeOptions> {
-        let enabled = self.content_encoding_enabled().await;
-        self.measured_content_options_with(
-            file,
-            opts,
-            encoder,
-            cache_only,
-            enabled,
-            HeldProbe::Read,
-        )
-        .await
+        self.measured_content_options_with(file, opts, encoder, cache_only, HeldProbe::Read)
+            .await
     }
 
     async fn measured_content_options_with(
@@ -307,7 +281,6 @@ impl TranscodeManager {
         opts: &TranscodeOptions,
         encoder: Encoder,
         cache_only: bool,
-        enabled: bool,
         probe: HeldProbe<'_>,
     ) -> Option<TranscodeOptions> {
         let policy = self.rate_control_snapshot();
@@ -316,7 +289,6 @@ impl TranscodeManager {
             || policy.requested_quality.is_some()
             || policy.effective_for(encoder) != EffectiveRateControl::Vbr
             || !policy.quality_rc.supported_by(encoder)
-            || !enabled
         {
             return None;
         }
@@ -371,7 +343,6 @@ impl TranscodeManager {
             || policy.requested_quality.is_some()
             || policy.effective_for(encoder) != EffectiveRateControl::Vbr
             || !policy.quality_rc.supported_by(encoder)
-            || !self.content_encoding_enabled().await
         {
             return None;
         }
@@ -438,7 +409,7 @@ impl TranscodeManager {
                     break Err("analysis_budget_exhausted".into());
                 },
                 _ = poll.tick() => {
-                    if self.admissions.background_must_yield() || !self.content_encoding_enabled().await {
+                    if self.admissions.background_must_yield() {
                         stop.cancel(); let _ = operation.await; return None;
                     }
                 }

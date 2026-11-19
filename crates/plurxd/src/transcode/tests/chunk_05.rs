@@ -1213,8 +1213,6 @@
         store.put_setting(keys::HLS_READRATE, "1").await.expect("paced retention");
         store.put_setting(keys::HLS_BURST_SECS, "0").await.expect("no initial burst");
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("retained allowance");
-        // Rolling retention is a Developer switch, off by default (D3).
-        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(
             Arc::clone(&store), work.path().to_path_buf(), EncoderCaps::default(), Pipeline::Cpu,
@@ -1307,8 +1305,6 @@
                 ..Default::default()
             }).await;
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
-        // Rolling retention is a Developer switch, off by default (D3).
-        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
         store.put_setting(keys::HLS_READRATE, "1").await.expect("paced producer");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store),
@@ -1359,8 +1355,6 @@
                 ..Default::default()
             }).await;
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
-        // Rolling retention is a Developer switch, off by default (D3).
-        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
         store.put_setting(keys::HLS_READRATE, "0").await.expect("unpaced");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store),
@@ -1411,8 +1405,6 @@
                 ..Default::default()
             }).await;
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
-        // Rolling retention is a Developer switch, off by default (D3).
-        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
         // Obtain the complete retained fixture before testing its revocation;
         // optional capture contention belongs to the dedicated busy-owner test.
         store.put_setting(keys::HLS_READRATE, "1").await.expect("paced retention");
@@ -1480,8 +1472,6 @@
                 ..Default::default()
             }).await;
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
-        // Rolling retention is a Developer switch, off by default (D3).
-        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
         store.put_setting(keys::HLS_READRATE, "1").await.expect("paced writer");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store), work.path().to_path_buf(),
@@ -1537,9 +1527,6 @@
                 ..Default::default()
             }).await;
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
-        if retention {
-            store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
-        }
         store.put_setting(keys::HLS_READRATE, readrate).await.expect("pacing");
         // The default 90 s burst consumes this entire 12 s fixture before
         // retention can be abandoned; pacing needs a zero burst as well.
@@ -1548,12 +1535,27 @@
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store), work.path().to_path_buf(),
             EncoderCaps::default(), Pipeline::Cpu));
         manager.record_retained_headroom(1 << 50);
-        let info = manager.start_copy(file_id, 0.0, None, CopySessionOptions {
+        let (info, session) = d3_start(&manager, file_id, retention, "d3").await;
+        (manager, session, info, file_id, media, work)
+    }
+
+    /// One copy start of the d3 fixture. Rolling retention is always on;
+    /// `retention: false` is the viewer's per-playback opt-out
+    /// (`SessionRequest::retain_output`).
+    async fn d3_start(
+        manager: &Arc<TranscodeManager>,
+        file_id: i64,
+        retention: bool,
+        playback_id: &str,
+    ) -> (StartInfo, Arc<Session>) {
+        let supersession_user = serde_json::json!(["username", "owner"]).to_string();
+        let info = manager.start_copy_with_audio_offset(file_id, 0.0, None, 0, CopySessionOptions {
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
             dual_layer_as_copied: false,
-        }, "owner", "d3").await.expect("ordinary start");
+        }, "owner", &supersession_user, None, None, None, playback_id, false, None,
+            (!retention).then_some(false), false, None).await.expect("ordinary start");
         let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("session");
-        (manager, session, info, file_id, media, work)
+        (info, session)
     }
 
     async fn d3_wait_for_links(directory: &std::path::Path) {
@@ -1568,10 +1570,45 @@
     }
 
     #[tokio::test]
-    async fn rolling_retention_off_by_default_with_budget_set() {
+    async fn a_playback_that_declines_retention_collects_nothing() {
         let (manager, session, info, _file_id, _media, _work) = d3_copy_session("1", false).await;
         assert!(session.rolling_collection.is_none(),
-            "cache.max_gb alone no longer turns rolling retention on");
+            "retain_output: Some(false) keeps this playback's output out of the retained cache");
+        manager.stop_session(&info.session_id, "test_done").await;
+    }
+
+    /// The opt-out stops this playback collecting, never its reuse of a
+    /// retained copy that already exists.
+    #[tokio::test]
+    async fn an_opted_out_start_still_reuses_an_existing_retained_copy() {
+        let (manager, session, info, file_id, _media, _work) = d3_copy_session("1", true).await;
+        let production = session.rolling_provenance.as_ref().expect("production");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while manager.vod.acquire_rolling_output(production).is_none() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.expect("the first playback published its retained copy");
+        manager.stop_session(&info.session_id, "test_done").await;
+        drop(session);
+        let (declined, reused) = d3_start(&manager, file_id, false, "d3-declined").await;
+        assert!(reused.rolling_artifact.is_some(),
+            "an opted-out start is served from the existing retained copy");
+        assert!(reused.rolling_collection.is_none(), "and collects nothing of its own");
+        manager.stop_session(&declined.session_id, "test_done").await;
+    }
+
+    #[tokio::test]
+    async fn rolling_retention_is_on_by_default_and_the_viewer_can_stop_it_mid_playback() {
+        let (manager, session, info, _file_id, _media, _work) = d3_copy_session("1", true).await;
+        let collection = session.rolling_collection.as_ref()
+            .expect("with a cache budget, rolling retention needs no switch");
+        assert!(!collection.abandoned());
+        assert!(!manager.output_retention_refused(&info.session_id));
+        manager.stop_output_retention(&info.session_id).await;
+        assert!(collection.abandoned(), "turning it off mid-playback abandons the collection");
+        assert!(manager.output_retention_refused(&info.session_id));
+        // Idempotent.
+        manager.stop_output_retention(&info.session_id).await;
         manager.stop_session(&info.session_id, "test_done").await;
     }
 
@@ -1862,8 +1899,6 @@
                 container: Some("mp4".into()), video_codec: Some("h264".into()),
                 width: Some(160), height: Some(120), ..Default::default() }).await;
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
-        // Rolling retention is a Developer switch, off by default (D3).
-        store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
         store.put_setting(keys::HLS_READRATE, "0").await.expect("unpaced");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store), work.path().to_path_buf(),

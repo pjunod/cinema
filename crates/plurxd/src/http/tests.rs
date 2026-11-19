@@ -1925,6 +1925,45 @@ async fn quality_schedule_routes_bound_bodies_and_require_peer_auth() {
     );
 }
 
+#[tokio::test]
+async fn retain_output_routes_bound_bodies_and_require_peer_auth() {
+    let app = test_app();
+    for path in [
+        format!("/api/v1/hls/{}/retain-output", uuid::Uuid::new_v4()),
+        hls::RETAIN_OUTPUT_PATH.to_owned(),
+    ] {
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(vec![b'x'; hls::RETAIN_OUTPUT_MAX_BYTES + 1]))
+            .expect("oversized retain-output");
+        assert_eq!(
+            app.clone()
+                .oneshot(request)
+                .await
+                .expect("response")
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+    let relay = serde_json::json!({
+        "session_id": uuid::Uuid::new_v4().to_string(),
+        "expected_owner_node_id": "any-node",
+    });
+    let unsigned = Request::builder()
+        .method("POST")
+        .uri(hls::RETAIN_OUTPUT_PATH)
+        .header("content-type", "application/json")
+        .body(Body::from(relay.to_string()))
+        .expect("unsigned relay");
+    assert_eq!(
+        app.oneshot(unsigned).await.expect("response").status(),
+        StatusCode::UNAUTHORIZED,
+        "the owner relay is peer-authenticated"
+    );
+}
+
 #[test]
 fn trace_targets_omit_queries_and_redact_capability_paths() {
     let ordinary: Uri = "/api/v1/search?q=secret&X-Plex-Token=credential"
@@ -6896,6 +6935,8 @@ async fn live_tv_quorum_loss_fences_channels_and_stops_readiness_before_device_w
 async fn content_and_reordered_vod_preferences_save_without_readiness_gate() {
     let (app, state) = test_app_with_state();
     let admin = setup_admin(&app).await;
+    // Content-aware encoding is always on: an old client's field is accepted,
+    // ignored and never stored, and the GET keeps reporting `true`.
     for (enabled, frames) in [(true, 2), (false, 0)] {
         let (status, result) = call(
             &app,
@@ -6907,16 +6948,15 @@ async fn content_and_reordered_vod_preferences_save_without_readiness_gate() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{result}");
-        assert_eq!(result["content_aware_encoding"], enabled);
+        assert_eq!(result["content_aware_encoding"], true);
         assert_eq!(result["vod_reorder_frames"], frames);
         assert_eq!(
             state
                 .store
-                .get_setting(plurx_core::store::keys::CONTENT_AWARE_ENCODING)
+                .get_setting("transcode.content_aware_encoding")
                 .await
-                .expect("fixture succeeds")
-                .as_deref(),
-            Some(if enabled { "1" } else { "0" })
+                .expect("fixture succeeds"),
+            None
         );
     }
     let (status, _) = call(
@@ -6929,15 +6969,6 @@ async fn content_and_reordered_vod_preferences_save_without_readiness_gate() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        state
-            .store
-            .get_setting(plurx_core::store::keys::CONTENT_AWARE_ENCODING)
-            .await
-            .expect("fixture succeeds")
-            .as_deref(),
-        Some("0")
-    );
 }
 
 #[tokio::test]
@@ -8820,10 +8851,6 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "cluster_transport_recovery",
             "playback_control_protocol_v1",
             "prepared_quality_handoff",
-            // S-10's SDR master CODECS switch, off by default. Its one
-            // row is `unknown`: the device re-qualification is a
-            // physical result this daemon cannot read.
-            "sdr_master_codecs",
             "content_analysis_repair",
             "live_hls_recovery",
             "pgs_overlay",
@@ -8840,10 +8867,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "dolby_vision_refit_android",
             "dolby_vision_refit_linux",
             "source_probe_comparison",
-            "output_preparation",
-            "rolling_retention",
-            "display_aware_auto",
-            "network_priors"
+            "output_preparation"
         ],
         "every Developer card with prerequisites needs a row here: {body}"
     );
@@ -9076,24 +9100,15 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "durable_queue",
             "durable_role",
             "dv_target_cache",
-            // Display-aware Auto on a single node owns every session.
-            "local_session_owner",
-            // Output preparation and rolling retention: the budget is the
-            // 50 GB unset default; the job list, mode, Stop and live
-            // bytes are statements of what this node reads.
+            // Output preparation reports its default budget, current jobs,
+            // mode, and Stop state.
             "output_budget",
             "output_jobs",
             "output_mode",
             "output_stop",
-            // Network priors' two rows say what the switch does.
-            "priors_cold_start",
-            "priors_history",
             // Empty FEL catalogue and statistics spool, asserted above.
             "refit_coverage",
             "refit_spool",
-            "retention_budget",
-            "retention_cleanup_pending",
-            "retention_live_bytes",
             "rolling_contract_built",
             "runtime",
             "server_preparation_is_real",
@@ -11555,11 +11570,6 @@ async fn client_telemetry_updates_the_matching_network_prior() {
         .await
         .expect("admin lookup")
         .expect("admin user");
-    state
-        .store
-        .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
-        .await
-        .expect("enable priors");
 
     let report =
         |event: &'static str, bandwidth: i64, height: i64, detail: Option<&'static str>| {
@@ -11640,11 +11650,6 @@ async fn client_telemetry_updates_the_matching_network_prior() {
 async fn authenticated_client_log_stays_bound_to_captured_credential_generation() {
     let (app, state) = test_state();
     let token = setup_admin(&app).await;
-    state
-        .store
-        .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
-        .await
-        .expect("enable priors");
     let original = state
         .store
         .get_user_by_username("paul")
@@ -16330,11 +16335,6 @@ async fn a_browser_reads_back_the_prior_it_reported_over_the_wire() {
     let admin = setup_admin(&app).await;
     let s = seed_content(&state).await;
     prepare_vod_copy_fixture(&state, s.file, 16).await;
-    state
-        .store
-        .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
-        .await
-        .expect("enable priors");
 
     let as_client = |mut request: Request<Body>, ua: &'static str| {
         request.headers_mut().insert(
@@ -16468,7 +16468,7 @@ async fn network_prior_is_opt_in_and_additive_on_decision_and_session_wires() {
     assert_eq!(status, StatusCode::OK, "{cold}");
     assert!(
         cold.get("prior_kbps").is_none(),
-        "the default-off response must be byte-for-byte additive: {cold}"
+        "a network with no stored prior gets a byte-for-byte additive response: {cold}"
     );
     let (status, cold_session) = call(
         &app,
@@ -16485,7 +16485,7 @@ async fn network_prior_is_opt_in_and_additive_on_decision_and_session_wires() {
     assert_eq!(status, StatusCode::OK, "{cold_session}");
     assert!(
         cold_session.get("prior_kbps").is_none(),
-        "the default-off session response must omit the additive key: {cold_session}"
+        "a network with no stored prior omits the additive key: {cold_session}"
     );
     if let Some(session_id) = cold_session["session_id"].as_str() {
         state.transcode.stop_session(session_id, "test").await;

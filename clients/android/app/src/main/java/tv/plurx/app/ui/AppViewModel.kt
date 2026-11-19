@@ -20,6 +20,7 @@ import retrofit2.HttpException
 import java.net.URI
 import tv.plurx.app.data.ItemAnnotations
 import tv.plurx.app.data.OffloadAnswer
+import tv.plurx.app.data.RetainOutputReq
 import tv.plurx.app.data.offloadAnswerOrThrow
 import tv.plurx.app.data.PresentationTarget
 import tv.plurx.app.data.withPeakFrom
@@ -1093,6 +1094,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun hlsSessionStatus(sessionId: String) = api().hlsSessionStatus(sessionId)
+
+    /** Throws on failure; the caller decides how small the notice is. */
+    suspend fun retainHlsOutputOff(sessionId: String) {
+        api().retainHlsOutput(sessionId, RetainOutputReq(retain_output = false))
+    }
 
     /**
      * Fire-and-forget session release, on [viewModelScope] for the same reason

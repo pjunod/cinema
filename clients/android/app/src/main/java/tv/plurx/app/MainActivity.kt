@@ -58,7 +58,6 @@ import tv.plurx.app.ui.components.LoadingBox
 import tv.plurx.app.ui.theme.PlurxTheme
 import tv.plurx.app.livetv.LiveTvPlayer
 import tv.plurx.app.livetv.LiveTvScreen
-import tv.plurx.app.livetv.LiveTvDeveloperScreen
 import tv.plurx.app.livetv.LiveTvSettingsScreen
 import tv.plurx.app.livetv.DvrApi
 import tv.plurx.app.livetv.DvrController
@@ -477,7 +476,7 @@ internal fun MainNav(
         composable("sharing-settings") { entry ->
             CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             SharedSharingSettingsScreen(onBack = { nav.popBackStackFrom(entry) },
-                onLibraries = { nav.navigate("shared-libraries") }, onDeveloper = { nav.navigate("developer") })
+                onLibraries = { nav.navigate("shared-libraries") })
             }
         }
         composable("settings") { entry ->
@@ -485,7 +484,6 @@ internal fun MainNav(
             SettingsScreen(
                 vm = vm,
                 onBack = { nav.popBackStackFrom(entry) },
-                onOpenDeveloper = { nav.navigate("developer") },
                 onOpenLiveTvSettings = { nav.navigate("live-tv-settings") },
                 onOpenSharing = { nav.navigate("sharing-settings") },
                 onOpenRemotes = { nav.navigate("remote-devices") },
@@ -569,11 +567,6 @@ internal fun MainNav(
             }
         }
         composable("remote-devices") { entry -> RemoteDeviceSettings(remote) { nav.popBackStackFrom(entry) } }
-        composable("developer") { entry ->
-            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
-            LiveTvDeveloperScreen(origin = vm.origin, onBack = { nav.popBackStackFrom(entry) })
-            }
-        }
         composable("live-tv-settings") { entry ->
             CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             LiveTvSettingsScreen(origin = vm.origin, onBack = { nav.popBackStackFrom(entry) })

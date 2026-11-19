@@ -937,6 +937,167 @@ pub struct TranscodeManager {
     /// never waits on the catalog rebuild, source fences or replicated
     /// enqueue; [`TranscodeManager::output_enqueue_loop`] owns them.
     output_enqueue: OutputEnqueueQueue,
+    /// The viewer's mid-playback "stop retaining output" choices and the
+    /// complete-output rows each session's own start created, so turning it
+    /// off can cancel exactly that session's work. Process-local, like the
+    /// sessions it describes.
+    retain_output: std::sync::Mutex<RetainOutputLedger>,
+}
+
+/// How long a mid-playback retention choice or a queued-row record is kept.
+/// Longer than any one playback; bounded so the ledger cannot grow forever.
+const RETAIN_OUTPUT_LEDGER_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+/// Hard bound on each ledger map, whatever the TTL leaves.
+const RETAIN_OUTPUT_LEDGER_MAX: usize = 4096;
+
+/// See [`TranscodeManager::stop_output_retention`].
+#[derive(Default)]
+pub(crate) struct RetainOutputLedger {
+    /// Sessions whose viewer turned output retention off.
+    refused: HashMap<String, Instant>,
+    /// The complete-output job each session's start reached, whether it
+    /// created the row or dedup-joined one, and when.
+    queued: HashMap<String, QueuedOutput>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QueuedOutput {
+    job_id: String,
+    /// This session's enqueue created the row (not a dedup join).
+    created: bool,
+    at: Instant,
+}
+
+/// Drop the oldest entries of `map` until at most `max` remain.
+fn evict_oldest<V>(map: &mut HashMap<String, V>, max: usize, at: impl Fn(&V) -> Instant) {
+    if map.len() <= max {
+        return;
+    }
+    let mut ages = map
+        .iter()
+        .map(|(key, value)| (at(value), key.clone()))
+        .collect::<Vec<_>>();
+    ages.sort_unstable();
+    for (_, key) in ages.into_iter().take(map.len() - max) {
+        map.remove(&key);
+    }
+}
+
+impl RetainOutputLedger {
+    fn prune(&mut self, now: Instant) {
+        self.refused
+            .retain(|_, at| now.duration_since(*at) < RETAIN_OUTPUT_LEDGER_TTL);
+        self.queued
+            .retain(|_, row| now.duration_since(row.at) < RETAIN_OUTPUT_LEDGER_TTL);
+    }
+
+    /// The job `session_id` may cancel: one its own start created, that no
+    /// other session on this node has joined. A row someone else shares is
+    /// theirs too and stays.
+    fn cancellable(&self, session_id: &str, row: &QueuedOutput) -> Option<String> {
+        let shared = self
+            .queued
+            .iter()
+            .any(|(other, joined)| other != session_id && joined.job_id == row.job_id);
+        (row.created && !shared).then(|| row.job_id.clone())
+    }
+
+    /// Record the refusal; returns the job this session may cancel, if any.
+    fn refuse(&mut self, session_id: &str) -> Option<String> {
+        let now = Instant::now();
+        self.prune(now);
+        self.refused.insert(session_id.to_owned(), now);
+        evict_oldest(&mut self.refused, RETAIN_OUTPUT_LEDGER_MAX, |at| *at);
+        let row = self.queued.remove(session_id)?;
+        self.cancellable(session_id, &row)
+    }
+
+    fn refused(&self, session_id: &str) -> bool {
+        self.refused.contains_key(session_id)
+    }
+
+    /// Record the row this session's start reached. Returns the job to
+    /// cancel at once when the session already refused retention.
+    fn record_queued(&mut self, session_id: &str, job_id: String, created: bool) -> Option<String> {
+        let now = Instant::now();
+        self.prune(now);
+        let row = QueuedOutput {
+            job_id,
+            created,
+            at: now,
+        };
+        if self.refused.contains_key(session_id) {
+            return self.cancellable(session_id, &row);
+        }
+        self.queued.insert(session_id.to_owned(), row);
+        evict_oldest(&mut self.queued, RETAIN_OUTPUT_LEDGER_MAX, |row| row.at);
+        None
+    }
+
+    /// A session that ended has nothing left to opt out of.
+    fn forget(&mut self, session_id: &str) {
+        self.refused.remove(session_id);
+        self.queued.remove(session_id);
+    }
+}
+
+#[cfg(test)]
+mod retain_output_ledger_tests {
+    use super::*;
+
+    #[test]
+    fn refusing_hands_back_only_an_unshared_row_this_session_created() {
+        let mut ledger = RetainOutputLedger::default();
+        assert_eq!(ledger.record_queued("a", "job-a".into(), true), None);
+        assert_eq!(ledger.record_queued("b", "job-b".into(), true), None);
+        assert!(!ledger.refused("a"));
+        assert_eq!(ledger.refuse("a").as_deref(), Some("job-a"));
+        assert!(ledger.refused("a"));
+        assert!(!ledger.refused("b"), "another session is untouched");
+        assert_eq!(
+            ledger.refuse("a"),
+            None,
+            "idempotent: the row was handed back once"
+        );
+        assert_eq!(
+            ledger
+                .record_queued("a", "job-late".into(), true)
+                .as_deref(),
+            Some("job-late"),
+            "a row created after the refusal is cancelled at once"
+        );
+        // A dedup join is never the joiner's to cancel, and a row another
+        // session joined is no longer its creator's alone.
+        assert_eq!(ledger.record_queued("c", "job-b".into(), false), None);
+        assert_eq!(ledger.refuse("b"), None, "c shares job-b");
+        assert_eq!(ledger.refuse("c"), None, "c only joined job-b");
+    }
+
+    #[test]
+    fn the_ledger_evicts_its_oldest_entries_and_forgets_ended_sessions() {
+        let mut ledger = RetainOutputLedger::default();
+        for index in 0..=RETAIN_OUTPUT_LEDGER_MAX {
+            ledger.refuse(&format!("s{index}"));
+        }
+        assert_eq!(ledger.refused.len(), RETAIN_OUTPUT_LEDGER_MAX);
+        assert!(!ledger.refused("s0"), "the oldest goes first");
+        assert!(ledger.refused(&format!("s{RETAIN_OUTPUT_LEDGER_MAX}")));
+        ledger.forget(&format!("s{RETAIN_OUTPUT_LEDGER_MAX}"));
+        assert!(!ledger.refused(&format!("s{RETAIN_OUTPUT_LEDGER_MAX}")));
+
+        for index in 0..=RETAIN_OUTPUT_LEDGER_MAX {
+            ledger.record_queued(&format!("q{index}"), format!("job-{index}"), true);
+        }
+        assert_eq!(ledger.queued.len(), RETAIN_OUTPUT_LEDGER_MAX);
+        assert!(
+            !ledger.queued.contains_key("q0"),
+            "the oldest row goes first"
+        );
+        let newest = format!("q{RETAIN_OUTPUT_LEDGER_MAX}");
+        assert!(ledger.queued.contains_key(&newest));
+        ledger.forget(&newest);
+        assert!(!ledger.queued.contains_key(&newest));
+    }
 }
 
 /// Starts that may hand off before the owned worker drains. Beyond this a
@@ -1015,15 +1176,6 @@ const QUALIFICATION_PIPELINES: [Pipeline; 18] = [
 mod terminal_admission;
 use terminal_admission::*;
 // split: end terminal-admission
-
-/// Rolling retention as this node sees it, for the Developer card.
-pub(crate) struct RollingRetentionFacts {
-    pub(crate) same_filesystem: Option<bool>,
-    pub(crate) slack: Option<i64>,
-    pub(crate) admits: Result<(), &'static str>,
-    pub(crate) rows: Vec<crate::vodserve::retained::RetainedOutputRow>,
-    pub(crate) cleanup_pending: usize,
-}
 
 // split: begin manager
 #[path = "transcode/manager/cache.rs"]

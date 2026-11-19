@@ -199,6 +199,9 @@ async fn jellyfin_native_hls_encoded_without_copy_index_preserves_ranges_clock_a
     Box::pin(native_hls_copy_flow(false, true)).await;
 }
 async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
+    if encoded {
+        crate::http::hls::tests::prepare_catalog_test_encoder().await;
+    }
     let f = playback_fixture().await;
     // Production renews the native route's 12-second lease from the
     // owner loop. Without it, a flow slower than one lease (a loaded CI
