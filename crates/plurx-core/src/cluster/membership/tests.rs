@@ -10963,3 +10963,28 @@ fn peer_proof_leases_expire_on_heartbeat_source_aba_or_image_movement() {
     changed.membership.committed = false;
     assert!(!lease.admits(&changed, now, 10_000));
 }
+
+#[test]
+fn peer_replay_capacity_is_distinct_from_an_actual_replay() {
+    let now = Instant::now();
+    let mut mutation = InternalAuthReplayWindow::default();
+    assert_eq!(mutation.admit_proof("same", now), Ok(true));
+    assert_eq!(mutation.admit_proof("same", now), Ok(false));
+    for n in 1..MAX_INTERNAL_REPLAYS_PER_PEER {
+        assert_eq!(mutation.admit_proof(&format!("nonce-{n}"), now), Ok(true));
+    }
+    assert_eq!(
+        mutation.admit_proof("new", now),
+        Err(PeerAuthAdmissionRefusal::ReplayCapacity)
+    );
+    assert_eq!(mutation.admit_proof("same", now), Ok(false));
+    let mut read = InternalReadReplayWindow::default();
+    for n in 0..MAX_INTERNAL_READ_REPLAYS_PER_PEER {
+        assert_eq!(read.admit_proof(&format!("nonce-{n}"), now), Ok(true));
+    }
+    assert_eq!(
+        read.admit_proof("new", now),
+        Err(PeerAuthAdmissionRefusal::ReplayCapacity)
+    );
+    assert_eq!(read.admit_proof("nonce-0", now), Ok(false));
+}

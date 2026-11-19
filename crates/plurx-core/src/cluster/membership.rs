@@ -1356,8 +1356,16 @@ async fn bounded_shutdown_handoff(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerAuthAdmissionRefusal {
+    RateLimited,
+    ReplayCapacity,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MembershipError {
+    #[error("peer authentication admission refused: {0:?}")]
+    PeerAuthenticationAdmission(PeerAuthAdmissionRefusal),
     #[error("cluster clock cannot authorize new membership authority: {0:?}")]
     ClockUnbounded(ClockRefusal),
     #[error("cluster membership is unavailable while this node uses SQLite recovery")]
@@ -5446,20 +5454,26 @@ struct InternalAuthReplayWindow {
 }
 
 impl InternalAuthReplayWindow {
+    #[cfg(test)]
     fn admit(&mut self, nonce: &str, now: Instant) -> bool {
+        self.admit_proof(nonce, now).unwrap_or(false)
+    }
+
+    fn admit_proof(&mut self, nonce: &str, now: Instant) -> Result<bool, PeerAuthAdmissionRefusal> {
         while self.accepted.front().is_some_and(|(_, accepted_at)| {
             now.saturating_duration_since(*accepted_at)
                 > Duration::from_millis(ACTIVITY_AUTH_WINDOW_MS as u64)
         }) {
             self.accepted.pop_front();
         }
-        if self.accepted.iter().any(|(accepted, _)| accepted == nonce)
-            || self.accepted.len() >= MAX_INTERNAL_REPLAYS_PER_PEER
-        {
-            return false;
+        if self.accepted.iter().any(|(accepted, _)| accepted == nonce) {
+            return Ok(false);
+        }
+        if self.accepted.len() >= MAX_INTERNAL_REPLAYS_PER_PEER {
+            return Err(PeerAuthAdmissionRefusal::ReplayCapacity);
         }
         self.accepted.push_back((nonce.to_owned(), now));
-        true
+        Ok(true)
     }
 }
 
@@ -5469,20 +5483,26 @@ struct InternalReadReplayWindow {
 }
 
 impl InternalReadReplayWindow {
+    #[cfg(test)]
     fn admit(&mut self, nonce: &str, now: Instant) -> bool {
+        self.admit_proof(nonce, now).unwrap_or(false)
+    }
+
+    fn admit_proof(&mut self, nonce: &str, now: Instant) -> Result<bool, PeerAuthAdmissionRefusal> {
         while self.accepted.front().is_some_and(|(_, accepted_at)| {
             now.saturating_duration_since(*accepted_at)
                 > Duration::from_millis(INTERNAL_READ_AUTH_WINDOW_MS as u64)
         }) {
             self.accepted.pop_front();
         }
-        if self.accepted.iter().any(|(accepted, _)| accepted == nonce)
-            || self.accepted.len() >= MAX_INTERNAL_READ_REPLAYS_PER_PEER
-        {
-            return false;
+        if self.accepted.iter().any(|(accepted, _)| accepted == nonce) {
+            return Ok(false);
+        }
+        if self.accepted.len() >= MAX_INTERNAL_READ_REPLAYS_PER_PEER {
+            return Err(PeerAuthAdmissionRefusal::ReplayCapacity);
         }
         self.accepted.push_back((nonce.to_owned(), now));
-        true
+        Ok(true)
     }
 }
 
@@ -9829,9 +9849,13 @@ impl MembershipManager {
         if !self
             .activity_signature_is_valid(&auth.node_id, &message, &signature)
             .await?
-            || !self.admit_activity_authority_check(&auth.node_id)?
         {
             return Ok(false);
+        }
+        if !self.admit_activity_authority_check(&auth.node_id)? {
+            return Err(MembershipError::PeerAuthenticationAdmission(
+                PeerAuthAdmissionRefusal::RateLimited,
+            ));
         }
         let authorized = self
             .cached_live_peer_authority(
@@ -9903,7 +9927,9 @@ impl MembershipManager {
         // semaphore: cached-key verification completes in one executor poll
         // and would otherwise release a permit before peers can contend.
         if !admit_internal_preverification(&inner.internal_preverify_admission)? {
-            return Ok(false);
+            return Err(MembershipError::PeerAuthenticationAdmission(
+                PeerAuthAdmissionRefusal::RateLimited,
+            ));
         }
         let Some(message) = internal_peer_auth_message(
             &auth.node_id,
@@ -9931,10 +9957,13 @@ impl MembershipManager {
         // window so a captured proof can authorize at most one request, and
         // reject rather than evict while the bounded cache is full. Forged
         // proofs never reach this cache.
-        if !self.admit_internal_replay(&auth.node_id, &auth.nonce)?
-            || !self.admit_internal_authority_check(&auth.node_id)?
-        {
+        if !self.admit_internal_replay(&auth.node_id, &auth.nonce)? {
             return Ok(false);
+        }
+        if !self.admit_internal_authority_check(&auth.node_id)? {
+            return Err(MembershipError::PeerAuthenticationAdmission(
+                PeerAuthAdmissionRefusal::RateLimited,
+            ));
         }
         let clock_request = path == "/_internal/v1/clock";
         let authorized = if clock_request {
@@ -10145,7 +10174,9 @@ impl MembershipManager {
             })?
             .admit(Instant::now())
         {
-            return Ok(false);
+            return Err(MembershipError::PeerAuthenticationAdmission(
+                PeerAuthAdmissionRefusal::RateLimited,
+            ));
         }
         let Some(message) = internal_peer_auth_message(
             &auth.node_id,
@@ -10297,7 +10328,9 @@ impl MembershipManager {
                 .is_ok());
         }
         if !self.admit_activity_key_lookup()? {
-            return Ok(false);
+            return Err(MembershipError::PeerAuthenticationAdmission(
+                PeerAuthAdmissionRefusal::RateLimited,
+            ));
         }
         let rows = inner
             .client
@@ -10425,10 +10458,11 @@ impl MembershipManager {
         let mut replays = inner.internal_auth_replays.lock().map_err(|_| {
             MembershipError::Internal("internal peer replay lock was poisoned".to_owned())
         })?;
-        Ok(replays
+        replays
             .entry(node_id.to_owned())
             .or_default()
-            .admit(nonce, now))
+            .admit_proof(nonce, now)
+            .map_err(MembershipError::PeerAuthenticationAdmission)
     }
 
     fn admit_internal_read_replay(
@@ -10441,10 +10475,11 @@ impl MembershipManager {
         let mut replays = inner.internal_read_replays.lock().map_err(|_| {
             MembershipError::Internal("internal read replay lock was poisoned".to_owned())
         })?;
-        Ok(replays
+        replays
             .entry(node_id.to_owned())
             .or_default()
-            .admit(nonce, now))
+            .admit_proof(nonce, now)
+            .map_err(MembershipError::PeerAuthenticationAdmission)
     }
 
     /// Confirm both ends of an internal proof against committed membership.

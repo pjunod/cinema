@@ -254,9 +254,11 @@ mod operations {
             path: &str,
             body: &[u8],
         ) -> Result<bool, MembershipError> {
-            self.protocol
-                .authorize_request(auth, method, path, body)
-                .await
+            super::calls::observe_authorization(
+                self.protocol
+                    .authorize_request(auth, method, path, body)
+                    .await,
+            )
         }
 
         pub(crate) fn request_still_fresh(
@@ -1895,11 +1897,118 @@ pub(crate) mod calls {
             Option<(i64, i64, plurx_core::cluster::clock::ClockDecisionTicket)>,
     }
 
+    pub(crate) const AUTH_REFUSAL_HEADER: &str = "x-plurx-peer-auth-refusal";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum PeerAuthRefusal {
+        InvalidProof,
+        RateLimited,
+        ReplayCapacity,
+        AuthorityUnavailable,
+        Unclassified,
+    }
+
+    impl PeerAuthRefusal {
+        fn wire(self) -> Option<&'static str> {
+            match self {
+                Self::InvalidProof => Some("invalid_proof"),
+                Self::RateLimited => Some("rate_limited"),
+                Self::ReplayCapacity => Some("replay_capacity"),
+                Self::AuthorityUnavailable => Some("authority_unavailable"),
+                Self::Unclassified => None,
+            }
+        }
+    }
+
+    tokio::task_local! {
+        static AUTH_REFUSAL: std::cell::Cell<Option<PeerAuthRefusal>>;
+    }
+
+    pub(super) fn observe_authorization(
+        result: Result<bool, plurx_core::cluster::membership::MembershipError>,
+    ) -> Result<bool, plurx_core::cluster::membership::MembershipError> {
+        use plurx_core::cluster::membership::{MembershipError, PeerAuthAdmissionRefusal};
+        let refusal = match &result {
+            Ok(true) => None,
+            Ok(false) => Some(PeerAuthRefusal::InvalidProof),
+            Err(MembershipError::PeerAuthenticationAdmission(
+                PeerAuthAdmissionRefusal::RateLimited,
+            )) => Some(PeerAuthRefusal::RateLimited),
+            Err(MembershipError::PeerAuthenticationAdmission(
+                PeerAuthAdmissionRefusal::ReplayCapacity,
+            )) => Some(PeerAuthRefusal::ReplayCapacity),
+            Err(_) => Some(PeerAuthRefusal::AuthorityUnavailable),
+        };
+        // Success clears an earlier attempted mechanism. Outside an HTTP
+        // scope this remains diagnostic metadata and changes nothing.
+        let _ = AUTH_REFUSAL.try_with(|slot| slot.set(refusal));
+        // These cases used to be Ok(false). Keep each route's existing
+        // status/body behavior while carrying their real diagnostic class in
+        // the response-only context. No refusal becomes an authorization.
+        match result {
+            Err(MembershipError::PeerAuthenticationAdmission(_)) => Ok(false),
+            result => result,
+        }
+    }
+
+    pub(crate) async fn auth_refusal_response(
+        request: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> axum::response::Response {
+        let (mut response, refusal) = AUTH_REFUSAL
+            .scope(std::cell::Cell::new(None), async move {
+                let response = next.run(request).await;
+                let refusal = AUTH_REFUSAL.with(std::cell::Cell::get);
+                (response, refusal)
+            })
+            .await;
+        // Never reflect an incoming/proxied or inner-handler hint. Only this
+        // request's actual observed peer refusal can publish the private header.
+        response.headers_mut().remove(AUTH_REFUSAL_HEADER);
+        if response.status() == axum::http::StatusCode::UNAUTHORIZED {
+            if let Some(value) = refusal.and_then(PeerAuthRefusal::wire) {
+                response.headers_mut().insert(
+                    AUTH_REFUSAL_HEADER,
+                    axum::http::HeaderValue::from_static(value),
+                );
+            }
+        }
+        response
+    }
+
+    fn authentication_refusal(
+        status: reqwest::StatusCode,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Option<PeerAuthRefusal> {
+        if status != reqwest::StatusCode::UNAUTHORIZED {
+            return None;
+        }
+        let mut values = headers.get_all(AUTH_REFUSAL_HEADER).iter();
+        let value = values.next();
+        let parsed = if values.next().is_none() {
+            value
+                .filter(|value| value.as_bytes().len() <= 32)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| match value {
+                    "invalid_proof" => Some(PeerAuthRefusal::InvalidProof),
+                    "rate_limited" => Some(PeerAuthRefusal::RateLimited),
+                    "replay_capacity" => Some(PeerAuthRefusal::ReplayCapacity),
+                    "authority_unavailable" => Some(PeerAuthRefusal::AuthorityUnavailable),
+                    _ => None,
+                })
+        } else {
+            None
+        };
+        Some(parsed.unwrap_or(PeerAuthRefusal::Unclassified))
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum PeerTransportError {
         /// This node could not construct/sign the request; no peer failure
         /// has been observed and no negative health receipt may be published.
         LocalUnavailable,
+        /// Advisory refusal metadata is never an authenticated response or ack.
+        AuthenticationRefused(PeerAuthRefusal),
         Unreachable,
         TimedOut,
         InvalidResponse,
@@ -1908,6 +2017,7 @@ pub(crate) mod calls {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum PeerCallOutcome {
         Responded(u16),
+        Refused(PeerAuthRefusal),
         Unreachable,
         TimedOut,
         InvalidResponse,
@@ -1917,6 +2027,7 @@ pub(crate) mod calls {
         fn failure(error: PeerTransportError) -> Option<Self> {
             match error {
                 PeerTransportError::LocalUnavailable => None,
+                PeerTransportError::AuthenticationRefused(refusal) => Some(Self::Refused(refusal)),
                 PeerTransportError::Unreachable => Some(Self::Unreachable),
                 PeerTransportError::TimedOut => Some(Self::TimedOut),
                 PeerTransportError::InvalidResponse => Some(Self::InvalidResponse),
@@ -1974,7 +2085,18 @@ pub(crate) mod calls {
                 {
                     0
                 }
-                _ => 2,
+                PeerCallOutcome::Refused(
+                    PeerAuthRefusal::RateLimited
+                    | PeerAuthRefusal::ReplayCapacity
+                    | PeerAuthRefusal::AuthorityUnavailable,
+                ) => 1,
+                PeerCallOutcome::Refused(
+                    PeerAuthRefusal::InvalidProof | PeerAuthRefusal::Unclassified,
+                )
+                | PeerCallOutcome::Responded(_)
+                | PeerCallOutcome::Unreachable
+                | PeerCallOutcome::TimedOut
+                | PeerCallOutcome::InvalidResponse => 2,
             }
         }
     }
@@ -1993,7 +2115,7 @@ pub(crate) mod calls {
             &self,
             auth: &ActivityPeerAuth,
         ) -> Result<bool, plurx_core::cluster::membership::MembershipError> {
-            self.membership.authorize_activity_request(auth).await
+            observe_authorization(self.membership.authorize_activity_request(auth).await)
         }
         pub(crate) async fn authorize_read_request(
             &self,
@@ -2002,9 +2124,11 @@ pub(crate) mod calls {
             path: &str,
             body: &[u8],
         ) -> Result<bool, plurx_core::cluster::membership::MembershipError> {
-            self.membership
-                .authorize_internal_peer_read_request(auth, method, path, body)
-                .await
+            observe_authorization(
+                self.membership
+                    .authorize_internal_peer_read_request(auth, method, path, body)
+                    .await,
+            )
         }
         pub(crate) async fn authorize_voter_request(
             &self,
@@ -2013,9 +2137,11 @@ pub(crate) mod calls {
             path: &str,
             body: &[u8],
         ) -> Result<bool, plurx_core::cluster::membership::MembershipError> {
-            self.membership
-                .authorize_internal_peer_voter_request(auth, method, path, body)
-                .await
+            observe_authorization(
+                self.membership
+                    .authorize_internal_peer_voter_request(auth, method, path, body)
+                    .await,
+            )
         }
         pub(crate) async fn authorize_exact_request(
             &self,
@@ -2024,9 +2150,11 @@ pub(crate) mod calls {
             path: &str,
             body: &[u8],
         ) -> Result<bool, plurx_core::cluster::membership::MembershipError> {
-            self.membership
-                .authorize_internal_peer_request(auth, method, path, body)
-                .await
+            observe_authorization(
+                self.membership
+                    .authorize_internal_peer_request(auth, method, path, body)
+                    .await,
+            )
         }
         pub(crate) fn sign_exact_response(
             &self,
@@ -2299,6 +2427,7 @@ pub(crate) mod calls {
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_owned);
             let retry_after = retry_after_seconds(response.headers());
+            let refusal = authentication_refusal(response.status(), response.headers());
             read_then_verify(
                 response,
                 deadline,
@@ -2306,6 +2435,9 @@ pub(crate) mod calls {
                 timestamp_ms,
                 clock_guard.zip(clock_ticket),
                 |response| async move {
+                    if let Some(refusal) = refusal {
+                        return Err(PeerTransportError::AuthenticationRefused(refusal));
+                    }
                     if let Some((target, nonce, member_scoped)) = response_binding {
                         #[cfg(test)]
                         if signature.is_none() {
@@ -2326,8 +2458,8 @@ pub(crate) mod calls {
                                 ),
                             )
                             .await
-                            .map_err(|_| PeerTransportError::TimedOut)?
-                            .map_err(|_| PeerTransportError::InvalidResponse)?
+                            .map_err(|_| PeerTransportError::LocalUnavailable)?
+                            .map_err(|_| PeerTransportError::LocalUnavailable)?
                         } else {
                             tokio::time::timeout_at(
                                 deadline,
@@ -2341,8 +2473,8 @@ pub(crate) mod calls {
                                 ),
                             )
                             .await
-                            .map_err(|_| PeerTransportError::TimedOut)?
-                            .map_err(|_| PeerTransportError::InvalidResponse)?
+                            .map_err(|_| PeerTransportError::LocalUnavailable)?
+                            .map_err(|_| PeerTransportError::LocalUnavailable)?
                         };
                         if !verified {
                             #[cfg(test)]
@@ -2446,7 +2578,7 @@ pub(crate) mod calls {
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
                     .body(body);
             }
-            tokio::time::timeout_at(deadline, request.send())
+            let response = tokio::time::timeout_at(deadline, request.send())
                 .await
                 .map_err(|_| PeerTransportError::TimedOut)?
                 .map_err(|error| {
@@ -2455,7 +2587,11 @@ pub(crate) mod calls {
                     } else {
                         PeerTransportError::Unreachable
                     }
-                })
+                })?;
+            if let Some(refusal) = authentication_refusal(response.status(), response.headers()) {
+                return Err(PeerTransportError::AuthenticationRefused(refusal));
+            }
+            Ok(response)
         }
     }
 
@@ -2698,6 +2834,194 @@ pub(crate) mod calls {
         /// Every transport must take the membership manager's pooled client. A
         /// client built here is a connection pool per caller, which is what made
         /// node-to-node requests redial on every use.
+        #[tokio::test]
+        async fn refusal_adapter_preserves_status_body_and_only_adds_actual_peer_metadata() {
+            use axum::extract::Path;
+            use plurx_core::cluster::membership::{MembershipError, PeerAuthAdmissionRefusal};
+            use tower::ServiceExt;
+            let app = Router::new()
+                .route(
+                    "/{kind}",
+                    get(|Path(kind): Path<String>| async move {
+                        let result = match kind.as_str() {
+                            "rate" => Some(Err(MembershipError::PeerAuthenticationAdmission(
+                                PeerAuthAdmissionRefusal::RateLimited,
+                            ))),
+                            "capacity" => Some(Err(MembershipError::PeerAuthenticationAdmission(
+                                PeerAuthAdmissionRefusal::ReplayCapacity,
+                            ))),
+                            "store" => Some(Err(MembershipError::Unavailable)),
+                            "bad" | "fallback" | "ok" => Some(Ok(false)),
+                            _ => None,
+                        };
+                        if let Some(result) = result {
+                            let _ = observe_authorization(result);
+                        }
+                        if kind == "fallback" {
+                            assert!(observe_authorization(Ok(true)).unwrap());
+                        }
+                        let mut headers = axum::http::HeaderMap::new();
+                        // A business handler/proxy cannot spoof the private metadata.
+                        if kind == "user" || kind == "ok" {
+                            headers.insert(
+                                AUTH_REFUSAL_HEADER,
+                                axum::http::HeaderValue::from_static("rate_limited"),
+                            );
+                        }
+                        (
+                            if kind == "ok" {
+                                StatusCode::OK
+                            } else {
+                                StatusCode::UNAUTHORIZED
+                            },
+                            headers,
+                        )
+                    }),
+                )
+                .layer(axum::middleware::from_fn(auth_refusal_response));
+            for (kind, expected) in [
+                ("rate", Some("rate_limited")),
+                ("capacity", Some("replay_capacity")),
+                ("store", Some("authority_unavailable")),
+                ("bad", Some("invalid_proof")),
+                ("user", None),
+                ("fallback", None),
+                ("ok", None),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri(format!("/{kind}"))
+                            .header(AUTH_REFUSAL_HEADER, "rate_limited")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    if kind == "ok" {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    }
+                );
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(AUTH_REFUSAL_HEADER)
+                        .and_then(|value| value.to_str().ok()),
+                    expected,
+                    "{kind}"
+                );
+                assert!(
+                    axum::body::to_bytes(response.into_body(), 1024)
+                        .await
+                        .unwrap()
+                        .is_empty(),
+                    "the original empty response body is unchanged"
+                );
+            }
+            assert!(
+                !observe_authorization(Ok(false)).unwrap(),
+                "non-HTTP callers keep the original result without panic"
+            );
+        }
+
+        #[tokio::test]
+        async fn simultaneous_peer_and_user_refusals_never_share_classification() {
+            use axum::extract::{Path, State};
+            use tower::ServiceExt;
+            let app = Router::new()
+                .route(
+                    "/{kind}",
+                    get(
+                        |Path(kind): Path<String>,
+                         State(barrier): State<Arc<tokio::sync::Barrier>>| async move {
+                            if kind == "peer" {
+                                let _ = observe_authorization(Err(
+                                    plurx_core::cluster::membership::MembershipError::Unavailable,
+                                ));
+                            }
+                            barrier.wait().await;
+                            StatusCode::UNAUTHORIZED
+                        },
+                    ),
+                )
+                .with_state(Arc::new(tokio::sync::Barrier::new(2)))
+                .layer(axum::middleware::from_fn(auth_refusal_response));
+            let request = |path| {
+                axum::http::Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap()
+            };
+            let (peer, user) = tokio::join!(
+                app.clone().oneshot(request("/peer")),
+                app.oneshot(request("/user"))
+            );
+            assert_eq!(
+                peer.unwrap().headers().get(AUTH_REFUSAL_HEADER).unwrap(),
+                "authority_unavailable"
+            );
+            assert!(!user.unwrap().headers().contains_key(AUTH_REFUSAL_HEADER));
+        }
+
+        #[test]
+        fn refusal_headers_are_fixed_bounded_advisory_and_ignored_on_success() {
+            use reqwest::header::{HeaderMap, HeaderValue};
+            let mut headers = HeaderMap::new();
+            assert_eq!(
+                authentication_refusal(reqwest::StatusCode::UNAUTHORIZED, &headers),
+                Some(PeerAuthRefusal::Unclassified)
+            );
+            for (value, expected) in [
+                ("invalid_proof", PeerAuthRefusal::InvalidProof),
+                ("rate_limited", PeerAuthRefusal::RateLimited),
+                ("replay_capacity", PeerAuthRefusal::ReplayCapacity),
+                (
+                    "authority_unavailable",
+                    PeerAuthRefusal::AuthorityUnavailable,
+                ),
+            ] {
+                headers.insert(AUTH_REFUSAL_HEADER, HeaderValue::from_static(value));
+                assert_eq!(
+                    authentication_refusal(reqwest::StatusCode::UNAUTHORIZED, &headers),
+                    Some(expected)
+                );
+                assert_eq!(
+                    authentication_refusal(reqwest::StatusCode::OK, &headers),
+                    None,
+                    "a hint cannot replace successful response authentication"
+                );
+            }
+            for value in [
+                HeaderValue::from_static("unknown"),
+                HeaderValue::from_str(&"x".repeat(33)).unwrap(),
+                HeaderValue::from_bytes(&[0xff]).unwrap(),
+            ] {
+                headers.insert(AUTH_REFUSAL_HEADER, value);
+                assert_eq!(
+                    authentication_refusal(reqwest::StatusCode::UNAUTHORIZED, &headers),
+                    Some(PeerAuthRefusal::Unclassified)
+                );
+            }
+            headers.clear();
+            headers.append(
+                AUTH_REFUSAL_HEADER,
+                HeaderValue::from_static("rate_limited"),
+            );
+            headers.append(
+                AUTH_REFUSAL_HEADER,
+                HeaderValue::from_static("invalid_proof"),
+            );
+            assert_eq!(
+                authentication_refusal(reqwest::StatusCode::UNAUTHORIZED, &headers),
+                Some(PeerAuthRefusal::Unclassified)
+            );
+        }
+
         #[tokio::test(start_paused = true)]
         async fn passive_peer_outcomes_rank_only_the_same_origin_and_expire_without_a_timer() {
             let outcomes = PeerOutcomes::default();

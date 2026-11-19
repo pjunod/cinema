@@ -427,6 +427,7 @@ impl PeerActivityClient {
             Err(PeerTransportError::InvalidResponse) => PeerActivityOutcome::InvalidResponse,
             Err(PeerTransportError::Unreachable) => PeerActivityOutcome::Unreachable,
             Err(PeerTransportError::LocalUnavailable) => PeerActivityOutcome::LocalUnavailable,
+            Err(PeerTransportError::AuthenticationRefused(_)) => PeerActivityOutcome::Refused,
         }
     }
 }
@@ -512,6 +513,7 @@ async fn read_snapshot_response(
         Err(PeerTransportError::InvalidResponse) => PeerActivityOutcome::InvalidResponse,
         Err(PeerTransportError::Unreachable) => PeerActivityOutcome::Unreachable,
         Err(PeerTransportError::LocalUnavailable) => PeerActivityOutcome::LocalUnavailable,
+        Err(PeerTransportError::AuthenticationRefused(_)) => PeerActivityOutcome::Refused,
     }
 }
 
@@ -1779,6 +1781,7 @@ mod tests {
             "refused",
             "http_error",
             "invalid_response",
+            "local_unavailable",
         ] {
             assert!(metrics.contains(&format!("outcome=\"{outcome}\"")));
         }
