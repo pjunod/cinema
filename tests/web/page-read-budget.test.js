@@ -2044,6 +2044,73 @@ test("marker actions emit bounded playback telemetry at the shipped controls", (
   assert.match(seek, /event:"marker_seek_back",detail:"undo"/);
 });
 
+test("a healthy Cluster tab reads the roster and the status once per 15 s gate, and nothing between", async () => {
+  // The tick runs every two seconds. On a healthy cluster it spends one
+  // /cluster/nodes and one /cluster/status per fifteen-second gate — the
+  // roster read was added on the status gate (2026-11-18) so "Nodes
+  // reachable", the strip's verdict and the heartbeats follow a voter that
+  // stops answering without a Refresh. That is the whole budget: one extra
+  // cheap read per gate, no new timer, no new endpoint.
+  const PANEL = require("../../crates/plurxd/src/web/cluster-panel.js");
+  const nodes = ["lab1", "lab2", "lab3"].map((host, index) => ({
+    node_id: `node-${index + 1}`, hostname: host, raft_id: index + 1, role: "voter", is_voter: true,
+    is_leader: index === 0, reachable: true, last_seen_at: 1, apply_lag_entries: 0, maintenance: false,
+  }));
+  const cluster = { local_node_id: "node-1", availability: "high_availability", nodes };
+  const ops = { observed_at_unix_ms: 1, nodes: [], verdict: { safe_to_restart_one: true, blockers: [], warnings: [] } };
+  const reads = [];
+  const clock = { now: 1_000_000 };
+  const tick = new Function(
+    "api", "PlurxClusterPanel", "clock", "SETTINGS_DATA",
+    `let PAGE_RENDER_GENERATION=1,AUTH_GENERATION=1,SETTINGS_TICKING=null,TRAKT_EDIT=false,TRAKT=null,
+       CLUSTER_LOADED=true,CLUSTER_OPS_FETCHED_AT=clock.now;
+     const SETTINGS_LOADED=new Set(["cluster","clusterOps"]);
+     const SERVER={cluster_enabled:true};
+     const Date={now:()=>clock.now};
+     const performance={now:()=>clock.now};
+     const CLUSTER_OPS_RECEIVED_AT=new WeakMap();
+     const document={visibilityState:"visible",getElementById:()=>null,querySelectorAll:()=>[],querySelector:()=>null};
+     const location={hash:"#/settings/cluster"};
+     const settingsTab=()=>"cluster",settingsCurrent=()=>true,refreshLogs=async()=>{},refreshClusterLogs=async()=>{};
+     const renderSettings=()=>{},cacheTrakt=(value)=>value,paintTrakt=()=>{};
+     ${shippedSource("settingsClusterEnabled")}
+     ${shippedSource("isSettingsRoute")}
+     ${shippedSource("clusterOpsReceived")}
+     ${shippedSource("clusterOpsInterval")}
+     ${shippedSource("clusterOpsStamp")}
+     ${shippedSource("clusterOpsDue")}
+     ${shippedSource("clusterRepaintDeferred")}
+     ${shippedSource("repaintClusterPreserving")}
+     ${shippedSource("clusterControlValues")}
+     ${shippedSource("clusterRestoreControlValues")}
+     ${shippedSource("patchClusterReadingAge")}
+     ${shippedSource("esc")}
+     ${shippedSource("fmtAgo")}
+     ${shippedSource("fmtBytes")}
+     ${shippedSource("clenv")}
+     ${shippedSource("settingsTick")}
+     return settingsTick;`,
+  )(
+    (url) => {
+      reads.push(url);
+      return Promise.resolve(JSON.parse(JSON.stringify(url === "/cluster/nodes" ? cluster : ops)));
+    },
+    PANEL,
+    clock,
+    { cluster, clusterOps: ops },
+  );
+  // Sixty-four seconds of two-second ticks after the page loaded: at a 2 s
+  // tick the 15 s gate falls due at 16, 32, 48 and 64.
+  for (let second = 2; second <= 64; second += 2) {
+    clock.now = 1_000_000 + second * 1000;
+    await tick(1, "cluster");
+  }
+  const count = (url) => reads.filter((read) => read === url).length;
+  assert.equal(count("/cluster/status"), 4, "one fan-out per fifteen seconds");
+  assert.equal(count("/cluster/nodes"), 4, "one roster read per gate on a healthy cluster, none between");
+  assert.equal(reads.length, 8, `no other read: ${reads.join(", ")}`);
+});
+
 main().catch((error) => {
   failures += 1;
   process.stdout.write(`FAIL the suite itself threw\n${error && error.stack}\n`);

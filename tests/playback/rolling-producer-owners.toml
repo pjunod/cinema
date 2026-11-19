@@ -4360,7 +4360,8 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
-expected_occurrences = 102
+# The owned voter fixture process is joined before a collision can retry.
+expected_occurrences = 103
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4393,6 +4394,8 @@ expected_occurrences = 26
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Four test-only timers wait for the artwork fixture identity and the offline
+# worker result. Each pair uses a bounded timeout around the positive condition.
 # Source-budget audit (8ab61a779 -> bbc5c1664): +11 timer shapes. Group's
 # 100 ms failed-wait retry and 25 ms quiescence poll retain the owned children,
 # registrations and pause guard until positive reap; neither is settlement.
@@ -6063,15 +6066,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 #     unpolled fit.
 #  +6 source_probe/refit_work_tests.rs: test pacing sleeps and the 20 s bounds on the
 #     joined execute() tasks.
-# Main 60443f341 has 2266 matches, including the subtitle identity fixture.
-# Recovery adds six test-only matches in shared_source_playback/tests.rs.
-# One waits for Store-wall lease expiry, one bounds Source-factory retirement,
-# three bound native failure diagnostics, and one bounds the VTT failure body.
-# The owned-process pause fixture replaces four observation timeouts and five
-# sleeps with host-clock observation bounds and an explicit budget clock.
-# The native Source collision fixture bounds the paired request and
-# real heartbeat injection by the existing resource deadline.
-expected_occurrences = 2264
+# Both sides keep the title-lane and reader admission timers on their existing owners.
+# The recovery diagnostics and native heartbeat collision keep their bounded waits.
+# The process pause fixture observes the child on the host clock and advances the active budget on the paused clock.
+# The voter fixture bounds its test subprocess wait before checking retry eligibility.
+expected_occurrences = 2267
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6609,7 +6608,8 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # source_probe/title_work_tests.rs +1.
 # Union at 0d501cae6: 349 + 13 + 3 = 365, less those 3 counted twice = 362; the spool
 # registration test adds one isolated test image: 363.
-expected_occurrences = 367
+# The owned voter fixture process is joined before a collision can retry.
+expected_occurrences = 368
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7343,15 +7343,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # processed_stream_format_reports_the_attached_carrier_not_its_pq_base.
 # It reads the existing VOD owner's status_publication snapshot: no child
 # launch, lease renewal, or ownership transfer. The broad matcher is unchanged.
-# Root custody-fixture observations and the prepared VOD status observer
-# remain in scope. F+ (#1565) adds five awaited test-only launches in
-# dv_disk/tests.rs, fragindex/refit_acceptance_tests.rs, fragindex/tests.rs
-# and source_probe/dv_refit.rs.
-# Main 60443f341 has 945 matches. Recovery adds six HTTP Response::status()
-# reads in shared_source_playback/tests.rs. They observe the Direct response
-# and native/VTT failure responses. The native Source heartbeat collision
-# adds one read of the successful H2 master response status.
-expected_occurrences = 952
+# Recovery and native collision HTTP status calls observe the response to each request.
+# The prepared VOD status call reads its existing owner publication.
+# The voter fixture starts one test subprocess and joins it before retrying a clean bind collision.
+expected_occurrences = 953
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7672,12 +7667,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Change-driven sharing monitors (A6 M3): +1 closed.wait() in the receiver
 # connection monitor's one-second floor wait, beside its change wait. No
 # process is involved.
-# Recovery fixture union: +1 retained Source factory entry.wait() observer.
-# It observes the actual factory owner, not a new OS-child reaper.
-# Root/recovery merge: exact configured source census measures 401.
-# Preserve the Root custody/startup observations and recovery fixture sites;
-# earlier counts describe their reviewed snapshots. Patterns/roots unchanged.
-expected_occurrences = 401
+# Recovery retains the Source factory entry.wait() observation.
+# The voter fixture waits for its subprocess and kills it on timeout before returning.
+expected_occurrences = 403
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -7926,7 +7918,8 @@ pattern = "kill_on_drop\\s*\\("
 # sleep child, killed and waited before the successor takes the lane).
 # Union at 0d501cae6: 126 + 2 + 1 = 129, less 1 counted twice = 128; the spool
 # registration test adds one: 129.
-expected_occurrences = 131
+# The owned voter fixture process is joined before a collision can retry.
+expected_occurrences = 132
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
