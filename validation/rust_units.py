@@ -43,6 +43,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 import zipfile
 
 from validation.runner import matches
@@ -52,6 +53,10 @@ SCHEMA = 1
 KEY_VERSION = "rust-units-key-v1"
 CONFIG = Path("validation/rust-unit-inputs.toml")
 STATE = Path("target/rust-units")
+JUNIT_REPORT = Path("target/nextest/ci/rust-units.xml")
+JUNIT_MAX_BYTES = 32 * 1024 * 1024
+EVIDENCE_CASE = "rust-units case "
+EVIDENCE_END = "rust-units invocation "
 NEXTEST_VERSION = "0.9.151"
 # Partitioning: one shard until a selection is worth splitting, then about this
 # many tests per shard, never more shards than the x64 `general` pool holds.
@@ -77,7 +82,7 @@ TASK_LINE = re.compile(r"received task \d+ of job (?:rust_units\.)?([A-Za-z0-9_-
 CRATE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
-# nextest's per-test status lines, as printed with --color never. Newer
+# Human-readable nextest output for merge-base diagnostics only. Newer
 # releases may insert a "(done/total)" counter after the duration.
 STATUS_LINE = re.compile(
     r"^\s*(PASS|LEAK|FAIL|SIGSEGV|SIGABRT|SIGKILL|SIGBUS|TIMEOUT|LEAK-FAIL|ABORT)"
@@ -572,8 +577,8 @@ def validate_receipt(receipt, crate, key):
             "receipt has no run identity", NotAdopted)
 
 
-def logged_outcomes(log):
-    """{test id: 'PASS' | 'FAIL'} from nextest status lines in a job log."""
+def baseline_outcomes(log):
+    """Read nextest console statuses for diagnostic merge-base classification."""
     outcomes = {}
     for line in log.splitlines():
         # Forgejo prefixes each line with an RFC 3339 timestamp.
@@ -583,6 +588,53 @@ def logged_outcomes(log):
             status, binary, test = found.groups()
             # LEAK is a pass whose test left handles open (nextest's default).
             outcomes[f"{binary} {test}"] = "PASS" if status in ("PASS", "LEAK") else "FAIL"
+    return outcomes
+
+
+def merge_outcomes(outcomes, incoming):
+    repeated = outcomes.keys() & incoming.keys()
+    require(not repeated, f"duplicate Rust unit outcomes: {sorted(repeated)[:5]}")
+    outcomes.update(incoming)
+
+
+def verify_exit(returncode, outcomes):
+    """Require nextest's documented exit to agree with the completed cases."""
+    if "FAIL" in outcomes.values():
+        expected = 100
+    elif "PASS" in outcomes.values():
+        expected = 0
+    else:
+        expected = 4
+    require(type(returncode) is int and returncode == expected,
+            f"nextest exit {returncode} disagrees with its case outcomes (expected {expected})")
+
+
+def evidence_digest(outcomes):
+    return digest_lines(f"{status} {test}" for test, status in sorted(outcomes.items()))
+
+
+def logged_outcomes(log):
+    """Accept only complete result frames written by the shard's JUnit consumer."""
+    outcomes, invocation = {}, {}
+    for line in log.split("\n"):
+        line = re.sub(r"^\d{4}-\d\d-\d\dT[0-9:.]+Z ", "", line)
+        if line.startswith(EVIDENCE_CASE):
+            record = json.loads(line[len(EVIDENCE_CASE):])
+            require(isinstance(record, list) and len(record) == 2, "malformed Rust unit case record")
+            test, status = record
+            require(isinstance(test, str) and test.isprintable() and " " in test
+                    and status in ("PASS", "FAIL", "SKIP"), "malformed Rust unit case evidence")
+            merge_outcomes(invocation, {test: status})
+        elif line.startswith(EVIDENCE_END):
+            record = json.loads(line[len(EVIDENCE_END):])
+            require(isinstance(record, list) and len(record) == 3, "malformed Rust unit invocation summary")
+            returncode, count, sha256 = record
+            require(type(count) is int and count == len(invocation) and sha256 == evidence_digest(invocation),
+                    "incomplete or corrupt Rust unit invocation evidence")
+            verify_exit(returncode, invocation)
+            merge_outcomes(outcomes, invocation)
+            invocation = {}
+    require(not invocation, "Rust unit case evidence is missing its invocation summary")
     return outcomes
 
 
@@ -671,7 +723,7 @@ class Authenticator:
     A receipt is the producer's claim. It is adopted only when the forge
     confirms the run belongs to this repository and was for the receipt's
     commit, the publishing job uploaded exactly that artifact, every adopted
-    pass appears as a nextest PASS line in a named evidence job's own log,
+    pass appears in a completed JUnit evidence frame in a named shard's log,
     and the key — recomputed by *this* code from the receipt's commit —
     equals the key being looked up. Because the key covers this module, the
     workflow and the CI image, a run whose harness differs can never match.
@@ -683,6 +735,7 @@ class Authenticator:
         self._keys = {}
         self._jobs = {}
         self._logs = {}
+        self._outcomes = {}
         self._workflows = {}
 
     def key_at(self, commit, crate):
@@ -749,7 +802,10 @@ class Authenticator:
         logged = {}
         for job_name in receipt["evidence_jobs"]:
             job = self.job(run, job_name, {"success", "failure"}, "shard")
-            logged.update(logged_outcomes(self.log(job["id"])))
+            job_id = job["id"]
+            if job_id not in self._outcomes:
+                self._outcomes[job_id] = logged_outcomes(self.log(job_id))
+            merge_outcomes(logged, self._outcomes[job_id])
         passed = {test for test in receipt["passed"] if logged.get(test) == "PASS"}
         failed = {test for test in receipt["failed"] if logged.get(test) == "FAIL"}
         return {"run": run, "commit": receipt["commit"], "listing": receipt.get("listing"),
@@ -930,28 +986,82 @@ def make_plan(selection_doc, pending, listing, config, run):
 # Running a shard
 
 
-def run_nextest(command):
-    """Run nextest, echo its output into the job log, and read each outcome
-    from the same status lines a later run authenticates against."""
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               text=True, errors="replace", bufsize=1)
+def require_junit_totals(element, tests, failures, errors):
+    for name, count in (("tests", tests), ("failures", failures), ("errors", errors)):
+        require(element.get(name) == str(count), f"nextest JUnit {element.tag} {name} count disagrees with cases")
+
+
+def junit_outcomes(report):
+    """Read final cases from pinned nextest's JUnit report, never case output."""
+    with report.open("rb") as stream:
+        data = stream.read(JUNIT_MAX_BYTES + 1)
+    require(len(data) <= JUNIT_MAX_BYTES, "nextest JUnit report exceeds its bound")
+    require(b"<!DOCTYPE" not in data, "unexpected nextest JUnit document type")
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as error:
+        raise UnitsError(f"invalid nextest JUnit report: {error}") from error
+    require(root.tag == "testsuites", "invalid nextest JUnit report root")
     outcomes = {}
-    for line in process.stdout:
-        sys.stdout.write(line)
-        outcomes.update(logged_outcomes(line))
-    return process.wait(), outcomes
+    failures = errors = 0
+    seen_suites = set()
+    for suite in root:
+        binary = suite.get("name", "")
+        require(suite.tag == "testsuite" and binary and binary.isprintable() and " " not in binary
+                and binary not in seen_suites, "invalid or duplicate nextest JUnit suite")
+        seen_suites.add(binary)
+        cases = {}
+        suite_failures = suite_errors = 0
+        for case in suite:
+            name = case.get("name", "")
+            require(case.tag == "testcase" and case.get("classname") == binary and name and name.isprintable(),
+                    f"{binary}: invalid nextest JUnit case")
+            tags = [child.tag for child in case if child.tag not in ("system-out", "system-err")]
+            require(not tags or tags in (["failure"], ["error"], ["skipped"]),
+                    f"{binary} {name}: invalid or repeated nextest JUnit outcome")
+            tag = tags[0] if tags else None
+            suite_failures += tag == "failure"
+            suite_errors += tag == "error"
+            status = {None: "PASS", "failure": "FAIL", "error": "FAIL", "skipped": "SKIP"}[tag]
+            merge_outcomes(cases, {f"{binary} {name}": status})
+        require_junit_totals(suite, len(cases), suite_failures, suite_errors)
+        failures += suite_failures
+        errors += suite_errors
+        merge_outcomes(outcomes, cases)
+    require_junit_totals(root, len(outcomes), failures, errors)
+    return outcomes
+
+
+def run_nextest(command):
+    """Validate a fresh nextest report and log only its reconciled results as evidence."""
+    JUNIT_REPORT.unlink(missing_ok=True)
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, errors="replace", bufsize=1) as process:
+        for line in process.stdout:
+            # Diagnostic output includes captured test text. Keep each line
+            # in an escaped field so it cannot inject a case or summary.
+            print("nextest: " + json.dumps(line.rstrip("\n")))
+        returncode = process.wait()
+    require(returncode in (0, 4, 100), f"nextest could not run (exit {returncode})")
+    # Nextest can exit before its reporter starts for an empty partition.
+    require(JUNIT_REPORT.is_file() or returncode == 4, "nextest did not publish its JUnit report")
+    outcomes = junit_outcomes(JUNIT_REPORT) if JUNIT_REPORT.is_file() else {}
+    verify_exit(returncode, outcomes)
+    for test, status in sorted(outcomes.items()):
+        print(EVIDENCE_CASE + json.dumps([test, status], separators=(",", ":")))
+    print(EVIDENCE_END + json.dumps([returncode, len(outcomes), evidence_digest(outcomes)], separators=(",", ":")))
+    return returncode, outcomes
 
 
 EXTRACT = STATE / "extract"
 
 
 def nextest_command(archive, filters, extra):
-    # Extract into the workspace so the JUnit report outlives the run, and
-    # remap the workspace so `CARGO_MANIFEST_DIR` and fixtures resolve here.
+    # Extract into the workspace and remap it so `CARGO_MANIFEST_DIR` and fixtures resolve here.
     command = ["cargo-nextest", "nextest", "run", "--archive-file", str(archive),
                "--workspace-remap", str(Path.cwd()), "--extract-to", str(EXTRACT.resolve()),
                "--extract-overwrite",
-               "--profile", "ci", "--no-fail-fast", "--color", "never", *extra]
+               "--profile", "ci", "--no-fail-fast", "--no-tests=fail", "--retries", "0", "--color", "never", *extra]
     for expression in filters:
         command += ["-E", expression]
     return command
@@ -1041,9 +1151,7 @@ def run_shard(plan_path, archive, index, threads):
         returncode, seen = run_nextest(command)
         print(f"::endgroup::\nnextest {label} exited {returncode} after "
               f"{time.monotonic() - started:.0f}s")
-        # 0: all passed; 100: tests failed; 4: no tests matched this partition.
-        require(returncode in (0, 4, 100), f"nextest {label} could not run (exit {returncode})")
-        outcomes.update(seen)
+        merge_outcomes(outcomes, seen)
     planned = {t for crate in plan["crates"].values() for t in crate["remaining"] + crate["serial"]}
     unexpected = sorted(set(outcomes) - planned)
     require(not unexpected, f"shard ran tests outside the plan: {unexpected[:5]}")
@@ -1052,7 +1160,7 @@ def run_shard(plan_path, archive, index, threads):
         mine = {t: o for t, o in outcomes.items() if crate_of(t.split(" ", 1)[0]) == crate}
         results[crate] = {"passed": sorted(t for t, o in mine.items() if o == "PASS"),
                           "failed": sorted(t for t, o in mine.items() if o == "FAIL"),
-                          "skipped": []}
+                          "skipped": sorted(t for t, o in mine.items() if o == "SKIP")}
     receipt = {"schema": SCHEMA, "producer": "validation.rust_units", "run": plan["run"],
                "index": index, "shards": count, "head": plan["head"],
                "job": JOB_SHARD.format(index=index), "results": results}
@@ -1060,7 +1168,7 @@ def run_shard(plan_path, archive, index, threads):
     failed = sum(len(r["failed"]) for r in results.values())
     passed = sum(len(r["passed"]) for r in results.values())
     print(f"shard {index}/{count}: {passed} passed, {failed} failed "
-          "(the verdict job judges failures against the merge-base)")
+          "(every required case needs a positive pass)")
     return receipt
 
 
@@ -1301,7 +1409,7 @@ def command_classify(args):
     head_failures = failures["failures"]
     base_outcomes = {}
     if Path(args.log).exists():
-        base_outcomes = logged_outcomes(Path(args.log).read_text(encoding="utf-8", errors="replace"))
+        base_outcomes = baseline_outcomes(Path(args.log).read_text(encoding="utf-8", errors="replace"))
     pre_existing, new = {}, {}
     for crate, tests in sorted(head_failures.items()):
         for test in tests:

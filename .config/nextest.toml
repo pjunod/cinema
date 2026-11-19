@@ -14,8 +14,7 @@ nextest-version = { required = "0.9.151" }
 default-filter = "not test(/^scan::probe::tests::fixture_child_/)"
 fail-fast = false
 retries = 0
-# One status line per test: shard outcomes, and the receipts' PASS evidence,
-# are read from these lines in the job log.
+# Console output is diagnostic. Shards read positive outcomes from JUnit.
 status-level = "pass"
 final-status-level = "fail"
 failure-output = "immediate-final"
@@ -23,3 +22,12 @@ success-output = "never"
 # `make unit` has no per-test limit; this only stops a hung test from eating
 # the shard's job budget. Twenty minutes is far past every measured test.
 slow-timeout = { period = "300s", terminate-after = 4 }
+
+
+[profile.ci.junit]
+path = "rust-units.xml"
+store-success-output = false
+store-failure-output = false
+# Planned tests omitted from the report are caught by the verdict. Including
+# every skipped test would duplicate other shards' partitions in each report.
+report-skipped = "none"

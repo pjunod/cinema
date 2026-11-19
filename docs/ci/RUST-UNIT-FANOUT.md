@@ -50,8 +50,11 @@ The stage is six jobs (names are part of receipt authentication):
    like every general job). Runs `cargo-nextest nextest run --archive-file …
    --partition hash:i/N --profile ci --test-threads 2` with the plan's
    filtersets. Shard 1 also runs `make vodencode-restart-check`'s two ignored
-   real-FFmpeg restart tests serially. A shard fails only when it could not
-   run; test failures go into its receipt.
+   real-FFmpeg restart tests serially. The shard reads a fresh nextest JUnit
+   report for each invocation and checks that its case outcomes, totals and
+   nextest exit agree. It prints the validated records separately from
+   escaped diagnostic output. A shard fails if it cannot establish these
+   results. Test failures go into its receipt.
 4. **`Rust units: verdict`** proves the shards ran every planned test exactly
    once (a missing shard, missing test or skipped planned case fails it; a test
    in two shards or one outside the plan is an integrity failure), publishes
@@ -169,10 +172,10 @@ publishing job is terminal and its own log shows that exact artifact being
 uploaded; **the key recomputed by the current code from the receipt's commit
 equals the key being looked up** — the key covers the harness, so a run with a
 different workflow, CI image or producer can never match; and each adopted
-pass appears as a nextest `PASS` line in a named shard job's log. A pass the
-logs do not show is dropped, a logged failure can never be adopted as a pass,
-and any lookup, download, fetch or parse problem means "not adopted; its tests
-run". History never fails the stage; only the current run's own integrity
+pass appears in a complete JUnit outcome frame in a named shard job's log.
+The frame's count and digest bind its case records to the invocation.
+A recorded failure or a case without positive evidence stays due. A lookup,
+download, fetch or parse failure leaves that evidence unavailable. History never fails the stage; only the current run's own integrity
 does.
 
 Passes union across runs: a crate whose union of passes covers its whole

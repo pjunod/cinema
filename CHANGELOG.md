@@ -55,6 +55,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Rust qualification reads fresh, exit-checked nextest JUnit results and authenticates
+  complete evidence records, so captured test output cannot turn a failure into a reusable pass.
 - Source playback Start observes membership at its claim boundary after pure
   preparation. Slow filesystem or planning work no longer consumes the
   five-second authority proof before it is used; claim expiry, file and grant

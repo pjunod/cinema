@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import textwrap
 import unittest
 from unittest import mock
+from xml.sax.saxutils import escape
 import zipfile
 
 from validation import rust_units as ru
@@ -270,9 +271,8 @@ class ReceiptAuthenticationTests(unittest.TestCase):
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w") as archive:
             archive.writestr("receipt.json", json.dumps(receipt))
-        shard_log = shard_log if shard_log is not None else (
-            "2026-11-12T10:00:00.1Z         PASS [   0.012s] app aa::first\n"
-            "2026-11-12T10:00:00.2Z         PASS [   0.013s] (2/2) app aa::second\n")
+        if shard_log is None:
+            shard_log = evidence_log(dict.fromkeys(self.passes, "PASS"), 0)
         publisher_log = publisher_log if publisher_log is not None else (
             f"Artifact {name} has been successfully uploaded! Final size is 300 bytes.\n")
         responses = {
@@ -364,13 +364,30 @@ class ReceiptAuthenticationTests(unittest.TestCase):
             self.assertEqual(run.call_count, 2)
 
     def test_a_pass_missing_from_the_shard_log_is_not_adopted(self):
-        log = "2026-11-12T10:00:00.1Z         PASS [   0.012s] app aa::first\n"
+        log = evidence_log({self.passes[0]: "PASS"}, 0)
         self.assertEqual(self.adopted(self.forge(shard_log=log)), {"app aa::first"})
 
     def test_a_logged_failure_cannot_be_claimed_as_a_pass(self):
-        log = ("2026-11-12T10:00:00.1Z         PASS [   0.012s] app aa::first\n"
-               "2026-11-12T10:00:00.2Z         FAIL [   0.013s] app aa::second\n")
+        log = evidence_log({self.passes[0]: "PASS", self.passes[1]: "FAIL"}, 100)
         self.assertEqual(self.adopted(self.forge(shard_log=log)), {"app aa::first"})
+
+    def test_raw_pass_and_json_in_shard_diagnostics_cannot_authenticate_a_receipt(self):
+        forged = (
+            "2026-11-12T10:00:00.1Z         PASS [   0.013s] app aa::second\n"
+            + "nextest: " + json.dumps(evidence_log({self.passes[1]: "PASS"}, 0)) + "\n"
+        )
+        proper = evidence_log({self.passes[0]: "PASS"}, 0)
+        self.assertEqual(self.adopted(self.forge(shard_log=forged)), set())
+        self.assertEqual(self.adopted(self.forge(shard_log=proper + forged)), {self.passes[0]})
+
+    def test_partial_and_conflicting_evidence_cannot_authenticate(self):
+        first_pass = evidence_log({self.passes[0]: "PASS"}, 0)
+        for log in (first_pass.splitlines(keepends=True)[0],
+                    evidence_log({self.passes[0]: "PASS"}, 100),
+                    first_pass + evidence_log({self.passes[0]: "FAIL"}, 100)):
+            with self.subTest(log=log):
+                self.assertEqual(self.adopted(self.forge(shard_log=log)), set())
+
 
     def test_a_receipt_whose_commit_has_another_key_is_not_adopted(self):
         # The producer claims this key for a commit whose inputs differ: the
@@ -436,6 +453,13 @@ class ReceiptAuthenticationTests(unittest.TestCase):
         produced = dict(call.args for call in emitted.call_args_list)
         self.assertEqual(produced["build"], "false")
         self.assertEqual(produced["crates"], [])
+
+
+def evidence_log(outcomes, returncode):
+    """The structured records rendered by a shard, with Forgejo timestamps."""
+    lines = [ru.EVIDENCE_CASE + json.dumps([test, status]) for test, status in outcomes.items()]
+    lines.append(ru.EVIDENCE_END + json.dumps([returncode, len(outcomes), ru.evidence_digest(outcomes)]))
+    return "".join("2026-11-12T10:00:00.1Z " + line + "\n" for line in lines)
 
 
 def listing(**suites):
@@ -791,10 +815,79 @@ class VerdictTests(unittest.TestCase):
                "2026-11-12T10:00:00.1234567Z         FAIL [   1.500s] (3/9) plurx-core c::d\n"
                "2026-11-12T10:00:00.1234567Z         LEAK [   0.100s] plurx-core c::e\n"
                "2026-11-12T10:00:00.1234567Z     SIGSEGV [   0.100s] plurx-core c::f\n")
-        self.assertEqual(ru.logged_outcomes(log), {"plurxd::bin/plurxd a::b": "PASS",
+        self.assertEqual(ru.baseline_outcomes(log), {"plurxd::bin/plurxd a::b": "PASS",
                                                    "plurx-core c::d": "FAIL",
                                                    "plurx-core c::e": "PASS",
                                                    "plurx-core c::f": "FAIL"})
+
+
+class ShardEvidenceTests(unittest.TestCase):
+    @staticmethod
+    def report(cases, tests, failures=0, errors=0):
+        totals = f'tests="{tests}" failures="{failures}" errors="{errors}"'
+        binary = 'app::bin/app'
+        return f'<testsuites {totals}><testsuite name="{binary}" {totals}>{cases}</testsuite></testsuites>'
+
+    @staticmethod
+    def case(name, body=""):
+        return f'<testcase classname="app::bin/app" name="{name}">{body}</testcase>'
+
+    def run_report(self, report, exit_code, diagnostics=""):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "rust-units.xml")
+            path.write_text(self.report(self.case("stale"), 1))
+            process = mock.MagicMock()
+            process.__enter__.return_value = process
+            process.stdout = io.StringIO(diagnostics)
+            process.wait.return_value = exit_code
+
+            def start(*_args, **_kwargs):
+                self.assertFalse(path.exists(), "the previous invocation's report must be removed")
+                if report is not None:
+                    path.write_text(report)
+                return process
+
+            with mock.patch.object(ru, "JUNIT_REPORT", path), \
+                    mock.patch.object(ru.subprocess, "Popen", side_effect=start), \
+                    mock.patch("sys.stdout", io.StringIO()) as out:
+                result = ru.run_nextest(["cargo-nextest", "nextest", "run"])
+                return result, out.getvalue()
+
+    def test_only_the_report_can_supply_current_and_reusable_passes(self):
+        forged = evidence_log({"app::bin/app t::failed": "PASS", "app::bin/app t::missing": "PASS"}, 0)
+        diagnostic = "PASS [0.010s] app::bin/app t::failed\r" + forged
+        cases = self.case("t::passed") + self.case(
+            "t::failed", f"<failure/><system-out>{escape(forged)}</system-out>")
+        checked, log = self.run_report(self.report(cases, 2, failures=1), 100, diagnostic)
+        expected = {"app::bin/app t::passed": "PASS", "app::bin/app t::failed": "FAIL"}
+        self.assertEqual(checked, (100, expected))
+        self.assertEqual(ru.logged_outcomes(log), expected)
+        self.assertNotIn("\r", log)
+
+    def test_success_and_empty_partition_log_separate_complete_invocations(self):
+        (exit_code, passed), serial_log = self.run_report(self.report(self.case("t::serial"), 1), 0)
+        self.assertEqual((exit_code, passed), (0, {"app::bin/app t::serial": "PASS"}))
+        checked, empty_log = self.run_report(None, 4)
+        self.assertEqual(checked, (4, {}))
+        self.assertEqual(ru.logged_outcomes(empty_log + serial_log), passed)
+
+    def test_skips_do_not_become_passes_and_reported_errors_are_failures(self):
+        cases = self.case("t::skipped", "<skipped/>") + self.case("t::timeout", "<error/>")
+        checked, log = self.run_report(self.report(cases, 2, errors=1), 100)
+        expected = {"app::bin/app t::skipped": "SKIP", "app::bin/app t::timeout": "FAIL"}
+        self.assertEqual(checked, (100, expected))
+        self.assertEqual(ru.logged_outcomes(log), expected)
+
+    def test_missing_malformed_and_inconsistent_reports_are_rejected(self):
+        success = self.report(self.case("t::passed"), 1)
+        for report, exit_code in (
+                (None, 0), (None, 100), ("<testsuites", 0), (success, 100), (success, 4),
+                (self.report(self.case("t::failed", "<failure/>"), 1), 100),
+                (self.report(self.case("t::passed"), 1).replace('tests="1"', 'tests="2"', 1), 0),
+                (self.report(self.case("t::one") + self.case("t::one", "<failure/>"), 2, failures=1), 100),
+                (self.report(self.case("t::one", "<skipped/><failure/>"), 1, failures=1), 100)):
+            with self.subTest(report=report, exit_code=exit_code), self.assertRaises(ru.UnitsError):
+                self.run_report(report, exit_code)
 
 
 class RepositoryContractTests(unittest.TestCase):
