@@ -868,7 +868,7 @@ impl TranscodeManager {
                 .ok_or(PreparationError::Fail("vod_policy_unavailable"))?;
             let compatibility_report = report.clone();
             let encoding = self
-                .resolve_adaptive_encoding_from_probe(request, file, &snapshot, report)
+                .resolve_adaptive_encoding_from_probe(request, file, &snapshot, report, None)
                 .await
                 .map_err(PreparationError::Retry)?;
             if request.candidate_context.as_ref().is_some_and(|context| {

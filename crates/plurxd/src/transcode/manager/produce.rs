@@ -283,7 +283,7 @@ impl TranscodeManager {
                 return Err("selected fixture original source changed".to_owned());
             }
             let encoding = self
-                .resolve_adaptive_encoding_from_probe(request, file, &planning, report)
+                .resolve_adaptive_encoding_from_probe(request, file, &planning, report, None)
                 .await?;
             let requested = encoding
                 .requested_heap_bytes()

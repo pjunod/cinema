@@ -130,6 +130,7 @@ pub(in crate::transcode) async fn source_fixed_planning_fixture(
             prepared.file(),
             operation.fixed_snapshot().expect("same snapshot"),
             report.clone(),
+            None,
         )
         .await
         .expect("pure Source recipe from the same admitted M");

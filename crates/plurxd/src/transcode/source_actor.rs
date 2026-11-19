@@ -1770,6 +1770,7 @@ impl TranscodeManager {
             prepared.file(),
             operation.fixed_snapshot().map_err(refused)?,
             report,
+            None,
         );
         let refinement_frame = std::mem::size_of_val(&refinement);
         let encoding = refinement.await.map_err(refused)?;
