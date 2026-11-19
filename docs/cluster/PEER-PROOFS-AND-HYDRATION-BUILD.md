@@ -178,3 +178,26 @@ returns the transport's typed timeout. Execution of these new controls is
 pending on the combined source. Rate/replay admission and Store failure
 must still be separated from invalid credentials at every peer route before
 claiming the audit's end-to-end refusal classification complete.
+
+## 10. Compatible authentication refusal metadata
+
+Keep the existing HTTP status and response body. A shared request-scoped
+adapter adds `x-plurx-peer-auth-refusal` only to a 401 produced after a peer
+authorizer recorded a typed refusal. The fixed values are `invalid_proof`,
+`rate_limited`, `replay_capacity`, and `authority_unavailable`. Ordinary
+user-token 401s carry no header. A later successful peer authentication
+clears earlier refusal metadata, and concurrent requests have distinct empty
+contexts. Outside an HTTP context, recording metadata is a harmless no-op.
+
+The core distinguishes rate exhaustion and replay-cache capacity from an
+invalid or replayed proof. Signature/nonce acceptance, admission bounds and
+fresh authority are unchanged. The main router and startup clock router
+receive only the lightweight response layer; listener ownership, callback
+arguments, T1/T4 placement and exact clock response proof are unchanged.
+
+Outbound calls parse this fixed metadata only on refused responses. Missing,
+unknown, repeated or oversized values become an unclassified refusal.
+Unsigned refusal metadata cannot acknowledge a mutation, authenticate a
+response body, publish positive proof or supply clock timing. It never
+extends a deadline or triggers an automatic retry. Successful member/voter
+responses retain the same mandatory exact signature verification.
