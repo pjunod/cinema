@@ -178,7 +178,20 @@ static SOURCE_RENEWAL_PAUSES: std::sync::Mutex<
 > = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 #[cfg(feature = "fixtures")]
+tokio::task_local! {
+    static SOURCE_RESOURCE_RENEWAL: ();
+}
+
+#[cfg(feature = "fixtures")]
 impl HiqliteAuthStore {
+    /// Allow a resource request to consume its own one-shot renewal pause.
+    #[doc(hidden)]
+    pub async fn validation_scope_resource_renewal<T>(
+        renewal: impl std::future::Future<Output = T>,
+    ) -> T {
+        SOURCE_RESOURCE_RENEWAL.scope((), renewal).await
+    }
+
     /// Order a real competing write after this incarnation's SQL guard was
     /// bound, then observe whether the guarded renewal refused.
     #[doc(hidden)]
@@ -7184,10 +7197,15 @@ async fn renew_with_authority(
         };
         #[cfg(feature = "fixtures")]
         {
-            let pause = SOURCE_RENEWAL_PAUSES
-                .lock()
-                .expect("Source renewal fixtures")
-                .remove(&authority.assignment.binding.incarnation_id());
+            let pause = SOURCE_RESOURCE_RENEWAL
+                .try_with(|()| {
+                    SOURCE_RENEWAL_PAUSES
+                        .lock()
+                        .expect("Source renewal fixtures")
+                        .remove(&authority.assignment.binding.incarnation_id())
+                })
+                .ok()
+                .flatten();
             if let Some(pause) = pause {
                 // The third bound value is both the guard's heartbeat upper
                 // timestamp and its exact route observation time.

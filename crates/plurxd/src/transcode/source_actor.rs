@@ -988,7 +988,11 @@ impl SourceViewerActor {
         }
         // Couple delivery liveness to current Source authority; the response
         // token is checked again immediately before its Local VOD touch.
-        let route = self.0.gate.renew_with(&self.0.assignment, &proof).await?;
+        let renewal = self.0.gate.renew_with(&self.0.assignment, &proof);
+        #[cfg(test)]
+        let renewal =
+            plurx_core::store::HiqliteAuthStore::validation_scope_resource_renewal(renewal);
+        let route = renewal.await?;
         if route.session_id != session_id
             || !manager
                 .vod
