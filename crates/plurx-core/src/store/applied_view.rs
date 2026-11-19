@@ -2455,7 +2455,14 @@ mod tests {
         let mut writers = std::collections::BTreeSet::new();
         for (crate_name, dir) in [("plurx-core", &root), ("plurxd", &daemon)] {
             for (path, text) in production_sources(dir, "") {
-                if sql_texts(&path, &text).into_iter().any(writes_settings) {
+                if sql_texts(&path, &text).into_iter().any(|sql| {
+                    // The facade now owns this backup anchor. Its exact SQL
+                    // appends a committed cut and cannot change settings rows.
+                    let backup_anchor = crate_name == "plurxd"
+                        && path == "cluster.rs"
+                        && sql == "UPDATE settings SET updated_at = updated_at WHERE 0";
+                    writes_settings(sql) && !backup_anchor
+                }) {
                     writers.insert(format!("{crate_name}/{path}"));
                 }
             }

@@ -671,19 +671,19 @@ mod tests {
             .find("preparation_expiry_unix_ms")
             .expect("committed lease bounds local fence");
         let begin = enter
-            .find("begin_maintenance_preparation")
+            .find(".prepare_maintenance_fence(local_expiry)")
             .expect("maintenance fence begins");
         let wait = enter
-            .find("wait_for_restart_admissions")
+            .find(".settle_outage_admissions(local_fence, &state.shutdown)")
             .expect("in-flight admissions settle");
         let commit = enter
-            .rfind(".enter_maintenance(&node_id, lease.claim())")
+            .find(".commit_maintenance(&node_id, lease.claim())")
             .expect("durable maintenance commit");
         let exact_release = enter
             .find("lease.release_replicated_claim().await")
             .expect("ordered exact release barrier");
         let reconcile = enter
-            .find("reconcile_local_maintenance_commit().await")
+            .find(".reconcile_maintenance().await")
             .expect("post-release maintenance reconciliation");
         assert!(claim < bound && bound < begin && begin < wait && wait < commit);
         assert!(
@@ -723,13 +723,56 @@ mod tests {
             .split_once("pub async fn force_election(")
             .expect("exit maintenance end")
             .0;
-        assert!(exit.contains("local_maintenance_active"));
+        assert!(exit.contains("if !state.cluster.maintenance_active()"));
         assert!(
-            exit.find("local_owned_media_sessions") < exit.find(".exit_maintenance(&node_id)"),
+            exit.find("local_owned_media_sessions")
+                .expect("local inventory")
+                < exit
+                    .find(".resume_member(&node_id)")
+                    .expect("durable resume"),
             "local direct streams and offline work must drain before the durable fence clears"
         );
         assert!(exit.contains("node_id != state.node_id"));
-        assert!(exit.contains("cancel_current_maintenance_preparation"));
+        assert!(
+            exit.find(".resume_member(&node_id)")
+                .expect("durable resume")
+                < exit
+                    .find(".cancel_maintenance_fence(active_sessions)")
+                    .expect("local unfence")
+        );
+
+        // The route keeps the order, and each facade operation keeps the
+        // original fence or replicated membership action behind that order.
+        let operations = include_str!("../cluster.rs");
+        for (operation, action) in [
+            (
+                "prepare_maintenance_fence",
+                ".begin_maintenance_preparation_until(expires_at_unix_ms)",
+            ),
+            (
+                "settle_outage_admissions",
+                ".wait_for_restart_admissions_until(token, shutdown)",
+            ),
+            ("commit_maintenance", ".enter_maintenance(node_id, lease)"),
+            (
+                "reconcile_maintenance",
+                ".reconcile_local_maintenance_commit()",
+            ),
+            ("resume_member", ".exit_maintenance(node_id)"),
+            (
+                "cancel_maintenance_fence",
+                ".cancel_current_maintenance_preparation(active_sessions)",
+            ),
+        ] {
+            let method = operations
+                .split_once(&format!("async fn {operation}("))
+                .expect("maintenance operation")
+                .1
+                .split_once("\n        }")
+                .expect("operation end")
+                .0;
+            assert!(method.contains(action), "{operation} must call {action}");
+        }
 
         let inventory = include_str!("cluster_operations.rs")
             .split_once("pub(crate) async fn local_owned_media_sessions")
