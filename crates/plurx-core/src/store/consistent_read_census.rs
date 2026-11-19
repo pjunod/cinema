@@ -67,8 +67,9 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_annotations.rs", 5),
     // Curation reads are local replica reads: a person's own tags and rows.
     ("hiqlite_curation.rs", 0),
-    // Managed bootstrap validates committed shape and the singleton marker.
-    ("hiqlite_background_jobs.rs", 4),
+    // Managed bootstrap validates committed shape and marker. Legacy trigger
+    // installation also checks the committed custody-retention marker.
+    ("hiqlite_background_jobs.rs", 5),
     ("hiqlite_catalog.rs", 2),
     ("hiqlite_classification.rs", 1),
     ("hiqlite_coordination.rs", 2),

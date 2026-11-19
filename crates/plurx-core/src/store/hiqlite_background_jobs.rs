@@ -154,22 +154,22 @@ async fn install_probe_and_managed_schema(client: &hiqlite::Client) -> Result<()
     ))
 }
 
+const CUSTODY_RETENTION_MARKER: &str = "SELECT name FROM sqlite_master WHERE type='table' AND name='background_custody_retention_schema'";
+
+async fn custody_retention_marker_present(client: &hiqlite::Client) -> Result<bool, StoreError> {
+    // authority: committed custody schema ownership decides whether bootstrap may replay legacy triggers.
+    let rows = timeout_store(client.query_consistent(CUSTODY_RETENTION_MARKER, params!())).await?;
+    Ok(!rows.is_empty())
+}
+
 // The newer custody extension owns these same trigger names. Keep the legacy
 // order for a fresh database and fence same-name replay inside the transaction.
 async fn install_legacy_retention_triggers(client: &hiqlite::Client) -> Result<(), StoreError> {
-    const MARKER_PRESENT: &str = "SELECT name FROM sqlite_master WHERE type='table' AND name='background_custody_retention_schema'";
-    async fn has_marker(client: &hiqlite::Client) -> Result<bool, StoreError> {
-        Ok(
-            !timeout_store(client.query_consistent(MARKER_PRESENT, params!()))
-                .await?
-                .is_empty(),
-        )
-    }
-    if has_marker(client).await? {
+    if custody_retention_marker_present(client).await? {
         return Ok(());
     }
     let guard = format!(
-        "SELECT CASE WHEN NOT EXISTS({MARKER_PRESENT}) THEN 1 ELSE json('custody retention already installed') END"
+        "SELECT CASE WHEN NOT EXISTS({CUSTODY_RETENTION_MARKER}) THEN 1 ELSE json('custody retention already installed') END"
     );
     let mut statements = vec![(guard, params!())];
     for schema in [
@@ -195,7 +195,7 @@ async fn install_legacy_retention_triggers(client: &hiqlite::Client) -> Result<(
         });
     if let Err(error) = result {
         // The ordinary custody installer still validates a concurrent winner.
-        if !has_marker(client).await? {
+        if !custody_retention_marker_present(client).await? {
             return Err(error);
         }
     }
