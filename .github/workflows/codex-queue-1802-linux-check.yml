@@ -1,0 +1,94 @@
+name: Private focused Linux check for PR 1802
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  RUST_MIN_STACK: "8388608"
+jobs:
+  check:
+    name: Check five exact Developer Rust regressions
+    runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 14g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 50
+    steps:
+      - name: Verify this job has its own bounded Docker cgroup
+        run: |
+          set -euo pipefail
+          relative="$(awk -F: '$1=="0" { print $3 }' /proc/self/cgroup)"
+          [[ "$relative" = /* ]]
+          root="/sys/fs/cgroup$relative"
+          test "$(cat "$root/memory.max")" = 15032385536
+          test "$(cat "$root/memory.swap.max")" = 0
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: a1d8301985cc97287d6395c57c532ab2a9eb5c45
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+      - uses: ./.github/actions/rust-native-deps
+        with:
+          desktop: "true"
+      - uses: ./.github/actions/ffmpeg
+        with:
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
+      - name: Verify the candidate and run the named cases
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = a1d8301985cc97287d6395c57c532ab2a9eb5c45
+          mkdir -p target/queue-1802-diagnostic
+          receipt=target/queue-1802-diagnostic/outcomes.txt
+          {
+            git rev-parse HEAD
+            rustc --version | grep -F 'rustc 1.97.1 '
+            /usr/lib/jellyfin-ffmpeg/ffmpeg -version | sed -n '1p'
+          } | tee "$receipt"
+          run_exact() {
+            local case_id="$1" log="$2"
+            shift 2
+            set +e
+            cargo test --locked -j1 "$@" "$case_id" -- --exact --nocapture --test-threads=1 2>&1 | tee "$log"
+            local result=${PIPESTATUS[0]}
+            set -e
+            if test "$result" = 0 && grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$log"; then
+              printf 'passed %s\n' "$case_id" | tee -a "$receipt"
+            else
+              printf 'failed %s\n' "$case_id" | tee -a "$receipt"
+            fi
+          }
+          run_exact contract_inventory_matches_every_store_method target/queue-1802-diagnostic/store.log -p plurx-core --features hiqlite-store --test store_contract
+          cases=(
+            cluster::census::reach_arounds_match_the_pinned_census
+            http::hls::tests::every_preparation_cancellation_reason_in_this_file_is_attributable
+            http::hls::tests::the_confirmation_reserves_recovery_budget_inside_the_owner_lease
+            http::jellyfin::tests::jellyfin_native_hls_encoded_without_copy_index_preserves_ranges_clock_and_stop
+          )
+          for i in "${!cases[@]}"; do
+            run_exact "${cases[$i]}" "target/queue-1802-diagnostic/daemon-$i.log" -p plurxd --features plurx-core/hiqlite-store --bin plurxd
+          done
+          test "$(grep -c '^passed ' "$receipt")" = 5
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
+        if: always()
+        with:
+          name: queue-1802-focused-linux-diagnostic
+          path: target/queue-1802-diagnostic
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
