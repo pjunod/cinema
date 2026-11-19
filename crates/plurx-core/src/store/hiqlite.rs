@@ -306,6 +306,12 @@ const AUTHORITY_QUORUM_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
 const IDEMPOTENT_WRITE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize = 5;
 pub(super) const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
+const AUTH_TOKEN_POLICY_WRITE_SQL: &str = "INSERT INTO settings (key, value, updated_at) \
+                   SELECT $1, $2, $3 WHERE \
+                     ($4 = '' AND NOT EXISTS (SELECT 1 FROM cluster_credential_guard_activation)) \
+                     OR EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_leases WHERE claim_id = $4) \
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at";
+
 const CREDENTIAL_MUTATION_INTENT_BEGIN_SQL: &str =
     "INSERT INTO cluster_credential_mutation_intents (singleton) VALUES (1)";
 const CREDENTIAL_MUTATION_INTENT_END_SQL: &str =
@@ -7249,6 +7255,39 @@ impl SettingsStore for HiqliteAuthStore {
         Ok(())
     }
 
+    async fn put_auth_token_policy(
+        &self,
+        values: &[(&str, &str)],
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        if values.iter().any(|(key, _)| {
+            !matches!(
+                *key,
+                keys::AUTH_TOKEN_EXPIRY_ENABLED
+                    | keys::AUTH_TOKEN_IDLE_DAYS
+                    | keys::AUTH_TOKEN_EXPIRY_SINCE
+            )
+        }) {
+            return Err(StoreError::Database("invalid token policy key".to_owned()));
+        }
+        if values.is_empty() {
+            return Ok(true);
+        }
+        let now = self.now()?;
+        let claim_id = claim.map_or("", CacheAdminMutationClaim::as_str);
+        let sql = AUTH_TOKEN_POLICY_WRITE_SQL;
+        let changed = self
+            .credential_mutation(
+                "put_auth_token_policy",
+                values
+                    .iter()
+                    .map(|(key, value)| (sql, params!(*key, *value, now, claim_id)))
+                    .collect(),
+            )
+            .await?;
+        Ok(changed.iter().all(|count| *count == 1))
+    }
+
     async fn put_settings_if_generation(
         &self,
         generation_key: &str,
@@ -7673,17 +7712,26 @@ impl UserStore for HiqliteAuthStore {
         token_hash: &str,
         audience: super::TokenAudience,
     ) -> Result<TokenAuthentication, StoreError> {
+        Ok(self
+            .authenticate_token_proof_for(token_hash, audience)
+            .await?
+            .authentication)
+    }
+
+    async fn authenticate_token_proof_for(
+        &self,
+        token_hash: &str,
+        audience: super::TokenAudience,
+    ) -> Result<crate::store::TokenAuthenticationProof, StoreError> {
         // A handoff token is never a row in `tokens`; its own table answers.
         if audience == super::TokenAudience::PlaybackHandoff {
-            return Ok(
-                match self
-                    .authenticate_playback_handoff("authenticate_token_for", token_hash)
-                    .await?
-                {
-                    Some(user) => TokenAuthentication::Authenticated(user),
-                    None => TokenAuthentication::Unknown,
-                },
-            );
+            return Ok(crate::store::TokenAuthenticationProof::uncached(match self
+                .authenticate_playback_handoff("authenticate_token_for", token_hash)
+                .await?
+            {
+                Some(user) => TokenAuthentication::Authenticated(user),
+                None => TokenAuthentication::Unknown,
+            }));
         }
         // The expiry policy rides the same consistent read as the token row:
         // no extra round trip per request, and every voter judges a token
@@ -7717,7 +7765,9 @@ impl UserStore for HiqliteAuthStore {
             )
             .await?;
         let Some(row) = rows.pop() else {
-            return Ok(TokenAuthentication::Unknown);
+            return Ok(crate::store::TokenAuthenticationProof::uncached(
+                TokenAuthentication::Unknown,
+            ));
         };
         let now = self.now()?;
         if let Some(policy) = row
@@ -7725,13 +7775,20 @@ impl UserStore for HiqliteAuthStore {
             .filter(|policy| policy.is_expired(row.last_seen_at, now))
         {
             // No activity refresh: touching an expired token would revive it.
-            return Ok(TokenAuthentication::Expired {
-                idle_days: policy.idle_days,
-            });
+            return Ok(crate::store::TokenAuthenticationProof::uncached(
+                TokenAuthentication::Expired {
+                    idle_days: policy.idle_days,
+                },
+            ));
         }
         self.refresh_token_activity_if_due(token_hash, row.last_seen_at, now)
             .await?;
-        Ok(TokenAuthentication::Authenticated(row.user.into()))
+        Ok(crate::store::TokenAuthenticationProof::authenticated(
+            row.user.into(),
+            now,
+            row.last_seen_at,
+            row.expiry,
+        ))
     }
 
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError> {

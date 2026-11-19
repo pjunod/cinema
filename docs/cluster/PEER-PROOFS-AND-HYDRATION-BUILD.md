@@ -87,9 +87,10 @@ B5 or B3a by itself.
 ## 7. General token proof admission
 
 `UserStore::authenticate_token_proof_for` will default to a normal
-Store-backed authentication with no reusable witness. SQLite and Hiqlite
-will return a committed token/policy witness from their existing joint
-statement. Its wall-clock expiry is the earlier of the policy's exact idle
+Store-backed authentication with no reusable witness. Hiqlite returns a
+committed token/policy witness from its existing joint statement. SQLite
+stays uncached because local Store writers do not carry the replicated
+rollback guards and have no quorum round to save. Its wall-clock expiry is the earlier of the policy's exact idle
 expiry and the next activity-refresh boundary (at most sixty seconds).
 Monotonic cache age also caps that lifetime, and a backwards wall clock
 refuses reuse. Playback handoff tokens retain their own path and no cache.
@@ -117,3 +118,10 @@ clock in `http/users.rs`; the latter initializes an absent clock before
 admission and cannot revoke an existing active cache. Tests must cover a
 policy tightening, stale authentication publication, mixed v4/v5 members,
 legacy raw policy SQL, audience separation and expiry at the exact boundary.
+
+The initial expiry clock now reads an existing setting before attempting
+its atomic seed. A no-op INSERT still runs BEFORE INSERT guards; avoiding
+that write preserves ordinary restarts without weakening the guard against
+`INSERT OR REPLACE`. A missing clock after permanent activation is refused
+rather than seeded around live proofs. User-role promotion also takes the
+existing user revocation bracket, so cached viewer roles are invalidated.

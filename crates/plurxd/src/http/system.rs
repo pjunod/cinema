@@ -4892,6 +4892,9 @@ pub async fn update_settings(
             .await?;
     }
     if req.auth_token_expiry.is_some() || req.auth_token_idle_days.is_some() {
+        let proof_revocation =
+            super::internal_auth_revocation::ClusterCacheRevocation::begin_token_policy(&state)
+                .await?;
         let mut values: Vec<(&str, String)> = Vec::new();
         if let Some(days) = req.auth_token_idle_days {
             values.push((keys::AUTH_TOKEN_IDLE_DAYS, days.to_string()));
@@ -4924,7 +4927,16 @@ pub async fn update_settings(
             .iter()
             .map(|(key, value)| (*key, value.as_str()))
             .collect::<Vec<_>>();
-        state.store.put_settings(&borrowed).await?;
+        let changed = state
+            .store
+            .put_auth_token_policy(&borrowed, proof_revocation.mutation_claim())
+            .await?;
+        proof_revocation.finish(&state).await?;
+        if !changed {
+            return Err(ApiError::Conflict(
+                "token policy lost its cache-revocation exclusion; retry the request".to_owned(),
+            ));
+        }
     }
     if let Some(on) = req.cinema_remote_invitations {
         // Readiness never rejects or rewrites the administrator's choice.

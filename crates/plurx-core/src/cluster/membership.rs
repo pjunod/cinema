@@ -193,7 +193,7 @@ const LEARNER_LIFECYCLE_CAPABILITY: &str = "learner_lifecycle_v1";
 /// protocol for process-local cache-only admin authorization. Unlike an
 /// activated Raft protocol this remains a rolling capability: consumers must
 /// stop using the cache whenever any committed member no longer proves it.
-const CACHE_ADMIN_REVOCATION_CAPABILITY: &str = "cache_admin_revocation_v4";
+const CACHE_ADMIN_REVOCATION_CAPABILITY: &str = "cache_admin_revocation_v5";
 #[cfg(test)]
 const LEGACY_CACHE_ADMIN_REVOCATION_V1_CAPABILITY: &str = "cache_admin_revocation_v1";
 #[cfg(test)]
@@ -804,6 +804,28 @@ const REQUIRE_CURRENT_CREDENTIAL_TOKEN_DELETE_SQL: &str =
      WHEN EXISTS (SELECT 1 FROM cluster_credential_guard_activation) \
        AND NOT EXISTS (SELECT 1 FROM cluster_credential_mutation_intents) \
      BEGIN SELECT RAISE(ABORT, 'credential mutation requires current binary'); END";
+const REQUIRE_CURRENT_AUTH_POLICY_INSERT_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_auth_policy_insert_guard \
+     BEFORE INSERT ON settings \
+     WHEN NEW.key IN ('auth.token_expiry_enabled', 'auth.token_idle_days', 'auth.token_expiry_since') \
+       AND EXISTS (SELECT 1 FROM cluster_credential_guard_activation) \
+       AND NOT EXISTS (SELECT 1 FROM cluster_credential_mutation_intents) \
+     BEGIN SELECT RAISE(ABORT, 'token policy mutation requires current binary'); END";
+const REQUIRE_CURRENT_AUTH_POLICY_UPDATE_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_auth_policy_update_guard \
+     BEFORE UPDATE OF key, value ON settings \
+     WHEN (NEW.key IN ('auth.token_expiry_enabled', 'auth.token_idle_days', 'auth.token_expiry_since') OR OLD.key IN ('auth.token_expiry_enabled', 'auth.token_idle_days', 'auth.token_expiry_since')) \
+       AND EXISTS (SELECT 1 FROM cluster_credential_guard_activation) \
+       AND NOT EXISTS (SELECT 1 FROM cluster_credential_mutation_intents) \
+     BEGIN SELECT RAISE(ABORT, 'token policy mutation requires current binary'); END";
+const REQUIRE_CURRENT_AUTH_POLICY_DELETE_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_auth_policy_delete_guard \
+     BEFORE DELETE ON settings \
+     WHEN OLD.key IN ('auth.token_expiry_enabled', 'auth.token_idle_days', 'auth.token_expiry_since') \
+       AND EXISTS (SELECT 1 FROM cluster_credential_guard_activation) \
+       AND NOT EXISTS (SELECT 1 FROM cluster_credential_mutation_intents) \
+     BEGIN SELECT RAISE(ABORT, 'token policy mutation requires current binary'); END";
+
 // Once the v3 local-apply acknowledgement has landed, a binary rollback must
 // not make an older heartbeat proof current again. Ignoring only the retired
 // capability statements lets the rest of an older heartbeat commit; equality
@@ -1070,6 +1092,9 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
     REQUIRE_CURRENT_CREDENTIAL_USER_DELETE_SQL,
     REQUIRE_CURRENT_CREDENTIAL_TOKEN_INSERT_SQL,
     REQUIRE_CURRENT_CREDENTIAL_TOKEN_DELETE_SQL,
+    REQUIRE_CURRENT_AUTH_POLICY_INSERT_SQL,
+    REQUIRE_CURRENT_AUTH_POLICY_UPDATE_SQL,
+    REQUIRE_CURRENT_AUTH_POLICY_DELETE_SQL,
     RETIRE_CACHE_ADMIN_V1_INSERT_SQL,
     RETIRE_CACHE_ADMIN_V1_UPDATE_SQL,
     RETIRE_CACHE_ADMIN_V2_INSERT_SQL,
