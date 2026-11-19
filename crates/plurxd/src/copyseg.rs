@@ -481,6 +481,7 @@ impl NativeSplitAuthor {
 /// layout. Each segment is added only after its two immutable objects land.
 #[derive(Default)]
 pub(crate) struct NativeSplitInventory {
+    startup_budget: u64,
     init_ids: std::sync::OnceLock<NativeSplitInitIds>,
     chosen: std::sync::OnceLock<bool>,
     reported_presentation: std::sync::atomic::AtomicBool,
@@ -531,6 +532,13 @@ pub(crate) struct NativeSplitEntry {
 }
 
 impl NativeSplitInventory {
+    pub(crate) fn with_startup_budget(startup_budget: u64) -> Self {
+        Self {
+            startup_budget,
+            ..Self::default()
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn seed_for_http_test(&self, count: u64) -> NativeSplitInitIds {
         let ids = NativeSplitInitIds {
@@ -679,6 +687,7 @@ struct SessionDir {
     dir: PathBuf,
     split_inventory: Option<std::sync::Arc<NativeSplitInventory>>,
     split_author: Option<NativeSplitAuthor>,
+    split_staged_bytes: u64,
     /// The `#EXTINF`/URI pairs, without the immutable header.
     entries: String,
     /// Media written so far, summed from every published segment's real
@@ -747,6 +756,7 @@ impl SessionDir {
             dir,
             split_inventory: None,
             split_author: None,
+            split_staged_bytes: 0,
             entries: String::new(),
             published_secs: 0.0,
             gate_secs,
@@ -923,7 +933,30 @@ impl SessionDir {
             .split_inventory
             .as_ref()
             .expect("split writer has inventory");
-        let active = inventory.active_ids().is_some();
+        let mut active = inventory.active_ids().is_some();
+        if inventory.chosen.get() == Some(&false) {
+            return Ok(false);
+        }
+        let (payload, largest) = files
+            .iter()
+            .fold((0u64, 0u64), |(total, largest), (_, bytes)| {
+                let size = bytes.len() as u64;
+                (total.saturating_add(size), largest.max(size))
+            });
+        if !active
+            && self
+                .split_staged_bytes
+                .saturating_add(payload)
+                .saturating_add(largest)
+                > inventory.startup_budget
+        {
+            // Never start either member of a pair with the original copy's
+            // startup grant. A selected layout already owns a live reserve.
+            active = inventory.choose(None).is_some();
+            if !active {
+                return Ok(false);
+            }
+        }
         self.optional_write = !active;
         for (name, bytes) in files {
             if let Err(error) = self.publish_file(name, bytes).await {
@@ -936,6 +969,7 @@ impl SessionDir {
             }
         }
         self.optional_write = false;
+        self.split_staged_bytes = self.split_staged_bytes.saturating_add(payload);
         Ok(true)
     }
 

@@ -2162,19 +2162,18 @@ impl TranscodeManager {
         // Keep the original mux and both role objects alive through their
         // ordinary grace. Reserve startup for both copies before exposing the
         // alternate layout so it cannot spend the incumbent's startup grant.
-        let split_startup_bytes = startup_bytes.saturating_mul(2);
-        let split_sizing = RollingScratchSizing::Startup(split_startup_bytes);
-        let split_reservation =
-            (native_split && segmenting && split_sizing.grant_bytes(limits) >= split_startup_bytes)
-                .then(|| self.reserve_rolling_scratch_with(split_sizing, limits))
-                .and_then(Result::ok);
+        let ordinary_sizing = RollingScratchSizing::Startup(startup_bytes);
+        let split_sizing = RollingScratchSizing::Startup(startup_bytes.saturating_mul(2));
+        let split_startup_budget = split_sizing
+            .grant_bytes(limits)
+            .saturating_sub(ordinary_sizing.grant_bytes(limits));
+        let split_reservation = (native_split && segmenting && split_startup_budget > 0)
+            .then(|| self.reserve_rolling_scratch_with(split_sizing, limits))
+            .and_then(Result::ok);
         let native_split = split_reservation.is_some();
         let scratch_reservation = match split_reservation {
             Some(reservation) => reservation,
-            None => self.reserve_rolling_scratch_with(
-                RollingScratchSizing::Startup(startup_bytes),
-                limits,
-            )?,
+            None => self.reserve_rolling_scratch_with(ordinary_sizing, limits)?,
         };
         let scratch_envelope = rolling_scratch_envelope(copy_bitrate, 1.0)
             .saturating_mul(if native_split { 2 } else { 1 });
@@ -2332,7 +2331,11 @@ impl TranscodeManager {
             cache_location: None,
             control,
             publication: Mutex::new(RollingPublicationClock::default()),
-            native_split: native_split.then(|| Arc::new(crate::copyseg::NativeSplitInventory::default())),
+            native_split: native_split.then(|| {
+                Arc::new(crate::copyseg::NativeSplitInventory::with_startup_budget(
+                    split_startup_budget as u64,
+                ))
+            }),
             publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
             file_id,
