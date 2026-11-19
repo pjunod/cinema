@@ -79,6 +79,12 @@ pre-vote to preserve mixed-version liveness. The port must explicitly enable
 and implement/authenticate that RPC, then test the mixed-version case; a
 version bump alone does not establish the intended C4 protection.
 
+The ordinary committed-follower timer is also longer than the current 5 s
+serving-session grace. Centralizing unchanged numbers does not establish
+that the grace covers an unplanned leader loss: timer anchors, proof expiry,
+term transitions, RPC arrival and scheduling must be observed together.
+The earlier 2.4–4 s estimate cannot justify that coverage claim.
+
 ## 4. Qualification — preserve failures and measure before tuning
 
 The isolated port must exercise all of these cases before retiring code:

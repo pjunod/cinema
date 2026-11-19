@@ -93,3 +93,24 @@ operation progress and worker refinement. Reviewed alias items retain their
 values, and explicit timing-module dependencies keep future shared-value
 changes inside the drift checks. No model or configuration changed; there
 is no new TLC execution claim.
+
+Strict replicated-core all-target Clippy passes after the new test's panic
+message was made explicit. The two existing Store recovery-envelope cases
+also pass. The default core build passes with its existing default-feature
+warnings. Documentation routing, facade-ratchet checks and all three formal
+mappings pass. Paperwork's sole new-file mapping failure was corrected and
+its catalog check passes.
+
+The daemon all-target check exposed the inherited macOS `dv_runtime`
+reference blocker and a test-only handoff-window import removed by this
+extraction. The fixture import is restored under `cfg(test)`. The build was
+then interrupted when the external drive filled; no completed daemon check
+is claimed. Root integration owns the next combined compiler run. Only this
+lane's inactive incremental cache was removed to reclaim space; source and
+receipts remain preserved.
+
+The exact committed-follower election timer found during C4 source review is
+also longer than the current 5 s session grace. The shared table exposes
+this relationship; it does not prove outage coverage or change the policy.
+Resolve the actual anchored deadline chain from measured failure evidence
+before describing the set of timers as mutually safe.

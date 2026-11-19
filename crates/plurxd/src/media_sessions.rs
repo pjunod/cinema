@@ -17,6 +17,8 @@ use plurx_core::cluster::clock::{
 };
 #[cfg(test)]
 use plurx_core::cluster::membership::MembershipManager;
+#[cfg(test)]
+use plurx_core::domain::MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS;
 use plurx_core::domain::{
     MediaSessionActivation, MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
     MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor, OwnedMediaSessionLease,
