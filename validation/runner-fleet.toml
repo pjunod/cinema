@@ -161,6 +161,14 @@ os = "Linux"
 arch = "X64"
 labels = ["lab", "android-kvm", "baremetal", "ubuntu-26.04"]
 
+# --- brix1: bounded repository general worker ---------------------------
+[[runners]]
+name = "gha-brix1-general-01"
+host = "brix1"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "general"]
+
 # --- lab6, lab3, lab4: Incus guest hosts, production plurx voters -------------
 [[runners]]
 name = "gha-lab6-general-02"
