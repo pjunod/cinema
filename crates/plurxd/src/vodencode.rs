@@ -980,16 +980,29 @@ impl Drop for FiniteSoftwareCompatibility {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub(crate) enum FiniteCompatibilityRefusal {
-    #[error("finite software compatibility pool is occupied")]
     Capacity,
-    #[error("the original finite software prepare deadline elapsed")]
     Deadline,
-    #[error("the original fragment index still owns capacity at the prepare deadline")]
     BackgroundYieldDeadline,
-    #[error("the original fragment index has unresolved cleanup and still owns capacity")]
     BackgroundCleanupUnknown,
+}
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Display for FiniteCompatibilityRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self {
+            Self::Capacity => "finite software compatibility pool is occupied",
+            Self::Deadline => "the original finite software prepare deadline elapsed",
+            Self::BackgroundYieldDeadline => {
+                "the original fragment index still owns capacity at the prepare deadline"
+            }
+            Self::BackgroundCleanupUnknown => {
+                "the original fragment index has unresolved cleanup and still owns capacity"
+            }
+        };
+        formatter.write_str(reason)
+    }
 }
 
 #[cfg(target_os = "linux")]
