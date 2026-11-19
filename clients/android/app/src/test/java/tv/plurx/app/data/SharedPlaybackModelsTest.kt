@@ -125,7 +125,8 @@ class SharedPlaybackModelsTest {
         val context = fetch(base)
         val session = "44444444-4444-4444-8444-444444444444"
         val bound = context.withSession(session)
-        val start = HlsStart(session_id = session, playlist_url = "/api/v1/hls/$session/master.m3u8?native=1&subtitle=2&diagnostic=video-only", vod = true,
+        val start = HlsStart(session_id = session, playlist_url = "/api/v1/hls/$session/master.m3u8?native=1&subtitle=2&diagnostic=video-only",
+            vod = true,
             control = tv.plurx.app.player.ControlBootstrap("plurx-playback-control-v1", "/api/v1/hls/$session/control", "55555555-5555-4555-8555-555555555555", 1, 1000, 5000))
         val wireStart = Json.encodeToJsonElement(start).jsonObject
         val sharedStart = SharedStart.decode(JsonObject(wireStart + mapOf("prior_kbps" to JsonPrimitive(4294967295L), "plan_notes" to buildJsonArray { add("retained") })).toString()).validated(bound)

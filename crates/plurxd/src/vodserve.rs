@@ -168,6 +168,7 @@ impl TrialClaim {
 
     /// The trial took its bundle with the reservation: the request is then
     /// kept to its deadline rather than its short refresh lifetime.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn mark_admitted(&self) {
         self.admitted
             .store(true, std::sync::atomic::Ordering::Release);

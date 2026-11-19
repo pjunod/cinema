@@ -5,7 +5,7 @@ impl VodServe {
     /// live Source-owned processed root in the same principal and hint scope;
     /// physical reservation and incarnation checks remain in the common
     /// capture helper below.
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(target_os = "linux")]
     pub(crate) async fn capture_source_processed_root(
         &self,
         request: &SessionRequest,

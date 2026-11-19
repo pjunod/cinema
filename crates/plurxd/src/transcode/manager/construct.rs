@@ -1577,6 +1577,7 @@ impl TranscodeManager {
     /// no viewer waits, and it yields only when a viewer waits for capacity
     /// or an offline download does (decision F), or exact playback qualification
     /// needs the lane; an existing playing session alone does not preempt it.
+    #[cfg(target_os = "linux")]
     pub(crate) async fn admit_dv_refit(&self, threads: usize) -> Option<FragmentAdmission> {
         if *self.playback_qualification_waiters.borrow() > 0
             || self.admissions.live_is_waiting()
@@ -1885,7 +1886,7 @@ impl TranscodeManager {
                 .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn subscribe_playback_qualification_waiters(
         &self,
     ) -> tokio::sync::watch::Receiver<usize> {

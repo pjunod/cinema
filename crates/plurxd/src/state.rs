@@ -4997,6 +4997,24 @@ impl JobManager {
     // A queued disk request is itself a fitting consumer. The title scanner
     // must first identify every displayed RPU as FEL or MEL; a legacy recipe
     // fact cannot authorize deletion of the enhancement layer.
+    async fn disk_refit_title(
+        &self,
+        file_id: i64,
+    ) -> Result<(String, plurx_core::scan::dv_title::DvTitleStats), String> {
+        use plurx_core::scan::dv_title::DvTitleStats;
+        let document = self
+            .store
+            .get_file_probe_json(file_id)
+            .await
+            .map_err(|e| format!("reading title facts for disk conversion: {e}"))?
+            .ok_or("complete title facts are not yet available")?;
+        let stats = DvTitleStats::from_probe_json(&document)
+            .filter(|stats| stats.complete)
+            .ok_or("complete title facts are not yet available")?;
+        Ok((document, stats))
+    }
+
+    #[cfg(target_os = "linux")]
     async fn disk_refit_ready(
         &self,
         file: &MediaFile,
@@ -5007,17 +5025,9 @@ impl JobManager {
         )>,
         String,
     > {
-        use plurx_core::scan::dv_title::{DvTitleStats, TitleConstant, TitleElKind};
+        use plurx_core::scan::dv_title::{TitleConstant, TitleElKind};
         use plurx_core::store::dv_refit_jobs::RefitVerdict;
-        let document = self
-            .store
-            .get_file_probe_json(file.id)
-            .await
-            .map_err(|e| format!("reading title facts for disk conversion: {e}"))?
-            .ok_or("complete title facts are not yet available")?;
-        let stats = DvTitleStats::from_probe_json(&document)
-            .filter(|stats| stats.complete)
-            .ok_or("complete title facts are not yet available")?;
+        let (document, stats) = self.disk_refit_title(file.id).await?;
         match stats.el_kind {
             TitleConstant::Consistent(TitleElKind::Mel) => return Ok(None),
             TitleConstant::Consistent(TitleElKind::Fel) => {}
@@ -5194,6 +5204,7 @@ impl JobManager {
                     return;
                 }
             };
+            #[cfg(target_os = "linux")]
             let fitted = match self.disk_refit_ready(&file).await {
                 Ok(fitted) => fitted,
                 Err(waiting) => {
@@ -5201,6 +5212,30 @@ impl JobManager {
                     return;
                 }
             };
+            #[cfg(not(target_os = "linux"))]
+            {
+                use plurx_core::scan::dv_title::{TitleConstant, TitleElKind};
+                let ready = self
+                    .disk_refit_title(file.id)
+                    .await
+                    .and_then(|(_, stats)| match stats.el_kind {
+                        TitleConstant::Consistent(TitleElKind::Mel) => Ok(()),
+                        TitleConstant::Consistent(TitleElKind::Fel) => {
+                            Err("waiting for a Linux host with the F+ helper".into())
+                        }
+                        _ => Err("waiting for a complete, consistent FEL or MEL title scan".into()),
+                    });
+                if let Err(waiting) = ready {
+                    tracing::info!(file_id, %waiting, "Dolby Vision disk conversion remains queued");
+                    return;
+                }
+            }
+            #[cfg(target_os = "linux")]
+            let fitted_input = fitted
+                .as_ref()
+                .map(|(table, tools)| (table, tools.scanner.as_path()));
+            #[cfg(not(target_os = "linux"))]
+            let fitted_input = None;
             match publisher
                 .mark_dv_conversion_running(file_id, file.size)
                 .await
@@ -5219,9 +5254,7 @@ impl JobManager {
                 self.coordinator.node_id(),
                 loss,
                 keep_original,
-                fitted
-                    .as_ref()
-                    .map(|(table, tools)| (table, tools.scanner.as_path())),
+                fitted_input,
             )
             .await
             {
@@ -5235,6 +5268,7 @@ impl JobManager {
             if loss.is_cancelled() {
                 return;
             }
+            #[cfg(target_os = "linux")]
             if let Some((table, tools)) = &fitted {
                 let still_current = tools.is_current().await
                     && self
