@@ -3,7 +3,7 @@
 **Updated:** 2026-11-16 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
-- **2026-11-18 · Settings → Cluster rebuilt:** owner Claude, branch `claude/cluster-settings-layout`. Status strip, alert slot, nodes table with per-node drawers, one settings list with advisory readiness chips, ledger, Maintenance, Backup, log; no folds or tabs. Web tests pass; Chromium baseline and PR still to come ([operator docs](docs/OPERATIONS.md)).
+- **2026-11-18 · Settings → Cluster rebuilt:** owner Claude, branch `claude/cluster-settings-layout`. Status strip, alert slot, nodes table with per-node drawers, one settings list with advisory readiness chips, ledger, Maintenance, Backup, log; no folds or tabs. PR #1798. ([operator docs](docs/OPERATIONS.md))
 
 - **2026-11-16 · Native prepared forward rendezvous:** owner GPT. New Moon's
   native seeks trailed 90–97 ms; buffered forward aim+existing hold preserves the guard.

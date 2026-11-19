@@ -6,7 +6,10 @@
 > two-up cards. The functions and storage key named below are history; see
 > [OPERATIONS.md](../OPERATIONS.md) §"The Cluster tab" for the current page.
 > The invariants in §4 (credential surface, repaint survival, server-owned
-> preconditions) still hold.
+> preconditions) still hold. The tick's `/cluster/nodes` read is no longer
+> limited to maintenance or recovery: it also runs on the 15 s status gate,
+> compared without heartbeat timestamps, so the roster no longer ages
+> unrefreshed on a healthy cluster.
 
 **Status:** ready to build · **Depends on:** PR #651 (`agent/cluster-operations-rail`,
 code head `7e417145`) — if it is not merged when you start, branch from its head ·

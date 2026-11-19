@@ -938,8 +938,8 @@ database**, **Maintenance** beside **Backup**, and the **Cluster log**. Nothing 
 browser, and it grows with the roster rather than scrolling inside a box.
 
 The header reads `<n> nodes · sampled <age>`; the age is the oldest direct
-sample and moves in place without a fetch. **Refresh** reloads the roster and
-the direct status together and keeps unsaved settings.
+sample and moves in place without a fetch. **Refresh** re-reads the roster and
+the direct status and repaints in place, keeping everything you chose.
 
 #### The status strip
 
@@ -957,11 +957,11 @@ the direct status together and keeps unsaved settings.
 | `Not clustered` (header; no strip) | This server is on unreplicated SQLite and has no membership. Normal and complete for one machine; there is nothing to fix. |
 | `One node` | Replicated, one voter. A supported configuration, not a half-built cluster. |
 | `Reconfiguring` | Two voters. Both are required for every write and membership change, so this survives no failure and is never redundancy. Add a third node. |
-| `Healthy` | Three or more voters, every heartbeat fresh. The sub-line names the majority and how many voters may be down. |
-| `Degraded` | A voter's heartbeat is stale; the alert names the host and what that now blocks. |
+| `Healthy` | Three or more voters, all fresh and directly observed. The sub-line names the majority and how many may be down. |
+| `Degraded` | A stale or unobserved voter, a blocked restart verdict or degraded replication; the alert says which. |
 | `Maintenance` | A node is fenced for planned maintenance. |
 | `Recovery required` | The committed heartbeats do not prove a reachable voter majority. Force election and membership changes are unavailable because neither can bypass quorum. |
-| `Status unavailable` | The roster could not be read. |
+| `Status unavailable` | The roster or direct status could not be read. |
 
 Precedence when several apply: recovery, maintenance, reconfiguring, degraded,
 healthy, one node. A heartbeat is a recent committed application heartbeat, not a direct socket
@@ -980,6 +980,7 @@ one sentence and its controls.
 - **Voter unreachable** (warn): which host, since when, how many more failures
   are tolerated, and what rolling restart is now blocked by.
 - **Status unavailable** (warn): the direct status failed; **Retry status**.
+- **Do not restart another voter** (warn): the verdict's blocker.
 - **Two-voter reconfiguration** (warn): two voters are not redundancy; add a
   third node.
 - **Refused operation** (bad): the server's refusal, kept until **Dismiss**.
@@ -988,7 +989,7 @@ one sentence and its controls.
 
 #### Nodes
 
-One row per member, reflowing into labelled cards at phone width. **Node** is
+One row per member, as labelled cards when the card is too narrow. **Node** is
 the short OS hostname with Leader, This node, Removal pending and read-worker
 pills and the advertised host beneath; then **Role** (`voter`, `joining voter`,
 `learner`), **Status**, **Heartbeat**, **Raft**, **WAL**, **Database**,
@@ -1022,7 +1023,7 @@ sources are never presented as the same thing.
 |---|---|
 | This node | **Enter maintenance** or **Resume service**, **Prepare for restart**, **Leave cluster…** |
 | Another voter | **Remove permanently…**; maintenance and restart run from that node itself |
-| A learner | **Promote to voter**, **Remove permanently…** |
+| A learner | **Promote to voter** (also its own row), **Remove permanently…** |
 
 A blocked action stays visible with the server's blocker beside it, so a
 refusal is something you read while deciding: a learner whose data root has not
@@ -1042,7 +1043,7 @@ One list, one **Save**, one request carrying all five switches: Remote media
 placement, Session takeover (under it), Local catalogue reads, Enforce clock
 guard and Shared subtitle tracks. **Transport recovery** is listed as `always
 on`. Each row's chip, such as `3 of 4 checks`, expands to the full description
-and each requirement's status and evidence exactly as the server reported it. It
+and each requirement's status, detail and the server's evidence verbatim. It
 counts only requirements the server reports a status for, and reads `checking…`
 or `checks unavailable` otherwise.
 
@@ -1051,7 +1052,7 @@ never refused for runtime state. Unsaved changes survive repaints and **Refresh*
 
 #### Replicated database
 
-The store, kept apart from the machines carrying it: a health pill and a ledger of backend, leader and term, quorum commit against this node's applied
+The store, apart from the machines carrying it: a health pill and a ledger of backend, leader and term, quorum commit against this node's applied
 index, behind-by, last converged, WAL, snapshots, database size, read capacity,
 protocol range and reading age (updated in place).
 
@@ -1059,7 +1060,7 @@ protocol range and reading age (updated in place).
 
 **Maintenance** holds the cluster-wide actions. **Rolling restart** states the
 verdict (one step, not a health badge) and, when blocked,
-every blocker and warning the server returned; **Prepare** appears only on the
+every blocker and warning; **Prepare** appears only on the
 candidate node, otherwise the row names the host to open. **Leader election** (more than one voter) opens the
 force-election dialog: a bounded campaign request, never a quorum override. **Diagnostics** downloads a support bundle or roster snapshot.
 
@@ -1078,17 +1079,16 @@ and nothing more.
 
 #### What the tab refreshes, and when
 
-The committed roster and the direct all-voter status are two different reads
-with two different costs. The roster is refetched every two seconds only while
-something is in flight: a node in maintenance, or a recovery in progress. The
-direct status behind the strip, the drawers and the ledger is collected at most
-every fifteen seconds while the tab is visible. It probes every voter, so it is
-not a two-second reading, and the restart-preparation flow that does need one
-keeps its own poll. Nothing is collected while the tab is hidden or on an unclustered machine, and
-a probe slower than the interval never overlaps.
+The direct all-voter status behind the strip, drawers and ledger is collected
+at most every fifteen seconds while the tab is visible, with the roster; the
+roster also every two seconds while a node is in maintenance or
+a recovery is in progress. The status probes every voter, so it is not a
+two-second reading; restart preparation keeps its own poll. Nothing is collected
+while the tab is hidden or on an unclustered machine, and a probe slower than
+the interval never overlaps.
 
 A collection is not a redraw. The page repaints only when something it shows has
-changed; ages are excluded from that comparison. A repaint keeps open drawers,
+changed; ages and heartbeats are excluded and patched in place. A repaint keeps open drawers,
 every control you have touched, the minted token and focus. It is deferred
 entirely while a dialog is open; the sample is held rather than stored, so what
 the page holds is always what it painted.

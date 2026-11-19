@@ -54,7 +54,13 @@ bump may break compatibility and a **patch** bump never does.
   and advisory readiness chips, the replicated database ledger, Maintenance,
   Backup and the log. Blocked actions keep their server-supplied reason beside
   the button, refused operations stay until dismissed, and nothing is remembered
-  in the browser any more. Settings, endpoints and permissions are unchanged.
+  in the browser any more. The roster is re-read with the direct status every
+  fifteen seconds, so a voter that stops answering shows without a Refresh, and
+  the page is not "Healthy" while the direct status shows an unobserved voter, a
+  blocked restart verdict or degraded replication. Refresh repaints in place and
+  keeps the join-token form, the log controls and unsaved settings. The nodes
+  table reflows into labelled cards whenever its card is too narrow for it.
+  Settings, endpoints and permissions are unchanged.
 
 ### Removed
 
