@@ -3,6 +3,14 @@ enforce_after = "e8a910f"
 
 # Await every submitted debounce task before counting tuner starts.
 [[fixes]]
+id = "android.retain-output-mid-playback-explicit-false"
+commits = ["ed051bacb3ddb899a667ea6b962b8526c79a0dc1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "data class RetainOutputReq(val retain_output: Boolean)"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/RetainOutputWireTest.kt"
+test_anchor = "midPlaybackOffBodyNamesTheField"
+
+[[fixes]]
 id = "apple.held-channel-key-task-settlement"
 commits = ["e64e399d847abbf97d000e04fb3c7d93001dbcc8"]
 source = "clients/apple/Sources/LiveTvView.swift"
@@ -39,7 +47,7 @@ test_anchor = "func testRefitPlaybackReportKeepsFittedGainAndIdentityReasonDisti
 [[fixes]]
 id = "dv-refit.web-advisory-platform-choices"
 commits = ["b1b8f83955256ece94461df2bf847a2dbe136dba"]
-source = "crates/plurxd/src/web/pages/settings-developer.js"
+source = 'crates/plurxd/src/web/pages/settings-playback.js'
 source_anchor = "function dolbyVisionRefitCard(settings,readiness)"
 test = "tests/web/settings-sections.test.js"
 test_anchor = "F+ curve switches are four independent, advisory, default-off choices"
@@ -511,14 +519,15 @@ source_anchor = 'XCTAssertEqual(pick(processed(grade: "sdr")), 720)'
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testProcessedHdr10PreferenceRequiresQualifiedProductionAndCodec"
 
+# The native Developer screen retired in PR #1802. Verify its removal and the replacements.
 [[fixes]]
 id = "https.apple-developer-graduation-fixture"
 commits = []
 supplements = "https.apple-unit-current-contracts"
 source = "clients/apple/Tests/LiveTvTests.swift"
-source_anchor = 'XCTAssertTrue(card.contains("graduates from Developer after those checks pass"), title)'
+source_anchor = 'XCTAssertFalse(settings.contains("Section(\"Developer\")"))'
 test = "clients/apple/Tests/LiveTvTests.swift"
-test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"
+test_anchor = 'testDeveloperIsGoneAndItsCardsLiveInTheirOwnSections'
 
 [[fixes]]
 id = "https.apple-native-adaptive-sidebar-fixture"
@@ -4821,7 +4830,7 @@ test_anchor = "sharedContinueWatchingKeepsFullSourceIdentityOrderAndRefusesOffli
 id = "sharing.android-advisory-qualification-status"
 commits = ["3dd492f8c"]
 source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedSharingSettingsScreen.kt"
-source_anchor = "Shared playback is implemented; private network, cluster recovery and physical-device qualification remain pending."
+source_anchor = 'Readiness never changes your selection or prevents Save.'
 test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
 test_anchor = "savedChoiceAndPendingEditSurviveUnknownReadiness"
 
@@ -5442,7 +5451,7 @@ test_anchor = "func testLetterIndexScrollsToOffscreenRowAndRepeatsAfterManualScr
 [[fixes]]
 id = "web.sharing-current-source-activation"
 commits = ["8177e7af8d42f17e8c8603b28662293f05a8b6a7"]
-source = "crates/plurxd/src/web/pages/settings-developer.js"
+source = 'crates/plurxd/src/web/pages/sharing-management.js'
 source_anchor = "Current Source activation"
 test = "tests/web/settings-sections.test.js"
 test_anchor = "Cinema sharing reports current activation during rolling upgrade without a restart gate"
@@ -6648,13 +6657,14 @@ source_anchor = "FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrang
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/HomeTopBarTest.kt"
 test_anchor = "liveTvAndSettingsFitNarrowPhonesAndLiveActionIsReachable"
 
+# The remote switch now lives in Remotes & devices.
 [[fixes]]
 id = "apple.cinema-developer-card-inventory"
 commits = ["7e38cadc0c73de80f73de23e66bd951371a16306"]
-source = "clients/apple/Sources/LiveTvSettingsView.swift"
-source_anchor = "Cinema remotes · advisory enablement"
+source = 'clients/apple/Sources/SettingsView.swift'
+source_anchor = 'Toggle("Enable Cinema remotes on this installation", isOn: $cinemaRemoteEnabled)'
 test = "clients/apple/Tests/LiveTvTests.swift"
-test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"
+test_anchor = 'testDeveloperIsGoneAndItsCardsLiveInTheirOwnSections'
 
 [[fixes]]
 id = "android.dolby-vision-profile-badge-parity"
@@ -6880,7 +6890,7 @@ test_anchor = "loginRehydratesNegotiatedCapabilitiesWithAutoOff"
 id = "android.manual-intent-without-display-aware-auto"
 commits = ["41e4f6956d98f06755a17bfbe5bd5bd9c819d1d7"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
-source_anchor = "private fun applyQualityIntent(body: CreateSessionReq): CreateSessionReq {"
+source_anchor = 'private fun applyQualityIntent(body: CreateSessionReq): CreateSessionReq ='
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
 test_anchor = "manualSessionCarriesIntentWithDisplayAwareAutoDisabled"
 
@@ -7777,14 +7787,15 @@ source_anchor = "// Keep the shared transport options contiguous in their contra
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerControlsFocusTest.kt"
 test_anchor = "transportOptionsFollowTheSharedContractOrder"
 
+# Diagnostic reporting now lives in Help.
 [[fixes]]
 id = "https.apple-developer-registry-matches-shipped-diagnostics"
 commits = []
 supplements = "https.qualification-client-corrections"
-source = "clients/apple/Sources/LiveTvSettingsView.swift"
-source_anchor = '"Remote diagnostics · advisory readiness",'
+source = 'clients/apple/Sources/SettingsView.swift'
+source_anchor = 'DiagnosticReportButton()'
 test = "clients/apple/Tests/LiveTvTests.swift"
-test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"
+test_anchor = 'testDeveloperIsGoneAndItsCardsLiveInTheirOwnSections'
 
 [[fixes]]
 id = "https.apple-auto-tick-source-contract-retains-parameterized-function"
