@@ -1,11 +1,11 @@
-name: BRIX general runner qualification
+name: Second BRIX general runner qualification
 on:
   push:
-    branches: [codex/brix01-ci-qualification]
+    branches: [codex/brix02-ci-qualification]
 jobs:
   operations:
     name: bounded Plurx operations tests
-    runs-on: [self-hosted, Linux, X64, lab, ci-brix-qualification]
+    runs-on: [self-hosted, Linux, X64, lab, ci-brix02-qualification]
     timeout-minutes: 15
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
