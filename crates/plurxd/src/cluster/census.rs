@@ -290,25 +290,19 @@ const EXEMPT: &[(&str, &str)] = &[
 /// `docs/cluster/CLUSTER-FACADE-BUILD.md` §10.
 #[rustfmt::skip]
 const REACH_AROUNDS: &[(&str, &str, usize)] = &[
-    ("background_jobs.rs", "role", 6),
     ("clock_offset.rs", "membership", 13),
     ("clock_offset.rs", "type", 2),
     ("desktop_control.rs", "membership", 2),
     ("desktop_control.rs", "replication", 4),
     ("dv_runtime.rs", "membership", 1),
-    ("http/background_jobs.rs", "role", 1),
     ("http/cluster_operations.rs", "membership", 42),
     ("http/cluster_operations.rs", "serving", 4),
     ("http/hls/relay.rs", "membership", 1),
     ("http/hls/relay.rs", "manager", 1),
-    ("http/images_worker.rs", "role", 1),
     ("http/live_tv.rs", "membership", 1),
     ("http/live_tv.rs", "manager", 1),
     ("http/stream.rs", "serving", 1),
     ("http/system.rs", "replication", 1),
-    ("http/transcode_copies.rs", "role", 1),
-    ("job_lease.rs", "role", 1),
-    ("library_search.rs", "role", 3),
     ("live_tv.rs", "serving", 13),
     ("live_tv/dvr.rs", "serving", 12),
     ("live_tv/resource.rs", "serving", 3),
@@ -317,24 +311,19 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("main.rs", "serving", 3),
     ("main.rs", "type", 5),
     ("main.rs", "manager", 8),
-    ("offline.rs", "role", 1),
     ("pgs_overlay.rs", "manager", 1),
     ("sharing.rs", "serving", 3),
     ("state.rs", "membership", 2),
     ("state.rs", "replication", 2),
     ("state.rs", "serving", 1),
     ("state.rs", "type", 6),
-    ("state.rs", "role", 8),
     ("state.rs", "manager", 1),
-    ("subtitle_work.rs", "role", 1),
     ("subtitles.rs", "manager", 2),
-    ("trakt.rs", "role", 1),
     ("waitpool.rs", "serving", 4),
-    ("watched.rs", "role", 1),
 ];
 
 /// The sum of [`REACH_AROUNDS`]; it may only fall.
-const CEILING: usize = 183;
+const CEILING: usize = 158;
 
 fn exempt(rel: &str) -> bool {
     EXEMPT.iter().any(|(path, _)| rel == *path)
@@ -1137,19 +1126,19 @@ fn a_new_reach_around_fails_naming_its_file_and_class() {
     let cases: &[(&str, &str, &[Class])] = &[
         (
             "direct",
-            "async fn f(state: &AppState) { let _ = state.membership.activity_peers().await; }",
-            &[Class::Membership, Class::Roster],
+            "async fn f(state: &AppState) { let _ = state.membership.promote_learner(id).await; }",
+            &[Class::Membership, Class::Manager],
         ),
         (
             "split across lines",
             "async fn f(state: &AppState) {\n    let _ = state\n        .membership\n        \
-             .activity_peers()\n        .await;\n}",
-            &[Class::Membership, Class::Roster],
+             .promote_learner(id)\n        .await;\n}",
+            &[Class::Membership, Class::Manager],
         ),
         (
             "a cloned field",
-            "impl Pool { async fn f(&self) { let _ = self.membership.media_peers().await; } }",
-            &[Class::Membership, Class::Roster],
+            "impl Pool { async fn f(&self) { let _ = self.membership.promote_learner(id).await; } }",
+            &[Class::Membership, Class::Manager],
         ),
         (
             "a transport",
@@ -1158,9 +1147,9 @@ fn a_new_reach_around_fails_naming_its_file_and_class() {
         ),
         (
             "inside a macro",
-            "async fn f(&self) { let _ = tokio::join!(self.membership.activity_peers(), \
+            "async fn f(&self) { let _ = tokio::join!(self.membership.promote_learner(id), \
              self.serving.is_ready()); }",
-            &[Class::Membership, Class::Roster, Class::Serving],
+            &[Class::Membership, Class::Manager, Class::Serving],
         ),
         (
             "a raw type",
