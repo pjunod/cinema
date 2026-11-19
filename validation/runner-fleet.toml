@@ -161,10 +161,17 @@ os = "Linux"
 arch = "X64"
 labels = ["lab", "android-kvm", "baremetal", "ubuntu-26.04"]
 
-# --- brix1: bounded repository general worker ---------------------------
+# --- brix1 and brix2: bounded repository general workers ---------------------------
 [[runners]]
 name = "gha-brix1-general-01"
 host = "brix1"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "general"]
+
+[[runners]]
+name = "gha-brix2-general-01"
+host = "brix2"
 os = "Linux"
 arch = "X64"
 labels = ["lab", "general"]
