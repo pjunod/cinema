@@ -982,9 +982,29 @@ impl ParentMediaReader {
     }
 }
 
+/// Original reader application ownership of one adopted finite route.
+#[derive(Default)]
+pub(super) struct AdoptedReaderTerminal(std::sync::atomic::AtomicU8);
+
+impl AdoptedReaderTerminal {
+    pub(super) fn attach(&self) -> bool {
+        self.0.compare_exchange(0, 1, AcqRel, Acquire).is_ok()
+    }
+
+    pub(super) fn finish_detach(&self) {
+        let _ = self.0.compare_exchange(1, 2, AcqRel, Acquire);
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn detached(&self) -> bool {
+        self.0.load(Acquire) == 2
+    }
+}
+
 /// One session handle (plan §2.5): auth attribution, sliding TTL, reader
 /// window, and — once it ends for good — a tombstone.
 pub(super) struct Session {
+    pub(super) adopted_reader: Option<Arc<AdoptedReaderTerminal>>,
     /// Cleared synchronously by the detached terminal cleanup owner before it
     /// publishes completion. The compact fields below retain exact 410/replay
     /// identity without retaining manifests, source handles, readers, or the

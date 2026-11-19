@@ -738,6 +738,7 @@ impl VodServe {
                             std::mem::take(&mut session.children),
                             session.rendition.take(),
                             session.root_admission.take(),
+                            session.adopted_reader.take(),
                         ))
                     } else {
                         if let Some(session) = sessions.get(&id) {
@@ -748,6 +749,7 @@ impl VodServe {
                                 std::mem::take(&mut session.children),
                                 session.rendition.take(),
                                 session.root_admission.take(),
+                                session.adopted_reader.take(),
                             )
                         })
                     }
@@ -755,14 +757,13 @@ impl VodServe {
                     None
                 }
             };
-            if let Some((children, rendition, root_admission)) = expired_session {
+            if let Some((children, rendition, root_admission, adopted_reader)) = expired_session {
                 let shared = Arc::clone(&self.shared);
                 let cleanup = spawn_cancellation_independent(async move {
                     // Keep the exact per-id gate through all child detaches.
                     // Cancelling maintain cannot let a same-id resurrection
                     // race the departed parent's still-attached reader graph.
                     let _lifecycle = lifecycle_guard;
-                    let _root_admission = root_admission;
                     for child in children {
                         child.detach(&shared.pool).await;
                     }
@@ -786,6 +787,11 @@ impl VodServe {
                             rendition = %rendition.key,
                             "vod session idle-reaped (sliding TTL)"
                         );
+                        drop(rendition);
+                        drop(root_admission);
+                        if let Some(reader) = adopted_reader {
+                            reader.finish_detach();
+                        }
                     }
                 });
                 let _ = cleanup.await;

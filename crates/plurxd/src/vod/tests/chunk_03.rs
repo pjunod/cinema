@@ -135,6 +135,38 @@ async fn processed_instance_abandoned_before_reader_attachment_is_reaped() {
 }
 
 #[tokio::test]
+async fn original_adopted_reader_marks_terminal_only_after_this_detach() {
+    let base = crate::test_tempdir().expect("adopted reader cleanup");
+    let serve = bare_serve(base.path());
+    let rendition = synthetic_rendition(base.path()).await;
+    let session_id = "adopted-reader-cleanup";
+    insert_control_session(&serve, session_id, Arc::clone(&rendition), Instant::now()).await;
+
+    let original = Arc::new(AdoptedReaderTerminal::default());
+    let unrelated = AdoptedReaderTerminal::default();
+    unrelated.finish_detach();
+    assert!(!unrelated.detached(), "no attachment never produces a reader receipt");
+    assert!(original.attach());
+    assert!(!original.attach(), "one marker belongs to one attached reader");
+    serve.shared.sessions.lock().await.get_mut(session_id).expect("original session").adopted_reader =
+        Some(Arc::clone(&original));
+    let pause = serve.arm_terminal_detach_pause_for_test();
+    let waiting = {
+        let serve = Arc::clone(&serve);
+        tokio::spawn(async move { serve.end(session_id, Terminal::Deleted).await })
+    };
+    let held = pause.reached().await;
+    waiting.abort();
+    assert!(!original.detached(), "tombstone and abandoned HTTP waiter are insufficient");
+    assert!(rendition.readers.lock().await.contains_key(session_id));
+    held.release();
+    assert!(serve.end(session_id, Terminal::Deleted).await);
+    assert!(!rendition.readers.lock().await.contains_key(session_id));
+    assert!(original.detached(), "the exact successful detach publishes the receipt");
+    assert!(!unrelated.detached());
+}
+
+#[tokio::test]
 async fn prepared_root_cancelled_end_keeps_capacity_through_detach_and_worker_reap() {
     let base = crate::test_tempdir().expect("root cleanup");
     let serve = bare_serve(base.path());
@@ -349,6 +381,7 @@ async fn resolved_vod_owner_cannot_commit_after_tombstone_or_reattachment() {
     serve.shared.sessions.lock().await.insert(
         "sess-a".into(),
         Session {
+            adopted_reader: None,
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,
@@ -408,6 +441,7 @@ async fn resolved_vod_owner_cannot_commit_after_tombstone_or_reattachment() {
     serve.shared.sessions.lock().await.insert(
         "sess-a".into(),
         Session {
+            adopted_reader: None,
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,
@@ -5157,6 +5191,7 @@ async fn materialize_watchdog_spans_http_retries_and_fails_typed() {
     serve.shared.sessions.lock().await.insert(
         "sess-a".into(),
         Session {
+            adopted_reader: None,
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,

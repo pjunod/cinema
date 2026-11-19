@@ -506,7 +506,7 @@ impl VodServe {
                 release_fence: None,
                 serving_admission: Some(serving_admission),
                 viewer: Some(viewer),
-                expected_attempt: Some(pending.rendition()),
+                expected_attempt: Some((pending.rendition(), pending.adopted_reader()?)),
             },
         )
         .await
@@ -2124,7 +2124,7 @@ impl VodServe {
                 settings,
                 fences.viewer.as_ref(),
                 None,
-                fences.expected_attempt,
+                fences.expected_attempt.map(|(rendition, _)| rendition),
                 !continuous,
             )
             .await?;
@@ -2350,6 +2350,9 @@ impl VodServe {
             ));
         }
         let mut replacement = Session {
+            adopted_reader: fences
+                .expected_attempt
+                .map(|(_, reader)| Arc::clone(reader)),
             children: Vec::new(),
             root_admission,
             processed_reuse_scope,
@@ -2435,6 +2438,22 @@ impl VodServe {
                 "the VOD session already has a terminal tombstone",
             ));
         }
+        if let Some(original) = sessions
+            .get(&session_id)
+            .and_then(|session| session.adopted_reader.as_ref())
+        {
+            if replacement
+                .adopted_reader
+                .as_ref()
+                .is_some_and(|incoming| Arc::ptr_eq(incoming, original))
+            {
+                return Ok(VodStart {
+                    session_id,
+                    duration_ms,
+                });
+            }
+            return Err("the original adopted VOD attachment still owns this session".into());
+        }
         let previous_rendition = sessions
             .get(&session_id)
             .and_then(|session| session.rendition.as_ref().map(Arc::clone));
@@ -2515,6 +2534,13 @@ impl VodServe {
         }
         let prepared_authority =
             rendition.prepare_client_reader(&session_id, start_entry, admission_priority)?;
+        if replacement
+            .adopted_reader
+            .as_ref()
+            .is_some_and(|reader| !reader.attach())
+        {
+            return Err("the original adopted VOD attachment was already spent".into());
+        }
         if let Some(previous_readers) = previous_readers.as_mut() {
             previous_readers.remove(&session_id);
             if previous_readers.is_empty() {
@@ -3246,6 +3272,7 @@ impl VodServe {
         let _lifecycle = lifecycle.lock().await;
         let duration_ms = plan_duration_ms(&rendition.plan);
         let replacement = Session {
+            adopted_reader: None,
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,
@@ -3331,6 +3358,12 @@ impl VodServe {
                 "vod_session_ended",
                 "the VOD session already has a terminal tombstone",
             ));
+        }
+        if sessions
+            .get(&session_id)
+            .is_some_and(|session| session.adopted_reader.is_some())
+        {
+            return Err("the original adopted VOD attachment still owns this session".into());
         }
         let previous_rendition = sessions
             .get(&session_id)

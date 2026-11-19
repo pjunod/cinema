@@ -702,6 +702,252 @@ async fn adopted_winner_does_not_block_exact_losing_worker_close() {
     .await;
 }
 
+#[tokio::test]
+async fn adopted_terminal_settlement_keeps_live_winner_and_replays_its_exact_close() {
+    for_each_adaptive_backend(|store, backend| async move {
+        let fixture = AttemptFixture::new(store.as_ref()).await;
+        let adoption = ready_adoption(store.as_ref(), &fixture).await;
+        assert_adopt_publishes_once_worker_publishes(store.as_ref(), backend, &adoption).await;
+        let binding = &adoption.binding;
+        let status = store
+            .adaptive_request_status(&binding.key, &binding.principal)
+            .await
+            .expect("adopted request read")
+            .expect("adopted request");
+        let winner = &status.attempts[0];
+        let close = AdoptedAttemptClose {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: status.sequence,
+                expected_attempt_sequence: winner.sequence,
+                now_ms: 20_100,
+            },
+            binding: adoption.binding.clone(),
+            key: adoption.key.clone(),
+            worker: adoption.worker.clone(),
+            adoption_operation_id: adoption.context.operation_id,
+        };
+        assert_eq!(
+            store
+                .close_adopted_adaptive_attempt(&close)
+                .await
+                .expect("active route"),
+            AttemptMutation::Refused(AttemptRefusal::StaleBinding),
+        );
+        let query = AttemptInventoryQuery {
+            worker_node_id: close.key.worker_node_id.clone(),
+            after_attempt_id: None,
+            limit: 8,
+        };
+        let inventory = store
+            .unclosed_adaptive_attempts(&query)
+            .await
+            .expect("worker inventory");
+        assert_eq!(inventory.entries.len(), 1);
+        assert_eq!(inventory.entries[0].attempt, *winner);
+
+        let route = store
+            .media_session_route_by_incarnation(&adoption.activation.incarnation_id)
+            .await
+            .expect("exact route read")
+            .expect("exact route");
+        let ended = store
+            .end_media_session_if_owner(&plurx_core::domain::MediaSessionEnd {
+                incarnation_id: route.incarnation_id,
+                session_id: route.session_id,
+                expected_owner_node_id: route.owner_node_id,
+                expected_owner_epoch: route.owner_epoch,
+                expected_lease_expires_at_ms: route.lease_expires_at_ms,
+                terminal_reason: "deleted".into(),
+                now_ms: 20_099,
+            })
+            .await
+            .expect("record original durable End")
+            .expect("same ended route");
+        assert_eq!(ended.state, "ended");
+        let mut successor = adoption.activation.clone();
+        successor.incarnation_id = Uuid::new_v4().to_string();
+        successor.session_id = Uuid::new_v4().to_string();
+        successor.request_id = None;
+        successor.owner_node_id = "successor-worker".into();
+        successor.now_ms = 20_099;
+        successor.lease_expires_at_ms = 25_000;
+        successor.publication_ready_at_ms = 0;
+        successor.response_json =
+            serde_json::json!({"session_id": &successor.session_id}).to_string();
+        let successor_route = store
+            .activate_media_session(&successor)
+            .await
+            .expect("activate a different current successor")
+            .expect("successor accepted")
+            .route;
+        let mut wrong = close.clone();
+        wrong.worker.worker_instance_id = Uuid::new_v4();
+        assert_eq!(
+            store
+                .close_adopted_adaptive_attempt(&wrong)
+                .await
+                .expect("wrong worker"),
+            AttemptMutation::Refused(AttemptRefusal::StaleBinding),
+        );
+        let mut wrong = close.clone();
+        wrong.adoption_operation_id = Uuid::new_v4();
+        assert_eq!(
+            store
+                .close_adopted_adaptive_attempt(&wrong)
+                .await
+                .expect("wrong Adopt UUID"),
+            AttemptMutation::Refused(AttemptRefusal::StaleBinding),
+        );
+        let ordinary = AttemptClose {
+            context: close.context.clone(),
+            binding: close.binding.clone(),
+            key: close.key.clone(),
+            worker_instance_id: close.worker.worker_instance_id,
+            serving_generation: close.worker.serving_generation,
+            cleanup_operation_id: close.adoption_operation_id,
+        };
+        assert_eq!(
+            store
+                .close_adaptive_attempt(&ordinary)
+                .await
+                .expect("ordinary Close"),
+            AttemptMutation::Refused(AttemptRefusal::WinnerLost),
+        );
+
+        let closed = applied(
+            store
+                .close_adopted_adaptive_attempt(&close)
+                .await
+                .expect("exact terminal Close"),
+        );
+        closed
+            .validate()
+            .expect("closed winner remains a valid adoption history");
+        assert_eq!(closed.winner_attempt_id, status.winner_attempt_id);
+        assert_eq!(closed.disposition, RequestDisposition::Adopted);
+        assert_eq!(closed.sequence, status.sequence + 1);
+        assert_eq!(closed.attempts[0].sequence, winner.sequence + 1);
+        assert_eq!(closed.attempts[0].phase, AttemptPhase::Closed);
+        assert_eq!(
+            closed.attempts[0].last_operation_id,
+            close.context.operation_id
+        );
+        let current = store
+            .media_session_route_for_playback(&binding.principal, &binding.playback_id)
+            .await
+            .expect("current route after old terminal")
+            .expect("successor still current");
+        assert_eq!(current, successor_route);
+        assert!(store
+            .unclosed_adaptive_attempts(&query)
+            .await
+            .expect("fresh inventory")
+            .entries
+            .is_empty());
+        assert_eq!(
+            store
+                .close_adopted_adaptive_attempt(&close)
+                .await
+                .expect("same terminal replay"),
+            AttemptMutation::Replay(closed),
+        );
+        assert_eq!(
+            store
+                .close_adaptive_attempt(&ordinary)
+                .await
+                .expect("history action payload collision"),
+            AttemptMutation::Refused(AttemptRefusal::Conflict),
+        );
+    })
+    .await;
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+async fn adopted_terminal_cleanup_transition_is_atomic_and_lost_reply_replays() {
+    use plurx_core::store::adaptive_resource_attempts::validation::{self, TransactionFault};
+    with_adaptive_cluster(|cluster| {
+        Box::pin(async move {
+            let store = cluster.open_store().await;
+            let fixture = AttemptFixture::new(&store).await;
+            let adoption = ready_adoption(&store, &fixture).await;
+            assert_adopt_publishes_once_worker_publishes(&store, "hiqlite-3-voter", &adoption)
+                .await;
+            let binding = &adoption.binding;
+            let status = store
+                .adaptive_request_status(&binding.key, &binding.principal)
+                .await
+                .expect("known Adopt")
+                .expect("request");
+            let route = store
+                .media_session_route_by_incarnation(&adoption.activation.incarnation_id)
+                .await
+                .expect("original route read")
+                .expect("original route");
+            store
+                .end_media_session_if_owner(&plurx_core::domain::MediaSessionEnd {
+                    incarnation_id: route.incarnation_id,
+                    session_id: route.session_id,
+                    expected_owner_node_id: route.owner_node_id,
+                    expected_owner_epoch: route.owner_epoch,
+                    expected_lease_expires_at_ms: route.lease_expires_at_ms,
+                    terminal_reason: "deleted".into(),
+                    now_ms: 20_099,
+                })
+                .await
+                .expect("durable End")
+                .expect("same ended route");
+            let close = AdoptedAttemptClose {
+                context: MutationContext {
+                    operation_id: Uuid::new_v4(),
+                    expected_request_sequence: status.sequence,
+                    expected_attempt_sequence: status.attempts[0].sequence,
+                    now_ms: 20_100,
+                },
+                binding: adoption.binding.clone(),
+                key: adoption.key,
+                worker: adoption.worker,
+                adoption_operation_id: adoption.context.operation_id,
+            };
+            assert!(validation::close_adopted_hiqlite(
+                &store,
+                &close,
+                TransactionFault::FinalAssertion
+            )
+            .await
+            .is_err());
+            assert_eq!(
+                store
+                    .adaptive_request_status(&binding.key, &binding.principal)
+                    .await
+                    .expect("no half-closed replay"),
+                Some(status)
+            );
+            assert!(validation::close_adopted_hiqlite(
+                &store,
+                &close,
+                TransactionFault::LostAcknowledgement
+            )
+            .await
+            .is_err());
+            let replay = store
+                .close_adopted_adaptive_attempt(&close)
+                .await
+                .expect("exact terminal replay");
+            let AttemptMutation::Replay(replayed) = replay else {
+                panic!("expected replay: {replay:?}")
+            };
+            assert_eq!(replayed.attempts[0].phase, AttemptPhase::Closed);
+            assert_eq!(
+                replayed.attempts[0].last_operation_id,
+                close.context.operation_id
+            );
+        })
+    })
+    .await;
+}
+
 async fn ready_adoption(store: &dyn Store, fixture: &AttemptFixture) -> AdaptiveAdoption {
     ready_adoption_recipe(store, fixture, "{}").await
 }

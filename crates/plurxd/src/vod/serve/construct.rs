@@ -326,6 +326,7 @@ impl VodServe {
         self.shared.sessions.lock().await.insert(
             session_id.to_owned(),
             Session {
+                adopted_reader: None,
                 children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,

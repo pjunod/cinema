@@ -86,6 +86,14 @@ pub async fn adopt_hiqlite(
     transactions::adopt(&Fault { store, fault }, input).await
 }
 
+pub async fn close_adopted_hiqlite(
+    store: &crate::store::HiqliteAuthStore,
+    input: &AdoptedAttemptClose,
+    fault: TransactionFault,
+) -> Result<AttemptMutation, StoreError> {
+    transactions::close_adopted(&Fault { store, fault }, input).await
+}
+
 /// Prefix for the existing feature-only EXCLUSIVE contract reset. This is not
 /// a normal mutation or a route to Closed. It destroys only the test database's
 /// retained fixture history, reinstalls all guards in the SAME transaction and

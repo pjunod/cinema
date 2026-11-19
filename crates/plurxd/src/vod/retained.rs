@@ -3065,6 +3065,7 @@ mod tests {
                 .expect("verified incoming cached attachment")
         };
         let session = Session {
+            adopted_reader: None,
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,

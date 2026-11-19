@@ -2933,6 +2933,7 @@ async fn status_describes_vod_without_touching_its_idle_lease() {
     serve.shared.sessions.lock().await.insert(
         "sess-a".into(),
         Session {
+            adopted_reader: None,
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,
@@ -3087,6 +3088,7 @@ async fn a_far_seek_reports_the_frontier_the_client_can_actually_fetch() {
     serve.shared.sessions.lock().await.insert(
         "sess-a".into(),
         Session {
+            adopted_reader: None,
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,

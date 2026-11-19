@@ -237,11 +237,64 @@ pub(crate) struct PreparedAttemptRendition {
     build_guard: Option<RenditionBuildGuard>,
     original_driver_registered: bool,
     cleanup: Option<PreparedAttemptCleanup>,
+    adopted_terminal: Option<AdoptedFiniteTerminal>,
     // Last: the original core charge stays live until every rich field above
     // and the detached abandoned-owner transfer have been destroyed.
     application_lease:
         Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteApplicationLease>,
     installed: bool,
+}
+
+/// Original finite producer and its exact attached reader. Holding the
+/// observation neither keeps the R graph alive nor grants native release.
+#[cfg(target_os = "linux")]
+pub(crate) struct AdoptedFiniteTerminal {
+    slot: Option<OrdinarySlot>,
+    producer: std::sync::Weak<super::finite_software::FiniteSoftwareProducer>,
+    reader: Arc<AdoptedReaderTerminal>,
+}
+
+/// Local positive observation from the original finite owner only.
+#[cfg(target_os = "linux")]
+pub(crate) struct ConfirmedAdoptedFiniteTerminal(());
+
+#[cfg(target_os = "linux")]
+impl AdoptedFiniteTerminal {
+    pub(crate) fn reader_marker_requested_bytes() -> usize {
+        std::mem::size_of::<([usize; 2], AdoptedReaderTerminal)>()
+    }
+
+    pub(crate) fn reader_detached(&self) -> bool {
+        self.reader.detached()
+    }
+
+    pub(crate) async fn positively_closed(
+        &self,
+    ) -> Result<Option<ConfirmedAdoptedFiniteTerminal>, String> {
+        if !self.reader_detached() {
+            return Ok(None);
+        }
+        if self
+            .slot
+            .as_ref()
+            .is_some_and(OrdinarySlot::original_native_closed)
+        {
+            return Ok(Some(ConfirmedAdoptedFiniteTerminal(())));
+        }
+        let Some(producer) = self.producer.upgrade() else {
+            return Ok(None);
+        };
+        if !producer.retained_without_producer() || !producer.original_driver_finished() {
+            return Ok(None);
+        }
+        // RETAINED follows the original known conserving R→S commit; the
+        // exact task handle also has to return successfully. S stays owned.
+        producer
+            .join_installed_driver()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(Some(ConfirmedAdoptedFiniteTerminal(())))
+    }
 }
 
 /// The exact existing finite-closing owner, retained independently of the
@@ -499,6 +552,19 @@ impl PreparedAttemptRendition {
         {
             return Err("adaptive selected route is outside the finite AVC profile".into());
         }
+        if self.adopted_terminal.is_none() {
+            let producer = self
+                .rendition()
+                .dir
+                .finite_producer()
+                .ok_or("adaptive adoption lost its original finite producer")?;
+            let slot = producer.collector_slot();
+            self.adopted_terminal = Some(AdoptedFiniteTerminal {
+                slot,
+                producer: Arc::downgrade(&producer),
+                reader: Arc::new(AdoptedReaderTerminal::default()),
+            });
+        }
         self.install_after_adoption().await?;
         let rendition = self.rendition();
         let file = &rendition.recipe.file;
@@ -543,6 +609,21 @@ impl PreparedAttemptRendition {
             self,
         )
         .await
+    }
+
+    pub(super) fn adopted_reader(&self) -> Result<&Arc<AdoptedReaderTerminal>, String> {
+        self.adopted_terminal
+            .as_ref()
+            .map(|original| &original.reader)
+            .ok_or_else(|| "adaptive attachment has no original reader selector".into())
+    }
+
+    pub(crate) fn adopted_terminal(&self) -> Option<&AdoptedFiniteTerminal> {
+        self.adopted_terminal.as_ref()
+    }
+
+    pub(crate) fn take_adopted_terminal(&mut self) -> Option<AdoptedFiniteTerminal> {
+        self.adopted_terminal.take()
     }
 
     pub(crate) fn planned_duration_ms(&self) -> i64 {
@@ -1378,6 +1459,7 @@ impl Shared {
             build_guard: Some(build_guard),
             original_driver_registered: false,
             cleanup: Some(cleanup),
+            adopted_terminal: None,
             application_lease: Some(application_lease),
             installed: false,
         })

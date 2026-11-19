@@ -101,6 +101,16 @@ macro_rules! impl_attempt_store {
             > {
                 crate::store::adaptive_resource_attempts::transactions::close(self, input).await
             }
+            async fn close_adopted_adaptive_attempt(
+                &self,
+                input: &crate::store::adaptive_resource_attempts::AdoptedAttemptClose,
+            ) -> Result<
+                crate::store::adaptive_resource_attempts::AttemptMutation,
+                crate::error::StoreError,
+            > {
+                crate::store::adaptive_resource_attempts::transactions::close_adopted(self, input)
+                    .await
+            }
             async fn adaptive_request_status(
                 &self,
                 key: &crate::store::adaptive_resource_attempts::RequestKey,
@@ -464,14 +474,24 @@ struct Operation<'a> {
 }
 
 impl Operation<'_> {
+    fn durable_action(&self) -> &'static str {
+        if self.action == "close-adopted" {
+            "close"
+        } else {
+            self.action
+        }
+    }
+
     fn validate(&self) -> Result<(), StoreError> {
         self.context.validate()?;
         self.key.validate(self.binding)
     }
     fn claim(&self) -> Result<String, StoreError> {
-        encode(
-            &serde_json::json!({"operation_id":self.context.operation_id,"action":self.action,"owner_key":self.binding.principal.owner_key(),"request_id":self.binding.key.request_id,"request_incarnation_id":self.binding.key.request_incarnation_id,"attempt_id":self.key.attempt_id,"route_incarnation_id":self.key.route_incarnation_id,"session_id":self.key.session_id,"owner_epoch":self.key.owner_epoch,"expected_request_sequence":self.context.expected_request_sequence,"expected_attempt_sequence":self.context.expected_attempt_sequence,"payload_digest":self.payload}),
-        )
+        let mut claim = serde_json::json!({"operation_id":self.context.operation_id,"action":self.durable_action(),"owner_key":self.binding.principal.owner_key(),"request_id":self.binding.key.request_id,"request_incarnation_id":self.binding.key.request_incarnation_id,"attempt_id":self.key.attempt_id,"route_incarnation_id":self.key.route_incarnation_id,"session_id":self.key.session_id,"owner_epoch":self.key.owner_epoch,"expected_request_sequence":self.context.expected_request_sequence,"expected_attempt_sequence":self.context.expected_attempt_sequence,"payload_digest":self.payload});
+        if self.action == "close-adopted" {
+            claim["adopted_terminal"] = serde_json::Value::Bool(true);
+        }
+        encode(&claim)
     }
     fn open(&self, layout: Layout, outage: schema::OutageFence) -> Result<Vec<String>, StoreError> {
         let claim = quote(&self.claim()?);
@@ -480,12 +500,12 @@ impl Operation<'_> {
     fn finish(&self, statements: &mut Vec<String>) -> Result<(), StoreError> {
         // SQL no-ops cannot mint history: both projections must advance.
         statements.push(schema::assertion(&format!("EXISTS(SELECT 1 FROM media_resource_requests r WHERE {} AND r.sequence={} AND r.last_operation_id={} AND r.last_payload_digest={}) AND EXISTS(SELECT 1 FROM media_resource_attempts a WHERE a.attempt_id={} AND a.key_json={} AND a.sequence={} AND a.last_operation_id={} AND a.last_payload_digest={})", request_predicate(self.binding,"r"),self.context.expected_request_sequence+1,quote(&self.context.operation_id.to_string()),quote(&self.payload),quote(&self.key.attempt_id.to_string()),quote(&encode(self.key)?),self.context.expected_attempt_sequence+1,quote(&self.context.operation_id.to_string()),quote(&self.payload))));
-        let history = if self.action == "close" {
+        let history = if self.durable_action() == "close" {
             "media_resource_close_operations"
         } else {
             "media_resource_operations"
         };
-        statements.push(format!("INSERT INTO {history}(operation_id,owner_key,request_id,request_incarnation_id,attempt_id,action,payload_digest,request_sequence,attempt_sequence) VALUES({},{},{},{},{},{},{},{},{})",quote(&self.context.operation_id.to_string()),quote(&self.binding.principal.owner_key()),quote(&self.binding.key.request_id),quote(&self.binding.key.request_incarnation_id.to_string()),quote(&self.key.attempt_id.to_string()),quote(self.action),quote(&self.payload),self.context.expected_request_sequence+1,self.context.expected_attempt_sequence+1));
+        statements.push(format!("INSERT INTO {history}(operation_id,owner_key,request_id,request_incarnation_id,attempt_id,action,payload_digest,request_sequence,attempt_sequence) VALUES({},{},{},{},{},{},{},{},{})",quote(&self.context.operation_id.to_string()),quote(&self.binding.principal.owner_key()),quote(&self.binding.key.request_id),quote(&self.binding.key.request_incarnation_id.to_string()),quote(&self.key.attempt_id.to_string()),quote(self.durable_action()),quote(&self.payload),self.context.expected_request_sequence+1,self.context.expected_attempt_sequence+1));
         let claim = quote(&self.claim()?);
         statements.push(format!("UPDATE media_resource_schema SET mutation_claim=NULL,revision=revision+1 WHERE singleton=1 AND mutation_claim={claim} AND revision<9223372036854775807"));
         statements.push(schema::assertion("EXISTS(SELECT 1 FROM media_resource_schema WHERE singleton=1 AND mutation_claim IS NULL)"));
@@ -504,7 +524,7 @@ async fn replay<B: Backend>(
         &operation.binding.key.request_id,
         operation.binding.key.request_incarnation_id.to_string(),
         operation.key.attempt_id.to_string(),
-        operation.action,
+        operation.durable_action(),
         &operation.payload,
     ))?;
     match rows.as_slice() {
@@ -542,7 +562,7 @@ async fn admit<B: Backend>(
     if let Some(result) = replay(store, operation).await? {
         return Ok(Some(result));
     }
-    if !matches!(operation.action, "fence" | "winner" | "close")
+    if !matches!(operation.durable_action(), "fence" | "winner" | "close")
         && operation.context.now_ms >= operation.binding.original_deadline_ms
     {
         return Ok(Some(AttemptMutation::Refused(AttemptRefusal::Expired)));
@@ -918,5 +938,97 @@ pub(crate) async fn close<B: Backend>(
     statements.push(advance_attempt(&operation, ",phase='closed'"));
     statements.push(advance_request(&operation, ""));
     statements.push(schema::assertion(&format!("EXISTS(SELECT 1 FROM media_sessions WHERE incarnation_id={route} AND state='ended' AND lease_expires_at_ms<={now}) AND EXISTS(SELECT 1 FROM job_leases WHERE resource={lease} AND expires_at_ms<={now})")));
+    execute(store, &operation, statements).await
+}
+
+/// Settle only the exact adopted winner after its ordinary durable End.
+/// The original application owner supplies the physical terminal separately.
+pub(crate) async fn close_adopted<B: Backend>(
+    store: &B,
+    input: &AdoptedAttemptClose,
+) -> Result<AttemptMutation, StoreError> {
+    input.validate()?;
+    let operation = Operation {
+        context: &input.context,
+        binding: &input.binding,
+        key: &input.key,
+        action: "close-adopted",
+        payload: payload("close-adopted", input)?,
+    };
+    if let Some(result) = admit(store, &operation).await? {
+        return Ok(result);
+    }
+    let Some(current) = status(store, &input.binding.key, &input.binding.principal).await? else {
+        return Ok(AttemptMutation::Refused(AttemptRefusal::StaleBinding));
+    };
+    if current.binding != input.binding {
+        return Ok(AttemptMutation::Refused(AttemptRefusal::Conflict));
+    }
+    let Some(attempt) = current
+        .attempts
+        .iter()
+        .find(|record| record.key == input.key)
+    else {
+        return Ok(AttemptMutation::Refused(AttemptRefusal::StaleBinding));
+    };
+    if current.disposition != RequestDisposition::Adopted
+        || current.winner_attempt_id != Some(input.key.attempt_id)
+        || attempt.phase != AttemptPhase::Winner
+    {
+        return Ok(AttemptMutation::Refused(AttemptRefusal::WinnerLost));
+    }
+    if current.sequence != input.context.expected_request_sequence
+        || attempt.sequence != input.context.expected_attempt_sequence
+        || attempt.worker.as_ref() != Some(&input.worker)
+        || attempt.last_operation_id != input.adoption_operation_id
+        || input.context.now_ms < attempt.updated_at_ms
+    {
+        return Ok(AttemptMutation::Refused(AttemptRefusal::StaleBinding));
+    }
+
+    let layout = store.attempt_layout().await?;
+    let outage = store.attempt_outage_fence();
+    let key = &input.key;
+    let binding = &input.binding;
+    let now = input.context.now_ms;
+    let winner = quote(&key.attempt_id.to_string());
+    let route = quote(&key.route_incarnation_id.to_string());
+    let session = quote(&key.session_id.to_string());
+    let owner = quote(&binding.principal.owner_key());
+    let node = quote(&key.worker_node_id);
+    let owner_epoch = key.owner_epoch;
+    let route_owner = layout.owner("s");
+    let user = binding.principal.local_user_id().ok_or_else(invalid)?;
+    let lease = quote(&format!("session:{}", key.route_incarnation_id));
+    let worker = quote(&encode(&input.worker)?);
+    let adopted = quote(&input.adoption_operation_id.to_string());
+    let playback = quote(&binding.playback_id);
+    let request_fingerprint = quote(&binding.request_fingerprint);
+    let recovery_epoch = quote(&binding.recovery_epoch.to_string());
+    let ended = format!("EXISTS(SELECT 1 FROM media_sessions s JOIN job_leases l ON l.resource={lease} WHERE s.incarnation_id={route} AND s.session_id={session} AND {route_owner}={owner} AND s.user_id={user} AND s.playback_id={playback} AND s.request_fingerprint={request_fingerprint} AND s.recovery_epoch={recovery_epoch} AND s.owner_node_id={node} AND s.owner_epoch={owner_epoch} AND s.state='ended' AND s.publication_ready_at_ms={} AND s.lease_expires_at_ms<={now} AND s.updated_at_ms<={now} AND l.owner_node_id={node} AND l.fence={owner_epoch} AND l.expires_at_ms<={now}) AND NOT EXISTS(SELECT 1 FROM media_playback_pointers WHERE current_incarnation_id={route})",crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED);
+    let rows = store
+        .attempt_read(format!(
+            "SELECT CASE WHEN ({}) THEN json_quote(({ended})) ELSE 'unavailable' END AS payload",
+            schema::ready_guard_for(layout, outage)
+        ))
+        .await?;
+    match rows.as_slice() {
+        [row] if row == "1" => {}
+        [row] if row == "0" => return Ok(AttemptMutation::Refused(AttemptRefusal::StaleBinding)),
+        _ => return Err(invalid()),
+    }
+
+    let mut statements = operation.open(layout, outage)?;
+    let request = request_predicate(binding, "r");
+    statements.push(schema::assertion(&format!("({}) AND ({}) AND EXISTS(SELECT 1 FROM media_resource_requests r WHERE {request} AND r.disposition='adopted' AND r.winner_attempt_id={winner}) AND EXISTS(SELECT 1 FROM media_resource_attempts a JOIN media_resource_operations op ON op.operation_id=a.last_operation_id WHERE a.attempt_id={winner} AND a.phase='winner' AND a.worker_json={worker} AND a.last_operation_id={adopted} AND a.last_payload_digest=op.payload_digest AND op.action='adopt' AND op.attempt_id={winner} AND op.owner_key=a.owner_key AND op.request_id=a.request_id AND op.request_incarnation_id=a.request_incarnation_id AND a.updated_at_ms<={now}) AND ({ended})",exact_request(&operation)?,exact_attempt(&operation)?)));
+    // The installed trigger already admits a scoped phase-only change
+    // into Cleanup. From there its original Close guard still applies.
+    // Both updates and the immutable result are in the SAME transaction.
+    // Only the actual close advances the two CAS sequences.
+    let sequence = input.context.expected_attempt_sequence;
+    statements.push(format!("UPDATE media_resource_attempts SET phase='cleanup' WHERE attempt_id={winner} AND phase='winner' AND sequence={sequence} AND last_operation_id={adopted}"));
+    statements.push(schema::assertion(&format!("EXISTS(SELECT 1 FROM media_resource_attempts WHERE attempt_id={winner} AND phase='cleanup' AND sequence={sequence} AND last_operation_id={adopted})")));
+    statements.push(advance_attempt(&operation, ",phase='closed'"));
+    statements.push(advance_request(&operation, ""));
     execute(store, &operation, statements).await
 }

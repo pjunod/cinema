@@ -544,6 +544,20 @@ impl OrdinarySlot {
     pub(in crate::adaptive_resources::runtime) fn wake_failure(&self) {
         self.control.changed.notify_waiters();
     }
+    /// Observe exact accepted R cleanup, excluding an unbound cancellation
+    /// and retained shutdown. This lease pins the original record generation.
+    pub fn original_native_closed(&self) -> bool {
+        self.payload.records[self.index]
+            .meta
+            .lock()
+            .is_ok_and(|meta| {
+                meta.generation == self.generation
+                    && meta.identity.is_some()
+                    && matches!(meta.phase, Phase::Completed | Phase::Terminal)
+                    && meta.original.is_none()
+            })
+    }
+
     /// Observation only; Native close authority remains in the stored ticket.
     pub async fn wait_terminal(
         &self,

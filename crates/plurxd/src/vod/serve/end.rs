@@ -211,6 +211,7 @@ impl VodServe {
             // rendition/media/process graph. A resurrected replacement has a
             // different cleanup pointer and is left untouched.
             let mut sessions = serve.shared.sessions.lock().await;
+            let mut adopted_reader = None;
             if let Some(session) = sessions.get_mut(&session_id) {
                 let exact_cleanup = session
                     .terminal_cleanup
@@ -223,6 +224,7 @@ impl VodServe {
                 if session.tombstone.is_some() && exact_cleanup && exact_rendition {
                     session.rendition = None;
                     session.retained_output = None;
+                    adopted_reader = session.adopted_reader.take();
                 }
             }
             drop(sessions);
@@ -243,6 +245,11 @@ impl VodServe {
             // observes completion cannot still race this future's teardown.
             drop(rendition);
             drop(serve);
+            #[cfg(target_os = "linux")]
+            drop(_finite_cleanup_slot);
+            if let Some(reader) = adopted_reader {
+                reader.finish_detach();
+            }
         });
     }
 

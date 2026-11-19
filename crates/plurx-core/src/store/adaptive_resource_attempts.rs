@@ -171,6 +171,18 @@ pub struct AttemptClose {
     pub cleanup_operation_id: Uuid,
 }
 
+/// An exact worker-local terminal settlement for a previously adopted winner.
+/// Created by the original physical/application owner; there is no wire
+/// decoder or resource refund capability in this Store input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AdoptedAttemptClose {
+    pub context: MutationContext,
+    pub binding: RequestBinding,
+    pub key: AttemptKey,
+    pub worker: WorkerBinding,
+    pub adoption_operation_id: Uuid,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptPhase {
@@ -313,6 +325,10 @@ pub trait AdaptiveResourceAttemptStore: Send + Sync {
     async fn close_adaptive_attempt(
         &self,
         close: &AttemptClose,
+    ) -> Result<AttemptMutation, StoreError>;
+    async fn close_adopted_adaptive_attempt(
+        &self,
+        close: &AdoptedAttemptClose,
     ) -> Result<AttemptMutation, StoreError>;
     async fn adaptive_request_status(
         &self,
@@ -491,6 +507,20 @@ impl AttemptClose {
         self.context.validate()?;
         self.key.validate(&self.binding)?;
         if self.worker_instance_id.is_nil() || self.cleanup_operation_id.is_nil() {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+
+impl AdoptedAttemptClose {
+    fn validate(&self) -> Result<(), StoreError> {
+        self.context.validate()?;
+        self.key.validate(&self.binding)?;
+        self.worker.validate(&self.binding, &self.key)?;
+        if self.adoption_operation_id.is_nil()
+            || self.adoption_operation_id == self.context.operation_id
+        {
             return Err(invalid());
         }
         Ok(())

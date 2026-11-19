@@ -1245,7 +1245,7 @@ struct VodCreateFences<'a> {
     viewer: Option<crate::state::PlaybackViewerDemand>,
     // Installed only by the private adaptive-attempt entrypoint after its
     // exact Store Adopt. Resolution may select this Arc, never build another.
-    expected_attempt: Option<&'a Arc<Rendition>>,
+    expected_attempt: Option<(&'a Arc<Rendition>, &'a Arc<AdoptedReaderTerminal>)>,
 }
 
 impl VodServingAdmission {
@@ -1811,7 +1811,9 @@ pub(crate) use shared::PreparedAttemptCleanup;
 #[cfg(target_os = "linux")]
 pub(crate) use shared::PreparedAttemptCleanupTask;
 #[cfg(target_os = "linux")]
-pub(crate) use shared::PreparedAttemptRendition;
+pub(crate) use shared::{
+    AdoptedFiniteTerminal, ConfirmedAdoptedFiniteTerminal, PreparedAttemptRendition,
+};
 // split: end vod-shared
 
 // split: begin vod-driver

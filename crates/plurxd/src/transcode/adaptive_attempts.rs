@@ -16,9 +16,9 @@ use plurx_core::adaptive_resources::runtime::planning_probe::{
     FixedPlanningProbeCleanup, FixedPlanningProbeOwner,
 };
 use plurx_core::store::adaptive_resource_attempts::{
-    selected_recipe_digest, AdaptiveStagedAdoption, AttemptAdoption, AttemptClaim, AttemptClose,
-    AttemptMutation, AttemptPhase, MutationContext, PreparedAttempt, RequestDisposition,
-    WorkerBinding,
+    selected_recipe_digest, AdaptiveStagedAdoption, AdoptedAttemptClose, AttemptAdoption,
+    AttemptClaim, AttemptClose, AttemptKey, AttemptMutation, AttemptPhase, AttemptRefusal,
+    MutationContext, PreparedAttempt, RequestBinding, RequestDisposition, WorkerBinding,
 };
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -26,7 +26,8 @@ type AttemptRef = attempt_root::AttemptRef<AttemptEntry>;
 
 use crate::media_sessions::{AdaptivePreparePurpose, AdaptiveProcessedRefusal};
 use crate::vodserve::{
-    PreparedAttemptCleanup, PreparedAttemptCleanupTask, PreparedAttemptRendition,
+    AdoptedFiniteTerminal, ConfirmedAdoptedFiniteTerminal, PreparedAttemptCleanup,
+    PreparedAttemptCleanupTask, PreparedAttemptRendition,
 };
 
 /// The fixed node controller can refuse a new provisional worker without
@@ -572,6 +573,26 @@ fn adoption_requested_bytes(
     ])
 }
 
+fn adopted_terminal_requested_bytes(
+    adoption: &plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption,
+) -> Option<usize> {
+    let worker = &adoption.worker;
+    let strings = checked_caps([
+        control_binding_bytes(&adoption.binding)?,
+        control_key_bytes(&adoption.key)?,
+        worker.node_id.capacity(),
+        worker.planning_source_digest.capacity(),
+        worker.selected_recipe_digest.capacity(),
+        worker.prepared_handle_digest.capacity(),
+        worker.output_digest.capacity(),
+    ])?;
+    // The original selector and its one replayable Close each retain these
+    // bounded strings. The shared reader marker is paid by the same root.
+    std::mem::size_of::<AdoptedAttempt>()
+        .checked_add(AdoptedFiniteTerminal::reader_marker_requested_bytes())?
+        .checked_add(strings.checked_mul(2)?)
+}
+
 fn fence_requested_bytes(
     fence: &plurx_core::store::adaptive_resource_attempts::AttemptFence,
 ) -> Option<usize> {
@@ -745,7 +766,10 @@ pub(super) enum AttemptState {
     Rich(Box<RichAttempt>),
     Handoff(Box<HandoffAttempt>),
     Closing(Box<ClosingAttempt>),
-    Adopted,
+    Adopted(Box<AdoptedAttempt>),
+    // The processed owner has accepted the product. Its durable obligation
+    // remains until the original processed graph can prove terminal closure.
+    AdoptedWithoutTerminal,
     Closed,
     Unknown,
 }
@@ -785,6 +809,16 @@ pub(super) struct RichAttempt {
     // Last: destroy the pending owner and strings before releasing the
     // registered application fence.
     application_lease: Option<FiniteApplicationLease>,
+}
+
+pub(super) struct AdoptedAttempt {
+    binding: RequestBinding,
+    key: AttemptKey,
+    worker: WorkerBinding,
+    adoption_operation_id: Uuid,
+    terminal: Option<AdoptedFiniteTerminal>,
+    confirmed_terminal: Option<ConfirmedAdoptedFiniteTerminal>,
+    close: Option<AdoptedAttemptClose>,
 }
 
 pub(super) struct ClosingAttempt {
@@ -2707,6 +2741,13 @@ impl super::TranscodeManager {
             .await
             .map_err(|error| format!("reading adaptive viewer: {error}"))?
             .ok_or("adaptive viewer disappeared before Adopt")?;
+        if adopted_terminal_requested_bytes(&adoption)
+            .is_none_or(|bytes| bytes > attempt_root::FENCE_BYTES)
+        {
+            return Err(
+                "adaptive Adopt terminal ownership exceeds its precharged partition".into(),
+            );
+        }
         if rich.adoption.is_none() {
             rich.adoption = Some(adoption);
         }
@@ -2804,26 +2845,162 @@ impl super::TranscodeManager {
         // `adopted` before the route is publishable.
         self.publish_adopted_route(entry, original, &publication_authority, deadline)
             .await?;
-        let AttemptState::Rich(rich) = std::mem::replace(&mut *state, AttemptState::Adopted) else {
-            unreachable!();
+        Self::retain_adopted_terminal(entry, &mut state)?;
+        Ok(start)
+    }
+
+    fn retain_adopted_terminal(entry: &AttemptRef, state: &mut AttemptState) -> Result<(), String> {
+        let mut held = entry
+            .finishing_lease
+            .lock()
+            .map_err(|_| "adaptive application fence is uncertain")?;
+        if held.is_some() {
+            return Err("adaptive Adopt application fence was already retained".into());
+        }
+        if !matches!(state, AttemptState::Rich(rich)
+        if rich.adoption.is_some() && match &rich.pending {
+            PreparedWorkerProduct::Finite(pending) => pending.adopted_terminal().is_some(),
+            PreparedWorkerProduct::ProcessedFel(_) => true,
+        }) {
+            return Err("adaptive Adopt has no original terminal selector".into());
+        }
+        let AttemptState::Rich(rich) = std::mem::replace(state, AttemptState::Unknown) else {
+            unreachable!("original Rich owner was checked under the same lock");
         };
         let RichAttempt {
+            mut pending,
+            adoption,
             application_lease,
             settlement,
             ..
         } = *rich;
-        let mut held = entry
-            .finishing_lease
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if held.is_some() {
-            std::mem::forget(application_lease);
-            return Err("adaptive Adopt application fence was already retained".into());
-        }
+        let original = adoption.expect("checked original Adopt");
+        *state = match &mut pending {
+            PreparedWorkerProduct::Finite(pending) => {
+                AttemptState::Adopted(Box::new(AdoptedAttempt {
+                    adoption_operation_id: original.context.operation_id,
+                    binding: original.binding,
+                    key: original.key,
+                    worker: original.worker,
+                    terminal: Some(
+                        pending
+                            .take_adopted_terminal()
+                            .expect("checked terminal selector"),
+                    ),
+                    confirmed_terminal: None,
+                    close: None,
+                }))
+            }
+            PreparedWorkerProduct::ProcessedFel(_) => AttemptState::AdoptedWithoutTerminal,
+        };
         *held = application_lease;
-        // The published local worker is now visible to ordinary liveness.
+        drop(pending);
         drop(settlement);
-        Ok(start)
+        Ok(())
+    }
+
+    /// Positive original detach and R closure (including a conserving R→S
+    /// transfer) release only this attempt. An active or uncertain route or
+    /// resource owner keeps its own obligation through the existing repair pass.
+    async fn finish_adopted_terminal(&self, entry: &AttemptRef) -> Result<(), String> {
+        if !entry.no_original_tasks_or_application() {
+            return Ok(());
+        }
+        let mut state = entry.state().await;
+        // End can win after the exact attachment but before its publication
+        // reply settled. The armed reader survives in the original Rich owner
+        // and proves that it, too, was successfully detached.
+        if matches!(&*state, AttemptState::Rich(rich)
+            if matches!(&rich.pending, PreparedWorkerProduct::Finite(pending)
+                if pending.adopted_terminal().is_some_and(AdoptedFiniteTerminal::reader_detached)))
+        {
+            Self::retain_adopted_terminal(entry, &mut state)?;
+            return Ok(());
+        }
+        let AttemptState::Adopted(adopted) = &mut *state else {
+            return Ok(());
+        };
+        if adopted.confirmed_terminal.is_none() {
+            let original = adopted
+                .terminal
+                .as_ref()
+                .ok_or("adopted attempt lost its original terminal selector")?;
+            let Some(proof) = original.positively_closed().await? else {
+                return Ok(());
+            };
+            // A known R transfer remains known after S retires or Store's
+            // acknowledgement is lost. Drop only the observation aliases.
+            adopted.confirmed_terminal = Some(proof);
+            adopted.terminal.take();
+        }
+        if adopted.close.is_none() {
+            let route = self
+                .store
+                .media_session_route_by_incarnation(&adopted.key.route_incarnation_id.to_string())
+                .await
+                .map_err(|error| format!("reading original adopted terminal route: {error}"))?
+                .ok_or("original adopted terminal route disappeared")?;
+            if route.state != "ended" {
+                return Ok(());
+            }
+            let status = self
+                .store
+                .adaptive_request_status(&adopted.binding.key, &adopted.binding.principal)
+                .await
+                .map_err(|error| format!("reading adopted terminal request: {error}"))?
+                .ok_or("original adopted request disappeared")?;
+            status
+                .validate()
+                .map_err(|error| format!("invalid adopted terminal request: {error}"))?;
+            let attempt = status
+                .attempts
+                .iter()
+                .find(|record| record.key == adopted.key)
+                .ok_or("original adopted attempt disappeared")?;
+            if status.binding != adopted.binding
+                || status.disposition != RequestDisposition::Adopted
+                || status.winner_attempt_id != Some(adopted.key.attempt_id)
+                || attempt.phase != AttemptPhase::Winner
+                || attempt.worker.as_ref() != Some(&adopted.worker)
+                || attempt.last_operation_id != adopted.adoption_operation_id
+            {
+                return Err("durable adopted terminal identity differs from the original".into());
+            }
+            adopted.close = Some(AdoptedAttemptClose {
+                context: MutationContext {
+                    operation_id: Uuid::new_v4(),
+                    expected_request_sequence: status.sequence,
+                    expected_attempt_sequence: attempt.sequence,
+                    now_ms: crate::media_sessions::unix_ms(),
+                },
+                binding: adopted.binding.clone(),
+                key: adopted.key.clone(),
+                worker: adopted.worker.clone(),
+                adoption_operation_id: adopted.adoption_operation_id,
+            });
+        }
+        let original = adopted.close.as_ref().expect("retained terminal Close");
+        match self.store.close_adopted_adaptive_attempt(original).await {
+            Ok(AttemptMutation::Applied(status) | AttemptMutation::Replay(status))
+                if status.binding == original.binding
+                    && status.attempts.iter().any(|attempt| {
+                        attempt.key == original.key
+                            && attempt.phase == AttemptPhase::Closed
+                            && attempt.last_operation_id == original.context.operation_id
+                    }) =>
+            {
+                *state = AttemptState::Closed;
+                Ok(())
+            }
+            // A definite refusal permits a fresh CAS after a concurrent
+            // loser Close. An unknown write must replay the original bytes.
+            Ok(AttemptMutation::Refused(AttemptRefusal::StaleBinding)) => {
+                adopted.close = None;
+                Ok(())
+            }
+            Ok(_) => Err("adopted terminal Close was refused; original remains registered".into()),
+            Err(error) => Err(format!("adopted terminal Close is unknown: {error}")),
+        }
     }
 
     /// Only the actual finite closing owner's known result and destruction of
@@ -3279,7 +3456,7 @@ impl super::TranscodeManager {
                 {
                     return Err("staged attachment cleanup remains uncertain".into());
                 }
-                *state = AttemptState::Adopted;
+                *state = AttemptState::AdoptedWithoutTerminal;
                 return Ok(());
             }
         }
@@ -3820,7 +3997,7 @@ impl super::TranscodeManager {
             AttemptState::Handoff(_) => "native_cleanup_registering",
             AttemptState::Closing(closing) if closing.cleanup.known_closed() => "native_closed",
             AttemptState::Closing(_) => "closing_owner_held",
-            AttemptState::Adopted => "adopted",
+            AttemptState::Adopted(_) | AttemptState::AdoptedWithoutTerminal => "adopted",
             AttemptState::Closed => "closed",
             AttemptState::Unknown => "unknown_held",
         }
@@ -3872,11 +4049,15 @@ impl super::TranscodeManager {
                 tracing::warn!(attempt_id = %entry.attempt_id(), %error,
                     "adaptive failed planning retains its exact P/M and Store operations");
             }
+            if let Err(error) = self.finish_adopted_terminal(&entry).await {
+                tracing::warn!(attempt_id = %entry.attempt_id(), %error,
+                    "adopted finite attempt retains its exact terminal settlement");
+            }
             match self.finish_adaptive_close(&entry).await {
                 Ok(_) => {
                     let terminal = matches!(
                         *entry.state().await,
-                        AttemptState::Closed | AttemptState::Adopted
+                        AttemptState::Closed | AttemptState::AdoptedWithoutTerminal
                     );
                     if terminal && entry.no_original_tasks_or_application() {
                         if let Err(error) = self.adaptive_attempts.remove_terminal(&entry) {

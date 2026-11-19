@@ -642,7 +642,7 @@ impl TranscodeManager {
         }
         // The actual pending VOD owner now owns the verified window and credit.
         // The existing viewer commit alone will advance the playback pointer.
-        *held = AttemptState::Adopted;
+        *held = AttemptState::AdoptedWithoutTerminal;
         Ok(start)
     }
 }
