@@ -1916,7 +1916,12 @@ fn writer_abandoned_replies_render_by_request_and_outcome() {
     ] {
         assert!(rendered.contains(line), "missing {line:?} in\n{rendered}");
     }
-    assert_eq!(crate::cluster::writer_abandoned_replies().len(), 11);
+    let facade = crate::cluster::Cluster::compose(crate::cluster::ClusterParts::standalone(), None);
+    assert_eq!(
+        facade.observations().writer_replies().len(),
+        11,
+        "the facade's sample carries every fixed writer-reply label"
+    );
 }
 
 /// E1a: the applied view's families render from one observation, the mark's
