@@ -1421,6 +1421,8 @@
   .clcard{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);min-width:0;overflow:hidden}
   .clcardhead{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 18px;border-bottom:1px solid var(--line)}
   .clcardhead h2{margin:0;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.08em}
+  .clcardhead h2{white-space:nowrap}
+  .clcardhead .clwhy{text-align:right}
   .clcardhead h2 small{font-weight:500;color:var(--muted);letter-spacing:0;text-transform:none;font-size:12.5px;margin-left:8px}
   .clcardhead .row{gap:8px;flex-wrap:nowrap;align-items:center}
   .clcardhead select{width:auto;font-size:12.5px;padding:4px 8px}
