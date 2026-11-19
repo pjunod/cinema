@@ -14,9 +14,9 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 1 | `NodeConfig` duplicate-id rejection | generic bug | pending M6 | Upstream release selects by id and rejects duplicate durable ids. |
 | 2 | Split-brain probe TLS policy | plurx policy | — | Never; self-signed cluster TLS is a Plurx deployment requirement. |
 | 3 | Concurrent TLS key publication | plurx policy | — | Never; shared embedded-node startup is a Plurx lifecycle requirement. |
-| 4 | OpenRaft election trigger | plurx policy | — | Never; graceful voter removal depends on this OpenRaft 0.9 bridge. |
+| 4 | OpenRaft election trigger | plurx policy | — | Retire the 0.9 bridge after native 0.10 transfer passes the [C5 handoff contract](../../docs/cluster/OPENRAFT-010-EVALUATION.md); graceful removal policy remains. |
 | 5 | Local Raft metrics wrapper | plurx policy | — | Never; Plurx readiness owns this deliberately bounded view. |
-| 6 | Quorum watermark wrapper | plurx policy | — | Never; bounded local reads require this proof shape and version. |
+| 6 | Quorum watermark wrapper | plurx policy | — | Replace the 0.9 implementation after native linearizers pass the [C5 proof contract](../../docs/cluster/OPENRAFT-010-EVALUATION.md); bounded local-read policy remains. |
 | 7 | Snapshot duration metrics | plurx policy | — | Never; fixed-cardinality snapshot observability is a Plurx contract. |
 | 8 | Snapshot `RemoteError` preservation | generic bug | pending M6 | Upstream release preserves mismatch errors on SQLite and cache snapshot RPCs. |
 | 9 | WebSocket write-and-flush budget | generic bug | pending M6 | Upstream release flushes every frame within one bounded write budget. |
@@ -38,7 +38,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 25 | Bounded snapshot transport observations and RPC budgets | plurx policy | — | Never; Plurx owns this process-local observation surface and its configured chunk, transfer and install budgets. |
 | 26 | `TCP_NODELAY` on accepted Raft and API streams | generic bug | https://github.com/sebadob/hiqlite/pull/374 | Upstream release disables Nagle on the streams its Raft and API listeners accept. |
 | 27 | Applied mark: registered-table revisions, applied index, image generation and change watches, plus read-pool wait | plurx policy | — | Never; Plurx's applied views (playback-start E1) need a local, publish-before-reply signal of what this replica applied, which no upstream surface offers. |
-| 28 | Lease idle Raft client connections instead of dialing per `new_client` | generic bug | pending M6 | Upstream release stops opening a connection per `RaftNetworkFactory::new_client`, so a read-confirm client reuses an established socket. |
+| 28 | Lease idle Raft client connections instead of dialing per `new_client` | generic bug | pending M6 | Upstream transport reuses established read-confirm sockets; for 0.10, an independent reusable heartbeat path passes the [C5 socket contract](../../docs/cluster/OPENRAFT-010-EVALUATION.md). The default heartbeat factory alone does not retire this fix. |
 | 29 | `DbRaftMetrics` type re-export | plurx policy | — | Never; it only names a type Plurx's counted membership client forwards. |
 | 30 | Local switch that stops this node's own election timer | plurx policy | — | Never; a stopping Plurx leader hands off and must not campaign again, and OpenRaft 0.9 exposes the switch only on the embedded `Raft` handle. |
 | 31 | One proposal gate on the database Raft, with a local hold and metrics wait | plurx policy | — | Never; a Plurx leader handing off must stop its own log before triggering its successor, and OpenRaft 0.9 has no leadership transfer. |

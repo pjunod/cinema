@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use plurx_core::cluster::migration::status::{PassiveRaftMetrics, ServingProof};
 
-const SERVING_FENCE_POLL: Duration = Duration::from_millis(25);
+const SERVING_FENCE_POLL: Duration = plurx_core::cluster::timing::serving::SERVING_FENCE_POLL;
 
 pub(crate) const SERVING_FENCED_MESSAGE: &str = "this node has lost quorum serving authority";
 pub(crate) const SERVING_FENCED_JSON: &str =
@@ -412,7 +412,8 @@ impl ServingState {
 /// generation exactly as before.
 // Real-media qualification exercises the same 2468 ms outage and five-second
 // boundary as production; an accelerated test-only budget would retire it.
-pub(crate) const SERVING_FENCE_SESSION_GRACE: Duration = Duration::from_secs(5);
+pub(crate) const SERVING_FENCE_SESSION_GRACE: Duration =
+    plurx_core::cluster::timing::serving::SERVING_FENCE_SESSION_GRACE;
 
 /// How one loss of serving authority ended for an owner of running work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
