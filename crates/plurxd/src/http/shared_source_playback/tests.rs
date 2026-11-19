@@ -1497,16 +1497,9 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
             | SourceFixtureMode::NativeEncoded
             | SourceFixtureMode::NativeHdr10Copy
     );
-    if native
-        || matches!(
-            mode,
-            SourceFixtureMode::BurnText
-                | SourceFixtureMode::BurnBitmap
-                | SourceFixtureMode::DolbyVisionProfile5Encoded
-        )
-    {
-        fixture.keep_fixture_membership_stable().await;
-    }
+    // Real resource requests exercise a stable committed roster. Membership
+    // changes are exercised by the separate authority and retirement tests.
+    fixture.keep_fixture_membership_stable().await;
     let dolby_vision = matches!(
         mode,
         SourceFixtureMode::DolbyVisionPreserved | SourceFixtureMode::DolbyVisionConverted
