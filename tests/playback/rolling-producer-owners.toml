@@ -7596,11 +7596,12 @@ expected_occurrences = 0
 
 [[module_structures]]
 id = "low-level-process-start"
-# The two raw forks in private_contained_child_entry's pids-limit/orphan
-# branches both run as the already-contained delegated test executable.
-# The validator pins those exact fixture branches and still requires zero
-# unowned starts anywhere in the scanned source.
-pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:fork|vfork|posix_spawn|posix_spawnp)|(?:(?:libc|nix|rustix)(?:::[A-Za-z_]\\w*)*)::(?:clone|clone3)|(?<![:.\\w])(?:fork|vfork|clone|clone3|posix_spawn|posix_spawnp))\\s*\\("
+# The contained graph launches its original cgroup root with CLONE_PIDFD and
+# CLONE_INTO_CGROUP. Startup uses a zero-sized capability query. The delegated
+# child fixtures exercise two forks and the sandbox's direct clone3 refusal.
+# The validator pins each of these exact call sites and requires zero unowned
+# starts anywhere in the scanned source.
+pattern = "(?:[A-Za-z_]\\w*::)*syscall\\s*\\(\\s*(?:[A-Za-z_]\\w*::)*SYS_(?:clone3?|fork|vfork)\\s*,|(?:(?:[A-Za-z_]\\w*::)+(?:fork|vfork|posix_spawn|posix_spawnp)|(?:(?:libc|nix|rustix)(?:::[A-Za-z_]\\w*)*)::(?:clone|clone3)|(?<![:.\\w])(?:fork|vfork|clone|clone3|posix_spawn|posix_spawnp))\\s*\\("
 expected_occurrences = 0
 
 [[module_structures]]

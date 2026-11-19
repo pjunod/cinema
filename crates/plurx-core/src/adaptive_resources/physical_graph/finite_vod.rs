@@ -182,8 +182,8 @@ impl FiniteVodRootOnlyClosure {
     }
 }
 
-/// Original fixed graph never entered process acquisition. It proves absence
-/// of both root and writer without borrowing a process identity or PID.
+/// Original fixed graph proved no root was cloned and no writer registered.
+/// A positively closed native setup is recorded separately from non-entry.
 #[must_use]
 pub(in crate::adaptive_resources) struct FiniteVodNeverRootClosure {
     binding: ReservationBinding,
@@ -192,6 +192,7 @@ pub(in crate::adaptive_resources) struct FiniteVodNeverRootClosure {
     task_member: Uuid,
     acquisition_id: Uuid,
     close_operation_id: Uuid,
+    native_setup_closed: bool,
 }
 impl FiniteVodNeverRootClosure {
     pub(in crate::adaptive_resources) fn matches(&self, graph: &SealedPhysicalGraph) -> bool {
@@ -210,6 +211,9 @@ impl FiniteVodNeverRootClosure {
     }
     pub(in crate::adaptive_resources) fn acquisition_id(&self) -> Uuid {
         self.acquisition_id
+    }
+    pub(in crate::adaptive_resources) fn native_setup_closed(&self) -> bool {
+        self.native_setup_closed
     }
     pub(in crate::adaptive_resources) fn close_operation_id(&self) -> Uuid {
         self.close_operation_id
@@ -491,8 +495,6 @@ impl SealedPhysicalGraph {
         let mut members = self.custody.members.lock().await;
         if !cfg!(target_os = "linux")
             || !self.custody.sealed.load(Ordering::Acquire)
-            || members.acquired
-            || members.uncertain_launch
             || members.unaudited_handoff
             || members.receipt_issued
             || members.finite_process_closed
@@ -510,6 +512,24 @@ impl SealedPhysicalGraph {
                 "fixed AVC no-root inventory is incomplete",
             ));
         }
+        let native_setup_closed = if members.acquired || members.uncertain_launch {
+            #[cfg(target_os = "linux")]
+            {
+                let original = members
+                    .native_setup
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("no original native preclone setup proof"))?;
+                if !original.close_refused_preclone_setup()? {
+                    return Err(io::Error::other("original preclone setup remains held"));
+                }
+                members.native_setup = None;
+                true
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Err(io::Error::other("native preclone closure is unavailable"));
+        } else {
+            false
+        };
         members.finite_process_closed = true;
         Ok(FiniteVodNeverRootClosure {
             binding: self.custody.binding,
@@ -518,6 +538,7 @@ impl SealedPhysicalGraph {
             task_member,
             acquisition_id,
             close_operation_id: Uuid::new_v4(),
+            native_setup_closed,
         })
     }
 }
@@ -562,28 +583,35 @@ impl SealedPhysicalGraph {
             || owned.job.is_none()
             || owned.pipes_claimed
             || owned.child.stdin.is_some()
-            || owned.child.stdout.is_none()
-            || owned.child.stderr.is_none()
+            || (!owned.unclaimed_pipes_closed
+                && (owned.child.stdout.is_none() || owned.child.stderr.is_none()))
         {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "original fixed AVC root or unclaimed pipe remains unresolved",
             ));
         }
-        let stdout = owned
-            .child
-            .stdout
-            .take()
-            .expect("validated original stdout");
-        let stderr = owned
-            .child
-            .stderr
-            .take()
-            .expect("validated original stderr");
-        let stdout_close = super::finite_pipes::close_unclaimed_stdout(stdout);
-        let stderr_close = super::finite_pipes::close_unclaimed_stderr(stderr);
-        stdout_close?;
-        stderr_close?;
+        if !owned.unclaimed_pipes_closed {
+            let stdout = owned
+                .child
+                .stdout
+                .take()
+                .expect("validated original stdout");
+            let stderr = owned
+                .child
+                .stderr
+                .take()
+                .expect("validated original stderr");
+            let stdout = super::finite_pipes::close_unclaimed_stdout(stdout);
+            let stderr = super::finite_pipes::close_unclaimed_stderr(stderr);
+            if let Err(error) = stdout.and(stderr) {
+                members.uncertain_launch = true;
+                return Err(error);
+            }
+            owned.unclaimed_pipes_closed = true;
+        }
+        #[cfg(target_os = "linux")]
+        super::finite_native::close_original_root(&mut members, root.index)?;
         let image = image.take().expect("validated fixed image");
         let closure = FiniteVodRootOnlyClosure {
             binding: self.custody.binding,
@@ -678,6 +706,8 @@ impl SealedPhysicalGraph {
             executable_sha256: image.sha256,
             writer: summary,
         };
+        #[cfg(target_os = "linux")]
+        super::finite_native::close_original_root(&mut members, selected_root.index)?;
         // The original waited Child and ChildJob (including its registered
         // pidfd) are disposed only after the fixed graph's terminal checks.
         members.roots.clear();

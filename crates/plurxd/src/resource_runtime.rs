@@ -39,6 +39,8 @@ pub(crate) async fn open_before_cleanup(
     }
     let dirs = crate::configured_dirs(&config.storage);
     let rendition_root = dirs.renditions.clone();
+    #[cfg(target_os = "linux")]
+    let native_root = std::env::var_os("PLURX_NATIVE_CGROUP_ROOT").map(std::path::PathBuf::from);
     let mut excluded = vec![
         dirs.transcode,
         dirs.artwork,
@@ -58,7 +60,14 @@ pub(crate) async fn open_before_cleanup(
     // Enqueued blocking startup is not raced against a cancellation timeout.
     // Its real owner drains and retains the lock even if its async waiter goes.
     let runtime = tokio::task::spawn_blocking(move || {
-        NodeResourceRuntime::open_with_rendition_root(options, rendition_root)
+        let runtime = NodeResourceRuntime::open_with_rendition_root(options, rendition_root)?;
+        #[cfg(target_os = "linux")]
+        let runtime = {
+            let mut runtime = runtime;
+            runtime.configure_finite_native_root(native_root);
+            runtime
+        };
+        Ok::<_, plurx_core::adaptive_resources::runtime::RuntimeOpenError>(runtime)
     })
     .await
     .context("resource custody startup owner failed")?

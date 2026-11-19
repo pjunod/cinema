@@ -148,13 +148,10 @@ pub(crate) fn apply_policy(command: &mut std::process::Command, policy: ChildPol
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        #[cfg(not(target_os = "linux"))]
         let nice = policy.nice;
         #[cfg(target_os = "linux")]
-        let parent = unsafe { libc::getpid() };
-        #[cfg(target_os = "linux")]
-        let ioprio = linux::ioprio_value(policy.io_level);
-        #[cfg(target_os = "linux")]
-        let oom = linux::OomBytes::new(policy.oom_score_adj);
+        let native = LinuxChildPriority::new(policy);
         // SAFETY: the closure makes raw syscalls on values computed above,
         // before the fork: no allocation, no lock, no logging. Each result is
         // ignored for priority. Linux lifetime setup must succeed before exec.
@@ -162,30 +159,16 @@ pub(crate) fn apply_policy(command: &mut std::process::Command, policy: ChildPol
             command.pre_exec(move || {
                 #[cfg(target_os = "linux")]
                 {
-                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                    if native.install_parent_death() != 0 {
                         return Err(io::Error::last_os_error());
                     }
-                    // The owner can die between fork and prctl: no signal is
-                    // delivered retroactively, so never exec an orphan.
-                    if libc::getppid() != parent {
-                        libc::_exit(127);
-                    }
+                    native.apply();
                 }
-                let current = libc::getpriority(libc::PRIO_PROCESS, 0);
-                if current < nice {
-                    libc::setpriority(libc::PRIO_PROCESS, 0, nice);
-                }
-                #[cfg(target_os = "linux")]
+                #[cfg(not(target_os = "linux"))]
                 {
-                    libc::syscall(libc::SYS_ioprio_set, linux::IOPRIO_WHO_PROCESS, 0, ioprio);
-                    let fd = libc::open(
-                        c"/proc/self/oom_score_adj".as_ptr(),
-                        libc::O_WRONLY | libc::O_CLOEXEC,
-                    );
-                    if fd >= 0 {
-                        let bytes = oom.as_bytes();
-                        libc::write(fd, bytes.as_ptr().cast(), bytes.len());
-                        libc::close(fd);
+                    let current = libc::getpriority(libc::PRIO_PROCESS, 0);
+                    if current < nice {
+                        libc::setpriority(libc::PRIO_PROCESS, 0, nice);
                     }
                 }
                 Ok(())
@@ -194,6 +177,64 @@ pub(crate) fn apply_policy(command: &mut std::process::Command, policy: ChildPol
     }
     #[cfg(not(unix))]
     let _ = (command, policy);
+}
+
+/// Fixed Linux pre-exec policy shared by the trusted and contained launchers.
+#[cfg(target_os = "linux")]
+pub(super) struct LinuxChildPriority {
+    parent: libc::pid_t,
+    nice: i32,
+    ioprio: libc::c_int,
+    oom: linux::OomBytes,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxChildPriority {
+    pub(super) fn new(policy: ChildPolicy) -> Self {
+        Self {
+            parent: unsafe { libc::getpid() },
+            nice: policy.nice,
+            ioprio: linux::ioprio_value(policy.io_level),
+            oom: linux::OomBytes::new(policy.oom_score_adj),
+        }
+    }
+
+    /// Runs in the child before exec. Only fixed syscalls, no locks/allocations.
+    pub(super) unsafe fn install_parent_death(&self) -> libc::c_int {
+        let result = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) };
+        // A death between clone/fork and prctl sends no retroactive signal.
+        // Never proceed to exec after losing the original daemon parent.
+        if result == 0 && unsafe { libc::getppid() } != self.parent {
+            unsafe { libc::_exit(127) };
+        }
+        result
+    }
+
+    /// Apply the already formatted priority policy in the unexecuted child.
+    /// As before, OS refusal of these priority requests is advisory.
+    pub(super) unsafe fn apply(&self) {
+        unsafe {
+            let current = libc::getpriority(libc::PRIO_PROCESS, 0);
+            if current < self.nice {
+                libc::setpriority(libc::PRIO_PROCESS, 0, self.nice);
+            }
+            libc::syscall(
+                libc::SYS_ioprio_set,
+                linux::IOPRIO_WHO_PROCESS,
+                0,
+                self.ioprio,
+            );
+            let fd = libc::open(
+                c"/proc/self/oom_score_adj".as_ptr(),
+                libc::O_WRONLY | libc::O_CLOEXEC,
+            );
+            if fd >= 0 {
+                let bytes = self.oom.as_bytes();
+                libc::write(fd, bytes.as_ptr().cast(), bytes.len());
+                libc::close(fd);
+            }
+        }
+    }
 }
 
 /// What the kernel reports for a running child.
@@ -365,6 +406,20 @@ pub(crate) struct RegisteredChildControl {
 }
 
 impl Registration {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn close_original_native(&self) -> std::io::Result<()> {
+        use std::os::fd::IntoRawFd;
+        let pidfd = registry()
+            .entries
+            .remove(&self.key)
+            .and_then(|entry| entry.pidfd)
+            .ok_or_else(|| std::io::Error::other("original native registration missing"))?;
+        if unsafe { libc::close(pidfd.into_raw_fd()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub(crate) fn control(&self) -> RegisteredChildControl {
         RegisteredChildControl { key: self.key }
     }
@@ -487,6 +542,21 @@ pub(crate) fn register(
     work: ChildWork,
 ) -> Option<Registration> {
     let pid = pid?;
+    Some(register_child(
+        pid,
+        program,
+        work,
+        #[cfg(target_os = "linux")]
+        linux::pidfd_open(pid),
+    ))
+}
+
+fn register_child(
+    pid: u32,
+    program: &std::ffi::OsStr,
+    work: ChildWork,
+    #[cfg(target_os = "linux")] pidfd: Option<std::os::fd::OwnedFd>,
+) -> Registration {
     SPAWNED[work.class.index()].fetch_add(1, Ordering::Relaxed);
     *SPAWNED_BY_WORK
         .lock()
@@ -513,13 +583,33 @@ pub(crate) fn register(
         resource_graph: super::observation::current_graph(),
         control_epoch: 0,
         #[cfg(target_os = "linux")]
-        pidfd: linux::pidfd_open(pid),
+        pidfd,
     };
     let mut registry = registry();
     let key = registry.next;
     registry.next += 1;
     registry.entries.insert(key, entry);
-    Some(Registration { key })
+    Registration { key }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn native_registration_requested_bytes(program: &std::ffi::OsStr) -> Option<usize> {
+    use std::mem::size_of;
+    let name = std::path::Path::new(program).file_name()?.to_str()?;
+    size_of::<Entry>()
+        .checked_add(size_of::<Mutex<super::observation::ProcessObserver>>())?
+        .checked_add(2 * size_of::<usize>())?
+        .checked_add(name.len())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn register_original_pidfd(
+    pid: u32,
+    program: &std::ffi::OsStr,
+    work: ChildWork,
+    original: std::os::fd::OwnedFd,
+) -> Registration {
+    register_child(pid, program, work, Some(original))
 }
 
 /// Whether [`register`] counts a just-started child as unapplied: its

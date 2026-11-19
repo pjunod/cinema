@@ -40,9 +40,13 @@ pub mod copy_vod;
 pub mod direct_source;
 #[cfg(unix)]
 mod finite_lifetime;
+#[cfg(target_os = "linux")]
+pub(crate) mod finite_native;
 #[cfg(unix)]
 pub mod finite_vod;
 mod operations;
+#[cfg(target_os = "linux")]
+pub(super) use operations::entry_window_closed;
 #[cfg(target_os = "linux")]
 pub mod planning_probe;
 #[cfg(target_os = "linux")]
@@ -151,6 +155,9 @@ pub struct NodeResourceRuntime {
     direct_read_domain: Mutex<Option<Arc<direct_source::DirectReadDomain>>>,
     finalization_support: Mutex<finalization_support::SupportSlot>,
     attempt_support: Mutex<finalization_support::SupportSlot>,
+    native_factory_support: Mutex<finalization_support::SupportSlot>,
+    #[cfg(target_os = "linux")]
+    native_root: Option<finite_native::FiniteNativeRoot>,
     capacity_observer: tokio::sync::Mutex<capacity_observer::CapacityObserver>,
     #[cfg(target_os = "linux")]
     mount_namespace_inode: Option<u64>,
@@ -234,6 +241,9 @@ impl NodeResourceRuntime {
             direct_read_domain: Mutex::new(None),
             finalization_support: Mutex::new(finalization_support::SupportSlot::new()),
             attempt_support: Mutex::new(finalization_support::SupportSlot::new()),
+            native_factory_support: Mutex::new(finalization_support::SupportSlot::new()),
+            #[cfg(target_os = "linux")]
+            native_root: None,
             capacity_observer: tokio::sync::Mutex::new(capacity_observer::CapacityObserver::new()),
             #[cfg(target_os = "linux")]
             mount_namespace_inode: {
@@ -347,7 +357,12 @@ impl NodeResourceRuntime {
     /// Blocking final-owner shutdown, not request cancellation or settlement.
     /// Charges remain durable; joining the DB owner grants no physical refund.
     pub fn drain(self) -> Result<(), CustodyError> {
-        if self.ledger.finalization_support_present() {
+        if self
+            .ledger
+            .inner
+            .lock()
+            .map_or(true, |state| state.any_support())
+        {
             return Err(CustodyError {
                 kind: crate::resource_custody::ErrorKind::Conflict,
                 operation_id: None,

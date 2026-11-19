@@ -2,7 +2,7 @@
 //! never allocates, unwinds, invokes callbacks, or drops inherited Rust owners.
 
 use super::SealedLaunchSpec;
-use std::fs::File;
+use crate::process::priority::{ChildClass, LinuxChildPriority};
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
@@ -36,56 +36,48 @@ struct KernelSignalAction {
     mask: u64,
 }
 
-fn high_copy(file: &File) -> io::Result<OwnedFd> {
-    let descriptor = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10) };
-    if descriptor < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
-    }
-}
-
 pub(super) struct PreparedChild<'spec> {
-    executable: OwnedFd,
-    input: OwnedFd,
-    finite_inputs: Vec<OwnedFd>,
-    output: OwnedFd,
-    errors: OwnedFd,
-    error_writer: OwnedFd,
+    executable: RawFd,
+    input: RawFd,
+    finite_inputs: [RawFd; 2],
+    input_count: usize,
+    output: RawFd,
+    errors: RawFd,
+    error_writer: RawFd,
     arguments: Vec<*const libc::c_char>,
     environment: Vec<*const libc::c_char>,
     sandbox: Option<&'spec super::sandbox::PreparedSandbox>,
+    priority: Option<LinuxChildPriority>,
 }
 
 impl<'spec> PreparedChild<'spec> {
     pub(super) fn new(
         spec: &'spec SealedLaunchSpec,
-        output: File,
-        errors: File,
-        error_writer: File,
+        scratch: &mut super::LaunchScratch,
+        class: Option<ChildClass>,
     ) -> io::Result<Self> {
-        let mut arguments: Vec<_> = spec.arguments.iter().map(|value| value.as_ptr()).collect();
+        let mut arguments = Vec::with_capacity(spec.arguments.len() + 1);
+        arguments.extend(spec.arguments.iter().map(|value| value.as_ptr()));
         arguments.push(std::ptr::null());
-        let mut environment: Vec<_> = spec
-            .environment
-            .iter()
-            .map(|value| value.as_ptr())
-            .collect();
+        let mut environment = Vec::with_capacity(spec.environment.len() + 1);
+        environment.extend(spec.environment.iter().map(|value| value.as_ptr()));
         environment.push(std::ptr::null());
-        let mut finite_inputs = Vec::with_capacity(spec.finite_inputs.len());
-        for file in &spec.finite_inputs {
-            finite_inputs.push(high_copy(file)?);
+        let mut finite_inputs = [-1; 2];
+        for (index, file) in spec.finite_inputs.iter().enumerate() {
+            finite_inputs[index] = scratch.copy(file.as_raw_fd())?;
         }
         Ok(Self {
-            executable: high_copy(&spec.executable)?,
+            executable: scratch.copy(spec.executable.as_raw_fd())?,
             finite_inputs,
-            input: high_copy(&spec.input)?,
-            output: high_copy(&output)?,
-            errors: high_copy(&errors)?,
-            error_writer: high_copy(&error_writer)?,
+            input_count: spec.finite_inputs.len(),
+            input: scratch.copy(spec.input.as_raw_fd())?,
+            output: scratch.copy(scratch.pipe_fd(1)?)?,
+            errors: scratch.copy(scratch.pipe_fd(3)?)?,
+            error_writer: scratch.copy(scratch.pipe_fd(5)?)?,
             arguments,
             environment,
             sandbox: spec.sandbox.as_ref(),
+            priority: class.map(|class| LinuxChildPriority::new(class.policy())),
         })
     }
 
@@ -164,7 +156,7 @@ impl<'spec> PreparedChild<'spec> {
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     unsafe fn child(&self, previous: &u64) -> ! {
-        let error_fd = self.error_writer.as_raw_fd();
+        let error_fd = self.error_writer;
         // Reset inherited handlers before unblocking; no parent Rust signal
         // handler may execute in this multithreaded-fork child.
         let action = KernelSignalAction {
@@ -201,27 +193,27 @@ impl<'spec> PreparedChild<'spec> {
         {
             unsafe { fail(error_fd, 2) }
         }
+        if let Some(priority) = &self.priority {
+            if unsafe { priority.install_parent_death() } != 0 {
+                unsafe { fail(error_fd, 10) }
+            }
+            unsafe { priority.apply() };
+        }
         if unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, CLOSE_RANGE_CLOEXEC) } != 0
         {
             unsafe { fail(error_fd, 3) }
         }
-        for (source, target) in [
-            (self.input.as_raw_fd(), 0),
-            (self.output.as_raw_fd(), 1),
-            (self.errors.as_raw_fd(), 2),
-        ] {
+        for (source, target) in [(self.input, 0), (self.output, 1), (self.errors, 2)] {
             if unsafe { libc::dup3(source, target, 0) } < 0 {
                 unsafe { fail(error_fd, 4) }
             }
         }
-        for (index, source) in self.finite_inputs.iter().enumerate() {
-            if unsafe { libc::dup3(source.as_raw_fd(), 3 + index as i32, 0) } < 0 {
+        for (index, source) in self.finite_inputs.iter().take(self.input_count).enumerate() {
+            if unsafe { libc::dup3(*source, 3 + index as i32, 0) } < 0 {
                 unsafe { fail(error_fd, 8) }
             }
         }
-        if !self.finite_inputs.is_empty()
-            && unsafe { libc::dup3(self.executable.as_raw_fd(), 9, 0) } < 0
-        {
+        if self.input_count != 0 && unsafe { libc::dup3(self.executable, 9, 0) } < 0 {
             unsafe { fail(error_fd, 9) }
         }
         if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
@@ -235,7 +227,7 @@ impl<'spec> PreparedChild<'spec> {
         unsafe {
             libc::syscall(
                 libc::SYS_execveat,
-                self.executable.as_raw_fd(),
+                self.executable,
                 c"".as_ptr(),
                 self.arguments.as_ptr(),
                 self.environment.as_ptr(),

@@ -7,11 +7,13 @@
 //! and is not a production demand model or physical-close proof.
 use super::*;
 
-const ROOT_PIPE_SLOTS: u64 = 3;
+pub(super) const ROOT_PIPE_SLOTS: u64 = 3;
 
 #[derive(Default)]
 pub(super) struct BudgetDelta {
     pub roots: u64,
+    #[cfg(target_os = "linux")]
+    pub native_root: Option<crate::process::contained_launch::FiniteNativeAllowance>,
     pub sources: u64,
     pub read_bytes: u64,
     pub drains: u64,
@@ -37,12 +39,30 @@ pub(super) fn check(
     let sources = (members.source_files.len() as u64)
         .checked_add(delta.sources)
         .ok_or_else(overflow)?;
-    let handles = roots
-        .checked_mul(ROOT_PIPE_SLOTS)
-        .and_then(|value| value.checked_add(sources))
-        .ok_or_else(overflow)?;
+    let root_handles = roots.checked_mul(ROOT_PIPE_SLOTS).ok_or_else(overflow)?;
     let mut drains = delta.drains;
-    let mut finite_memory = delta.finite_memory_bytes;
+    let finite_memory = delta.finite_memory_bytes;
+    #[cfg(target_os = "linux")]
+    let (root_handles, mut finite_memory) = {
+        let allowance = delta
+            .native_root
+            .or_else(|| members.native_setup.as_ref().map(|setup| setup.allowance));
+        match allowance {
+            Some(allowance) => (
+                root_handles
+                    .checked_sub(ROOT_PIPE_SLOTS)
+                    .and_then(|handles| handles.checked_add(allowance.handles))
+                    .ok_or_else(overflow)?,
+                finite_memory
+                    .checked_add(allowance.requested_bytes)
+                    .ok_or_else(overflow)?,
+            ),
+            None => (root_handles, finite_memory),
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut finite_memory = finite_memory;
+    let handles = root_handles.checked_add(sources).ok_or_else(overflow)?;
     for writer in &members.writers {
         #[cfg(unix)]
         if let Some(finite) = &writer.finite {

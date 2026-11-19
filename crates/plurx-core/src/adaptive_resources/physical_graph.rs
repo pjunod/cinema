@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -25,8 +25,11 @@ use crate::process::observation::{Metric, ProcessIdentity, ProcessObserver, Unkn
 use crate::process::{spawn_job_custodied, ChildJob, ChildWork, OwnedSpawnFailure};
 
 mod budgets;
+mod child;
 #[cfg(target_os = "linux")]
 pub(super) mod copy_vod;
+#[cfg(target_os = "linux")]
+pub(super) mod finite_native;
 pub(super) mod finite_pipes;
 #[cfg(unix)]
 pub(super) mod finite_vod;
@@ -92,13 +95,14 @@ pub struct RootPipes {
 }
 
 struct Root {
-    child: Child,
+    child: child::GraphChild,
     // Retain the actual job even after leader wait. Dropping it is not proof.
     job: Option<ChildJob>,
     process: Metric<ProcessIdentity>,
     waited: bool,
     exit_status: Option<std::process::ExitStatus>,
     pipes_claimed: bool,
+    unclaimed_pipes_closed: bool,
 }
 
 struct Members {
@@ -117,6 +121,8 @@ struct Members {
     #[cfg(target_os = "linux")]
     copy_hold: Option<copy_vod::CopyTaskHoldReason>,
     roots: Vec<Root>,
+    #[cfg(target_os = "linux")]
+    native_setup: Option<Box<finite_native::NativeSetup>>,
     writers: Vec<Writer>,
     joined_writers: usize,
     abandoned_writers: usize,
@@ -279,6 +285,8 @@ impl ResourceReservation {
                 copy_process_closed: false,
                 #[cfg(target_os = "linux")]
                 copy_hold: None,
+                #[cfg(target_os = "linux")]
+                native_setup: None,
                 roots: Vec::new(),
                 writers: Vec::new(),
                 joined_writers: 0,
@@ -360,7 +368,14 @@ impl OwnedPhysicalGraph {
         work: ChildWork,
         arm: super::runtime::DurableArm,
         entered: &mut bool,
+        #[cfg(target_os = "linux")] native: Option<finite_native::NativeRootEntry<'_>>,
     ) -> io::Result<GraphRoot> {
+        #[cfg(target_os = "linux")]
+        if let Some(native) = native {
+            return self
+                .spawn_finite_native_root(work, arm, entered, native)
+                .await;
+        }
         self.spawn_root_inner(command, work, Some(arm), Some(entered))
             .await
     }
@@ -410,7 +425,7 @@ impl OwnedPhysicalGraph {
                 return Err(error);
             }
         };
-        Ok(retain_root(custody, &mut members, child, Some(job)))
+        Ok(retain_root(custody, &mut members, child.into(), Some(job)))
     }
 
     /// Core starts and retains the actual task, not a task-owned completion
@@ -490,33 +505,32 @@ impl OwnedPhysicalGraph {
 fn retain_root(
     custody: &GraphCustody,
     members: &mut Members,
-    child: Child,
+    child: child::GraphChild,
     job: Option<ChildJob>,
 ) -> GraphRoot {
-    let process = child
-        .id()
-        .map(
-            |pid| match ProcessObserver::new(pid).snapshot(Instant::now()).counters {
-                Metric::Known(counters) => Metric::Known(counters.identity),
-                Metric::Unknown(reason) => Metric::Unknown(reason),
-            },
-        )
-        .unwrap_or(Metric::Unknown(UnknownReason::UnboundIdentity));
-    let root = GraphRoot {
-        generation: custody.identity.generation,
-        index: members.roots.len(),
-        process,
-        control: job.as_ref().and_then(ChildJob::registered_control),
-    };
+    let index = members.roots.len();
     members.roots.push(Root {
         child,
         job,
-        process,
+        process: Metric::Unknown(UnknownReason::UnboundIdentity),
         waited: false,
         exit_status: None,
         pipes_claimed: false,
+        unclaimed_pipes_closed: false,
     });
-    root
+    let owned = &mut members.roots[index];
+    if let Some(pid) = owned.child.id() {
+        owned.process = match ProcessObserver::new(pid).snapshot(Instant::now()).counters {
+            Metric::Known(counters) => Metric::Known(counters.identity),
+            Metric::Unknown(reason) => Metric::Unknown(reason),
+        };
+    }
+    GraphRoot {
+        generation: custody.identity.generation,
+        index,
+        process: owned.process,
+        control: owned.job.as_ref().and_then(ChildJob::registered_control),
+    }
 }
 
 fn retain_launch_failure(
@@ -526,7 +540,7 @@ fn retain_launch_failure(
 ) -> io::Error {
     members.uncertain_launch = true;
     if let Some(child) = failure.child {
-        retain_root(custody, members, child, failure.job);
+        retain_root(custody, members, child.into(), failure.job);
     }
     failure.error
 }
@@ -675,7 +689,7 @@ impl SealedPhysicalGraph {
     pub async fn start_kill_root(&self, root: GraphRoot) -> io::Result<()> {
         let mut members = self.custody.members.lock().await;
         let member = root_member(&self.custody, &mut members, root)?;
-        if member.waited {
+        if member.waited && !member.child.is_native() {
             return Ok(());
         }
         member.child.start_kill()
@@ -749,7 +763,7 @@ impl SealedPhysicalGraph {
         // Request all roots' termination before awaiting any of them. Their
         // real retained handles, not recycled numeric PIDs, select the targets.
         for root in &mut members.roots {
-            if !root.waited {
+            if !root.waited || root.child.is_native() {
                 let _ = root.child.start_kill();
             }
         }

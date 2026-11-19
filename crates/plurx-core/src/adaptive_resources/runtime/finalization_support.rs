@@ -58,6 +58,23 @@ struct SupportState {
     inner: Mutex<Counts>,
     published: Notify,
 }
+
+#[cfg(target_os = "linux")]
+pub(super) fn native_factory_support_storage_bytes() -> Option<usize> {
+    payload_requested_bytes::<
+        super::finite_native::NativeFactoryPayload,
+        OwnedPayload<super::finite_native::NativeFactoryPayload>,
+    >()
+}
+
+fn payload_requested_bytes<T, S: StoredPayload>() -> Option<usize> {
+    std::mem::size_of::<SupportState>()
+        .checked_add(std::mem::size_of::<SupportPayload<T>>())?
+        .checked_add(std::mem::size_of::<S>())?
+        .checked_add(8 * std::mem::size_of::<usize>())?
+        .checked_add(S::additional_requested()?)
+}
+
 struct Counts {
     sealed: bool,
     joined: bool,
@@ -76,11 +93,11 @@ trait StoredPayload: Send + Sync {
     }
     fn destroy(self: Box<Self>) -> Option<SealIdentity>;
 }
-#[cfg(test)]
+#[cfg(any(test, target_os = "linux"))]
 struct OwnedPayload<T> {
     original: Arc<SupportPayload<T>>,
 }
-#[cfg(test)]
+#[cfg(any(test, target_os = "linux"))]
 impl<T: Send + Sync + 'static> StoredPayload for OwnedPayload<T> {
     fn unique(&mut self) -> bool {
         Arc::get_mut(&mut self.original).is_some()
@@ -191,10 +208,11 @@ impl NodeResourceRuntime {
         match kind {
             SupportKind::Ordinary => &self.finalization_support,
             SupportKind::Attempt => &self.attempt_support,
+            SupportKind::NativeFactory => &self.native_factory_support,
         }
     }
 
-    fn reserve_support(
+    pub(super) fn reserve_support(
         self: &Arc<Self>,
         profile: FinalizationSupportProfile,
         epoch: u64,
@@ -269,6 +287,32 @@ impl NodeResourceRuntime {
 }
 
 impl FinalizationSupportLease {
+    #[cfg(target_os = "linux")]
+    pub(super) fn activate_native_factory(
+        &mut self,
+        path: &std::path::Path,
+        identity: crate::process::containment::NativeDomainIdentity,
+        limits: crate::process::containment::NativeDomainLimits,
+    ) -> Result<SupportPayloadRef<super::finite_native::NativeFactoryPayload>, AdmissionRefusal>
+    {
+        let requested =
+            native_factory_support_storage_bytes().ok_or(AdmissionRefusal::ArithmeticOverflow)?;
+        let (original, _state, mut pending) = self.activate_payload(
+            requested,
+            || super::finite_native::NativeFactoryPayload::open(path, identity, limits),
+            |original| OwnedPayload { original },
+        )?;
+        // The actual standing task is already the prepaid native thread.
+        // Its process-lifetime lease intentionally has no Tokio join/close
+        // path that could refund a running reaper.
+        pending.armed = false;
+        Ok(original)
+    }
+    #[cfg(target_os = "linux")]
+    pub(super) fn mark_native_factory_unknown(&self) {
+        self.marker.mark();
+    }
+
     #[cfg(test)]
     fn activate_fixture<T, F>(
         &mut self,
@@ -286,8 +330,7 @@ impl FinalizationSupportLease {
         })
     }
 
-    /// Internal fixture kernel: concrete storage supplies its own typed layout.
-    /// This is not a production payload/profile constructor.
+    /// Register the original Tokio task with its concrete payload storage.
     fn activate_registered<T, F, S>(
         &mut self,
         executor: tokio::runtime::Handle,
@@ -300,13 +343,35 @@ impl FinalizationSupportLease {
         F: Future<Output = ()> + Send + 'static,
         S: StoredPayload + 'static,
     {
-        let requested = std::mem::size_of::<SupportState>()
-            .checked_add(std::mem::size_of::<SupportPayload<T>>())
-            .and_then(|v| v.checked_add(std::mem::size_of::<S>()))
-            .and_then(|v| v.checked_add(registered_future_size::<F>()))
-            .and_then(|v| v.checked_add(8 * std::mem::size_of::<usize>()))
-            .and_then(|v| v.checked_add(S::additional_requested()?))
+        let requested = payload_requested_bytes::<T, S>()
+            .and_then(|bytes| bytes.checked_add(registered_future_size::<F>()))
             .ok_or(AdmissionRefusal::ArithmeticOverflow)?;
+        let (result, state, mut pending) =
+            self.activate_payload(requested, make_payload, make_storage)?;
+        let future = run_registered(Arc::clone(&state), make_task(result.clone()));
+        // Never hold a support/census/ledger mutex over spawn: an already
+        // closed executor can synchronously destroy the submitted future.
+        let task = executor.spawn(future);
+        state
+            .inner
+            .lock()
+            .map_err(|_| AdmissionRefusal::Unavailable)?
+            .task = Some(task);
+        state.published.notify_waiters();
+        pending.armed = false;
+        Ok(result)
+    }
+
+    fn activate_payload<T, S>(
+        &mut self,
+        requested: usize,
+        make_payload: impl FnOnce() -> T,
+        make_storage: impl FnOnce(Arc<SupportPayload<T>>) -> S,
+    ) -> Result<(SupportPayloadRef<T>, Arc<SupportState>, DestructionPending), AdmissionRefusal>
+    where
+        T: Send + Sync + 'static,
+        S: StoredPayload + 'static,
+    {
         if !self.profile.fits_inline(requested) {
             return Err(AdmissionRefusal::HardLimit(
                 super::super::ResourceDimension::Memory,
@@ -354,7 +419,7 @@ impl FinalizationSupportLease {
                 Ok(())
             })
             .map_err(inventory_error)??;
-        let mut pending = DestructionPending {
+        let pending = DestructionPending {
             marker: self.marker.clone(),
             armed: true,
         };
@@ -393,18 +458,7 @@ impl FinalizationSupportLease {
             }
             *original = Some(Arc::clone(&state));
         }
-        let future = run_registered(Arc::clone(&state), make_task(result.clone()));
-        // Never hold a support/census/ledger mutex over spawn: an already
-        // closed executor can synchronously destroy the submitted future.
-        let task = executor.spawn(future);
-        state
-            .inner
-            .lock()
-            .map_err(|_| AdmissionRefusal::Unavailable)?
-            .task = Some(task);
-        state.published.notify_waiters();
-        pending.armed = false;
-        Ok(result)
+        Ok((result, state, pending))
     }
 
     fn original_state(&self) -> Result<Arc<SupportState>, AdmissionRefusal> {

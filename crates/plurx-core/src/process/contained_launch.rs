@@ -1,31 +1,39 @@
-//! Atomic Linux native-domain entry. This foundation exposes no production
-//! launch-profile constructor and grants no whole-attempt resource bound.
+//! Atomic Linux native-domain entry for the fixed finite production profile.
+//! The original kernel controls do not certify a whole-attempt resource bound.
 //!
 //! Domain ownership, root wait, exec-error reporting, and output-pipe closure
 //! remain separate facts. In particular EOF on the exec-error pipe is not
 //! proof of exec: a signal before exec can also close that pipe.
 
-#![cfg(all(target_os = "linux", any(test, feature = "fixtures")))]
+#![cfg(target_os = "linux")]
 
-use super::containment::{NativeDomainExtinction, OwnedNativeDomain};
+#[cfg(test)]
+use super::containment::NativeDomainExtinction;
+use super::containment::OwnedNativeDomain;
 use std::ffi::CString;
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
+mod finite_profile;
 mod linux;
 mod sandbox;
+pub(crate) use finite_profile::{FiniteNativeAllowance, FiniteNativeProfile};
 
 const MAX_ROOTS: usize = 16;
 const MAX_STRINGS: usize = 64;
 const MAX_STRING_BYTES: usize = 16 * 1024;
+// Requested storage for the already-existing standing cleanup thread. This
+// fixes its stack request so its original support owner can prepay that request;
+// it is not a bound on pthread, allocator, executor or kernel memory peaks.
+const REAPER_STACK_BYTES: usize = 2 * 1024 * 1024;
 static ROOTS: AtomicUsize = AtomicUsize::new(0);
 
-/// No production constructor exists until a concrete executable/profile and
-/// descriptor policy have been audited. Arbitrary Command/pre_exec is absent.
+/// Internally built only from the fixed finite recipe and its actual opened
+/// objects. The launcher accepts no arbitrary Command or pre-exec callback.
 pub(super) struct SealedLaunchSpec {
     executable: File,
     input: File,
@@ -140,15 +148,26 @@ impl SealedLaunchSpec {
 }
 
 #[derive(Debug)]
-pub(super) enum LaunchRefusal {
+pub(crate) enum LaunchRefusal {
     Unavailable(io::Error),
     Refused(io::Error),
 }
 
 /// A launch refusal retains the original owner, including uncertain cleanup.
-pub(super) struct LaunchFailure {
+pub(crate) struct LaunchFailure {
     pub domain: OwnedNativeDomain,
     pub reason: LaunchRefusal,
+    pub setup_close_uncertain: bool,
+}
+
+impl LaunchFailure {
+    pub(crate) fn try_cleanup(&mut self) -> io::Result<bool> {
+        if self.setup_close_uncertain {
+            return Err(io::Error::other("original launch setup close is uncertain"));
+        }
+        self.domain.request_termination()?;
+        self.domain.try_close_original()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,15 +204,22 @@ struct Custody {
     domain: OwnedNativeDomain,
     root: Root,
     _slot: Slot,
+    close_uncertain: bool,
 }
 
 struct Root {
     pid: libc::pid_t,
-    pidfd: OwnedFd,
+    pidfd: Option<OwnedFd>,
     wait_status: Option<i32>,
 }
 
 impl Root {
+    fn original_pidfd(&self) -> io::Result<&OwnedFd> {
+        self.pidfd
+            .as_ref()
+            .ok_or_else(|| io::Error::other("original pidfd unavailable"))
+    }
+
     fn try_wait(&mut self) -> io::Result<Option<i32>> {
         if self.wait_status.is_some() {
             return Ok(self.wait_status);
@@ -203,7 +229,7 @@ impl Root {
             let result = unsafe {
                 libc::waitid(
                     libc::P_PIDFD,
-                    self.pidfd.as_raw_fd() as libc::id_t,
+                    self.original_pidfd()?.as_raw_fd() as libc::id_t,
                     &mut information,
                     libc::WEXITED | libc::WNOHANG,
                 )
@@ -232,10 +258,13 @@ impl Root {
     }
 
     fn request_kill(&self) -> io::Result<()> {
+        if self.wait_status.is_some() {
+            return Ok(());
+        }
         let result = unsafe {
             libc::syscall(
                 libc::SYS_pidfd_send_signal,
-                self.pidfd.as_raw_fd(),
+                self.original_pidfd()?.as_raw_fd(),
                 libc::SIGKILL,
                 std::ptr::null::<libc::siginfo_t>(),
                 0u32,
@@ -265,66 +294,103 @@ fn unix_wait_status(code: i32, status: i32) -> io::Result<i32> {
     }
 }
 
-struct Reaper {
-    sender: mpsc::SyncSender<Custody>,
+impl Custody {
+    fn try_close(&mut self) -> io::Result<bool> {
+        if self.close_uncertain {
+            return Err(io::Error::other(
+                "original native control close is uncertain",
+            ));
+        }
+        if self.root.try_wait()?.is_none() || !self.domain.try_close_original()? {
+            return Ok(false);
+        }
+        if let Some(pidfd) = self.root.pidfd.take() {
+            if let Err(error) = close_original(pidfd) {
+                self.close_uncertain = true;
+                return Err(error);
+            }
+        }
+        Ok(true)
+    }
 }
-static REAPER: OnceLock<Option<Reaper>> = OnceLock::new();
 
-fn reaper() -> io::Result<&'static Reaper> {
+fn close_original(descriptor: impl IntoRawFd) -> io::Result<()> {
+    if unsafe { libc::close(descriptor.into_raw_fd()) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+struct Reaper {
+    pending: Mutex<Vec<Custody>>,
+    changed: Condvar,
+}
+static REAPER: OnceLock<Option<Arc<Reaper>>> = OnceLock::new();
+
+fn reaper() -> io::Result<&'static Arc<Reaper>> {
     REAPER
         .get_or_init(|| {
-            let (sender, receiver) = mpsc::sync_channel::<Custody>(MAX_ROOTS);
+            let original = Arc::new(Reaper {
+                pending: Mutex::new(Vec::with_capacity(MAX_ROOTS)),
+                changed: Condvar::new(),
+            });
+            let worker = Arc::clone(&original);
             let mut retained = Vec::<Custody>::with_capacity(MAX_ROOTS);
             std::thread::Builder::new()
                 .name("contained-native-reaper".into())
+                .stack_size(REAPER_STACK_BYTES)
                 .spawn(move || loop {
-                    match receiver.recv_timeout(Duration::from_millis(20)) {
-                        Ok(mut custody) => {
-                            let _ = custody.root.request_kill();
-                            let _ = custody.domain.request_termination();
-                            retained.push(custody);
-                        }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    let mut pending = worker
+                        .pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if pending.is_empty() {
+                        (pending, _) = worker
+                            .changed
+                            .wait_timeout(pending, Duration::from_millis(20))
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                     }
-                    retained.retain_mut(|custody| {
-                        if !matches!(custody.root.try_wait(), Ok(Some(_))) {
-                            return true;
-                        }
-                        let Ok(Some(proof)) = custody.domain.try_extinction() else {
-                            return true;
-                        };
-                        custody.domain.remove_extinct(proof).is_err()
-                    });
+                    // Every queued or retained custodian still owns one of
+                    // MAX_ROOTS slots. Appending cannot grow this allocation.
+                    retained.append(&mut pending);
+                    drop(pending);
+                    retained.retain_mut(|custody| !matches!(custody.try_close(), Ok(true)));
                 })
                 .ok()
-                .map(|_| Reaper { sender })
+                .map(|_| original)
         })
         .as_ref()
         .ok_or_else(|| io::Error::other("contained reaper could not start"))
 }
 
+fn reaper_unavailable() -> io::Error {
+    io::Error::other("prepaid native reaper unavailable")
+}
+
 /// Holds the original domain and root until explicit closure or transfer to the
 /// bounded reaper. Root wait never substitutes for descendant extinction.
 #[must_use]
-pub(super) struct OwnedContainedChild {
+pub(crate) struct OwnedContainedChild {
     custody: Option<Custody>,
+    reaper: Arc<Reaper>,
     stdout: Option<File>,
     stderr: Option<File>,
-    error_pipe: File,
+    error_pipe: Option<File>,
     report: ExecReport,
     error_frame: [u8; 8],
     error_length: usize,
+    setup_close_uncertain: bool,
 }
 
 impl OwnedContainedChild {
-    pub(super) fn try_wait(&mut self) -> io::Result<Option<i32>> {
+    pub(crate) fn try_wait(&mut self) -> io::Result<Option<i32>> {
         self.custody
             .as_mut()
             .map_or(Ok(None), |custody| custody.root.try_wait())
     }
 
-    pub(super) fn request_kill(&mut self) -> io::Result<()> {
+    pub(crate) fn request_kill(&mut self) -> io::Result<()> {
         let Some(custody) = self.custody.as_mut() else {
             return Ok(());
         };
@@ -341,7 +407,10 @@ impl OwnedContainedChild {
         loop {
             let result = unsafe {
                 libc::read(
-                    self.error_pipe.as_raw_fd(),
+                    self.error_pipe
+                        .as_ref()
+                        .ok_or_else(|| io::Error::other("original exec report already closed"))?
+                        .as_raw_fd(),
                     self.error_frame[self.error_length..].as_mut_ptr().cast(),
                     self.error_frame.len() - self.error_length,
                 )
@@ -377,9 +446,11 @@ impl OwnedContainedChild {
     }
 
     /// These nonblocking readers remain explicit application-owned resources.
+    #[cfg(test)]
     pub(super) fn stdout(&mut self) -> Option<&mut File> {
         self.stdout.as_mut()
     }
+    #[cfg(test)]
     pub(super) fn stderr(&mut self) -> Option<&mut File> {
         self.stderr.as_mut()
     }
@@ -388,6 +459,77 @@ impl OwnedContainedChild {
         self.stderr.take();
     }
 
+    pub(crate) fn id(&self) -> Option<u32> {
+        self.custody
+            .as_ref()
+            .and_then(|custody| u32::try_from(custody.root.pid).ok())
+    }
+
+    pub(crate) fn original_pidfd_copy(&self) -> io::Result<OwnedFd> {
+        self.custody
+            .as_ref()
+            .ok_or_else(|| io::Error::other("original root already closed"))?
+            .root
+            .original_pidfd()?
+            .try_clone()
+    }
+
+    pub(crate) fn take_stdout(&mut self) -> Option<File> {
+        self.stdout.take()
+    }
+    pub(crate) fn take_stderr(&mut self) -> Option<File> {
+        self.stderr.take()
+    }
+
+    /// Original root reap and original sealed-domain extinction are independent.
+    /// Keep both capabilities on every refused/uncertain cleanup observation.
+    pub(crate) fn try_close_native(&mut self) -> io::Result<bool> {
+        if self.setup_close_uncertain {
+            return Err(io::Error::other("original launch setup close is uncertain"));
+        }
+        self.close_retired_controls()
+    }
+
+    /// A refused graph keeps its full charge. Close independently known
+    /// outputs and controls even when acquisition or a consuming adapter's
+    /// original close is unresolved. Its receipt path never calls this.
+    pub(crate) fn reap_refused_native(&mut self) -> io::Result<bool> {
+        let outputs = [self.stdout.take(), self.stderr.take()]
+            .into_iter()
+            .flatten()
+            .fold(Ok(()), |result, file| result.and(close_original(file)));
+        self.setup_close_uncertain |= outputs.is_err();
+        let controls = self.close_retired_controls();
+        outputs.and(controls)
+    }
+
+    fn close_retired_controls(&mut self) -> io::Result<bool> {
+        if self.stdout.is_some() || self.stderr.is_some() {
+            return Err(io::Error::other("original native output remains owned"));
+        }
+        let Some(custody) = self.custody.as_mut() else {
+            return Ok(true);
+        };
+        if !custody.try_close()? {
+            return Ok(false);
+        }
+        // A graph invokes this only after its actual output readers close.
+        // Once the original domain is extinct there can be no pending writer
+        // of the pre-exec report. Its contents never prove resource release.
+        if self.poll_exec_report()? == ExecReport::Pending {
+            return Err(io::Error::other("native exec report still has a writer"));
+        }
+        if let Some(pipe) = self.error_pipe.take() {
+            if let Err(error) = close_original(pipe) {
+                self.setup_close_uncertain = true;
+                return Err(error);
+            }
+        }
+        self.custody.take();
+        Ok(true)
+    }
+
+    #[cfg(test)]
     pub(super) fn try_native_extinction(&mut self) -> io::Result<Option<NativeDomainExtinction>> {
         self.custody
             .as_mut()
@@ -395,50 +537,127 @@ impl OwnedContainedChild {
     }
 }
 
+/// Startup queries only. A zero-size NULL clone3 request cannot create a
+/// process. Unavailable or rejected syscalls leave the trusted route selected
+/// before any factory/domain ownership is acquired.
+pub(crate) fn finite_native_startup_available() -> bool {
+    if !cfg!(target_arch = "x86_64")
+        || unsafe { libc::geteuid() } == 0
+        || sandbox::available_abi() < sandbox::MIN_ABI
+    {
+        return false;
+    }
+    let status =
+        unsafe { libc::syscall(libc::SYS_clone3, std::ptr::null::<libc::c_void>(), 0usize) };
+    status == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL)
+}
+
+pub(crate) fn prepare_reaper() -> io::Result<()> {
+    reaper().map(|_| ())
+}
+
+pub(crate) fn reaper_projection() -> Option<(usize, u16)> {
+    // Each original root may occupy a channel cell and a bounded retained
+    // vector cell. The channel's private control allocation is not a peak.
+    let cells = 2 * MAX_ROOTS;
+    let bytes = REAPER_STACK_BYTES
+        .checked_add(std::mem::size_of::<Reaper>())?
+        .checked_add(cells * std::mem::size_of::<Custody>())?;
+    Some((bytes, u16::try_from(cells).ok()?))
+}
+
 impl Drop for OwnedContainedChild {
     fn drop(&mut self) {
         self.close_output_pipes();
         if let Some(mut custody) = self.custody.take() {
+            custody.close_uncertain |= self.setup_close_uncertain;
             let _ = custody.domain.request_termination();
             let _ = custody.root.request_kill();
-            // Every active/queued/reaping owner holds one of MAX_ROOTS slots;
-            // consequently this MAX_ROOTS queue cannot be full here.
-            let Some(Some(reaper)) = REAPER.get() else {
-                std::mem::forget(custody);
-                return;
-            };
-            match reaper.sender.try_send(custody) {
-                Ok(()) => {}
-                Err(error) => {
-                    let mut custody = match error {
-                        mpsc::TrySendError::Full(custody)
-                        | mpsc::TrySendError::Disconnected(custody) => custody,
-                    };
-                    // Retain the exact owner on impossible reaper failure;
-                    // never turn missing cleanup into apparent closure.
-                    let _ = custody.domain.request_termination();
-                    let _ = custody.root.request_kill();
-                    std::mem::forget(custody);
+            // The same original slot covers the queue transfer even if the
+            // reaper stops servicing it. No consuming send can lose custody.
+            let mut pending = self
+                .reaper
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            pending.push(custody);
+            self.reaper.changed.notify_one();
+        }
+    }
+}
+
+/// Fixed partial setup custody. All descriptors are installed immediately;
+/// failure closes each original once and carries uncertainty to the same
+/// LaunchFailure/child. No ambiguous numeric fd is ever closed a second time.
+struct LaunchScratch {
+    pipes: [Option<File>; 6],
+    copies: [Option<OwnedFd>; 7],
+    copy_count: usize,
+    close_uncertain: bool,
+}
+impl LaunchScratch {
+    fn new() -> Self {
+        Self {
+            pipes: std::array::from_fn(|_| None),
+            copies: std::array::from_fn(|_| None),
+            copy_count: 0,
+            close_uncertain: false,
+        }
+    }
+    fn pipe(&mut self, index: usize) -> io::Result<()> {
+        let mut descriptors = [-1; 2];
+        if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        self.pipes[index] = Some(unsafe { File::from_raw_fd(descriptors[0]) });
+        self.pipes[index + 1] = Some(unsafe { File::from_raw_fd(descriptors[1]) });
+        let raw = descriptors[0];
+        let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    fn pipe_fd(&self, index: usize) -> io::Result<i32> {
+        self.pipes[index]
+            .as_ref()
+            .map(AsRawFd::as_raw_fd)
+            .ok_or_else(|| io::Error::other("original launch pipe missing"))
+    }
+    fn copy(&mut self, original: i32) -> io::Result<i32> {
+        if self.copy_count >= self.copies.len() {
+            return Err(io::Error::other("native launch copy slots exhausted"));
+        }
+        let raw = unsafe { libc::fcntl(original, libc::F_DUPFD_CLOEXEC, 10) };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        self.copies[self.copy_count] = Some(unsafe { OwnedFd::from_raw_fd(raw) });
+        self.copy_count += 1;
+        Ok(raw)
+    }
+    fn close(&mut self) {
+        use std::os::fd::IntoRawFd;
+        for cell in &mut self.copies {
+            if let Some(fd) = cell.take() {
+                if unsafe { libc::close(fd.into_raw_fd()) } != 0 {
+                    self.close_uncertain = true;
+                }
+            }
+        }
+        for cell in &mut self.pipes {
+            if let Some(fd) = cell.take() {
+                if unsafe { libc::close(fd.into_raw_fd()) } != 0 {
+                    self.close_uncertain = true;
                 }
             }
         }
     }
 }
-
-fn pipe() -> io::Result<(File, File)> {
-    let mut descriptors = [-1; 2];
-    if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return Err(io::Error::last_os_error());
+impl Drop for LaunchScratch {
+    fn drop(&mut self) {
+        self.close();
     }
-    let read = unsafe { File::from_raw_fd(descriptors[0]) };
-    let write = unsafe { File::from_raw_fd(descriptors[1]) };
-    let flags = unsafe { libc::fcntl(read.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0
-        || unsafe { libc::fcntl(read.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok((read, write))
 }
 
 /// Clone failures return the original domain. Successful clones always return
@@ -447,59 +666,96 @@ fn pipe() -> io::Result<(File, File)> {
     clippy::result_large_err,
     reason = "A failed launch returns its original inline native owner; error handling must not allocate another custody box."
 )]
+#[cfg(test)]
 pub(super) fn launch(
-    mut domain: OwnedNativeDomain,
+    domain: OwnedNativeDomain,
     spec: SealedLaunchSpec,
 ) -> Result<OwnedContainedChild, LaunchFailure> {
+    if let Err(error) = prepare_reaper() {
+        return Err(LaunchFailure {
+            domain,
+            reason: LaunchRefusal::Unavailable(error),
+            setup_close_uncertain: false,
+        });
+    }
+    launch_borrowed(domain, &spec, None)
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "Failures return their exact original domain without a new allocation after entry."
+)]
+fn launch_borrowed(
+    mut domain: OwnedNativeDomain,
+    spec: &SealedLaunchSpec,
+    class: Option<super::priority::ChildClass>,
+) -> Result<OwnedContainedChild, LaunchFailure> {
+    let mut scratch = LaunchScratch::new();
     let prepared = (|| {
         spec.validate()?;
-        let _ = reaper()?;
+        let reaper = REAPER
+            .get()
+            .and_then(Option::as_ref)
+            .ok_or_else(reaper_unavailable)?;
         let slot = Slot::acquire()?;
-        let (stdout, output) = pipe()?;
-        let (stderr, errors) = pipe()?;
-        let (error_pipe, error_writer) = pipe()?;
-        let child = linux::PreparedChild::new(&spec, output, errors, error_writer)?;
-        Ok::<_, io::Error>((slot, stdout, stderr, error_pipe, child))
+        scratch.pipe(0)?;
+        scratch.pipe(2)?;
+        scratch.pipe(4)?;
+        let child = linux::PreparedChild::new(spec, &mut scratch, class)?;
+        Ok::<_, io::Error>((slot, child, Arc::clone(reaper)))
     })();
-    let (slot, stdout, stderr, error_pipe, child) = match prepared {
+    let (slot, child, reaper) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
+            scratch.close();
             return Err(LaunchFailure {
                 domain,
                 reason: LaunchRefusal::Refused(error),
+                setup_close_uncertain: scratch.close_uncertain,
             });
         }
     };
     let seed = match domain.take_entry_seed() {
         Ok(seed) => seed,
         Err(error) => {
+            scratch.close();
             return Err(LaunchFailure {
                 domain,
                 reason: LaunchRefusal::Refused(error),
+                setup_close_uncertain: scratch.close_uncertain,
             });
         }
     };
     let result = child.spawn(seed.directory_fd());
-    drop(seed);
+    scratch.close_uncertain |= seed.close_original().is_err();
     domain.seal_entry();
     match result {
-        Ok((pid, pidfd)) => Ok(OwnedContainedChild {
-            custody: Some(Custody {
-                domain,
-                root: Root {
-                    pid,
-                    pidfd,
-                    wait_status: None,
-                },
-                _slot: slot,
-            }),
-            stdout: Some(stdout),
-            stderr: Some(stderr),
-            error_pipe,
-            report: ExecReport::Pending,
-            error_frame: [0; 8],
-            error_length: 0,
-        }),
+        Ok((pid, pidfd)) => {
+            let stdout = scratch.pipes[0].take();
+            let stderr = scratch.pipes[2].take();
+            let error_pipe = scratch.pipes[4].take();
+            scratch.close();
+            Ok(OwnedContainedChild {
+                custody: Some(Custody {
+                    domain,
+                    root: Root {
+                        pid,
+                        pidfd: Some(pidfd),
+                        wait_status: None,
+                    },
+                    _slot: slot,
+                    close_uncertain: false,
+                }),
+                reaper,
+                stdout,
+                stderr,
+                error_pipe,
+                report: ExecReport::Pending,
+                error_frame: [0; 8],
+                error_length: 0,
+                setup_close_uncertain: scratch.close_uncertain,
+            })
+        }
         Err(error) => {
             let reason = if matches!(
                 error.raw_os_error(),
@@ -509,7 +765,12 @@ pub(super) fn launch(
             } else {
                 LaunchRefusal::Refused(error)
             };
-            Err(LaunchFailure { domain, reason })
+            scratch.close();
+            Err(LaunchFailure {
+                domain,
+                reason,
+                setup_close_uncertain: scratch.close_uncertain,
+            })
         }
     }
 }
@@ -1409,14 +1670,25 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(child.try_wait().unwrap(), Some(0));
+        for pipe in [child.take_stdout(), child.take_stderr()]
+            .into_iter()
+            .flatten()
+        {
+            close_original(pipe).unwrap();
+        }
         assert!(
-            child.try_native_extinction().unwrap().is_none(),
-            "root exit cannot close the still-live descendant"
+            !child.try_close_native().unwrap(),
+            "root exit and closed readers cannot close the still-live descendant"
         );
         child.request_kill().unwrap();
-        while child.try_native_extinction().unwrap().is_none() {
-            assert!(Instant::now() < deadline, "native extinction deadline");
+        while !child.try_close_native().unwrap() {
+            assert!(
+                Instant::now() < deadline,
+                "native extinction and original close deadline"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
+        assert!(child.custody.is_none());
+        assert!(child.error_pipe.is_none());
     }
 }

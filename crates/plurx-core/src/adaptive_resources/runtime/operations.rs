@@ -195,7 +195,7 @@ pub(in crate::adaptive_resources::runtime) fn continuous_window_closed(
 
 /// The local entry deadline or the original continuous cutoff, whichever
 /// closes first. Only fresh arm/native-entry seams use this.
-pub(in crate::adaptive_resources::runtime) fn entry_window_closed(
+pub(in crate::adaptive_resources) fn entry_window_closed(
     continuous: Option<&crate::cluster::clock::ContinuousDeadline>,
     deadline: Instant,
 ) -> bool {
@@ -1284,8 +1284,18 @@ impl NodeResourceRuntime {
         self.eligible(&bundle)?;
         let id = bundle.id;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
-        self.launch_root_role(id, role, member, command, work, deadline, None)
-            .await
+        self.launch_root_role(
+            id,
+            role,
+            member,
+            command,
+            work,
+            deadline,
+            None,
+            #[cfg(target_os = "linux")]
+            None,
+        )
+        .await
     }
 
     // Callers are private concrete adapters or the existing legacy entry above.
@@ -1300,6 +1310,7 @@ impl NodeResourceRuntime {
         work: crate::process::ChildWork,
         deadline: Instant,
         named_arm: Option<Uuid>,
+        #[cfg(target_os = "linux")] native_descriptors: Option<&[(std::os::fd::RawFd, i32)]>,
     ) -> Result<GraphRoot, OperationError> {
         let plan = role
             .members
@@ -1366,6 +1377,12 @@ impl NodeResourceRuntime {
         }
         if !role.armed.contains(&member) {
             if role.transition.is_none() {
+                #[cfg(target_os = "linux")]
+                if let Some(finite) = role.finite_vod.as_mut().filter(|finite| {
+                    finite.native_plan.is_some() && named_arm == Some(finite.acquisition_id)
+                }) {
+                    finite.native_arm_prior_sequence = Some(role.sequence);
+                }
                 start_named_transition(
                     &self.journal,
                     role,
@@ -1418,22 +1435,49 @@ impl NodeResourceRuntime {
         let launched = if named_arm.is_some() {
             #[cfg(unix)]
             {
-                let entered = match named_adapter.ok_or(OperationError::State)? {
+                match named_adapter.ok_or(OperationError::State)? {
                     NamedAdapter::Finite => {
-                        &mut role
-                            .finite_vod
-                            .as_mut()
-                            .ok_or(OperationError::State)?
-                            .entered
+                        let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
+                        #[cfg(target_os = "linux")]
+                        let native = match finite.native_plan.as_ref() {
+                            Some(plan) => Some(physical_graph::finite_native::NativeRootEntry {
+                                factory: finite
+                                    .native_factory
+                                    .as_ref()
+                                    .ok_or(OperationError::State)?,
+                                command: &finite.command,
+                                descriptors: native_descriptors.ok_or(OperationError::State)?,
+                                allowance: plan.allowance,
+                                limits: plan.limits,
+                                deadline,
+                                continuous: role.continuous_entry_deadline.as_ref(),
+                            }),
+                            None => None,
+                        };
+                        graph
+                            .spawn_selected_durable_root(
+                                command,
+                                work,
+                                arm,
+                                &mut finite.entered,
+                                #[cfg(target_os = "linux")]
+                                native,
+                            )
+                            .await
                     }
                     #[cfg(target_os = "linux")]
                     NamedAdapter::Copy => {
-                        &mut role.copy_vod.as_mut().ok_or(OperationError::State)?.entered
+                        graph
+                            .spawn_selected_durable_root(
+                                command,
+                                work,
+                                arm,
+                                &mut role.copy_vod.as_mut().ok_or(OperationError::State)?.entered,
+                                None,
+                            )
+                            .await
                     }
-                };
-                graph
-                    .spawn_selected_durable_root(command, work, arm, entered)
-                    .await
+                }
             }
             #[cfg(not(unix))]
             {

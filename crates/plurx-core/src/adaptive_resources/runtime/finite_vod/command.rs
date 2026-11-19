@@ -187,6 +187,11 @@ pub struct SoftwareAvcCommand {
 }
 
 impl SoftwareAvcCommand {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn native_engine_objects(&self) -> &[(PathBuf, String)] {
+        &self.engine_snapshot.objects
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn compile(
         source: &MediaFile,
@@ -327,7 +332,7 @@ impl SoftwareAvcCommand {
             && source.scanner_mtime == self.scanner_mtime
     }
 
-    pub(in crate::adaptive_resources::runtime) fn program(&self) -> &std::path::Path {
+    pub(crate) fn program(&self) -> &std::path::Path {
         self.executable.path()
     }
 
@@ -343,11 +348,11 @@ impl SoftwareAvcCommand {
         Arc::clone(&self.engine_snapshot)
     }
 
-    pub(in crate::adaptive_resources::runtime) fn args(&self) -> &[String] {
+    pub(crate) fn args(&self) -> &[String] {
         &self.args
     }
 
-    pub(in crate::adaptive_resources::runtime) fn env(&self) -> &[(OsString, OsString)] {
+    pub(crate) fn env(&self) -> &[(OsString, OsString)] {
         &self.env
     }
 
@@ -355,7 +360,7 @@ impl SoftwareAvcCommand {
         &self.runtime_cache
     }
 
-    pub(in crate::adaptive_resources::runtime) fn source_count(&self) -> usize {
+    pub(crate) fn source_count(&self) -> usize {
         self.source_count
     }
 

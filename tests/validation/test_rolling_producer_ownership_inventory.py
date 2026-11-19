@@ -470,7 +470,7 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                     self.fail(f"invalid structural pattern for {row['id']}: {error}")
                 actual = len(pattern.findall(self.module_structural_source))
                 if row["id"] == "low-level-process-start":
-                    actual -= self.containment_fixture_starts(pattern)
+                    actual -= self.reviewed_containment_starts(pattern)
                 self.assertEqual(
                     actual,
                     row["expected_occurrences"],
@@ -480,7 +480,7 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                     "ownership review and allowlist update",
                 )
 
-    def containment_fixture_starts(self, pattern: re.Pattern) -> int:
+    def reviewed_containment_starts(self, pattern: re.Pattern) -> int:
         path = ROOT / "crates/plurx-core/src/process/contained_launch.rs"
         header = (
             '    #[test]\n'
@@ -500,7 +500,38 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         for branch in (limit, orphan):
             self.assertEqual(pattern.findall(rust_structural_source(branch)), ["libc::fork("])
         self.assertEqual(len(pattern.findall(rust_structural_source(fixture))), 2)
-        return 2
+
+        restricted = source.split("    fn private_restricted_child_entry() {", 1)[1]
+        restricted = restricted.split("\n    #[test]", 1)[0]
+        self.assertRegex(
+            restricted,
+            r"libc::syscall\(\s*libc::SYS_clone3,\s*args.as_ptr\(\),"
+            r"\s*std::mem::size_of_val\(&args\),\s*\)",
+        )
+        self.assertEqual(len(pattern.findall(rust_structural_source(restricted))), 1)
+
+        startup = source.split("pub(crate) fn finite_native_startup_available() -> bool {", 1)[1]
+        startup = startup.split("\n}\n", 1)[0]
+        self.assertIn(
+            "libc::syscall(libc::SYS_clone3, std::ptr::null::<libc::c_void>(), 0usize)",
+            startup,
+        )
+        self.assertEqual(len(pattern.findall(rust_structural_source(startup))), 1)
+
+        launch_path = path.with_suffix("") / "linux.rs"
+        self.assertIn(launch_path, self.module_paths)
+        launch = launch_path.read_text(encoding="utf-8").split(
+            "pub(super) fn spawn(&self, domain: BorrowedFd<'_>)", 1
+        )[1]
+        launch = launch.split("\n    }\n", 1)[0]
+        self.assertIn("flags: CLONE_PIDFD | CLONE_INTO_CGROUP,", launch)
+        self.assertIn("cgroup: domain.as_raw_fd() as u64,", launch)
+        self.assertIn(
+            "libc::syscall(libc::SYS_clone3, &args, std::mem::size_of::<CloneArgs>())",
+            launch,
+        )
+        self.assertEqual(len(pattern.findall(rust_structural_source(launch))), 1)
+        return 5
 
     def test_promised_syntax_forms_hit_structural_sentinels(self) -> None:
         patterns = {

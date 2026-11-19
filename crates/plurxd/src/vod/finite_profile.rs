@@ -269,6 +269,21 @@ pub(super) fn compile(
             .to_owned(),
     )
     .map_err(|error| format!("planning the finite software writer: {error}"))?;
+    let runtime = shared
+        .resource_runtime
+        .as_ref()
+        .ok_or("finite resource runtime unavailable for metadata projection")?;
+    #[cfg(target_os = "linux")]
+    let native_plan = runtime.finite_native_plan(&command);
+    #[cfg(target_os = "linux")]
+    let (native_handles, native_memory) = match &native_plan {
+        Some(plan) => plan
+            .requested_resources()
+            .ok_or("finite native demand overflows")?,
+        None => (0, 0),
+    };
+    #[cfg(not(target_os = "linux"))]
+    let (native_handles, native_memory) = (0, 0);
     let known_memory = SoftwareVodRequest::known_memory_component(&command, &pump, &output, 0)
         .map_err(|error| format!("sizing the finite software memory component: {error}"))?;
 
@@ -305,8 +320,12 @@ pub(super) fn compile(
     let demand = WorkloadDemand {
         resources: Metric::Known(ResourceVector {
             cpu_ns_per_second,
-            peak_memory_bytes: known_memory,
-            handles: u64::from(handles),
+            peak_memory_bytes: known_memory
+                .checked_add(native_memory)
+                .ok_or("finite memory demand overflows")?,
+            handles: u64::from(handles)
+                .checked_add(native_handles)
+                .ok_or("finite handle demand overflows")?,
             processes: 1,
             hardware_slots: 0,
             tuner_slots: 0,
@@ -317,6 +336,8 @@ pub(super) fn compile(
     };
 
     let mut request = SoftwareVodRequest {
+        #[cfg(target_os = "linux")]
+        native_plan,
         continuous_entry_deadline: None,
         rendition_id: key.to_owned(),
         generation_epoch: SoftwareVodRequest::INITIAL_GENERATION_EPOCH,
@@ -334,10 +355,6 @@ pub(super) fn compile(
     // knows its configured root and the exact source/executable selections;
     // construction later checks actual requested capacities against this
     // projection. Reserving a larger daemon lease after prepare is too late.
-    let runtime = shared
-        .resource_runtime
-        .as_ref()
-        .ok_or("finite resource runtime unavailable for metadata projection")?;
     let (owner_heap, output_heap) = runtime
         .software_application_metadata_projection(&request)
         .map_err(|error| format!("projecting finite application metadata: {error}"))?;

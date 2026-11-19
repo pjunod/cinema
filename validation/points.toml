@@ -535,6 +535,8 @@ paths = [
   "crates/plurx-core/src/adaptive_resources/retained.rs",
   "crates/plurx-core/src/adaptive_resources/retained/**",
   "crates/plurx-core/src/adaptive_resources/physical_graph.rs",
+  "crates/plurx-core/src/adaptive_resources/physical_graph/child.rs",
+  "crates/plurx-core/src/adaptive_resources/physical_graph/finite_native.rs",
   "crates/plurx-core/src/adaptive_resources/physical_graph/never_acquired.rs",
   "crates/plurx-core/src/adaptive_resources/physical_graph/fixed_probe.rs",
   "crates/plurx-core/src/adaptive_resources/physical_graph/fixed_engine.rs",

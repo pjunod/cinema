@@ -6,15 +6,8 @@ pub mod bounded;
 mod census;
 #[cfg(unix)]
 mod child_limits;
-#[cfg(all(target_os = "linux", any(test, feature = "fixtures")))]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "The atomic launcher is compiled for fixture qualification; no production profile is minted before the sandbox audit."
-    )
-)]
-mod contained_launch;
+#[cfg(target_os = "linux")]
+pub(crate) mod contained_launch;
 pub mod containment;
 #[cfg(target_os = "linux")]
 pub(crate) mod fixed_planning_engine;
@@ -87,6 +80,28 @@ pub struct ChildJob {
 }
 
 impl ChildJob {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn register_original_native(
+        pid: u32,
+        original: std::os::fd::OwnedFd,
+        program: &std::ffi::OsStr,
+        work: ChildWork,
+    ) -> Self {
+        Self {
+            _registration: Some(priority::register_original_pidfd(
+                pid, program, work, original,
+            )),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn close_original_native(&self) -> io::Result<()> {
+        self._registration
+            .as_ref()
+            .ok_or_else(|| io::Error::other("original native registration missing"))?
+            .close_original_native()
+    }
+
     /// Control the actual registered root while another task holds the Child
     /// for `wait()`. This does not extend the registration's lifetime.
     pub(crate) fn registered_control(&self) -> Option<priority::RegisteredChildControl> {
@@ -96,7 +111,7 @@ impl ChildJob {
     }
 }
 
-/// The one launcher every production child goes through.
+/// The shared command launcher for trusted processing routes.
 ///
 /// Spawn without giving the child a chance to create descendants before its
 /// lifetime is tied to the daemon. Linux spawns on a persistent owner thread
@@ -109,8 +124,7 @@ impl ChildJob {
 /// ([`priority::apply`]; priority refusals never fail the spawn, but Linux
 /// ownership setup must succeed), and it is
 /// listed in [`priority::running`] until the returned job is dropped.
-/// `process::census::every_production_spawn_goes_through_the_launcher` fails
-/// on any production spawn that does not come through here.
+/// The process census verifies ownership of Command-based spawns.
 pub fn spawn_job_owned(
     command: &mut tokio::process::Command,
     work: ChildWork,

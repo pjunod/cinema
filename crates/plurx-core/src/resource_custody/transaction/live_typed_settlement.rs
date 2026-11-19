@@ -54,6 +54,44 @@ pub(super) fn change(
         if envelope.planned != *planned {
             return Err(codec::invalid());
         }
+        if let v2::ClosedFact::FiniteNativeSetupClosedV1 {
+            arm_operation_id,
+            arm_prior_sequence,
+            ..
+        } = fact
+        {
+            if phase != "acquisition_possible" || envelope.observed.is_some() {
+                return Err(codec::invalid());
+            }
+            let arm_id = arm_operation_id.uuid();
+            let original_arm = Command::Change {
+                key: TransitionKey {
+                    handle: key.handle.clone(),
+                    operation_id: arm_id,
+                    expected_sequence: *arm_prior_sequence,
+                },
+                mutation: Mutation::Arm {
+                    members: vec![member_id.uuid()],
+                },
+            };
+            let (request_json, result_json): (String, String) = tx.query_row(
+                "SELECT request_json,result_json FROM operations WHERE operation_id=?1",
+                [arm_id.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if codec::decode::<String>(&request_json)? != super::fingerprint(&original_arm)?
+                || !matches!(codec::decode::<DiskResult>(&result_json)?,
+                    DiskResult::Changed(ack)
+                        if ack.operation_id == arm_id
+                            && ack.obligation_id == key.handle.obligation_id
+                            && ack.graph_id == key.handle.graph_id
+                            && ack.phase == Phase::AcquisitionPossible
+                            && ack.sequence > *arm_prior_sequence
+                            && ack.sequence <= key.expected_sequence)
+            {
+                return Err(codec::invalid());
+            }
+        }
         // A scratch head in the request is data only. Rebuild the durable
         // event fold and require the same terminal, empty state.
         if let (

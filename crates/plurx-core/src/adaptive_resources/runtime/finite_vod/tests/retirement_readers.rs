@@ -2,9 +2,10 @@
 //! original operation and supplies no replacement close or refund proof.
 use super::*;
 use crate::adaptive_resources::runtime::finite_vod::{
-    cleanup_tests::original_software_fixture_with_producer, FiniteCloseIdentity,
-    FiniteCloseWorkspace, FiniteFile, FiniteOutput, FiniteReader, FiniteResponseBuffer,
-    FiniteVodError, FiniteWriterOutcome, SoftwareAvcPumpPlan, SoftwareVodEvent, SoftwareVodOwner,
+    cleanup_tests::{original_software_fixture_selected, original_software_fixture_with_producer},
+    FiniteCloseIdentity, FiniteCloseWorkspace, FiniteFile, FiniteOutput, FiniteReader,
+    FiniteResponseBuffer, FiniteVodError, FiniteWriterOutcome, SoftwareAvcPumpPlan,
+    SoftwareVodEvent, SoftwareVodOwner,
 };
 use crate::adaptive_resources::ResourceVector;
 use crate::fmp4::{CutPolicy, FiniteSegmenterLimits, FragmentReaderBounds, MergeMemoryLimits};
@@ -112,12 +113,153 @@ enum EarlyReader {
     Opened,
 }
 
+fn native_children(root: &std::path::Path) -> usize {
+    std::fs::read_dir(root)
+        .expect("original delegated root")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("plurx-"))
+        .count()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[tokio::test]
+#[ignore = "requires isolated finite delegated cgroup v2, clone3, Landlock ABI6 and native FFmpeg"]
+async fn bounded_native_software_vod_retires_original_and_reuses_capacity() {
+    let delegated = std::path::PathBuf::from(
+        std::env::var_os("PLURX_TEST_FINITE_NATIVE_ROOT").expect("explicit isolated finite root"),
+    );
+    assert_eq!(native_children(&delegated), 0);
+    let (fixture, _) = OriginalOutput::produce_selected(None, Some(&delegated)).await;
+    assert_eq!(
+        native_children(&delegated),
+        0,
+        "original domain removed before positive process close"
+    );
+    let before = fixture.runtime.accounting().unwrap();
+    assert_eq!(before.unknown_peak_producers, 1);
+    assert_eq!(before.unknown_task_peak_producers, 1);
+    let retained = fixture
+        .owner
+        .retire_output(deadline())
+        .await
+        .expect("conserving native R to S");
+    let active = fixture.runtime.accounting().unwrap();
+    assert_eq!(
+        active.used.processes, 0,
+        "original native root capacity reusable"
+    );
+    assert!(active.used.peak_memory_bytes < before.used.peak_memory_bytes);
+    let mut ticket = retained
+        .prepare_eviction(deadline())
+        .await
+        .expect("original retained output eviction");
+    let OriginalOutput {
+        runtime,
+        owner,
+        preparation,
+        output,
+        root,
+        ..
+    } = fixture;
+    drop((retained, owner, preparation, output));
+    ticket
+        .finish_retirement(deadline())
+        .await
+        .expect("original native output and app owner closed");
+    let after = runtime.accounting().unwrap();
+    let support = after
+        .native_factory_support
+        .expect("original standing native support remains charged");
+    assert_eq!(after.held, 0);
+    assert_eq!(after.used.peak_memory_bytes, support.requested_bytes);
+    assert_eq!(after.used.handles, support.handles);
+    assert_eq!(after.unknown_peak_producers, 0);
+    assert_eq!(after.unknown_task_peak_producers, 0);
+    assert_eq!(native_children(&delegated), 0);
+    drop((ticket, root));
+}
+
+#[cfg(target_arch = "x86_64")]
+#[tokio::test]
+#[ignore = "requires isolated finite delegated cgroup v2, clone3, Landlock ABI6 and native FFmpeg"]
+async fn bounded_native_software_preclone_refusal_settles_exact_original_arm() {
+    use crate::adaptive_resources::physical_graph::finite_native::REFUSE_AFTER_NATIVE_SETUP;
+    let delegated = std::path::PathBuf::from(
+        std::env::var_os("PLURX_TEST_FINITE_NATIVE_ROOT").expect("explicit isolated finite root"),
+    );
+    let parent =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/finite-vod-fixtures");
+    std::fs::create_dir_all(&parent).expect("repo-local native fixture parent");
+    let parent = std::fs::canonicalize(parent).expect("canonical native ancestry");
+    let root = FixtureRoot(tempfile::tempdir_in(parent).expect("original finite test root"));
+    let (runtime, mut owner, preparation, _) =
+        original_software_fixture_selected(root.path(), complete_output_plan(), Some(&delegated));
+    let result = REFUSE_AFTER_NATIVE_SETUP
+        .scope((), owner.start(deadline()))
+        .await;
+    let error = result.expect_err("exact original native setup refuses before clone");
+    assert!(
+        error
+            .to_string()
+            .contains("fixture refusal after original native domain setup"),
+        "{error}"
+    );
+    let binding = preparation.state.lock().await.roles[0].binding;
+    let held = runtime.accounting().unwrap();
+    assert_eq!(held.unknown_held, 1);
+    assert_eq!(held.unknown_peak_producers, 1);
+    assert_eq!(held.used.processes, 1);
+    assert_eq!(
+        native_children(&delegated),
+        0,
+        "original native setup was reaped"
+    );
+    let mut ticket = owner
+        .prepare_cancel(deadline())
+        .await
+        .expect("same durable original setup close");
+    assert_eq!(
+        runtime.accounting().unwrap().used,
+        held.used,
+        "an outstanding app owner remains charged"
+    );
+    drop((owner, preparation));
+    ticket
+        .finish_retirement(deadline())
+        .await
+        .expect("original native setup and app owner settled");
+    let after = runtime.accounting().unwrap();
+    assert_eq!(after.held, 0);
+    assert_eq!(after.used.processes, 0);
+    assert!(!runtime
+        .ledger
+        .inner
+        .lock()
+        .unwrap()
+        .entries
+        .contains_key(&binding.reservation));
+    let support = after
+        .native_factory_support
+        .expect("standing reaper stays charged");
+    assert_eq!(after.used.peak_memory_bytes, support.requested_bytes);
+    assert_eq!(after.used.handles, support.handles);
+    assert_eq!(native_children(&delegated), 0);
+    drop((ticket, root));
+}
+
 impl OriginalOutput {
     async fn produced() -> Self {
         Self::produce(None).await.0
     }
 
     async fn produce(early: Option<EarlyReader>) -> (Self, Option<FiniteReader>) {
+        Self::produce_selected(early, None).await
+    }
+
+    async fn produce_selected(
+        early: Option<EarlyReader>,
+        native_root: Option<&std::path::Path>,
+    ) -> (Self, Option<FiniteReader>) {
         let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/finite-vod-fixtures");
         std::fs::create_dir_all(&parent).expect("repo-local native fixture parent");
@@ -128,13 +270,45 @@ impl OriginalOutput {
                 .tempdir_in(parent)
                 .expect("actual finite installation"),
         );
-        let (runtime, mut owner, preparation, member) =
-            original_software_fixture_with_producer(root.path(), complete_output_plan());
+        let (runtime, mut owner, preparation, member) = if native_root.is_some() {
+            original_software_fixture_selected(root.path(), complete_output_plan(), native_root)
+        } else {
+            original_software_fixture_with_producer(root.path(), complete_output_plan())
+        };
+        if native_root.is_some() {
+            let (prepared, other_waiter) = tokio::join!(
+                owner.prepare(deadline()),
+                runtime.prepare_native_factory(deadline(), None),
+            );
+            prepared.expect("original native support before actual source preparation");
+            let left = other_waiter.expect("concurrent preparation shares the original factory");
+            let right = runtime
+                .prepare_native_factory(deadline(), None)
+                .await
+                .expect("a subsequent preparation shares the same original factory");
+            assert!(std::ptr::eq(left.root().unwrap(), right.root().unwrap()));
+            let support = runtime
+                .accounting()
+                .unwrap()
+                .native_factory_support
+                .unwrap();
+            assert_eq!(
+                support.phase,
+                crate::adaptive_resources::FinalizationSupportPhase::Active
+            );
+        }
         let mut events = owner.take_events().expect("original producer events");
         owner
             .start(deadline())
             .await
             .expect("actual software producer");
+        if let Some(native_root) = native_root {
+            assert_eq!(
+                native_children(native_root),
+                1,
+                "original native domain is retained while its writer runs"
+            );
+        }
         let output = owner.output();
         let mut initialized = 0_u32;
         let mut materialized = 0_u32;

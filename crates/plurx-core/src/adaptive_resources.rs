@@ -386,6 +386,7 @@ struct State {
     // Ephemeral daemon support is not a native role or persisted producer claim.
     support: Option<finalization_support::SupportEntry>,
     attempt_support: Option<finalization_support::SupportEntry>,
+    native_factory_support: Option<finalization_support::SupportEntry>,
     next_support_generation: u64,
 }
 
@@ -396,6 +397,7 @@ pub struct ResourceLedger {
     // Startup-owned marker: active Drop never takes the ledger/census locks.
     support_unknown: Arc<std::sync::atomic::AtomicBool>,
     attempt_support_unknown: Arc<std::sync::atomic::AtomicBool>,
+    native_factory_support_unknown: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct ResourceReservation {
@@ -441,6 +443,9 @@ pub struct LedgerSnapshot {
     /// Independently charged pre-P attempt custody, never ordinary collector credit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt_support: Option<finalization_support::FinalizationSupportSnapshot>,
+    /// Process-lifetime prepaid native factory, distinct from both collectors.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_factory_support: Option<finalization_support::FinalizationSupportSnapshot>,
     /// Cumulative extra charge observed by native-I/O snapshots. Overflowed
     /// cumulative accounting reports Unknown rather than a misleading value.
     pub native_overage_debt: Metric<ResourceVector>,
@@ -603,10 +608,12 @@ impl ResourceLedger {
                 draining: false,
                 support: None,
                 attempt_support: None,
+                native_factory_support: None,
                 next_support_generation: 1,
             })),
             support_unknown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             attempt_support_unknown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            native_factory_support_unknown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -1098,6 +1105,9 @@ impl ResourceLedger {
             attempt_support: state
                 .attempt_support
                 .map(|entry| entry.snapshot(self.attempt_support_unknown.load(Ordering::Acquire))),
+            native_factory_support: state.native_factory_support.map(|entry| {
+                entry.snapshot(self.native_factory_support_unknown.load(Ordering::Acquire))
+            }),
             native_overage_debt: if state.invalid && state.native_overage_fenced {
                 Metric::Unknown(UnknownReason::Unbounded)
             } else {

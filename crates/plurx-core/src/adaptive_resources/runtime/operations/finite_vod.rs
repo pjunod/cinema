@@ -17,7 +17,13 @@ pub(super) struct FiniteLaunch {
     /// Synchronous original registrations; absence is meaningful only with
     /// the sealed no-root graph and a matching unarmed planned slot.
     pub(super) registered_source_members: std::collections::BTreeSet<Uuid>,
-    command: SoftwareAvcCommand,
+    pub(super) command: SoftwareAvcCommand,
+    #[cfg(target_os = "linux")]
+    pub(super) native_plan: Option<super::super::finite_native::FiniteNativePlan>,
+    #[cfg(target_os = "linux")]
+    pub(super) native_factory: Option<super::super::finite_native::NativeFactoryRef>,
+    #[cfg(target_os = "linux")]
+    pub(super) native_arm_prior_sequence: Option<i64>,
     pump: Option<SoftwarePump>,
     pub(super) entered: bool,
     pub(super) control: Arc<crate::adaptive_resources::runtime::finite_vod::FiniteControl>,
@@ -261,6 +267,9 @@ impl NodeResourceRuntime {
         task_member: Uuid,
         acquisition_id: Uuid,
         source_members: Vec<Uuid>,
+        #[cfg(target_os = "linux")] native_plan: Option<
+            super::super::finite_native::FiniteNativePlan,
+        >,
         command: SoftwareAvcCommand,
         pump: SoftwarePump,
         control: Arc<crate::adaptive_resources::runtime::finite_vod::FiniteControl>,
@@ -289,6 +298,12 @@ impl NodeResourceRuntime {
             source_members,
             registered_source_members: std::collections::BTreeSet::new(),
             command,
+            #[cfg(target_os = "linux")]
+            native_plan,
+            #[cfg(target_os = "linux")]
+            native_factory: None,
+            #[cfg(target_os = "linux")]
+            native_arm_prior_sequence: None,
             pump: Some(pump),
             entered: false,
             control,
@@ -363,6 +378,35 @@ impl NodeResourceRuntime {
         result
     }
 
+    /// Actual prepare, after the original R reservation and journal prepare.
+    /// Native factory prepayment precedes any loader/domain work.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) async fn prepare_finite_native_factory(
+        self: &Arc<Self>,
+        owner: &OwnedPreparation,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        let already_prepared = bundle
+            .roles
+            .first()
+            .and_then(|role| role.finite_vod.as_ref())
+            .is_none_or(|finite| finite.native_plan.is_none() || finite.native_factory.is_some());
+        if already_prepared {
+            return Ok(());
+        }
+        self.eligible(&bundle)?;
+        let role = bundle.roles.first_mut().ok_or(OperationError::State)?;
+        let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
+        let plan = finite.native_plan.as_ref().ok_or(OperationError::State)?;
+        let continuous = role.continuous_entry_deadline.as_ref();
+        let original = self.prepare_native_factory(deadline, continuous).await?;
+        original.verify_finite_limits(plan.limits)?;
+        finite.native_factory = Some(original);
+        Ok(())
+    }
+
     pub(in crate::adaptive_resources::runtime) async fn start_finite_vod(
         &self,
         owner: &OwnedPreparation,
@@ -387,6 +431,10 @@ impl NodeResourceRuntime {
         let source_members = finite.source_members.clone();
         if role.refunded || finite.retiring || finite.source_drifted {
             return Err(OperationError::State);
+        }
+        #[cfg(target_os = "linux")]
+        if finite.native_plan.is_some() && !finite.entered {
+            self.refresh_admission_capacity(deadline).await?;
         }
         // Resume the exact retained journal command, never submit replacement
         // IDs after a cancelled/unknown wait. Native ownership is already held.
@@ -514,6 +562,8 @@ impl NodeResourceRuntime {
                 crate::process::ChildWork::realtime("VOD transcode"),
                 deadline,
                 Some(acquisition_id),
+                #[cfg(target_os = "linux")]
+                Some(&descriptors[..source_members.len()]),
             )
             .await?
         };
@@ -722,6 +772,8 @@ impl NodeResourceRuntime {
             Effect::SourceRoot(member) => finite.source_members.contains(&member),
             Effect::FiniteTask(member) => member == finite.task_member,
             Effect::Arm(member) => member == finite.root_member || member == finite.task_member,
+            #[cfg(target_os = "linux")]
+            Effect::Hold => finite.native_plan.is_some() && role.roots.is_empty(),
             // Bootstrap and pre-root source-prefix commands retain their own
             // cleanup reconciler; this helper cannot change their evidence.
             _ => false,
@@ -748,7 +800,7 @@ impl NodeResourceRuntime {
         OperationError,
     > {
         self.validate_preparation(owner)?;
-        let (graph, task, root, control, root_only_closed) = {
+        let (graph, task, root, control, root_only_closed, native) = {
             let mut bundle = owner.state.lock().await;
             if !bundle.installed {
                 return Err(OperationError::State);
@@ -786,10 +838,17 @@ impl NodeResourceRuntime {
                 .as_ref()
                 .ok_or(OperationError::State)?
                 .select_same();
-            (graph, task, root, control, root_only_closed)
+            #[cfg(target_os = "linux")]
+            let native = finite.native_plan.is_some();
+            #[cfg(not(target_os = "linux"))]
+            let native = false;
+            (graph, task, root, control, root_only_closed, native)
         };
         // No bundle lock is held while joining. The SAME task/result remain in
         // graph custody if this waiter is cancelled before or after the join.
+        if let Some(root) = root.filter(|_| native && control.requested()) {
+            graph.start_kill_root(root).await?;
+        }
         let writer = if let Some(task) = task {
             let joined = graph.join_finite_vod(task, control.requested()).await?;
             if joined.selection() != task {

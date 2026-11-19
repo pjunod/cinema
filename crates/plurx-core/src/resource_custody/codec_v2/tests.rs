@@ -530,6 +530,83 @@ fn never_acquired_settlement_requires_exact_unobserved_plans() {
 }
 
 #[test]
+fn native_setup_close_requires_its_live_only_plan_and_exact_inherited_source_arm() {
+    let (mut manifest, original_envelopes, mut settlement) = never_acquired_v3_fixture();
+    let MemberPlan::LegacyV1 { planned } = &mut manifest.members[0] else {
+        unreachable!()
+    };
+    planned.recovery = super::super::RecoveryMethod::LiveOnly {
+        reason: FINITE_NATIVE_LIVE_ONLY_REASON.into(),
+    };
+    let planned = planned.clone();
+    let root_member_id = Id::new(planned.member_id).unwrap();
+    let arm_operation_id = id();
+    let close_operation_id = id();
+    let MemberPlan::SourceV1 { source, .. } = &mut manifest.members[1] else {
+        unreachable!()
+    };
+    let child = SourceCopy {
+        copy_id: id(),
+        owner: CopyOwner::OwnedRoot {
+            graph_id: manifest.graph_id,
+            root_member_id,
+        },
+        acquisition_operation_id: arm_operation_id,
+        parent_copy_id: Some(source.planned_copies[0].copy_id),
+    };
+    source.planned_copies.push(child.clone());
+    let mut envelopes = original_envelopes;
+    for (envelope, plan) in envelopes.iter_mut().zip(&manifest.members) {
+        envelope.planned = plan.clone();
+    }
+    settlement.members[0] = MemberDisposition::Closed {
+        member_id: root_member_id,
+        fact: ClosedFact::FiniteNativeSetupClosedV1 {
+            planned,
+            arm_operation_id,
+            arm_prior_sequence: 3,
+            operation_id: close_operation_id,
+        },
+    };
+    let MemberDisposition::Closed {
+        fact: ClosedFact::SourceV1 { copies, .. },
+        ..
+    } = &mut settlement.members[1]
+    else {
+        unreachable!()
+    };
+    copies.push(CopyClosed::ProvenNeverAcquired {
+        copy: child,
+        operation_id: close_operation_id,
+    });
+    let MemberDisposition::Closed {
+        fact: ClosedFact::VodOutputTaskNeverAcquiredV1 { operation_id, .. },
+        ..
+    } = &mut settlement.members[3]
+    else {
+        unreachable!()
+    };
+    *operation_id = close_operation_id;
+    validate_settlement(&manifest, &envelopes, &settlement).unwrap();
+    let encoded = codec::encode(&settlement).unwrap();
+    assert_eq!(
+        decode_settlement(&encoded).unwrap(),
+        SettlementDocument::Physical(settlement.clone())
+    );
+    let MemberDisposition::Closed {
+        fact: ClosedFact::FiniteNativeSetupClosedV1 {
+            arm_operation_id, ..
+        },
+        ..
+    } = &mut settlement.members[0]
+    else {
+        unreachable!()
+    };
+    *arm_operation_id = id();
+    assert!(validate_settlement(&manifest, &envelopes, &settlement).is_err());
+}
+
+#[test]
 fn old_task_domain_extinction_requires_exact_root_and_process_identity() {
     let (manifest, envelopes, mut settlement) = never_acquired_v3_fixture();
     let MemberPlan::VodOutputTaskV1 { task, .. } = &manifest.members[3] else {

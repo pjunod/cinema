@@ -131,6 +131,21 @@ pub(in crate::adaptive_resources::runtime) fn original_software_fixture_with_pro
     OwnedPreparation,
     Uuid,
 ) {
+    original_software_fixture_selected(root, producer, None)
+}
+
+/// Runs the same normal finite owner with a real delegated, finite cgroup.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(in crate::adaptive_resources::runtime) fn original_software_fixture_selected(
+    root: &Path,
+    producer: SoftwareAvcPumpPlan,
+    native_root: Option<&Path>,
+) -> (
+    Arc<NodeResourceRuntime>,
+    SoftwareVodOwner,
+    OwnedPreparation,
+    Uuid,
+) {
     // Match the ordinary finite child's explicit loader planning. The selected
     // child clears its environment; the probe's inherited loader path alone
     // cannot make this fixed executable runnable.
@@ -152,6 +167,7 @@ pub(in crate::adaptive_resources::runtime) fn original_software_fixture_with_pro
         None,
         producer,
         loader_env,
+        native_root,
     );
     let owner = owner.expect("same original accepted command with explicit producer bounds");
     let preparation = owner.preparation.clone();
@@ -175,6 +191,7 @@ fn original_owner_with_cutoff(
         continuous_entry_deadline,
         super::tests::pump_plan(),
         Vec::new(),
+        None,
     )
 }
 
@@ -185,6 +202,7 @@ fn original_owner_with_producer(
     continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
     producer: SoftwareAvcPumpPlan,
     loader_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    native_root: Option<&Path>,
 ) -> (
     Arc<NodeResourceRuntime>,
     Result<SoftwareVodOwner, FiniteVodError>,
@@ -297,6 +315,34 @@ fn original_owner_with_producer(
     let execution = TranscodeExecution::from_options(&file, &options, Pacing::unpaced(), ".")
         .expect("actual execution");
     let grid = VodFrameGrid::new(24, 1).expect("original pump grid");
+    let engine_objects = if native_root.is_some() {
+        let executable = &executable_path;
+        let report = crate::testfixtures::run(std::process::Command::new("ldd").arg(executable));
+        let report = std::str::from_utf8(&report).expect("actual loader dependency output");
+        assert!(
+            !report.contains("not found"),
+            "actual loader closure: {report}"
+        );
+        let mut paths = vec![executable.clone()];
+        for line in report.lines() {
+            let path = if let Some((_, resolved)) = line.split_once("=>") {
+                resolved.split_whitespace().next()
+            } else {
+                line.split_whitespace().next()
+            };
+            if let Some(path) = path.filter(|path| path.starts_with('/')) {
+                paths.push(std::fs::canonicalize(path).expect("actual loader object"));
+            }
+        }
+        paths.sort_unstable();
+        paths.dedup();
+        paths
+            .into_iter()
+            .map(engine_object_version)
+            .collect::<Vec<_>>()
+    } else {
+        vec![engine_object_version(executable_path.clone())]
+    };
     let command = SoftwareAvcCommand::compile(
         &file,
         &plan,
@@ -311,25 +357,8 @@ fn original_owner_with_producer(
             &executable_digest,
         )
         .expect("actual executable plan"),
-        // Engine path versions use their existing seven-field metadata
-        // format; SourceIdentity's s1 wire prefix belongs to source custody.
-        FiniteEngineSnapshot::from_captured(
-            &[(
-                executable_path,
-                format!(
-                    "{}:{}:{}:{}:{}:{}:{}",
-                    executable_metadata.dev(),
-                    executable_metadata.ino(),
-                    executable_metadata.size(),
-                    executable_metadata.mtime(),
-                    executable_metadata.mtime_nsec(),
-                    executable_metadata.ctime(),
-                    executable_metadata.ctime_nsec(),
-                ),
-            )],
-            None,
-        )
-        .expect("actual engine metadata fence"),
+        FiniteEngineSnapshot::from_captured(&engine_objects, None)
+            .expect("actual engine metadata fence"),
         loader_env,
         root.to_owned(),
     )
@@ -345,11 +374,13 @@ fn original_owner_with_producer(
     let renditions = root.join("renditions");
     std::fs::create_dir(&renditions).expect("actual configured output root");
     options.queue_capacity = 4;
-    let runtime = Arc::new(
-        NodeResourceRuntime::open_with_rendition_root(options, renditions)
-            .expect("original runtime"),
-    );
-    let vector = ResourceVector {
+    let mut runtime = NodeResourceRuntime::open_with_rendition_root(options, renditions)
+        .expect("original runtime");
+    if let Some(native_root) = native_root {
+        runtime.configure_finite_native_root(Some(native_root.to_owned()));
+    }
+    let runtime = Arc::new(runtime);
+    let mut vector = ResourceVector {
         cpu_ns_per_second: 1_000_000_000,
         peak_memory_bytes: 256 * 1024 * 1024,
         handles: 64,
@@ -357,6 +388,37 @@ fn original_owner_with_producer(
         hardware_slots: 0,
         tuner_slots: 0,
         scratch_bytes: 64 * 1024 * 1024,
+    };
+    let native_plan = if native_root.is_some() {
+        let before = runtime.accounting().expect("ledger before pure projection");
+        let fd_count = || {
+            std::fs::read_dir("/proc/self/fd")
+                .expect("actual FD table")
+                .count()
+        };
+        let fds = fd_count();
+        let plan = runtime
+            .finite_native_plan(&command)
+            .expect("actual ordinary fixed recipe fits the unprivileged native sealed profile");
+        let (handles, bytes) = plan
+            .requested_resources()
+            .expect("concrete native allowance");
+        assert_eq!(
+            runtime
+                .finite_native_plan(&command)
+                .and_then(|plan| plan.requested_resources()),
+            Some((handles, bytes))
+        );
+        let after = runtime.accounting().expect("ledger after pure projection");
+        assert_eq!(before.used, after.used);
+        assert_eq!(before.held, after.held);
+        assert!(after.native_factory_support.is_none());
+        assert_eq!(fds, fd_count(), "projection must leave no new descriptor");
+        vector.handles += handles;
+        vector.peak_memory_bytes += bytes;
+        Some(plan)
+    } else {
+        None
     };
     runtime
         .update_capacity(1, Metric::Known(vector))
@@ -366,6 +428,7 @@ fn original_owner_with_producer(
     // an injected error or replaces the original accepted command/result.
     let owner = runtime.prepare_software_vod(
         SoftwareVodRequest {
+            native_plan,
             rendition_id: "original-finite".into(),
             generation_epoch,
             recipe_source_binding: "actual-original-source".into(),
@@ -410,6 +473,22 @@ fn original_owner_with_producer(
         deadline(),
     );
     (runtime, owner)
+}
+
+fn engine_object_version(path: PathBuf) -> (PathBuf, String) {
+    let metadata = std::fs::metadata(&path).expect("actual loader object metadata");
+    // Engine versions use the existing bare seven-field identity.
+    let version = format!(
+        "{}:{}:{}:{}:{}:{}:{}",
+        metadata.dev(),
+        metadata.ino(),
+        metadata.size(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    );
+    (path, version)
 }
 
 #[tokio::test]

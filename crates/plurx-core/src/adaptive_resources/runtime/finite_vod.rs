@@ -4,6 +4,8 @@ mod command;
 mod executable;
 mod initial_unit;
 pub(in crate::adaptive_resources) mod pump;
+#[cfg(target_os = "linux")]
+pub use super::finite_native::FiniteNativePlan;
 pub use super::operations::bootstrap::readers::{FiniteReadChunk, FiniteReader};
 pub use command::{FiniteEngineSnapshot, SoftwareAvcCommand};
 pub use executable::SoftwareAvcExecutable;
@@ -127,6 +129,8 @@ pub struct FiniteOutputLimits {
 }
 
 pub struct SoftwareVodRequest {
+    #[cfg(target_os = "linux")]
+    pub native_plan: Option<FiniteNativePlan>,
     pub rendition_id: String,
     /// Nonzero typed asset generation, fixed before admission.
     pub generation_epoch: u64,
@@ -1133,6 +1137,10 @@ impl SoftwareVodOwner {
         self.runtime
             .resolve_preparation(&self.preparation, deadline)
             .await?;
+        #[cfg(target_os = "linux")]
+        self.runtime
+            .prepare_finite_native_factory(&self.preparation, deadline)
+            .await?;
         for (member, spec) in self.source_members.iter().zip(&mut self.source_specs) {
             if spec.is_some() {
                 self.runtime
@@ -1535,11 +1543,22 @@ impl NodeResourceRuntime {
         let Metric::Known(resources) = request.demand.resources else {
             return Err(invalid());
         };
+        #[cfg(target_os = "linux")]
+        let (native_handles, native_memory) = match request.native_plan.as_ref() {
+            Some(plan) if plan.matches(self, &request.command) => {
+                plan.requested_resources().ok_or_else(invalid)?
+            }
+            None if self.finite_native_plan(&request.command).is_none() => (0, 0),
+            _ => return Err(invalid()),
+        };
+        #[cfg(not(target_os = "linux"))]
+        let (native_handles, native_memory) = (0, 0);
         let minimum_handles = u64::try_from(request.sources.len() + 1)
             .map_err(|_| invalid())?
             .checked_mul(3)
             .and_then(|n| n.checked_add(u64::from(request.output.live_handles)))
             .and_then(|n| n.checked_add(3))
+            .and_then(|n| n.checked_add(native_handles))
             .ok_or_else(invalid)?;
         if resources.handles < minimum_handles
             || resources.processes != 1
@@ -1570,6 +1589,13 @@ impl NodeResourceRuntime {
             &request.output,
             request.application_owner_bytes,
         )?;
+        let total_memory = total_memory
+            .checked_add(native_memory)
+            .ok_or_else(invalid)?;
+        #[cfg(target_os = "linux")]
+        let native_selected = request.native_plan.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let native_selected = false;
         if resources.peak_memory_bytes < total_memory
             || response_memory == 0
             || request.output.retained_metadata_bytes == 0
@@ -1796,7 +1822,11 @@ impl NodeResourceRuntime {
                 .to_str()
                 .ok_or_else(invalid)?
                 .to_owned(),
-            recovery: if cfg!(target_os = "linux")
+            recovery: if native_selected {
+                RecoveryMethod::LiveOnly {
+                    reason: v2::FINITE_NATIVE_LIVE_ONLY_REASON.into(),
+                }
+            } else if cfg!(target_os = "linux")
                 && self.owner.platform_domain.continuity_provider.as_deref()
                     == Some("linux_kernel_pid_namespace_v1")
                 && matches!(&self.owner.os_boot, BootIdentity::Known { provider, .. }
@@ -1916,6 +1946,8 @@ impl NodeResourceRuntime {
                         task_member.uuid(),
                         root_acquisition_id.uuid(),
                         source_members_for_launch,
+                        #[cfg(target_os = "linux")]
+                        request.native_plan,
                         request.command,
                         pump,
                         control_for_launch,

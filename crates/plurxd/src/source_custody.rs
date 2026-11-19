@@ -1667,6 +1667,7 @@ async fn run_owner(
 
 /// One direct-range descriptor. A blocking read owns an Arc independently of
 /// its waiter, so disconnect cannot return source credit before the read join.
+#[cfg(not(target_os = "linux"))]
 struct DirectReader {
     source: std::sync::Mutex<crate::fragment_index_cluster::SourceFence>,
     _custody: SourceCustody,
@@ -1758,6 +1759,7 @@ impl DirectTransfer {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 pub(crate) async fn file_body(
     source: crate::fragment_index_cluster::SourceFence,
     start: u64,

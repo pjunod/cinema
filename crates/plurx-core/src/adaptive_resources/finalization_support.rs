@@ -11,11 +11,14 @@ use super::*;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-const FRESH_FOR: Duration = Duration::from_secs(1);
+pub(super) const FRESH_FOR: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SupportKind {
     Ordinary,
+    // A third owner in the existing ephemeral support ledger/census. This is
+    // neither a persisted family nor an independently executable service.
+    NativeFactory,
     #[cfg_attr(
         not(target_os = "linux"),
         allow(
@@ -41,6 +44,7 @@ pub(super) struct FinalizationSupportProfile {
     requested_bytes: u64,
     record_slots: u16,
     task_slots: u16,
+    handles: u64,
 }
 impl FinalizationSupportProfile {
     #[cfg(test)]
@@ -50,6 +54,7 @@ impl FinalizationSupportProfile {
             requested_bytes: 64 * 1024,
             record_slots: 1,
             task_slots: 1,
+            handles: 0,
         }
     }
 
@@ -61,6 +66,7 @@ impl FinalizationSupportProfile {
                 .map_err(|_| AdmissionRefusal::ArithmeticOverflow)?,
             record_slots: 256,
             task_slots: 1,
+            handles: 0,
         })
     }
 
@@ -74,14 +80,51 @@ impl FinalizationSupportProfile {
             .map_err(|_| AdmissionRefusal::ArithmeticOverflow)?,
             record_slots: 64,
             task_slots: 1,
+            handles: 0,
         })
     }
 
     pub(super) fn resources(self) -> ResourceVector {
         ResourceVector {
             peak_memory_bytes: self.requested_bytes,
+            handles: self.handles,
             ..ResourceVector::default()
         }
+    }
+
+    /// Private concrete-owner projection only. Reserving this profile has no
+    /// constructor/thread effect. The existing fresh capacity, epoch, phase,
+    /// census, owner identity and total-vector checks apply unchanged.
+    #[cfg(target_os = "linux")]
+    pub(super) fn native_factory(
+        resources: ResourceVector,
+        records: u16,
+        tasks: u16,
+    ) -> Result<Self, AdmissionRefusal> {
+        if resources.peak_memory_bytes == 0
+            || resources.handles == 0
+            || resources.cpu_ns_per_second != 0
+            || resources.processes != 0
+            || resources.hardware_slots != 0
+            || resources.tuner_slots != 0
+            || resources.scratch_bytes != 0
+            || records == 0
+            || tasks == 0
+        {
+            return Err(AdmissionRefusal::InvalidBundle);
+        }
+        Ok(Self {
+            kind: SupportKind::NativeFactory,
+            requested_bytes: resources.peak_memory_bytes,
+            handles: resources.handles,
+            record_slots: records,
+            task_slots: tasks,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn task_slots(self) -> u16 {
+        self.task_slots
     }
 
     pub(super) fn fits_inline(self, requested: usize) -> bool {
@@ -102,9 +145,15 @@ pub enum FinalizationSupportPhase {
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct FinalizationSupportSnapshot {
     pub requested_bytes: u64,
+    #[serde(skip_serializing_if = "is_zero_handles")]
+    pub handles: u64,
     pub logical_record_slots: u16,
     pub logical_task_slots: u16,
     pub phase: FinalizationSupportPhase,
+}
+
+fn is_zero_handles(handles: &u64) -> bool {
+    *handles == 0
 }
 
 #[derive(Clone, Copy)]
@@ -117,6 +166,7 @@ impl SupportEntry {
     pub(super) fn snapshot(self, unknown: bool) -> FinalizationSupportSnapshot {
         FinalizationSupportSnapshot {
             requested_bytes: self.profile.requested_bytes,
+            handles: self.profile.handles,
             logical_record_slots: self.profile.record_slots,
             logical_task_slots: self.profile.task_slots,
             phase: if unknown {
@@ -133,16 +183,20 @@ impl State {
         match kind {
             SupportKind::Ordinary => self.support,
             SupportKind::Attempt => self.attempt_support,
+            SupportKind::NativeFactory => self.native_factory_support,
         }
     }
     fn support_entry_mut(&mut self, kind: SupportKind) -> &mut Option<SupportEntry> {
         match kind {
             SupportKind::Ordinary => &mut self.support,
             SupportKind::Attempt => &mut self.attempt_support,
+            SupportKind::NativeFactory => &mut self.native_factory_support,
         }
     }
     pub(super) fn any_support(&self) -> bool {
-        self.support.is_some() || self.attempt_support.is_some()
+        self.support.is_some()
+            || self.attempt_support.is_some()
+            || self.native_factory_support.is_some()
     }
     fn support_preflight(
         &self,
@@ -170,8 +224,10 @@ impl State {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }
         if profile.requested_bytes == 0
-            || !matches!(profile.record_slots, 1 | 64 | 256)
-            || profile.task_slots != 1
+            || (profile.kind != SupportKind::NativeFactory
+                && (!matches!(profile.record_slots, 1 | 64 | 256) || profile.task_slots != 1))
+            || profile.record_slots == 0
+            || profile.task_slots == 0
         {
             return Err(AdmissionRefusal::InvalidBundle);
         }
@@ -183,6 +239,11 @@ impl State {
             .filter(|entry| entry.memory_claim.is_active_producer())
             .count()
             > 1
+        {
+            return Err(AdmissionRefusal::InsufficientEvidence);
+        }
+        if profile.kind == SupportKind::NativeFactory
+            && !matches!(self.cap.kernel_tasks, Metric::Known(tasks) if tasks >= u64::from(profile.task_slots))
         {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }
@@ -200,6 +261,7 @@ impl ResourceLedger {
         match kind {
             SupportKind::Ordinary => &self.support_unknown,
             SupportKind::Attempt => &self.attempt_support_unknown,
+            SupportKind::NativeFactory => &self.native_factory_support_unknown,
         }
     }
 
@@ -274,7 +336,9 @@ impl ResourceLedger {
     }
 
     pub(in crate::adaptive_resources) fn finalization_support_present(&self) -> bool {
-        self.inner.lock().map_or(true, |state| state.any_support())
+        self.inner
+            .lock()
+            .map_or(true, |state| state.support.is_some())
     }
 
     pub(in crate::adaptive_resources) fn finish_finalization_support<T>(

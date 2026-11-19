@@ -4,9 +4,9 @@
 //! mandatory: O_PATH acquisition alone is not restricted by Landlock.
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 
-const MIN_ABI: libc::c_long = 6;
+pub(super) const MIN_ABI: libc::c_long = 6;
 const FILTER_CAPACITY: usize = 256;
 const MAX_RULES: usize = 256;
 const EXECUTE: u64 = 1;
@@ -14,6 +14,17 @@ const READ_FILE: u64 = 1 << 2;
 const READ_DIR: u64 = 1 << 3;
 // ABI5 filesystem rights, including REFER, TRUNCATE and device ioctl.
 const HANDLED_FS: u64 = (1 << 16) - 1;
+
+pub(super) fn available_abi() -> libc::c_long {
+    unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<u8>(),
+            0usize,
+            1u32,
+        )
+    }
+}
 
 #[repr(C)]
 struct RulesetAttributes {
@@ -34,15 +45,50 @@ pub(super) struct PreparedSandbox {
 }
 
 impl PreparedSandbox {
+    pub(super) fn close_original(self) -> io::Result<()> {
+        let descriptor = self.ruleset.into_raw_fd();
+        if unsafe { libc::close(descriptor) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
     /// The profile accepts read-only object capabilities, not path strings or
     /// arbitrary callbacks. No write rule exists. This foundation remains
     /// inaccessible to production until its concrete recipe is audited.
+    #[cfg(test)]
     pub(super) fn read_only(
         executable: &File,
         input: &File,
         interpreters: &[File],
         read_only: &[File],
     ) -> io::Result<Self> {
+        let objects: Vec<_> = read_only.iter().collect();
+        Self::read_only_refs(executable, input, interpreters, &objects)
+    }
+
+    #[cfg(test)]
+    pub(super) fn read_only_refs(
+        executable: &File,
+        input: &File,
+        interpreters: &[File],
+        read_only: &[&File],
+    ) -> io::Result<Self> {
+        let mut original = None;
+        Self::prepare_in_place(&mut original, executable, input, interpreters, read_only)?;
+        original.ok_or_else(|| io::Error::other("original prepared policy missing"))
+    }
+
+    pub(super) fn prepare_in_place(
+        original: &mut Option<Self>,
+        executable: &File,
+        input: &File,
+        interpreters: &[File],
+        read_only: &[&File],
+    ) -> io::Result<()> {
+        if original.is_some() {
+            return Err(io::Error::other("original sandbox already prepared"));
+        }
         if !cfg!(target_arch = "x86_64") {
             return Err(io::Error::from(io::ErrorKind::Unsupported));
         }
@@ -65,14 +111,7 @@ impl PreparedSandbox {
                 "sandbox object count exceeds fixed limit",
             ));
         }
-        let version = unsafe {
-            libc::syscall(
-                libc::SYS_landlock_create_ruleset,
-                std::ptr::null::<u8>(),
-                0usize,
-                1u32,
-            )
-        };
+        let version = available_abi();
         if version < MIN_ABI {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -97,7 +136,7 @@ impl PreparedSandbox {
             return Err(io::Error::last_os_error());
         }
         let ruleset = unsafe { OwnedFd::from_raw_fd(raw as RawFd) };
-        let mut sandbox = Self {
+        *original = Some(Self {
             ruleset,
             filter: [libc::sock_filter {
                 code: 0,
@@ -106,7 +145,10 @@ impl PreparedSandbox {
                 k: 0,
             }; FILTER_CAPACITY],
             filter_len: 0,
-        };
+        });
+        let sandbox = original
+            .as_mut()
+            .ok_or_else(|| io::Error::other("original sandbox not retained"))?;
         sandbox.add(executable, true)?;
         sandbox.add(input, false)?;
         for file in interpreters {
@@ -116,7 +158,7 @@ impl PreparedSandbox {
             sandbox.add(file, false)?;
         }
         sandbox.build_filter()?;
-        Ok(sandbox)
+        Ok(())
     }
     fn add(&self, file: &File, execute: bool) -> io::Result<()> {
         let metadata = file.metadata()?;

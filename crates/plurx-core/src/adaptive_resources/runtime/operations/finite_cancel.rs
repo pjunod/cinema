@@ -137,7 +137,16 @@ impl NodeResourceRuntime {
         let bundle_id = bundle.id;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
-        if finite.never_root_closure.is_none() && (finite.entered || !role.roots.is_empty()) {
+        #[cfg(target_os = "linux")]
+        let attempted_native = finite.native_plan.is_some()
+            && finite.entered
+            && role.armed.contains(&finite.root_member)
+            && role.sealed.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let attempted_native = false;
+        if finite.never_root_closure.is_none()
+            && (!role.roots.is_empty() || (finite.entered && !attempted_native))
+        {
             return Ok(false);
         }
         if role.refunded
@@ -204,6 +213,9 @@ impl NodeResourceRuntime {
                     finite.acquisition_id,
                 )
                 .await?;
+            if proof.native_setup_closed() != attempted_native {
+                return Err(OperationError::State);
+            }
             finite.never_root_closure = Some(proof);
         }
         let proof = role
@@ -273,6 +285,22 @@ impl NodeResourceRuntime {
             }
             if !role.finite_app.as_ref().is_some_and(|state| state.seal()) {
                 return Err(OperationError::State);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let refused_graph = {
+                let bundle = owner.state.lock().await;
+                let role = bundle.roles.get(index).ok_or(OperationError::State)?;
+                role.sealed
+                    .as_ref()
+                    .filter(|_| role.roots.is_empty())
+                    .map(SealedPhysicalGraph::select_same)
+            };
+            if let Some(graph) = refused_graph {
+                tokio::time::timeout_at(deadline.into(), graph.reap_refused_finite_native_root())
+                    .await
+                    .map_err(|_| OperationError::Deadline)??;
             }
         }
         // A cancelled launch can leave its exact Arm/Observe result pending.
@@ -352,9 +380,22 @@ impl NodeResourceRuntime {
                 .await?;
             Some(member)
         };
-        let needs_seal = {
+        let (needs_seal, held_native_no_root) = {
             let bundle = owner.state.lock().await;
-            bundle.roles.get(index).ok_or(OperationError::State)?.phase != Phase::Sealed
+            let role = bundle.roles.get(index).ok_or(OperationError::State)?;
+            #[cfg(target_os = "linux")]
+            let held_native_no_root = never_root
+                && role.phase == Phase::UnknownHeld
+                && role
+                    .finite_vod
+                    .as_ref()
+                    .is_some_and(|finite| finite.native_plan.is_some());
+            #[cfg(not(target_os = "linux"))]
+            let held_native_no_root = false;
+            (
+                role.phase != Phase::Sealed && !held_native_no_root,
+                held_native_no_root,
+            )
         };
         if needs_seal {
             self.seal_role(owner, index, deadline).await?;
@@ -364,7 +405,8 @@ impl NodeResourceRuntime {
         if role.refunded {
             return Ok(());
         }
-        if role.phase != Phase::Sealed
+        if (role.phase != Phase::Sealed
+            && !(held_native_no_root && role.phase == Phase::UnknownHeld))
             || role.transition.is_some()
             || role.graph.is_some()
             || role.retirement.is_some()
@@ -449,8 +491,24 @@ impl NodeResourceRuntime {
                     }
                     None => return Err(OperationError::State),
                 },
+                #[cfg(target_os = "linux")]
                 v2::MemberPlan::LegacyV1 { planned }
-                    if never_root.is_some()
+                    if never_root.is_some_and(FiniteVodNeverRootClosure::native_setup_closed)
+                        && planned.member_id == root_member
+                        && planned.kind == MemberKind::Root
+                        && planned.adapter == Adapter::ProcessRoot =>
+                {
+                    v2::ClosedFact::FiniteNativeSetupClosedV1 {
+                        planned: planned.clone(),
+                        arm_operation_id: v2::Id::new(finite.acquisition_id)?,
+                        arm_prior_sequence: finite
+                            .native_arm_prior_sequence
+                            .ok_or(OperationError::State)?,
+                        operation_id: close_id,
+                    }
+                }
+                v2::MemberPlan::LegacyV1 { planned }
+                    if never_root.is_some_and(|proof| !proof.native_setup_closed())
                         && planned.member_id == root_member
                         && planned.kind == MemberKind::Root
                         && planned.adapter == Adapter::ProcessRoot =>

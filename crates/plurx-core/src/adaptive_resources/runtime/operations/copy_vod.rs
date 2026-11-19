@@ -605,6 +605,7 @@ impl NodeResourceRuntime {
                     crate::process::ChildWork::realtime("rolling copy"),
                     deadline,
                     Some(acquisition_id),
+                    None,
                 )
                 .await?;
             // Only launch_root_role's known original Enrich acknowledgment

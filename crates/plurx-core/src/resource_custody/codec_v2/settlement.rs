@@ -1,6 +1,42 @@
 //! Versioned close/transfer AUDIT records, never physical capabilities.
 use super::*;
 
+/// This exact typed finite launch cannot use an executable/PID-only
+/// recovery proof once its retained native domain authority is gone.
+pub(crate) const FINITE_NATIVE_LIVE_ONLY_REASON: &str =
+    "original native domain authority is live-only";
+
+fn finite_native_live_root(plan: &super::super::PlannedMember) -> bool {
+    plan.kind == super::super::MemberKind::Root
+        && plan.adapter == super::super::Adapter::ProcessRoot
+        && matches!(&plan.recovery, super::super::RecoveryMethod::LiveOnly { reason }
+            if reason == FINITE_NATIVE_LIVE_ONLY_REASON)
+}
+
+fn finite_native_source_arm<'a>(
+    envelopes: impl Iterator<Item = EnvelopeRef<'a>>,
+    root: Uuid,
+    arm: Id,
+) -> bool {
+    let mut original = false;
+    for envelope in envelopes {
+        let MemberPlan::SourceV1 { source, .. } = envelope.planned else {
+            continue;
+        };
+        for copy in &source.planned_copies {
+            if matches!(copy.owner, CopyOwner::OwnedRoot { root_member_id, .. }
+                if root_member_id.uuid() == root)
+            {
+                if copy.acquisition_operation_id != arm {
+                    return false;
+                }
+                original = true;
+            }
+        }
+    }
+    original
+}
+
 /// Disjoint cancellation audit: never label an uninvoked source/task as an
 /// actually joined/closed owner. No physical capability is serialized here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +203,14 @@ pub(crate) enum ClosedFact {
     },
     LegacyNeverAcquiredV1 {
         planned: super::super::PlannedMember,
+        operation_id: Id,
+    },
+    /// Checked live closure of the original finite setup after its exact
+    /// durable Arm. No child was cloned. This is not NeverAcquired.
+    FiniteNativeSetupClosedV1 {
+        planned: super::super::PlannedMember,
+        arm_operation_id: Id,
+        arm_prior_sequence: i64,
         operation_id: Id,
     },
     SourceV1 {
@@ -465,6 +509,12 @@ where
                     {
                         return Err(codec::invalid());
                     }
+                    if finite_native_live_root(planned)
+                        && !matches!(envelope.observed, Some(Observed::LegacyV1 { identity })
+                            if identity.process.is_some())
+                    {
+                        return Err(codec::invalid());
+                    }
                     codec::long_text(&fact.object_identity)?;
                     codec::long_text(&fact.evidence)?;
                     if let Some(Observed::LegacyV1 { identity }) = envelope.observed {
@@ -482,6 +532,25 @@ where
                 ) if planned == closed
                     && envelope.observed.is_none()
                     && !operation_id.uuid().is_nil() => {}
+                (
+                    MemberPlan::LegacyV1 { planned },
+                    ClosedFact::FiniteNativeSetupClosedV1 {
+                        planned: closed,
+                        arm_operation_id,
+                        arm_prior_sequence,
+                        operation_id,
+                    },
+                ) if planned == closed
+                    && finite_native_live_root(planned)
+                    && finite_native_source_arm(envelopes.clone(), planned.member_id, *arm_operation_id)
+                    && envelope.observed.is_none()
+                    && *arm_prior_sequence > 0
+                    && arm_operation_id != operation_id
+                    && value.members.iter().any(|member| matches!(member,
+                        MemberDisposition::Closed { fact: ClosedFact::VodOutputTaskNeverAcquiredV1 {
+                            task, operation_id: task_close,
+                        }, .. } if task.root_member_id.uuid() == planned.member_id
+                            && task_close == operation_id)) => {}
                 (
                     MemberPlan::SourceV1 { source, .. },
                     ClosedFact::SourceV1 { holder_id, copies },
