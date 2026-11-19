@@ -1,12 +1,12 @@
 # FEL RPU re-fit (F+) — build plan
 
-**Status:** open — milestones 1–2 merged; 3–6 candidate in PR #1565.
-The Q23 MMR candidate failed native equivalence. The replacement method,
-`dv-refit-safe-v2-mmr12`, publishes and scores a common Q12 chroma grid;
-its production-written candidate passes all 48 native points and controls.
-Independent review passed; the PR's fast lane remains open.
-Milestone 7 follows served F+ scores · **Updated:** 2026-11-16 · **Written:** 2026-11-12 ·
-**Owner:** Codex (continuing Claude's reviewed candidate) · **Decision:** Paul approved building F+
+**Status:** built — milestones 1–6 merged in PR #1565 (`8630ee431`,
+2026-11-19); not deployed. The Q23 MMR candidate failed native equivalence.
+The replacement method, `dv-refit-safe-v2-mmr12`, publishes and scores a
+common Q12 chroma grid; its production-written candidate passes all 48 native
+points and controls. Landing evidence and its one recorded gap: below.
+Milestone 7 follows served F+ scores · **Updated:** 2026-11-19 · **Written:** 2026-11-12 ·
+**Owner:** Claude (landing; from Codex 2026-11-18) · **Decision:** Paul approved building F+
 and per-title re-encode trials against it, 2026-11-12
 
 Companion to the offline result,
@@ -111,23 +111,21 @@ native results by SHA-256.
 
 Earlier source-scoped compile, store, daemon, formal-mapping and native results
 remain in the historical receipts and PR history. They do not qualify later
-source automatically. PR #1565 stays `WIP:` pending the required focused lane;
-readiness then boards [the merge train](../ci/MERGE-TRAIN.md).
+source automatically. The source-lease/schema-v136 prototype stays separate.
 
-The F+-first source `ef4345dd5` includes main `16d097973` and preserves
-SQLite v134. Formatting and affected all-target daemon Clippy pass; core source
-and dependencies are unchanged from their prior passing compilation checks.
-Its current production export writes the exact same qualified 435-byte RPU,
-with identical mapping readback. The native receipt preserves its original
-measurement scope and earlier source bindings, and separately binds this export
-and its verified source manifest; no accepted capture was repeated. Independent
-adversarial review found no blockers in the failed-case fixes or provenance.
-
-The prior focused probe passed 22 cases and failed two. The fixes preserve
-Apple's prerequisite lookup IDs while making platform IDs unique, and supply
-the persisted HDR fact required by the method-selection fixture. Six unaffected
-passes remain valid; 19 failed, new or shared-fixture cases await the focused
-lane. The source-lease/schema-v136 prototype is isolated from this candidate.
+**Landing, 2026-11-19.** #1565 landed through `scripts/land` with the merge
+train off, as `8630ee431`, with all 50 `Regression-Test:` lines. Every fast-lane
+job, the Main promotion gate included, passed on `f8a7f5ab3` (run 8114). That
+run re-ran only the seven unit tests that failed in run 8334. Five of them
+passed at the merge base; two fail on `main` too. Two fixes came first. `58628fe3c` repinned the
+durable-jobs sources that a test-only change had left stale. `d2236539d` merged
+main (#1676 item pins, #1646) and recorded five item pins for already-reviewed
+F+ items. That landed head ran preflight only. Paul ordered that passed jobs
+not re-run after a main merge, so it carries `Landed-Untested:`. He then
+declined a run on `main`, so the combined tree has no lane run as one tree.
+`transcode/dv_refit` and `tools/dv_processing` are byte-identical from
+`802c0e5cc`, which the 48-point receipt's independent review covered, to the
+landing. No native capture was repeated.
 
 ## 1. Objective
 
@@ -609,10 +607,9 @@ that the cluster can carry the work.
 
 ## 6. Milestones
 
-Milestones 1–2 landed separately. At Paul's request, milestones 3–6 are
-batched in PR #1565 with proper commits, one final adversarial review, then
-the acceptance and fast-lane checks. Rerun only failed checks; preserve
-completed applicable results.
+Milestones 1–2 landed separately. At Paul's request, milestones 3–6 were
+batched in PR #1565 with proper commits and one final adversarial review, and
+landed on 2026-11-19 (`8630ee431`).
 
 1. **The arithmetic** (`plurx-core/src/transcode/dv_refit.rs`):
    - **Contents:** stats, safe solve, diagnostics, composer domain,
