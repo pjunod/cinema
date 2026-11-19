@@ -121,15 +121,28 @@ function clusterRestoreControlValues(values){
     else if(saved.value!==undefined&&saved.value!==null) control.value=saved.value;
   });
 }
-// The readings that move without a new fetch. When the projection has not
-// changed there is no repaint, so these cells are patched on their own; without
-// it the rows whose only job is freshness would say "now" indefinitely.
+// The readings that move without a new fetch. When neither projection has
+// changed there is no repaint, so these cells are patched on their own, on
+// every tick; without it the rows whose only job is freshness would say "now"
+// (or "4m ago") indefinitely.
 function patchClusterReadingAge(){
   const data=SETTINGS_DATA||{};
   const cell=document.getElementById("cldb-reading-age");
   if(cell) cell.innerHTML=PlurxClusterPanel.clusterReadingAge(clenv(),data.cluster,data.clusterOps);
   const sampled=document.getElementById("cl-sampled");
   if(sampled) sampled.textContent=PlurxClusterPanel.clusterSampledText(data.clusterOps);
+  const cluster=data.cluster;
+  if(!cluster||cluster.unavailable) return;
+  const converged=document.getElementById("cldb-converged");
+  const at=cluster.replication&&cluster.replication.last_converged_at;
+  if(converged&&at) converged.textContent=fmtAgo(at);
+  const nodes=cluster.nodes||[];
+  document.querySelectorAll("[data-clhb]").forEach(el=>{
+    const n=nodes.find(row=>row.node_id===el.getAttribute("data-clhb"));
+    if(!n) return;
+    if(el.tagName==="TD") el.innerHTML=PlurxClusterPanel.clusterNodeCells(clenv(),n,data.clusterOps).heartbeat.text;
+    else el.textContent=n.last_seen_at?fmtAgo(Math.floor(n.last_seen_at/1000)):"never";
+  });
 }
 // One node's drawer: the three ledgers that used to be its card — membership,
 // Raft and WAL, snapshot and media — then that node's own actions. Every
@@ -145,7 +158,7 @@ function clusterNodeDrawer(n,cluster,ops){
   const lag=n.apply_lag_entries==null?"unavailable":`${n.apply_lag_entries} entr${n.apply_lag_entries===1?"y":"ies"}`;
   const membership=[["Node ID",`<span class="clmono">${esc(n.node_id)}</span>`],["Raft ID",esc(String(n.raft_id))],
     ["Advertised",n.advertised_host?esc(n.advertised_host):unknown],
-    ["Heartbeat",`${n.reachable?`<span class="clgood">fresh</span>`:`<span class="clbad">stale</span>`} · ${n.last_seen_at?ago(n.last_seen_at):`<span class="muted">never</span>`}`],
+    ["Heartbeat",`${n.reachable?`<span class="clgood">fresh</span>`:`<span class="clbad">stale</span>`} · <span data-clhb="${esc(n.node_id)}">${n.last_seen_at?ago(n.last_seen_at):"never"}</span>`],
     ["Apply lag",esc(lag)]];
   const transport=P.clusterTransportExplanation(ops,n.raft_id,n.bounded_read_ready,clusterOpsElapsed(ops));
   const seen=transport.observation;
@@ -208,13 +221,18 @@ function clusterNodeActionsHtml(n,cluster,ops){
   const actions=PlurxClusterPanel.clusterNodeActions(clenv(),cluster,ops,n);
   const local=n.node_id===cluster.local_node_id;
   const why=a=>a.blocked&&a.reason?`<span class="clwhy">${a.reason}</span>`:"";
+  // Each action is one item, its button and its reason together, so a wrap
+  // never parts a blocked button from the sentence that explains it.
+  const item=(a,html,cls="")=>`<span class="clactitem${cls}">${html}${why(a)}</span>`;
   const lead=local?"":`<span class="clwhy">Maintenance and restart run from the node itself.</span>`;
-  const plain=actions.filter(a=>!a.destructive).map(a=>`${a.html}${why(a)}`).join("");
+  const plain=actions.filter(a=>!a.destructive).map(a=>item(a,a.html)).join("");
+  let first=true;
   const destructive=actions.filter(a=>a.destructive).map(a=>{
-    if(a.expand!=="leave") return `<span class="clpush">${why(a)}${a.html}</span>`;
+    const cls=first?" clpush":""; first=false;
+    if(a.expand!=="leave") return item(a,a.html,cls);
     const open=!a.blocked&&CLUSTER_RAIL_EXPANDED.indexOf("leave")!==-1;
-    const button=`<button class="danger sm" ${a.blocked?"disabled":""} aria-controls="clexp-leave" aria-expanded="${open}" onclick="toggleClusterExpansion('leave')">${open?"Hide":"Leave cluster…"}</button>`;
-    return `<span class="clpush">${why(a)}${button}</span>${a.blocked?"":`<div class="clexpansion" id="clexp-leave"${open?"":" hidden"}>${leavePanel(cluster.local_node_id,Boolean(a.blocked))}</div>`}`;
+    const button=`<button class="danger sm" ${a.blocked?"disabled":`aria-controls="clexp-leave" aria-expanded="${open}"`} onclick="toggleClusterExpansion('leave')">${open?"Hide":"Leave cluster…"}</button>`;
+    return `${item(a,button,cls)}${a.blocked?"":`<div class="clexpansion" id="clexp-leave"${open?"":" hidden"}>${leavePanel(cluster.local_node_id)}</div>`}`;
   }).join("");
   return `${lead}${plain}${destructive}`;
 }
@@ -234,15 +252,14 @@ function clusterNodeTableRow(n,cluster,ops){
       : `<span class="pill" title="A non-voting capacity role. A learner receives replication and may serve gated work; explicit promotion adds its vote only after catch-up and storage preflight.">learner</span>`;
   const pills=`${n.is_leader?`<span class="pill acc">Leader</span>`:""}${n.node_id===cluster.local_node_id?`<span class="pill">This node</span>`:""}${
     n.removal_pending?`<span class="pill warn">Removal pending</span>`:""}${!n.is_voter&&n.role==="learner"&&n.bounded_read_ready?`<span class="pill ok">read worker</span>`:""}`;
-  const cell=(label,c)=>`<td data-label="${label}" class="num${c.tone?` ${clusterTone(c.tone)}`:""}">${c.text}</td>`;
+  const cell=(label,c,attrs="")=>`<td data-label="${label}" class="num${c.tone?` ${clusterTone(c.tone)}`:""}"${attrs}>${c.text}</td>`;
   const status=cells.status;
-  return `<tr class="clrow${open?" setopen":""}${n.reachable?"":" stale"}" id="clrow-${id}" data-node="${id}" tabindex="0" aria-expanded="${open}" aria-controls="cldrawer-${id}"
-      onclick="toggleClusterNode(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleClusterNode(this)}">
-    <td class="clname"><span class="clchev" aria-hidden="true">${open?"▾":"▸"}</span><span class="clhost">${esc(n.hostname||n.node_id)}</span>${pills}${
+  return `<tr class="clrow${open?" setopen":""}${n.reachable?"":" stale"}" id="clrow-${id}" data-node="${id}" onclick="clusterRowClick(event,this)">
+    <td class="clname"><button type="button" class="clnodebtn" data-node="${id}" aria-expanded="${open}" aria-controls="cldrawer-${id}" onclick="toggleClusterNode(this)"><span class="clchev" aria-hidden="true">${open?"▾":"▸"}</span><span class="clhost">${esc(n.hostname||n.node_id)}</span></button>${pills}${
       n.advertised_host?`<div class="clsub">${esc(n.advertised_host)}</div>`:""}</td>
     <td data-label="Role">${role}</td>
     <td data-label="Status"${status.why?` title="${esc(status.why)}"`:""}><span class="cldot ${status.tone}"></span><span class="${clusterTone(status.tone==="good"?"":status.tone)}">${esc(status.label)}</span></td>
-    ${cell("Heartbeat",cells.heartbeat)}${cell("Raft",cells.raft)}${cell("WAL",cells.wal)}${cell("Database",cells.database)}${cell("Streams",cells.streams)}${cell("Build",cells.build)}</tr>
+    ${cell("Heartbeat",cells.heartbeat,` data-clhb="${id}"`)}${cell("Raft",cells.raft)}${cell("WAL",cells.wal)}${cell("Database",cells.database)}${cell("Streams",cells.streams)}${cell("Build",cells.build)}</tr>
     <tr class="setdrawer" id="cldrawer-${id}" data-node="${id}"${open?"":" hidden"}><td colspan="9">${clusterNodeDrawer(n,cluster,ops)}</td></tr>`;
 }
 function clusterNodesCard(cluster,ops){
@@ -250,28 +267,39 @@ function clusterNodesCard(cluster,ops){
   const voters=nodes.filter(n=>n.is_voter).length, others=nodes.length-voters;
   const add=PlurxClusterPanel.clusterAddNodeAction(clenv(),cluster);
   const open=!add.blocked&&CLUSTER_RAIL_EXPANDED.indexOf("add")!==-1;
-  const lifecycleLocked=nodes.some(n=>n.maintenance);
   return `<section class="clcard" id="cluster-nodes"><div class="clcardhead"><h2>Nodes<small>${nodes.length} member${nodes.length===1?"":"s"} · ${voters} voter${voters===1?"":"s"} · ${others} learner${others===1?"":"s"}</small></h2>
-      <div class="row">${add.blocked?`<span class="clwhy">${add.reason}</span>`:""}<button class="ghost sm" ${add.blocked?"disabled":""} aria-controls="clexp-add" aria-expanded="${open}" onclick="toggleClusterExpansion('add')">${open?"Hide":"+ Add node"}</button></div></div>
-    ${add.blocked?"":`<div class="clexpansion" id="clexp-add"${open?"":" hidden"}>${joinPanel(lifecycleLocked)}</div>`}
+      <div class="row">${add.blocked?`<span class="clwhy">${add.reason}</span>`:""}<button class="ghost sm" ${add.blocked?"disabled":`aria-controls="clexp-add" aria-expanded="${open}"`} onclick="toggleClusterExpansion('add')">${open?"Hide":"+ Add node"}</button></div></div>
+    ${add.blocked?"":`<div class="clexpansion" id="clexp-add"${open?"":" hidden"}>${joinPanel()}</div>`}
     ${nodes.length?`<table class="clnodetable"><thead><tr><th>Node</th><th>Role</th><th>Status</th><th>Heartbeat</th><th>Raft</th><th>WAL</th><th>Database</th><th>Streams</th><th>Build</th></tr></thead>
       <tbody id="cluster-node-list">${nodes.map(n=>clusterNodeTableRow(n,cluster,ops)).join("")}</tbody></table>`
       :`<div class="empty">No node records yet.</div>`}</section>`;
 }
 // Opening a drawer is state, not a repaint: the row and its drawer flip in
 // place and the module state records it, so the next status repaint draws it
-// open again. More than one may be open.
-function toggleClusterNode(row){
-  const id=row&&row.getAttribute("data-node");
+// open again. More than one may be open. The control is the Node cell's
+// button, so the keyboard and a screen reader get a real one.
+function toggleClusterNode(button){
+  const id=button&&button.getAttribute("data-node");
   if(!id) return;
   const open=CLUSTER_OPEN_NODES.indexOf(id)===-1;
   CLUSTER_OPEN_NODES=open?CLUSTER_OPEN_NODES.concat([id]):CLUSTER_OPEN_NODES.filter(node=>node!==id);
   const drawer=document.getElementById("cldrawer-"+id);
   if(drawer) drawer.hidden=!open;
-  row.classList.toggle("setopen",open);
-  row.setAttribute("aria-expanded",String(open));
-  const chev=row.querySelector(".clchev");
+  const row=document.getElementById("clrow-"+id);
+  if(row) row.classList.toggle("setopen",open);
+  button.setAttribute("aria-expanded",String(open));
+  const chev=button.querySelector(".clchev");
   if(chev) chev.textContent=open?"▾":"▸";
+}
+// A click anywhere else on the row is the same toggle — unless it landed on a
+// control of its own, or it ended a text selection (copying a hostname).
+function clusterRowClick(event,row){
+  const target=event&&event.target;
+  if(target&&target.closest&&target.closest("button,a,input,select,label")) return;
+  const selection=typeof getSelection==="function"?getSelection():null;
+  if(selection&&!selection.isCollapsed&&String(selection).trim()) return;
+  const button=row.querySelector(".clnodebtn");
+  if(button) toggleClusterNode(button);
 }
 // Recovery is the most severe thing this page can say, so it leads the alert
 // slot. The voter list is the table's now; this keeps the arithmetic, the
@@ -297,7 +325,7 @@ function clusterRecoveryAlert(cluster,recovery,active,ops){
   const guidance=recovery.quorum_available?`<p>A healthy caught-up voter will campaign. Raft still requires the reachable majority and chooses the winner.</p>`:`<p>Restore any missing original voter with its existing data directory and identity. Do not initialize a replacement cluster over these files.
       This release does not support force-reconfiguring around lost voters. Preserve every surviving data directory before taking any recovery action.</p>
     <div id="clpreserve" class="hint" hidden>Stop writes, copy each surviving data directory independently, record node IDs and Raft IDs, and keep the originals untouched until recovery is verified.</div>`;
-  return `<div class="clalert bad" role="status"><div><b>${title}: ${recovery.reachable_voters} / ${recovery.required_voters} reachable voters needed for quorum.</b> ${recoverySummary}
+  return `<div class="clalert bad" role="status"><div><b>${title}: ${recovery.reachable_voters} voter${recovery.reachable_voters===1?"":"s"} reachable, ${recovery.required_voters} needed for quorum.</b> ${recoverySummary}
     ${guidance}${maintained}</div><div class="row">${actions}</div></div>`;
 }
 // The four steps a maintenance target walks through, inline, then the state
@@ -400,8 +428,8 @@ function clusterChecksChip(row,checks,readiness){
 }
 function clusterChecksMore(row,checks){
   const mark=status=>status==="met"?`<i class="clgood">✓</i>`:status==="unmet"?`<i class="clwarn">!</i>`:`<i class="muted">·</i>`;
-  return `<p>${esc(row.more)}</p>${checks.map(check=>`<div class="clcheck" title="${esc(check.detail||"")}">${mark(check.status)}<div><b>${esc(check.title)}</b>${
-    check.evidence?` <span>— ${esc(check.evidence)}</span>`:""}</div></div>`).join("")}`;
+  return `<p>${esc(row.more)}</p>${checks.map(check=>`<div class="clcheck">${mark(check.status)}<div><b>${esc(check.title)}</b>${
+    check.evidence?` <span>— ${esc(check.evidence)}</span>`:""}${check.detail?`<small>${esc(check.detail)}</small>`:""}</div></div>`).join("")}`;
 }
 function clusterChecksHtml(row,settings,readiness){
   if(!row.more) return {chip:"",more:""};

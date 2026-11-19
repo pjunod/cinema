@@ -22,6 +22,8 @@ function clusterAlerts(cluster,ops){
     if(kind==="maintenance") return clusterMaintenanceAlert(active,ops,cluster.local_node_id);
     if(kind==="restart") return clusterRestartPreparationHtml(P.clusterDirectOperationRow(ops,cluster.local_node_id));
     if(kind==="voter_down") return plain(tone,P.clusterVoterDownText(clenv(),cluster,ops));
+    if(kind==="restart_blocked") return plain(tone,`<b>Do not restart another voter.</b> Rolling restart is blocked: ${
+      P.clusterBlockerText(clenv(),ops.verdict.blockers,cluster)||"a direct safety condition is missing"}.`);
     if(kind==="ops_unavailable"){ opsMount=true; return `<div id="cluster-operations">${clusterOperationsUnavailable(esc(ops.message||"request failed"))}</div>`; }
     if(kind==="reconfiguration"){
       // The deliverable of the two-voter state is these words, unshortened.
@@ -85,13 +87,29 @@ function retryCluster(){
   SETTINGS_LOADED.delete("cluster"); CLUSTER_LOADED=false;
   viewSettings(++PAGE_RENDER_GENERATION,false);
 }
-// The header's Refresh: the roster and the direct status together. Dropping
-// the status from the loaded set makes the same-section reload fetch it again
-// as the secondary it already is — no new request kind, no second loop — and
-// the reload carries the kept settings mounts across like any repaint.
-function refreshClusterPage(){
-  SETTINGS_LOADED.delete("clusterOps");
-  retryCluster();
+// The header's Refresh is the tick's gate, on demand: the roster and the
+// direct status through the reads they already have, painted once through the
+// preserving repaint. No reload through the loading shell and no generation
+// bump, so the token form, the log controls, focus, open drawers and
+// expansions, an unsaved setting, and an operation already in flight all keep
+// what they had. An open dialog holds both samples, as the tick does. The
+// status read stamps the gate, so the tick does not repeat it at once.
+async function refreshClusterPage(btn){
+  const generation=PAGE_RENDER_GENERATION;
+  if(btn) btn.disabled=true;
+  try{
+    const cluster=await SETTINGS_ENDPOINTS.cluster();
+    if(!settingsCurrent(generation,"cluster")) return;
+    // A single machine has no fan-out to collect (see settingsTick).
+    const ops=cluster&&!cluster.unavailable?await SETTINGS_ENDPOINTS.clusterOps():null;
+    if(!settingsCurrent(generation,"cluster")) return;
+    if(clusterRepaintDeferred()){ patchClusterReadingAge(); return; }
+    SETTINGS_DATA.cluster=cluster; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
+    if(ops){ SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps"); }
+    repaintClusterPreserving(renderSettings);
+  }catch(error){
+    if(error&&error.status===401) return;
+  }finally{ if(btn) btn.disabled=false; }
 }
 async function setNodeMaintenance(nodeId,enter){
   if(enter&&!confirm(`Enter maintenance on ${nodeId}?\n\nNew work will be fenced and existing streams will drain. If this node is leader, leadership moves before it is marked ready.`)) return;
@@ -154,14 +172,18 @@ function toggleRecoveryChecklist(btn){
 // paragraphs. It stays until dismissed or the next operation starts.
 function clusterRefusalHtml(){
   if(!CLUSTER_REFUSAL) return "";
-  return `<div class="clalert bad" role="alert"><div><b>Cluster operation for ${esc(CLUSTER_REFUSAL.node_id)} was refused.</b> ${
+  // Announced once, when it first appears; every later repaint redraws the
+  // same refusal without asking a screen reader to read it out again.
+  const announce=!CLUSTER_REFUSAL.announced;
+  CLUSTER_REFUSAL.announced=true;
+  return `<div class="clalert bad"${announce?' role="alert"':""}><div><b>Cluster operation for ${esc(CLUSTER_REFUSAL.node_id)} was refused.</b> ${
     esc(PlurxClusterPanel.membershipRefusalText(CLUSTER_REFUSAL.code,CLUSTER_REFUSAL.message))}</div>
     <div class="row"><button class="ghost sm" onclick="dismissClusterRefusal()">Dismiss</button></div></div>`;
 }
 function dismissClusterRefusal(){ CLUSTER_REFUSAL=null; repaintClusterPreserving(renderSettings); }
 // Minting is separated from showing because the token exists exactly once: the
 // server hands back the only copy and keeps nothing but its digest.
-function joinPanel(lifecycleLocked=false){
+function joinPanel(){
   if(CLUSTER_TOKEN) return joinTokenHtml(CLUSTER_TOKEN);
   return `<div class="row" style="gap:10px;align-items:center">
       <span class="schedpair">Token valid for
@@ -173,16 +195,16 @@ function joinPanel(lifecycleLocked=false){
         <select id="clrole" style="max-width:150px;font-size:12px;padding:3px 6px">
           <option value="voter" selected>Voting member</option>
           <option value="learner">Read worker</option></select></span>
-      <button ${lifecycleLocked?'disabled title="Finish maintenance before changing membership."':''} onclick="mintJoinToken(this)">Create a join token</button></div>
+      <button onclick="mintJoinToken(this)">Create a join token</button></div>
     <div class="hint">A join token is single-use and short-lived, and it is shown once. Create it when the
       other machine is ready to start, not before.</div>`;
 }
-function leavePanel(localNodeId,lifecycleLocked=false){
+function leavePanel(localNodeId){
   if(CLUSTER_LEAVING) return `<div class="clstate calm"><h3>Leaving the cluster</h3><p>The membership change committed. This
       Cinema node is draining connections and will shut down.</p></div>`;
   if(!localNodeId) return `<div class="clstate warn"><h3>Local node identity unavailable</h3><p>Refresh the roster before
       leaving. The server will not guess which backend this destructive action should remove.</p></div>`;
-  return `<button class="ghost sm" ${lifecycleLocked?'disabled title="Finish maintenance before changing membership."':''} onclick='leaveCluster(this,${esc(JSON.stringify(localNodeId))})'>Leave this cluster</button>
+  return `<button class="ghost sm" onclick='leaveCluster(this,${esc(JSON.stringify(localNodeId))})'>Leave this cluster</button>
     <div class="hint">A graceful leave is permanent, not an update or restart action. This node resolves
       its owned offline work and coordinates a safe membership change with the surviving quorum. It then
       drains and shuts down. Rejoining this machine requires a fresh data directory and
@@ -425,58 +447,58 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
     }
     if(tab==="cluster"){
       const current=SETTINGS_DATA.cluster;
-      const recovery=current&&!current.unavailable?PlurxClusterPanel.clusterRecoveryState(current):null;
-      const live=current&&!current.unavailable&&((current.nodes||[]).some(n=>n.maintenance)||(recovery&&recovery.required));
-      if(live){
-        const snapshot=await api("/cluster/nodes");
-        if(!settingsCurrent(generation,tab)) return;
-        const operational=cluster=>JSON.stringify({
-          recovery:PlurxClusterPanel.clusterRecoveryState(cluster),
-          nodes:(cluster.nodes||[]).map(n=>({id:n.node_id,leader:n.is_leader,reachable:n.reachable,
-            lag:n.apply_lag_entries,maintenance:n.maintenance,ack:n.maintenance_acknowledged,
-            ready:n.maintenance_ready,sessions:n.active_media_sessions,removal:n.removal_pending})),
-        });
-        const changed=operational(current)!==operational(snapshot);
-        // This branch runs precisely while a node is fenced or a recovery is
-        // required — which is when the force-election dialog is most likely to
-        // be open. Hold the sample rather than paint over the decision; two
-        // seconds later the same difference is still there.
-        if(!(changed&&clusterRepaintDeferred())){
-          SETTINGS_DATA.cluster=snapshot; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
-          if(changed) repaintClusterPreserving(renderSettings);
-        }
-      }
-      // The direct status ages the same way the roster does, and every rail
-      // verdict, node card, and ledger reading is read off it. It is refreshed
-      // here rather than on a timer of its own because this loop already owns
-      // the cadence, the generation guard, the visibility check, and the
+      const clustered=Boolean(current&&!current.unavailable);
+      const recovery=clustered?PlurxClusterPanel.clusterRecoveryState(current):null;
+      const live=clustered&&((current.nodes||[]).some(n=>n.maintenance)||(recovery&&recovery.required));
+      // The direct status ages the same way the roster does, and every strip
+      // cell, drawer and ledger reading is read off it. It is refreshed here
+      // rather than on a timer of its own because this loop already owns the
+      // cadence, the generation guard, the visibility check, and the
       // re-entrancy latch, and a second loop would have to reimplement all four.
       //
       // Only on a machine that is actually in a cluster: a single SQLite box
-      // renders no rail, no roster and no direct readings, so collecting a
+      // renders no strip, no roster and no direct readings, so collecting a
       // fan-out it will not paint is a request spent to learn nothing.
-      if(current&&!current.unavailable&&clusterOpsDue()){
-        // Stamped BEFORE the await: a probe slower than the gate must not stack
-        // a second fan-out behind itself. A refusal leaves it stamped too — the
-        // retry is the next gate, not the next tick — but the freshness row
-        // still has to move, because a failing collection is exactly when the
-        // age of the reading on screen matters most.
-        clusterOpsStamp();
+      //
+      // Stamped BEFORE the first await: a probe slower than the gate must not
+      // stack a second fan-out behind itself. A refusal leaves it stamped too —
+      // the retry is the next gate, not the next tick.
+      const due=clustered&&clusterOpsDue();
+      if(due) clusterOpsStamp();
+      // The roster is re-read on the same gate, so "Nodes reachable", the
+      // strip's verdict and the voter-down alert follow a voter that stops
+      // heartbeating; and every two seconds while something is in flight (a
+      // node in maintenance, a recovery), which is when it moves fastest. A
+      // failed re-read keeps the roster on screen; the next tick tries again.
+      let snapshot=null;
+      if(live||due){
+        snapshot=await api("/cluster/nodes").catch(error=>{ if(error&&error.status===401) throw error; return null; });
+        if(!settingsCurrent(generation,tab)) return;
+      }
+      const rosterChanged=Boolean(snapshot)&&PlurxClusterPanel.clusterRosterProjection(current)
+        !==PlurxClusterPanel.clusterRosterProjection(snapshot);
+      if(snapshot){
+        // The roster poll runs precisely while a node is fenced or a recovery
+        // is required — which is when the force-election dialog is most likely
+        // to be open. A roster that arrives under a dialog is dropped, not
+        // stored; the next read sees the same difference and pays the repaint.
+        if(clusterRepaintDeferred()) snapshot=null;
+        else{ SETTINGS_DATA.cluster=snapshot; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true; }
+      }
+      let repaint=rosterChanged&&Boolean(snapshot);
+      if(due){
         try{
           const previous=SETTINGS_DATA.clusterOps;
           const ops=clusterOpsReceived(await api("/cluster/status",{keepSessionOn401:true}));
           if(!settingsCurrent(generation,tab)) return;
           const changed=PlurxClusterPanel.clusterOpsProjection(previous)
             !==PlurxClusterPanel.clusterOpsProjection(ops);
-          if(changed&&clusterRepaintDeferred()){
-            // Held, not stored: the freshness row keeps reporting the age of the
-            // sample actually on screen, which is the only thing it can honestly
-            // describe.
-            patchClusterReadingAge();
-          }else{
+          // Held, not stored, when it changed under a dialog: the freshness row
+          // keeps reporting the age of the sample actually on screen, which is
+          // the only thing it can honestly describe.
+          if(!(changed&&clusterRepaintDeferred())){
             SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
-            if(changed) repaintClusterPreserving(renderSettings);
-            else patchClusterReadingAge();
+            if(changed) repaint=true;
           }
         }catch(error){
           // No refusal here ends the session any more, including a 401: the
@@ -488,12 +510,15 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
           // Retained transport evidence advances locally even when the refresh
           // fails: active work crosses its deadline into Stalled and eventually
           // expires. Re-render that projection unless an open decision dialog
-          // owns the current DOM; in that case only the independent age cell is
-          // safe to patch and the next tick will try the preserving repaint.
-          if(clusterRepaintDeferred()) patchClusterReadingAge();
-          else repaintClusterPreserving(renderSettings);
+          // owns the current DOM; the next tick will try the preserving repaint.
+          repaint=true;
         }
       }
+      // One paint for whatever changed, never under a dialog.
+      if(repaint&&!clusterRepaintDeferred()) repaintClusterPreserving(renderSettings);
+      // Every tick, fetch or no fetch: the sample age, the reading age and the
+      // heartbeats are ages against the clock, and patching them is free.
+      patchClusterReadingAge();
     }
     await Promise.all(secondary);
   }catch(e){ if(e&&e.status===401) return; }

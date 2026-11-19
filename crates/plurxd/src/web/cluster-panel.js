@@ -630,7 +630,11 @@
       ["Quorum commit",num(raft.commit_index),true],
       ["Applied on this node",`${applied}${!sampled&&replication&&known(replication.last_applied_term)?` <span class="muted">term ${esc(String(replication.last_applied_term))}</span>`:""} · ${lag}`,true],
       ["Behind by",behind===null?"unknown":`${behind} change${behind===1?"":"s"}`,true],
-      ["Last converged",replication&&replication.last_converged_at?esc(fmtAgo(replication.last_converged_at)):"not yet observed",true],
+      // In sync needs no sentence; degraded does, and the server's says which
+      // node is behind and what to do about it.
+      ...(replication&&replication.health==="degraded"&&replication.explanation
+        ?[["Watch state",esc(replication.explanation),false]]:[]),
+      ["Last converged",replication&&replication.last_converged_at?esc(fmtAgo(replication.last_converged_at)):"not yet observed",true,"cldb-converged"],
       ["WAL",clusterDatabaseWal(env,status),true],
       ["Snapshots",status?(snap.available
         ? `build ${num(snap.build_ok_count)} ok / ${num(snap.build_error_count)} error · install ${num(snap.install_ok_count)} ok / ${num(snap.install_error_count)} error`
@@ -697,10 +701,12 @@
     const fenced=nodes.find(n=>n.maintenance);
     const answered=clusterAnswered(ops);
 
+    const unobserved=clusterUnobservedVoters(cluster,ops);
+    const verdict=ops&&!ops.unavailable&&ops.verdict;
     let health;
     if(recovery.required)
       health={value:"Recovery required",tone:"bad",
-        sub:`${recovery.reachable_voters} of ${recovery.required_voters} voters needed for quorum reachable`};
+        sub:`${recovery.reachable_voters} reachable · ${recovery.required_voters} needed for quorum`};
     else if(fenced){
       const direct=clusterDirectMaintenanceStatus(ops,fenced.node_id);
       const sessions=direct&&direct.media?Number(direct.media.local_active_sessions||0):Number(fenced.active_media_sessions||0);
@@ -711,6 +717,18 @@
     else if(reachableVoters<voters.length)
       health={value:"Degraded",tone:"warn",
         sub:`${reachableVoters} of ${voters.length} voters reachable · tolerates ${Math.max(0,reachableVoters-q.majority)} more`};
+    // The roster says every voter is reachable; the direct status, already
+    // fetched, may know better. A collection that failed, a voter it could not
+    // observe, a blocked rollout verdict or degraded replication is not
+    // "Healthy". Still collecting (`ops === null`) degrades nothing.
+    else if(cluster.availability==="high_availability"&&ops&&ops.unavailable)
+      health={value:"Status unavailable",tone:"warn",sub:"direct status could not be collected"};
+    else if(cluster.availability==="high_availability"&&(unobserved.length||(verdict&&!verdict.safe_to_restart_one)))
+      health={value:"Degraded",tone:"warn",
+        sub:(verdict&&!verdict.safe_to_restart_one&&clusterBlockerText(env,verdict.blockers,cluster))
+          ||`${voters.length-unobserved.length} of ${voters.length} voters answered`};
+    else if(cluster.availability==="high_availability"&&cluster.replication&&cluster.replication.health==="degraded")
+      health={value:"Degraded",tone:"warn",sub:"replication degraded"};
     else if(cluster.availability==="high_availability")
       health={value:"Healthy",tone:"good",
         sub:`${plural(q.voters,"voter","voters")} · quorum ${q.majority} · tolerates ${plural(q.tolerates,"failure","failures")}`};
@@ -743,7 +761,6 @@
     }
 
     let restart;
-    const verdict=ops&&!ops.unavailable&&ops.verdict;
     if(!ops) restart={value:"Collecting…",sub:"direct status not collected yet",tone:""};
     else if(ops.unavailable||!verdict) restart={value:"Unavailable",sub:"direct status could not be collected",tone:"warn"};
     else if(verdict.safe_to_restart_one)
@@ -782,9 +799,9 @@
     else if(ops.unavailable) status={label:"Status unavailable",tone:"warn"};
     else if(!s) status={label:"Not observed",tone:"bad",
       why:clusterObservationReason(row&&(row.error_class||row.observation)||"not_observed")};
-    else if(!n.is_voter&&!n.bounded_read_ready) status={label:"Catching up",tone:"warn"};
     else if(!s.process||!s.process.live||!s.serving||!s.serving.ready||!raft||!raft.sample_valid
       ||!raft.watermark_valid||!clusterWalHealthy(wal)) status={label:"Needs attention",tone:"warn"};
+    else if(!n.is_voter&&!n.bounded_read_ready) status={label:"Catching up",tone:"warn"};
     else status={label:"Ready",tone:"good"};
     const roleWord=raft&&raft.is_leader===true?"leader":n.is_voter?"follower":"learner";
     const raftCell=raft
@@ -821,6 +838,15 @@
     const met=reported.filter(row=>row.status==="met").length;
     return {tone:met===reported.length?"ok":"warn",label:`${met} of ${reported.length} checks`};
   }
+  // Voters the roster calls reachable that the direct status did not answer
+  // for. Nothing while the status is collecting or failed: those are stated
+  // on their own.
+  function clusterUnobservedVoters(cluster,ops){
+    if(!ops||ops.unavailable) return [];
+    const answered=clusterAnswered(ops);
+    return ((cluster&&cluster.nodes)||[]).filter(n=>n.is_voter&&n.reachable&&!n.maintenance
+      &&!answered.some(row=>row.membership&&row.membership.node_id===n.node_id));
+  }
   // What needs saying above the table, most severe first. Recovery carries the
   // maintenance target and the down voters inside it, so neither is repeated
   // beside it. `context.refusal` is the shell's module state.
@@ -834,8 +860,15 @@
       const local=clusterDirectMaintenanceStatus(ops,cluster.local_node_id);
       const media=local&&local.media;
       if(media&&media.new_admissions_blocked) kinds.push({kind:"restart",tone:media.drained?"good":"warn"});
-      if(!recovery.required&&nodes.some(n=>n.is_voter&&!n.reachable&&!n.maintenance))
-        kinds.push({kind:"voter_down",tone:"warn"});
+      const down=!recovery.required&&nodes.some(n=>n.is_voter&&!n.reachable&&!n.maintenance);
+      if(down) kinds.push({kind:"voter_down",tone:"warn"});
+      // The direct verdict alone can say "do not restart": a voter the status
+      // could not observe, a WAL fault, a stale proof. The voter-down block
+      // already names the blocked restart, and maintenance and recovery
+      // explain their own; a one- or two-voter cluster states its own shape.
+      const verdict=ops&&!ops.unavailable&&ops.verdict;
+      if(verdict&&!verdict.safe_to_restart_one&&!down&&!recovery.required&&!nodes.some(n=>n.maintenance)
+        &&cluster.availability==="high_availability") kinds.push({kind:"restart_blocked",tone:"warn"});
       if(ops&&ops.unavailable) kinds.push({kind:"ops_unavailable",tone:"warn"});
       if(cluster.availability==="degraded_reconfiguration") kinds.push({kind:"reconfiguration",tone:"warn"});
     }
@@ -896,7 +929,7 @@
     if(locked) return {blocked:true,reason:locked};
     if(lifecycle) return {blocked:true,
       reason:`A membership change is already in flight on ${esc(lifecycle.hostname||lifecycle.node_id)}. Finish it before admitting another node.`};
-    return {blocked:false,reason:"Mints one single-use join token, shown once, for a machine with a fresh data directory."};
+    return {blocked:false,reason:""};
   }
   // The actions in one node's drawer. This node: maintenance, restart
   // preparation and leave. Another member: remove, and promote for a learner.
@@ -920,11 +953,13 @@
       }else{
         const verdict=clusterMaintenanceEntryVerdict(ops,n.node_id);
         const safe=Boolean(verdict&&verdict.safe_to_enter);
-        const ready=safe&&n.reachable&&!n.removal_pending&&!pending&&!fenced;
+        const ready=safe&&n.reachable&&!n.removal_pending&&!pending;
         const why=!n.reachable?"This node's own heartbeat is not fresh."
           :pending?`A removal is pending on ${name(pending)}.`
-          :fenced?`Maintenance is already active on ${name(fenced)}; resume it before fencing another node.`
           :verdict?(blockerText=>blockerText?`${blockerText}.`:"The direct maintenance preflight has not approved this node.")(clusterBlockerText(env,verdict.blockers,cluster))
+          // With a verdict, the server names a conflicting fence itself
+          // (maintenance_already_active); without one, the roster still can.
+          :fenced?`Maintenance is already active on ${name(fenced)}; resume it before fencing another node.`
           :ops&&ops.unavailable?"The direct status could not be collected, and a heartbeat is not a substitute for it."
           :"The direct maintenance preflight has not answered yet.";
         actions.push({id:"maintenance",blocked:!ready,reason:ready?"":why,
@@ -936,7 +971,8 @@
       const why=!ops?"The direct rollout verdict has not answered yet."
         :!verdict?"The direct status could not be collected, and a heartbeat is not a substitute for it."
         :!verdict.safe_to_restart_one?`${clusterBlockerText(env,verdict.blockers,cluster)||"At least one direct safety condition is missing"}.`
-        :`The safe candidate is ${esc(clusterHost(cluster,candidate))} — open that node directly to prepare it.`;
+        :candidate?`The safe candidate is ${esc(clusterHost(cluster,candidate))} — open that node directly to prepare it.`
+        :"The direct rollout verdict names no candidate.";
       actions.push({id:"restart",blocked:!here,reason:here?"":why,
         html:button("ghost","Prepare for restart",here,`prepareLocalRestart(this,${arg(n)})`)});
       // A graceful leave is a membership change like any other: it needs a
@@ -948,8 +984,8 @@
         :fenced?`Maintenance is active on ${name(fenced)}, and membership changes are refused while it is. Resume that node first.`
         :!leaveQuorum?`A voter can only leave while at least three voters remain, and this cluster has ${voters.length}. Add a node first.`:"";
       actions.push({id:"leave",destructive:true,expand:"leave",blocked:Boolean(leaveWhy),reason:leaveWhy,html:""});
-      return actions;
     }
+    // A learner is promoted from any node's screen, its own included.
     if(!n.is_voter&&n.role==="learner"){
       // Promotion is refused until the learner has published a fresh zero-lag
       // apply proof and its filesystem has proved the voter reserve.
@@ -961,16 +997,16 @@
       actions.push({id:"promote",blocked:!ready,reason:ready?"":why,
         html:button("ghost","Promote to voter",ready,`promoteNode(${arg(n)})`)});
     }
+    // This node leaves; it is not removed from its own screen.
+    if(n.node_id===cluster.local_node_id) return actions;
     // A learner leaves by a different path and is not held to the voter
-    // arithmetic. A removal already pending on THIS node may be retried — the
-    // server treats it idempotently.
+    // arithmetic. A removal pending elsewhere is not a reason here: the
+    // server's removal fence is per node and it refuses what it refuses.
     const quorumHolds=voters.length>=3||!n.is_voter;
-    const otherPending=pending&&pending.node_id!==n.node_id?pending:null;
     const removeWhy=locked?locked
       :fenced?"Finish maintenance before changing membership."
       :!quorumHolds?`A voter removal needs at least three voters and this cluster has ${voters.length}. Add a node first.`
-      :n.is_leader?`${name(n)} is the current leader and can only leave from its own screen.`
-      :otherPending?`A membership change is in flight on ${name(otherPending)}.`:"";
+      :n.is_leader?`${name(n)} is the current leader and can only leave from its own screen.`:"";
     actions.push({id:"remove",destructive:true,blocked:Boolean(removeWhy),reason:removeWhy,
       html:button("danger",n.removal_pending?"Retry removal":"Remove permanently…",!removeWhy,`removeNode(${arg(n)})`)});
     return actions;
@@ -993,15 +1029,18 @@
     else if(!verdict) rows.push({id:"restart",title:"Rolling restart",
       text:blocked("the direct status could not be collected, and a heartbeat is not a substitute for it."),action:prepare(false)});
     else if(verdict.safe_to_restart_one){
+      const named=Boolean(verdict.candidate_node_id);
       const candidate=esc(clusterHost(cluster,verdict.candidate_node_id));
-      const here=verdict.candidate_node_id===cluster.local_node_id;
+      const here=named&&verdict.candidate_node_id===cluster.local_node_id;
       rows.push({id:"restart",title:"Rolling restart",
-        text:`The observed voters preserve majority after one restart. Prepare only <b>${candidate}</b> and re-check before touching another node.`+
+        text:`The observed voters preserve majority after one restart.${named?` Prepare only <b>${candidate}</b> and re-check before touching another node.`:""}`+
           findingList(verdict.warnings||[]),
-        action:here?prepare(true):`<span class="clwhy">Open ${candidate} to prepare it</span>`});
+        action:here||!named?prepare(here):`<span class="clwhy">Open ${candidate} to prepare it</span>`});
     }else{
+      // The verdict's own sentences, then every finding it reported.
       rows.push({id:"restart",title:"Rolling restart",
-        text:blocked(`${clusterBlockerText(env,verdict.blockers,cluster)||"at least one direct safety condition is missing"}.`)+
+        text:blocked("Do not restart another voter.")+
+          " At least one direct safety condition is missing or unhealthy. Keep the available voters running until every blocker below clears."+
           findingList([...(verdict.blockers||[]),...(verdict.warnings||[])]),
         action:prepare(false)});
     }
@@ -1084,6 +1123,26 @@
     return JSON.stringify(root);
   }
 
+  // The roster's counterpart of the projection above, for the tick that
+  // re-reads it on the same gate. Its self-ticking fields: each node's
+  // heartbeat `last_seen_at` and the store's `last_converged_at`, both shown
+  // as ages and patched in place (patchClusterReadingAge), and the store's
+  // `last_applied_index`, which advances on every commit and is shown only
+  // when the direct sample has no applied index of its own — the direct
+  // sample's commit watermark, in the projection above, already moves the
+  // screen when the store does.
+  function clusterRosterProjection(cluster){
+    const skip=key=>key==="last_seen_at"||key==="last_converged_at"||key==="last_applied_index";
+    const walk=value=>{
+      if(Array.isArray(value)) return value.map(walk);
+      if(!value||typeof value!=="object") return value;
+      const out={};
+      for(const key of Object.keys(value).sort()) if(!skip(key)) out[key]=walk(value[key]);
+      return out;
+    };
+    return JSON.stringify(walk(cluster===undefined?null:cluster));
+  }
+
   return Object.freeze({
     clusterQuorum,
     clusterStateView,
@@ -1119,7 +1178,9 @@
     clusterNodeCells,
     clusterReadinessChip,
     clusterAlertKinds,
+    clusterUnobservedVoters,
     clusterVoterDownText,
+    clusterRosterProjection,
     clusterSampledText,
     clusterLifecycle,
     clusterAddNodeAction,

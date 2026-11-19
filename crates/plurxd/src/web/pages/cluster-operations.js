@@ -21,9 +21,9 @@ function clusterMaintenanceCard(cluster,ops){
   const rows=PlurxClusterPanel.clusterMaintenanceRows(clenv(),cluster,ops);
   return `<section class="clcard" id="cluster-maintenance"><div class="clcardhead"><h2>Maintenance</h2></div>${
     rows.map(row=>`<div class="clact" data-row="${row.id}"><div><div class="t">${esc(row.title)}</div><div class="d">${row.text}</div></div><div class="row">${row.action}</div></div>`).join("")}
-    ${forceElectionDialog(true)}</section>`;
+    ${forceElectionDialog()}</section>`;
 }
-function forceElectionDialog(enabled){
+function forceElectionDialog(){
   return `<dialog class="cldialog" id="clelection"><div class="cldialogbody"><h3>Force leader election</h3>
     <p>This briefly interrupts writes while a caught-up follower campaigns. The current voter majority stays unchanged, and Raft—not this screen—selects the next leader.</p>
     <ol class="clsteps"><li class="done">A voter quorum is reachable</li><li class="done">A caught-up follower is available</li><li class="done">No maintenance or removal is pending</li></ol>

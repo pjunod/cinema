@@ -346,16 +346,28 @@ function operationStatus(membership, { safe = true, unreachable = false } = {}) 
         : [],
       warnings: [],
     },
-    maintenance: membership.nodes.map((entry) => ({
-      node_id: entry.node_id,
-      safe_to_enter:
-        !unreachable &&
-        (entry.is_voter
-          ? membership.capacity.voting_nodes === 1 ||
-            membership.capacity.voting_nodes >= 3
-          : entry.role === "learner"),
-      blockers: [],
-    })),
+    // As the server does (http/cluster_operations.rs): a fence already
+    // active anywhere is a blocker on every other node's entry verdict.
+    maintenance: membership.nodes.map((entry) => {
+      const fences = membership.nodes
+        .filter((other) => other.maintenance)
+        .map((other) => ({
+          code: "maintenance_already_active",
+          node_id: other.node_id,
+          message: "another durable maintenance fence is already active",
+        }));
+      return {
+        node_id: entry.node_id,
+        safe_to_enter:
+          !unreachable &&
+          !fences.length &&
+          (entry.is_voter
+            ? membership.capacity.voting_nodes === 1 ||
+              membership.capacity.voting_nodes >= 3
+            : entry.role === "learner"),
+        blockers: fences,
+      };
+    }),
   };
 }
 
@@ -2310,10 +2322,12 @@ test("the current leader is labeled beside its hostname", () => {
 test("node actions stay inside the node card footer", () => {
   const ui = sandbox();
   const row = nodeRow(ui, node("node-a", 1, "voter"));
-  // The row itself is a summary to click; every control is in its drawer's
-  // action row, under the readings it acts on.
+  // The row itself is a summary to click; its one control is the drawer
+  // toggle, and every action is in the drawer's action row, under the
+  // readings it acts on.
   const [summary, drawer] = row.split('<tr class="setdrawer"');
-  assert.equal(summary.includes("<button"), false);
+  assert.deepEqual(summary.match(/<button[^>]*>/g),
+    ['<button type="button" class="clnodebtn" data-node="node-a" aria-expanded="false" aria-controls="cldrawer-node-a" onclick="toggleClusterNode(this)">']);
   assert.match(drawer, /<div class="cldraweract">[\s\S]*>Enter maintenance</);
   assert.ok(drawer.indexOf("<h4>Membership</h4>") < drawer.indexOf('class="cldraweract"'));
 });
@@ -2391,10 +2405,10 @@ test("a row click opens its drawer in place and records it as module state", () 
   const chev = { textContent: "▸" };
   const attributes = {};
   const classes = new Set(["clrow"]);
-  const row = {
+  const row = { classList: { toggle: (name, on) => (on ? classes.add(name) : classes.delete(name)) } };
+  const button = {
     getAttribute: (name) => (name === "data-node" ? "node-b" : null),
     setAttribute: (name, value) => { attributes[name] = value; },
-    classList: { toggle: (name, on) => (on ? classes.add(name) : classes.delete(name)) },
     querySelector: () => chev,
   };
   const toggle = new Function(
@@ -2402,14 +2416,14 @@ test("a row click opens its drawer in place and records it as module state", () 
     `let CLUSTER_OPEN_NODES=[];
      ${shippedSource("toggleClusterNode")}
      return {toggle:toggleClusterNode,open:()=>CLUSTER_OPEN_NODES};`,
-  )({ getElementById: (id) => (id === "cldrawer-node-b" ? drawer : null) });
-  toggle.toggle(row);
+  )({ getElementById: (id) => (id === "cldrawer-node-b" ? drawer : id === "clrow-node-b" ? row : null) });
+  toggle.toggle(button);
   assert.deepEqual(toggle.open(), ["node-b"]);
   assert.equal(drawer.hidden, false);
   assert.equal(attributes["aria-expanded"], "true");
   assert.ok(classes.has("setopen"));
   assert.equal(chev.textContent, "▾");
-  toggle.toggle(row);
+  toggle.toggle(button);
   assert.deepEqual(toggle.open(), []);
   assert.equal(drawer.hidden, true);
   assert.equal(attributes["aria-expanded"], "false");
@@ -2516,8 +2530,6 @@ test("maintenance resume requires direct local process evidence", () => {
   assert.equal(panel.includes('id="clexp-add"'), false);
   assert.equal(panel.includes("Create a join token"), false);
   assert.match(panel, /A membership change is already in flight on node-b/);
-  const leaving = ui.leavePanel("node-a", true);
-  assert.match(leaving, /disabled title="Finish maintenance before changing membership[^>]*>Leave this cluster/);
   assert.match(panel, /disabled[^>]*>Remove permanently/);
 });
 
@@ -3178,7 +3190,8 @@ test("no action offers what the server would refuse", () => {
   // One planned outage at a time: this node may not fence itself while
   // another is fenced, and only the fenced node can lift its own fence.
   assert.equal(locked.get("Enter maintenance").blocked, true);
-  assert.match(locked.get("Enter maintenance").reason, /already active on node-b/);
+  // The reason is the server's own blocker, named by hostname.
+  assert.equal(locked.get("Enter maintenance").reason, "maintenance already active on node-b.");
   assert.ok(!locked.has("Resume service"));
   assert.match(ui.clusterAlerts(fenced, operationStatus(fenced)),
     /title="Open the maintenance target directly to resume it\." [^>]*>Resume service/);
@@ -3268,7 +3281,7 @@ test("an action's verdict reaches the markup, not just the model", () => {
   const local = ui.clusterNodeDrawer(cluster.nodes[0], cluster, operationStatus(cluster));
   assert.match(local, /<button class="ghost sm"  onclick='setNodeMaintenance\(&quot;node-a&quot;,true\)'>Enter maintenance<\/button>(?!<span class="clwhy">)/);
   assert.match(local, /<button class="ghost sm" disabled >Prepare for restart<\/button><span class="clwhy">The safe candidate is node-b/);
-  assert.match(local, /<span class="clpush"><button class="danger sm"  aria-controls="clexp-leave"/);
+  assert.match(local, /<span class="clactitem clpush"><button class="danger sm" aria-controls="clexp-leave" aria-expanded="false"/);
 });
 
 test("entering maintenance is offered only when the preflight approved it", () => {
@@ -3527,7 +3540,9 @@ test("both membership rows carry an evaluated precondition", () => {
   assert.match(locked.reason, /elected leader and a reachable voter majority/);
   const lockedHtml = sandbox({ expanded: ["leave"] }).clusterNodeDrawer(recovering.nodes[0], recovering, operationStatus(recovering));
   assert.equal(lockedHtml.includes('id="clexp-leave"'), false, "a blocked action has no reachable control");
-  assert.match(lockedHtml, /<button class="danger sm" disabled aria-controls="clexp-leave"/);
+  // …and no aria-controls naming a panel that is not there.
+  assert.match(lockedHtml, /<button class="danger sm" disabled onclick="toggleClusterExpansion\('leave'\)">/);
+  assert.equal(lockedHtml.includes('aria-controls="clexp-leave"'), false);
   assert.equal(lockedHtml.includes("leaveCluster(this,"), false);
 
 
@@ -3572,9 +3587,10 @@ test("both membership rows carry an evaluated precondition", () => {
   const learnerRow = railRows(ui, learnerLocal, operationStatus(learnerLocal)).get("Leave this cluster");
   assert.equal(learnerRow.blocked, false);
 
-  // And the join control still receives the lifecycle state, so its own
-  // button stays disabled wherever the panel is reachable.
-  assert.match(shippedSource("clusterNodesCard"), /joinPanel\(lifecycleLocked\)/);
+  // The join control is only ever rendered when Add is not blocked, so it
+  // carries no disabled branch of its own to drift from the action's reason.
+  assert.match(shippedSource("clusterNodesCard"), /add\.blocked\?"":`<div class="clexpansion" id="clexp-add"[^`]*\$\{joinPanel\(\)\}/);
+  assert.equal(shippedSource("joinPanel").includes("disabled"), false);
 });
 
 test("the danger zone is gone, not renamed", () => {
@@ -3681,7 +3697,12 @@ test("transport observer age advances the repaint projection", () => {
 
 // A settingsTick harness that can actually run the cluster branch: the tick
 // itself is shipped source, everything it reaches for is supplied here.
-function tickHarness({ cluster, ops, now, clustered=true }) {
+// The tick reads the roster on the status gate too. Unless a test asks to
+// answer it by hand (`manualRoster`), the roster read is answered at once with
+// the roster the panel already holds, and only the status reads are queued.
+// The roster read answers on a microtask; let the status request follow it.
+const tickSettle = () => new Promise((resolve) => setImmediate(resolve));
+function tickHarness({ cluster, ops, now, clustered=true, manualRoster=false }) {
   const requests = [];
   const painted = [];
   const paintedTransport = [];
@@ -3731,7 +3752,9 @@ function tickHarness({ cluster, ops, now, clustered=true }) {
   )(
     document,
     { hash: "#/settings" },
-    (url) => new Promise((resolve, reject) => requests.push({ url, resolve, reject })),
+    (url) => (url === "/cluster/nodes" && !manualRoster
+      ? Promise.resolve(JSON.parse(JSON.stringify(cluster)))
+      : new Promise((resolve, reject) => requests.push({ url, resolve, reject }))),
     () => "cluster",
     () => true,
     async () => {},
@@ -3759,37 +3782,49 @@ test("the direct status collects on its own gate, and never overlaps", async () 
   ]);
   const ops = operationStatus(cluster);
   const now = { value: 1_000_000 };
-  const { harness, requests } = tickHarness({ cluster, ops, now });
+  const { harness, requests } = tickHarness({ cluster, ops, now, manualRoster: true });
 
-  // Fifteen seconds since the tab painted, so this tick collects — and stamps
-  // the clock BEFORE the await, at request time rather than at completion.
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  // Fifteen seconds since the tab painted, so this tick collects: the roster,
+  // then the direct status — and it stamps the clock BEFORE the first await,
+  // at request time rather than at completion.
   now.value += 15_000;
   const first = harness.settingsTick(1, "cluster");
-  assert.deepEqual(requests.map((r) => r.url), ["/cluster/status"]);
+  assert.deepEqual(requests.map((r) => r.url), ["/cluster/nodes"]);
   assert.equal(harness.stamped(), now.value, "the clock is stamped before the await");
 
   // A probe slower than the gate must not put a second fan-out behind itself.
   now.value += 20_000;
   await harness.settingsTick(1, "cluster");
   assert.equal(requests.length, 1, "a slow probe is never overlapped");
-  requests[0].resolve(ops);
+  requests[0].resolve(cluster);
+  await settle();
+  assert.deepEqual(requests.map((r) => r.url), ["/cluster/nodes", "/cluster/status"],
+    "one roster read and one fan-out per gate");
+  requests[1].resolve(ops);
   await first;
 
   // …and because the clock was stamped at request time, a probe that took
   // twenty seconds does not also push the next collection twenty seconds out.
   const prompt = harness.settingsTick(1, "cluster");
-  assert.equal(requests.length, 2, "a slow probe does not delay the next one by its own duration");
-  requests[1].resolve(ops);
+  assert.equal(requests.length, 3, "a slow probe does not delay the next one by its own duration");
+  requests[2].resolve(cluster);
+  await settle();
+  requests[3].resolve(ops);
   await prompt;
 
   now.value += 9_000;
   await harness.settingsTick(1, "cluster");
-  assert.equal(requests.length, 2, "the 2s tick does not become a 2s fan-out");
+  assert.equal(requests.length, 4, "the 2s tick does not become a 2s fan-out, nor a 2s roster read");
   now.value += 7_000;
   const dueAgain = harness.settingsTick(1, "cluster");
-  assert.equal(requests.length, 3, "fifteen seconds later it collects again");
-  requests[2].resolve(ops);
+  assert.equal(requests.length, 5, "fifteen seconds later it collects again");
+  requests[4].resolve(cluster);
+  await settle();
+  requests[5].resolve(ops);
   await dueAgain;
+  assert.deepEqual(requests.map((r) => r.url),
+    ["/cluster/nodes", "/cluster/status", "/cluster/nodes", "/cluster/status", "/cluster/nodes", "/cluster/status"]);
 });
 
 test("the gate is fifteen seconds, and a single machine is never polled", async () => {
@@ -3830,12 +3865,16 @@ test("a refused collection repaints retained transport unless a dialog owns the 
   };
   const now = { value: 1_000_000 };
   const { harness, requests, painted, paintedTransport, readingAge } = tickHarness({
-    cluster, ops, now,
+    cluster, ops, now, manualRoster: true,
   });
   readingAge.innerHTML = "frozen";
+  // Each gate reads the roster first; answer it unchanged, then the status.
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const rosterThen = async () => { requests.at(-1).resolve(cluster); await settle(); };
   now.value += 15_000;
   const refused = harness.settingsTick(1, "cluster");
-  requests[0].reject(Object.assign(new Error("gateway"), { status: 502 }));
+  await rosterThen();
+  requests.at(-1).reject(Object.assign(new Error("gateway"), { status: 502 }));
   await refused;
   assert.notEqual(readingAge.innerHTML, "frozen");
   assert.deepEqual(painted, ["render"], "the locally projected stall is repainted");
@@ -3848,7 +3887,8 @@ test("a refused collection repaints retained transport unless a dialog owns the 
   readingAge.innerHTML = "frozen under modal";
   now.value += 286_001;
   const held = harness.settingsTick(1, "cluster");
-  requests[1].reject(Object.assign(new Error("gateway"), { status: 502 }));
+  await rosterThen();
+  requests.at(-1).reject(Object.assign(new Error("gateway"), { status: 502 }));
   await held;
   assert.deepEqual(painted, ["render"], "the open modal prevented a repaint");
   assert.notEqual(readingAge.innerHTML, "frozen under modal");
@@ -3858,7 +3898,8 @@ test("a refused collection repaints retained transport unless a dialog owns the 
   harness.openDialog(false);
   now.value += 15_000;
   const expired = harness.settingsTick(1, "cluster");
-  requests[2].reject(Object.assign(new Error("gateway"), { status: 502 }));
+  await rosterThen();
+  requests.at(-1).reject(Object.assign(new Error("gateway"), { status: 502 }));
   await expired;
   assert.deepEqual(painted, ["render", "render"]);
   assert.deepEqual(paintedTransport, ["stalled", "unavailable"]);
@@ -3872,8 +3913,9 @@ test("a refused collection repaints retained transport unless a dialog owns the 
   // try again on the next gate.
   now.value += 15_000;
   const unauthorized = harness.settingsTick(1, "cluster");
+  await rosterThen();
   readingAge.innerHTML = "frozen after a refusal";
-  requests[3].reject(Object.assign(new Error("unauthorized"), { status: 401 }));
+  requests.at(-1).reject(Object.assign(new Error("unauthorized"), { status: 401 }));
   await unauthorized;
   assert.deepEqual(
     painted,
@@ -3905,7 +3947,7 @@ test("the two-second roster poll holds its sample under a dialog too", async () 
   ]);
   const ops = operationStatus(fenced);
   const now = { value: 1_000_000 };
-  const { harness, requests, painted } = tickHarness({ cluster: fenced, ops, now });
+  const { harness, requests, painted } = tickHarness({ cluster: fenced, ops, now, manualRoster: true });
   const moved = JSON.parse(JSON.stringify(fenced));
   moved.nodes[2].reachable = false;
 
@@ -4185,6 +4227,7 @@ test("a decision in progress is never repainted out from under the operator", as
   harness.openDialog(true);
   now.value += 15_000;
   const held = harness.settingsTick(1, "cluster");
+  await tickSettle();
   requests[0].resolve(changed);
   await held;
   assert.deepEqual(painted, [], "the dialog was still open");
@@ -4198,6 +4241,7 @@ test("a decision in progress is never repainted out from under the operator", as
   harness.openDialog(false);
   now.value += 15_000;
   const paid = harness.settingsTick(1, "cluster");
+  await tickSettle();
   requests[1].resolve(changed);
   await paid;
   assert.deepEqual(painted, ["render"], "the owed repaint landed once the modal closed");
@@ -4209,6 +4253,7 @@ test("a decision in progress is never repainted out from under the operator", as
   harness.openDialog(true);
   now.value += 15_000;
   const quiet = harness.settingsTick(1, "cluster");
+  await tickSettle();
   requests[2].resolve(changed);
   await quiet;
   assert.deepEqual(painted, ["render"], "nothing changed, so nothing repainted");
@@ -4232,6 +4277,7 @@ test("a fetch is not a repaint, and the freshness row still ages", async () => {
   });
   readingAge.innerHTML = "stale text";
   const quiet = harness.settingsTick(1, "cluster");
+  await tickSettle();
   requests[0].resolve(older);
   await quiet;
   assert.deepEqual(painted, [], "nothing changed, so nothing was rewritten");
@@ -4242,6 +4288,7 @@ test("a fetch is not a repaint, and the freshness row still ages", async () => {
   const changed = JSON.parse(JSON.stringify(older));
   changed.verdict.safe_to_restart_one = !changed.verdict.safe_to_restart_one;
   const loud = harness.settingsTick(1, "cluster");
+  await tickSettle();
   requests[1].resolve(changed);
   await loud;
   assert.deepEqual(painted, ["render"], "a changed verdict repaints exactly once");
@@ -4308,7 +4355,7 @@ test("every repaint on this tab preserves what the operator was looking at", () 
   const html = sandbox({ open: ["node-b"] }).clusterNodesCard(cluster, operationStatus(cluster));
   assert.match(html, /<tr class="setdrawer" id="cldrawer-node-b" data-node="node-b">/);
   assert.match(html, /<tr class="setdrawer" id="cldrawer-node-a" data-node="node-a" hidden>/);
-  assert.match(html, /<tr class="clrow setopen" id="clrow-node-b"[^>]*aria-expanded="true"/);
+  assert.match(html, /<tr class="clrow setopen" id="clrow-node-b"[\s\S]*?<button type="button" class="clnodebtn" data-node="node-b" aria-expanded="true" aria-controls="cldrawer-node-b"/);
 });
 
 // ---- the module boundary ---------------------------------------------------
@@ -4350,15 +4397,21 @@ test("the ledger's freshness cell is addressable, and the clock is stamped where
 test("every path that rewrites this tab goes through the preserving repaint", () => {
   // A bare renderSettings() on the Cluster tab throws away the roster scroll,
   // the open drill-downs, and the half-filled token form. Both branches of the
-  // tick, initial secondary hydration, the manual refresh, the restart poll,
-  // and the three controls that repaint from inside the rail all use the helper.
+  // tick, initial secondary hydration, the manual refresh, the header Refresh,
+  // the restart poll, and the controls that repaint from inside the page all
+  // use the helper. The tick paints once for the roster and the status
+  // together, whichever of them changed or failed.
   const tick = shippedSource("settingsTick");
   assert.equal(
     (tick.match(/repaintClusterPreserving\(renderSettings\)/g) || []).length,
-    3,
-    "the roster and both successful and failed direct-status branches preserve",
+    1,
+    "the tick's one paint preserves",
   );
+  assert.match(tick, /if\(repaint&&!clusterRepaintDeferred\(\)\) repaintClusterPreserving\(renderSettings\);/);
+  assert.equal(/\brenderSettings\(\)/.test(shippedSource("refreshClusterPage")), false,
+    "the header Refresh never repaints bare");
   for (const handler of [
+    "refreshClusterPage",
     "patchSettingsSecondary",
     "refreshClusterOperations",
     "pollLocalRestart",
@@ -4532,7 +4585,7 @@ test("maintenance and recovery outrank a healthy availability in the strip", () 
   const r = PANEL.clusterStripCells(sandbox().env, lost, null)[0];
   assert.equal(r.value, "Recovery required");
   assert.equal(r.tone, "bad");
-  assert.equal(r.sub, "2 of 3 voters needed for quorum reachable");
+  assert.equal(r.sub, "2 reachable · 3 needed for quorum");
 });
 
 test("build skew and protocol skew are visible in the strip", () => {
@@ -4733,8 +4786,10 @@ test("removal keeps the voter arithmetic per node and allows retrying its own pe
   pending.nodes[1].removal_pending = true;
   assert.equal(remove(pending, pending.nodes[1]).blocked, false);
   assert.match(remove(pending, pending.nodes[1]).html, />Retry removal</);
-  assert.equal(remove(pending, pending.nodes[2]).blocked, true);
-  assert.match(remove(pending, pending.nodes[2]).reason, /in flight on lab2/);
+  // A removal pending on another node does not block this one: the server's
+  // removal fence is per node, and the server refuses what it refuses.
+  assert.equal(remove(pending, pending.nodes[2]).blocked, false);
+  assert.equal(remove(pending, pending.nodes[2]).reason, "");
   pending.nodes[1].removal_pending = false;
   pending.nodes[0].maintenance = true;
   assert.equal(remove(pending, pending.nodes[2]).reason, "Finish maintenance before changing membership.");
@@ -4764,7 +4819,8 @@ test("the maintenance card's rows are cluster-wide and carry the server's verdic
   ops.verdict = { safe_to_restart_one: false, blockers: [{ code: "voter_unreachable", node_id: "node-4", message: "no answer" }],
     warnings: [{ code: "build_skew", node_id: null, message: "two builds" }] };
   const blocked = PANEL.clusterMaintenanceRows(env, cluster, ops)[0];
-  assert.match(blocked.text, /Blocked<\/span> — voter unreachable on lab4\./);
+  // The verdict's own sentences, as the operations card said them.
+  assert.match(blocked.text, /Blocked<\/span> — Do not restart another voter\. At least one direct safety condition is missing or unhealthy\. Keep the available voters running until every blocker below clears\./);
   assert.match(blocked.text, /<li><b>voter unreachable<\/b> on lab4: no answer<\/li><li><b>build skew<\/b>: two builds<\/li>/);
   assert.match(blocked.action, /disabled/);
   cluster.nodes[2].removal_pending = true;
