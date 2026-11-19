@@ -125,3 +125,28 @@ that write preserves ordinary restarts without weakening the guard against
 `INSERT OR REPLACE`. A missing clock after permanent activation is refused
 rather than seeded around live proofs. User-role promotion also takes the
 existing user revocation bracket, so cached viewer roles are invalidated.
+
+## 8. Peer authority reuse
+
+Generalize the existing per-sender one-second single-flight cache to two
+independent leases: committed member and committed voter. A member proof
+never satisfies a voter check. Every signed request/response still verifies
+its exact bytes; request nonce replay and rate admission remain separate.
+The clock route keeps its existing fresh, exact applied-roster algorithm;
+membership mutation authorization and revocation claims remain fresh.
+
+A reused lease is bounded by the original heartbeat's reachable-through
+wall time and a monotonic expiry anchored before the authority read. Its
+stamp binds the exact committed membership log (including ABA), local image
+generation, and the nodes/removals/activity-key table revisions. Unknown
+local stamps fall back to the original fresh query. Missing registered table
+slots fall back to the applied index, which is conservative but less cheap.
+A moved stamp does not publish or reuse a proof. Key eviction removes both
+role leases through the existing per-sender ownership map.
+
+Transport errors already have a typed `PeerTransportError` and media-session
+control has typed lifecycle errors; retain those paths rather than replacing
+them with strings. The remaining admission/refusal classification and health
+observations must describe call outcomes without treating an unauthenticated
+response, a timeout or cancellation as committed removal or credential
+revocation. Health can rank candidate attempts; it cannot grant authority.
