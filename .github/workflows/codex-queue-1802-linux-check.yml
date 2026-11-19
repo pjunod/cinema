@@ -12,7 +12,7 @@ env:
   RUST_MIN_STACK: "8388608"
 jobs:
   check:
-    name: Check five exact Developer Rust regressions
+    name: Check thirteen exact Developer Rust regressions
     runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
@@ -23,7 +23,7 @@ jobs:
     defaults:
       run:
         shell: bash
-    timeout-minutes: 50
+    timeout-minutes: 55
     steps:
       - name: Verify this job has its own bounded Docker cgroup
         run: |
@@ -40,7 +40,7 @@ jobs:
           (( memory == 15032385536 && swap <= 4294967296 ))
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: a1d8301985cc97287d6395c57c532ab2a9eb5c45
+          ref: f97d32d433c11110c264bc76d62ec4b30d6dff07
           persist-credentials: false
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
       - uses: ./.github/actions/rust-native-deps
@@ -53,7 +53,7 @@ jobs:
       - name: Verify the candidate and run the named cases
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = a1d8301985cc97287d6395c57c532ab2a9eb5c45
+          test "$(git rev-parse HEAD)" = f97d32d433c11110c264bc76d62ec4b30d6dff07
           mkdir -p target/queue-1802-diagnostic
           receipt=target/queue-1802-diagnostic/outcomes.txt
           {
@@ -80,11 +80,19 @@ jobs:
             http::hls::tests::every_preparation_cancellation_reason_in_this_file_is_attributable
             http::hls::tests::the_confirmation_reserves_recovery_budget_inside_the_owner_lease
             http::jellyfin::tests::jellyfin_native_hls_encoded_without_copy_index_preserves_ranges_clock_and_stop
+            desktop_control::tests::native_uninitialized_and_configured_sole_voter_commit_real_replicated_store
+            http::hls::link_receipts::tests::filter_catalog_fences_once_and_drops_only_exact_negatives
+            http::hls::tests::a05_geometry_promoted_compat_copy_carries_resolved_auto_policy
+            http::hls::tests::a_switch_releases_the_drain_through_the_relay_and_only_when_accepted
+            http::hls::tests::one_start_mints_one_recovery_epoch_for_both_the_session_and_the_row
+            http::hls::tests::the_create_runs_no_processed_work_before_the_first_frame
+            http::tests::developer_readiness_reports_what_it_reads_and_admits_what_it_cannot
+            source_probe::title_work::tests::title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
           )
           for i in "${!cases[@]}"; do
             run_exact "${cases[$i]}" "target/queue-1802-diagnostic/daemon-$i.log" -p plurxd --features plurx-core/hiqlite-store --bin plurxd
           done
-          test "$(grep -c '^passed ' "$receipt")" = 5
+          test "$(grep -c '^passed ' "$receipt")" = 13
       - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
         if: always()
         with:
