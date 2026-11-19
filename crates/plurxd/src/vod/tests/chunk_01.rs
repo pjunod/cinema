@@ -11,6 +11,35 @@ use plurx_core::testfixtures;
 
 use crate::fragindex::IndexOutcome;
 
+#[tokio::test]
+async fn fitted_status_uses_only_the_attached_digest_and_does_not_change_rendition_key() {
+    let base = crate::test_tempdir().expect("refit status fixture");
+    let rendition = synthetic_rendition(base.path()).await;
+    let mut recipe = rendition.recipe.clone();
+    let identity = crate::fragindex::identity_for(&recipe.file, recipe.video);
+    let key = rendition_key(&recipe, &identity);
+    let digest = [0x31; 32];
+    recipe.dv_refit_gain = Some(crate::dv_refit_serving::PinnedRefitGain {
+        digest,
+        gain: Some(0.37),
+    });
+    assert_eq!(rendition_key(&recipe, &identity), key);
+    assert!(recipe.fitted_refit_report().is_none());
+
+    recipe.video = recipe.video.with_dolby_vision_conversion(true);
+    let identity_report = recipe.refit_report().expect("actual To81 identity copy");
+    assert_eq!(identity_report.state, "identity");
+    assert!(identity_report.reason.is_some());
+    recipe.video = recipe.video.with_dolby_vision_refit(Some(digest));
+    let report = recipe.fitted_refit_report().expect("matching attached table");
+    assert_eq!(report.state, "fitted");
+    assert_eq!(report.gain, Some(0.37));
+    assert_eq!(report.reason, None);
+
+    recipe.dv_refit_gain.as_mut().expect("fact").digest = [0x32; 32];
+    assert!(recipe.fitted_refit_report().is_none());
+}
+
 struct CleanupObservingCommitter {
     rendition: Arc<Rendition>,
     session_id: String,
@@ -450,6 +479,7 @@ fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -972,6 +1002,7 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         key: "synthetic-rendition".to_string(),
         dir,
         recipe: Recipe {
+            dv_refit_gain: None,
             source_telemetry:false,
             retained_logical: None,
             measured_candidate: None,

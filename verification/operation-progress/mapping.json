@@ -243,7 +243,7 @@
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
         "scope": "item",
         "item": "impl JobKind > fn permits_artifact_execution",
-        "item_sha256": "3aa46e819262d2b80ca6d2a27eaf9357ccf8b222ef10a6489e49afcd48028155"
+        "item_sha256": "a4a41f593353b612921239809ae18333523b11c5424dc1fe30bba3da37f8a059"
       },
       {
         "table": "31 authority implementation",

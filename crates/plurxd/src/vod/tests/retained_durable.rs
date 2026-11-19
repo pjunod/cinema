@@ -134,6 +134,7 @@ async fn durable_completion_requires_actual_trailer_and_refuses_mixed_or_repeate
     let serve = local_serve(base.path().to_owned(), store);
     let video = CopyVideoOptions::new(crate::ffmpeg::has_dovi_rpu().await, false);
     let recipe = Recipe {
+        dv_refit_gain: None,
             source_telemetry:false,
         retained_logical: None, measured_candidate: None, file: file.clone(),
         audio_index: None, aac: true, audio_delivery: None, video,
@@ -175,6 +176,7 @@ async fn durable_completion_requires_actual_trailer_and_refuses_mixed_or_repeate
         encoded_frame_ticks: None,
         encoded_video_origin: None,
         identity: identity.clone(), convert_dolby_vision: false,
+        dv_refit: None,
         retain_hevc_parameter_sets: false, start_entry: 0, policy,
     }, &sink, "durable-trailer-negative").await;
     assert!(matches!(outcome, Outcome::Ran { .. }), "trailerless EOF is not normal completion: {outcome:?}");

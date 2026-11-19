@@ -83,7 +83,7 @@
         "table": "proposal \u00a74.1 queue protocol trait",
         "scope": "item",
         "item": "trait BackgroundJobStore",
-        "item_sha256": "18c8be841854cafcb7a6c1b8995e238ef975667468f95d5af46881df8bf8d2c5"
+        "item_sha256": "8bf0dd5035d3d630563b525f0b64742f3d99373b2394da4446dff716d54dece8"
       },
       {
         "anchor": "pub struct JobToken {",
@@ -99,7 +99,7 @@
         "table": "proposal \u00a74.1 shared queue adapter",
         "scope": "item",
         "item": "impl<T: QueueSql> BackgroundJobStore for T",
-        "item_sha256": "f0259efb170d5195ca9ce5f8df47ce4e15c50dbccb57c7530ba4ab5206c449af"
+        "item_sha256": "ba67199b0109ab617cb02b09e54838a49cb9384a0f13ae284cf4cacd295471e6"
       },
       {
         "anchor": "            || self.now_ms.saturating_sub(self.dispatched_at_ms) >= CLAIM_RESOLUTION_WINDOW_MS",
@@ -331,7 +331,7 @@
         "table": "review \u00a73 citation crates/plurx-core/src/store/hiqlite.rs:3585",
         "scope": "item",
         "item": "impl HiqliteAuthStore > fn migrate_schema",
-        "item_sha256": "435a45e01a112fabe1b7f001cb4ae8b4915f2c990fdeadb074ace15b7eb0eb3f"
+        "item_sha256": "e3ab5c855d6acfa3bc5fc09444fe53801b691aa4cd9dae8581c48e38060b9afc"
       },
       {
         "anchor": "impl QueueSql for HiqliteAuthStore {",
@@ -587,7 +587,7 @@
         "table": "review \u00a73 citation crates/plurx-core/src/store/sqlite/mod.rs:1255",
         "scope": "item",
         "item": "const MIGRATIONS",
-        "item_sha256": "8a011ac951075f1a5fc51f4df3a68ae80c7309fadb6e5d1c8ab910c3d2160348"
+        "item_sha256": "47e0ae57e8f79c1fdfb1250b299b169b9b7396bbe65a908930e44b4ffc5b576f"
       },
       {
         "anchor": "async fn insert_item_fenced(",
