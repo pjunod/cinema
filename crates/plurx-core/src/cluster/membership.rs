@@ -5412,7 +5412,7 @@ fn peer_authority_stamp(inner: &ReplicatedMembership) -> Option<PeerAuthoritySta
     {
         return None;
     }
-    let mark = inner.client.local_db_applied_mark().ok()?;
+    let mark = inner.client.local_applied_mark()?;
     let image_generation = mark.generation();
     if !image_generation.is_multiple_of(2) {
         return None;
