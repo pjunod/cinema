@@ -19,7 +19,8 @@ use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
 use crate::state::AppState;
 
-const MAINTENANCE_PREPARATION_DURATION: Duration = Duration::from_secs(3_600);
+const MAINTENANCE_PREPARATION_DURATION: Duration =
+    plurx_core::cluster::timing::operations::MAINTENANCE_PREPARATION_DURATION;
 
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]

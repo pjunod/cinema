@@ -137,15 +137,16 @@ const HIQLITE_READDRESS_BACKUP_DIRNAME: &str = "hiqlite.before-readdress";
 #[cfg(feature = "hiqlite-store")]
 const HIQLITE_READDRESS_MARKER_FILENAME: &str = "hiqlite-readdress.json";
 #[cfg(feature = "hiqlite-store")]
-const HIQLITE_HEALTH_TIMEOUT: Duration = Duration::from_secs(45);
+const HIQLITE_HEALTH_TIMEOUT: Duration = crate::cluster::timing::startup::HIQLITE_HEALTH_TIMEOUT;
 #[cfg(feature = "hiqlite-store")]
-const MEMBERSHIP_ADMISSION_TIMEOUT: Duration = Duration::from_secs(45);
+const MEMBERSHIP_ADMISSION_TIMEOUT: Duration =
+    crate::cluster::timing::startup::MEMBERSHIP_ADMISSION_TIMEOUT;
 #[cfg(feature = "hiqlite-store")]
-const SNAPSHOT_CATCHUP_GRACE: Duration = Duration::from_secs(45);
+const SNAPSHOT_CATCHUP_GRACE: Duration = crate::cluster::timing::startup::SNAPSHOT_CATCHUP_GRACE;
 #[cfg(feature = "hiqlite-store")]
-const JOIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const JOIN_CONNECT_TIMEOUT: Duration = crate::cluster::timing::startup::JOIN_CONNECT_TIMEOUT;
 #[cfg(feature = "hiqlite-store")]
-const JOIN_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+const JOIN_TOTAL_TIMEOUT: Duration = crate::cluster::timing::startup::JOIN_TOTAL_TIMEOUT;
 #[cfg(feature = "hiqlite-store")]
 const JOIN_ERROR_MAX_BYTES: u64 = 4 * 1024 * 1024;
 // OpenRaft gives an AppendEntries RPC one heartbeat interval. Once a leader is

@@ -114,3 +114,57 @@ also longer than the current 5 s session grace. The shared table exposes
 this relationship; it does not prove outage coverage or change the policy.
 Resolve the actual anchored deadline chain from measured failure evidence
 before describing the set of timers as mutually safe.
+
+## 6. Completion inventory — proof, revocation and peer observation bounds
+
+Root's acceptance review extends the same mechanical extraction to the
+remaining fixed cluster proof, revocation, operation-observation, media-pool
+and holder-call bounds. The original 86 declarations were not a claim that
+every cluster clock had moved. This completion preserves independently named
+protocol policies even when their numbers happen to match.
+
+Add the existing admin proof/revocation TTLs and bounded fallback/admission
+waits; the one-second role-specific peer-authority lease and wire freshness
+windows; revocation exclusion/apply/fanout/retry bounds; operation status and
+transport-observation bounds; media-pool snapshot/offer/root-observation
+bounds; and each holder protocol's existing eight-second call deadline.
+The named cluster startup health/admission/join call bounds also move.
+
+Root owns active membership, extractor, media-pool and holder files, so this
+lane supplies their exact compatibility aliases in a durable integration
+manifest instead of editing those active sources. Root applies those aliases
+with the combined change. Other timing-declaration replacements remain
+mechanical and have an exact-base value control.
+
+`auth::ACTIVITY_REFRESH_SECS` remains the canonical token-activity coalescing
+policy. The timing table references it; it does not duplicate a new sixty
+second literal or widen the token-proof policy. Dynamic user timeouts,
+filesystem lock/storage-deferral machinery, diagnostic logging intervals,
+wire-size limits and unrelated local extraction timeouts remain with their
+own policy owners. They are not interchangeable authority leases. No election
+floor or proof freshness decision changes in this completion.
+
+**Prepared completion:** 48 more independently named fixed declarations join
+the original 86; one additional value references the canonical token-activity
+policy. The root-owned alias manifest covers 24 extractor, membership,
+media-pool and holder callsites and must be applied by the integration owner.
+The remaining 24 declarations are mechanically aliased in this lane's
+revocation, operation and startup sources.
+
+| Policy | Disposition |
+|---|---|
+| Admin proofs, remote tombstones, bounded fallback and revocation admission | Shared `timing::proofs`; remote tombstone lifetime retains its existing dependency on the proof TTL. |
+| Signed wire freshness and one-second role-specific membership proof cache | Separate named `timing::proofs` policies; clock domains, read anchors and stamp checks remain with their existing authorizers. |
+| Exclusion/fanout/apply/cleanup/activation bounds | Shared `timing::revocation`; relation tests cover individual phase bounds, not arbitrary roster-change passes. |
+| Aggregate/peer/directory calls and passive operation observations | Shared `timing::operations`; advisory freshness never becomes permission to mutate. |
+| Media snapshot/offer/root observations and viewer envelope ceiling | Shared `timing::pool`; existing source-bound B6 invalidation remains unchanged. |
+| Fragment index, copy index and subtitle holder calls | Three separately named eight-second `timing::holders` budgets; each keeps its single absolute deadline. |
+| Cluster health/admission/join call bounds | Shared `timing::startup`; equal forty-five-second values remain separately named. |
+| Token activity refresh | Canonical `auth::ACTIVITY_REFRESH_SECS`; the table references it instead of declaring another sixty-second policy. |
+| User-configured snapshot intervals and context-bounded call deadlines | Remain dynamic values; no fixed global replacement. |
+| Filesystem lock retries, local snapshot-storage deferral, diagnostic log cadence | Remain startup/storage mechanism policy; they do not validate peer proofs or renew serving authority. |
+| General HTTP listener resource bounds and local format/extraction limits | Remain with their server/format owner; this completion does not claim every application timeout has moved. |
+
+Three new relation tests check tombstone coverage and bounded revocation
+phases, passive observation refresh/expiry, and separation from canonical
+wire/token authentication policy. They add no policy choices or floor tuning.
