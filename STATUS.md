@@ -3,6 +3,15 @@
 **Updated:** 2026-11-13 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
+- **2026-11-18 · Developer tab cleanup:** Owner Claude (claude-opus-5-5,
+  session 01BCWL9x). Developer keeps only Mac video processing, Mac HEVC
+  output and Unverified HEVC copy as name + switch with detail collapsed;
+  everything else moved, became always on, or was removed per Paul's rulings
+  ([plan rev 2](docs/reviews/PLAN-developer-tab-cleanup-2026-11-18.md),
+  [where each item went](docs/features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#developer-cleanup-2026-11-18-supersedes-the-lifecycle-table-below)).
+  Branch `claude/devtab-cleanup`; web, native and docs committed; server half
+  and test rewrite in progress; then draft PR, review, fast lane, merge.
+
 - **2026-11-16 · Native prepared forward rendezvous:** owner GPT. New Moon's
   native seeks trailed 90–97 ms; buffered forward aim+existing hold preserves the guard.
   Astra review and 103 focused tests pass; Safari acceptance, seam and deadline
