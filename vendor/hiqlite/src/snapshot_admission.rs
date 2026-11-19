@@ -421,9 +421,12 @@ mod tests {
         let (write_tx, write_rx) = flume::unbounded::<()>();
         drop(write_rx);
         let missing = std::env::temp_dir().join("hiqlite-admission-missing-database");
-        let admission = wait_for_storage(&missing, DEFAULT_SNAPSHOT_STORAGE_DEFERRAL, || {
-            write_tx.is_disconnected()
-        })
+        let admission = wait_for_storage(
+            &missing,
+            DEFAULT_SNAPSHOT_STORAGE_DEFERRAL,
+            || write_tx.is_disconnected(),
+            std::future::pending(),
+        )
         .await;
         assert_eq!(admission, Admission::WriterGone);
     }
