@@ -128,6 +128,7 @@ impl Class {
 /// Raw handles and metrics types of the cluster layer.
 const TYPES: &[&str] = &[
     "MembershipManager",
+    "ClusterAccess",
     "ReplicationMonitor",
     "ServingFence",
     "PassiveRaftMetrics",
@@ -199,6 +200,10 @@ fn manager_methods() -> &'static [String] {
 }
 
 fn manager_pub_fns() -> Vec<String> {
+    manager_declared_fns(false)
+}
+
+fn manager_declared_fns(include_scoped: bool) -> Vec<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../plurx-core/src/cluster");
     let mut files = vec![root.join("membership.rs")];
     for entry in std::fs::read_dir(root.join("membership")).expect("membership children") {
@@ -237,9 +242,11 @@ fn manager_pub_fns() -> Vec<String> {
             }
             for item in block.items {
                 if let syn::ImplItem::Fn(function) = item {
-                    if matches!(function.vis, syn::Visibility::Public(_))
-                        && !is_cfg_test(&function.attrs)
-                    {
+                    let visible = matches!(function.vis, syn::Visibility::Public(_))
+                        || (include_scoped
+                            && matches!(&function.vis,
+                            syn::Visibility::Restricted(scope) if scope.path.is_ident("super")));
+                    if visible && !is_cfg_test(&function.attrs) {
                         names.push(function.sig.ident.to_string());
                     }
                 }
@@ -268,182 +275,55 @@ const EXEMPT: &[(&str, &str)] = &[
 #[rustfmt::skip]
 const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("background_jobs.rs", "role", 6),
-    ("background_jobs/analysis_reconcile.rs", "membership", 3),
-    ("background_jobs/analysis_reconcile.rs", "type", 2),
-    ("background_jobs/analysis_reconcile.rs", "role", 2),
-    ("background_jobs/analysis_reconcile.rs", "roster", 1),
-    ("backup.rs", "hiqlite", 4),
-    ("cache_preparation.rs", "membership", 2),
-    ("cache_preparation.rs", "roster", 2),
-    ("clock_offset.rs", "membership", 27),
-    ("clock_offset.rs", "type", 7),
-    ("clock_offset.rs", "transport", 1),
-    ("clock_offset.rs", "role", 2),
-    ("clock_offset.rs", "roster", 3),
-    ("clock_offset.rs", "manager", 14),
-    ("copy_index_v3.rs", "membership", 2),
-    ("copy_index_v3.rs", "type", 4),
-    ("copy_index_v3.rs", "transport", 1),
-    ("desktop_control.rs", "membership", 4),
+    ("clock_offset.rs", "membership", 13),
+    ("clock_offset.rs", "type", 2),
+    ("desktop_control.rs", "membership", 2),
     ("desktop_control.rs", "replication", 4),
-    ("desktop_control.rs", "serving", 12),
-    ("desktop_control.rs", "manager", 1),
-    ("diagnostics.rs", "membership", 2),
-    ("diagnostics.rs", "transport", 1),
-    ("diagnostics.rs", "manager", 1),
     ("dv_runtime.rs", "membership", 1),
-    ("fragment_index_cluster.rs", "type", 4),
-    ("fragment_index_cluster.rs", "transport", 1),
-    ("http/activity_starts.rs", "membership", 2),
-    ("http/activity_starts.rs", "transport", 1),
-    ("http/activity_starts.rs", "manager", 1),
     ("http/background_jobs.rs", "role", 1),
-    ("http/cluster.rs", "membership", 22),
-    ("http/cluster.rs", "serving", 7),
-    ("http/cluster.rs", "role", 2),
-    ("http/cluster.rs", "roster", 1),
-    ("http/cluster.rs", "manager", 14),
-    ("http/cluster_operations.rs", "membership", 58),
-    ("http/cluster_operations.rs", "replication", 5),
-    ("http/cluster_operations.rs", "serving", 24),
-    ("http/cluster_operations.rs", "type", 11),
-    ("http/cluster_operations.rs", "transport", 2),
-    ("http/cluster_operations.rs", "role", 2),
-    ("http/cluster_operations.rs", "roster", 2),
-    ("http/cluster_operations.rs", "manager", 5),
-    ("http/dvr.rs", "membership", 1),
-    ("http/dvr.rs", "role", 1),
-    ("http/hls/control.rs", "serving", 6),
-    ("http/hls/create.rs", "serving", 3),
-    ("http/hls/fence.rs", "serving", 1),
-    ("http/hls/fence.rs", "type", 1),
-    ("http/hls/preparation.rs", "serving", 5),
+    ("http/cluster_operations.rs", "membership", 42),
+    ("http/cluster_operations.rs", "serving", 4),
     ("http/hls/relay.rs", "membership", 1),
     ("http/hls/relay.rs", "manager", 1),
-    ("http/hls/response.rs", "serving", 1),
     ("http/images_worker.rs", "role", 1),
-    ("http/internal_activity.rs", "membership", 1),
-    ("http/internal_activity.rs", "type", 1),
-    ("http/internal_activity.rs", "transport", 1),
-    ("http/internal_activity.rs", "manager", 1),
-    ("http/internal_auth_revocation.rs", "membership", 16),
-    ("http/internal_auth_revocation.rs", "type", 4),
-    ("http/internal_auth_revocation.rs", "transport", 1),
-    ("http/internal_auth_revocation.rs", "role", 3),
-    ("http/internal_auth_revocation.rs", "roster", 1),
-    ("http/internal_auth_revocation.rs", "manager", 9),
-    ("http/internal_clock.rs", "membership", 2),
-    ("http/internal_clock.rs", "type", 2),
-    ("http/internal_clock.rs", "manager", 4),
-    ("http/internal_live_tv.rs", "membership", 3),
-    ("http/internal_live_tv.rs", "manager", 3),
-    ("http/internal_media.rs", "membership", 2),
-    ("http/internal_media.rs", "manager", 2),
-    ("http/internal_media_sessions.rs", "membership", 2),
-    ("http/internal_media_sessions.rs", "serving", 6),
     ("http/internal_media_sessions.rs", "type", 4),
-    ("http/internal_media_sessions.rs", "manager", 2),
     ("http/live_tv.rs", "membership", 1),
-    ("http/live_tv.rs", "type", 1),
-    ("http/live_tv.rs", "transport", 1),
     ("http/live_tv.rs", "manager", 1),
-    ("http/mod.rs", "serving", 1),
-    ("http/mod.rs", "type", 1),
-    ("http/remote.rs", "membership", 4),
-    ("http/remote.rs", "transport", 2),
-    ("http/remote.rs", "manager", 2),
-    ("http/remote/invitations/snapshots.rs", "membership", 2),
-    ("http/remote/invitations/snapshots.rs", "transport", 1),
-    ("http/remote/invitations/snapshots.rs", "roster", 1),
-    ("http/shared_library.rs", "membership", 4),
-    ("http/shared_library.rs", "serving", 3),
-    ("http/shared_library.rs", "role", 2),
-    ("http/shared_library.rs", "manager", 2),
-    ("http/shared_receiver_forwarding.rs", "membership", 2),
-    ("http/shared_receiver_forwarding.rs", "manager", 2),
-    ("http/shared_receiver_ingress_custody.rs", "membership", 2),
-    ("http/shared_receiver_ingress_custody.rs", "role", 1),
-    ("http/shared_receiver_ingress_custody.rs", "manager", 1),
-    ("http/shared_receiver_playback.rs", "serving", 1),
-    ("http/shared_source_forwarding.rs", "membership", 3),
-    ("http/shared_source_forwarding.rs", "roster", 1),
-    ("http/shared_source_forwarding.rs", "manager", 2),
-    ("http/shared_source_ingress.rs", "membership", 4),
-    ("http/shared_source_ingress.rs", "serving", 1),
-    ("http/shared_source_ingress.rs", "manager", 4),
-    ("http/shared_source_playback.rs", "membership", 3),
-    ("http/shared_source_playback.rs", "manager", 3),
-    ("http/stream.rs", "serving", 2),
+    ("http/stream.rs", "serving", 1),
     ("http/system.rs", "replication", 1),
-    ("http/system.rs", "hiqlite", 3),
-    ("http/transcode_copies.rs", "membership", 2),
-    ("http/transcode_copies.rs", "transport", 1),
     ("http/transcode_copies.rs", "role", 1),
-    ("http/transcode_copies.rs", "roster", 1),
     ("job_lease.rs", "role", 1),
     ("library_search.rs", "role", 3),
     ("live_tv.rs", "serving", 13),
     ("live_tv/dvr.rs", "serving", 12),
     ("live_tv/resource.rs", "serving", 3),
-    ("main.rs", "membership", 19),
+    ("main.rs", "membership", 14),
     ("main.rs", "replication", 4),
-    ("main.rs", "serving", 4),
+    ("main.rs", "serving", 3),
     ("main.rs", "type", 5),
-    ("main.rs", "hiqlite", 2),
     ("main.rs", "manager", 8),
     ("media_pool.rs", "serving", 3),
-    ("media_pool.rs", "type", 2),
-    ("media_pool.rs", "transport", 1),
     ("media_sessions.rs", "membership", 2),
-    ("media_sessions.rs", "type", 2),
-    ("media_sessions.rs", "transport", 1),
     ("media_sessions.rs", "manager", 2),
-    ("offline.rs", "serving", 2),
-    ("offline.rs", "type", 2),
     ("offline.rs", "role", 1),
     ("pgs_overlay.rs", "manager", 1),
-    ("settings_changes.rs", "type", 1),
-    ("shared_cache.rs", "type", 2),
-    ("shared_cache.rs", "transport", 1),
-    ("sharing.rs", "serving", 4),
-    ("sharing_connection_custody.rs", "membership", 2),
-    ("sharing_connection_custody.rs", "manager", 2),
-    ("state.rs", "membership", 6),
+    ("sharing.rs", "serving", 3),
+    ("state.rs", "membership", 2),
     ("state.rs", "replication", 2),
     ("state.rs", "serving", 1),
-    ("state.rs", "type", 8),
-    ("state.rs", "hiqlite", 1),
-    ("state.rs", "role", 10),
-    ("state.rs", "manager", 2),
-    ("subtitle_models/mod.rs", "membership", 2),
-    ("subtitle_models/mod.rs", "serving", 1),
-    ("subtitle_models/mod.rs", "role", 1),
-    ("subtitle_models/mod.rs", "roster", 1),
-    ("subtitle_ranges.rs", "transport", 1),
-    ("subtitle_source.rs", "membership", 3),
-    ("subtitle_source.rs", "type", 4),
-    ("subtitle_source.rs", "transport", 1),
+    ("state.rs", "type", 6),
+    ("state.rs", "role", 8),
+    ("state.rs", "manager", 1),
     ("subtitle_work.rs", "role", 1),
     ("subtitles.rs", "manager", 2),
     ("trakt.rs", "role", 1),
-    ("transcode.rs", "type", 1),
-    ("transcode/manager/construct.rs", "type", 1),
     ("transcode/manager/control.rs", "type", 5),
-    ("transcode/source_actor.rs", "membership", 6),
-    ("transcode/source_actor.rs", "type", 1),
-    ("transcode/source_actor.rs", "manager", 5),
-    ("transcode/source_actor/growing.rs", "membership", 2),
-    ("transcode/source_actor/growing.rs", "manager", 2),
-    ("transcode/source_direct.rs", "membership", 3),
-    ("transcode/source_direct.rs", "manager", 2),
-    ("vod/serve/construct.rs", "type", 3),
-    ("vodserve.rs", "type", 1),
     ("waitpool.rs", "serving", 4),
     ("watched.rs", "role", 1),
 ];
 
 /// The sum of [`REACH_AROUNDS`]; it may only fall.
-const CEILING: usize = 626;
+const CEILING: usize = 199;
 
 fn exempt(rel: &str) -> bool {
     EXEMPT.iter().any(|(path, _)| rel == *path)
@@ -1049,15 +929,39 @@ fn a_struct_update_in_a_macro_is_not_a_field() {
 /// counted the day it lands; the hand lists name only real methods.
 #[test]
 fn every_named_method_is_a_real_manager_method() {
-    let all = manager_pub_fns();
+    let all = manager_declared_fns(true);
+    let public = manager_pub_fns();
+    for name in ROLE.iter().chain(ROSTER) {
+        assert!(
+            !public.iter().any(|method| method == name),
+            "raw method {name} must remain module-private"
+        );
+    }
     assert!(
         all.len() > 50,
         "the manager's methods were not found: {all:?}"
     );
-    for name in ROLE.iter().chain(ROSTER) {
+    let retired = [
+        "activity_peers",
+        "activity_voter_count",
+        "media_peers",
+        "media_peers_for_route",
+    ];
+    for name in &retired {
+        assert!(ROSTER.contains(name), "retired raw method remains reserved");
+        assert!(
+            !all.iter().any(|method| method == name),
+            "retired raw method {name} must not return"
+        );
+    }
+    for name in ROLE
+        .iter()
+        .chain(ROSTER)
+        .filter(|name| !retired.contains(name))
+    {
         assert!(
             all.iter().any(|method| method == name),
-            "{name} is not a manager method"
+            "{name} is not a restricted manager method"
         );
     }
     for (name, reason) in NOT_CLUSTER {

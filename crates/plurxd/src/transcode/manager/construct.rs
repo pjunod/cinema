@@ -61,7 +61,7 @@ impl TranscodeManager {
             work_dir,
             runtime_cache,
             subtitle_cache,
-            subtitle_membership: None,
+            subtitle_calls: None,
             subtitle_directory: None,
             subtitle_jobs: None,
             rate_control: std::sync::RwLock::new(RateControlSnapshot::bitrate(caps.quality_rc)),
@@ -355,14 +355,14 @@ impl TranscodeManager {
         rendition_cache: PathBuf,
         ffmpeg_build: String,
         node_id: String,
-        cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        cluster_calls: Option<crate::cluster::calls::PeerTransport>,
         cluster_directory: Option<crate::cluster::Directory>,
     ) -> Self {
         self.runtime_cache = runtime_cache;
         self.macos_video_probe =
             Arc::new(self.macos_video_probe.rebuilt(self.runtime_cache.clone()));
         self.subtitle_cache = subtitle_cache;
-        self.subtitle_membership = cluster_membership.clone();
+        self.subtitle_calls = cluster_calls.clone();
         self.subtitle_directory = cluster_directory.clone();
         // Renditions are durable state — admitted ones are the copy cache the
         // plan promises — so they live beside the persistent caches rather
@@ -373,7 +373,7 @@ impl TranscodeManager {
             Arc::clone(&self.store),
             node_id.clone(),
             crate::fragment_index_cluster::cache_root(&self.runtime_cache),
-            cluster_membership,
+            cluster_calls,
             cluster_directory,
         );
         if let Err(err) = std::fs::create_dir_all(&self.runtime_cache) {
@@ -431,10 +431,8 @@ impl TranscodeManager {
             &self.runtime_cache,
         )
         .on_node(self.cache_location().map(|(_, node_id)| node_id));
-        let access = match (&self.subtitle_membership, &self.subtitle_directory) {
-            (Some(membership), Some(directory)) => {
-                access.with_membership(membership.clone(), directory.clone())
-            }
+        let access = match (&self.subtitle_calls, &self.subtitle_directory) {
+            (Some(calls), Some(directory)) => access.with_cluster(calls.clone(), directory.clone()),
             _ => access,
         };
         match &self.subtitle_jobs {

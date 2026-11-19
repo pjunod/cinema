@@ -381,3 +381,15 @@ test('closed playback info still samples attached session facts and repaints the
   assert.equal(context.playerToneMapping(p),false,'retired session cannot award successor pill');
   await context.pollSessionHealth();assert.equal(requests,2,'successor needs its own facts');
 });
+
+test('a neutral prepared processing claim adopts only the current HDR10 execution receipt',()=>{
+  const context=enhancementSetup({active:[],details:[],requires_effective_processing:true});
+  context.PLAYER.effectiveProcessing=null;
+  assert.equal(context.playerEnhancementRow(context.PLAYER),null);
+  context.PLAYER.effectiveProcessing=report();
+  assert.deepEqual(pills(context),['FEL','RPU','DYN']);
+  assert.match(context.playerEnhancementRow(context.PLAYER).note,/full enhancement layer reconstructed/);
+  assert.doesNotMatch(context.playerEnhancementRow(context.PLAYER).note,/not used|disabled/);
+  context.PLAYER.effectiveProcessing={...report(),generation:'22222222-2222-4222-8222-222222222222'};
+  assert.equal(context.playerEnhancementRow(context.PLAYER),null,'a stale receipt cannot populate the pending claim');
+});

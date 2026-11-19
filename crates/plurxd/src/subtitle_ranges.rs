@@ -10,7 +10,7 @@ use plurx_core::domain::MediaFile;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
+use crate::http::peer_transport::PeerAuthMode;
 use crate::subtitle_source::StoreAccess;
 
 pub(crate) const PATH: &str = "/internal/media/subtitle-range";
@@ -208,7 +208,7 @@ async fn prefetch(
     anchor: i64,
     span: i64,
 ) -> Result<(), String> {
-    let (Some(membership), Some(directory)) = (access.membership(), access.directory()) else {
+    let (Some(transport), Some(directory)) = (access.calls(), access.directory()) else {
         return Ok(());
     };
     let node_id = access.node_id().unwrap_or_default();
@@ -236,7 +236,6 @@ async fn prefetch(
     let attested =
         crate::fragment_index_cluster::attest_source(node_id, file, None, &|_| {}).await?;
     let digest = attested.observation.source_sha256.clone();
-    let transport = PeerTransport::new(membership.clone());
     let mut ahead = FuturesUnordered::new();
     for (offset, peer) in peers.into_iter().enumerate() {
         let next = anchor.saturating_add(span.saturating_mul(offset as i64 + 1));

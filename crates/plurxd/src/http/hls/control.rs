@@ -570,7 +570,7 @@ pub(super) async fn reserve_preparation_settlement(
         .await
         .ok()?
         .ok()?;
-    let authority = state.serving.authority();
+    let authority = state.cluster.authority();
     let serving_generation = authority.admit()?;
     let serving_commit = authority
         .commit_guard_before(serving_generation, deadline.into_std())
@@ -856,7 +856,7 @@ async fn settle_preparation_control(
                 let planned_commit_guard =
                     match active_preparation.as_ref().map(|active| active.purpose) {
                         Some(PreparationPurpose::PlannedRelocation(fence)) => {
-                            let Ok(guard) = state.serving.try_planned_outage_operation_guard()
+                            let Ok(guard) = state.cluster.operations().claim_outage_operation()
                             else {
                                 let wake = (tokio::time::Instant::now() + delay).min(deadline);
                                 tokio::time::sleep_until(wake).await;
@@ -865,7 +865,7 @@ async fn settle_preparation_control(
                                     .min(PREPARATION_SETTLEMENT_RETRY_MAX);
                                 continue;
                             };
-                            if !state.serving.planned_outage_is_current(fence).await {
+                            if !state.cluster.operations().outage_is_current(fence).await {
                                 if let Some(active) = active_preparation.clone() {
                                     settle_cancelled_preparation(
                                         active,
@@ -1091,8 +1091,9 @@ async fn planned_preparation_still_current(state: &AppState, incarnation_id: &st
         return true;
     };
     state
-        .serving
-        .current_planned_outage()
+        .cluster
+        .operations()
+        .current_outage()
         .await
         .is_some_and(|fence| reason == format!("planned_relocation:{}", fence.identity()))
 }
@@ -1157,7 +1158,7 @@ async fn settle_committed_preparation(
     if successor.publication_ready_at_ms == 0 {
         return;
     }
-    let authority = state.serving.authority();
+    let authority = state.cluster.authority();
     let Some(admitted_generation) = authority.admit() else {
         return;
     };
@@ -2078,6 +2079,46 @@ pub(super) fn control_start_response(route: &MediaSessionRoute) -> Option<StartR
         .filter(|response| response.control.is_some())
 }
 
+/// Enhancement is deliberately not deserialized from a persisted create
+/// response. A prepared offer instead projects the exact live attachment under
+/// its lifecycle fence; no stored receipt or source-only plan can replace it.
+pub(crate) async fn prepared_successor_enhancement(
+    transcode: &crate::transcode::TranscodeManager,
+    session_id: &str,
+    incarnation_id: &str,
+    file_id: i64,
+    delivered_range: Option<&str>,
+    delivered_dolby_vision_profile: Option<u8>,
+) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
+    let (facts, _owner) = transcode
+        .prepared_hls_facts(session_id, incarnation_id)
+        .await?;
+    let encoding = facts.encoding.as_ref()?;
+    if facts.file.id != file_id {
+        return None;
+    }
+    let kind = crate::transcode::SessionKind::Transcode {
+        height: encoding.options.target_height,
+    };
+    let grade = encoding.delivered_output_grade();
+    let profile = encoding.preserves_processed_dv().then_some(8);
+    let (range, delivered_profile) =
+        super::create::session_delivered_processing_shape(Some(&facts.file), &kind, grade, profile);
+    if range != delivered_range || delivered_profile != delivered_dolby_vision_profile {
+        return None;
+    }
+    super::create::session_enhancement(
+        Some(&facts.file),
+        &kind,
+        grade,
+        profile,
+        encoding.processed_fel(),
+        None,
+        None,
+        None,
+    )
+}
+
 /// Resolve the staged successor this predecessor may announce now.
 ///
 /// The ledger is the wanted-work authority: a route at the publication
@@ -2214,6 +2255,15 @@ async fn staged_successor_action(
         );
         return Err(());
     }
+    let enhancement = prepared_successor_enhancement(
+        &state.transcode,
+        &successor.session_id,
+        &successor.incarnation_id,
+        recipe.request.file_id,
+        start.delivered_dynamic_range.as_deref(),
+        start.delivered_dolby_vision_profile,
+    )
+    .await;
     let prepared = crate::playback_control::PreparedSuccessorAction {
         staged_incarnation_id: staged.staged_incarnation_id,
         deadline_ms: staged.deadline_ms,
@@ -2226,7 +2276,8 @@ async fn staged_successor_action(
             start.height,
             start.delivered_dynamic_range,
         ),
-        enhancement: start.enhancement,
+        enhancement,
+        delivered_dolby_vision_profile: start.delivered_dolby_vision_profile,
     };
     if !crate::playback_control::prepared_payload_is_valid(
         None,
@@ -3169,7 +3220,7 @@ async fn control_local_with_observation(
     // the successor the viewer actually asked for was built once, refused, and
     // forgotten. This stays true until the ask has been dispatched.
     let planned_relocation = if route.owner_node_id == state.node_id {
-        state.serving.current_planned_outage().await
+        state.cluster.operations().current_outage().await
     } else {
         None
     };

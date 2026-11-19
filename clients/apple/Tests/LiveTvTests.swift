@@ -2915,12 +2915,17 @@ final class LiveTvTests: XCTestCase {
         // one start — so this counts the starts a stub lease actually sees.
         let requests = LiveTvCountingRequests()
         let controller = LiveTvPlayerController.testing(requests: requests)
-        controller.requestChannel(channel)
-        controller.requestChannel(channel)
-        controller.requestChannel(channel)
-        try await Task.sleep(nanoseconds: UInt64(LiveTvInputRouting.channelCoalesceMilliseconds + 250) * 1_000_000)
+        let first = controller.requestChannel(channel)
+        let second = controller.requestChannel(channel)
+        let last = controller.requestChannel(channel)
+        // Settle every submitted task, including the superseded requests.
+        // A fixed sleep races the debounce task on a loaded simulator.
+        await first.value
+        await second.value
+        await last.value
         XCTAssertEqual(requests.starts, 1, "three presses inside the window are one tuner start")
         XCTAssertEqual(LiveTvInputRouting.channelCoalesceMilliseconds, 350)
+        await controller.stop()
     }
 
     func testGuideFollowingNowAdvancesAfterIdleWithoutOverridingManualPaging() {

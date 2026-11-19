@@ -3384,7 +3384,7 @@ async fn create_with_purpose_attempt(
         }
         None => None,
     };
-    let ingress_serving_authority = state.serving.authority();
+    let ingress_serving_authority = state.cluster.authority();
     let ingress_serving_generation = ingress_serving_authority
         .admit()
         .ok_or_else(|| create_owner_transition("the ingress node has no serving authority"))?;
@@ -5742,10 +5742,10 @@ pub(in crate::http) async fn prime_live_prepared_session(
     {
         return false;
     }
-    let Some(_restart_admission) = state.serving.try_restart_admission().await else {
+    let Some(_restart_admission) = state.cluster.try_restart_admission().await else {
         return false;
     };
-    let authority = state.serving.authority();
+    let authority = state.cluster.authority();
     let Some(admitted_generation) = authority.admit() else {
         return false;
     };

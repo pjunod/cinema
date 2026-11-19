@@ -5,7 +5,6 @@ use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::MediaFile;
 use plurx_core::segplan::FragmentIndex;
 use plurx_core::store::{
@@ -1501,29 +1500,29 @@ fn pipeline_digest_for_transform(
 
 pub(crate) async fn hydrate(
     store: &dyn Store,
-    membership: Option<&MembershipManager>,
+    calls: Option<&PeerTransport>,
     directory: Option<&crate::cluster::Directory>,
     node_id: &str,
     root: &Path,
     artifact: &ClusterFragmentIndexArtifact,
 ) -> Result<Option<FragmentIndex>, String> {
-    hydrate_inner(store, membership, directory, node_id, root, artifact, true).await
+    hydrate_inner(store, calls, directory, node_id, root, artifact, true).await
 }
 
 pub(crate) async fn hydrate_for_job(
     store: &dyn Store,
-    membership: Option<&MembershipManager>,
+    calls: Option<&PeerTransport>,
     directory: Option<&crate::cluster::Directory>,
     node_id: &str,
     root: &Path,
     artifact: &ClusterFragmentIndexArtifact,
 ) -> Result<Option<FragmentIndex>, String> {
-    hydrate_inner(store, membership, directory, node_id, root, artifact, false).await
+    hydrate_inner(store, calls, directory, node_id, root, artifact, false).await
 }
 
 async fn hydrate_inner(
     store: &dyn Store,
-    membership: Option<&MembershipManager>,
+    calls: Option<&PeerTransport>,
     directory: Option<&crate::cluster::Directory>,
     node_id: &str,
     root: &Path,
@@ -1563,7 +1562,7 @@ async fn hydrate_inner(
             );
         }
     }
-    let (Some(membership), Some(directory)) = (membership, directory) else {
+    let (Some(calls), Some(directory)) = (calls, directory) else {
         return Ok(None);
     };
     let peers = directory
@@ -1582,7 +1581,7 @@ async fn hydrate_inner(
         .cluster_fragment_index_locations(&artifact.cache_key)
         .await
         .map_err(|error| error.to_string())?;
-    let transport = PeerTransport::new(membership.clone());
+    let transport = calls;
     let path = format!("{PEER_PATH_PREFIX}{}", artifact.cache_key);
     for location in locations {
         let Some((base, _)) = peers.get(&location.node_id) else {

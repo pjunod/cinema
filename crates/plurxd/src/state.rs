@@ -840,7 +840,7 @@ pub struct AppState {
     /// five-second memory of the owner's address. Signing, expected-node
     /// binding and response verification stay per request inside the
     /// transport; nothing about a credential is held here.
-    pub(crate) live_tv_peers: Arc<crate::http::live_tv::LiveTvPeers>,
+    pub(crate) live_tv_peers: crate::cluster::calls::PeerTransport,
     pub(crate) subtitle_models: Arc<crate::subtitle_models::Runtime>,
     pub server_name: String,
     /// Items whose review-site scores this node is fetching right now.
@@ -1077,7 +1077,7 @@ impl AppState {
             &self.runtime_cache_dir,
         )
         .on_node(Some(&self.node_id))
-        .with_membership(self.membership.clone(), self.cluster.directory())
+        .with_cluster(self.cluster.calls(), self.cluster.directory())
         .with_jobs(Arc::clone(&self.jobs))
     }
 
@@ -1161,7 +1161,7 @@ impl AppState {
                 snapshot_recovery_budgets: SnapshotRecoveryBudgets::default(),
                 data_dir: PathBuf::new(),
                 credential_key_path: PathBuf::new(),
-                backup_client: None,
+                backup_source: None,
             },
             store,
             dirs,
@@ -1201,7 +1201,7 @@ impl AppState {
             snapshot_recovery_budgets,
             data_dir,
             credential_key_path,
-            backup_client,
+            backup_source,
         } = config;
         crate::source_custody::configure_settlement_journal(&data_dir);
         let copy_observation_dir = (!data_dir.as_os_str().is_empty())
@@ -1238,7 +1238,7 @@ impl AppState {
         let live_tv_scratch = transcode_dir.join(crate::transcode::LIVE_TV_WORK_DIR_NAME);
         let system = Arc::new(system);
         let peer_activity = crate::http::internal_activity::PeerActivityClient::new(
-            membership.clone(),
+            cluster.calls(),
             cluster.directory(),
         );
         let jobs = Arc::new(
@@ -1247,7 +1247,7 @@ impl AppState {
                 artwork_dir.clone(),
                 scan_prune_percent,
                 node_id.clone(),
-                Arc::new(membership.clone()),
+                Arc::new(cluster.jobs().clone()),
             )
             .with_source_checkpoint_dir(
                 (!data_dir.as_os_str().is_empty())
@@ -1255,7 +1255,7 @@ impl AppState {
             )
             .with_dv_disk_capabilities(system.dv_disk.clone())
             .with_applied_view(applied.clone())
-            .with_membership(membership.clone(), cluster.directory())
+            .with_cluster(cluster.jobs().clone(), cluster.calls(), cluster.directory())
             .with_peer_activity(peer_activity.clone()),
         );
         let sharing = Arc::new(crate::sharing::SharingManager::new(
@@ -1266,12 +1266,12 @@ impl AppState {
         // A replicated daemon applies the Raft log in this process; that watch
         // is how an idle settings reader (the Live TV observer, the takeover
         // gate, the clock-enforcement follower) learns of a save elsewhere.
-        let settings_changes = match backup_client
+        let settings_changes = match backup_source
             .as_ref()
-            .and_then(|client| client.local_db_raft_metrics().ok())
+            .and_then(crate::cluster::BackupSource::applied_changes)
         {
             Some(applied) => crate::settings_changes::SettingsChangeSource::Applied(applied),
-            None if membership.is_replicated() => {
+            None if cluster.jobs().clustered() => {
                 crate::settings_changes::SettingsChangeSource::Polled
             }
             None => crate::settings_changes::SettingsChangeSource::LocalOnly,
@@ -1280,7 +1280,7 @@ impl AppState {
         let backup = crate::backup::BackupManager::new(
             Arc::clone(&store),
             Arc::clone(&jobs),
-            backup_client,
+            backup_source,
             data_dir,
             credential_key_path,
             node_id.clone(),
@@ -1296,7 +1296,7 @@ impl AppState {
             shared_cache_id,
             &cluster_id,
             node_id.clone(),
-            membership.clone(),
+            cluster.calls(),
             cluster.directory(),
             Arc::clone(&store),
         );
@@ -1339,7 +1339,7 @@ impl AppState {
                 renditions,
                 system.ffmpeg_version.clone().unwrap_or_default(),
                 node_id.clone(),
-                Some(membership.clone()),
+                Some(cluster.calls()),
                 Some(cluster.directory()),
             )
             .with_subtitle_jobs(Arc::clone(&jobs))
@@ -1386,18 +1386,18 @@ impl AppState {
             Arc::clone(&store),
             Arc::clone(&transcode),
             node_id.clone(),
-            serving.clone(),
+            cluster.restart_admissions(),
         );
-        let media_pool = crate::media_pool::MediaPool::new(membership.clone(), cluster.directory());
+        let media_pool = crate::media_pool::MediaPool::new(cluster.calls(), cluster.directory());
         let media_sessions = crate::media_sessions::MediaSessionCoordinator::with_directory(
-            membership.clone(),
+            cluster.calls(),
             cluster.directory(),
             Arc::clone(&store),
             Arc::new(applied.clone()),
         );
         let cache_only_admin_proofs =
-            crate::http::CacheOnlyAdminProofCache::new(membership.is_replicated());
-        let live_tv_peers = crate::http::live_tv::LiveTvPeers::new(membership.clone());
+            crate::http::CacheOnlyAdminProofCache::new(cluster.role().is_clustered());
+        let live_tv_peers = cluster.calls();
         let live_tv = crate::live_tv::LiveTvManager::new(
             Arc::clone(&store),
             Arc::clone(&system),
@@ -1501,6 +1501,7 @@ impl AppState {
             self.replication.clone(),
             self.applied.applied_mark(),
         );
+        self.live_tv_peers = self.cluster.calls();
         self.membership = membership;
     }
 
@@ -1658,7 +1659,7 @@ pub struct AppConfig {
     pub snapshot_recovery_budgets: SnapshotRecoveryBudgets,
     pub data_dir: PathBuf,
     pub credential_key_path: PathBuf,
-    pub backup_client: Option<hiqlite::Client>,
+    pub(crate) backup_source: Option<crate::cluster::BackupSource>,
 }
 
 /// Status of the most recent (or in-flight) scan for one library.
@@ -1849,9 +1850,10 @@ pub struct JobManager {
     /// than sampled once, because committed membership moves under a running
     /// daemon: a learner may be promoted, and a voter may be removed.
     job_authority: Arc<dyn ClusterJobAuthority>,
-    /// Exact committed membership and internal addressing for optional peer
-    /// hydration. Tests and recovery-only construction deliberately omit it.
-    membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    /// Existing membership evidence for analysis reconciliation. Hydration
+    /// separately owns bounded peer calls and the stamped directory.
+    reconciliation: Option<crate::cluster::Jobs>,
+    peer_calls: Option<crate::cluster::calls::PeerTransport>,
     directory: Option<crate::cluster::Directory>,
     artwork_dir: PathBuf,
     scan_prune_percent: u8,
@@ -4076,7 +4078,8 @@ impl JobManager {
             identity_repairs: Default::default(),
             coordinator,
             job_authority,
-            membership: None,
+            reconciliation: None,
+            peer_calls: None,
             directory: None,
             artwork_dir,
             scan_prune_percent,
@@ -4132,12 +4135,14 @@ impl JobManager {
         self
     }
 
-    fn with_membership(
+    fn with_cluster(
         mut self,
-        membership: plurx_core::cluster::membership::MembershipManager,
+        reconciliation: crate::cluster::Jobs,
+        peer_calls: crate::cluster::calls::PeerTransport,
         directory: crate::cluster::Directory,
     ) -> Self {
-        self.membership = Some(membership);
+        self.reconciliation = Some(reconciliation);
+        self.peer_calls = Some(peer_calls);
         self.directory = Some(directory);
         self
     }
@@ -4173,7 +4178,7 @@ impl JobManager {
         let ctx = crate::background_jobs::analysis_reconcile::ReconcileContext {
             store: &*self.store,
             node_id: self.coordinator.node_id(),
-            membership: self.membership.as_ref(),
+            jobs: self.reconciliation.as_ref(),
             peers: self.peer_activity.as_ref(),
         };
         let report = match crate::background_jobs::analysis_reconcile::reconcile_retired(
@@ -11788,7 +11793,7 @@ impl JobManager {
             .flatten();
         if let Some(artifact) = &published {
             let hydrated = tokio::select! {
-                result = crate::fragment_index_cluster::hydrate_for_job(self.store.as_ref(), self.membership.as_ref(), self.directory.as_ref(),
+                result = crate::fragment_index_cluster::hydrate_for_job(self.store.as_ref(), self.peer_calls.as_ref(), self.directory.as_ref(),
                     &node_id, &worker.cache_root, artifact) => matches!(result, Ok(Some(_))),
                 () = lost.cancelled() => false,
             };

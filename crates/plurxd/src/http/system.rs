@@ -6051,7 +6051,6 @@ pub(crate) struct MetricsState {
     cluster_observations: crate::cluster::Observations,
     blocked_gets: Arc<crate::waitpool::BlockedGetMetrics>,
     live_tv: Arc<crate::live_tv::LiveTvMetrics>,
-    live_tv_peers: Arc<crate::http::live_tv::LiveTvPeerMetrics>,
     backup: Arc<crate::backup::BackupMetrics>,
     plex_census: Arc<super::PlexCensus>,
     start_attempts: Arc<crate::playstart::StartAttempts>,
@@ -6076,7 +6075,6 @@ impl FromRef<AppState> for MetricsState {
             // this node is actually serving from.
             blocked_gets: state.transcode.blocked_get_metrics_handle(),
             live_tv: state.live_tv.metrics_handle(),
-            live_tv_peers: state.live_tv_peers.metrics_handle(),
             backup: state.backup.metrics(),
             plex_census: Arc::clone(&state.plex_census),
             start_attempts: Arc::clone(&state.start_attempts),
@@ -6306,7 +6304,7 @@ fn render_cluster_directory_metrics(
 /// against. Loaded at scrape time from atomics; no Store read, no timer.
 fn render_applied_view_metrics(
     observation: &plurx_core::store::AppliedViewObservation,
-    wait: &hiqlite::DbReadPoolWait,
+    wait: &crate::cluster::ReadPoolWait,
 ) -> String {
     let mut out = String::from(
         "# HELP plurx_applied_view_reads_total Applied-view reads by view and by what answered: view is this node's own replica (on SQLite, the only copy), authority a quorum read, with the reason the view could not answer.\n\
@@ -6365,13 +6363,10 @@ fn render_applied_view_metrics(
         "# HELP plurx_hiqlite_read_pool_wait_seconds Time a local replicated-store query waited for a read-pool connection before it ran.\n\
          # TYPE plurx_hiqlite_read_pool_wait_seconds histogram\n",
     );
-    for (bound, count) in hiqlite::DB_READ_POOL_WAIT_BOUNDS_NANOS
-        .iter()
-        .zip(wait.cumulative_buckets)
-    {
+    for (bound, count) in wait.buckets {
         out.push_str(&format!(
             "plurx_hiqlite_read_pool_wait_seconds_bucket{{le=\"{}\"}} {count}\n",
-            prometheus_seconds_label(*bound)
+            prometheus_seconds_label(bound)
         ));
     }
     out.push_str(&format!(
@@ -6388,7 +6383,9 @@ fn render_applied_view_metrics(
 /// Hiqlite patch 32: replies the SQLite writer produced after the Raft apply
 /// or teardown that asked for them had stopped waiting. Fixed labels, loaded
 /// from atomics at scrape time.
-fn render_writer_abandoned_replies(rows: &[hiqlite::DbWriterAbandonedReplies]) -> String {
+fn render_writer_abandoned_replies(
+    rows: impl IntoIterator<Item = crate::cluster::WriterReplyObservation>,
+) -> String {
     let mut out = String::from(
         "# HELP plurx_hiqlite_writer_abandoned_replies_total Replicated-store writer replies whose requester (a cancelled Raft apply, or a teardown) had stopped waiting, by request and by whether the abandoned result was an error. The write itself committed or rolled back as usual; an error's text is in the node log.\n\
          # TYPE plurx_hiqlite_writer_abandoned_replies_total counter\n",
@@ -6667,8 +6664,11 @@ pub(crate) async fn metrics(
     let decode_fact_metrics = state.transcode.decode_facts_prometheus();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
     let raft_metrics = render_passive_raft_metrics(state.cluster_observations.raft())
-        + &render_applied_view_metrics(&state.applied.observation(), &hiqlite::db_read_pool_wait())
-        + &render_writer_abandoned_replies(&hiqlite::db_writer_abandoned_replies())
+        + &render_applied_view_metrics(
+            &state.applied.observation(),
+            &state.cluster_observations.read_pool_wait(),
+        )
+        + &render_writer_abandoned_replies(state.cluster_observations.writer_replies())
         + &render_cluster_directory_metrics(state.cluster_directory.reads());
     let membership_metrics =
         render_passive_membership_metrics(state.cluster_observations.members());
@@ -6704,7 +6704,7 @@ pub(crate) async fn metrics(
         crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &crate::background_jobs::analysis_reconcile::prometheus() + &crate::state::analysis_completed_prometheus(&state.node_id) + &state.clock.prometheus() + &crate::source_custody::launch_prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
-    let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();
+    let live_tv_metrics = state.live_tv.prometheus();
     let backup_metrics = state.backup.prometheus();
     let codec_qualification_metrics = state.transcode.codec_qualification_prometheus();
 

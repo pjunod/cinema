@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 
 use super::error::ApiError;
 use super::extract::AdminUser;
-use super::peer_transport::{deadline_after, PeerAuthMode, PeerTransport, PeerTransportError};
+use super::peer_transport::{deadline_after, PeerAuthMode, PeerTransportError};
 use crate::playstart::{START_DEADLINE, START_FAILURE_EVENTS, START_NOT_YET_CODES};
 use crate::state::AppState;
 
@@ -313,7 +313,7 @@ async fn peer_reports(
     limit: i64,
 ) -> Result<Vec<NodeReport>, ()> {
     let peers = state.cluster.operation_targets().await.map_err(|_| ())?;
-    let transport = PeerTransport::new(state.membership.clone());
+    let transport = state.cluster.calls();
     let body = serde_json::to_vec(&PeerRequest { limit, before_ms }).map_err(|_| ())?;
     let deadline = deadline_after(PEER_TIMEOUT);
     let mut reports = stream::iter(peers.into_iter().map(|peer| {
@@ -666,8 +666,9 @@ pub(crate) async fn peer(
         super::peer_transport::exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let payload = super::peer_transport::signed_response_payload(200, &bytes);
     let signature = state
-        .membership
-        .sign_internal_peer_response(&auth.node_id, &auth.nonce, PEER_PATH, &payload)
+        .cluster
+        .authentication()
+        .sign_exact_response(&auth.node_id, &auth.nonce, PEER_PATH, &payload)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let mut response = (StatusCode::OK, bytes).into_response();
     response.headers_mut().insert(

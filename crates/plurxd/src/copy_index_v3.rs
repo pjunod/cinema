@@ -17,7 +17,6 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::MediaFile;
 use plurx_core::segplan::{FragmentIndex, SourceIdentity};
 use plurx_core::store::{
@@ -146,7 +145,7 @@ pub(crate) fn peer_route_key(path: &str) -> Option<(&str, &str)> {
 /// What one resolution needs of this node, fixed before any head is read.
 struct Consumer<'a> {
     store: &'a dyn Store,
-    membership: Option<&'a MembershipManager>,
+    calls: Option<&'a PeerTransport>,
     directory: Option<&'a crate::cluster::Directory>,
     node_id: &'a str,
     namespace: &'a str,
@@ -165,7 +164,7 @@ struct Consumer<'a> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve(
     store: &dyn Store,
-    membership: Option<&MembershipManager>,
+    calls: Option<&PeerTransport>,
     directory: Option<&crate::cluster::Directory>,
     node_id: &str,
     namespace: &str,
@@ -189,7 +188,7 @@ pub(crate) async fn resolve(
         .map_err(|error| format!("deriving the copy source key: {error}"))?;
     let consumer = Consumer {
         store,
-        membership,
+        calls,
         directory,
         node_id,
         namespace,
@@ -299,7 +298,7 @@ impl Consumer<'_> {
         }
         let blob = match load_blob(
             self.store,
-            self.membership,
+            self.calls,
             self.directory,
             self.node_id,
             &self.root,
@@ -562,7 +561,7 @@ enum Loaded {
 /// write and disk budget and then records itself as a verified location.
 async fn load_blob(
     store: &dyn Store,
-    membership: Option<&MembershipManager>,
+    calls: Option<&PeerTransport>,
     directory: Option<&crate::cluster::Directory>,
     node_id: &str,
     root: &Path,
@@ -637,7 +636,7 @@ async fn load_blob(
     if locations.is_empty() {
         return Ok(Loaded::NoHolder);
     }
-    let (Some(membership), Some(directory)) = (membership, directory) else {
+    let (Some(calls), Some(directory)) = (calls, directory) else {
         return Ok(Loaded::Unavailable);
     };
     // Holders that did not themselves say they hold nothing.
@@ -654,7 +653,7 @@ async fn load_blob(
                 .map(|base| (peer.node_id.clone(), (base, peer.reachable)))
         })
         .collect::<HashMap<_, _>>();
-    let transport = PeerTransport::new(membership.clone());
+    let transport = calls;
     let request_path = peer_path(source_key, &artifact.blob_sha256);
     for location in locations {
         let Some((base, _)) = peers.get(&location.node_id) else {

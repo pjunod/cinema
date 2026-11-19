@@ -617,7 +617,12 @@ mod fleet {
                         .heartbeat()
                         .await
                         .expect("learner heartbeat");
-                    let peers = leader.operations_peers().await.expect("directory");
+                    let peers = leader
+                        .cluster_access()
+                        .administrative()
+                        .targets()
+                        .await
+                        .expect("directory");
                     if peers
                         .iter()
                         .any(|p| p.node_id == answering_id && p.reachable)
@@ -632,7 +637,9 @@ mod fleet {
             .expect("both learners are committed members");
             assert!(
                 leader
-                    .activity_peers()
+                    .cluster_access()
+                    .directory(None)
+                    .voter_observation()
                     .await
                     .expect("voters")
                     .iter()
@@ -706,7 +713,9 @@ mod fleet {
         node_id: &str,
     ) -> String {
         leader
-            .operations_peers()
+            .cluster_access()
+            .administrative()
+            .targets()
             .await
             .expect("directory")
             .into_iter()

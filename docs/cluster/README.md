@@ -14,6 +14,10 @@ failures.
 
 | File | Answers | |
 |---|---|---|
+| [CLUSTER-FACADE-BOUNDARY-DECISION.md](CLUSTER-FACADE-BOUNDARY-DECISION.md) | How core-private mechanisms cross into one daemon facade without fake privacy. | open |
+| [CLUSTER-FACADE-SLICE-7-BUILD.md](CLUSTER-FACADE-SLICE-7-BUILD.md) | The serialized final ownership migrations and evidence required for honest zero. | open |
+| [CLUSTER-FACADE-SLICE-6-BUILD.md](CLUSTER-FACADE-SLICE-6-BUILD.md) | How sharing, Source and receiver custody retain fresh typed witnesses through the facade. | open |
+| [CLUSTER-FACADE-SLICE-5-BUILD.md](CLUSTER-FACADE-SLICE-5-BUILD.md) | How typed peer-call ownership and stamped owner lookup replace raw transports and the Live TV TTL. | open |
 | [ROSTER-APPLIED-MARK-BUILD.md](ROSTER-APPLIED-MARK-BUILD.md) | How bounded table revisions make directory cache invalidation selective. | open |
 | [SHARING-AUTHORITY-A6-BUILD.md](SHARING-AUTHORITY-A6-BUILD.md) | How shared-library monitors stop proving their own authority: classified observations, one outage policy through `SessionGrace`, a cached advisory member floor, then change-driven re-observation (audit A6). | built |
 | [ASYNC-STORE-REFINEMENT-STATUS.md](ASYNC-STORE-REFINEMENT-STATUS.md) | Why the exhaustive async driver/Store refinement proof is parked, the state it reached, where the work is preserved and what restarting it needs. | open |
@@ -65,8 +69,10 @@ failures.
 | [CLUSTER-FACADE-BUILD.md](CLUSTER-FACADE-BUILD.md) | Build contract for audit items B1 and B2: the `state.cluster` facade, the census and ratchet that keep feature code off raw membership, replication and serving handles, and the cached peer directory, sliced behind the open PRs. | built |
 | [CLUSTER-FACADE-SLICE-2-BUILD.md](CLUSTER-FACADE-SLICE-2-BUILD.md) | Execution plan and delivery ledger for media artifact rosters and Live TV HTTP authority through the shared facade, with existing grace and restart-admission semantics preserved. | open |
 | [CLUSTER-FACADE-SLICE-3-BUILD.md](CLUSTER-FACADE-SLICE-3-BUILD.md) | Execution plan and delivery ledger for role, admission, artwork and hostname answers through the facade, preserving fresh voter confirmation and existing peer rules. | open |
+| [CLUSTER-FACADE-SLICE-4-BUILD.md](CLUSTER-FACADE-SLICE-4-BUILD.md) | Execution plan for typed operations, exact outage ownership, clock proofs and claim-bound revocation rosters; final integration follows C7 landing. | open |
 | [CLAIM-LOCAL-VERDICT-BUILD.md](CLAIM-LOCAL-VERDICT-BUILD.md) | Build plan for audit item A1: a node proposes a job claim only when its own replica says the claim statement would accept it — shared predicates, a local verdict before the quorum pre-read, and counters that name why a claim was skipped. | open |
 | [LEADER-SHUTDOWN-HANDOFF-BUILD.md](LEADER-SHUTDOWN-HANDOFF-BUILD.md) | How a stopping leader moves leadership to a caught-up voter before its drain (audit C2): the one bounded handoff, Hiqlite patches for disabling its own elections and gating proposals, a real transfer (proposal hold, matched successor) inside `handoff_leadership`, the call site in the signal path, and before/after numbers. | built |
+| [DEAD-RAFT-CORE-EXIT-BUILD.md](DEAD-RAFT-CORE-EXIT-BUILD.md) | Why a node whose database Raft core died on a full disk served fenced for hours, and the fix (audit C7): exit non-zero on the core's own fatal state, never start a build that cannot fit, and leave no snapshot temporaries. | built |
 | [PLAYBACK-QUORUM-GAPS-RCA.md](PLAYBACK-QUORUM-GAPS-RCA.md) | Why playback died on brief quorum gaps (serving-fence lapses, fail-fast 503s, a leader-bound cache read, a dead producer polled for 55 s, an uncapped build on a voter), and the milestone plan that fixes each cause. | open |
 | [DVR-ACTIVITY-ZERO-GENERATION-STATUS.md](DVR-ACTIVITY-ZERO-GENERATION-STATUS.md) | Why remote Activity rejected a healthy recorder's initial serving epoch, and the repair's review and promotion state. | open |
 | [IDLE-QUORUM-POLLERS-BUILD.md](IDLE-QUORUM-POLLERS-BUILD.md) | Build plan for audit item A4: background loops read settings from the applied view and check a local hint before asking the leader whether there is work, so an idle tick costs no settings or idle-inventory quorum read. | built |

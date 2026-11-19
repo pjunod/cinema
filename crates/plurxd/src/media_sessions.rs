@@ -15,6 +15,7 @@ use futures_util::{future::BoxFuture, stream, StreamExt};
 use plurx_core::cluster::clock::{
     ClockDecision, ClockRefusal, ClusterClockGuard, OwnedClockAcquisitionTicket,
 };
+#[cfg(test)]
 use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::{
     MediaSessionActivation, MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
@@ -2786,20 +2787,25 @@ impl MediaSessionCoordinator {
         applied: Arc<dyn RouteView>,
     ) -> Arc<Self> {
         let directory = crate::cluster::Directory::new(membership.clone());
-        Self::with_directory(membership, directory, store, applied)
+        Self::with_directory(
+            crate::cluster::test_calls(membership),
+            directory,
+            store,
+            applied,
+        )
     }
 
     /// The coordinator over this node's store and applied view (`AppState`'s
     /// `applied`, which reads the same store's replica), sharing the
     /// process's peer directory.
     pub(crate) fn with_directory(
-        membership: MembershipManager,
+        transport: PeerTransport,
         directory: crate::cluster::Directory,
         store: Arc<dyn Store>,
         applied: Arc<dyn RouteView>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            transport: PeerTransport::new(membership),
+            transport,
             directory,
             store,
             routes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),

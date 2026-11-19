@@ -1,4 +1,7 @@
 "use strict";
+require("./control-final-exchange.test.js");
+require("./prepared-control-ownership.test.js");
+require("./native-forward-alignment.test.js");
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
@@ -431,6 +434,8 @@ async function flushDeep() {
 }
 
 async function main() {
+  const preparedDelivery=preparedDeliveryTests();
+  if(process.argv.includes('--prepared-delivery')) return preparedDelivery;
   const preparedRecovery=preparedHlsRecoveryTests();
   if(process.argv.includes('--prepared-hls-recovery')) return preparedRecovery;
   await test("Close and pagehide retain an unacknowledged commit's predecessor after decoder retirement",()=>{
@@ -2471,11 +2476,18 @@ async function main() {
       effective_selection: { ...PREPARE_FIXTURE.effective_selection, audio_offset_ms: 15_001 } }],
     ["an unknown dynamic range", {
       effective_selection: { ...PREPARE_FIXTURE.effective_selection, dynamic_range: "hdr12" } }],
+    ["a string delivered DV profile", { delivered_dolby_vision_profile: "8" }],
+    ["a fractional delivered DV profile", { delivered_dolby_vision_profile: 8.1 }],
+    ["an out-of-range delivered DV profile", { delivered_dolby_vision_profile: 256 }],
     ["no effective_selection", { effective_selection: undefined }],
   ]) {
     assert.equal(control.validPreparation(Object.assign({}, PREPARE_FIXTURE, patch)), false,
       `${label} is refused`);
   }
+  assert.equal(control.validPreparation({...PREPARE_FIXTURE,
+    delivered_dolby_vision_profile:8,
+    effective_selection:{...PREPARE_FIXTURE.effective_selection,dynamic_range:"dolby_vision"}}),true);
+  assert.equal(control.validPreparation({...PREPARE_FIXTURE,delivered_dolby_vision_profile:null}),true);
   // …and a key this build has never heard of is tolerated: `ControlAction`
   // carries no `deny_unknown_fields`, so a later server may add one.
   assert.equal(control.validPreparation(
@@ -4353,7 +4365,7 @@ async function main() {
         // §7.3: the commit is two phases now. Alignment finishes before the
         // successor is exposed, so a corrective seek can no longer put a
         // blank element in front of the viewer.
-        shippedSource("alignPreparedReplacement"), shippedSource("preparedAlignSeek"),
+        shippedSource("alignPreparedReplacement"), shippedSource("holdPreparedNativeSuccessor"), shippedSource("preparedAlignSeek"),
         shippedSource("preparedAlignedBuffered"), shippedSource("preparedFrameCadence"),
         shippedSource("preparedFramesMeet"), shippedSource("exposePreparedReplacementAtFrame"),
         shippedSource("preparedDecodedFrameCount"), shippedSource("exposePreparedReplacementAfterDecodedFrames"),
@@ -4541,6 +4553,48 @@ async function main() {
 
   await test("prepared HLS buffer readiness follows incumbent clock and releases listener ownership",
     ()=>preparedBufferObservationTests(preparedHarness,preparedPlayer,prepareAction));
+
+  function preparedDeliveryTests(){
+    const prepareAction=(overrides={})=>({...PREPARE_FIXTURE,...overrides});
+    const preparedPlayer=overrides=>({offset:0,vod:true,hls:null,prepared:null,priorKbps:0,
+      controlAcknowledgement:null,pendingMediaChange:null,wantsPlayback:true,...overrides});
+    return Promise.all([
+    test("prepared delivery adopts verified Profile 8.1 over the candidate HDR10 base",()=>{
+    for(const catalogPresent of [true,false]){
+      const h=preparedHarness();
+      const candidate={id:"processed-p81",route:"encode",target_height:2160,grade:"hdr10"};
+      const p=h.set(preparedPlayer({hls:{destroy(){}},deliveredRange:"dolby_vision",deliveredDvProfile:7,
+        qualityCandidates:catalogPresent?[candidate]:[]}));
+      const state=h.handle(prepareAction({delivered_dolby_vision_profile:8,
+        effective_selection:{...PREPARE_FIXTURE.effective_selection,candidate_id:candidate.id,
+          dynamic_range:"dolby_vision"}}));
+      assert.equal(state.deliveredDvProfile,8);
+      h.instances[0].events.manifest();h.spare.ranges=[[0,30]];
+      h.instances[0].events.append();h.provePrepared();
+      assert.equal(p.deliveredRange,"dolby_vision","the built carrier wins with or without a catalog entry");
+      assert.equal(p.deliveredDvProfile,8,"source Profile7 cannot leak into the successor");
+    }
+  }),
+
+    test("prepared delivery clears absent profiles and rollback restores its predecessor profile",()=>{
+    for(const offeredRange of ["hdr10","dolby_vision"]){
+      const h=preparedHarness(),incumbent={destroy(){}};
+      const p=h.set(preparedPlayer({hls:incumbent,deliveredRange:"dolby_vision",deliveredDvProfile:7}));
+      h.handle(prepareAction({effective_selection:{...PREPARE_FIXTURE.effective_selection,
+        dynamic_range:offeredRange}}));
+      h.instances[0].events.manifest();h.spare.ranges=[[0,30]];
+      h.instances[0].events.append();h.provePrepared(false);
+      assert.equal(p.deliveredRange,offeredRange);
+      assert.equal(p.deliveredDvProfile,null,"an older offer cannot inherit source Profile7");
+      h.fireAll();
+      assert.equal(p.hls,incumbent);
+      assert.equal(p.deliveredRange,"dolby_vision");
+      assert.equal(p.deliveredDvProfile,7,"rollback restores the incumbent's own profile");
+    }
+  }),
+
+    ]);
+  }
 
   function preparedHlsRecoveryTests(){
     const preparedPlayer=overrides=>({offset:0,vod:true,hls:null,prepared:null,priorKbps:0,
@@ -8513,4 +8567,13 @@ test("a session opens with no skipped upgrade, so its first exchange does not re
   const exchange=source.indexOf("const skip=processingSkipFromWire(response?.processing_skip");
   assert.ok(exchange>=0);
   assert.match(source.slice(exchange,exchange+400),/JSON\.stringify\(p\.processingSkip\)!==JSON\.stringify\(skip\)/);
+});
+
+test("prepared delivery profile parsing accepts legacy absence and numeric wire facts",()=>{
+  for(const value of [undefined,null,8]){
+    assert.equal(control.validPreparation({...PREPARE_FIXTURE,delivered_dolby_vision_profile:value}),true);
+  }
+  for(const value of ["8",8.1,-1,256]){
+    assert.equal(control.validPreparation({...PREPARE_FIXTURE,delivered_dolby_vision_profile:value}),false);
+  }
 });

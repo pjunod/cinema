@@ -1987,6 +1987,174 @@ async fn sigterm_on_the_leader_moves_leadership_before_its_raft_stops() {
     );
 }
 
+/// Audit C7: a follower whose database Raft core dies on a storage error
+/// ends its process with a non-zero status instead of serving fenced for
+/// hours; the other two keep a leader; once storage is back, a restart
+/// rejoins. The storage error is real: the follower's snapshots directory is
+/// replaced by a file, so the backup's snapshot build cannot write, and
+/// OpenRaft 0.9 makes a failed build fatal to its core.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_follower_whose_raft_core_dies_exits_non_zero_and_rejoins_after_restart() {
+    let root = canonical_tempdir();
+    let client = two_voter_client();
+    let mut cluster = ThreeVoters::start(&client, root.path()).await;
+    wait_for_handoff_candidates(&client, &mut cluster).await;
+    let follower = cluster.target_index;
+    let name = ["node-a", "node-b", "node-c"][follower];
+    let snapshots = state_machine_snapshots(&root.path().join(name));
+    let parked = snapshots.with_file_name("snapshots.parked");
+    std::fs::rename(&snapshots, &parked).expect("park the snapshots directory");
+    std::fs::write(&snapshots, b"not a directory").expect("block the snapshots path");
+
+    let destination = root.path().join("backups");
+    std::fs::create_dir_all(&destination).expect("backup destination");
+    // The answer does not matter: the build this asks for is what kills the
+    // core.
+    let _ = client
+        .post(format!(
+            "{}/api/v1/cluster/backups",
+            cluster.bases[follower]
+        ))
+        .bearer_auth(&cluster.voters.token)
+        .json(&json!({"output": destination.to_string_lossy()}))
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await;
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let status = loop {
+        if let Some(status) = cluster.daemon(follower).exited() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the follower kept running with a dead Raft core\n{}",
+            cluster.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert!(
+        !status.success(),
+        "a dead core must exit non-zero for its supervisor: {status}\n{}",
+        cluster.diagnostics()
+    );
+    let log = cluster.daemon(follower).diagnostics();
+    assert!(
+        log.contains("the database Raft core stopped with a fatal error"),
+        "the exit names the dead core:\n{log}"
+    );
+    // The drained store closed its SQL writer, which removes the lock file;
+    // a lock left behind would make auto-heal rebuild the state machine on
+    // the restart below, and the rejoin would still pass.
+    let lock = snapshots.with_file_name("lock");
+    assert!(
+        !lock.exists(),
+        "a dead core's drain releases the state machine lock {}",
+        lock.display()
+    );
+    let others = (0..3)
+        .filter(|index| *index != follower)
+        .collect::<Vec<_>>();
+    let mut views = Vec::new();
+    for index in others.iter().copied() {
+        views.push((index, raft_view(&client, &cluster.bases[index]).await));
+    }
+    assert!(
+        surviving_leader(&views).is_some(),
+        "the other two keep a leader: {views:?}\n{}",
+        cluster.diagnostics()
+    );
+
+    std::fs::remove_file(&snapshots).expect("unblock the snapshots path");
+    std::fs::rename(&parked, &snapshots).expect("restore the snapshots directory");
+    let config = root.path().join(format!("{name}.toml"));
+    *cluster.daemon(follower) = Daemon::spawn(
+        &config,
+        root.path().join(format!("{name}-restarted.log")),
+        &format!("plurx-{name}"),
+    );
+    let port = cluster.bases[follower]
+        .rsplit(':')
+        .next()
+        .and_then(|port| port.parse::<u16>().ok())
+        .expect("follower port");
+    wait_ready(&client, cluster.daemon(follower), port).await;
+    let token = cluster.voters.token.clone();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let rejoined = raft_view(&client, &cluster.bases[follower])
+            .await
+            .is_some_and(|view| view.leader_known && !view.is_leader);
+        // Whoever leads now: leadership may have moved since the fault.
+        let mut leader_base = None;
+        for base in &cluster.bases {
+            if raft_view(&client, base)
+                .await
+                .is_some_and(|view| view.is_leader)
+            {
+                leader_base = Some(base.clone());
+                break;
+            }
+        }
+        let reachable = match &leader_base {
+            Some(leader_base) => client
+                .get(format!("{leader_base}/api/v1/cluster/nodes"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .ok(),
+            None => None,
+        };
+        let roster_ok = match reachable {
+            Some(response) => response.json::<Value>().await.is_ok_and(|body| {
+                body["nodes"].as_array().is_some_and(|nodes| {
+                    nodes.len() == 3
+                        && nodes
+                            .iter()
+                            .all(|node| node["is_voter"] == true && node["reachable"] == true)
+                })
+            }),
+            None => false,
+        };
+        if rejoined && roster_ok {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the restarted follower did not rejoin\n{}",
+            cluster.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// The voter's one `state_machine/snapshots` directory under its data root.
+fn state_machine_snapshots(data: &Path) -> PathBuf {
+    let mut stack = vec![data.to_path_buf()];
+    let mut found = Vec::new();
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory).expect("readable data dir") {
+            let path = entry.expect("data entry").path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "snapshots")
+                    && path
+                        .parent()
+                        .is_some_and(|parent| parent.ends_with("state_machine"))
+                {
+                    found.push(path.clone());
+                }
+                stack.push(path);
+            }
+        }
+    }
+    assert_eq!(
+        found.len(),
+        1,
+        "exactly one live state machine under {}: {found:?}",
+        data.display()
+    );
+    found.remove(0)
+}
+
 /// A follower's SIGTERM moves nothing: the leader and its term hold through
 /// the follower's whole drain and after it exits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

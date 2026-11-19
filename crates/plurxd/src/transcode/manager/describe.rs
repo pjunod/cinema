@@ -1,6 +1,27 @@
 use super::*;
 
 impl TranscodeManager {
+    /// Facts from the exact primed attachment, fenced for their caller's
+    /// synchronous projection. A durable response is not fresh processing
+    /// authority; the guard keeps these owner-local facts bound to the
+    /// requested preparation until that projection finishes.
+    /// No release-transition lock may be held by the caller.
+    pub(crate) async fn prepared_hls_facts(
+        &self,
+        session_id: &str,
+        incarnation_id: &str,
+    ) -> Option<(
+        crate::vodserve::VodHlsFacts,
+        tokio::sync::OwnedMutexGuard<()>,
+    )> {
+        let facts = self.vod.hls_facts(session_id).await?;
+        let guard = self
+            .vod
+            .lock_preparation_owner(session_id, &facts.response_owner, incarnation_id)
+            .await?;
+        Some((facts, guard))
+    }
+
     pub(crate) async fn dv_effective_report(
         &self,
         session_id: &str,

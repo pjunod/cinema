@@ -3348,8 +3348,11 @@ async fn materialize_join_snapshot(
 /// that would hold a voter's image.
 #[cfg(feature = "hiqlite-store")]
 const JOIN_SNAPSHOT_MIN_COPY_BYTES_PER_SECOND: u64 = 8 * 1024 * 1024;
-/// How long the snapshot builder waits for storage before it fails the build
-/// (Hiqlite's `snapshot_storage_deferral`, which Plurx leaves at its default).
+/// The longest the snapshot builder waits for storage that can fit the build
+/// or cannot be measured before attempting it (Hiqlite's
+/// `snapshot_storage_deferral`, which Plurx leaves at its default). Storage
+/// that cannot fit the build at all (patch 33) defers with no bound, so such
+/// a join's build outlives this budget and the backstop below ends the join.
 #[cfg(feature = "hiqlite-store")]
 const JOIN_SNAPSHOT_STORAGE_DEFERRAL: Duration = Duration::from_secs(600);
 
@@ -3887,10 +3890,20 @@ async fn start_voter(
     let admission_started = tokio::time::Instant::now();
     let admission_deadline = admission_started + MEMBERSHIP_ADMISSION_TIMEOUT;
     loop {
-        let metrics = client
+        let watch = client
             .local_db_raft_metrics()
-            .map_err(|error| StoreError::Database(format!("reading voter membership: {error}")))?
-            .membership_snapshot();
+            .map_err(|error| StoreError::Database(format!("reading voter membership: {error}")))?;
+        if let Some(error) = watch.core_fatal() {
+            return Err(startup_core_died(
+                &client,
+                active_transport,
+                pending_client.is_none(),
+                &identity.node_id,
+                &error,
+            )
+            .await);
+        }
+        let metrics = watch.membership_snapshot();
         let is_voter = metrics.voters.contains(&identity.raft_id);
         let is_member = metrics.members.contains(&identity.raft_id);
         let admitted = match role {
@@ -3967,6 +3980,16 @@ async fn start_voter(
                 biased;
                 result = &mut watermark => break result,
                 () = tokio::time::sleep_until(next_wait_log) => {
+                    if let Some(error) = local_metrics.core_fatal() {
+                        return Err(startup_core_died(
+                            &client,
+                            active_transport,
+                            pending_client.is_none(),
+                            &identity.node_id,
+                            &error,
+                        )
+                        .await);
+                    }
                     if startup_wait_log_is_due(&mut next_wait_log) {
                         log_startup_transport_wait(
                             &identity.node_id,
@@ -3979,6 +4002,16 @@ async fn start_voter(
                 }
             }
         };
+        if let Some(error) = local_metrics.core_fatal() {
+            return Err(startup_core_died(
+                &client,
+                active_transport,
+                pending_client.is_none(),
+                &identity.node_id,
+                &error,
+            )
+            .await);
+        }
         match watermark {
             Ok(Ok(watermark)) => break watermark.committed_index,
             Ok(Err(error)) if tokio::time::Instant::now() < catchup_deadline => {
@@ -4014,6 +4047,16 @@ async fn start_voter(
             .unwrap_or_default();
         if applied >= catchup_target {
             break;
+        }
+        if let Some(error) = local_metrics.core_fatal() {
+            return Err(startup_core_died(
+                &client,
+                active_transport,
+                pending_client.is_none(),
+                &identity.node_id,
+                &error,
+            )
+            .await);
         }
         if tokio::time::Instant::now() >= catchup_deadline {
             if pending_client.is_none() {
@@ -4068,6 +4111,26 @@ async fn start_voter(
 #[cfg(feature = "hiqlite-store")]
 fn startup_admission_remaining(phase: Duration, admission_spent: Duration) -> Duration {
     phase.saturating_sub(admission_spent)
+}
+
+/// Audit C7: a database Raft core that quit while startup waits for
+/// admission or catch-up never serves again in this process, so startup ends
+/// at once with the core's own error, and the supervisor restarts it, rather
+/// than waiting out the catch-up deadline behind the fence.
+#[cfg(feature = "hiqlite-store")]
+async fn startup_core_died(
+    client: &Client,
+    active_transport: bool,
+    owns_shutdown: bool,
+    node_id: &str,
+    error: &str,
+) -> StoreError {
+    if owns_shutdown {
+        let _ = shutdown_voter(client, active_transport).await;
+    }
+    StoreError::Database(format!(
+        "node {node_id}'s database Raft core stopped during startup: {error}"
+    ))
 }
 
 #[cfg(feature = "hiqlite-store")]

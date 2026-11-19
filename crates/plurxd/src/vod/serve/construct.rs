@@ -402,7 +402,7 @@ impl VodServe {
         store: Arc<dyn Store>,
         node_id: String,
         cluster_index_root: PathBuf,
-        membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        calls: Option<crate::cluster::calls::PeerTransport>,
         directory: Option<crate::cluster::Directory>,
     ) -> Arc<VodServe> {
         let runtime_cache = cluster_index_root
@@ -415,7 +415,7 @@ impl VodServe {
             store,
             node_id,
             cluster_index_root,
-            membership,
+            calls,
             directory,
         )
     }
@@ -426,7 +426,7 @@ impl VodServe {
         store: Arc<dyn Store>,
         node_id: String,
         cluster_index_root: PathBuf,
-        membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        calls: Option<crate::cluster::calls::PeerTransport>,
         directory: Option<crate::cluster::Directory>,
     ) -> Arc<VodServe> {
         Self::new_configured(
@@ -435,7 +435,7 @@ impl VodServe {
             store,
             Some(node_id),
             Some(cluster_index_root),
-            membership,
+            calls,
             directory,
         )
     }
@@ -446,7 +446,7 @@ impl VodServe {
         store: Arc<dyn Store>,
         cluster_node_id: Option<String>,
         cluster_index_root: Option<PathBuf>,
-        cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        cluster_calls: Option<crate::cluster::calls::PeerTransport>,
         cluster_directory: Option<crate::cluster::Directory>,
     ) -> Arc<VodServe> {
         let mut encoded_generation_scanner = EncodedGenerationScanner::new(base.clone());
@@ -469,7 +469,7 @@ impl VodServe {
                 encoded_generation_scanner: Arc::new(StdMutex::new(encoded_generation_scanner)),
                 cluster_node_id,
                 cluster_index_root,
-                cluster_membership,
+                cluster_calls,
                 cluster_directory,
                 catalog_namespace: tokio::sync::OnceCell::new(),
                 copy_analysis: std::sync::OnceLock::new(),
@@ -623,7 +623,7 @@ impl VodServe {
                         .await?;
                 crate::copy_index_v3::resolve(
                     self.shared.store.as_ref(),
-                    self.shared.cluster_membership.as_ref(),
+                    self.shared.cluster_calls.as_ref(),
                     self.shared.cluster_directory.as_ref(),
                     node_id,
                     namespace,
@@ -779,7 +779,7 @@ impl VodServe {
         };
         let index = crate::fragment_index_cluster::hydrate(
             self.shared.store.as_ref(),
-            self.shared.cluster_membership.as_ref(),
+            self.shared.cluster_calls.as_ref(),
             self.shared.cluster_directory.as_ref(),
             node_id,
             root,

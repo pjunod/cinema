@@ -18,6 +18,16 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Safari prepared upgrades that have buffered the current picture but still
+  play behind it now seek to a buffered forward rendezvous and hold there.
+  Seek latency no longer leaves both exact-current attempts behind the moving
+  incumbent; the same decoded-frame guard still decides whether to expose.
+
+- Web prepared upgrades keep predecessor control observations on their own
+  media source through exposure, so a transient successor wait cannot cancel
+  its own preparation. The first visible frame freezes the final commit;
+  retries and close preserve that exact settlement before changing reporters.
+
 - Dolby Vision titles the server reconstructs from the base layer alone no
   longer have their black level raised: Profile 5, Profile 8, and Profile 7
   when it is processed without its enhancement layer. The reconstruction pass

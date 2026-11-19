@@ -45,8 +45,9 @@ pub async fn issue_join_token(
 ) -> Result<Json<IssuedJoinToken>, ApiError> {
     let seconds = request.expires_in_seconds.unwrap_or(600).clamp(60, 3_600);
     state
-        .membership
-        .issue_token(Duration::from_secs(seconds))
+        .cluster
+        .operations()
+        .issue_voter_token(Duration::from_secs(seconds))
         .await
         .map(Json)
         .map_err(api_error)
@@ -59,8 +60,9 @@ pub async fn issue_learner_join_token(
 ) -> Result<Json<IssuedJoinToken>, ApiError> {
     let seconds = request.expires_in_seconds.unwrap_or(600).clamp(60, 3_600);
     state
-        .membership
-        .issue_learner_token(Duration::from_secs(seconds))
+        .cluster
+        .operations()
+        .issue_learner_join(Duration::from_secs(seconds))
         .await
         .map(Json)
         .map_err(api_error)
@@ -70,7 +72,12 @@ pub async fn nodes(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Json<MembershipStatus>, ApiError> {
-    state.membership.status().await.map(Json).map_err(api_error)
+    state
+        .cluster
+        .membership_status()
+        .await
+        .map(Json)
+        .map_err(api_error)
 }
 
 /// GET /api/v1/cluster/ingress — the other ingresses a signed-in client may
@@ -92,8 +99,9 @@ pub async fn ingress(
 ) -> Result<Json<ClusterIngress>, ApiError> {
     Ok(Json(ClusterIngress {
         node_urls: state
-            .membership
-            .reachable_peer_http_urls()
+            .cluster
+            .operations()
+            .ingress_targets()
             .await
             .unwrap_or_default()
             .into_iter()
@@ -123,8 +131,9 @@ pub async fn activate_learner_protocol(
     State(state): State<AppState>,
 ) -> Result<Json<ProtocolChange>, ApiError> {
     state
-        .membership
-        .activate_learner_protocol()
+        .cluster
+        .operations()
+        .enable_learner_protocol()
         .await
         .map(Json)
         .map_err(api_error)
@@ -136,8 +145,9 @@ pub async fn deactivate_learner_protocol(
     State(state): State<AppState>,
 ) -> Result<Json<ProtocolChange>, ApiError> {
     state
-        .membership
-        .deactivate_learner_protocol()
+        .cluster
+        .operations()
+        .disable_learner_protocol()
         .await
         .map(Json)
         .map_err(api_error)
@@ -149,8 +159,9 @@ pub async fn remove_node(
     Path(node_id): Path<String>,
 ) -> Result<Json<MembershipStatus>, ApiError> {
     state
-        .membership
-        .remove_node(&node_id)
+        .cluster
+        .operations()
+        .remove_member(&node_id)
         .await
         .map(Json)
         .map_err(api_error)
@@ -162,8 +173,9 @@ pub async fn promote_node(
     Path(node_id): Path<String>,
 ) -> Result<Json<MembershipStatus>, ApiError> {
     state
-        .membership
-        .promote_learner(&node_id)
+        .cluster
+        .operations()
+        .promote_member(&node_id)
         .await
         .map(Json)
         .map_err(api_error)
@@ -177,17 +189,17 @@ pub async fn enter_maintenance(
     if node_id != state.node_id {
         // Preserve the unclustered API contract: SQLite has no maintenance
         // target at all, which is more fundamental than a route-id mismatch.
-        state.membership.status().await.map_err(api_error)?;
+        state.cluster.membership_status().await.map_err(api_error)?;
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "maintenance_node_mismatch",
             "open the target node directly; maintenance must be prepared by the process being fenced",
         ));
     }
-    let serving = state.serving.clone();
-    run_serialized_planned_outage_task(&serving, async move {
-        if state.membership.local_maintenance_active() {
-            return state.membership.status().await.map(Json).map_err(api_error);
+    let operations = state.cluster.operations();
+    run_serialized_planned_outage_task(&operations, async move {
+        if state.cluster.maintenance_active() {
+            return state.cluster.membership_status().await.map(Json).map_err(api_error);
         }
         let (mut lease, preflight) = acquire_planned_outage_preflight(
             &state,
@@ -227,9 +239,7 @@ pub async fn enter_maintenance(
             .claim()
             .preparation_expiry_unix_ms(MAINTENANCE_PREPARATION_DURATION);
         let local_fence = if let Some(local_expiry) = local_expiry {
-            state
-                .serving
-                .begin_maintenance_preparation_until(local_expiry)
+            state.cluster.operations().prepare_maintenance_fence(local_expiry)
                 .await
         } else {
             None
@@ -243,9 +253,7 @@ pub async fn enter_maintenance(
             ));
         };
         lease.arm_local_fence(local_fence);
-        if !state
-            .serving
-            .wait_for_restart_admissions_until(local_fence, &state.shutdown)
+        if !state.cluster.operations().settle_outage_admissions(local_fence, &state.shutdown)
             .await
         {
             lease.release().await;
@@ -256,7 +264,7 @@ pub async fn enter_maintenance(
             ));
         }
         let active_sessions = local_owned_media_sessions(&state).await;
-        let drain = state.serving.restart_drain_status(active_sessions).await;
+        let drain = state.cluster.operations().drain_status(active_sessions).await;
         if !drain.new_admissions_blocked {
             lease.release().await;
             return Err(ApiError::typed(
@@ -265,8 +273,8 @@ pub async fn enter_maintenance(
                 "maintenance preparation expired before pre-existing admissions settled; run preflight again",
             ));
         }
-        let membership = state.membership.clone();
-        match membership.enter_maintenance(&node_id, lease.claim()).await {
+        let operations = state.cluster.operations();
+        match operations.commit_maintenance(&node_id, lease.claim()).await {
             Ok(status) => {
                 lease.disarm();
                 Ok(Json(status))
@@ -279,7 +287,7 @@ pub async fn enter_maintenance(
                 // claim before this barrier; if it arrives afterwards, its
                 // lease predicate is false and the transaction is a no-op.
                 match lease.release_replicated_claim().await {
-                    Ok(()) => match membership.reconcile_local_maintenance_commit().await {
+                    Ok(()) => match operations.reconcile_maintenance().await {
                         Ok(true) => {
                             // The response path failed after the transaction
                             // became durable. Keep the local drain and let the
@@ -321,17 +329,17 @@ pub async fn exit_maintenance(
     Path(node_id): Path<String>,
 ) -> Result<Json<MembershipStatus>, ApiError> {
     if node_id != state.node_id {
-        state.membership.status().await.map_err(api_error)?;
+        state.cluster.membership_status().await.map_err(api_error)?;
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "maintenance_node_mismatch",
             "maintenance can be cleared only by the running target process",
         ));
     }
-    let serving = state.serving.clone();
-    run_serialized_planned_outage_task(&serving, async move {
-        if !state.membership.local_maintenance_active() {
-            let status = state.membership.status().await.map_err(api_error)?;
+    let operations = state.cluster.operations();
+    run_serialized_planned_outage_task(&operations, async move {
+        if !state.cluster.maintenance_active() {
+            let status = state.cluster.membership_status().await.map_err(api_error)?;
             if status
                 .nodes
                 .iter()
@@ -346,7 +354,11 @@ pub async fn exit_maintenance(
             return Ok(Json(status));
         }
         let active_sessions = local_owned_media_sessions(&state).await;
-        let drain = state.serving.restart_drain_status(active_sessions).await;
+        let drain = state
+            .cluster
+            .operations()
+            .drain_status(active_sessions)
+            .await;
         if !drain.drained {
             return Err(ApiError::typed(
                 StatusCode::CONFLICT,
@@ -355,13 +367,15 @@ pub async fn exit_maintenance(
             ));
         }
         let status = state
-            .membership
-            .exit_maintenance(&node_id)
+            .cluster
+            .operations()
+            .resume_member(&node_id)
             .await
             .map_err(api_error)?;
         state
-            .serving
-            .cancel_current_maintenance_preparation(active_sessions)
+            .cluster
+            .operations()
+            .cancel_maintenance_fence(active_sessions)
             .await;
         Ok(Json(status))
     })
@@ -373,8 +387,9 @@ pub async fn force_election(
     State(state): State<AppState>,
 ) -> Result<Json<MembershipStatus>, ApiError> {
     state
-        .membership
-        .force_election()
+        .cluster
+        .operations()
+        .elect_member()
         .await
         .map(Json)
         .map_err(api_error)
@@ -391,7 +406,12 @@ pub async fn leave(
     if request.node_id != state.node_id {
         return Err(api_error(MembershipError::LeaveNodeMismatch));
     }
-    state.membership.leave_node().await.map_err(api_error)?;
+    state
+        .cluster
+        .operations()
+        .leave_member()
+        .await
+        .map_err(api_error)?;
     state.shutdown.cancel();
     Ok(Json(serde_json::json!({
         "leaving": true,
@@ -429,8 +449,9 @@ pub async fn redeem_join(
     Json(request): Json<RedeemJoinRequest>,
 ) -> Result<StatusCode, ApiError> {
     state
-        .membership
-        .redeem(&request)
+        .cluster
+        .operations()
+        .redeem_voter(&request)
         .await
         .map(|()| StatusCode::NO_CONTENT)
         .map_err(api_error)
@@ -441,8 +462,9 @@ pub async fn redeem_learner_join(
     Json(request): Json<RedeemJoinRequest>,
 ) -> Result<StatusCode, ApiError> {
     state
-        .membership
-        .redeem_learner(&request)
+        .cluster
+        .operations()
+        .redeem_learner_join(&request)
         .await
         .map(|()| StatusCode::NO_CONTENT)
         .map_err(api_error)
@@ -453,8 +475,9 @@ pub async fn finalize_join(
     Json(request): Json<FinalizeJoinRequest>,
 ) -> Result<StatusCode, ApiError> {
     state
-        .membership
-        .finalize(&request)
+        .cluster
+        .operations()
+        .finalize_voter(&request)
         .await
         .map(|()| StatusCode::NO_CONTENT)
         .map_err(api_error)
@@ -465,8 +488,9 @@ pub async fn finalize_learner_join(
     Json(request): Json<FinalizeJoinRequest>,
 ) -> Result<StatusCode, ApiError> {
     state
-        .membership
-        .finalize_learner(&request)
+        .cluster
+        .operations()
+        .finalize_learner_join(&request)
         .await
         .map(|()| StatusCode::NO_CONTENT)
         .map_err(api_error)

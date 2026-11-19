@@ -1,5 +1,8 @@
 // Production children go through `process_control::spawn_job_owned`; see
 // clippy.toml.
+// Typed cluster capabilities deepen the existing source-worker Send proof.
+// Keep the proof enforced; allow the compiler to traverse the full type graph.
+#![recursion_limit = "256"]
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 #![cfg_attr(plurx_dv_segment_probe, allow(dead_code))]
 
@@ -642,29 +645,50 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(all(not(unix), plurx_dv_segment_probe))]
 compile_error!("DV segment physical probe requires Unix descriptor custody");
 
-#[tokio::main]
-async fn daemon_main() -> anyhow::Result<()> {
+/// How long the runtime's own shutdown may wait for blocking work once the
+/// daemon has returned, before the process exits anyway.
+const RUNTIME_SHUTDOWN: Duration = Duration::from_secs(10);
+
+/// Run the daemon, then drop its runtime (and every task, listener and store
+/// handle it still owns) before the process exits: an error's exit status is
+/// set only after that, never with `std::process::exit` from inside it.
+fn daemon_main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building the Tokio runtime")?;
+    let outcome = runtime.block_on(daemon_run());
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN);
+    match outcome {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            let code = error
+                .downcast_ref::<CliExit>()
+                .map_or(1, |error| error.code);
+            eprintln!("{error:#}");
+            std::process::exit(code);
+        }
+        // Parsing and configuration errors return from `main` as before.
+        Err(error) => Err(error),
+    }
+}
+
+/// The command line and configuration (whose errors `main` returns), then
+/// the command's own outcome.
+async fn daemon_run() -> anyhow::Result<anyhow::Result<()>> {
     let cli = Cli::parse();
     #[cfg(unix)]
     if cli.source_commit {
         println!("{}", crate::version::SOURCE_COMMIT);
-        return Ok(());
+        return Ok(Ok(()));
     }
     let config = Config::load(cli.config.as_deref()).context("loading configuration")?;
-    if let Err(error) = dispatch(
+    Ok(dispatch(
         cli.command.unwrap_or(Command::Run),
         config,
         cli.config.as_deref(),
     )
-    .await
-    {
-        let code = error
-            .downcast_ref::<CliExit>()
-            .map_or(1, |error| error.code);
-        eprintln!("{error:#}");
-        std::process::exit(code);
-    }
-    Ok(())
+    .await)
 }
 
 /// The deliberate panic behind `plurxd diagnostic-panic`. Its own function, and
@@ -2004,7 +2028,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             applied,
             identity: selected.identity.clone(),
             credential_key: Arc::clone(&selected.credential_key),
-            backup_client: selected.local_client(),
+            backup_source: selected.local_client().map(crate::cluster::backup_source),
             dirs,
             encoder_caps,
             system,
@@ -2031,11 +2055,13 @@ async fn run(config: Config) -> anyhow::Result<()> {
     };
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let native_commit = false;
-    let shutdown = if native_commit {
+    // A committed native close, and the close after a dead Raft core, are
+    // bounded: neither may hold the process open past 30 s.
+    let shutdown = if native_commit || drained_a_dead_core(&result) {
         match tokio::time::timeout(Duration::from_secs(30), selected.shutdown()).await {
             Ok(result) => result.context("stopping local Hiqlite voter"),
             Err(_) => Err(anyhow::anyhow!(
-                "local Hiqlite store close timed out during committed native shutdown"
+                "local Hiqlite store close timed out after 30 s during a bounded shutdown"
             )),
         }
     } else {
@@ -2063,7 +2089,7 @@ struct Boot {
     /// Resolved before the store is handed on, so a node that cannot open its
     /// existing Trakt rows fails here rather than at the first sync.
     credential_key: Arc<plurx_core::secrets::CredentialKey>,
-    backup_client: Option<hiqlite::Client>,
+    backup_source: Option<crate::cluster::BackupSource>,
     dirs: crate::state::Dirs,
     encoder_caps: plurx_core::transcode::EncoderCaps,
     system: SystemInfo,
@@ -2309,7 +2335,7 @@ impl StartupClockObserver for StartupObservationHttp {
                 )
                 .route("/readyz", axum::routing::get(startup_pending_readyz))
                 .with_state(http::internal_clock::ObservationContext {
-                    membership: membership.clone(),
+                    clock: cluster::startup_clock(membership.clone()),
                     node_id,
                     observer: observer.clone(),
                 })
@@ -2414,7 +2440,7 @@ async fn boot_observing(
         applied,
         identity,
         credential_key,
-        backup_client,
+        backup_source,
         dirs,
         encoder_caps,
         system,
@@ -2445,7 +2471,7 @@ async fn boot_observing(
         node_id.clone(),
         instance_id.clone(),
         credential_key,
-        backup_client,
+        backup_source,
         replication,
         membership,
         catalogue,
@@ -2471,7 +2497,7 @@ async fn boot_observing(
             anyhow::anyhow!("startup observation owner disappeared before activation")
         })?;
         anyhow::ensure!(
-            observer.belongs_to(&state.membership),
+            observer.belongs_to(&state.cluster.operations().clock()),
             "foreign startup clock owner"
         );
         state.clock_observer = observer;
@@ -2551,8 +2577,14 @@ async fn boot_observing(
     let telemetry_store = Arc::clone(&state.store);
     let leave_shutdown = state.shutdown.clone();
     let live_tv_shutdown = Arc::clone(&state.live_tv);
-    let serving_shutdown = state.serving.clone();
-    let membership_shutdown = state.membership.clone();
+    let operations_shutdown = state.cluster.operations();
+    // The database Raft core's own terminal state. A core that quit on a
+    // fatal error (a full disk, a storage error, a panic) never serves again
+    // in this process, so it resolves the same drain a signal does and the
+    // process then exits non-zero for its supervisor to restart.
+    let raft_core_failure = state.cluster.core_failure();
+    let raft_core_fatal = Arc::new(std::sync::OnceLock::<String>::new());
+    let raft_core_fatal_drain = Arc::clone(&raft_core_fatal);
     let jellyfin_standard_port = Arc::clone(&state.jellyfin_standard_port);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let desktop_server = if let Some(desktop) = &desktop {
@@ -2612,11 +2644,23 @@ async fn boot_observing(
     // listener (including its startup-observation handoff) redirects.
     let app = https::redirect::router(app, https_redirect_port);
 
+    // The select is biased, in order: a signal or a leave that is already
+    // pending wins over a core failure, so a deliberate stop is never recorded
+    // as a dead core (and never exits non-zero) just because both were ready.
     let shutdown = async move {
         tokio::select! {
+            biased;
             () = shutdown => {}
             () = leave_shutdown.cancelled() => {
                 tracing::info!("local shutdown requested, draining");
+            }
+            error = raft_core_failure => {
+                tracing::error!(
+                    target: "plurx::cluster",
+                    %error,
+                    "the database Raft core stopped with a fatal error; draining and exiting"
+                );
+                let _ = raft_core_fatal_drain.set(error);
             }
         }
         // The drain's first act, while Raft and every listener are still
@@ -2624,7 +2668,7 @@ async fn boot_observing(
         // (bounded at 10 s), and every replicated node stops campaigning, so
         // the drain's own writes go to the successor and the survivors never
         // wait out a timeout election. It never fails; the drain continues.
-        membership_shutdown.handoff_for_shutdown().await;
+        operations_shutdown.handoff_for_shutdown().await;
         // One drain token for both causes: owners that must hand work back
         // before exit (shared session retirement) observe `state.shutdown`,
         // and a signal is as much a drain as a committed leave.
@@ -2636,9 +2680,7 @@ async fn boot_observing(
             .saturating_add(10_000)
             .try_into()
             .unwrap_or(u64::MAX);
-        let _ = serving_shutdown
-            .begin_restart_preparation_until(expires)
-            .await;
+        let _ = operations_shutdown.prepare_restart_fence(expires).await;
         crate::telemetry::drain_for_shutdown(&telemetry_store).await;
         if let Err(error) = live_tv_shutdown.shutdown().await {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2703,7 +2745,51 @@ async fn boot_observing(
     {
         tracing::warn!(%error, "could not record the Plex façade census at shutdown");
     }
-    served.map(|_| ())
+    exit_after_drain(raft_core_fatal.get(), served.map(drop))
+}
+
+/// How a drained daemon ends: as serving ended after a signal or a leave,
+/// and with the dead core's verdict, so a non-zero exit status and a bounded
+/// store close, after its database Raft core died. The verdict wins over a
+/// serving error during that drain, which is logged: the core is the cause.
+fn exit_after_drain(
+    raft_core_fatal: Option<&String>,
+    served: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match raft_core_fatal {
+        None => served,
+        Some(error) => {
+            if let Err(serving) = served {
+                tracing::error!(error = %format!("{serving:#}"), "serving also failed while a dead Raft core drained");
+            }
+            Err(RaftCoreFatal(error.clone()).into())
+        }
+    }
+}
+
+/// The drain's verdict after the database Raft core died. Typed, so the
+/// store's close after it is bounded like a committed native close: a dead
+/// core's store must not hold the exit, and so the restart, open.
+#[derive(Debug)]
+struct RaftCoreFatal(String);
+
+impl std::fmt::Display for RaftCoreFatal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the database Raft core stopped with a fatal error: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for RaftCoreFatal {}
+
+/// Whether the serving result is a dead core's drain.
+fn drained_a_dead_core(result: &anyhow::Result<()>) -> bool {
+    result
+        .as_ref()
+        .is_err_and(|error| error.downcast_ref::<RaftCoreFatal>().is_some())
 }
 
 /// How a Bonjour record gets published. A parameter rather than a direct call
@@ -2714,7 +2800,7 @@ type MdnsAdvertiser =
 
 /// Widen the inherited open-file limit and say what it now is.
 ///
-/// `#[tokio::main]` builds the runtime before any of `main`'s body runs, so
+/// `daemon_main` builds the runtime before any of the daemon's body runs, so
 /// there is no "before the runtime starts" to run this in. What matters is
 /// that the limit is consulted when a descriptor is opened, and this runs
 /// before the store, the system probe and every listener open theirs.
@@ -3507,7 +3593,7 @@ fn build_state(
     node_id: String,
     cluster_id: String,
     credential_key: Arc<plurx_core::secrets::CredentialKey>,
-    backup_client: Option<hiqlite::Client>,
+    backup_source: Option<crate::cluster::BackupSource>,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
     catalogue: plurx_core::store::CatalogueReader,
@@ -3541,7 +3627,7 @@ fn build_state(
             },
             data_dir: config.storage.data_dir.clone(),
             credential_key_path: config.cluster.credential_key_path(&config.storage.data_dir),
-            backup_client,
+            backup_source,
         },
         store,
         dirs,
@@ -3817,7 +3903,8 @@ fn spawn_background_loops(
     // ungated; claiming the next queued package is not, and takes the same
     // live membership check the other cluster-wide loops do.
     tokio::spawn(
-        std::sync::Arc::clone(&state.offline).run(std::sync::Arc::new(state.membership.clone())),
+        std::sync::Arc::clone(&state.offline)
+            .run(std::sync::Arc::new(state.cluster.jobs().clone())),
     );
 
     // What the libraries' storage reads at. Deliberately after the listener
@@ -3846,7 +3933,7 @@ fn spawn_background_loops(
     // Trakt: hourly (and on-demand) two-way sync + the scrobble-pause sweep.
     tokio::spawn(
         std::sync::Arc::clone(&state.trakt)
-            .sync_loop(std::sync::Arc::new(state.membership.clone())),
+            .sync_loop(std::sync::Arc::new(state.cluster.jobs().clone())),
     );
     tokio::spawn(std::sync::Arc::clone(&state.trakt).sweep_loop());
     // The watched outbox. Its own loop because a retry scheduled two minutes
@@ -3860,7 +3947,7 @@ fn spawn_background_loops(
             tokio::spawn(std::sync::Arc::clone(&state.watched).run(
                 crate::watched::DrainAuthority {
                     coordinator,
-                    authority: std::sync::Arc::new(state.membership.clone()),
+                    authority: std::sync::Arc::new(state.cluster.jobs().clone()),
                     policy: crate::watched::WatchedLeasePolicy::PRODUCTION,
                 },
             ));

@@ -323,12 +323,9 @@ pub struct PeerActivityClient {
 #[allow(dead_code)]
 impl PeerActivityClient {
     #[must_use]
-    pub fn new(
-        membership: plurx_core::cluster::membership::MembershipManager,
-        directory: crate::cluster::Directory,
-    ) -> Self {
+    pub fn new(transport: PeerTransport, directory: crate::cluster::Directory) -> Self {
         Self {
-            transport: PeerTransport::new(membership.clone()),
+            transport,
             directory,
             reads: Arc::new(tokio::sync::Mutex::new(PeerActivityReadGate::default())),
             owner_reads: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -559,8 +556,9 @@ pub async fn snapshot(
 ) -> Result<(HeaderMap, Json<ActivitySnapshot>), StatusCode> {
     let auth = peer_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !state
-        .membership
-        .authorize_activity_request(&auth)
+        .cluster
+        .authentication()
+        .authorize_activity(&auth)
         .await
         .unwrap_or(false)
     {
@@ -1121,7 +1119,9 @@ mod tests {
     #[tokio::test]
     async fn reachable_peer_without_activity_origin_is_unsupported_not_unreachable() {
         let client = PeerActivityClient::new(
-            plurx_core::cluster::membership::MembershipManager::unavailable(),
+            crate::cluster::test_calls(
+                plurx_core::cluster::membership::MembershipManager::unavailable(),
+            ),
             crate::cluster::Directory::new(
                 plurx_core::cluster::membership::MembershipManager::unavailable(),
             ),
