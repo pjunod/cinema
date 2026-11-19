@@ -1,7 +1,8 @@
 # F+ graduation and NP1 trials — remaining acceptance
 
 **Status:** open — isolated fit and served baseline acquisition complete;
-physical graduation and M7 candidate trials remain open. **Owner:** Codex. **Updated:** 2026-11-19.
+the first frozen M7 candidate was rejected; physical graduation and runtime
+comparison integration remain open. **Owner:** Codex. **Updated:** 2026-11-19.
 
 Companion to [the build ledger](FEL-RPU-REFIT-BUILD.md): that records the
 merged implementation; this records physical graduation and the next trial.
@@ -125,6 +126,15 @@ own store and listeners and no production cluster join. No production service, c
 is installed, restarted or upgraded as part of this work. Test fixtures must be identified
 as fixtures and cannot alone satisfy real plurx session acceptance.
 
+Native Safari 27.2 on the M5/macOS 27.2.1 also committed fitted copy,
+performed a same-session buffered seek with a presented frame in 60 ms,
+and naturally ended at 206.864 seconds. Playback Info reported fitted
+curves, delivered Dolby Vision Profile 8, zero buffering interruptions and
+five dropped of 1,399 total video frames at the terminal observation.
+Display output was unverified. This is a scoped browser playback witness,
+not optical mapping proof or native macOS/iOS client coverage. Its earlier
+quality-change decline is retained separately from the successful successor.
+
 ## Native M5 test-instance prerequisites
 
 CPU title scanning, F+ fitting and their fenced publication use portable tool
@@ -221,10 +231,21 @@ The actual served F+ evaluation baseline was measured once after protocol
 freeze (Model B mean 1.397672 ΔITP). The other three frozen models were also
 measured once. Baseline/none/zero same-input encoder controls passed, with
 byte-identical elementary streams. They remain reusable while their consumed
-inputs, encoder, harness and recipe bindings match. The bounded NP1 trial
-has started; candidate authoring, actual authored-rate admission and paired
-quality results remain pending. Runtime title-qualification integration is
-not implemented by this offline trial.
+inputs, encoder, harness and recipe bindings match. The bounded NP1 trial selected attempt 3 of 3. The current-core author and
+independent metadata/clock/software-decode checks passed. Actual authored
+video packets were 129.213487 Mb/s, within the frozen experimental band.
+
+The [held-out result](FEL-RPU-REFIT-M7-2026-11-19.json) rejected NP1. All four
+models worsened, and every prescribed shadow check failed. Model B mean
+ΔITP was 1.503623 for NP1 versus 1.397672 for served F+; the required gain
+was +0.05, while observed F+ minus NP1 was −0.105951. Its worst-frame
+below-0.1-nit p99 rose from 3.685399 to 6.549889. The other models agree
+on the direction. The scorer's exit 1 records a valid rejection, not an
+execution failure. No fourth encode, tuning or scoring rerun is planned.
+The source and F+ copy remain intact. This outcome applies only to the
+frozen window and new representation; it does not settle historical NP1
+results or generalize to a full title. Runtime title-qualification
+integration is not implemented by this offline trial.
 
 ## Execution ledger
 
@@ -235,7 +256,7 @@ not implemented by this offline trial.
 | Physical matrix | tvOS fitted handoff and seek retained; earlier 52-second completion retained; full matrix open | Unresolved cold timeout, mapping, drops and remaining client/device scopes |
 | M7 baseline | Two calibration windows and frozen evaluation192–239 bound and scored once in all four models | Retain source-bound scores |
 | Numeric margin | Frozen at 0.05 with strict shadow-tail limits before candidate work | Apply unchanged to paired outputs |
-| NP1 trials/integration | Three encoder controls passed; bounded trial running; integration open | Actual authored rate/readback, paired result and existing-job integration |
+| NP1 trials/integration | Three controls retained; frozen candidate rejected in four models; author/readback/rate admitted; integration open | Existing-job comparison integration and exact result reuse |
 
 Adversarial review happens when the change is ready to merge. Afterwards run
 only the remaining required fast-lane checks, preserving every valid pass.

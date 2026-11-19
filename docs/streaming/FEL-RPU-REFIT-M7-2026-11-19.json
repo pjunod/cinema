@@ -1,0 +1,153 @@
+{
+  "schema": 1,
+  "kind": "m7_frozen_window_result",
+  "status": "rejected",
+  "date": "2026-11-19",
+  "scope": "One 48-frame held-out window and the new composed-model-B TopLeft representation; no per-title generalization, replacement or deployment authority",
+  "source_sha256": "c29a0e5576974a320f017dcc4c68803f9a138e32930296283f9be847a5eff496",
+  "source_ordinals": [
+    192,
+    239
+  ],
+  "window": [
+    "8133/1000",
+    "10135/1000"
+  ],
+  "protocol_sha256": "9fa874faf2ac48c928bf6dbadf86528b7922061179c041e1ea084a5b93db05f3",
+  "required_mean_gain": 0.05,
+  "sampling": {
+    "roi": [
+      0,
+      32,
+      3840,
+      2128
+    ],
+    "stride": 8,
+    "axis_phases": [
+      0,
+      1
+    ],
+    "frames": 48
+  },
+  "samples_per_model": 24145920,
+  "served_curve_digest": "6373ab9d580701c4f8189510304260d157234fa5a36eb7ff75907fe20551325c",
+  "encoded_video_packet_mbps": 129.16917882117883,
+  "authored_video_packet_mbps": 129.21348651348652,
+  "authored_video_packet_mbps_exact": "1293427/10010",
+  "selected_attempt": 3,
+  "unique_encode_attempts": 3,
+  "target_kbps": 121179,
+  "envelope": {
+    "target_kbps": 121179,
+    "peak_kbps": 125000,
+    "buffer_kbits": 136000,
+    "hevc_level_idc": 153,
+    "dv_level": 6,
+    "provenance": "explicit_encode",
+    "bounded_peak": true,
+    "bounded_buffer": true,
+    "source_preference": true
+  },
+  "author_status": "validated_profile81_window",
+  "encoder_admission": {
+    "aq_mode_strength_qg_cutree": [
+      2,
+      0,
+      32,
+      1
+    ],
+    "psy": {
+      "psy-rd": 2,
+      "rdoq": 2,
+      "psy-rdoq": 1
+    },
+    "effective_qp_group_size": 32,
+    "sps_pps": {
+      "log2_min_luma_coding_block_size_minus3": 0,
+      "log2_diff_max_min_luma_coding_block_size": 3,
+      "cu_qp_delta_enabled_flag": 1,
+      "diff_cu_qp_delta_depth": 1
+    },
+    "selected_nonzero_offset_blocks": 985199,
+    "roi_skip_warning": false,
+    "scope": "Map construction and encoder admission do not prove each coded block used its requested offset."
+  },
+  "identities": {
+    "run_request_sha256": "528c16ec716ab5abb1231e516e8306debf399f5f1f0e4baa86be90dfde888819",
+    "comparison_request_sha256": "4947f961e498bbb25b92af96f4388c89b6a044ec384d70749cc5d2927e2bc817",
+    "comparison_result_sha256": "9aee13ffe862f894c5b50dd4aadcbf405c0cafe45fb645db73ae9c46ac7f65f0",
+    "scorer_sha256": "3c8e6caee30556915db888ed745c3611d581b4207a4a6ae269615330c89acb13",
+    "author_receipt_sha256": "2838af578c7638e00f5afc2cd1e48331a68cd440190947f2a1ded7e1773c96d6",
+    "decode_receipt_sha256": "eeb33010851fd51f474b58ae0655a980563412624b4c9b0d3319cc90f5dedb58",
+    "encoded_mp4_sha256": "b4161b3e3e23849d5c0c428cadd083f9d8a7bbd10be6a464ea89059482ac02c5",
+    "authored_mp4_sha256": "48309d1cc10734ed035eb0d18d913ed2515d9b826e59ebe564bfca777abbe122"
+  },
+  "models": {
+    "A": {
+      "served_fplus_mean": 1.3762535507382034,
+      "np1_mean": 1.499052330911622,
+      "fplus_minus_np1_mean": -0.1227987801734185,
+      "checks": {
+        "mean_gain_at_least_margin": false,
+        "pooled_[0,0.1)_mean_nonincrease": false,
+        "pooled_[0,0.1)_p99_nonincrease": false,
+        "pooled_[0.1,1)_p99_nonincrease": false,
+        "largest_frame_shadow_p99_nonincrease": false
+      },
+      "largest_frame_shadow_p99": {
+        "NP1": 6.810418302729218,
+        "served_Fplus": 3.67704224907032
+      }
+    },
+    "B": {
+      "served_fplus_mean": 1.397671933181744,
+      "np1_mean": 1.5036226717788972,
+      "fplus_minus_np1_mean": -0.1059507385971532,
+      "checks": {
+        "mean_gain_at_least_margin": false,
+        "pooled_[0,0.1)_mean_nonincrease": false,
+        "pooled_[0,0.1)_p99_nonincrease": false,
+        "pooled_[0.1,1)_p99_nonincrease": false,
+        "largest_frame_shadow_p99_nonincrease": false
+      },
+      "largest_frame_shadow_p99": {
+        "NP1": 6.54988912706099,
+        "served_Fplus": 3.6853994071910043
+      }
+    },
+    "C": {
+      "served_fplus_mean": 1.398003848494886,
+      "np1_mean": 1.5040180981280142,
+      "fplus_minus_np1_mean": -0.10601424963312822,
+      "checks": {
+        "mean_gain_at_least_margin": false,
+        "pooled_[0,0.1)_mean_nonincrease": false,
+        "pooled_[0,0.1)_p99_nonincrease": false,
+        "pooled_[0.1,1)_p99_nonincrease": false,
+        "largest_frame_shadow_p99_nonincrease": false
+      },
+      "largest_frame_shadow_p99": {
+        "NP1": 6.549816806192812,
+        "served_Fplus": 3.687583572846918
+      }
+    },
+    "D": {
+      "served_fplus_mean": 1.398023982336772,
+      "np1_mean": 1.504036715431126,
+      "fplus_minus_np1_mean": -0.1060127330943541,
+      "checks": {
+        "mean_gain_at_least_margin": false,
+        "pooled_[0,0.1)_mean_nonincrease": false,
+        "pooled_[0,0.1)_p99_nonincrease": false,
+        "pooled_[0.1,1)_p99_nonincrease": false,
+        "largest_frame_shadow_p99_nonincrease": false
+      },
+      "largest_frame_shadow_p99": {
+        "NP1": 6.549724500499817,
+        "served_Fplus": 3.6870314348630893
+      }
+    }
+  },
+  "retained_evidence": "Raw input, HTTP publication, author/readback, decoder and complete paired results are retained privately by the owning effort; this bounded report is not a substitute for those bytes.",
+  "decision": "Retain F+ copy and the original source. No fourth encode, candidate tuning or quality-score rerun. Runtime title-qualification integration and physical graduation remain open."
+}
