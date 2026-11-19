@@ -55,7 +55,7 @@ struct SharedSharingEnableSection: View {
             Toggle("Enable Shared libraries", isOn: Binding(get: { draft.enabled }, set: { draft.choose($0) }))
                 .accessibilityIdentifier("sharing-enabled-choice")
             if let saved { Text(saved ? "Saved choice: Enabled" : "Saved choice: Disabled").font(.caption) }
-            DisclosureGroup("Details") {
+            SettingsDisclosure("Details") {
                 Text("Source-labelled browsing and Shared playback are implemented. Readiness never changes your selection or prevents Save.").font(.caption)
                 Text(message).font(.caption).accessibilityIdentifier("sharing-settings-status")
                 Button("Reload saved choice") { Task { await load() } }.disabled(busy)

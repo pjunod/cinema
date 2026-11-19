@@ -836,11 +836,12 @@ final class LiveTvTests: XCTestCase {
             .components(separatedBy: "Section(\"Help\")")[0]
         XCTAssertTrue(remotes.contains("Toggle(\"Enable Cinema remotes on this installation\", isOn: $cinemaRemoteEnabled)"))
         XCTAssertTrue(remotes.contains("NavigationLink(\"Screen invitations\") { RemoteDeviceSettingsView() }"))
+        XCTAssertTrue(remotes.contains("SettingsDisclosure(\"Details\")"))
         XCTAssertTrue(settings.contains("@AppStorage(\"plurx.cinemaRemote\") private var cinemaRemoteEnabled = false"))
         // Playback.
         XCTAssertTrue(settings.contains("DolbyVisionRefitSettingsSection()"))
         let refit = try Self.appleSource("DolbyVisionRefitSettingsSection.swift")
-        XCTAssertTrue(refit.contains("DisclosureGroup(\"Details\")"))
+        XCTAssertTrue(refit.contains("SettingsDisclosure(\"Details\")"))
         XCTAssertTrue(refit.contains("Delete this node's statistics spool"))
         XCTAssertTrue(refit.contains("Button(\"Reload\")"))
         XCTAssertFalse(refit.contains("Leaves Developer"))
@@ -848,6 +849,7 @@ final class LiveTvTests: XCTestCase {
         let sharing = try Self.appleSource("SharedSharingSettingsView.swift")
         XCTAssertTrue(sharing.contains("SharedSharingEnableSection()"))
         XCTAssertTrue(sharing.contains("Toggle(\"Enable Shared libraries\""))
+        XCTAssertTrue(sharing.contains("SettingsDisclosure(\"Details\")"))
         XCTAssertFalse(sharing.contains("Developer"))
         // No client toggle for server behaviour that is now always on.
         for key in ["playback_sdr_master_codecs", "playback_auto_abr", "playback_display_aware_auto", "playback_network_priors"] {

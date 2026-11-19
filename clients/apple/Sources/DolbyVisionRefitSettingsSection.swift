@@ -29,7 +29,7 @@ struct DolbyVisionRefitSettingsSection: View {
                 .disabled(busy || readiness == nil)
                 .accessibilityIdentifier("\(platform.field)-choice")
             }
-            DisclosureGroup("Details") {
+            SettingsDisclosure("Details") {
                 Text("With any switch on, the server fits Profile 7 FEL titles in the background beside playback. A failed or cancelled title is fitted again only after its source changes or a retry. Readiness never prevents saving.").font(.caption)
                 if let rows = item("dolby_vision_refit_apple")?.requirements {
                     ForEach(rows) { requirement in

@@ -98,6 +98,38 @@ struct SettingsPicker<Selection: Hashable, Content: View>: View {
     }
 }
 
+/// Collapsed details use a focusable button on Apple TV and a native
+/// disclosure row on iPhone and iPad.
+struct SettingsDisclosure<Content: View>: View {
+    private let title: String
+    private let content: Content
+    @State private var isExpanded = false
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    @ViewBuilder var body: some View {
+        #if os(tvOS)
+        Button {
+            isExpanded.toggle()
+        } label: {
+            HStack {
+                Text(title)
+                Spacer()
+                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                    .accessibilityHidden(true)
+            }
+        }
+        .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+        if isExpanded { content }
+        #else
+        DisclosureGroup(title, isExpanded: $isExpanded) { content }
+        #endif
+    }
+}
+
 struct SettingsView: View {
     var category: TVSettingsCategory? = nil
     var entryRequest = 0
@@ -452,7 +484,7 @@ struct SettingsView: View {
                 #if os(iOS)
                 NavigationLink("Screen invitations") { RemoteDeviceSettingsView() }
                 #endif
-                DisclosureGroup("Details") {
+                SettingsDisclosure("Details") {
                     Text("The server must also enable Cinema remote control. Missing server support or network access does not prevent saving this choice.").font(.caption)
                     #if os(iOS)
                     Text("Each paired screen has its own saved invitation choice, independent of this switch.").font(.caption)
