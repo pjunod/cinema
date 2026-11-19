@@ -12,11 +12,11 @@ Record lateness when the existing serving-monitor sleep resolves, against that s
 
 Record DB AppendEntries RPC attempts at the existing RaftNetwork API entry. Also record incoming DBAppend handler entry/completion gaps and handler duration, using the request vote and current passive membership endpoint identity. Include empty heartbeats and data appends. Call the outgoing observation RPC-attempt gap: it precedes transport queueing and is neither physical socket completion nor peer delivery/RTT. Incoming handler duration includes Raft/store work and is not network RTT. Do not move clock-capture, pooling, connection/reset or snapshot logic.
 
-A process-local observational registry retains at most64 local-node/target entries. Reset each series on leader term or endpoint identity change, ignore older terms, and evict only observational state at capacity. Do not carry history across process/source changes. Snapshots copy plain bounded data under a short non-async lock; failures never affect authority.
+A process-local observational registry retains at most64 local-node/target entries. Assign source-instance epochs at the existing outbound pool and incoming AppState lifetimes. Reset each series on source instance, leader term or endpoint identity change, ignore older sources/terms, and evict only observational state at capacity. Do not carry history across process/source changes. Snapshots copy plain bounded data under a short non-async lock; failures never affect authority.
 
 ## 3. File ownership
 
-Own vendor hiqlite `append_timing.rs`, its lib export and the DBAppend API hook in network/raft_client.rs plus handler hooks in network/raft_server.rs; generic fork patch documentation; daemon serving_fence.rs observation fields/monitor sampling, cluster.rs Observations projection, http/system.rs metrics rendering; a bounded standard-library collector and focused tests. No OpenRaft dependency change, raw client getter, new runtime task or product toggle.
+Own vendor hiqlite `append_timing.rs`, its lib export and the DBAppend API hook in network/raft_client.rs plus handler hooks in network/raft_server.rs; the single AppState/start epoch field and generic fork patch documentation; daemon serving_fence.rs observation fields/monitor sampling, cluster.rs Observations projection, http/system.rs metrics rendering; a bounded standard-library collector and focused tests. No OpenRaft dependency change, raw client getter, new runtime task or product toggle.
 
 ## 4. Collector and evidence
 
