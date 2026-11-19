@@ -9,6 +9,8 @@ pub(crate) use census::{run_source_census, CopyClockCensus};
 mod pipes;
 #[cfg(unix)]
 pub(crate) use pipes::{spawn_source_generation, CopyGenerationOwner, RunningCopyGeneration};
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use pipes::{CopyPipeEvent, CopyPipeKind};
 #[cfg(unix)]
 mod observed;
 #[cfg(unix)]

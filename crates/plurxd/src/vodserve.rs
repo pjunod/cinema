@@ -1038,6 +1038,9 @@ impl VerifiedContinuousFamily {
 /// The durable request plus already resolved encoder recipes. Plain copy
 /// callers need no encoder preparation and convert from their request alone.
 pub(crate) struct VodRecipeRequest<'a> {
+    /// This attachment's server-owned purpose, independent of Auto selection
+    /// and the cached encoder recipe. Prepared work must name Speculative.
+    pub(crate) admission_priority: crate::admission::Priority,
     /// One admitted preparation transferred to its exact executable recipe.
     /// The attached parent owns this credit; the cached Encoding never does.
     pub(crate) root_admission: Option<PreparedRootAdmission>,
@@ -1055,6 +1058,7 @@ pub(crate) struct VodRecipeRequest<'a> {
 impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
     fn from(request: &'a SessionRequest) -> Self {
         Self {
+            admission_priority: crate::admission::Priority::Live,
             root_admission: None,
             measured_candidate: None,
             request,

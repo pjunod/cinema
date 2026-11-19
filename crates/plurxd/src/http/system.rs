@@ -6443,7 +6443,7 @@ fn render_applied_view_metrics(
 /// Hiqlite patch 32: replies the SQLite writer produced after the Raft apply
 /// or teardown that asked for them had stopped waiting. Fixed labels, loaded
 /// from atomics at scrape time.
-fn render_writer_abandoned_replies(rows: &[hiqlite::DbWriterAbandonedReplies]) -> String {
+fn render_writer_abandoned_replies(rows: &[crate::cluster::WriterAbandonedReply]) -> String {
     let mut out = String::from(
         "# HELP plurx_hiqlite_writer_abandoned_replies_total Replicated-store writer replies whose requester (a cancelled Raft apply, or a teardown) had stopped waiting, by request and by whether the abandoned result was an error. The write itself committed or rolled back as usual; an error's text is in the node log.\n\
          # TYPE plurx_hiqlite_writer_abandoned_replies_total counter\n",
@@ -6722,8 +6722,11 @@ pub(crate) async fn metrics(
     let decode_fact_metrics = state.transcode.decode_facts_prometheus();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
     let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot())
-        + &render_applied_view_metrics(&state.applied.observation(), &hiqlite::db_read_pool_wait())
-        + &render_writer_abandoned_replies(&hiqlite::db_writer_abandoned_replies())
+        + &render_applied_view_metrics(
+            &state.applied.observation(),
+            &crate::cluster::read_pool_wait(),
+        )
+        + &render_writer_abandoned_replies(&crate::cluster::writer_abandoned_replies())
         + &render_cluster_directory_metrics(state.cluster_directory.reads());
     let membership_metrics = render_passive_membership_metrics(state.passive_membership.snapshot());
     let process_metrics = format!(
