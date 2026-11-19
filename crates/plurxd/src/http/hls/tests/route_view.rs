@@ -16,7 +16,7 @@
         let applied: Arc<dyn crate::media_sessions::RouteView> = replica.clone();
         fixture.state.media_sessions =
             crate::media_sessions::MediaSessionCoordinator::with_applied_view(
-                fixture.state.membership.clone(),
+                fixture.state.cluster.test_membership().clone(),
                 Arc::clone(&fixture.store),
                 applied,
             );

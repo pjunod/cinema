@@ -7366,8 +7366,8 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         metric.outcome = TAKEOVER_SKIPPED;
         return Ok(());
     }
-    let clock = acquire_takeover_clock(&state.cluster.clock(), &route.owner_node_id)
-        .map_err(|cause| {
+    let clock =
+        acquire_takeover_clock(&state.cluster.clock(), &route.owner_node_id).map_err(|cause| {
             metric.outcome = TAKEOVER_SKIPPED;
             format!("media-session takeover clock refused: {cause:?}")
         })?;

@@ -441,7 +441,7 @@ mod fleet {
             Duration::from_secs(45),
             Box::pin(select_daemon_store_observing(
                 &learner_config,
-                Some(startup.as_ref()),
+                Some(&crate::cluster::StartupClockAdapter(startup.as_ref())),
             )),
         )
         .await
@@ -501,9 +501,12 @@ mod fleet {
         let startup = Arc::new(crate::StartupObservationHttp::new(
             source_config.server.bind,
         ));
-        let selected = select_daemon_store_observing(&source_config, Some(startup.as_ref()))
-            .await
-            .expect("actual singleton activation");
+        let selected = select_daemon_store_observing(
+            &source_config,
+            Some(&crate::cluster::StartupClockAdapter(startup.as_ref())),
+        )
+        .await
+        .expect("actual singleton activation");
         let leader = selected.membership_manager();
         let mut ingress = crate::http::tests::test_state_without_router();
         ingress.node_id = selected.identity.node_id.clone();

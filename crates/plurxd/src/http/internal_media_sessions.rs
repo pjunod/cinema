@@ -1696,7 +1696,7 @@ mod tests {
         let (_, first_generation) = admit_remote_start_serving_authority(&state)
             .unwrap_or_else(|_| panic!("initial serving authority"));
 
-        state.serving.validation_set_ready(false).await;
+        state.cluster.test_fence().validation_set_ready(false).await;
         assert!(matches!(
             admit_remote_start_serving_authority(&state),
             Err(RemoteStartError::ServingFence)
@@ -1708,7 +1708,7 @@ mod tests {
             Some(&HeaderValue::from_static("1"))
         );
 
-        state.serving.validation_set_ready(true).await;
+        state.cluster.test_fence().validation_set_ready(true).await;
         let (authority, recovered_generation) = admit_remote_start_serving_authority(&state)
             .unwrap_or_else(|_| panic!("recovered serving authority"));
         assert_ne!(recovered_generation, first_generation);

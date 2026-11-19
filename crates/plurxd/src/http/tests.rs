@@ -3031,8 +3031,8 @@ fn get(uri: &str, token: Option<&str>) -> Request<Body> {
 async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknown() {
     use plurx_core::cluster::clock::PeerClockOffset;
     let (app, state) = test_app_with_state();
-    state.serving.validation_set_ready(true).await;
-    let clock = state.membership.clock_guard();
+    state.cluster.test_fence().validation_set_ready(true).await;
+    let clock = state.cluster.test_membership().clock_guard();
     let publish = |offset_us| {
         let ticket = clock.roster(&["peer".to_owned()]);
         assert!(clock.publish(
@@ -3089,7 +3089,7 @@ async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknow
         call_text(&app, get("/healthz", None)).await.0,
         StatusCode::OK
     );
-    state.serving.validation_set_ready(false).await;
+    state.cluster.test_fence().validation_set_ready(false).await;
     assert_eq!(
         evaluate_readiness(&state).await.reason,
         Some(ReadinessFailure::QuorumUnavailable),
@@ -3099,7 +3099,7 @@ async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknow
         cluster_operations::operations_readiness(&state).reason,
         Some(ReadinessFailure::QuorumUnavailable)
     );
-    state.serving.validation_set_ready(true).await;
+    state.cluster.test_fence().validation_set_ready(true).await;
     clock.roster_failed();
     assert!(
         evaluate_readiness(&state).await.ready,
@@ -3125,7 +3125,7 @@ async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknow
 #[tokio::test]
 async fn quorum_loss_keeps_liveness_but_fences_readiness_and_mutable_media() {
     let (app, state) = test_app_with_state();
-    state.serving.validation_set_ready(false).await;
+    state.cluster.test_fence().validation_set_ready(false).await;
 
     assert_eq!(
         evaluate_readiness(&state).await,
@@ -6858,7 +6858,7 @@ async fn live_tv_quorum_loss_fences_channels_and_stops_readiness_before_device_w
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
 
-    state.serving.validation_set_ready(false).await;
+    state.cluster.test_fence().validation_set_ready(false).await;
     let (status, readiness) = call(&app, get("/api/v1/live-tv/readiness", Some(&admin))).await;
     assert_eq!(status, StatusCode::OK, "{readiness}");
     assert_eq!(readiness["ready"], false);
@@ -21514,7 +21514,7 @@ async fn facts_skip_photos_and_folders() {
 async fn desktop_drain_holds_direct_response_bodies_and_refuses_range_reconnects() {
     use tower::ServiceExt;
     let state = test_state_without_router();
-    let fence = state.serving.clone();
+    let fence = state.cluster.test_fence().clone();
     let app = Router::new()
         .route(
             "/items/one/direct",
@@ -21567,7 +21567,7 @@ async fn desktop_drain_holds_direct_response_bodies_and_refuses_range_reconnects
 async fn desktop_drain_accounts_internal_proxy_and_post_relay_bodies() {
     use tower::ServiceExt;
     let state = test_state_without_router();
-    let fence = state.serving.clone();
+    let fence = state.cluster.test_fence().clone();
     let app = Router::new()
         .route(
             "/internal/media/fragment-index/key",

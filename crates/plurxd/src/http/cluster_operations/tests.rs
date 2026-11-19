@@ -816,7 +816,7 @@ async fn aggregate_request_reads_only_node_owned_projections() {
     // request that reaches MembershipManager::status cannot succeed, and
     // its current peer directory is empty. Seed only the two node-owned
     // projections that GET and support are allowed to consume.
-    assert!(state.membership.status().await.is_err());
+    assert!(state.cluster.test_membership().status().await.is_err());
     assert!(state
         .cluster
         .operations()

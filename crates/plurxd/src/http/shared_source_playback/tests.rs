@@ -1076,7 +1076,8 @@ async fn sharing_source_bound_invocation_projects_the_complete_start_response() 
     };
     let members = fixture
         .state
-        .membership
+        .cluster
+        .test_membership()
         .observe_source_admission_members()
         .await
         .expect("member observation")
@@ -1288,7 +1289,11 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
                 eprintln!("Source retained diagnostic completed: {retained}");
                 let members = tokio::time::timeout(
                     Duration::from_secs(2),
-                    fixture.state.membership.observe_source_admission_members(),
+                    fixture
+                        .state
+                        .cluster
+                        .test_membership()
+                        .observe_source_admission_members(),
                 )
                 .await;
                 panic!("actual Source resource {resource} h2={h2} refused: {status}; body={}; retained={retained:?}; current_member_floor={:?}",

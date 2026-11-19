@@ -31,11 +31,17 @@
 //! manager's, and code outside this crate's `src/` — plurx-core,
 //! plurx-cluster-check, `tests/` and `benches/` are not read.
 //!
-//! [`REACH_AROUNDS`] pins every file's count exactly: a file that gains a site
-//! fails, a file that loses one fails until its entry is lowered, and a file
-//! with no entry must have none. [`CEILING`] is the table's sum and holds no
-//! headroom; `tests/operations/test_cluster_facade_ratchet.py` fails a change
-//! that raises it.
+//! Spellings are classified by what the sources declare ([`Declarations`]): a
+//! field spelling counts unless every declaration of that name has a proven
+//! type, a raw type counts through `use … as` and `type` aliases, a crate
+//! enum's same-named variant is not the raw type, and a role or roster name
+//! counts while plurx-core exposes the manager's inherent method of that
+//! name.
+//!
+//! [`REACH_AROUNDS`] is empty and [`CEILING`] is 0 (slice 7d): the census is a
+//! ban. Any site in any production file fails, naming its file and class.
+//! `tests/operations/test_cluster_facade_ratchet.py` fails a change that
+//! raises the ceiling.
 //!
 //! It is a source census: it counts spellings, not calls or cost.
 
@@ -289,41 +295,10 @@ const EXEMPT: &[(&str, &str)] = &[
 /// numbers moved, slice by slice, is recorded in
 /// `docs/cluster/CLUSTER-FACADE-BUILD.md` §10.
 #[rustfmt::skip]
-const REACH_AROUNDS: &[(&str, &str, usize)] = &[
-    ("clock_offset.rs", "membership", 13),
-    ("clock_offset.rs", "type", 2),
-    ("desktop_control.rs", "membership", 2),
-    ("desktop_control.rs", "replication", 4),
-    ("dv_runtime.rs", "membership", 1),
-    ("http/cluster_operations.rs", "membership", 42),
-    ("http/cluster_operations.rs", "serving", 4),
-    ("http/hls/relay.rs", "membership", 1),
-    ("http/hls/relay.rs", "manager", 1),
-    ("http/live_tv.rs", "membership", 1),
-    ("http/live_tv.rs", "manager", 1),
-    ("http/stream.rs", "serving", 1),
-    ("http/system.rs", "replication", 1),
-    ("live_tv.rs", "serving", 13),
-    ("live_tv/dvr.rs", "serving", 12),
-    ("live_tv/resource.rs", "serving", 3),
-    ("main.rs", "membership", 14),
-    ("main.rs", "replication", 4),
-    ("main.rs", "serving", 3),
-    ("main.rs", "type", 5),
-    ("main.rs", "manager", 8),
-    ("pgs_overlay.rs", "manager", 1),
-    ("sharing.rs", "serving", 3),
-    ("state.rs", "membership", 2),
-    ("state.rs", "replication", 2),
-    ("state.rs", "serving", 1),
-    ("state.rs", "type", 6),
-    ("state.rs", "manager", 1),
-    ("subtitles.rs", "manager", 2),
-    ("waitpool.rs", "serving", 4),
-];
+const REACH_AROUNDS: &[(&str, &str, usize)] = &[];
 
 /// The sum of [`REACH_AROUNDS`]; it may only fall.
-const CEILING: usize = 158;
+const CEILING: usize = 0;
 
 fn exempt(rel: &str) -> bool {
     EXEMPT.iter().any(|(path, _)| rel == *path)

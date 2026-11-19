@@ -803,14 +803,9 @@ pub struct AppState {
     /// (playback-start E1). E1a builds and observes it; no call site reads
     /// through it yet.
     pub applied: plurx_core::store::AppliedView,
-    /// Read-only projection of the selected backend's watch-state convergence.
-    pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
-    /// Monotonic, Store-free authority for mutable media and readiness.
-    pub(crate) serving: crate::serving_fence::ServingFence,
-    /// Join/add/remove lifecycle and privacy-safe per-node health.
-    pub membership: plurx_core::cluster::membership::MembershipManager,
-    /// The cluster facade (`crate::cluster`): authority, role and peers.
-    /// Feature code asks it; the three raw handles above stay until slice 7.
+    /// The cluster facade (`crate::cluster`): authority, role and peers. It
+    /// alone owns the fence, the membership manager and the replication
+    /// monitor; feature code asks it.
     pub(crate) cluster: crate::cluster::Cluster,
     /// Shared complete observation owner. Pending startup hands this exact
     /// handle to normal HTTP; a second loop cannot claim its receiver.
@@ -1151,8 +1146,7 @@ impl AppState {
                 // data directory to resolve it from, so nothing sealed under
                 // it is expected to outlive the process.
                 credential_key: Arc::new(CredentialKey::generate()),
-                replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
-                membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+                cluster_parts: crate::cluster::ClusterParts::standalone(),
                 cluster_id: String::new(),
                 shared_cache_dir: PathBuf::new(),
                 shared_cache_id: String::new(),
@@ -1191,8 +1185,7 @@ impl AppState {
             trusted_proxies,
             scan_prune_percent,
             credential_key,
-            replication,
-            membership,
+            cluster_parts,
             cluster_id,
             shared_cache_dir,
             shared_cache_id,
@@ -1206,13 +1199,9 @@ impl AppState {
         crate::source_custody::configure_settlement_journal(&data_dir);
         let copy_observation_dir = (!data_dir.as_os_str().is_empty())
             .then(|| data_dir.join("copy-ranges").join("observations"));
-        let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
-        let cluster = crate::cluster::Cluster::new(
-            serving.clone(),
-            membership.clone(),
-            replication.clone(),
-            applied.applied_mark(),
-        );
+        let cluster = crate::cluster::Cluster::compose(cluster_parts, applied.applied_mark());
+        let node_hostname = cluster.own_hostname();
+        let clock_observer = crate::clock_offset::ClockObserver::new(cluster.operations().clock());
         let Dirs {
             artwork: artwork_dir,
             transcode: transcode_dir,
@@ -1424,16 +1413,13 @@ impl AppState {
             trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
             applied,
-            replication,
             peer_activity,
             peer_status_cache: Default::default(),
             membership_status_cache: Default::default(),
-            serving,
-            clock_observer: crate::clock_offset::ClockObserver::new(membership.clone()),
+            clock_observer,
             copy_analysis,
             copy_observation_dir,
-            node_hostname: membership.local_hostname(),
-            membership,
+            node_hostname,
             cluster,
             media_pool,
             media_sessions,
@@ -1488,6 +1474,19 @@ impl AppState {
         }
     }
 
+    /// Point this state at another replication monitor, and the cluster
+    /// facade with it.
+    #[cfg(test)]
+    pub(crate) fn replace_replication(
+        &mut self,
+        replication: plurx_core::cluster::migration::status::ReplicationMonitor,
+    ) {
+        self.cluster = self
+            .cluster
+            .with_replication(replication, self.applied.applied_mark());
+        self.live_tv_peers = self.cluster.calls();
+    }
+
     /// Point this state at another membership manager, and the cluster
     /// facade with it, so a fixture can never leave the two disagreeing.
     #[cfg(test)]
@@ -1495,14 +1494,10 @@ impl AppState {
         &mut self,
         membership: plurx_core::cluster::membership::MembershipManager,
     ) {
-        self.cluster = crate::cluster::Cluster::new(
-            self.serving.clone(),
-            membership.clone(),
-            self.replication.clone(),
-            self.applied.applied_mark(),
-        );
+        self.cluster = self
+            .cluster
+            .with_membership(membership, self.applied.applied_mark());
         self.live_tv_peers = self.cluster.calls();
-        self.membership = membership;
     }
 
     /// Refresh all Store-backed Prometheus gauges as one complete sample.
@@ -1648,9 +1643,9 @@ pub struct AppConfig {
     /// verifies. Resolved by `open_store` so a boot that cannot open the
     /// existing Trakt rows fails before any subsystem starts.
     pub credential_key: Arc<CredentialKey>,
-    /// Actual backend selected before HTTP starts; tests default to SQLite.
-    pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
-    pub membership: plurx_core::cluster::membership::MembershipManager,
+    /// Actual backend's cluster handles, selected before HTTP starts and
+    /// composed into the facade; tests default to SQLite.
+    pub cluster_parts: crate::cluster::ClusterParts,
     pub cluster_id: String,
     pub shared_cache_dir: PathBuf,
     pub shared_cache_id: String,

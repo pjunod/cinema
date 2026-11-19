@@ -135,13 +135,15 @@ async fn k06_clock_only_socket_denies_application_and_transfers_existing_keepali
         tokio::net::TcpListener::bind(address).await.is_err(),
         "the same listener stays reserved before startup consumes it"
     );
-    owner
-        .start(
+    crate::cluster::StartupClock::start(
+        &*owner,
+        crate::cluster::startup_clock(
             plurx_core::cluster::membership::MembershipManager::unavailable(),
-            "pending-node".into(),
-        )
-        .await
-        .expect("pending socket");
+        ),
+        "pending-node".into(),
+    )
+    .await
+    .expect("pending socket");
     assert!(
         tokio::net::TcpListener::bind(address).await.is_err(),
         "pending phase owns the one bound socket"
@@ -220,13 +222,15 @@ async fn pending_socket_answers_starting_not_not_found() {
         tokio::net::TcpListener::bind(address).await.is_err(),
         "the same listener stays reserved before startup consumes it"
     );
-    owner
-        .start(
+    crate::cluster::StartupClock::start(
+        &*owner,
+        crate::cluster::startup_clock(
             plurx_core::cluster::membership::MembershipManager::unavailable(),
-            "pending-node".into(),
-        )
-        .await
-        .expect("pending socket");
+        ),
+        "pending-node".into(),
+    )
+    .await
+    .expect("pending socket");
     let app = owner.router.read().expect("router").clone();
     for path in ["/api/v1/server", "/healthz", "/web/index.html"] {
         let response = tower::ServiceExt::oneshot(
@@ -359,7 +363,7 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
         observed: Arc<AtomicBool>,
         origin: String,
     }
-    impl StartupClockObserver for AuditObserver {
+    impl plurx_core::cluster::migration::StartupClockObserver for AuditObserver {
         fn start(
             &self,
             membership: MembershipManager,
@@ -385,7 +389,12 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
                     !roster.voters.contains(&self.raft_id),
                     "desired voter must still be a committed learner at observation entry"
                 );
-                self.owner.start(membership, node_id.clone()).await?;
+                crate::cluster::StartupClock::start(
+                    &*self.owner,
+                    crate::cluster::startup_clock(membership),
+                    node_id.clone(),
+                )
+                .await?;
                 let response = crate::cluster::test_calls(self.source.clone())
                     .clock_request(&node_id, &self.origin)
                     .await
@@ -409,9 +418,12 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
             .expect("SQLite source"),
     );
     let source_owner = Arc::new(StartupObservationHttp::new(source_config.server.bind));
-    let source = select_daemon_store_observing(&source_config, Some(source_owner.as_ref()))
-        .await
-        .expect("source activation");
+    let source = select_daemon_store_observing(
+        &source_config,
+        Some(&crate::cluster::StartupClockAdapter(source_owner.as_ref())),
+    )
+    .await
+    .expect("source activation");
     let manager = source.membership_manager();
     let clock = axum::Router::new()
         .route(
@@ -2556,8 +2568,7 @@ fn booted_state(dir: &std::path::Path) -> AppState {
         "test-cluster".to_owned(),
         Arc::new(plurx_core::secrets::CredentialKey::generate()),
         None,
-        plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
-        plurx_core::cluster::membership::MembershipManager::unavailable(),
+        crate::cluster::ClusterParts::standalone(),
         catalogue,
         applied,
         store,
@@ -2599,8 +2610,10 @@ async fn https_prepared_socket_is_released_when_later_http_boot_binding_fails() 
             store: handle.store,
             catalogue,
             applied,
-            replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
-            membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+            cluster_parts: crate::cluster::ClusterParts::from_handles(
+                plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
+                plurx_core::cluster::membership::MembershipManager::unavailable(),
+            ),
             identity: handle.identity,
             credential_key: handle.credential_key,
             backup_source: None,
@@ -2651,13 +2664,15 @@ async fn https_and_http_share_full_router_auth_and_both_startup_owners_drain() {
         let observer = if observed {
             drop(plain_socket.take());
             let owner = Arc::new(StartupObservationHttp::new(plain_address));
-            owner
-                .start(
+            crate::cluster::StartupClock::start(
+                &*owner,
+                crate::cluster::startup_clock(
                     plurx_core::cluster::membership::MembershipManager::unavailable(),
-                    "pending-node".into(),
-                )
-                .await
-                .expect("pending owner");
+                ),
+                "pending-node".into(),
+            )
+            .await
+            .expect("pending owner");
             let pending = reqwest::Client::builder()
                 .no_proxy()
                 .build()
@@ -3466,8 +3481,10 @@ async fn boot_serve_and_drain_in_runtime(
             store: handle.store,
             catalogue,
             applied,
-            replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
-            membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+            cluster_parts: crate::cluster::ClusterParts::from_handles(
+                plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
+                plurx_core::cluster::membership::MembershipManager::unavailable(),
+            ),
             identity: handle.identity,
             credential_key: handle.credential_key,
             backup_source: None,
@@ -4994,7 +5011,7 @@ fn explicit_bind_advertises_only_that_address() {
 fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
     let source = include_str!("main.rs");
     assert_eq!(
-        source.matches(".handoff_for_shutdown()").count(),
+        source.matches(".hand_off_leadership_for_stop()").count(),
         1,
         "the daemon has exactly one stop-time handoff call"
     );
@@ -5010,7 +5027,7 @@ fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
         .find("\n        }\n")
         .expect("the signal/leave select ends the future's first statement");
     let handoff = future
-        .find("operations_shutdown.handoff_for_shutdown().await;")
+        .find("operations_shutdown.hand_off_leadership_for_stop().await;")
         .expect("the shutdown future hands leadership off");
     let first_await = future[select_end..]
         .find(".await")
@@ -5018,7 +5035,7 @@ fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
         .expect("the drain awaits");
     assert_eq!(
         first_await,
-        handoff + "operations_shutdown.handoff_for_shutdown()".len(),
+        handoff + "operations_shutdown.hand_off_leadership_for_stop()".len(),
         "the handoff is the drain's first await"
     );
     for later in [
@@ -5045,7 +5062,7 @@ fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
     // The facade's two drain delegates reach the original mechanisms.
     let facade: String = include_str!("cluster.rs").split_whitespace().collect();
     let handoff = facade
-        .split_once("pub(crate)asyncfnhandoff_for_shutdown(")
+        .split_once("pub(crate)asyncfnhand_off_leadership_for_stop(")
         .expect("the facade's stop-time handoff")
         .1
         .split_once("pub(crate)")

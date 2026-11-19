@@ -2628,7 +2628,11 @@ async fn build_real_source_start_fixture(
         )
     });
     let mut selected = if let Some(clock) = &startup_clock {
-        Box::pin(select_daemon_store_observing(&config, Some(clock.as_ref()))).await
+        Box::pin(select_daemon_store_observing(
+            &config,
+            Some(&crate::cluster::StartupClockAdapter(clock.as_ref())),
+        ))
+        .await
     } else {
         crate::sharing_fixture_clock::select_applied_singleton(&config).await
     }
@@ -2656,13 +2660,13 @@ async fn build_real_source_start_fixture(
             .await
             .expect("actual startup clock observer")
     } else {
-        crate::clock_offset::ClockObserver::new(state_mut.membership.clone())
+        crate::clock_offset::ClockObserver::new(state_mut.cluster.operations().clock())
     };
     state_mut.node_id = selected.identity.node_id.clone();
     state_mut.catalogue = selected.catalogue_reader();
-    state_mut.replication = selected.replication_monitor();
+    state_mut.replace_replication(selected.replication_monitor());
     state_mut.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
-        state_mut.membership.clone(),
+        state_mut.cluster.test_membership().clone(),
         Arc::clone(&state_mut.store),
     );
     state_mut.sharing = Arc::new(crate::sharing::SharingManager::new(
@@ -2672,17 +2676,20 @@ async fn build_real_source_start_fixture(
     ));
     state_mut.node_id = selected.identity.node_id.clone();
     state_mut
-        .membership
+        .cluster
+        .test_membership()
         .set_ingress_custody_boot(Some(state_mut.sharing.accepted_drivers.boot_id()));
     state_mut
-        .membership
+        .cluster
+        .test_membership()
         .publish_ingress_custody_boot()
         .await
         .expect("actual registry boot publication before admission");
 
     let replication_owner =
-        SourceFixtureMembershipOwner::start_replication(state.replication.clone());
-    let membership_owner = SourceFixtureMembershipOwner::start(state.membership.clone());
+        SourceFixtureMembershipOwner::start_replication(state.cluster.test_replication().clone());
+    let membership_owner =
+        SourceFixtureMembershipOwner::start(state.cluster.test_membership().clone());
     let store = Arc::clone(&state.store);
     store
         .put_setting(keys::SW_POOL_THREADS, "4")
