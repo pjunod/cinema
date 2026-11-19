@@ -6087,10 +6087,9 @@ switches nothing.
 
 ### Processed Dolby Vision as an upgrade after the first frame
 
-A create never renders or verifies processed Dolby Vision / HDR10-E before it
-answers: it resolves the ordinary plan, and a declined upgrade (setting off, no
-`hvc1` HLS fMP4, burned subtitles, the continuous route) is named on the
-start's enhancement details. When it applies, the session's owner waits for the
+Create answers with ordinary playback before any processed Dolby Vision /
+HDR10-E trial. Declines (setting off, no `hvc1` HLS fMP4, burned subtitles or
+continuous route) appear in the enhancement details. The owner then waits for the
 first frame (`ttff`, or an accepted rendering control exchange of the session's
 generation), then runs one bounded trial (8 s) in its one processed-preparation
 slot, verifying its window at the viewer's position (the latest accepted

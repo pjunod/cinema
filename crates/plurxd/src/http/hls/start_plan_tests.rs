@@ -496,6 +496,7 @@ async fn the_create_catalog_answers_from_the_create_plan_and_reads_nothing() {
 /// attempt is over; a worker spawned inside the attempt never carries it.
 #[tokio::test]
 async fn a_captured_plan_does_not_outlive_its_attempt() {
+    crate::http::hls::tests::prepare_catalog_test_encoder().await;
     let (state, file) = catalog_node().await;
     let plan = ingress_plan(&state.applied, file)
         .await
@@ -533,7 +534,11 @@ async fn a_captured_plan_does_not_outlive_its_attempt() {
             (during, in_worker, after)
         })
         .await;
-    assert!(during.complete, "inside the attempt: the plan's catalog");
+    assert!(
+        during.complete,
+        "inside the attempt: the plan's catalog: {:?}",
+        during.causes
+    );
     assert_eq!(
         in_worker.causes,
         vec![crate::media_pool::CatalogCause::StaleSource],
