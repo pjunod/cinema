@@ -1,8 +1,8 @@
 # Server-side Dolby Vision FEL splice
 
-**Status:** open. The lab replay passed in native Safari. The server
-packager is in local qualification. Live publication, promotion and
-deployed Safari acceptance are pending. · **Updated:** 2026-11-19 ·
+**Status:** open. Native Safari passed the real-media lab replay.
+The packager landed on the effort branch. Live publication is in
+qualification. Main promotion and deployed Safari acceptance are pending. · **Updated:** 2026-11-19 ·
 **Owner:** Codex.
 
 Keep the ordinary Dolby Vision Profile 8.1 conversion playing while
@@ -36,8 +36,9 @@ about whether the title and renderer can produce the enhanced interval.
 
 1. Freeze an eligible native session's split rendition layout before
    exposing its master. Prove the video and audio configuration and
-   their first complete playable window. Continue ordinary playback
-   when split admission declines.
+   their first complete playable window. Reserve scratch for the original
+   copy and the projected tracks before offering the split layout.
+   Continue ordinary playback when split admission declines.
 2. Bind the ordinary output clock to the same demuxed packet actually
    fed into the copy mux. The renderer hashes every framed base-layer
    VCL NAL of an accepted source picture. The publisher compares the
@@ -56,9 +57,9 @@ about whether the title and renderer can produce the enhanced interval.
    target media sequence and source identity still match. The
    publication snapshot exposes whole, contiguous rendition windows.
    A missed boundary keeps playing ordinary video.
-5. Publish FEL delivery evidence with the committed video boundary.
-   Playback Info uses that evidence when the viewer reaches the
-   boundary. Keep the preparation and frame-exposure guards on the
+5. Collect processing evidence from every FEL subwindow and publish it
+   after the selected video object is delivered. Playback Info uses that
+   evidence when the viewer reaches its boundary. Keep the preparation and frame-exposure guards on the
    existing player-replacement path.
 
 ## Implementation and acceptance

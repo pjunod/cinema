@@ -2157,11 +2157,27 @@ impl TranscodeManager {
             .bitrate
             .filter(|rate| *rate > 0)
             .map(|rate| rate as f64);
-        let scratch_envelope = rolling_scratch_envelope(copy_bitrate, 1.0);
-        let scratch_reservation = self.reserve_rolling_scratch_with(
-            RollingScratchSizing::Startup(rolling_startup_bytes(copy_bitrate, 1.0)),
-            self.ahead_limits_for_start(&settings),
-        )?;
+        let limits = self.ahead_limits_for_start(&settings);
+        let startup_bytes = rolling_startup_bytes(copy_bitrate, 1.0);
+        // Keep the original mux and both role objects alive through their
+        // ordinary grace. Reserve startup for both copies before exposing the
+        // alternate layout so it cannot spend the incumbent's startup grant.
+        let split_startup_bytes = startup_bytes.saturating_mul(2);
+        let split_sizing = RollingScratchSizing::Startup(split_startup_bytes);
+        let split_reservation =
+            (native_split && segmenting && split_sizing.grant_bytes(limits) >= split_startup_bytes)
+                .then(|| self.reserve_rolling_scratch_with(split_sizing, limits))
+                .and_then(Result::ok);
+        let native_split = split_reservation.is_some();
+        let scratch_reservation = match split_reservation {
+            Some(reservation) => reservation,
+            None => self.reserve_rolling_scratch_with(
+                RollingScratchSizing::Startup(startup_bytes),
+                limits,
+            )?,
+        };
+        let scratch_envelope = rolling_scratch_envelope(copy_bitrate, 1.0)
+            .saturating_mul(if native_split { 2 } else { 1 });
 
         let session_id = takeover
             .as_ref()
