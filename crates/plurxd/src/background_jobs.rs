@@ -3747,14 +3747,12 @@ pub(crate) mod tests {
             )
             .await
             .expect("stale fence"));
-        // `settle` samples its own request time after this fixture builds the
-        // yield. Keep the due time safely after that second wall-clock read.
-        let yield_not_before_ms = unix_ms().expect("clock").saturating_add(5_000);
         assert!(fence
             .settle(JobSettlement::Yield {
                 error_code: Some("foreground_preempted".into()),
                 checkpoint: Some(serde_json::json!({"staging_node_id":"node-a"})),
-                not_before_ms: yield_not_before_ms
+                // Settlement samples its own clock after taking the fence lock.
+                not_before_ms: token.lease_expires_ms,
             })
             .await
             .expect("yield"));

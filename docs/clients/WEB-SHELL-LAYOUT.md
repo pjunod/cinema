@@ -199,10 +199,10 @@ had to be edited.
 | 67 | [`pages/settings-developer.js`](../../crates/plurxd/src/web/pages/settings-developer.js) | Experimental Developer cards, adaptive Auto enablement, `developerPanel`, the `devGraduation` line each card prints, and shared advisory readiness helpers. | 19343–19799 |
 | 68 | [`pages/settings-live-tv.js`](../../crates/plurxd/src/web/pages/settings-live-tv.js) | `LIVE_TV_GUIDE_DRAFT`, guide, tuner, recording and library-channel cards, `liveTvPanel`. | 19800–20020 |
 | 69 | [`pages/settings-system.js`](../../crates/plurxd/src/web/pages/settings-system.js) | The users panel, build/storage/replication facts, `systemPanel`. | 20021–20238 |
-| 70 | [`pages/cluster.js`](../../crates/plurxd/src/web/pages/cluster.js) | Cluster membership: the node cards and what each one is claiming. | 20239–20557 |
-| 71 | [`pages/cluster-operations.js`](../../crates/plurxd/src/web/pages/cluster-operations.js) | The operations rail and its preconditions. | 20558–20762 |
-| 72 | [`pages/cluster-database.js`](../../crates/plurxd/src/web/pages/cluster-database.js) | The replicated database ledger, and remembering what is folded. | 20763–20859 |
-| 73 | [`pages/cluster-troubleshooting.js`](../../crates/plurxd/src/web/pages/cluster-troubleshooting.js) | Cluster troubleshooting: what is wrong, and the one thing to try. | 20860–21468 |
+| 70 | [`pages/cluster.js`](../../crates/plurxd/src/web/pages/cluster.js) | Cluster page state and repaint helpers, the nodes table and per-node drawers, the recovery and maintenance alerts, the settings list and the Backup card. | 20239–20557 |
+| 71 | [`pages/cluster-operations.js`](../../crates/plurxd/src/web/pages/cluster-operations.js) | The Maintenance card, the expansion toggle, restart preparation, the status refresh and the support bundle. | 20558–20762 |
+| 72 | [`pages/cluster-database.js`](../../crates/plurxd/src/web/pages/cluster-database.js) | The replicated database ledger card. | 20763–20859 |
+| 73 | [`pages/cluster-troubleshooting.js`](../../crates/plurxd/src/web/pages/cluster-troubleshooting.js) | The page assembler (header, status strip, alert slot, cluster log), the membership actions (join, leave, remove, promote, maintenance, election) and the settings tick. | 20860–21468 |
 | 74 | [`pages/settings-playback.js`](../../crates/plurxd/src/web/pages/settings-playback.js) | Playback defaults, recovery and protocol cards, the chapter-thumbnail and decoder cards that graduated from Developer, Trakt, and settings save handlers. | 21469–21740 |
 | 75 | [`pages/users-admin.js`](../../crates/plurxd/src/web/pages/users-admin.js) | The admin users route. Non-contiguous with `pages/settings-system.js`'s users panel. | 21741–21787 |
 | 76 | [`layouts/catalog.js`](../../crates/plurxd/src/web/layouts/catalog.js) | The catalog layout: sidebar, phone library sheet, chrome, Home, G2b item detail, and `LAYOUTS.catalog`. | 21788–22457 |

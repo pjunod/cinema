@@ -3143,3 +3143,7 @@ mod actor_adapter_tests;
 #[cfg(test)]
 #[path = "shared_source_forwarding_tests.rs"]
 mod actual_forwarding_tests;
+
+#[cfg(test)]
+#[path = "source_voter_fixture.rs"]
+pub(crate) mod source_voter_fixture;

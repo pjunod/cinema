@@ -262,20 +262,6 @@ async function remeasureStorage(btn){
     }
   }catch(e){ toast(e.message); btn.disabled=false; btn.textContent=was; }
 }
-// Watch-state durability in operator language. SQLite is deliberately not
-// labelled "synced": with no peer, there is nowhere for a pause to carry over
-// to. This returns text only so adding the status does not invent a second
-// Settings card or membership surface; M3 owns those controls.
-function replicationText(r){
-  if(!r) return "status unavailable";
-  const sqlite=r.backend==="sqlite";
-  const degraded=r.health==="degraded";
-  const label=sqlite?"SQLite single-node":degraded?"Replicated DEGRADED":r.clustered?"Replicated in sync":"Replicated one node";
-  const point=r.last_applied_index==null?"":` · applied term ${r.last_applied_term??"?"}, index ${r.last_applied_index}`;
-  const lag=r.behind_by?` · ${r.behind_by} change${r.behind_by===1?'':'s'} behind`:"";
-  const converged=r.last_converged_at?` · last observed in sync ${fmtAgo(r.last_converged_at)}`:"";
-  return esc(`${label}${point}${lag} — ${r.explanation||""}${converged}`);
-}
 function playbackSummaryCard(events){
   const rows=Array.isArray(events)?events:[];
   const starts={};
