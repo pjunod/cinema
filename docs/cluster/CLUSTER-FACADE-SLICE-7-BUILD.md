@@ -381,3 +381,131 @@ model execution. Added regressions distinguish standalone job/admission from
 fresh committed authority and cloned clock identity from independent sources.
 Focused execution, updated census/ownership checks and final intended-base
 review/gate/landing remain pending.
+
+## 7d contract: runtime ownership and a census that classifies by declaration
+
+**Owner:** Claude (effort `E-E154B131A2`). The plan comes before the code.
+Base: `effort/cluster-facade` with slices 4–7c (#1795). One task PR goes
+into the effort, with focused regressions, one whole-diff adversarial
+review and one exact-head Effort gate.
+
+### What the 199 remaining sites are
+
+The census counts spellings. A source inventory of every remaining site
+(2026-11-18) found that about 147 of the 199 are not raw handles.
+
+- **118 name collisions.** Data fields that happen to be called
+  `membership`, `serving` or `replication`:
+  - the cluster-operations rows (46);
+  - clock and desktop status (21);
+  - the wait pool, `dv_runtime`, `system`, and the CLI rows in `main.rs`;
+  - facade-fed `serving` authority fields in Live TV, DVR, resources,
+    sharing and stream (32);
+  - and nine enum variants named `ServingFence`.
+- **25 job-gate calls.** These call `may_run_cluster_jobs` through the typed
+  job capability, not through the manager.
+
+About 51 sites reach real raw handles:
+
+- **7 already covered.** `media_pool` and `media_sessions` raw calls that
+  have exact facade equivalents.
+- **About 44 with no facade equivalent yet:**
+  - background loop ownership: passive metrics, the fence monitor,
+    heartbeat, offline-source probe, and relay registration;
+  - boot-time ingress custody and purpose-key coordination;
+  - relay acquisition support;
+  - Live TV protocol readiness;
+  - the startup clock observer's input type;
+  - and `Boot`, `AppConfig`, `build_state` and `AppState` carrying the three
+    raw handles.
+
+Renaming the collision fields would make the number fall without proving
+anything. The acceptance contract forbids it, along with broad method
+exclusions and new file exemptions.
+
+### Census: classify by what the crate declares
+
+The census stays a `syn` source census. It changes what it may conclude
+from a name:
+
+1. **Declarations first.** Collect every struct field, tuple-struct field,
+   enum-variant field and `let` binding with an explicit type across the
+   crate's production `src/`. Do this for the three names and for any field
+   whose type names one of `TYPES`.
+2. **Field-name classes count only where a raw declaration exists.** An
+   access, pattern or shorthand named `membership`, `serving` or
+   `replication` counts if any non-exempt declaration of that name is
+   raw or unknown. Raw means its type names one of `TYPES`. Unknown means a
+   generic parameter, an alias, `impl Trait`, `dyn` or any type the census
+   cannot resolve. If every declaration of that name is a proven local or
+   standard type that names no raw type, the access is not counted.
+   - This is conservative: one raw field anywhere keeps every access with
+     that name counted.
+   - Private fields declared inside the exempt facade files are left out,
+     because the compiler rejects access to them from outside. A
+     compiler probe proves that.
+3. **Raw types are counted wherever they are named.** That covers fields of
+   any name, parameters, return types (raw-returning accessors), `use`
+   imports, and `use … as` aliases. The alias is new: today the census
+   cannot see one.
+   - A path segment counts as the raw type only when it does not resolve to
+     a crate enum's variant of the same name.
+   - Unknown receivers and unresolvable paths remain counted.
+4. **Method classes** (ROLE, ROSTER, manager) stay name-based. A name that
+   collides with an unrelated local method is resolved by moving the caller
+   to a facade method with its own name, not by excluding the name.
+   - The job-gate sites switch to the facade `Jobs` capability.
+   - `Operations::handoff_for_shutdown` becomes a facade name that is not
+     a manager name.
+5. **Negative controls become fixtures.** The census tests must still fail
+   for each of these:
+   - a renamed raw field;
+   - a `use … as` alias of a raw type;
+   - a raw clone through a local binding;
+   - a shorthand field and a destructuring pattern;
+   - a split line;
+   - a macro body;
+   - an accessor that returns a raw type;
+   - a generic-typed `membership` field;
+   - a new file.
+
+   They must also pass for a proven-local DTO field named `membership`.
+
+### Runtime ownership
+
+- **One `Cluster` through startup.** `Boot`, `AppConfig`, `build_state` and
+  `new_configured` carry one `Cluster` (`Cluster::new` at the existing
+  composition point, after store selection) instead of the raw
+  `ReplicationMonitor` and `MembershipManager`. The fence is still built from
+  the replication metrics handle inside that composition. There is no
+  raw-parts getter, `Deref` or callback.
+- **Remove the three raw fields.** `AppState.replication`, `.serving` and
+  `.membership` are deleted, not made private copies.
+- **New narrow capabilities.** Each one delegates the original call:
+  - `Cluster::spawn_owned_loops(shutdown)` starts passive metrics, the fence
+    monitor, heartbeat, the offline-source probe and relay registration,
+    with the same tasks and the same order as `spawn_background_loops`;
+  - a sharing boot capability for ingress-custody publication and
+    purpose-key coordination;
+  - relay acquisition support;
+  - Live TV protocol pending nodes;
+  - the node hostname.
+- **Clock observer.** `ClockObserver` and `StartupClockObserver` take the
+  facade's existing clock source (`ClockOperations`), not the manager.
+- **Test hooks.** Test-only hooks live on the facade under `#[cfg(test)]`:
+  readiness set, planned-outage hold, fence subscribe, membership replacement
+  and replication replacement. Tests that string-assert "no
+  `state.membership`" keep asserting it.
+
+### Done when
+
+- `REACH_AROUNDS` is empty and `CEILING` is 0, with the classification above.
+- Every negative control fails as intended, and the local-DTO control passes.
+- Sibling-module compiler probes reject direct raw `AppState` access, and
+  access to private facade fields.
+- C2 and C7 order, clock startup, admission, learner job decisions, custody
+  proofs, backup sequencing and settings-change proofs keep their regressions.
+- The formal item pins are re-recorded only after the item bodies are
+  reviewed.
+
+No fleet claim is made here. Deploying stays with Paul.
