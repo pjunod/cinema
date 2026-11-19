@@ -270,7 +270,7 @@ final class MeridianTests: XCTestCase {
         XCTAssertFalse(tabs.isTabBarHidden)
         XCTAssertEqual(tabs.sidebar.isHidden, nativeSidebarHidden,
             "Standard preserves the native adaptive sidebar choice for this device and geometry")
-        XCTAssertEqual((tabs.viewControllers ?? []).compactMap { $0.tabBarItem.title }, HomeTab.viewerTabs.map(\.title))
+        XCTAssertEqual(tabs.tabs.filter { !$0.isHidden }.map(\.title), HomeTab.viewerTabs.map(\.title))
         XCTAssertEqual(tabs.view.frame, try XCTUnwrap(tabs.view.superview).bounds)
         XCTAssertEqual(tabs.view.convert(tabs.view.bounds, to: hosting.view).width, hosting.view.bounds.width,
             accuracy: 0.5, "Standard must not reserve Meridian's sidebar width")
@@ -317,8 +317,8 @@ final class MeridianTests: XCTestCase {
         tabs.sidebar.isHidden = true
         model.features.recordings = false
         settle()
-        XCTAssertFalse((tabs.viewControllers ?? []).contains { $0.tabBarItem.title == HomeTab.recordings.title })
-        XCTAssertEqual(tabs.selectedViewController?.tabBarItem.title, HomeTab.settings.title)
+        XCTAssertFalse(tabs.tabs.contains { !$0.isHidden && $0.title == HomeTab.recordings.title })
+        XCTAssertEqual(tabs.selectedTab?.title, HomeTab.settings.title)
     }
 
     private func findAttentionBadge(_ view: UIView) -> UILabel? {
