@@ -30,7 +30,7 @@ same problem.
 | 3 | Create plan | — | Card removed. |
 | 4 | Processed DV upgrade | — | Card removed. |
 | 5 | Diagnostic ZIP reports | — | Card removed. Reporting stays in Help and the player. |
-| 6 | Playback restart recovery | `/developer/source-recovery` | Readout moves to Cluster → Troubleshooting, collapsed. |
+| 6 | Playback restart recovery | `/developer/source-recovery` | Readout moves to Settings → System, collapsed (rev 2: the Cluster page is being rebuilt by another session, and System also exists on a standalone server). |
 | 7 | Adaptive Auto quality | `playback_auto_abr` | Always on. Switch removed. |
 | 8 | Fit Auto to display | `playback_display_aware_auto` | Always on. Switch removed. |
 | 9 | Network priors | `playback_network_priors` | Always on (part of Auto). Switch removed. |

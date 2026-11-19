@@ -1064,7 +1064,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Throws on failure; the caller decides how small the notice is. */
     suspend fun retainHlsOutputOff(sessionId: String) {
-        api().retainHlsOutput(sessionId, RetainOutputReq())
+        api().retainHlsOutput(sessionId, RetainOutputReq(retain_output = false))
     }
 
     /**

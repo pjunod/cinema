@@ -861,18 +861,17 @@ final class LiveTvTests: XCTestCase {
     /// without a "Leaves Developer" line.
     func testPlaybackOwnsTheGraduatedPauseAndHandoffSwitches() throws {
         let settings = try Self.appleSource("SettingsView.swift")
-        // One definition of the rows: under Playback on iPhone and iPad, under
-        // Advanced (the Developer category) on Apple TV.
+        // One definition of the rows, under Playback on every platform
+        // (Developer retired 2026-11-18).
         let rows = try XCTUnwrap(settings.components(separatedBy: "@ViewBuilder private var playbackEngineeringRows: some View {").last)
             .components(separatedBy: "\n    }\n")[0]
         XCTAssertTrue(rows.contains("Toggle(\"Bounded pause/resume\", isOn: $boundedResumeEnabled)"))
         XCTAssertTrue(rows.contains("Toggle(\"Prepared quality handoff\", isOn: $preparedHandoffEnabled)"))
         XCTAssertTrue(rows.contains("{ PlaybackHandoffDetailsView() }"))
         let playback = try XCTUnwrap(settings.components(separatedBy: "Text(\"Playback\")").first)
-        XCTAssertTrue(playback.contains("#if !os(tvOS)\n                playbackEngineeringRows\n                #endif"))
-        let advanced = try XCTUnwrap(settings.components(separatedBy: "Text(TVSettingsCategory.developer.title)").first)
-            .components(separatedBy: "Section {").last ?? ""
-        XCTAssertTrue(advanced.contains("playbackEngineeringRows"))
+        XCTAssertTrue(playback.contains("                playbackEngineeringRows\n"))
+        XCTAssertFalse(playback.contains("#if !os(tvOS)\n                playbackEngineeringRows"))
+        XCTAssertFalse(settings.contains("TVSettingsCategory.developer"))
         XCTAssertEqual(settings.components(separatedBy: "@AppStorage(\"plurx.boundedResume\") private var boundedResumeEnabled = true").count - 1, 2)
         XCTAssertEqual(settings.components(separatedBy: "@AppStorage(\"plurx.preparedHandoff\") private var preparedHandoffEnabled = true").count - 1, 2)
         let details = try XCTUnwrap(settings.components(separatedBy: "struct PlaybackHandoffDetailsView: View {").last)

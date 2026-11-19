@@ -1131,7 +1131,9 @@ data class SessionOverrides(val retain_output: Boolean? = null)
 
 /** Body for `POST hls/{session}/retain-output`; off-only. */
 @Serializable
-data class RetainOutputReq(val retain_output: Boolean = false)
+// No default: the shared Json omits default values, and the server requires
+// the field, so `{}` would be refused.
+data class RetainOutputReq(val retain_output: Boolean)
 
 @Serializable
 @OptIn(ExperimentalSerializationApi::class)

@@ -12,12 +12,12 @@ const SET_GROUPS=[
 ];
 const SET_TABS=SET_GROUPS.flatMap(([,tabs])=>tabs);
 // Cards that left Developer on 2026-11-18. An old #/settings/developer/<anchor>
-// link lands on the section that now holds the card.
+// link opens the tab that now holds the card (at the card where its id survives).
 const DEVELOPER_MOVED={"cinema-sharing-settings":"sharing","jellyfin-compatibility-settings":"integrations",
   "enable-dolby-vision-processing":"playback","enable-display-target-hdr10":"playback","enable-output-preparation":"playback",
   "enable-vod-reorder":"playback","enable-auto-quality":"playback","enable-display-auto":"playback","enable-content-encoding":"playback",
   "enable-sdr-codecs":"playback","enable-indexing-while-serving":"analysis","enable-applied-view":"cluster","create-plan":"playback",
-  "settings-https":"system","settings-source-recovery":"system","cinema-remote":"remotes"};
+  "settings-https":"system","settings-source-recovery":"system"};
 // Every section is a route: #/settings/<section>. The bare #/settings (and
 // the older #/admin) land on the last section this browser visited, so the
 // address bar names the section and the back button walks between them.
