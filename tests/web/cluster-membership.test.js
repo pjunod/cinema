@@ -4031,7 +4031,7 @@ test("a manual refresh holds a success if force election opens after the request
   });
   const harness = new Function(
     "document", "loadSettingsKey", "settingsCurrent", "repaintClusterPreserving",
-    "clusterOperationsCard", "clusterOperationsUnavailable", "esc",
+    "clusterOperationsUnavailable", "esc",
     "clusterRepaintDeferred", "patchClusterReadingAge", "initialOps", "loaded", "record",
     `let PAGE_RENDER_GENERATION=1;
      let SETTINGS_DATA={clusterOps:initialOps};
@@ -4048,7 +4048,6 @@ test("a manual refresh holds a success if force election opens after the request
     },
     () => true,
     (paint) => paint(),
-    () => "collecting",
     (message) => `UNAVAILABLE:${message}`,
     (value) => value,
     () => dialogOpen,
@@ -4094,7 +4093,7 @@ test("a failed manual refresh ages transport unless force election opens after r
     });
     const refresh = new Function(
       "document", "loadSettingsKey", "settingsCurrent", "repaintClusterPreserving",
-      "clusterOperationsCard", "clusterOperationsUnavailable", "esc", "record",
+      "clusterOperationsUnavailable", "esc", "record",
       "PlurxClusterPanel", "performance", "initialOps", "clusterRepaintDeferred",
       "patchClusterReadingAge",
       `let PAGE_RENDER_GENERATION=1;
@@ -4116,7 +4115,6 @@ test("a failed manual refresh ages transport unless force election opens after r
       },
       () => true,
       (paint) => paint(),
-      () => "collecting",
       (message) => `UNAVAILABLE:${message}`,
       (value) => value,
       (code) => painted.push(code),
