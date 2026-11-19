@@ -10711,6 +10711,46 @@ final class AppleClientTests: XCTestCase {
         ])
     }
 
+    /// The capsule row became one quiet line carrying exactly the same facts,
+    /// and a resumable title says how much is left in plain words.
+    func testTVPlayableFactLineKeepsEveryBadgeFactOnOneLine() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let item = try decoder.decode(
+            Item.self,
+            from: Data(#"{"id":7,"kind":"episode","title":"Fray","year":2026,"season_number":4,"episode_number":2,"runtime_ms":3245000}"#.utf8)
+        )
+        let file = try decoder.decode(
+            MediaFile.self,
+            from: Data(#"{"id":11,"duration_ms":3245000,"container":"mkv","video_codec":"hevc","height":2160}"#.utf8)
+        )
+        let badges = DetailView.tvPlayableBadges(item, file: file, durationMs: file.durationMs)
+        XCTAssertEqual(
+            DetailView.tvPlayableFactLine(item, file: file, durationMs: file.durationMs),
+            badges.map(\.accessibilityLabel).joined(separator: " · ")
+        )
+        XCTAssertEqual(
+            DetailView.tvPlayableFactLine(item, file: file, durationMs: file.durationMs),
+            "Season 4, Episode 2 · 54 min · 4K · HEVC"
+        )
+        XCTAssertEqual(
+            DetailView.tvTimeLeftLabel(positionMs: 3_720_000, durationMs: 8_040_000),
+            "1 hr 12 min left"
+        )
+
+        // A single-track, single-file title has no Audio button, so its
+        // audio format must still be on the page: the fact line carries it.
+        var oneTrack = file
+        oneTrack.audioStreams = [
+            AudioTrack(index: 0, codec: "eac3", channels: 6, language: "eng", title: nil, default: true)
+        ]
+        XCTAssertTrue(
+            DetailView.tvPlayableFactLine(item, file: oneTrack, durationMs: oneTrack.durationMs)
+                .contains("Dolby Digital Plus"),
+            DetailView.tvPlayableFactLine(item, file: oneTrack, durationMs: oneTrack.durationMs)
+        )
+    }
+
     func testTVActionButtonsRemainReadableWithAndWithoutFocus() {
         for prominent in [false, true] {
             for focused in [false, true] {
@@ -12508,6 +12548,33 @@ final class AppleClientTests: XCTestCase {
         )
         XCTAssertEqual(TrackFacts.subtitleSummary(offByDefault, chosen: nil), "Off")
         XCTAssertEqual(TrackFacts.subtitleSummary(offByDefault, chosen: 0), "French · SubRip")
+    }
+
+    /// The Audio and Subtitles buttons say their current value on one short
+    /// line; the full row stays in the panel and in VoiceOver.
+    func testTrackButtonValuesAreShortAndFollowTheChoice() {
+        let file = Self.trackFactsFile(
+            audio: [
+                AudioTrack(index: 0, codec: "eac3", channels: 6, language: "jpn", title: nil, default: true),
+                AudioTrack(index: 1, codec: "aac", channels: nil, language: "eng", title: nil, default: false),
+            ],
+            subtitles: [
+                SubtitleStream(
+                    index: 0, codec: "subrip", language: "eng", title: nil,
+                    default: true, forced: false, hearingImpaired: true
+                ),
+            ],
+            audioDefaultIndex: 0,
+            subtitleDefaultIndex: 0
+        )
+        XCTAssertEqual(TrackFacts.audioButtonValue(file, chosen: nil), "Japanese 5.1")
+        XCTAssertEqual(TrackFacts.audioButtonValue(file, chosen: 1), "English AAC")
+        XCTAssertEqual(TrackFacts.subtitleButtonValue(file, chosen: nil), "English SDH")
+        XCTAssertEqual(TrackFacts.subtitleButtonValue(file, chosen: PrePlaySelection.subtitleOff), "Off")
+        XCTAssertEqual(TrackFacts.buttonValue("Short"), "Short")
+        let long = TrackFacts.buttonValue("Untagged Dolby Digital Plus Commentary")
+        XCTAssertLessThanOrEqual(long.count, 22)
+        XCTAssertTrue(long.hasSuffix("…"))
     }
 
     /// The shared fixture's track facts decode through the production models,
