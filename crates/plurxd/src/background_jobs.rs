@@ -3753,7 +3753,8 @@ pub(crate) mod tests {
             .settle(JobSettlement::Yield {
                 error_code: Some("foreground_preempted".into()),
                 checkpoint: Some(serde_json::json!({"staging_node_id":"node-a"})),
-                not_before_ms: unix_ms().expect("clock")
+                // Settlement samples its own clock after taking the fence lock.
+                not_before_ms: token.lease_expires_ms,
             })
             .await
             .expect("yield"));
