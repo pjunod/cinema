@@ -343,3 +343,13 @@ fn publication_reconciliation_excludes_only_the_exact_newly_fenced_owner() {
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].owner_epoch, successor.owner_epoch);
 }
+
+#[test]
+fn a_late_renewal_receipt_keeps_its_original_expiry_and_fences_after_it() {
+    let dispatched = 1_000;
+    let fixed_expiry = dispatched + LEASE_TTL_MS;
+    assert!(renewal_receipt_is_live(dispatched, dispatched + 4_000));
+    assert!(renewal_receipt_is_live(dispatched, fixed_expiry - 1));
+    assert!(!renewal_receipt_is_live(dispatched, fixed_expiry));
+    assert!(!renewal_receipt_is_live(dispatched, fixed_expiry + 1));
+}

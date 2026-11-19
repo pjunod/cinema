@@ -6126,7 +6126,9 @@ pub(crate) async fn lease_loop(state: AppState) {
                 Some(Ok(renewed)) => {
                     let renewed = renewed.into_iter().collect::<HashSet<_>>();
                     for route in &chunk {
-                        if renewed.contains(&route.incarnation_id) {
+                        if renewed.contains(&route.incarnation_id)
+                            && renewal_receipt_is_live(renewal_now_ms, unix_ms())
+                        {
                             known.insert(
                                 route.incarnation_id.clone(),
                                 (
@@ -7801,6 +7803,12 @@ fn renewal_has_full_runway(
 ) -> bool {
     tokio::time::Instant::now() < cycle_deadline
         && lease_expires_at_ms > now_ms.saturating_add(LEASE_RENEWAL_MIN_REMAINING_MS)
+}
+
+/// An acknowledgement can be polled late without moving the expiry that
+/// was proposed at dispatch. A receipt past that fixed boundary fences now.
+fn renewal_receipt_is_live(dispatched_at_ms: i64, received_at_ms: i64) -> bool {
+    dispatched_at_ms.saturating_add(LEASE_TTL_MS) > received_at_ms
 }
 
 fn renewal_chunks<T>(items: &[T]) -> impl Iterator<Item = &[T]> {

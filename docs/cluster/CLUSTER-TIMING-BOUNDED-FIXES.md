@@ -75,3 +75,8 @@ pins renewal/fencing before optional work and unchanged Store eligibility.
 Root runs the exact combined daemon build and these cases with the original
 confirmation, late-ACK, exact-owner and unconfirmed-route controls. No new
 compile or runtime pass is claimed by this source delivery alone.
+
+A renewal ACK retains the expiry proposed at dispatch, even if a stalled
+runtime polls it late. Still-live ACKs remain valid; a receipt at or beyond
+the fixed expiry joins the exact-owner fence path immediately. Its boundary
+control tests before/at/after expiry without starting another lease.
