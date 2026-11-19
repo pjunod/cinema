@@ -1370,7 +1370,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # settlement is then awaited). The 5100 ms wait holds mode 25 paused before the
 # native spawn past five seconds, so the window must use fresh current authority.
 # None is shipped; none certifies settlement or retries anything.
-expected_occurrences = 91
+# PR #1802 relay review adds one 25 ms poll inside the 30s retained-copy test deadline.
+expected_occurrences = 92
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -1740,9 +1741,8 @@ pattern = "HlsPresentationResolution"
 # adds a worker; both retain the VOD response owner attached to those bytes.
 # S10 public wire: +1 read-only match on the actual public session context;
 # no mocked presentation or new response authority.
-# Architecture close-out (#814): +1 test-only match —
-# sdr_master_codecs_is_frozen_when_the_session_is_created reads the created
-# session's ready context; no new owner.
+# Architecture close-out (#814) added a test-only match that the Developer
+# tab cleanup (2026-11-18) removed with SDR master CODECS: -1.
 # Processed Dolby Vision signaling (#1257): +1 test-only match in
 # processed_profile81_master_declares_hdr10_compatibility reads the admitted
 # session's ready context; no new response owner or worker.
@@ -1750,7 +1750,7 @@ pattern = "HlsPresentationResolution"
 # transcode/manager/processed_reuse_tests.rs:1955, assert_admitted_delivery.
 # It reads the admitted successor's frozen HLS context before/after replay;
 # the existing VOD response owner remains authoritative. No worker is added.
-expected_occurrences = 27
+expected_occurrences = 26
 
 [[module_symbols]]
 id = "m4-executor-registration"
@@ -2355,7 +2355,8 @@ pattern = "publication_ready_at_ms"
 # builds one blocked and one publishable media-session row to prove an idle
 # lease tick takes no inventory and an owned row still does. Test-only; no
 # fence is advanced or cleared.
-expected_occurrences = 171
+# PR #1802 owner-mismatch tests build one blocked route and one ready route.
+expected_occurrences = 173
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -2429,7 +2430,8 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # behind the blocked sentinel, as every activation must. Test-only.
 # 60 -> 61 with #1629: the same lease_inventory_tests.rs fixture seeds one
 # row with the blocked sentinel. Test-only.
-expected_occurrences = 61
+# PR #1802 owner-mismatch coverage uses the blocked sentinel in its test fixture.
+expected_occurrences = 62
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -4100,7 +4102,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Shared: both sides carried the Twilight/reader source (title-lane scheduling and reader
 # reclamation), so main's figure already counts admission.rs +1 and source_probe/title_work_tests.rs +4.
 # Union 1153 + 15 (F+) + 13 (main) = 1181, less those 5 counted twice = 1176.
-expected_occurrences = 1181
+# The scanner deadline fixture owns a task so it can observe the actual probe child.
+expected_occurrences = 1182
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -6066,8 +6069,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # source_probe/title_work_tests.rs +8 and transcode/manager/construct.rs +1 (the bounded
 # production qualification-admission timeout, QUEUE_WAIT in admit_dv_title).
 # Union 2212 + 20 + 39 = 2271, less those 11 counted twice = 2260.
+# Developer tab cleanup (2026-11-18): -4 test timers. Network priors are
+# always on, so the priors-off client-log barriers and their timeouts in
+# link_receipts tests are gone; no production timer changed. Main 2266 - 4 = 2262.
+# PR #1802 adds a timeout and a 25 ms poll to the retained-copy reuse test.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 2271
+# Main adds bounded artwork, offline worker, voter and heartbeat fixture waits.
+# The scanner deadline fixture bounds cleanup after advancing the test clock.
+expected_occurrences = 2270
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -7346,8 +7355,14 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Prepared delivery (#1736/#1752) contributes main's additional test-only
 # `.vod.status()` snapshot observation. It launches no child and transfers no
 # ownership. Preserve both reviewed contributions: main 937 + F+ 5 = 942.
+# Developer tab cleanup (2026-11-18): +3 net lexical `.status(` matches in
+# the retain-output route tests (HTTP response status reads); no process.
+# Main 945 + 3 = 948.
+# PR #1802 adds two relay response status reads and five route-test status reads.
+# All seven matches inspect HTTP replies and launch no processes.
+# Removing the retired parser-floor refusal drops one HTTP status read.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 946
+expected_occurrences = 955
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

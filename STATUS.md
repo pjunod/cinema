@@ -6,6 +6,7 @@
 - **2026-11-19 · MPV live opening delay:** Codex. ROG baseline seek passed. Patched Play and seek measurements are pending. [Ledger](docs/streaming/MPV-LIVE-STARTUP.md).
 - **2026-11-19 · Dolby Vision F+ curve fit (FEL RPU re-fit):** Owner Claude (claude-opus-5-5, from Codex 2026-11-18). Milestones 1–6 landed as #1565 (`8630ee431`) through `scripts/land` with the train off; all 50 Regression-Test lines carried. The nearest-Q12 production RPU passes all 48 native points and controls, and the full lane passed on `f8a7f5ab3`. The landed main merge ran preflight only (`Landed-Untested`, by Paul's order), so the combined tree has no lane run. Not deployed; physical playback and milestone 7 re-encode trials remain. [Ledger](docs/streaming/FEL-RPU-REFIT-BUILD.md).
 - **2026-11-18 · Settings → Cluster rebuilt:** owner Claude, branch `claude/cluster-settings-layout`. Status strip, alert slot, nodes table with per-node drawers, one settings list with advisory readiness chips, ledger, Maintenance, Backup, log; no folds or tabs. PR #1798. ([operator docs](docs/OPERATIONS.md))
+- **2026-11-18 · Developer tab cleanup:** Owner Claude (claude-opus-5-5); [PR #1802](http://forge.lan:3000/noirr/plurx/pulls/1802), [plan](docs/reviews/PLAN-developer-tab-cleanup-2026-11-18.md). Developer keeps three in-development switches; the rest moved, became always on or went.
 - **2026-11-16 · Native prepared forward rendezvous:** owner GPT. New Moon's
   native seeks trailed 90–97 ms; buffered forward aim+existing hold preserves the guard.
   Astra review and 103 focused tests pass; Safari acceptance, seam and deadline
@@ -90,16 +91,14 @@ B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; sim
   deployment paths. Focused fixture validation is recorded in its PR; real
   desktop/engine acceptance and custom Pi ownership migration remain open.
 
-## macOS source installation and the missing tray
-
-**Source correction built; PR review pending.** The first tray promotion packaged the companion for release archives but left `make install-macos` on the daemon-only path. Source installation now stages a complete native runtime and companion before migration; the explicit server-only path retains legacy prefix installs. [Desktop controls](docs/server/DESKTOP-CONTROL.md) explains installation, opening the app and separate login preferences. The focused controller/migration and installer regressions pass; independent PR review remains pending.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19, 2026-10-26, 2026-11-07, 2026-11-15 and 2026-11-18 into the status history of their subject folder. One row per section, newest first.
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19, 2026-10-26, 2026-11-07, 2026-11-15, 2026-11-18 and 2026-11-19 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| Undated | Native server tray, startup policy and release upgrades | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
+| Undated | macOS source installation and the missing tray | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
 | Undated | Playback startup path: the per-read stall and the web scrim | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-11 | Startup and tone-map: fewer create-path reads, a tone-map census, lab arms | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-10 | HDR tone-map on Apple Silicon runs on the GPU, held to CPU parity | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |

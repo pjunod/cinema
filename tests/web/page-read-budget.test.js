@@ -875,11 +875,12 @@ test("Settings loads only the active tab manifest", () => {
     analysis: { required: ["settings", "analysis"], secondary: ["developerReadiness"] },
     maintenance: { required: ["settings", "dvConversions"], secondary: ["developerReadiness"] },
     users: { required: ["settings", "users"], secondary: [] },
-    system: { required: ["sys"], secondary: [] },
+    system: { required: ["sys"], secondary: ["https", "sourceRecovery"] },
     cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness", "settings"] },
-    sharing: { required: ["sharingStatus", "sharingImports", "sharingExports"], secondary: [] },
-    integrations: { required: ["settings", "trakt"], secondary: [] },
-    developer: { required: ["settings"], secondary: ["developerReadiness", "https", "sourceRecovery"] },
+    sharing: { required: ["settings", "sharingStatus", "sharingImports", "sharingExports"], secondary: ["developerReadiness"] },
+    integrations: { required: ["settings", "trakt"], secondary: ["developerReadiness"] },
+    remotes: { required: ["settings"], secondary: ["developerReadiness"] },
+    developer: { required: ["settings"], secondary: ["developerReadiness"] },
   });
   const view = shippedSource("viewSettings");
   assert.doesNotMatch(view, /Promise\.all\(\[\s*api/,
@@ -1702,15 +1703,16 @@ test("Settings executes exact required and secondary waves for every tab", async
     analysis:{required:["/settings","/analysis/summary"],secondary:["/developer/readiness"]},
     maintenance:{required:["/settings","/dv-conversions"],secondary:["/developer/readiness"]},
     users:{required:["/settings","/users"],secondary:[]},
-    system:{required:["/system"],secondary:[]},
+    system:{required:["/system"],secondary:["/system/https","/developer/source-recovery"]},
     // The cluster settings cards fill their own mount when /settings lands; the
     // health board never waits for it.
     cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","/developer/readiness","/settings","cluster-log"]},
-    integrations:{required:["/settings","/trakt/status"],secondary:[]},
+    integrations:{required:["/settings","/trakt/status"],secondary:["/developer/readiness"]},
+    remotes:{required:["/settings"],secondary:["/developer/readiness"]},
     // The switches paint from the settings snapshot; the advisory prerequisite
     // readings arrive behind them because one of them asks membership for the
     // local applied roster.
-    developer:{required:["/settings"],secondary:["/developer/readiness","/system/https","/developer/source-recovery"]},
+    developer:{required:["/settings"],secondary:["/developer/readiness"]},
     standalone:{tab:"cluster",clustered:false,required:[],secondary:[]},
     sqlite:{tab:"cluster",legacy:true,roster:{unavailable:true,code:"membership_unavailable"},required:["/cluster/nodes"],secondary:[]},
   };
