@@ -1,6 +1,6 @@
 # Peer catalogue snapshots
 
-**Status:** ready to build · **Executes:** B6 of the
+**Status:** open; implementation prepared, qualification pending · **Executes:** B6 of the
 [cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md) · **Written:** 2026-11-19
 
 The [facade contract](CLUSTER-FACADE-BUILD.md) owns the directory and peer
@@ -69,7 +69,9 @@ integration. The active facade promotion remains independently owned.
 
 ## 5. Validation ledger
 
-Implementation, focused execution, final review and qualification are pending.
+The bounded cache and three focused scope/refusal/expiry regressions are
+implemented. Pinned rustfmt and diff checks pass; execution, final review and
+qualification remain pending.
 The source-only compiler slot is available; its exact-base daemon check reports
 only the existing two `state.rs` Linux-runtime type errors. Linux or a qualified
 platform repair is required before a green daemon result can be recorded.

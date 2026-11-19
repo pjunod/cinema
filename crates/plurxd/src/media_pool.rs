@@ -43,6 +43,7 @@ const MAX_SNAPSHOT_BYTES: usize = 64 * 1024;
 const MAX_OFFER_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_PEERS: usize = 64;
+const MAX_CATALOGUE_SNAPSHOTS: usize = 64;
 const MAX_CAPABILITIES: usize = 16;
 const MAX_CAPABILITY_BYTES: usize = 64;
 const MAX_TRACK_INDEX: i64 = 1_024;
@@ -972,6 +973,98 @@ struct CachedSnapshot {
     expires_at: tokio::time::Instant,
 }
 
+/// Descriptions only: no execution context, token or admission proof is held.
+struct CachedCatalogue {
+    result: QualityCatalogResult,
+    expires_at: tokio::time::Instant,
+    inserted_at: tokio::time::Instant,
+}
+
+#[derive(Default)]
+struct CatalogueSnapshots {
+    entries: BTreeMap<[u8; 32], CachedCatalogue>,
+}
+
+impl CatalogueSnapshots {
+    fn get(&mut self, key: &[u8; 32], now: tokio::time::Instant) -> Option<QualityCatalogResult> {
+        self.entries.retain(|_, row| now < row.expires_at);
+        self.entries.get(key).map(|row| row.result.clone())
+    }
+
+    fn insert(
+        &mut self,
+        key: [u8; 32],
+        expires_at: tokio::time::Instant,
+        binding: &PlanningBinding,
+        result: &QualityCatalogResult,
+        now: tokio::time::Instant,
+    ) {
+        // Never turn an incomplete/refused/legacy answer into a reusable fact.
+        if now >= expires_at
+            || !result.complete
+            || result.authority_refused
+            || !result.causes.is_empty()
+            || result.candidates.len() > 32
+            || result.candidates.iter().any(|row| {
+                row.partial
+                    || row.binding.as_ref() != Some(binding)
+                    || !row.candidate.identity_matches()
+            })
+        {
+            return;
+        }
+        if !serde_json::to_vec(result).is_ok_and(|bytes| bytes.len() <= MAX_OFFER_BYTES) {
+            return;
+        }
+        self.entries.retain(|_, row| now < row.expires_at);
+        if !self.entries.contains_key(&key) && self.entries.len() >= MAX_CATALOGUE_SNAPSHOTS {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, row)| row.inserted_at)
+                .map(|(key, _)| *key)
+                .expect("a full catalogue cache has an oldest entry");
+            self.entries.remove(&oldest);
+        }
+        self.entries.insert(
+            key,
+            CachedCatalogue {
+                result: result.clone(),
+                expires_at,
+                inserted_at: now,
+            },
+        );
+    }
+}
+
+/// Scope from the current roster and a still-fresh actual advertisement.
+/// The selected owner reconstructs its exact recipe before execution.
+fn catalogue_snapshot_scope(
+    request: &QualityCatalogRequest,
+    binding: &PlanningBinding,
+    peer: &ActivityPeer,
+    snapshot: &CachedSnapshot,
+    now: tokio::time::Instant,
+) -> Option<([u8; 32], tokio::time::Instant)> {
+    if !peer.reachable
+        || peer.http_base.is_none()
+        || peer.node_id != snapshot.snapshot.node_id
+        || snapshot.snapshot.protocol_version != PROTOCOL_VERSION
+        || now >= snapshot.expires_at
+    {
+        return None;
+    }
+    let scope = serde_json::to_vec(&(
+        request,
+        binding,
+        &peer.node_id,
+        &peer.http_base,
+        &snapshot.snapshot,
+    ))
+    .ok()?;
+    Some((Sha256::digest(scope).into(), snapshot.expires_at))
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RootReadability {
     readable: bool,
@@ -996,6 +1089,7 @@ pub(crate) struct MediaPool {
     directory: crate::cluster::Directory,
     transport: PeerTransport,
     snapshots: Arc<RwLock<BTreeMap<String, CachedSnapshot>>>,
+    catalogues: Arc<Mutex<CatalogueSnapshots>>,
     root_readability: Arc<RwLock<BTreeMap<PathBuf, RootReadability>>>,
     root_probes: Arc<Mutex<RootProbeRegistry>>,
     root_probe_launcher: Arc<tokio::sync::Semaphore>,
@@ -1085,6 +1179,7 @@ impl MediaPool {
             transport,
             directory,
             snapshots: Arc::new(RwLock::new(BTreeMap::new())),
+            catalogues: Arc::new(Mutex::new(CatalogueSnapshots::default())),
             root_readability: Arc::new(RwLock::new(BTreeMap::new())),
             root_probes: Arc::new(Mutex::new(RootProbeRegistry::default())),
             root_probe_launcher: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -1670,6 +1765,29 @@ impl MediaPool {
                             let Some(base) = peer.http_base.as_deref() else {
                                 return QualityCatalogResult::unavailable(CatalogCause::Transport);
                             };
+                            let observed_at = tokio::time::Instant::now();
+                            if observed_at >= deadline {
+                                return QualityCatalogResult::unavailable(CatalogCause::PeerDeadline);
+                            }
+                            let scope = {
+                                let snapshots = self.snapshots.read().await;
+                                expected_binding.as_ref().and_then(|binding| {
+                                    snapshots.get(&peer.node_id).and_then(|snapshot| {
+                                        catalogue_snapshot_scope(
+                                            &request, binding, &peer, snapshot, observed_at,
+                                        )
+                                    })
+                                })
+                            };
+                            if let Some((key, _)) = scope {
+                                let cached = self.catalogues
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .get(&key, observed_at);
+                                if let Some(result) = cached {
+                                    return result;
+                                }
+                            }
                             // Clock independent duration: subtract both transit reserves before
                             // signing, and never restart the parent deadline on fallback.
                             let budget_ms = deadline
@@ -1685,7 +1803,7 @@ impl MediaPool {
                             let Ok(body) = serde_json::to_vec(&BudgetedCatalogRequest {
                                 budget_ms,
                                 request: request.clone(),
-                                expected_binding,
+                                expected_binding: expected_binding.clone(),
                             }) else {
                                 return QualityCatalogResult::unavailable(
                                     CatalogCause::PeerProtocol,
@@ -1808,6 +1926,20 @@ impl MediaPool {
                                 return QualityCatalogResult::unavailable(
                                     CatalogCause::PeerProtocol,
                                 );
+                            }
+                            if let (false, Some((key, snapshot_expiry)), Some(binding)) =
+                                (legacy, scope, expected_binding.as_ref())
+                            {
+                                    self.catalogues
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .insert(
+                                            key,
+                                            snapshot_expiry.min(observed_at + SNAPSHOT_INTERVAL),
+                                            binding,
+                                            &outcome,
+                                            tokio::time::Instant::now(),
+                                        );
                             }
                             outcome
                         }
@@ -2811,6 +2943,210 @@ mod tests {
     use super::*;
     use plurx_core::domain::{AudioStream, SubtitleStream};
     use tokio::sync::mpsc;
+
+    fn catalogue_request() -> QualityCatalogRequest {
+        QualityCatalogRequest {
+            audio_claim: None,
+            audio_delivery: None,
+            copy_contract: None,
+            file_id: 1,
+            source_size: 10,
+            source_mtime: 1,
+            caps: serde_json::from_value(serde_json::json!({
+                "v": 2, "video": [{"codec": "h264", "present": ["sdr"]}]
+            }))
+            .expect("bounded client caps"),
+            audio_index: Some(1),
+            audio_offset_ms: 0,
+            subtitle_burn: None,
+            presentation: crate::transcode::Presentation::Vod,
+        }
+    }
+
+    fn catalogue_answer(binding: &PlanningBinding) -> QualityCatalogResult {
+        use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+        let recipe_digest = [7; 32];
+        QualityCatalogResult {
+            complete: true,
+            authority_refused: false,
+            causes: Vec::new(),
+            candidates: vec![WorkerQualityCandidate {
+                node_id: "worker".into(),
+                binding: Some(binding.clone()),
+                partial: false,
+                dispatch_supported: true,
+                candidate: QualityCandidate {
+                    id: CandidateId::for_recipe_digest(recipe_digest),
+                    recipe_digest,
+                    route: CandidateRoute::Remux,
+                    planned_codec: None,
+                    processed_dv: false,
+                    normalized_geometry: true,
+                    width: 1280,
+                    height: 720,
+                    target_height: 720,
+                    average_bps: Some(1000),
+                    peak_bps: None,
+                    grade: plurx_core::transcode::OutputGrade::Sdr,
+                    decoder_compatible: true,
+                    complete_cache: false,
+                    sustainable: true,
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn catalogue_snapshots_never_cross_request_source_endpoint_or_advertisement_scope() {
+        let now = tokio::time::Instant::now();
+        let request = catalogue_request();
+        let binding = PlanningBinding {
+            generation: 1,
+            source_digest: "a".repeat(64),
+        };
+        let peer = ActivityPeer {
+            node_id: "worker".into(),
+            raft_id: 2,
+            http_base: Some("http://worker:9080".into()),
+            reachable: true,
+        };
+        let advertised = CachedSnapshot {
+            snapshot: snapshot("worker", &["h264"], 1080),
+            expires_at: now + SNAPSHOT_EXPIRY,
+        };
+        let scope = |query: &QualityCatalogRequest,
+                     binding: &PlanningBinding,
+                     peer: &ActivityPeer,
+                     advertised: &CachedSnapshot| {
+            catalogue_snapshot_scope(query, binding, peer, advertised, now).map(|s| s.0)
+        };
+        let original = scope(&request, &binding, &peer, &advertised).expect("current scope");
+        let mut variants = Vec::new();
+        let mut query = request.clone();
+        query.source_mtime += 1;
+        variants.push(query);
+        let mut query = request.clone();
+        query.audio_index = Some(2);
+        variants.push(query);
+        let mut query = request.clone();
+        query.audio_offset_ms = 10;
+        variants.push(query);
+        let mut query = request.clone();
+        query.subtitle_burn = Some(3);
+        variants.push(query);
+        let mut query = request.clone();
+        query.copy_contract = Some((true, false, false));
+        variants.push(query);
+        for query in variants {
+            assert_ne!(scope(&query, &binding, &peer, &advertised), Some(original));
+        }
+        let mut changed_binding = binding.clone();
+        changed_binding.generation += 1;
+        assert_ne!(
+            scope(&request, &changed_binding, &peer, &advertised),
+            Some(original)
+        );
+        let mut changed_binding = binding.clone();
+        changed_binding.source_digest = "b".repeat(64);
+        assert_ne!(
+            scope(&request, &changed_binding, &peer, &advertised),
+            Some(original)
+        );
+        let mut moved = peer.clone();
+        moved.http_base = Some("http://replacement:9080".into());
+        assert_ne!(
+            scope(&request, &binding, &moved, &advertised),
+            Some(original)
+        );
+        let mut replaced = advertised.clone();
+        replaced.snapshot.build = "replacement".into();
+        assert_ne!(scope(&request, &binding, &peer, &replaced), Some(original));
+        moved.reachable = false;
+        assert!(scope(&request, &binding, &moved, &advertised).is_none());
+        replaced.snapshot.protocol_version -= 1;
+        assert!(scope(&request, &binding, &peer, &replaced).is_none());
+        assert!(catalogue_snapshot_scope(
+            &request,
+            &binding,
+            &peer,
+            &advertised,
+            advertised.expires_at
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn catalogue_snapshots_refuse_partial_failed_unbound_and_changed_recipe_answers() {
+        let now = tokio::time::Instant::now();
+        let binding = PlanningBinding {
+            generation: 1,
+            source_digest: "a".repeat(64),
+        };
+        let good = catalogue_answer(&binding);
+        let mut invalid = Vec::new();
+        let mut row = good.clone();
+        row.complete = false;
+        invalid.push(row);
+        let mut row = good.clone();
+        row.authority_refused = true;
+        invalid.push(row);
+        let mut row = good.clone();
+        row.causes.push(CatalogCause::StaleSource);
+        invalid.push(row);
+        let mut row = good.clone();
+        row.candidates[0].partial = true;
+        invalid.push(row);
+        let mut row = good.clone();
+        row.candidates[0].binding = None;
+        invalid.push(row);
+        let mut row = good.clone();
+        row.candidates[0].binding.as_mut().unwrap().generation += 1;
+        invalid.push(row);
+        let mut row = good.clone();
+        row.candidates[0].candidate.recipe_digest = [8; 32];
+        invalid.push(row);
+        for answer in invalid {
+            let mut held = CatalogueSnapshots::default();
+            held.insert([1; 32], now + SNAPSHOT_INTERVAL, &binding, &answer, now);
+            assert!(held.get(&[1; 32], now).is_none());
+        }
+        let mut held = CatalogueSnapshots::default();
+        held.insert([1; 32], now + SNAPSHOT_INTERVAL, &binding, &good, now);
+        let answer = held.get(&[1; 32], now).expect("complete bound description");
+        assert_eq!(
+            answer.candidates[0].candidate.id,
+            good.candidates[0].candidate.id
+        );
+        assert_eq!(answer.candidates[0].binding, good.candidates[0].binding);
+        assert!(held.get(&[1; 32], now + SNAPSHOT_INTERVAL).is_none());
+    }
+
+    #[test]
+    fn catalogue_snapshot_storage_stays_bounded_and_never_renews_on_read() {
+        let now = tokio::time::Instant::now();
+        let binding = PlanningBinding {
+            generation: 1,
+            source_digest: "a".repeat(64),
+        };
+        let good = catalogue_answer(&binding);
+        let mut held = CatalogueSnapshots::default();
+        for index in 0..=MAX_CATALOGUE_SNAPSHOTS {
+            held.insert(
+                [index as u8; 32],
+                now + SNAPSHOT_INTERVAL,
+                &binding,
+                &good,
+                now + Duration::from_millis(index as u64),
+            );
+            assert!(held.entries.len() <= MAX_CATALOGUE_SNAPSHOTS);
+        }
+        assert!(held.get(&[0; 32], now).is_none());
+        let key = [MAX_CATALOGUE_SNAPSHOTS as u8; 32];
+        assert!(held
+            .get(&key, now + SNAPSHOT_INTERVAL - Duration::from_millis(1))
+            .is_some());
+        assert!(held.get(&key, now + SNAPSHOT_INTERVAL).is_none());
+    }
 
     #[tokio::test]
     async fn retained_receipt_receiver_requires_fresh_actual_peer_advertisement() {

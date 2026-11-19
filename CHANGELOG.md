@@ -55,6 +55,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Repeated quality discovery reuses complete peer catalogue descriptions for
+  the same source, client request, endpoint and fresh peer advertisement.
+  Refusals and partial answers remain uncached; selected-owner recipe and
+  admission checks still run before execution.
+
 - F+ publishes chroma MMR coefficients on the Q12 grid tested on the native path and
   qualifies their actual stored precision. The new fitting method reuses
   existing statistics; new sessions wait for its replacement table while
