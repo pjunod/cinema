@@ -827,7 +827,7 @@ impl TranscodeManager {
             {
                 return false;
             }
-            let fetched_segment = complete_object
+            let fetched_segment = (complete_object && !kind.starts_with("audio-"))
                 .then(|| object_name.and_then(segment_index))
                 .flatten();
             let fetched_end_ms = if let Some(index) = fetched_segment {
@@ -867,6 +867,18 @@ impl TranscodeManager {
                 .await
             {
                 return false;
+            }
+            if matches!(
+                kind,
+                "split-video-media-segment" | "split-video-segment-range"
+            ) {
+                if let Some((split, index)) = session
+                    .native_split
+                    .as_ref()
+                    .zip(fetched_segment.and_then(|index| u64::try_from(index).ok()))
+                {
+                    split.mark_fel_delivered(index, *producer_attempt);
+                }
             }
             if tokio::time::timeout_at(
                 tokio::time::Instant::from_std(deadline),
@@ -1739,6 +1751,406 @@ impl TranscodeManager {
     /// response stream, and opening it *here* closes the window where the
     /// retention sweep could unlink the path between resolving it and reading
     /// it: an unlinked file that is already open stays readable.
+    pub(crate) async fn native_split_active(&self, session_id: &str) -> bool {
+        self.sessions
+            .lock()
+            .await
+            .get(session_id)
+            .and_then(|session| session.native_split.as_ref())
+            .is_some_and(|inventory| inventory.active_ids().is_some())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn run_native_fel_splice(
+        &self,
+        session_id: &str,
+        incarnation_id: &str,
+        file: &plurx_core::domain::MediaFile,
+        root: &crate::vodserve::PreparedRootAdmission,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<bool, String> {
+        use crate::vodencode::dv_runtime::{VerifiedWindow, WindowOutcome};
+        use plurx_core::fmp4::{segment_name, FragmentReader, Unit};
+        let session = self
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or("native splice session ended")?;
+        let split = session
+            .native_split
+            .as_ref()
+            .filter(|split| split.active_ids().is_some())
+            .ok_or("native split layout is not active")?;
+        let permit = session
+            .scratch
+            .as_ref()
+            .ok_or("native splice has no scratch owner")?;
+        let attempt = session.control.current_producer_attempt();
+        let encoding = &root.encoding;
+        let runtime = encoding
+            .dv_runtime
+            .as_ref()
+            .ok_or("native splice has no FEL renderer")?;
+        if !encoding.preserves_processed_dv()
+            || encoding.processed_fel() != Some(true)
+            || !runtime.source.unchanged()
+        {
+            return Ok(false);
+        }
+        let input = tokio::fs::read(session.dir.join("init.mp4"))
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut reader = FragmentReader::new();
+        reader.push(&input);
+        let Some(Unit::Init(init)) = reader.next_unit().map_err(|err| err.to_string())? else {
+            return Err("native splice copy init missing".into());
+        };
+        let grants = || {
+            crate::copyseg::WriteGrants::new(
+                Arc::clone(permit.ledger()),
+                permit.key(),
+                Arc::clone(&self.scratch_cap),
+                session.scratch_envelope,
+            )
+        };
+        let source_request = self.foreground_source_request(
+            file,
+            "native-fel-splice",
+            uuid::Uuid::new_v4(),
+            plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling,
+        );
+        let mut had_commit = false;
+        let mut last_attempted = 0;
+        let mut last_committed: Option<u64> = None;
+        loop {
+            let changed = split.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if cancellation.is_cancelled()
+                || session.control.is_retired()
+                || session.failed.load(Relaxed)
+                || session.control.current_producer_attempt() != attempt
+                || !runtime.source.unchanged()
+            {
+                return Ok(had_commit);
+            }
+            let frontier = {
+                let clock = session.publication.lock().await;
+                let Some(snapshot) = clock
+                    .served
+                    .as_ref()
+                    .filter(|snapshot| snapshot.producer_attempt == attempt)
+                else {
+                    return Ok(had_commit);
+                };
+                if snapshot.end_list {
+                    return Ok(had_commit);
+                }
+                u64::try_from(snapshot.last_segment)
+                    .map_err(|_| "invalid native splice frontier")?
+            };
+            if last_committed.is_some_and(|index| frontier > index) {
+                last_committed = None;
+            }
+            let pending = split.candidates(frontier.max(last_attempted));
+            // Keep a proved ordinary successor in hand before changing the
+            // producer. Its exact open picture is checked independently.
+            let mut target = pending
+                .windows(2)
+                .rev()
+                .find(|pair| pair[0].0.checked_add(1) == Some(pair[1].0))
+                .map(|pair| pair[0]);
+            if let Some(index) = last_committed {
+                target = pending
+                    .windows(2)
+                    .find(|pair| {
+                        index.checked_add(1) == Some(pair[0].0)
+                            && pair[0].0.checked_add(1) == Some(pair[1].0)
+                    })
+                    .map(|pair| pair[0]);
+            }
+            let Some((index, entry)) = target else {
+                if session
+                    .published_producer_ended_before(
+                        attempt,
+                        Instant::now() + Duration::from_secs(1),
+                    )
+                    .await
+                    .is_some()
+                {
+                    return Ok(had_commit);
+                }
+                tokio::select! {
+                    () = cancellation.cancelled() => return Ok(had_commit),
+                    () = changed => continue,
+                    // Actor expiry or a closed writer can leave no future
+                    // inventory change. Recheck their lifecycle without
+                    // pinning a renderer permit to an abandoned session.
+                    () = tokio::time::sleep(Duration::from_secs(1)) => continue,
+                }
+            };
+            last_attempted = index;
+            let prepared = async {
+                use plurx_core::transcode::dv_processing::{
+                    DvDigest, DvProductionRegistry, DvSelection,
+                };
+                use sha2::Digest;
+                let raw = tokio::fs::read(session.dir.join(segment_name(index)))
+                    .await
+                    .map_err(|err| err.to_string())?;
+                let next_raw = tokio::fs::read(session.dir.join(segment_name(index + 1)))
+                    .await
+                    .map_err(|err| err.to_string())?;
+                let mut author = crate::copyseg::NativeSplitAuthor::new(init.clone())
+                    .map_err(|err| err.to_string())?;
+                let first_sequence = u32::try_from(index)
+                    .ok()
+                    .and_then(|i| i.checked_mul(256))
+                    .ok_or("native splice sequence overflow")?;
+                let mut segment = author
+                    .segment(&raw, first_sequence)
+                    .map_err(|err| err.to_string())?;
+                let next = author
+                    .segment(
+                        &next_raw,
+                        first_sequence
+                            .checked_add(256)
+                            .ok_or("native splice sequence overflow")?,
+                    )
+                    .map_err(|err| err.to_string())?;
+                if !author.video.admits_ordinary_return(&next.public_video)
+                    || segment.ordinary.tracks[0].sample_count() as u64 != entry.samples
+                {
+                    return Err("native splice has no verified ordinary return boundary".into());
+                }
+                segment.first_source_frame = entry.first_source_frame;
+                let entries = segment.fel_windows(encoding.grid)?;
+                let mut windows: Vec<VerifiedWindow> = Vec::with_capacity(entries.len());
+                for entry in &entries {
+                    let worker = root
+                        .permit
+                        .clone()
+                        .try_claim_worker()
+                        .ok_or("FEL worker is occupied")?;
+                    let input = crate::source_input::SourceInput::open_current_held(
+                        &runtime.source.handle,
+                        "native-fel",
+                    )
+                    .await?
+                    .ok_or("native splice has no original source custody")?;
+                    let outcome = runtime
+                        .execute_with_source_input(
+                            file,
+                            &encoding.plan,
+                            &encoding.options,
+                            encoding.grid,
+                            entry,
+                            &encoding.executable.path,
+                            crate::dv_segment::SegmentAdmission::Retained(worker),
+                            Arc::new(crate::prodrun::ProducerSlot::new()),
+                            cancellation.child_token(),
+                            None,
+                            input,
+                            None,
+                            None,
+                        )
+                        .await?;
+                    let WindowOutcome::Completed((window, decision)) = outcome else {
+                        return Err("native splice render cancelled".into());
+                    };
+                    match &encoding.dv_processing {
+                        plurx_core::transcode::dv_processing::DvSelection::Selected(frozen)
+                            if decision.semantic_digest() == frozen.semantic_digest() =>
+                        {
+                            windows.push(window)
+                        }
+                        _ => {
+                            return Err(
+                                "native splice changed the qualified rendering recipe".into()
+                            )
+                        }
+                    }
+                }
+                let bytes = segment.enhanced_video(&author, &windows, first_sequence)?;
+                let DvSelection::Selected(plan) = &encoding.dv_processing else {
+                    return Err("native splice has no verified processing plan".into());
+                };
+                let shape = DvDigest::new(hex::encode(sha2::Sha256::digest(&bytes)))
+                    .map_err(|err| err.to_string())?;
+                let mut reports = windows.iter().map(|window| {
+                    let mut receipt = window
+                        .receipt
+                        .clone()
+                        .ok_or("native splice has no verified processing receipt")?;
+                    receipt
+                        .bind_publication(incarnation_id, shape.clone())
+                        .map_err(|err| err.to_string())?;
+                    receipt
+                        .effective_report(&DvProductionRegistry, plan, incarnation_id, &shape)
+                        .map_err(|err| err.to_string())?
+                        .filter(|report| {
+                            report.profile81_reconstructed() && report.fel_contributed()
+                        })
+                        .ok_or_else(|| {
+                            "native splice did not produce a FEL delivery report".to_owned()
+                        })
+                });
+                let report = reports
+                    .next()
+                    .ok_or("native splice produced no windows")??;
+                for other in reports {
+                    if other? != report {
+                        return Err("native splice windows disagree on effective processing".into());
+                    }
+                }
+                Ok::<_, String>((bytes, report))
+            };
+            let (bytes, report) = match crate::source_custody::with_request(
+                source_request.clone(),
+                prepared,
+            )
+            .await
+            {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::debug!(target: "plurxd::http::hls", index, %error, "native FEL object declined");
+                    last_committed = None;
+                    continue;
+                }
+            };
+            let Some(_writer) = permit.ledger().register_writer(permit.key()) else {
+                return Ok(had_commit);
+            };
+            let object = format!("split-fel-{attempt}-{index}-{}.m4s", uuid::Uuid::new_v4());
+            let write = crate::copyseg::write_native_split_fel(
+                session.dir.clone(),
+                grants(),
+                &object,
+                &bytes,
+            )
+            .await;
+            if let Err(reason) = write {
+                let _ = tokio::fs::remove_file(session.dir.join(format!("{object}.tmp"))).await;
+                return Err(reason);
+            }
+            let transition = session.child_transition.lock().await;
+            let clock = session.publication.lock().await;
+            let eligible = !cancellation.is_cancelled()
+                && !session.replacing_child.load(Acquire)
+                && session.control.current_producer_attempt() == attempt
+                && !session.control.is_retired()
+                && runtime.source.unchanged()
+                && clock.served.as_ref().is_some_and(|snapshot| {
+                    snapshot.producer_attempt == attempt
+                        && u64::try_from(snapshot.last_segment).is_ok_and(|last| last < index)
+                });
+            let installed = eligible
+                && split.commit_fel(
+                    index,
+                    attempt,
+                    incarnation_id.to_owned(),
+                    &object,
+                    report,
+                    bytes.len() as i64,
+                );
+            drop(clock);
+            drop(transition);
+            if !installed {
+                let _ = tokio::fs::remove_file(session.dir.join(object)).await;
+                last_committed = None;
+                continue;
+            }
+            last_committed = Some(index);
+            had_commit = true;
+            tracing::info!(target: "plurxd::http::hls", session = %session_log_id(session_id), index,
+                "native FEL object sealed for rolling publication");
+        }
+    }
+
+    pub(crate) async fn native_split_master(
+        self: &Arc<Self>,
+        session_id: &str,
+        deadline: Instant,
+    ) -> Option<crate::copyseg::NativeSplitInitIds> {
+        let session = self.sessions.lock().await.get(session_id).cloned()?;
+        let split = session.native_split.as_ref()?;
+        if session.publication.lock().await.served.is_none() {
+            self.playlist_with_owner_before(session_id, deadline)
+                .await
+                .ok()?;
+        }
+        let published = session.publication.lock().await;
+        let range = published
+            .served
+            .as_ref()
+            .filter(|snapshot| {
+                snapshot.producer_attempt == session.control.current_producer_attempt()
+            })
+            .and_then(|snapshot| {
+                Some((
+                    u64::try_from(snapshot.first_segment).ok()?,
+                    u64::try_from(snapshot.last_segment).ok()?,
+                ))
+            });
+        split.choose(range)
+    }
+
+    pub(crate) async fn native_split_child_playlist(
+        &self,
+        session_id: &str,
+        role: &str,
+        rendition: &str,
+    ) -> Option<(Vec<u8>, MediaResponseOwner)> {
+        use std::fmt::Write as _;
+        let session = self.sessions.lock().await.get(session_id).cloned()?;
+        let split = session.native_split.as_ref()?;
+        if split.active_ids()?.for_role(role)? != rendition {
+            return None;
+        }
+        let snapshot = session.publication.lock().await.served.as_ref()?.clone();
+        if snapshot.producer_attempt != session.control.current_producer_attempt() {
+            return None;
+        }
+        let first = u64::try_from(snapshot.first_segment).ok()?;
+        let last = u64::try_from(snapshot.last_segment).ok()?;
+        let entries = split.window(first, last)?;
+        let legacy = std::str::from_utf8(&snapshot.raw).ok()?;
+        let target = legacy
+            .lines()
+            .find(|line| line.starts_with("#EXT-X-TARGETDURATION:"))?;
+        let video_durations: Vec<_> = legacy
+            .lines()
+            .filter(|line| line.starts_with("#EXTINF:"))
+            .collect();
+        if video_durations.len() != entries.len() {
+            return None;
+        }
+        let mut playlist = format!(
+            "#EXTM3U\n#EXT-X-VERSION:7\n{target}\n#EXT-X-MEDIA-SEQUENCE:{first}\n#EXT-X-MAP:URI=\"init/{rendition}.mp4\"\n",
+        );
+        for ((index, entry), video_duration) in (first..=last).zip(entries).zip(video_durations) {
+            if role == "audio" {
+                let seconds = entry.audio_ticks as f64 / 48_000.0;
+                let _ = writeln!(playlist, "#EXTINF:{seconds:.6},");
+            } else {
+                let _ = writeln!(playlist, "{video_duration}");
+            }
+            let _ = writeln!(playlist, "segment/{index}.m4s");
+        }
+        if snapshot.end_list {
+            playlist.push_str("#EXT-X-ENDLIST\n");
+        }
+        Some((
+            playlist.into_bytes(),
+            MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+                session,
+                producer_attempt: snapshot.producer_attempt,
+            }),
+        ))
+    }
+
     pub(crate) async fn segment_for_publication(
         self: &Arc<Self>,
         session_id: &str,
@@ -1754,10 +2166,34 @@ impl TranscodeManager {
         name: &str,
         deadline: Instant,
     ) -> Result<SegmentPublication, SegmentOpenError> {
-        // Guard against path traversal: segment names are `segNNNNN.ts` only.
-        if !is_safe_segment(name) {
-            return Ok(SegmentPublication::Missing(None));
-        }
+        self.segment_for_publication_role_before(session_id, name, None, deadline)
+            .await
+    }
+
+    pub(crate) async fn native_split_matches_child(
+        &self,
+        session_id: &str,
+        child: &crate::vodserve::ChildMediaRequest,
+        deadline: Instant,
+    ) -> Result<bool, SegmentOpenError> {
+        Ok(self
+            .resolve_segment_presentation(session_id, deadline)
+            .await?
+            .is_some_and(|(session, _, _)| {
+                session
+                    .native_split
+                    .as_ref()
+                    .and_then(|split| split.active_ids())
+                    .and_then(|ids| ids.for_role(&child.role))
+                    .is_some_and(|id| id == child.rendition)
+            }))
+    }
+
+    async fn resolve_segment_presentation(
+        &self,
+        session_id: &str,
+        deadline: Instant,
+    ) -> Result<Option<(Arc<Session>, bool, u64)>, SegmentOpenError> {
         let live_session = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             self.sessions.lock(),
@@ -1779,13 +2215,33 @@ impl TranscodeManager {
         } else {
             None
         };
-        let (session, retired_owner, resolved_attempt) = match (live_session, retired) {
+        let owner = match (live_session, retired) {
             (Some(session), _) => {
                 let attempt = session.control.current_producer_attempt();
-                (session, false, attempt)
+                Some((session, false, attempt))
             }
-            (None, Some(retired)) => (retired.session, true, retired.producer_attempt),
-            (None, None) => return Ok(SegmentPublication::Missing(None)),
+            (None, Some(retired)) => Some((retired.session, true, retired.producer_attempt)),
+            (None, None) => None,
+        };
+        Ok(owner)
+    }
+
+    pub(crate) async fn segment_for_publication_role_before(
+        self: &Arc<Self>,
+        session_id: &str,
+        name: &str,
+        child: Option<&crate::vodserve::ChildMediaRequest>,
+        deadline: Instant,
+    ) -> Result<SegmentPublication, SegmentOpenError> {
+        // Guard against path traversal: segment names are `segNNNNN.ts` only.
+        if !is_safe_segment(name) {
+            return Ok(SegmentPublication::Missing(None));
+        }
+        let Some((session, retired_owner, resolved_attempt)) = self
+            .resolve_segment_presentation(session_id, deadline)
+            .await?
+        else {
+            return Ok(SegmentPublication::Missing(None));
         };
         // Negative classifications must carry the attempt that was current
         // when this lookup began. If fallback crosses any later await, HTTP's
@@ -1805,8 +2261,35 @@ impl TranscodeManager {
         if !retired_owner && session.control.is_retired() {
             return Ok(SegmentPublication::Pending(current_owner()));
         }
-        let path = session.dir.join(name);
         let idx = segment_index(name);
+        let path = if let Some(child) = child {
+            let inventory = session.native_split.as_ref().filter(|inventory| {
+                inventory
+                    .active_ids()
+                    .and_then(|ids| ids.for_role(&child.role))
+                    .is_some_and(|id| id == child.rendition)
+            });
+            let Some(inventory) = inventory else {
+                return Ok(SegmentPublication::Missing(Some(current_owner())));
+            };
+            if child.media_name().as_deref() != Some(name)
+                || (child.kind == "init"
+                    && child.object.strip_suffix(".mp4") != Some(child.rendition.as_str()))
+            {
+                return Ok(SegmentPublication::Missing(Some(current_owner())));
+            }
+            if let Some(index) = idx {
+                let index = u64::try_from(index).map_err(|_| SegmentOpenError::Capacity)?;
+                if inventory.window(index, index).is_none() {
+                    return Ok(SegmentPublication::Pending(current_owner()));
+                }
+                session.dir.join(format!("split-{}-{name}", child.role))
+            } else {
+                session.dir.join(format!("split-{}.mp4", child.role))
+            }
+        } else {
+            session.dir.join(name)
+        };
         let (first_retained, requested_visibility) = {
             let segments = session.segments.lock().await;
             (
@@ -1979,6 +2462,20 @@ impl TranscodeManager {
                 {
                     return Ok(SegmentPublication::Missing(Some(current_owner())));
                 }
+                let within_split_frontier = if let (Some(_), Some(index)) = (child, idx) {
+                    session
+                        .publication
+                        .lock()
+                        .await
+                        .served
+                        .as_ref()
+                        .is_some_and(|snapshot| {
+                            snapshot.producer_attempt == producer_attempt
+                                && index <= snapshot.last_segment
+                        })
+                } else {
+                    true
+                };
                 let available = if retired_owner {
                     let owner_current = self
                         .retired_presentations
@@ -2012,7 +2509,7 @@ impl TranscodeManager {
                             })
                         })
                 };
-                if !available {
+                if !available || !within_split_frontier {
                     if retired_owner {
                         return Ok(SegmentPublication::Missing(Some(current_owner())));
                     }
@@ -2033,6 +2530,17 @@ impl TranscodeManager {
                     continue;
                 }
             }
+            let enhanced = child
+                .filter(|child| child.role == "video")
+                .and(idx)
+                .and_then(|index| u64::try_from(index).ok())
+                .and_then(|index| {
+                    session
+                        .native_split
+                        .as_ref()?
+                        .fel_object(index, producer_attempt)
+                });
+            let path = enhanced.map_or_else(|| path.clone(), |object| session.dir.join(object));
             let opened = if let Some(opened) = authenticated_cached_file.take() {
                 Some((opened.file, Some(opened.bytes), Some(opened.lease)))
             } else if session.cached {

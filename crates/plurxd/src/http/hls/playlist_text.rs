@@ -182,6 +182,43 @@ fn native_subtitle_media(
     out
 }
 
+pub(super) fn native_split_master_text(
+    file: &MediaFile,
+    context: &crate::transcode::HlsContext,
+    ids: &crate::copyseg::NativeSplitInitIds,
+) -> Vec<u8> {
+    let mode = context
+        .codecs
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .replacen("hvc1.", "hev1.", 1);
+    let fallback = file.bitrate.unwrap_or(25_000_000).max(128_000) as u64;
+    let (peak, average) = context.bandwidth.map_or((fallback, fallback), |budget| {
+        (budget.peak_bps, budget.average_bps)
+    });
+    let mut out = format!(
+        "#EXTM3U\n#EXT-X-VERSION:10\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Main\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/{}/index.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH={peak},AVERAGE-BANDWIDTH={average},CODECS=\"{mode},mp4a.40.2\",VIDEO-RANGE=PQ,AUDIO=\"audio\"",
+        ids.audio,
+    );
+    use std::fmt::Write as _;
+    if let Some(supplemental) = &context.supplemental_codecs {
+        let supplemental = supplemental.replacen("dvh1.", "dvhe.", 1);
+        let _ = write!(out, ",SUPPLEMENTAL-CODECS=\"{supplemental}\"");
+    }
+    if let (Some(width), Some(height)) = (file.width, file.height) {
+        let _ = write!(out, ",RESOLUTION={width}x{height}");
+    }
+    if let Some(rate) = context
+        .frame_rate
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+    {
+        let _ = write!(out, ",FRAME-RATE={rate:.3}");
+    }
+    let _ = write!(out, "\nvideo/{}/index.m3u8\n", ids.video);
+    out.into_bytes()
+}
+
 /// Preserve every verified video/audio declaration and attach only the common
 /// native text group. Source bitrate/raster never replace family media facts.
 pub(super) fn continuous_master_with_subtitles(

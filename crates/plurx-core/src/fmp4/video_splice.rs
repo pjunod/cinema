@@ -1,6 +1,7 @@
 //! Exact clock mapping for the video rendition of a single-playlist splice.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 pub use super::video_splice_format::{SpliceBoundary, SpliceVideoFormat, SpliceVideoRendition};
 
@@ -18,6 +19,134 @@ pub struct VideoSpliceClock {
     pub input_presentation_anchor: i128,
     pub output_presentation_anchor: u64,
     pub output_decode_start: u64,
+}
+
+/// Original presentation clock and sample duration of one proved source
+/// picture, expressed in the ordinary media track's timescale.
+#[derive(Clone, Copy)]
+pub struct CopyPictureTime {
+    pub pts: u64,
+    pub duration: u32,
+}
+
+/// Match the first FEL source pictures to the first unpublished ordinary
+/// segment. The publisher binds both inputs to the same selected source
+/// and rechecks its ownership and segment frontier at publication.
+pub fn match_splice_pictures(
+    ordinary: &Fragment,
+    input: &Track,
+    source_pictures: &[[u8; 32]],
+) -> Result<Vec<CopyPictureTime>, Fmp4Error> {
+    if input.kind != TrackKind::Video || input.nal_length_size != 4 {
+        return Err(unsupported(
+            "splice witness requires four-byte HEVC framing",
+        ));
+    }
+    let track = ordinary
+        .track(input.id)
+        .ok_or_else(|| unsupported("ordinary splice anchor has no video track"))?;
+    let moof = check_fragment_boxes(ordinary)?;
+    let parsed = parse_moof(
+        &ordinary.bytes[..moof.size],
+        moof.header_len,
+        std::slice::from_ref(input),
+    )?;
+    if parsed != ordinary.tracks {
+        return malformed("ordinary splice anchor differs from its serialized samples");
+    }
+    let mut dts = track.base_decode_time;
+    let mut pictures = Vec::new();
+    for (sample, bytes) in ordinary.samples_with_bytes(input.id) {
+        let pts = u64::try_from(i128::from(dts) + i128::from(sample.cto))
+            .map_err(|_| unsupported("ordinary splice presentation time is out of range"))?;
+        let bytes = bytes.ok_or_else(|| unsupported("ordinary splice sample lies outside mdat"))?;
+        let time = CopyPictureTime {
+            pts,
+            duration: sample.duration,
+        };
+        pictures.push((time, super::hevc_base_layer_vcl_sha256(bytes)?));
+        dts = dts
+            .checked_add(u64::from(sample.duration))
+            .ok_or_else(|| unsupported("ordinary splice decode time is out of range"))?;
+    }
+
+    pictures.sort_unstable_by_key(|(time, _)| time.pts);
+    if pictures
+        .windows(2)
+        .any(|pair| pair[0].0.pts == pair[1].0.pts)
+    {
+        return Err(unsupported(
+            "ordinary splice starts on an ambiguous presentation clock",
+        ));
+    }
+    let overlap = source_pictures.len();
+    if overlap < 2 || overlap > pictures.len() {
+        return Err(unsupported(
+            "ordinary segment does not cover the complete witnessed FEL window",
+        ));
+    }
+    let matches = |window: &[(CopyPictureTime, [u8; 32])]| {
+        window.iter().map(|(_, digest)| digest).eq(source_pictures)
+    };
+    if !matches(&pictures[..overlap]) || pictures.windows(overlap).skip(1).any(matches) {
+        return Err(unsupported(
+            "FEL source pictures do not uniquely match the next ordinary interval",
+        ));
+    }
+    Ok(pictures[..overlap].iter().map(|(time, _)| *time).collect())
+}
+
+pub(super) fn copy_picture_schedule(
+    input: &Fragment,
+    input_track: &Track,
+    output: &Track,
+    copy_times: &[CopyPictureTime],
+    copy_scale: u32,
+) -> Result<BTreeMap<i128, (u64, u32)>, Fmp4Error> {
+    let video = input
+        .track(input_track.id)
+        .ok_or_else(|| unsupported("replacement window has no video track"))?;
+    if copy_scale == 0 || output.timescale == 0 || video.sample_count() != copy_times.len() {
+        return Err(unsupported(
+            "replacement window differs from the copy picture schedule",
+        ));
+    }
+    let mut dts = i128::from(video.base_decode_time);
+    let mut order = Vec::with_capacity(video.sample_count());
+    for sample in video.samples() {
+        order.push(dts + i128::from(sample.cto));
+        dts += i128::from(sample.duration);
+    }
+    order.sort_unstable();
+    if order.windows(2).any(|pair| pair[0] == pair[1])
+        || copy_times.windows(2).any(|pair| pair[0].pts >= pair[1].pts)
+    {
+        return Err(unsupported(
+            "replacement picture schedule repeats or reorders a presentation time",
+        ));
+    }
+    order
+        .into_iter()
+        .zip(copy_times)
+        .map(|(from, to)| {
+            let pts = u64::try_from(exact_rescale(
+                i128::from(to.pts),
+                copy_scale,
+                output.timescale,
+            )?)
+            .map_err(|_| unsupported("replacement presentation time exceeds the output clock"))?;
+            let duration = u32::try_from(exact_rescale(
+                i128::from(to.duration),
+                copy_scale,
+                output.timescale,
+            )?)
+            .map_err(|_| unsupported("replacement duration exceeds the trun field"))?;
+            if duration == 0 {
+                return malformed("replacement picture duration is zero");
+            }
+            Ok((from, (pts, duration)))
+        })
+        .collect()
 }
 
 pub(super) fn unsupported(reason: &str) -> Fmp4Error {
@@ -45,6 +174,43 @@ pub(super) fn retime_video_fragment(
     output: &Track,
     clock: VideoSpliceClock,
     sequence: u32,
+    rewrite: impl FnMut(&[u8], &Sample, bool) -> Result<Option<Vec<u8>>, Fmp4Error>,
+) -> Result<Fragment, Fmp4Error> {
+    let timing = |pts: i128, duration: u32| {
+        let relative = pts
+            .checked_sub(clock.input_presentation_anchor)
+            .ok_or_else(|| unsupported("splice presentation anchor overflows"))?;
+        let mapped = i128::from(clock.output_presentation_anchor)
+            .checked_add(exact_rescale(relative, input.timescale, output.timescale)?)
+            .ok_or_else(|| unsupported("splice presentation time exceeds the output clock"))?;
+        let mapped = u64::try_from(mapped)
+            .map_err(|_| unsupported("splice presentation time exceeds the output clock"))?;
+        let duration = u32::try_from(exact_rescale(
+            i128::from(duration),
+            input.timescale,
+            output.timescale,
+        )?)
+        .map_err(|_| unsupported("splice sample duration exceeds the trun field"))?;
+        Ok((mapped, duration))
+    };
+    author_video_fragment(
+        fragment,
+        input,
+        output,
+        clock.output_decode_start,
+        sequence,
+        timing,
+        rewrite,
+    )
+}
+
+pub(super) fn author_video_fragment(
+    fragment: &Fragment,
+    input: &Track,
+    output: &Track,
+    decode_start: u64,
+    sequence: u32,
+    mut timing: impl FnMut(i128, u32) -> Result<(u64, u32), Fmp4Error>,
     mut rewrite: impl FnMut(&[u8], &Sample, bool) -> Result<Option<Vec<u8>>, Fmp4Error>,
 ) -> Result<Fragment, Fmp4Error> {
     if [input, output].iter().any(|track| {
@@ -79,12 +245,12 @@ pub(super) fn retime_video_fragment(
 
     let mut plan = Plan {
         track_id: output.id,
-        base_decode_time: clock.output_decode_start,
+        base_decode_time: decode_start,
         samples: Vec::new(),
         slices: Vec::new(),
     };
     let mut input_dts = i128::from(track.base_decode_time);
-    let mut output_dts = clock.output_decode_start;
+    let mut output_dts = decode_start;
     let mut payload = Vec::new();
     let mut payload_cursor = fragment.mdat_payload.start;
     let mut sample_bytes = fragment.samples_with_bytes(input.id).into_iter();
@@ -97,26 +263,10 @@ pub(super) fn retime_video_fragment(
             if sample.duration == 0 || bytes.is_empty() {
                 return malformed("splice sample has zero duration or size");
             }
-            let pts_from_anchor = (input_dts + i128::from(sample.cto))
-                .checked_sub(clock.input_presentation_anchor)
-                .ok_or_else(|| unsupported("splice presentation anchor overflows"))?;
-            let output_pts = i128::from(clock.output_presentation_anchor)
-                .checked_add(exact_rescale(
-                    pts_from_anchor,
-                    input.timescale,
-                    output.timescale,
-                )?)
-                .ok_or_else(|| unsupported("splice presentation time exceeds the output clock"))?;
-            let output_pts = u64::try_from(output_pts)
-                .map_err(|_| unsupported("splice presentation time exceeds the output clock"))?;
+            let (output_pts, duration) =
+                timing(input_dts + i128::from(sample.cto), sample.duration)?;
             let cto = i32::try_from(i128::from(output_pts) - i128::from(output_dts))
                 .map_err(|_| unsupported("splice composition offset exceeds the trun field"))?;
-            let duration = u32::try_from(exact_rescale(
-                i128::from(sample.duration),
-                input.timescale,
-                output.timescale,
-            )?)
-            .map_err(|_| unsupported("splice sample duration exceeds the trun field"))?;
             let packet = match rewrite(bytes, sample, plan.samples.is_empty())? {
                 Some(changed) => Cow::Owned(changed),
                 None => Cow::Borrowed(bytes),
@@ -348,6 +498,72 @@ mod tests {
                 original_bytes.expect("source video sample")
             );
         }
+    }
+
+    #[test]
+    fn witness_uses_display_order_and_refuses_a_later_matching_interval() {
+        let input = video(1, 24_000);
+        let mut ordinary = fragment(&input);
+        let byte_to_mark = ordinary.mdat_payload.start + 2 * 7 + 6;
+        ordinary.bytes[byte_to_mark] = 0x81;
+        let digests: Vec<_> = ordinary
+            .samples_with_bytes(input.id)
+            .into_iter()
+            .map(|(_, bytes)| {
+                super::super::hevc_base_layer_vcl_sha256(bytes.expect("coded source sample"))
+                    .expect("valid coded picture")
+            })
+            .collect();
+        assert_eq!(
+            match_splice_pictures(&ordinary, &input, &[digests[0], digests[2], digests[1]])
+                .expect("source pictures in presentation order")[0]
+                .pts,
+            50_002
+        );
+        assert!(match_splice_pictures(&ordinary, &input, &[digests[0], digests[1]]).is_err());
+        assert!(match_splice_pictures(&ordinary, &input, &[digests[2], digests[1]]).is_err());
+    }
+
+    #[test]
+    fn replacement_uses_the_copy_cadence_even_when_decode_order_differs() {
+        let input = video(1, 24_000);
+        let output = video(1, 48_000);
+        let original = fragment(&input);
+        let times = [
+            CopyPictureTime {
+                pts: 12_000,
+                duration: 667,
+            },
+            CopyPictureTime {
+                pts: 12_667,
+                duration: 668,
+            },
+            CopyPictureTime {
+                pts: 13_335,
+                duration: 667,
+            },
+        ];
+        let mut schedule = copy_picture_schedule(&original, &input, &output, &times, 16_000)
+            .expect("copy clock is exactly representable");
+        let mapped = author_video_fragment(
+            &original,
+            &input,
+            &output,
+            33_998,
+            9,
+            |pts, _| Ok(schedule.remove(&pts).expect("one mapped source picture")),
+            |_, _, _| Ok(None),
+        )
+        .expect("write matched picture schedule");
+        assert!(schedule.is_empty());
+        let mapped_track = mapped.track(output.id).expect("mapped track");
+        assert_eq!(mapped_track.base_decode_time, 33_998);
+        assert_eq!(mapped_track.duration(), 6_006);
+        let timing: Vec<_> = mapped_track
+            .samples()
+            .map(|sample| (sample.duration, sample.cto))
+            .collect();
+        assert_eq!(timing, [(2_001, 2_002), (2_001, 4_006), (2_004, 1)]);
     }
 
     #[test]

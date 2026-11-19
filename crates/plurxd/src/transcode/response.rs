@@ -244,10 +244,14 @@ impl MediaResponsePublication {
             "subtitle-playlist" => Object::SubtitleMediaPlaylist,
             "subtitle-segment" => Object::SubtitleSegment,
             "init-segment" => Object::InitializationSegment,
-            "media-segment" => Object::MediaSegment,
-            "segment-not-modified" => Object::NotModified,
+            "media-segment" | "audio-media-segment" | "split-video-media-segment" => {
+                Object::MediaSegment
+            }
+            "segment-not-modified" | "audio-segment-not-modified" => Object::NotModified,
             "segment-range-not-satisfiable" => Object::RangeNotSatisfiable,
-            "segment-range" => Object::ByteRange,
+            "segment-range" | "audio-segment-range" | "split-video-segment-range" => {
+                Object::ByteRange
+            }
             "status" => Object::SessionStatus,
             _ => Object::ProtocolResponse,
         }
