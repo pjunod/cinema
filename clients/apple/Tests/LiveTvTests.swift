@@ -742,7 +742,6 @@ final class LiveTvTests: XCTestCase {
         // with their owner model. The rule is the same there.
         let source = try Self.appleSource("LiveTvSettingsView.swift")
         let model = try Self.appleSource("LiveTvAdminModel.swift")
-        let developer = try Self.appleSource("LiveTvDeveloperView.swift")
         // Both cards iterate the server's array rather than naming rows. That
         // is what makes `start_recovery` — and the next row nobody has written
         // yet — appear without a client change.
@@ -766,7 +765,7 @@ final class LiveTvTests: XCTestCase {
         // The save controls gate on exactly what they always did: an in-flight
         // request and unsaved edits. Never on a check.
         XCTAssertTrue(source.contains("}.disabled(admin.busy || admin.dirty)"))
-        for file in [developer, model] {
+        for file in [model] {
             for gate in ["disabled(!readiness", "disabled(readiness", "readiness.ready ||", "!readiness.ready"] {
                 XCTAssertFalse(file.contains(gate), "\(gate) would let an advisory check block an operator")
             }
@@ -789,11 +788,10 @@ final class LiveTvTests: XCTestCase {
     /// TV, and Paul's Developer rule says a finished setting does not wait in
     /// Developer. Settings → Live TV draws the five cards and their saves,
     /// enable first; Developer draws none of them.
-    func testLiveTvSettingsOwnTheFiveCardsTheWebMovedAndDeveloperListsNoneOfThem() throws {
+    func testLiveTvSettingsOwnTheFiveCardsTheWebMoved() throws {
         XCTAssertEqual(LiveTvSettingsPlacement.liveTvSettings,
                        ["Enable Live TV", "HDHomeRun Live TV", "Programme guide", "Recording", "Library channels"])
         let settings = try Self.appleSource("LiveTvSettingsView.swift")
-        let developer = try Self.appleSource("LiveTvDeveloperView.swift")
         let moved: [String: [String]] = [
             "Enable Live TV": ["write(.enabled(", "admin.loadPrerequisites()", "ForEach(prerequisites.checks)"],
             "HDHomeRun Live TV": ["write(.configure(", "admin.checkReadiness()", "ForEach(readiness.checks)"],
@@ -809,49 +807,51 @@ final class LiveTvTests: XCTestCase {
             let at = try XCTUnwrap(settings.range(of: header), title)
             XCTAssertGreaterThanOrEqual(at.lowerBound, previous, "\(title) is out of the web's order")
             previous = at.lowerBound
-            XCTAssertFalse(developer.contains(header), "Developer still lists \(title)")
             for call in moved[title] ?? [] {
                 XCTAssertTrue(settings.contains(call), "Settings → Live TV must draw \(title) (\(call))")
-                XCTAssertFalse(developer.contains(call), "Developer must not draw \(title) (\(call))")
             }
         }
-        // The Developer view draws no server Live TV card, so it reads no
-        // server Live TV settings at all.
-        XCTAssertFalse(developer.contains("LiveTvAdminModel("))
         XCTAssertTrue(settings.contains("LiveTvAdminModel()"))
     }
 
-    /// Every Developer card that stays says what it is waiting on — the web's
-    /// `devGraduation` line. The Live TV enable switch graduated to Settings →
-    /// Live TV, and bounded pause/resume and prepared quality handoff to
-    /// Settings → Playback, so none of them waits here any more.
-    func testEveryDeveloperCardThatStaysSaysWhatItWaitsOn() throws {
-        let developer = try Self.appleSource("LiveTvDeveloperView.swift")
-        XCTAssertEqual(LiveTvSettingsPlacement.developer,
-                       ["Remote diagnostics · advisory readiness", "Cinema remotes · advisory enablement",
-                        "Screen invitations · advisory readiness"])
-        for title in LiveTvSettingsPlacement.developer {
-            XCTAssertTrue(developer.contains("Section(\"\(title)\")"), title)
-        }
-        XCTAssertEqual(developer.components(separatedBy: "Section(\"").count - 1,
-                       LiveTvSettingsPlacement.developer.count,
-                       "a Developer card must be listed in LiveTvSettingsPlacement.developer")
-        for title in LiveTvSettingsPlacement.developer {
-            let card = try XCTUnwrap(developer.components(separatedBy: "Section(\"\(title)\")").last, title)
-                .components(separatedBy: "Section(\"")[0]
-            XCTAssertTrue(card.contains("Awaiting "), title)
-            if title == "Remote diagnostics · advisory readiness" {
-                XCTAssertTrue(card.contains("graduates from Developer after those checks pass"), title)
-            } else {
-                XCTAssertTrue(card.contains("graduates "), title)
-            }
-        }
-        for graduated in ["Enable Live TV", "Bounded pause/resume", "Prepared quality handoff"] {
-            XCTAssertFalse(developer.contains("Section(\"\(graduated)"), "\(graduated) graduated out of Developer")
-        }
-        for toggle in ["Toggle(\"Enable bounded pause/resume\"", "Toggle(\"Enable two-player prepared handoff\"",
-                       "write(.enabled("] {
-            XCTAssertFalse(developer.contains(toggle), toggle)
+    /// Nothing on Apple is still in development, so Settings has no Developer
+    /// category, screen or navigation row. What used to sit there lives in its
+    /// proper section with the same saved keys: Shared libraries in Sharing,
+    /// the Cinema remote switch and Screen invitations in Remotes & devices,
+    /// and the Dolby Vision F+ switches in Playback with their detail collapsed.
+    func testDeveloperIsGoneAndItsCardsLiveInTheirOwnSections() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../Sources")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("LiveTvDeveloperView.swift").standardizedFileURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("DolbyVisionRefitDeveloperCard.swift").standardizedFileURL.path))
+        let settings = try Self.appleSource("SettingsView.swift")
+        XCTAssertFalse(settings.contains("Section(\"Developer\")"))
+        XCTAssertFalse(settings.contains("case developer"))
+        XCTAssertFalse(settings.contains("LiveTvDeveloperView"))
+        XCTAssertFalse(settings.contains("Leaves Developer"))
+        // Help keeps reporting.
+        let help = try XCTUnwrap(settings.components(separatedBy: "Section(\"Help\")").last)
+        XCTAssertTrue(help.contains("DiagnosticReportButton()"))
+        // Remotes & devices.
+        let remotes = try XCTUnwrap(settings.components(separatedBy: "Section(\"Remotes & devices\")").last)
+            .components(separatedBy: "Section(\"Help\")")[0]
+        XCTAssertTrue(remotes.contains("Toggle(\"Enable Cinema remotes on this installation\", isOn: $cinemaRemoteEnabled)"))
+        XCTAssertTrue(remotes.contains("NavigationLink(\"Screen invitations\") { RemoteDeviceSettingsView() }"))
+        XCTAssertTrue(settings.contains("@AppStorage(\"plurx.cinemaRemote\") private var cinemaRemoteEnabled = false"))
+        // Playback.
+        XCTAssertTrue(settings.contains("DolbyVisionRefitSettingsSection()"))
+        let refit = try Self.appleSource("DolbyVisionRefitSettingsSection.swift")
+        XCTAssertTrue(refit.contains("DisclosureGroup(\"Details\")"))
+        XCTAssertTrue(refit.contains("Delete this node's statistics spool"))
+        XCTAssertTrue(refit.contains("Button(\"Reload\")"))
+        XCTAssertFalse(refit.contains("Leaves Developer"))
+        // Sharing.
+        let sharing = try Self.appleSource("SharedSharingSettingsView.swift")
+        XCTAssertTrue(sharing.contains("SharedSharingEnableSection()"))
+        XCTAssertTrue(sharing.contains("Toggle(\"Enable Shared libraries\""))
+        XCTAssertFalse(sharing.contains("Developer"))
+        // No client toggle for server behaviour that is now always on.
+        for key in ["playback_sdr_master_codecs", "playback_auto_abr", "playback_display_aware_auto", "playback_network_priors"] {
+            XCTAssertFalse(settings.contains(key), key)
         }
     }
 
@@ -898,7 +898,6 @@ final class LiveTvTests: XCTestCase {
             XCTAssertGreaterThan(lastEnd!.lowerBound, lastCondition.lowerBound,
                                  "the Live TV settings row must not be platform-conditional")
         }
-        XCTAssertTrue(settings.contains("NavigationLink(\"Shared libraries, Cinema remotes and other features awaiting evidence\") { LiveTvDeveloperView() }"))
         XCTAssertFalse(settings.contains("Enable Live TV"), "Enable Live TV graduated to Settings → Live TV")
     }
 

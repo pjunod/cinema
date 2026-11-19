@@ -41,7 +41,6 @@ enum TVSettingsCategory: String, CaseIterable, Identifiable {
     case sharing = "Sharing"
     case account = "Account"
     case remotes = "Remotes & devices"
-    case developer = "Developer"
     case about = "About"
     var id: String { rawValue }
 }
@@ -102,8 +101,9 @@ struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject private var remoteClient: RemoteClientModel
     @State private var diagnosticSignOutConfirmation = false
-    // Graduated from Developer with the same keys and defaults, so a choice a
-    // viewer already made there carries over unchanged.
+    // Same keys and defaults as before they left Developer, so a saved choice
+    // carries over unchanged.
+    @AppStorage("plurx.cinemaRemote") private var cinemaRemoteEnabled = false
     @AppStorage("plurx.boundedResume") private var boundedResumeEnabled = true
     @AppStorage("plurx.preparedHandoff") private var preparedHandoffEnabled = true
     #if os(tvOS)
@@ -223,6 +223,9 @@ struct SettingsView: View {
                 Text("Track choices apply when a title has more than one. Instant subtitle switching prepares subtitles from the first frame; After a short pause builds them the first time you turn them on. Pause/resume and quality handoff are on by default; their readiness rows are advisory and never change either switch.")
             }
             .settingsCategory(.playback, selection: category)
+
+            DolbyVisionRefitSettingsSection()
+                .settingsCategory(.playback, selection: category)
 
             #if os(iOS)
             Section {
@@ -378,14 +381,19 @@ struct SettingsView: View {
             Section("Remotes & devices") {
                 NavigationLink("Manage remote pairings") { RemoteDeviceSettingsView() }
                     .focused($focusedEntry, equals: .remotes)
+                Toggle("Enable Cinema remotes on this installation", isOn: $cinemaRemoteEnabled)
                 Text(remoteClient.status).font(.caption)
+                #if os(iOS)
+                NavigationLink("Screen invitations") { RemoteDeviceSettingsView() }
+                #endif
+                DisclosureGroup("Details") {
+                    Text("The server must also enable Cinema remote control. Missing server support or network access does not prevent saving this choice.").font(.caption)
+                    #if os(iOS)
+                    Text("Each paired screen has its own saved invitation choice, independent of this switch.").font(.caption)
+                    #endif
+                }
             }
             .settingsCategory(.remotes, selection: category)
-            Section("Developer") {
-                NavigationLink("Shared libraries, Cinema remotes and other features awaiting evidence") { LiveTvDeveloperView() }
-                    .focused($focusedEntry, equals: .developer)
-            }
-            .settingsCategory(.developer, selection: category)
 
             Section("Help") {
                 DiagnosticReportButton()
