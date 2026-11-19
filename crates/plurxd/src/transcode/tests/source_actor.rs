@@ -1,4 +1,5 @@
 use super::*;
+use crate::http::shared_source_playback::source_voter_fixture;
 
 /// This fixture boots the production one-voter selector. Candidate installation
 /// and explicit capability seeding are test setup, not rolling-upgrade proof.
@@ -328,9 +329,9 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     config.storage.data_dir = directory.path().join("database");
     (config.cluster.raft_bind, config.cluster.api_bind) = source_fixture_addresses();
     config.cluster.advertise_host = "localhost".into();
-    let mut selected = source_fixture_store(&config)
-        .await
-        .expect("actual standalone voter");
+    let result = source_fixture_store(&config).await;
+    let mut selected =
+        source_voter_fixture::finish_boot(&config, result, "actual standalone voter");
     selected
         .store
         .put_setting(keys::SHARING_ENABLED, "true")
@@ -3509,7 +3510,11 @@ async fn source_resource_init_open_job_retains_actual_fd_and_guard_after_waiter_
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_resource_media_open_job_retains_actual_fd_and_guard_after_waiter_cancellation() {
-    Box::pin(source_copy_preadmission_fixture(43)).await;
+    source_voter_fixture::run(
+        "transcode::source_actor::tests::source_resource_media_open_job_retains_actual_fd_and_guard_after_waiter_cancellation",
+        Box::pin(source_copy_preadmission_fixture(43)),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

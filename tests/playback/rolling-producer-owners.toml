@@ -4412,7 +4412,8 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
-expected_occurrences = 105
+# The owned voter fixture process is joined before a collision can retry.
+expected_occurrences = 106
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4445,6 +4446,8 @@ expected_occurrences = 26
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Four test-only timers wait for the artwork fixture identity and the offline
+# worker result. Each pair uses a bounded timeout around the positive condition.
 # Source-budget audit (8ab61a779 -> bbc5c1664): +11 timer shapes. Group's
 # 100 ms failed-wait retry and 25 ms quiescence poll retain the owned children,
 # registrations and pause guard until positive reap; neither is settlement.
@@ -6111,7 +6114,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Source-factory retirement observation. These matches are test-only; the
 # actual Instant::now credit samples do not match this constructor pattern.
 # Shared-DV + main8630 source union; existing reviewed sites/pattern unchanged.
-expected_occurrences = 2283
+expected_occurrences = 2288
 # F+ (#1565) on main 59022fd2a: main's 2251 plus 9 F+-only timer shapes, none a new owner:
 #  +1 background_jobs.rs: publish_dv_refit's bounded backoff sleep between store retries,
 #     on the job's own task while its lease holds.
@@ -6125,6 +6128,7 @@ expected_occurrences = 2283
 # source_probe/title_work_tests.rs +8 and transcode/manager/construct.rs +1 (the bounded
 # production qualification-admission timeout, QUEUE_WAIT in admit_dv_title).
 # Union 2212 + 20 + 39 = 2271, less those 11 counted twice = 2260.
+# The owned voter fixture process is joined before a collision can retry.
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6680,7 +6684,8 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Union at 0d501cae6: 349 + 13 + 3 = 365, less those 3 counted twice = 362; the spool
 # registration test adds one isolated test image: 363.
 # Shared-DV + main8630 source union; existing reviewed sites/pattern unchanged.
-expected_occurrences = 374
+# The owned voter fixture process is joined before a collision can retry.
+expected_occurrences = 375
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7421,13 +7426,14 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Recovery fixture union: +1 Direct-start HTTP Response::status() read.
 # This observes the returned response and launches no process.
 # Shared-DV + main8630 source union; existing reviewed sites/pattern unchanged.
-expected_occurrences = 958
+expected_occurrences = 959
 # F+ (#1565) contributes five awaited test-only launches beyond current main:
 # dv_disk/tests.rs +1, fragindex/refit_acceptance_tests.rs +1,
 # fragindex/tests.rs +1, and source_probe/dv_refit.rs +2.
 # Prepared delivery (#1736/#1752) contributes main's additional test-only
 # `.vod.status()` snapshot observation. It launches no child and transfers no
 # ownership. Preserve both reviewed contributions: main 937 + F+ 5 = 942.
+# The owned voter fixture process is joined before a collision can retry.
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7750,7 +7756,8 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # process is involved.
 # Recovery fixture union: +1 retained Source factory entry.wait() observer.
 # It observes the actual factory owner, not a new OS-child reaper.
-expected_occurrences = 401
+# The owned voter fixture process is joined before a collision can retry.
+expected_occurrences = 403
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -8000,7 +8007,8 @@ pattern = "kill_on_drop\\s*\\("
 # Union at 0d501cae6: 126 + 2 + 1 = 129, less 1 counted twice = 128; the spool
 # registration test adds one: 129.
 # Shared-DV + main8630 source union; existing reviewed sites/pattern unchanged.
-expected_occurrences = 131
+# The owned voter fixture process is joined before a collision can retry.
+expected_occurrences = 132
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

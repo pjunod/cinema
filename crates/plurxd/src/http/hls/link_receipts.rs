@@ -2708,6 +2708,7 @@ mod tests {
     /// rung; with priors off the same row is not read.
     #[tokio::test]
     async fn d6_cold_auto_decision_starts_below_a_measured_link_starvation() {
+        super::super::tests::prepare_catalog_test_encoder().await;
         use axum::{
             extract::{Path, Query, State},
             http::HeaderMap,

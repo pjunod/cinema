@@ -6704,6 +6704,7 @@ fn subtitle_playlist_keeps_takeover_and_sliding_discontinuity_epochs() {
 
 #[tokio::test]
 async fn legacy_manual_to_auto_preparation_binds_a_real_non_upgrading_candidate() {
+    prepare_catalog_test_encoder().await;
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
     let state = resolver_state();
     // Start below the ordinary cold Auto rung so loss of the bootstrap ceiling
