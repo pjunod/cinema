@@ -1638,7 +1638,7 @@ async fn hydrate_inner(
             response.status.is_success().then_some(response.body)
         })
     });
-    let responses = crate::cluster::calls::race_holders(requests);
+    let responses = crate::cluster::calls::race_holders(requests, deadline);
     futures_util::pin_mut!(responses);
     while let Some(candidate) = responses.next().await {
         let Some(body) = candidate else { continue };

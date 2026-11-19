@@ -75,7 +75,9 @@ inside each candidate future, so cleanup on an invalid fast response cannot
 hold up a valid peer. Installation and publication remain single-winner.
 Losing candidate futures, including best-effort exact stale-row deletions,
 are cancelled with the lookup; these deletions are idempotent catalogue
-cleanup, not authority or lease mutations.
+cleanup, not authority or lease mutations. The shared race also stops at the
+original absolute lookup deadline, so even an all-invalid set with blocked
+cleanup cannot extend the eight-second candidate budget.
 
 The initial macOS daemon baseline at `259e1f06a` found two inherited
 Linux-only `vodencode::dv_runtime` references. The integration lane repaired

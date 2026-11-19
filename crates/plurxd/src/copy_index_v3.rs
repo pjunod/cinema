@@ -710,7 +710,7 @@ async fn load_blob(
             }
         })
     });
-    let responses = crate::cluster::calls::race_holders(requests);
+    let responses = crate::cluster::calls::race_holders(requests, deadline);
     futures_util::pin_mut!(responses);
     while let Some(answer) = responses.next().await {
         let (holder, body) = match answer {

@@ -1869,12 +1869,16 @@ pub(crate) mod calls {
 
     /// Race bounded, lookup-owned holder futures. Dropping the stream cancels
     /// pending requests; callers validate each answer before selecting a winner.
-    /// All requests must receive the lookup's one absolute deadline.
+    /// The same absolute deadline bounds all candidate work, including
+    /// best-effort cleanup. Callers pass it to each wire request as well.
     pub(crate) fn race_holders<F: Future>(
         requests: impl IntoIterator<Item = F>,
+        deadline: tokio::time::Instant,
     ) -> impl futures_util::Stream<Item = F::Output> {
         use futures_util::StreamExt;
-        futures_util::stream::iter(requests).buffer_unordered(4)
+        futures_util::stream::iter(requests)
+            .buffer_unordered(4)
+            .take_until(tokio::time::sleep_until(deadline))
     }
 
     #[derive(Clone, Copy)]
@@ -3162,7 +3166,7 @@ pub(crate) mod calls {
                         holder
                     }
                 });
-                let responses = race_holders(requests);
+                let responses = race_holders(requests, deadline_after(Duration::from_secs(8)));
                 futures_util::pin_mut!(responses);
                 assert_eq!(
                     responses.next().await,
@@ -3183,15 +3187,64 @@ pub(crate) mod calls {
         async fn queued_holder_requests_share_the_original_absolute_deadline() {
             let started = tokio::time::Instant::now();
             let deadline = started + Duration::from_secs(8);
-            let responses = race_holders((0..12).map(|_| async move {
-                tokio::time::timeout_at(deadline, std::future::pending::<()>()).await
-            }));
-            let results: Vec<_> = responses.collect().await;
-            assert_eq!(results.len(), 12);
-            assert!(results.iter().all(Result::is_err));
+            let launched = Arc::new(AtomicUsize::new(0));
+            let requests = (0..12).map(|_| {
+                let launched = launched.clone();
+                async move {
+                    launched.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::timeout_at(deadline, std::future::pending::<()>()).await
+                }
+            });
+            let results: Vec<_> = race_holders(requests, deadline).collect().await;
+            assert!(
+                results.is_empty(),
+                "the lookup deadline wins over expired wire futures"
+            );
+            assert_eq!(
+                launched.load(Ordering::SeqCst),
+                4,
+                "queued holders receive no fresh budget"
+            );
             assert_eq!(
                 tokio::time::Instant::now() - started,
                 Duration::from_secs(8)
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn all_invalid_holders_drop_blocked_cleanup_at_the_original_lookup_deadline() {
+            struct Cleanup(Arc<AtomicUsize>);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            let started = tokio::time::Instant::now();
+            let deadline = started + Duration::from_secs(8);
+            let cleaning = Arc::new(AtomicUsize::new(0));
+            let launched = Arc::new(AtomicUsize::new(0));
+            let requests = (0..12).map(|_| {
+                let cleaning = cleaning.clone();
+                let launched = launched.clone();
+                async move {
+                    launched.fetch_add(1, Ordering::SeqCst);
+                    // Every peer answered, but its bytes failed validation.
+                    // A Store cleanup that never completes must not keep
+                    // this lookup, or its other candidate futures, alive.
+                    cleaning.fetch_add(1, Ordering::SeqCst);
+                    let _cleanup = Cleanup(cleaning);
+                    std::future::pending::<()>().await;
+                    None::<Vec<u8>>
+                }
+            });
+            let results: Vec<_> = race_holders(requests, deadline).collect().await;
+            assert!(results.is_empty());
+            assert_eq!(tokio::time::Instant::now(), deadline);
+            assert_eq!(launched.load(Ordering::SeqCst), 4);
+            assert_eq!(
+                cleaning.load(Ordering::SeqCst),
+                0,
+                "all blocked cleanup was canceled with the lookup"
             );
         }
 
