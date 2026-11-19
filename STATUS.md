@@ -41,7 +41,6 @@ Code, package and system-renderer interface qualification passed; coordinated
 installation and physical acceptance pending;
 [canonical ledger](docs/clients/LINUX-PLAYER-CINEMA-UI.md).
 
-
 ## 2026-11-07 · Pipeline contract v2 (cinema slice)
 
 Owner Claude (claude-opus-5-5, session 01BCWL9z). Built on `effort/pipeline-v2` as task PRs T1–T7 ([#1404](http://forge.lan:3000/noirr/plurx/pulls/1404)–[#1409](http://forge.lan:3000/noirr/plurx/pulls/1409) and T7 [#1463](http://forge.lan:3000/noirr/plurx/pulls/1463), the INTEGRATION.md rewrite); M0 merged to `main` as 29d61b824. The ledger is archived at [docs/archive/PIPELINE-V2-CINEMA-STATUS.md](docs/archive/PIPELINE-V2-CINEMA-STATUS.md); T1 is merged into the effort; what is left is review of T2–T7, the Main promotion gate and the qualification receipt.
