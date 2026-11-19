@@ -101,7 +101,6 @@ def train_tests(event: dict, bot: str) -> list[str] | None:
     return sorted(set(ids))
 
 
-
 def worker_proof_required(event: dict) -> bool:
     pull = event.get("pull_request") or {}
     base = (pull.get("base") or {}).get("sha", "")
@@ -121,6 +120,7 @@ def worker_proof_required(event: dict) -> bool:
         path in WORKER_PROOF_FILES or path.startswith(WORKER_PROOF_TREES)
         for path in map(os.fsdecode, paths.split(b"\0"))
     )
+
 
 def scope(lines: list[str], jobs: list[str] | None, enabled: bool = True,
           tests: list[str] | None = None) -> list[str]:

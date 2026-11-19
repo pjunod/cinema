@@ -187,10 +187,11 @@ Path(option('--output')).write_bytes(b'offline pinned archive fixture')
             ("true", "success", True), ("true", "skipped", False),
             ("true", "failure", False), ("false", "skipped", True),
             ("false", "failure", False), ("false", "success", False),
+            ("true", "cancelled", False), ("TRUE", "success", False),
             ("", "skipped", False),
         ):
             with self.subTest(required=required, result=proof):
-                env = dict(os.environ, **results, RUST_UNITS_REQUIRED="true",
+                env = dict(os.environ, **results,
                            WORKER_CONTROL_REQUIRED=required, WORKER_CONTROL_RESULT=proof)
                 actual = subprocess.run(["bash", "-eu", "-c", script], cwd=ROOT,
                                         env=env, capture_output=True, text=True)
