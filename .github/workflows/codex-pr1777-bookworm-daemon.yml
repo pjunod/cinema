@@ -1,0 +1,213 @@
+name: Private PR1777 integrated Bookworm daemon
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: private-pr1777-bookworm-daemon
+  cancel-in-progress: false
+jobs:
+  daemon:
+    runs-on: [ci-nonvoter-heavy-amd64]
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      PLURX_BUILD_SHA: 607cdf2921c736f37aace73106c5aec4185e30e6
+      SOURCE_DATE_EPOCH: '1795049844'
+      EXPECTED_HELPER: f2853f226fc2b598056c9284b10629cd2fb88aa3a5d4b105f79967071465aae0
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 607cdf2921c736f37aace73106c5aec4185e30e6
+          persist-credentials: false
+          path: source
+      - name: Verify exact source and bounded daemon-only storage
+        run: |
+          set -euo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$PLURX_BUILD_SHA"
+          test -z "$(git -C source status --porcelain)"
+          test "$(git -C source show -s --format=%ct HEAD)" = "$SOURCE_DATE_EPOCH"
+          test "$(python3 source/tools/dv_processing/bundle-manifest.py source/tools/dv_processing --identity)" = "$EXPECTED_HELPER"
+          command -v python3 readelf file gzip tar sha256sum >/dev/null
+          docker version --format '{{.Server.Os}}/{{.Server.Arch}}' | grep -Fx linux/amd64
+          docker_root="$(docker info --format '{{.DockerRootDir}}')"
+          test -d "$docker_root"
+          # One daemon graph: canonical25GiB Cargo budget +3GiB compiler/base
+          # allowance;4GiB for exported daemon/DWP, tar and upload staging.
+          if test "$(stat -c %d "$GITHUB_WORKSPACE")" = "$(stat -c %d "$docker_root")"; then
+            source/scripts/ci-require-disk "$docker_root" 32
+          else
+            source/scripts/ci-require-disk "$docker_root" 28
+            source/scripts/ci-require-disk "$GITHUB_WORKSPACE" 4
+          fi
+          mkdir -m 700 candidate-output
+      - name: Derive daemon-only scratch export through trusted binary renderer
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 - <<'PYCODE'
+          """Generate only the daemon export from the frozen standard Bookworm build."""
+          from pathlib import Path
+          import hashlib, json, sys
+          sys.path.insert(0, str(Path('source').resolve()))
+          from validation.release_dockerfile import render_binary_export
+          source=Path('source/Dockerfile').read_text()
+          expected_source_sha='be433a1578f78f30ed2a693244cd23cc24684524466efbda7210eaf2ffe889e8'
+          if hashlib.sha256(source.encode()).hexdigest()!=expected_source_sha: raise SystemExit('frozen Dockerfile digest mismatch')
+          text=render_binary_export(source)
+          def replace_once(old,new):
+              global text
+              if text.count(old)!=1: raise SystemExit('standard binary-export anchor mismatch')
+              text=text.replace(old,new,1)
+          replace_once(' \\\n    && CARGO_TARGET_DIR=/src/target-cluster-check cargo build --locked --release -p plurx-cluster-check \\\n    && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check \\\n    && cp target-cluster-check/release/plurx-cluster-check.dwp /plurx-cluster-check.dwp', '')
+          replace_once('    --mount=type=cache,id=plurx-target-cluster-check-${TARGETARCH},sharing=locked,target=/src/target-cluster-check \\\n', '')
+          replace_once('COPY --from=build /plurx-cluster-check /plurx-cluster-check\n','')
+          replace_once('COPY --from=build /plurx-cluster-check.dwp /plurx-cluster-check.dwp\n','')
+          replace_once('id=plurx-target-plurxd-${TARGETARCH}', 'id=plurx-bookworm-pr1777-daemon-${TARGETARCH}')
+          replace_once('RUN rustc -Vv > /rustc-version', 'RUN rustc -Vv > /rustc-version && cargo -V > /cargo-version')
+          text += 'COPY --from=build /cargo-version /cargo-version\n'
+          if text.count('cargo build')!=1 or 'cargo build --locked --release -p plurxd' not in text: raise SystemExit('daemon production command changed')
+          if 'cargo tree --locked -p plurxd -e features' not in text or 'cluster-read-cost-validation' not in text: raise SystemExit('production feature closure check absent')
+          if 'plurx-cluster-check' in text or 'dv-processing-helpers' in text: raise SystemExit('unrequested build retained')
+          if 'FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build' not in text: raise SystemExit('compiler base pin changed')
+          Path('Dockerfile.daemon-export').write_text(text)
+          Path('candidate-output/recipe-derivation.json').write_text(json.dumps({'source_Dockerfile_sha256':expected_source_sha,'generated_Dockerfile_sha256':hashlib.sha256(text.encode()).hexdigest(),'renderer':'validation.release_dockerfile.render_binary_export','changes':['remove exact trailing cluster-check build and unused cache mount','remove only cluster-check scratch copies','namespace Bookworm daemon cache','export cargo version beside stock rustc version'],'production_command':'cargo build --locked --release -p plurxd','cargo_jobs':2,'default_feature_closure_preserved':True},indent=2)+'\n')
+          PYCODE
+      - id: candidate-builder
+        uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+        with:
+          name: plurx-pr1777-daemon-${{ github.run_id }}-${{ github.run_attempt }}
+          cleanup: true
+      - name: Bound the owned BuildKit container before compilation
+        env:
+          BUILDER: ${{ steps.candidate-builder.outputs.name }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILDER" =~ ^plurx-[a-z0-9_.-]+$ ]] || exit 1
+          builder_info="$(docker buildx inspect "$BUILDER" | python3 -c 'import sys; data = sys.stdin.buffer.read(65537); len(data) <= 65536 or sys.exit("Buildx inspection exceeds 64 KiB"); sys.stdout.buffer.write(data)')"
+          printf '%s\n' "$builder_info" | awk -v expected="$BUILDER" '
+            /^Nodes:[[:space:]]*$/ { nodes = 1 }
+            !nodes && /^[[:space:]]*Name[[:space:]]*:/ {
+              names++
+              if ($0 !~ /^Name:[[:space:]]+/) invalid = 1
+              value = $0
+              sub(/^Name:[[:space:]]*/, "", value)
+              sub(/[[:space:]]*$/, "", value)
+              if (value != expected) invalid = 1
+            }
+            !nodes && /^[[:space:]]*Driver[[:space:]]*:/ {
+              drivers++
+              if ($0 !~ /^Driver:[[:space:]]+/) invalid = 1
+              value = $0
+              sub(/^Driver:[[:space:]]*/, "", value)
+              sub(/[[:space:]]*$/, "", value)
+              if (value != "docker-container") invalid = 1
+            }
+            END { if (names != 1 || drivers != 1 || !nodes || invalid) exit 1 }
+          '
+          container="buildx_buildkit_${BUILDER}0"
+          test "$(docker inspect --format '{{.Name}}' "$container")" = "/$container"
+          # This dedicated nonvoter builder shares the verified 20-GiB budget.
+          # Bound its sibling container independently of the runner service.
+          docker update --memory 20g --memory-swap 20g --pids-limit 4096 --cpuset-cpus 0-3 --cpu-period 100000 --cpu-quota 400000 "$container"
+          test "$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}} {{.HostConfig.CpusetCpus}} {{.HostConfig.PidsLimit}}' "$container")" = '21474836480 21474836480 400000 100000 0-3 4096'
+      - name: Compile exact Bookworm production daemon and export only its paired files
+        run: |
+          set -euo pipefail
+          docker buildx build --builder '${{ steps.candidate-builder.outputs.name }}' \
+            --platform linux/amd64 --target release-binaries \
+            --file Dockerfile.daemon-export \
+            --build-arg "PLURX_BUILD_SHA=$PLURX_BUILD_SHA" \
+            --build-arg "PLURX_BUILD_REF=$PLURX_BUILD_SHA" \
+            --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
+            --build-arg CARGO_BUILD_JOBS=2 --provenance=false --sbom=false \
+            --output type=local,dest=candidate-output/binary-export \
+            --metadata-file candidate-output/build-metadata.json source
+      - name: Verify Bookworm ABI and packed debug pair; package compact artifact
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          import pathlib
+          root=pathlib.Path('candidate-output/binary-export')
+          assert {p.name for p in root.iterdir()}=={'plurxd','plurxd.dwp','rustc-version','cargo-version'}
+          assert all(p.is_file() and not p.is_symlink() for p in root.iterdir())
+          PYCODE
+          binary=candidate-output/binary-export/plurxd
+          file "$binary" > candidate-output/elf-file.txt
+          readelf --version-info "$binary" > candidate-output/elf-version-info.txt
+          max_glibc=$(sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' candidate-output/elf-version-info.txt | sort -V | tail -1)
+          test -n "$max_glibc"
+          test "$(printf '%s\n' "$max_glibc" 2.36 | sort -V | tail -1)" = 2.36
+          export VERIFIED_MAX_GLIBC="$max_glibc"
+          cp source/Cargo.lock candidate-output/Cargo.lock
+          cp Dockerfile.daemon-export candidate-output/Dockerfile.daemon-export
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=source python3 - <<'PYCODE'
+          import hashlib,json,os,pathlib,subprocess
+          from validation.release_debug import Elf, verify_packed_pair
+          root=pathlib.Path('candidate-output');exp=root/'binary-export'
+          assert Elf(exp/'plurxd').machine==62
+          units=verify_packed_pair(exp/'plurxd',exp/'plurxd.dwp')
+          rust=(exp/'rustc-version').read_text();cargo=(exp/'cargo-version').read_text()
+          assert rust.startswith('rustc 1.97.1 ') and '\nhost: x86_64-unknown-linux-gnu\n' in rust
+          assert cargo.startswith('cargo 1.97.1 ')
+          assert subprocess.check_output(['git','-C','source','rev-parse','HEAD'],text=True).strip()==os.environ['PLURX_BUILD_SHA']
+          subprocess.run(['git','-C','source','diff','--quiet','HEAD','--'],check=True)
+          receipt={'source_sha':os.environ['PLURX_BUILD_SHA'],'source_tree':subprocess.check_output(['git','-C','source','rev-parse','HEAD^{tree}'],text=True).strip(),
+            'build_ref':os.environ['PLURX_BUILD_SHA'],'source_date_epoch':int(os.environ['SOURCE_DATE_EPOCH']),
+            'compiler_base':'rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e',
+            'profile':'release','command':'cargo build --locked --release -p plurxd','cargo_jobs':2,
+            'features':'package defaults; original Dockerfile forbidden-feature closure retained',
+            'cache_namespace':'plurx-bookworm-pr1777-daemon-${TARGETARCH}; task-owned BuildKit',
+            'helper_source_sha256':os.environ['EXPECTED_HELPER'],'max_required_glibc':os.environ['VERIFIED_MAX_GLIBC'],'dwo_units':units,
+            'workflow_run_id':os.environ['GITHUB_RUN_ID'],'limits':{'memory_bytes':21474836480,'swap_bytes':0,'cpus':4,'cpuset':'0-3','pids':4096},
+            'tests_run':False,'cluster_check_compiled':False,'helpers_compiled':False,'image_assembled':False,'published':False,'deployed':False,
+            'qualification':'daemon+DWP build, ABI and packed-pair verification only; runtime acceptance remains separate'}
+          (root/'provenance.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          PYCODE
+          (cd candidate-output && sha256sum binary-export/plurxd binary-export/plurxd.dwp \
+            binary-export/rustc-version binary-export/cargo-version Cargo.lock \
+            Dockerfile.daemon-export recipe-derivation.json build-metadata.json \
+            elf-file.txt elf-version-info.txt provenance.json > SHA256SUMS)
+          (cd candidate-output && sha256sum --check SHA256SUMS)
+          tar -czf pinned-bookworm-daemon.tar.gz -C candidate-output .
+          sha256sum pinned-bookworm-daemon.tar.gz > pinned-bookworm-daemon.tar.gz.sha256
+      - name: Upload one private daemon-only artifact with proven uploader
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
+        with:
+          name: private-pr1777-bookworm-daemon-607cdf2-${{ github.run_id }}
+          path: |
+            pinned-bookworm-daemon.tar.gz
+            pinned-bookworm-daemon.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      # setup-buildx-action post cleanup removes only its task-owned builder.
