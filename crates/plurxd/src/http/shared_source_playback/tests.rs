@@ -3355,6 +3355,10 @@ async fn actual_source_budgeted_start() {
         .transcode
         .test_hold_source_software_capacity()
         .expect("actual occupied software capacity");
+    let index_pause = fixture
+        .state
+        .transcode
+        .pause_source_index_after_spawn(crate::seam_hooks::ASYNC_PAUSE_BOUND);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("private fixture listener");
@@ -3519,7 +3523,19 @@ async fn actual_source_budgeted_start() {
         began + Duration::from_millis(4_600),
     ))
     .await;
-    let (status, _, bytes) = post(body(abandoned), Some(300)).await;
+    let entry = entry_of(abandoned).expect("the abandoned start's retained entry");
+    let assignment = super::ingress::assigned(
+        &fixture.state,
+        &entry,
+        Instant::now() + crate::seam_hooks::ASYNC_PAUSE_BOUND,
+    )
+    .await
+    .expect("the retained owner assigns on its preparation budget");
+    // Capacity can release before End once the actual index child is held.
+    // Let the rejoin register a real ingress while watching for that child.
+    drop(hold);
+    let (held_index, (status, _, bytes)) =
+        tokio::join!(index_pause.reached(), post(body(abandoned), Some(300)));
     assert_eq!(
         (status, typed(&bytes[..])),
         (
@@ -3529,7 +3545,6 @@ async fn actual_source_budgeted_start() {
         "the viewer's window does not end owned preparation: {}",
         String::from_utf8_lossy(&bytes)
     );
-    let entry = entry_of(abandoned).expect("the abandoned start's entry");
     let incarnation = entry
         .task
         .stage
@@ -3537,10 +3552,9 @@ async fn actual_source_budgeted_start() {
         .expect("stage")
         .incarnation()
         .expect("the entry owns its claim");
-    // The viewer leaves: B sends the End while preparation waits on the
-    // held capacity. The capacity then frees inside the 5 s queue, the cold
-    // index runs to completion and persists, and only then does the start
-    // end at its next stage boundary and settle.
+    assert_eq!(incarnation, assignment.binding().incarnation_id());
+    // End now observes a real cold index in progress. Releasing its existing
+    // hook lets the index persist before the owner settles.
     let end_url = format!("{path}/{abandoned}/end");
     // End must arrive on a fresh driver: the Start driver's retained
     // ingress custody cannot be settled while that same driver awaits End.
@@ -3574,7 +3588,8 @@ async fn actual_source_budgeted_start() {
     })
     .await
     .expect("the End is owned");
-    drop(hold);
+    assert!(!indexed().await, "the owned index is still unpersisted at End");
+    held_index.release();
     let receipt = tokio::time::timeout(Duration::from_secs(40), end)
         .await
         .expect("the abandoned start settles after its preparation")
