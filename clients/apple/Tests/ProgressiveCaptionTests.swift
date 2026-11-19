@@ -642,12 +642,21 @@ final class ProgressiveCaptionTests: XCTestCase {
             await fulfillment(of:[held],timeout:2);XCTAssertTrue(owner.busy)
             owner.read(publishedAsset)
             XCTAssertFalse(owner.busy,"the read owns presentation, not the cancelled mutation's busy flag")
-            try await eventually { self.owner.window != nil }
-            let replacementStatus=owner.status
+            // A periodic sample can publish an empty window while the read
+            // still reports startup. The cue proves the replacement read settled.
+            try await eventually { self.owner.window?.cues.first?.cueId == self.fixture.cueID }
+            let replacementStatus = owner.status
+            var observedStatuses: [String] = []
+            let statusObservation = owner.$status.sink { observedStatuses.append($0) }
             CaptionFixtureProtocol.holdRequest=nil;CaptionFixtureProtocol.releaseHeld?()
             for _ in 0..<20 { await Task.yield() }
-            XCTAssertFalse(owner.busy);XCTAssertEqual(owner.status,replacementStatus)
-            XCTAssertFalse(owner.status.contains("Stop is unconfirmed"))
+            // A refresh can report its operation before the cue read finishes.
+            try await eventually { self.owner.status == replacementStatus }
+            statusObservation.cancel()
+            XCTAssertFalse(owner.busy)
+            XCTAssertTrue(observedStatuses.allSatisfy {
+                $0 == replacementStatus || $0 == "Preparing captions. Playback continues."
+            }, "The replaced mutation published a status after " + mutation + ": " + observedStatuses.joined(separator: " | "))
             XCTAssertTrue(owner.request(.transcribe),"Generate remains usable after replacing "+mutation)
             owner.deselect();CaptionFixtureProtocol.onHeld=nil;CaptionFixtureProtocol.releaseHeld=nil
         }
