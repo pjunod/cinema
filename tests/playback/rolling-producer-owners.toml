@@ -857,7 +857,9 @@ also_in = ["crates/plurxd/src/transcode"]
 # which sets the mask so a marked path reader must answer before the hook point and clears it
 # again. No production reader or writer was added and nothing elects a replacement.
 # S10 rolling retained attachment: one false initializer, not a replacement election.
-expected_occurrences = 38
+# The native FEL publisher reads the mask under the existing transition lock
+# before selecting an unpublished video object.
+expected_occurrences = 39
 kind = "recovery_election"
 replacement = "retained process-replacement serialization projection; actor decisions and exact attempts own transcode prepublication"
 
@@ -883,7 +885,9 @@ also_in = ["crates/plurxd/src/transcode"]
 # 19 -> 20 with bee39df0e (test: expose the blocked retirement phase on a cleanup failure):
 # `test_support.rs::worker_retirement_debug` formats `child_transition.try_lock().is_ok()` into a
 # failure message. A test-only, non-blocking probe whose guard drops at once; no transition owner.
-expected_occurrences = 20
+# The native FEL publisher shares this lock for the final exact-attempt video
+# choice.
+expected_occurrences = 21
 kind = "mixed_ownership_lock"
 replacement = "specific attempt, response-admission, copy replacement, published cleanup, retirement, resource, or catalog-revision fences"
 
@@ -1377,8 +1381,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # settlement is then awaited). The 5100 ms wait holds mode 25 paused before the
 # native spawn past five seconds, so the window must use fresh current authority.
 # None is shipped; none certifies settlement or retries anything.
+# The native FEL publisher rechecks retirement and producer failure while no
+# new segment can wake it. The sleep only bounds permit cleanup discovery.
 # PR #1802 relay review adds one 25 ms poll inside the 30s retained-copy test deadline.
-expected_occurrences = 92
+expected_occurrences = 93
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -1528,7 +1534,8 @@ pattern = "child_transition"
 # effort's are both present; the total is the merged tree's exact count.
 # 36 -> 38 with bee39df0e: the same test-only debug helper names `child_transition` twice
 # (its `child_transition_available` label and the `try_lock()` probe above). No new owner.
-expected_occurrences = 38
+# The native FEL publication guard is the same lock use reviewed above.
+expected_occurrences = 39
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -1546,7 +1553,8 @@ pattern = "replacing_child"
 # 35 -> 37 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same two
 # test-only stores of the mask in the path-owner position test. No production owner added.
 # S10 retained attachment initializes false; no replacement owner is introduced.
-expected_occurrences = 38
+# The same native FEL commit checks the existing replacement fence.
+expected_occurrences = 39
 
 [[module_symbols]]
 id = "legacy-downgrade-owner"
@@ -1706,7 +1714,9 @@ pattern = "response_publication_deadline_before"
 # +1 native startup: the legacy-native VOD bridge derives the final
 # response-admission subdeadline after preparation, clipped to its original
 # request deadline. It neither renews that deadline nor adds a producer owner.
-expected_occurrences = 28
+# The split child playlist uses the existing response admission subdeadline of
+# its original request.
+expected_occurrences = 29
 
 [[module_symbols]]
 id = "m4-playlist-request-deadline-chain"
@@ -1738,7 +1748,9 @@ pattern = "SegmentPublication"
 # not the legacy probe facade's lossy Option result; no new response owner.
 # PR1341: +6. publication.rs +2: the exact attempt's terminal pre-publication
 # verdict authorizes its ProducerEnded 502 (the segment-gap fix). Tests +4.
-expected_occurrences = 53
+# The split child lookup adds typed role and frontier refusals with the same
+# response owner. Its actor regression asserts Pending for unpublished media.
+expected_occurrences = 58
 
 [[module_symbols]]
 id = "m4-typed-presentation-resolution"
@@ -6083,9 +6095,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # link_receipts tests are gone; no production timer changed. Main 2266 - 4 = 2262.
 # PR #1802 adds a timeout and a 25 ms poll to the retained-copy reuse test.
 # The owned voter fixture process is joined before a collision can retry.
+# The native FEL loop adds the idle lifecycle sleep reviewed under all-async-
+# sleeps above. It wakes the existing splice task.
 # Main adds bounded artwork, offline worker, voter and heartbeat fixture waits.
 # Remote processed upgrade relay adds one test-only control-cadence wait.
-expected_occurrences = 2270
+expected_occurrences = 2271
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

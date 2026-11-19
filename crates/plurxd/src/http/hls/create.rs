@@ -4835,20 +4835,28 @@ async fn create_with_purpose_attempt(
         crate::transcode::SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
         crate::transcode::SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
     };
-    let playlist_url = if request.continuous_media.is_some() || native_subtitles {
-        // Give the multivariant playlist its own path. AVPlayer caches HLS
-        // resources by URL and can otherwise conflate `index.m3u8?native=1`
-        // with the child `index.m3u8` media playlist referenced by that
-        // master. Keep the query form in `playlist` for clients holding an
-        // older session response, but new sessions use the unambiguous path.
-        let master = format!("/api/v1/hls/{}/master.m3u8", info.session_id);
-        match native_subtitle {
-            Some(index) => format!("{master}?subtitle={index}"),
-            None => master,
-        }
-    } else {
-        info.playlist_url
-    };
+    let native_split_master = request.transport.as_deref() == Some("native")
+        && request
+            .candidate_context
+            .as_deref()
+            .and_then(|context| context.canonical_caps.as_ref())
+            .and_then(|caps| caps.hls_hevc_sample_entries.as_ref())
+            .is_some_and(|entries| entries.iter().any(|entry| entry == "hev1"));
+    let playlist_url =
+        if request.continuous_media.is_some() || native_subtitles || native_split_master {
+            // Give the multivariant playlist its own path. AVPlayer caches HLS
+            // resources by URL and can otherwise conflate `index.m3u8?native=1`
+            // with the child `index.m3u8` media playlist referenced by that
+            // master. Keep the query form in `playlist` for clients holding an
+            // older session response, but new sessions use the unambiguous path.
+            let master = format!("/api/v1/hls/{}/master.m3u8", info.session_id);
+            match native_subtitle {
+                Some(index) => format!("{master}?subtitle={index}"),
+                None => master,
+            }
+        } else {
+            info.playlist_url
+        };
     remote_request.retained_output = info.retained_output.clone();
     recipe_json = serde_json::to_string(&remote_request)?;
     let measured_candidate_outputs = if let (true, Some(source), Some(caps), Some(catalog)) = (
