@@ -1332,6 +1332,17 @@ mod tests {
             );
             assert!(cache.authenticated_token(digest, Native, &source).is_none());
         }
+        cache.record_token_authenticated(
+            cache.authentication_ticket(),
+            "no-witness".into(),
+            Native,
+            source.clone(),
+            &user(1, false),
+            None,
+        );
+        assert!(cache
+            .authenticated_token("no-witness", Native, &source)
+            .is_none());
         for n in 0..=super::MAX_TOKEN_PROOFS {
             record_token(&cache, source.clone(), &format!("token-{n}"), Native);
         }
