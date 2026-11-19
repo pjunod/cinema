@@ -26,6 +26,7 @@ locations. Media, decoded frames and binaries stay outside Git.
 | `portable_lattice.py` | Reduces a private lattice report to the committed portable JSON with neutral path prefixes. |
 | `extract_served_refit.py` | Extracts the 48 Michael5400 RPUs from a captured Profile 8.1 publication, verifies the caller-supplied clock transform and binds copied BL slices to the source. |
 | `served_refit_eval.py` | Scores the extracted served F+ curves and identity on the same frozen four-model lattice, bound to the M5 capture and helper comparison receipt. |
+| `m7_pair_compare.py` | Compares the authored NP1 window with the retained served F+ result on the four frozen lattices and checks the prespecified margin and shadow limits. |
 | `protocol-m7-michael5400-20261119.json` | Freezes the first Michael evaluation window, served F+ comparison, NP1 recipe, rate-only envelope and four-model margin and shadow limits. |
 | `heldout_eval.py` | Frozen four-model scoring with observer metadata for fixtures that have no retained parsed metadata; full resolution or lattice; validated by exact reproduction of a retained result. |
 | `land_rate.py` | Lands an arm in the 128.5–130.0 Mb/s authored band by changing only the ABR target (secant, at most 4 encodes); the iso-rate rule for every coding arm. `--target T` lands a diagnostic rung at T ± 0.75 Mb/s instead. |
