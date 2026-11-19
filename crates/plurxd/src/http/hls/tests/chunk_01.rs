@@ -1694,14 +1694,20 @@
     async fn rolling_native_split_authorizes_both_renditions_and_holds_unpublished_video() {
         let dir = crate::test_tempdir().expect("split session directory");
         let session = uuid::Uuid::new_v4().to_string();
-        let feed = plurx_core::testfixtures::pipe_with_distinct_hevc_sample_entries("closed-gop");
+        let feed = plurx_core::testfixtures::pipe("closed-gop");
         let mut reader = plurx_core::fmp4::FragmentReader::new();
         reader.push(&feed);
         let Some(plurx_core::fmp4::Unit::Init(init)) = reader.next_unit().expect("fixture init") else {
             panic!("HEVC fixture has no initialization");
         };
+        let Some(plurx_core::fmp4::Unit::Fragment(fragment)) =
+            reader.next_unit().expect("fixture fragment")
+        else {
+            panic!("HEVC fixture has no first fragment");
+        };
         for (name, bytes) in [
             ("init.mp4", init.bytes.as_slice()),
+            ("seg00000.m4s", fragment.bytes.as_slice()),
             ("split-audio.mp4", b"audio init"),
             ("split-video.mp4", b"video init"),
             ("split-audio-seg00000.m4s", b"audio segment"),
@@ -1720,6 +1726,7 @@
         ).await.expect("authenticate split master");
         let master = axum::body::to_bytes(master.into_body(), 16_384).await.expect("split master body");
         let master = std::str::from_utf8(&master).expect("split master UTF-8");
+        assert!(master.contains("CODECS=\"hev1."));
 
         for (role, id, init, bytes, renewal, fetched) in [
             ("audio", &ids.audio, &b"audio init"[..], &b"audio segment"[..], "audio-media-segment", None),

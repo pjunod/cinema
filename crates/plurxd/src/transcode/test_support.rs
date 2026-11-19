@@ -392,7 +392,10 @@ impl HlsDeliveryFixture {
                 file_id,
                 start_seconds: 0.0,
                 media_origin_seconds: 0.0,
-                codecs: "avc1.640034,mp4a.40.2".into(),
+                codecs: match fixture_kind {
+                    DeliveryFixtureKind::NativeSplit => "hvc1.2.4.L153.B0,mp4a.40.2".into(),
+                    _ => "avc1.640034,mp4a.40.2".into(),
+                },
                 supplemental_codecs: None,
                 frame_rate: None,
             },
