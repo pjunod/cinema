@@ -864,7 +864,7 @@ pub(crate) async fn hydrate_from_peers(
     if !access.is_enabled().await || ordinal < 0 || file.size < 0 {
         return false;
     }
-    let rows = match catalog
+    let mut rows = match catalog
         .list_subtitle_source_publications(file.id, file.size, file.mtime)
         .await
     {
@@ -919,7 +919,13 @@ pub(crate) async fn hydrate_from_peers(
         ordinal,
         format.publication_name()
     );
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let peer_budget = Duration::from_secs(8);
+    rows.sort_by_cached_key(|row| {
+        reachable.get(&row.node_id).map_or(1, |base| {
+            transport.preference(&row.node_id, base, peer_budget)
+        })
+    });
+    let deadline = tokio::time::Instant::now() + peer_budget;
     let source_attestation = &attested.observation.source_sha256;
     let requests = rows.into_iter().filter_map(|row| {
         if row.ordinal != ordinal

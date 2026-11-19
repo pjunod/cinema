@@ -1897,9 +1897,86 @@ pub(crate) mod calls {
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum PeerTransportError {
+        /// This node could not construct/sign the request; no peer failure
+        /// has been observed and no negative health receipt may be published.
+        LocalUnavailable,
         Unreachable,
         TimedOut,
         InvalidResponse,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum PeerCallOutcome {
+        Responded(u16),
+        Unreachable,
+        TimedOut,
+        InvalidResponse,
+    }
+
+    impl PeerCallOutcome {
+        fn failure(error: PeerTransportError) -> Option<Self> {
+            match error {
+                PeerTransportError::LocalUnavailable => None,
+                PeerTransportError::Unreachable => Some(Self::Unreachable),
+                PeerTransportError::TimedOut => Some(Self::TimedOut),
+                PeerTransportError::InvalidResponse => Some(Self::InvalidResponse),
+            }
+        }
+    }
+
+    struct PeerCallObservation {
+        origin: String,
+        observed_at: tokio::time::Instant,
+        outcome: PeerCallOutcome,
+    }
+
+    /// Passive receipts, bounded by the maximum committed roster. A receipt
+    /// ranks attempts only; it never grants authority or removes a candidate.
+    #[derive(Default)]
+    struct PeerOutcomes(std::sync::Mutex<std::collections::BTreeMap<String, PeerCallObservation>>);
+
+    impl PeerOutcomes {
+        fn observe(&self, node_id: &str, origin: &str, outcome: PeerCallOutcome) {
+            if node_id.len() > 256 || origin.len() > 8192 {
+                return;
+            }
+            let Ok(mut peers) = self.0.lock() else { return };
+            if !peers.contains_key(node_id) && peers.len() >= 64 {
+                let oldest = peers
+                    .iter()
+                    .min_by_key(|(_, receipt)| receipt.observed_at)
+                    .map(|(node, _)| node.clone());
+                if let Some(oldest) = oldest {
+                    peers.remove(&oldest);
+                }
+            }
+            peers.insert(
+                node_id.to_owned(),
+                PeerCallObservation {
+                    origin: origin.to_owned(),
+                    observed_at: tokio::time::Instant::now(),
+                    outcome,
+                },
+            );
+        }
+
+        fn preference(&self, node_id: &str, origin: &str, max_age: Duration) -> u8 {
+            let Ok(peers) = self.0.lock() else { return 1 };
+            let Some(receipt) = peers.get(node_id) else {
+                return 1;
+            };
+            if receipt.origin != origin || receipt.observed_at.elapsed() >= max_age {
+                return 1;
+            }
+            match receipt.outcome {
+                PeerCallOutcome::Responded(status)
+                    if status < 500 && !matches!(status, 401 | 403 | 429) =>
+                {
+                    0
+                }
+                _ => 2,
+            }
+        }
     }
 
     /// Exact inbound authorization and response signing share the existing
@@ -1967,6 +2044,7 @@ pub(crate) mod calls {
     pub(crate) struct PeerTransport {
         membership: MembershipManager,
         client: Result<reqwest::Client, String>,
+        outcomes: std::sync::Arc<PeerOutcomes>,
     }
 
     impl PeerTransport {
@@ -1975,7 +2053,17 @@ pub(crate) mod calls {
         /// membership shares one connection pool, however many callers make one.
         pub(super) fn new(membership: MembershipManager) -> Self {
             let client = membership.peer_http().into_result();
-            Self { membership, client }
+            Self {
+                membership,
+                client,
+                outcomes: std::sync::Arc::new(PeerOutcomes::default()),
+            }
+        }
+
+        /// Prefer recent responding peers without excluding any directory
+        /// candidate. The caller supplies its existing lookup budget as age.
+        pub(crate) fn preference(&self, node_id: &str, origin: &str, max_age: Duration) -> u8 {
+            self.outcomes.preference(node_id, origin, max_age)
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -2101,11 +2189,51 @@ pub(crate) mod calls {
             extra_header: Option<(&'static str, &'static str)>,
             clock_guard: Option<&plurx_core::cluster::clock::ClusterClockGuard>,
         ) -> Result<(PeerResponse, Option<u32>), PeerTransportError> {
+            let result = self
+                .request_with_optional_header_inner(
+                    expected_node_id,
+                    base,
+                    method,
+                    path,
+                    body,
+                    deadline,
+                    max_response_bytes,
+                    auth_mode,
+                    extra_header,
+                    clock_guard,
+                )
+                .await;
+            let outcome = match &result {
+                Ok((response, _)) => Some(PeerCallOutcome::Responded(response.status.as_u16())),
+                Err(error) => PeerCallOutcome::failure(*error),
+            };
+            // Cancelled requests have no terminal outcome and never mark a
+            // healthy peer bad merely because another holder won the race.
+            if let Some(outcome) = outcome {
+                self.outcomes.observe(expected_node_id, base, outcome);
+            }
+            result
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn request_with_optional_header_inner(
+            &self,
+            expected_node_id: &str,
+            base: &str,
+            method: reqwest::Method,
+            path: &str,
+            body: Vec<u8>,
+            deadline: tokio::time::Instant,
+            max_response_bytes: usize,
+            auth_mode: PeerAuthMode,
+            extra_header: Option<(&'static str, &'static str)>,
+            clock_guard: Option<&plurx_core::cluster::clock::ClusterClockGuard>,
+        ) -> Result<(PeerResponse, Option<u32>), PeerTransportError> {
             let Some(url) = peer_url(base, path) else {
-                return Err(PeerTransportError::Unreachable);
+                return Err(PeerTransportError::LocalUnavailable);
             };
             let Some(client) = self.client.as_ref().ok() else {
-                return Err(PeerTransportError::Unreachable);
+                return Err(PeerTransportError::LocalUnavailable);
             };
             let clock_ticket = clock_guard.map(|guard| guard.ticket());
             let timestamp_ms = unix_ms();
@@ -2129,7 +2257,7 @@ pub(crate) mod calls {
                     )
                     .map(SignedPeerAuth::Exact),
             }
-            .map_err(|_| PeerTransportError::Unreachable)?;
+            .map_err(|_| PeerTransportError::LocalUnavailable)?;
             let response_binding = match &auth {
                 SignedPeerAuth::Exact(auth) => match auth_mode {
                     PeerAuthMode::ExactRequestAndResponse => {
@@ -2243,11 +2371,45 @@ pub(crate) mod calls {
             deadline: tokio::time::Instant,
             auth_mode: PeerAuthMode,
         ) -> Result<reqwest::Response, PeerTransportError> {
+            let result = self
+                .request_stream_inner(
+                    expected_node_id,
+                    base,
+                    method,
+                    path,
+                    body,
+                    deadline,
+                    auth_mode,
+                )
+                .await;
+            let outcome = match &result {
+                Ok(response) => Some(PeerCallOutcome::Responded(response.status().as_u16())),
+                Err(error) => PeerCallOutcome::failure(*error),
+            };
+            // This receipt proves response headers only. Stream body and
+            // lifecycle authority stay with the caller's existing checks.
+            if let Some(outcome) = outcome {
+                self.outcomes.observe(expected_node_id, base, outcome);
+            }
+            result
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn request_stream_inner(
+            &self,
+            expected_node_id: &str,
+            base: &str,
+            method: reqwest::Method,
+            path: &str,
+            body: Vec<u8>,
+            deadline: tokio::time::Instant,
+            auth_mode: PeerAuthMode,
+        ) -> Result<reqwest::Response, PeerTransportError> {
             let Some(url) = peer_url(base, path) else {
-                return Err(PeerTransportError::Unreachable);
+                return Err(PeerTransportError::LocalUnavailable);
             };
             let Some(client) = self.client.as_ref().ok() else {
-                return Err(PeerTransportError::Unreachable);
+                return Err(PeerTransportError::LocalUnavailable);
             };
             let timestamp_ms = unix_ms();
             let method_name = method.as_str();
@@ -2259,7 +2421,7 @@ pub(crate) mod calls {
                 // A stream has no complete body to authenticate at this layer.
                 PeerAuthMode::ExactRequestAndResponse
                 | PeerAuthMode::ExactRequestAndMemberResponse => {
-                    return Err(PeerTransportError::InvalidResponse);
+                    return Err(PeerTransportError::LocalUnavailable);
                 }
                 PeerAuthMode::ExactRequest => self
                     .membership
@@ -2273,7 +2435,7 @@ pub(crate) mod calls {
                     )
                     .map(SignedPeerAuth::Exact),
             }
-            .map_err(|_| PeerTransportError::Unreachable)?;
+            .map_err(|_| PeerTransportError::LocalUnavailable)?;
             let mut request = client.request(method, url);
             request = match auth {
                 SignedPeerAuth::Activity(auth) => signed_headers(request, &auth),
@@ -2536,6 +2698,119 @@ pub(crate) mod calls {
         /// Every transport must take the membership manager's pooled client. A
         /// client built here is a connection pool per caller, which is what made
         /// node-to-node requests redial on every use.
+        #[tokio::test(start_paused = true)]
+        async fn passive_peer_outcomes_rank_only_the_same_origin_and_expire_without_a_timer() {
+            let outcomes = PeerOutcomes::default();
+            let budget = Duration::from_secs(8);
+            assert_eq!(outcomes.preference("peer", "http://one", budget), 1);
+            outcomes.observe("peer", "http://one", PeerCallOutcome::Responded(200));
+            assert_eq!(outcomes.preference("peer", "http://one", budget), 0);
+            assert_eq!(
+                outcomes.preference("peer", "http://two", budget),
+                1,
+                "a changed endpoint has no receipt"
+            );
+            outcomes.observe("peer", "http://one", PeerCallOutcome::TimedOut);
+            assert_eq!(outcomes.preference("peer", "http://one", budget), 2);
+            outcomes.observe("peer", "http://one", PeerCallOutcome::Responded(404));
+            assert_eq!(
+                outcomes.preference("peer", "http://one", budget),
+                0,
+                "missing one artifact is a responding peer"
+            );
+            tokio::time::advance(budget).await;
+            assert_eq!(outcomes.preference("peer", "http://one", budget), 1);
+            for n in 0..100 {
+                outcomes.observe(
+                    &format!("peer-{n}"),
+                    "http://one",
+                    PeerCallOutcome::Responded(200),
+                );
+            }
+            assert!(outcomes.0.lock().unwrap().len() <= 64);
+        }
+
+        #[tokio::test]
+        async fn local_signing_or_client_failure_never_publishes_negative_peer_health() {
+            let mut transport = PeerTransport::new(MembershipManager::unavailable());
+            transport.client = Ok(reqwest::Client::new());
+            let call = || async {
+                transport
+                    .request(
+                        "peer",
+                        "http://127.0.0.1:9",
+                        reqwest::Method::GET,
+                        "/internal/media/test",
+                        Vec::new(),
+                        deadline_after(Duration::from_secs(1)),
+                        1024,
+                        PeerAuthMode::ExactRequest,
+                    )
+                    .await
+            };
+            assert!(matches!(
+                call().await,
+                Err(PeerTransportError::LocalUnavailable)
+            ));
+            assert!(
+                transport.outcomes.0.lock().unwrap().is_empty(),
+                "local signing failed before any peer call"
+            );
+            transport.client = Err("local client construction failed".to_owned());
+            assert!(matches!(
+                transport
+                    .request(
+                        "peer",
+                        "http://127.0.0.1:9",
+                        reqwest::Method::GET,
+                        "/internal/media/test",
+                        Vec::new(),
+                        deadline_after(Duration::from_secs(1)),
+                        1024,
+                        PeerAuthMode::ExactRequest
+                    )
+                    .await,
+                Err(PeerTransportError::LocalUnavailable)
+            ));
+            assert!(transport.outcomes.0.lock().unwrap().is_empty());
+            assert_eq!(
+                PeerCallOutcome::failure(PeerTransportError::LocalUnavailable),
+                None
+            );
+            assert_eq!(
+                PeerCallOutcome::failure(PeerTransportError::TimedOut),
+                Some(PeerCallOutcome::TimedOut)
+            );
+        }
+
+        #[tokio::test]
+        async fn an_actual_stalled_peer_body_keeps_its_typed_timeout() {
+            use tokio::io::AsyncWriteExt;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
+                    .await
+                    .unwrap();
+                std::future::pending::<()>().await;
+            });
+            let response = tokio::time::timeout(
+                Duration::from_secs(2),
+                reqwest::Client::new()
+                    .get(format!("http://{address}/stalled"))
+                    .send(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let result =
+                read_bounded(response, deadline_after(Duration::from_millis(50)), 1024).await;
+            server.abort();
+            assert!(matches!(result, Err(PeerTransportError::TimedOut)));
+        }
+
         #[tokio::test]
         async fn holder_race_is_bounded_and_drops_losers_after_a_later_holder_wins() {
             struct Active(std::sync::Arc<std::sync::atomic::AtomicUsize>);

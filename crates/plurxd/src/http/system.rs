@@ -5120,6 +5120,7 @@ fn peer_status(outcome: &PeerActivityOutcome) -> &'static str {
         PeerActivityOutcome::Unhealthy => "unhealthy",
         PeerActivityOutcome::Unsupported => "unsupported",
         PeerActivityOutcome::Unreachable => "unreachable",
+        PeerActivityOutcome::LocalUnavailable => "local_unavailable",
         PeerActivityOutcome::TimedOut => "timed_out",
         PeerActivityOutcome::Refused => "refused",
         PeerActivityOutcome::HttpError => "http_error",

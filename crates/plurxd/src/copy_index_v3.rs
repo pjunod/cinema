@@ -628,7 +628,7 @@ async fn load_blob(
     }
     // This node's own row, if any, is gone or was never there: its bytes are
     // not here. Whether anyone else holds them is what remains.
-    let locations = store
+    let mut locations = store
         .copy_index_v3_locations(&artifact.contract_key, &artifact.blob_sha256)
         .await
         .map_err(|error| format!("listing copy index holders: {error}"))?
@@ -662,6 +662,11 @@ async fn load_blob(
         Blob(String, Vec<u8>),
         Unknown,
     }
+    locations.sort_by_cached_key(|location| {
+        peers.get(&location.node_id).map_or(1, |(base, _)| {
+            transport.preference(&location.node_id, base, PEER_DEADLINE)
+        })
+    });
     let deadline = tokio::time::Instant::now() + PEER_DEADLINE;
     let requests = locations.into_iter().filter_map(|location| {
         let (base, _) = peers.get(&location.node_id)?;

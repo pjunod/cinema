@@ -298,6 +298,7 @@ fn failure_reason(error: PeerTransportError) -> &'static str {
         PeerTransportError::TimedOut => "timed_out",
         PeerTransportError::InvalidResponse => "invalid_response",
         PeerTransportError::Unreachable => "unreachable",
+        PeerTransportError::LocalUnavailable => "local_unavailable",
     }
 }
 

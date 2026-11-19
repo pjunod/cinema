@@ -80,9 +80,11 @@ cleanup, not authority or lease mutations.
 The pinned macOS daemon baseline at `259e1f06a` fails on the two inherited
 Linux-only `vodencode::dv_runtime` references in `state.rs`. No passing daemon
 build or regression execution is claimed. Linux compile qualification is
-being established. Peer-authorizer reuse, outcome health and token-proof
-caching remain unimplemented; this bounded hydration change does not close
-B5 or B3a by itself.
+being established. Source implementations of peer-authorizer reuse, passive
+outcome ranking and token-proof caching are now committed, but their complete
+combined-tree execution/review and admission-refusal classification remain
+open. A successful build or the bounded hydration change alone does not close
+B5 or B3a.
 
 ## 7. General token proof admission
 
@@ -150,3 +152,29 @@ them with strings. The remaining admission/refusal classification and health
 observations must describe call outcomes without treating an unauthenticated
 response, a timeout or cancellation as committed removal or credential
 revocation. Health can rank candidate attempts; it cannot grant authority.
+
+## 9. Passive outcomes and typed local failure
+
+The shared call owner records at most 64 terminal receipts keyed by node and
+exact origin. The caller's existing eight-second lookup budget bounds the
+age used for ordering. Recent responding peers come first, unknown origins
+next and recent failures last; every original holder remains eligible and
+passes the same fresh authority and artifact checks. Cancelling a losing
+request records no failure. The lazy clock transport keeps its existing
+construction and timing owner.
+
+`PeerTransportError::LocalUnavailable` distinguishes local client, signing
+and request-construction failure from an actual network failure. It never
+publishes a negative peer receipt. Activity carries the typed local outcome;
+operations renders it unavailable rather than unreachable. Existing remote
+lifecycle and Live TV errors remain typed to their HTTP boundary. Full call
+outcomes still distinguish unreachable, timed out and invalid response.
+A stream receipt describes response headers only and never asserts that its
+body or the peer's current authority was verified.
+
+Focused source tests cover origin/age/bounded receipts, no peer penalty for
+local signing/client failure, and a real TCP response whose stalled body
+returns the transport's typed timeout. Execution of these new controls is
+pending on the combined source. Rate/replay admission and Store failure
+must still be separated from invalid credentials at every peer route before
+claiming the audit's end-to-end refusal classification complete.

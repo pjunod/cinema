@@ -1582,12 +1582,17 @@ async fn hydrate_inner(
                 .map(|base| (peer.node_id.clone(), (base, peer.reachable)))
         })
         .collect::<HashMap<_, _>>();
-    let locations = store
+    let mut locations = store
         .cluster_fragment_index_locations(&artifact.cache_key)
         .await
         .map_err(|error| error.to_string())?;
     let transport = calls;
     let path = format!("{PEER_PATH_PREFIX}{}", artifact.cache_key);
+    locations.sort_by_cached_key(|location| {
+        peers.get(&location.node_id).map_or(1, |(base, _)| {
+            transport.preference(&location.node_id, base, PEER_DEADLINE)
+        })
+    });
     let deadline = tokio::time::Instant::now() + PEER_DEADLINE;
     let requests = locations.into_iter().filter_map(|location| {
         let (base, _) = peers.get(&location.node_id)?;
