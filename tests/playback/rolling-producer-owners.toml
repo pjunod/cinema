@@ -6069,7 +6069,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # three bound native failure diagnostics, and one bounds the VTT failure body.
 # The owned-process pause fixture replaces four observation timeouts and five
 # sleeps with host-clock observation bounds and an explicit budget clock.
-expected_occurrences = 2263
+# The native Source collision fixture bounds the paired request and
+# real heartbeat injection by the existing resource deadline.
+expected_occurrences = 2264
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -7347,8 +7349,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # and source_probe/dv_refit.rs.
 # Main 60443f341 has 945 matches. Recovery adds six HTTP Response::status()
 # reads in shared_source_playback/tests.rs. They observe the Direct response
-# and native/VTT failure responses.
-expected_occurrences = 951
+# and native/VTT failure responses. The native Source heartbeat collision
+# adds one read of the successful H2 master response status.
+expected_occurrences = 952
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
