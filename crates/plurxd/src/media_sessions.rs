@@ -20,7 +20,7 @@ use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::{
     MediaSessionActivation, MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
     MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor, OwnedMediaSessionLease,
-    MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
+    MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use plurx_core::error::StoreError;
 use plurx_core::store::{AppliedView, FactInstant, StampCheck, Store, ViewSource, ViewStamp};
@@ -57,15 +57,18 @@ pub(crate) const REMOTE_START_OWNERSHIP_V1: &str = "created-v1";
 pub(crate) const PREPARED_SUCCESSOR_PLAN_NOTE: &str = "prepared_quality_handoff";
 
 const MAX_START_RESPONSE_BYTES: usize = 128 * 1024;
-pub(crate) const START_DEADLINE: Duration = Duration::from_secs(50);
-pub(crate) const OWNER_ASSIGNMENT_DEADLINE: Duration = Duration::from_secs(3);
-pub(crate) const ACTIVATION_STORE_DEADLINE: Duration = Duration::from_secs(3);
-const ABORT_DEADLINE: Duration = Duration::from_secs(5);
+pub(crate) const START_DEADLINE: Duration = plurx_core::cluster::timing::media::START_DEADLINE;
+pub(crate) const OWNER_ASSIGNMENT_DEADLINE: Duration =
+    plurx_core::cluster::timing::media::OWNER_ASSIGNMENT_DEADLINE;
+pub(crate) const ACTIVATION_STORE_DEADLINE: Duration =
+    plurx_core::cluster::timing::media::ACTIVATION_STORE_DEADLINE;
+const ABORT_DEADLINE: Duration = plurx_core::cluster::timing::media::ABORT_DEADLINE;
 /// Post-header streaming is deliberately disjoint from the request's
 /// preparation budget. A media lookup may spend almost its whole request
 /// deadline before headers exist; every admitted local or relayed body then
 /// gets this one bounded lifetime.
-pub(crate) const MAX_ADMITTED_MEDIA_BODY_LIFETIME: Duration = Duration::from_secs(300);
+pub(crate) const MAX_ADMITTED_MEDIA_BODY_LIFETIME: Duration =
+    plurx_core::cluster::timing::media::MAX_ADMITTED_MEDIA_BODY_LIFETIME;
 /// Bytes requested from storage per read while streaming a media body.
 ///
 /// Tokio's file reader performs one blocking-pool hop per read and caps an
@@ -100,15 +103,14 @@ pub(crate) const MEDIA_BODY_ACK_GRANULARITY: usize = 4 * 1024;
 /// Longest authenticated public/relay resource envelope before response
 /// headers, including accepted inter-node clock disagreement. This is the
 /// playlist ceiling; segment and short-control envelopes are smaller.
-pub(crate) const MAX_ADMITTED_MEDIA_PREHEADER_LIFETIME: Duration = Duration::from_secs(
-    RELAY_PLAYLIST_MAX_LIFETIME.as_secs() + RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE.as_secs(),
-);
+pub(crate) const MAX_ADMITTED_MEDIA_PREHEADER_LIFETIME: Duration =
+    plurx_core::cluster::timing::media::MAX_ADMITTED_MEDIA_PREHEADER_LIFETIME;
 /// Once authoritative Store state is terminal, this outlives both the full
 /// pre-header envelope and body lifetime of every response admitted under the
 /// predecessor generation. Exact control projection normally settles
 /// immediately; this is the crash/partition proof boundary.
 pub(crate) const TERMINAL_PROJECTION_SAFETY_WINDOW: Duration =
-    Duration::from_millis(MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS as u64);
+    plurx_core::cluster::timing::media::TERMINAL_PROJECTION_SAFETY_WINDOW;
 const _: () = assert!(
     TERMINAL_PROJECTION_SAFETY_WINDOW.as_secs()
         == MAX_ADMITTED_MEDIA_PREHEADER_LIFETIME.as_secs()
@@ -118,28 +120,26 @@ const _: () = assert!(
 /// Once the downstream is actively polling, a local reader or remote owner
 /// that produces no next body item for this long is failed. This is an
 /// upstream no-progress bound, not a refresh of the total body lifetime.
-pub(crate) const MEDIA_BODY_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const MEDIA_BODY_NO_PROGRESS_TIMEOUT: Duration =
+    plurx_core::cluster::timing::media::MEDIA_BODY_NO_PROGRESS_TIMEOUT;
 /// A relay pump may read only this many chunks ahead of its downstream. The
 /// independently driven task owns the peer response and both body timers;
 /// dropping the HTTP body drops the receiver and cancels that sole owner.
 const RELAY_BODY_CHANNEL_CAPACITY: usize = 2;
-const LEASE_INTERVAL: Duration = Duration::from_secs(3);
-pub(crate) const LEASE_TTL_MS: i64 = 12_000;
+const LEASE_INTERVAL: Duration = plurx_core::cluster::timing::media::LEASE_INTERVAL;
+pub(crate) const LEASE_TTL_MS: i64 = plurx_core::cluster::timing::media::LEASE_TTL_MS;
 /// A takeover claim must survive provisional publication plus the worst-case
 /// first ordinary renewal path. After that first renewal it returns to the
 /// normal 12-second lease. The longer one-shot claim is an ownership fence,
 /// not an inactivity or playback-progress watchdog.
-const TAKEOVER_CLAIM_LEASE_TTL_MS: i64 = 24_000;
+const TAKEOVER_CLAIM_LEASE_TTL_MS: i64 =
+    plurx_core::cluster::timing::media::TAKEOVER_CLAIM_LEASE_TTL_MS;
 /// Begins on the worker before the start response leaves it, so it must
 /// strictly outlive ingress placement, owner assignment, the fixed activation
 /// lease, and a scheduling margin. There is no independent reconciliation or
 /// confirmation watchdog: the activation transaction owns one lease deadline.
-pub(crate) const REMOTE_ACTIVATION_CONFIRMATION_WINDOW: Duration = Duration::from_secs(
-    START_DEADLINE.as_secs()
-        + OWNER_ASSIGNMENT_DEADLINE.as_secs()
-        + (LEASE_TTL_MS as u64 / 1_000)
-        + 10,
-);
+pub(crate) const REMOTE_ACTIVATION_CONFIRMATION_WINDOW: Duration =
+    plurx_core::cluster::timing::media::REMOTE_ACTIVATION_CONFIRMATION_WINDOW;
 const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
 /// How long the route cache holds a fact it observed directly (a row this
 /// process committed, or a quorum read) while this replica is not proven to
@@ -155,33 +155,42 @@ const CONTROL_RATE_GLOBAL: u32 = 512;
 /// Maximum authenticated clock disagreement accepted on a relayed resource
 /// deadline. This is deliberately small: it is only tolerance for wall-clock
 /// conversion between workers, never extra request work minted at the owner.
-const RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE: Duration = Duration::from_secs(2);
+const RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE: Duration =
+    plurx_core::cluster::timing::media::RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE;
 /// The public playlist path reserves 55 seconds for rolling startup and five
 /// seconds for publication. Keep this wire-envelope ceiling synchronized with
 /// that externally visible request lifetime rather than trusting a peer to
 /// choose an arbitrary absolute deadline.
-const RELAY_PLAYLIST_MAX_LIFETIME: Duration = Duration::from_secs(60);
+const RELAY_PLAYLIST_MAX_LIFETIME: Duration =
+    plurx_core::cluster::timing::media::RELAY_PLAYLIST_MAX_LIFETIME;
 /// Public status, subtitle-segment, and release requests only perform bounded
 /// response publication/control work.
-const RELAY_SHORT_MAX_LIFETIME: Duration = Duration::from_secs(5);
+const RELAY_SHORT_MAX_LIFETIME: Duration =
+    plurx_core::cluster::timing::media::RELAY_SHORT_MAX_LIFETIME;
 /// A media segment can spend 30 seconds in a VOD blocked GET plus the five
 /// second publication fence.
-const RELAY_SEGMENT_MAX_LIFETIME: Duration = Duration::from_secs(35);
+const RELAY_SEGMENT_MAX_LIFETIME: Duration =
+    plurx_core::cluster::timing::media::RELAY_SEGMENT_MAX_LIFETIME;
 const ROUTE_QUERY_SHARDS: usize = 32;
 const ROUTE_GENERATION_SHARDS: usize = 4_096;
-const ROUTE_QUERY_DEADLINE: Duration = Duration::from_secs(3);
+const ROUTE_QUERY_DEADLINE: Duration = plurx_core::cluster::timing::media::ROUTE_QUERY_DEADLINE;
 const LEASE_RENEWAL_BATCH: usize = 256;
 const LEASE_RENEWAL_FANOUT: usize = 16;
-const LEASE_RENEWAL_DEADLINE: Duration = Duration::from_secs(4);
-const LEASE_RENEWAL_MIN_REMAINING_MS: i64 = 4_000;
+const LEASE_RENEWAL_DEADLINE: Duration = plurx_core::cluster::timing::media::LEASE_RENEWAL_DEADLINE;
+const LEASE_RENEWAL_MIN_REMAINING_MS: i64 =
+    plurx_core::cluster::timing::media::LEASE_RENEWAL_MIN_REMAINING_MS;
 const MAX_STALE_SETTLEMENTS_PER_TICK: usize = 64;
-const STALE_SETTLEMENT_DEADLINE: Duration = Duration::from_secs(4);
+const STALE_SETTLEMENT_DEADLINE: Duration =
+    plurx_core::cluster::timing::media::STALE_SETTLEMENT_DEADLINE;
 /// A candidate must still own the complete exact-read window. Routes closer
 /// to expiry are left active so a survivor can claim them instead of a stale
 /// local cleanup racing that handoff.
-const STALE_SETTLEMENT_MIN_RUNWAY_MS: i64 = 4_000;
-const STALE_SETTLEMENT_RETRY_BACKOFF: Duration = Duration::from_secs(30);
-const STALE_SETTLEMENT_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
+const STALE_SETTLEMENT_MIN_RUNWAY_MS: i64 =
+    plurx_core::cluster::timing::media::STALE_SETTLEMENT_MIN_RUNWAY_MS;
+const STALE_SETTLEMENT_RETRY_BACKOFF: Duration =
+    plurx_core::cluster::timing::media::STALE_SETTLEMENT_RETRY_BACKOFF;
+const STALE_SETTLEMENT_MAX_BACKOFF: Duration =
+    plurx_core::cluster::timing::media::STALE_SETTLEMENT_MAX_BACKOFF;
 /// Public DELETE admits at most this many distinct commit-unknown capabilities
 /// at once. Reconciliation itself uses a much smaller fan-out below, so a
 /// failed Store cannot turn the fail-closed registry into request-amplified
@@ -189,31 +198,32 @@ const STALE_SETTLEMENT_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 const MAX_PENDING_RELEASE_RECONCILIATIONS: usize = 128;
 const RELEASE_RECONCILIATION_SHARDS: usize = 32;
 const RELEASE_RECONCILIATION_FANOUT: usize = 4;
-const RELEASE_RECONCILIATION_RETRY_BACKOFF: Duration = Duration::from_secs(1);
-const RELEASE_RECONCILIATION_MAX_BACKOFF: Duration = Duration::from_secs(30);
+const RELEASE_RECONCILIATION_RETRY_BACKOFF: Duration =
+    plurx_core::cluster::timing::media::RELEASE_RECONCILIATION_RETRY_BACKOFF;
+const RELEASE_RECONCILIATION_MAX_BACKOFF: Duration =
+    plurx_core::cluster::timing::media::RELEASE_RECONCILIATION_MAX_BACKOFF;
 const RELEASE_CLEANUP_CAPACITY: usize = 128;
-const TAKEOVER_INTERVAL: Duration = Duration::from_secs(2);
-const TAKEOVER_DEADLINE: Duration = Duration::from_secs(8);
+const TAKEOVER_INTERVAL: Duration = plurx_core::cluster::timing::media::TAKEOVER_INTERVAL;
+const TAKEOVER_DEADLINE: Duration = plurx_core::cluster::timing::media::TAKEOVER_DEADLINE;
 const TAKEOVER_BATCH: usize = 16;
 const TAKEOVER_FANOUT: usize = 4;
-const TAKEOVER_OVERLAP_MARGIN_MS: i64 = 2_000;
-const TAKEOVER_CLEANUP_DEADLINE: Duration = Duration::from_secs(2);
+const TAKEOVER_OVERLAP_MARGIN_MS: i64 =
+    plurx_core::cluster::timing::media::TAKEOVER_OVERLAP_MARGIN_MS;
+const TAKEOVER_CLEANUP_DEADLINE: Duration =
+    plurx_core::cluster::timing::media::TAKEOVER_CLEANUP_DEADLINE;
 /// Commit-unknown takeover settlement owns only the fixed lease proposed by
 /// the CAS. Store attempts are kept short enough to make several exact reads
 /// inside that lease; immediate failures back off so an unavailable Store
 /// cannot become a busy loop.
-const TAKEOVER_RECONCILIATION_STORE_DEADLINE: Duration = Duration::from_secs(1);
-const TAKEOVER_RECONCILIATION_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+const TAKEOVER_RECONCILIATION_STORE_DEADLINE: Duration =
+    plurx_core::cluster::timing::media::TAKEOVER_RECONCILIATION_STORE_DEADLINE;
+const TAKEOVER_RECONCILIATION_RETRY_BACKOFF: Duration =
+    plurx_core::cluster::timing::media::TAKEOVER_RECONCILIATION_RETRY_BACKOFF;
 /// Enough authority to finish one bounded publication mutation and still
 /// reach the next ordinary lease tick, complete its owner inventory, and
 /// enter the renewal Store with the full fail-closed admission window.
-const TAKEOVER_PUBLICATION_MIN_RUNWAY: Duration = Duration::from_secs(
-    TAKEOVER_RECONCILIATION_STORE_DEADLINE.as_secs()
-        + LEASE_INTERVAL.as_secs()
-        + LEASE_RENEWAL_DEADLINE.as_secs()
-        + (LEASE_RENEWAL_MIN_REMAINING_MS as u64 / 1_000)
-        + 1,
-);
+const TAKEOVER_PUBLICATION_MIN_RUNWAY: Duration =
+    plurx_core::cluster::timing::media::TAKEOVER_PUBLICATION_MIN_RUNWAY;
 
 fn try_admit_takeover_settlement() -> Option<tokio::sync::OwnedSemaphorePermit> {
     static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();

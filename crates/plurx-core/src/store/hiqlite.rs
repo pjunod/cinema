@@ -295,16 +295,25 @@ pub const AUTH_PROTOCOL_VERSION: i64 = AUTH_PROTOCOL_MIN;
 /// learner admission" and must not.
 pub const AUTH_LEARNER_PROTOCOL: i64 = 5;
 
-const STORE_TIMEOUT: Duration = Duration::from_secs(3);
-const AUTHORITY_READ_TIMEOUT_RETRY_DELAY: Duration = Duration::from_millis(100);
-const AUTHORITY_READ_TIMEOUT_MAX_ATTEMPTS: usize = 2;
-const AUTHORITY_QUORUM_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(100);
-const AUTHORITY_QUORUM_RETRY_MAX_BACKOFF: Duration = Duration::from_millis(800);
-const AUTHORITY_QUORUM_RETRY_JITTER_RANGE_MILLIS: u8 = 100;
-const AUTHORITY_QUORUM_RETRY_MAX_DELAY: Duration = Duration::from_millis(899);
-const AUTHORITY_QUORUM_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
-const IDEMPOTENT_WRITE_RETRY_DELAY: Duration = Duration::from_millis(100);
-const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize = 5;
+const STORE_TIMEOUT: Duration = crate::cluster::timing::store::STORE_TIMEOUT;
+const AUTHORITY_READ_TIMEOUT_RETRY_DELAY: Duration =
+    crate::cluster::timing::store::AUTHORITY_READ_TIMEOUT_RETRY_DELAY;
+const AUTHORITY_READ_TIMEOUT_MAX_ATTEMPTS: usize =
+    crate::cluster::timing::store::AUTHORITY_READ_TIMEOUT_MAX_ATTEMPTS;
+const AUTHORITY_QUORUM_RETRY_INITIAL_DELAY: Duration =
+    crate::cluster::timing::store::AUTHORITY_QUORUM_RETRY_INITIAL_DELAY;
+const AUTHORITY_QUORUM_RETRY_MAX_BACKOFF: Duration =
+    crate::cluster::timing::store::AUTHORITY_QUORUM_RETRY_MAX_BACKOFF;
+const AUTHORITY_QUORUM_RETRY_JITTER_RANGE_MILLIS: u8 =
+    crate::cluster::timing::store::AUTHORITY_QUORUM_RETRY_JITTER_RANGE_MILLIS;
+const AUTHORITY_QUORUM_RETRY_MAX_DELAY: Duration =
+    crate::cluster::timing::store::AUTHORITY_QUORUM_RETRY_MAX_DELAY;
+const AUTHORITY_QUORUM_RECOVERY_BUDGET: Duration =
+    crate::cluster::timing::store::AUTHORITY_QUORUM_RECOVERY_BUDGET;
+const IDEMPOTENT_WRITE_RETRY_DELAY: Duration =
+    crate::cluster::timing::store::IDEMPOTENT_WRITE_RETRY_DELAY;
+const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize =
+    crate::cluster::timing::store::IDEMPOTENT_WRITE_MAX_ATTEMPTS;
 pub(super) const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
 const CREDENTIAL_MUTATION_INTENT_BEGIN_SQL: &str =
     "INSERT INTO cluster_credential_mutation_intents (singleton) VALUES (1)";

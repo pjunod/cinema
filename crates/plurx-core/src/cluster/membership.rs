@@ -89,7 +89,7 @@ const JOIN_TOKEN_V2_PREFIX: &str = "plxjoin:v2";
 const JOIN_TOKEN_V2_AAD: &[u8] = b"plurx-cluster-join-v2";
 const JOIN_TOKEN_V2_VERSION: u32 = 2;
 const MEMBERSHIP_SCHEMA_VERSION: i64 = 1;
-const NODE_REACHABLE_WINDOW_MS: i64 = 30_000;
+const NODE_REACHABLE_WINDOW_MS: i64 = crate::cluster::timing::membership::NODE_REACHABLE_WINDOW_MS;
 /// How long a member may say nothing before a protocol change treats it as
 /// absent rather than as proven.
 ///
@@ -113,16 +113,19 @@ const MEDIA_RELAY_ACQUISITION_HEARTBEAT_SQL: &str =
      VALUES($1,$2,$3) ON CONFLICT(node_id,capability) \
      DO UPDATE SET last_seen_at=excluded.last_seen_at";
 
-const PROTOCOL_CHANGE_ABSENCE_WINDOW_MS: i64 = 120_000;
+const PROTOCOL_CHANGE_ABSENCE_WINDOW_MS: i64 =
+    crate::cluster::timing::membership::PROTOCOL_CHANGE_ABSENCE_WINDOW_MS;
 const ARTWORK_AUTH_WINDOW_MS: i64 = 60_000;
-/// The vendored Raft configuration sends heartbeats every 500 ms and cannot
-/// elect a successor before 1,500 ms. Requiring an acknowledgement inside two
-/// heartbeats makes the old leader ineligible before a new term can exist.
-const ARTWORK_LEADER_QUORUM_FRESH_MS: u64 = 1_000;
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+/// The one-second acknowledgement bound expires before the shared Raft
+/// election floor. It also precedes the previous release's 1,500 ms floor
+/// during rolling upgrades; it is not a new proof lease.
+const ARTWORK_LEADER_QUORUM_FRESH_MS: u64 =
+    crate::cluster::timing::membership::ARTWORK_LEADER_QUORUM_FRESH_MS;
+const HEARTBEAT_INTERVAL: Duration = crate::cluster::timing::membership::HEARTBEAT_INTERVAL;
 /// Collapse only duplicate/concurrent submissions. The ordinary ten-second
 /// cadence and thirty-second reachability contract remain unchanged.
-const HEARTBEAT_COALESCE_WINDOW: Duration = Duration::from_millis(250);
+const HEARTBEAT_COALESCE_WINDOW: Duration =
+    crate::cluster::timing::membership::HEARTBEAT_COALESCE_WINDOW;
 /// Refresh the live member's address projection without letting a process
 /// claim a tombstoned identity or a different Raft id.
 ///
@@ -142,36 +145,36 @@ const UPSERT_CLUSTER_NODE_HEARTBEAT_SQL: &str = "INSERT INTO cluster_nodes \
 /// treating silence as "cannot prove it". Long enough for a healthy node's
 /// poll plus a `stat` on a sleeping NAS; short enough that an operator gets an
 /// answer rather than a hung request.
-const PROBE_WAIT: Duration = Duration::from_secs(15);
-const PROBE_POLL: Duration = Duration::from_millis(500);
+const PROBE_WAIT: Duration = crate::cluster::timing::membership::PROBE_WAIT;
+const PROBE_POLL: Duration = crate::cluster::timing::membership::PROBE_POLL;
 /// A probe nobody answered stops being worth answering. This bounds how far
 /// back a node looks so an abandoned removal cannot leave work queued forever.
-const PROBE_REQUEST_TTL: i64 = 300;
+const PROBE_REQUEST_TTL: i64 = crate::cluster::timing::membership::PROBE_REQUEST_TTL;
 /// Matches the activity surface's notion of a transfer in progress: a lease
 /// touched this recently is a downloader that is still fetching.
-const TRANSFER_ACTIVE_SECONDS: i64 = 60;
+const TRANSFER_ACTIVE_SECONDS: i64 = crate::cluster::timing::membership::TRANSFER_ACTIVE_SECONDS;
 /// How many times a removal re-reads and resolves newly created offline work
 /// before it refuses instead. Each round costs at most one [`PROBE_WAIT`], so
 /// this bounds the operator's wait as well as the loop.
 const OFFLINE_RESOLVE_ROUNDS: u32 = 3;
 /// Bound the required odd-voter handoff. Survivor probes run in parallel, so
 /// one unavailable voter cannot multiply this deadline.
-const SURVIVOR_LEADER_WAIT: Duration = Duration::from_secs(8);
+const SURVIVOR_LEADER_WAIT: Duration = crate::cluster::timing::membership::SURVIVOR_LEADER_WAIT;
 /// The one bound on a stopping leader's handoff: the survivor wait plus the
 /// election trigger's own 1 s budget and one more 1 s survivor probe round.
 /// A stop never waits longer than this for leadership to move.
-const SHUTDOWN_HANDOFF_WAIT: Duration = SURVIVOR_LEADER_WAIT.saturating_add(Duration::from_secs(2));
+const SHUTDOWN_HANDOFF_WAIT: Duration = crate::cluster::timing::membership::SHUTDOWN_HANDOFF_WAIT;
 /// How long a handing-off leader may hold off its own proposals (Hiqlite
 /// patch 31), counted from when it starts to take the hold: taking it, the
 /// wait for a survivor to match its log, the trigger and the wait to follow
 /// the new leader all end by then, so writers on this node wait at most this
 /// long. Inside the handoff's one deadline.
-const PROPOSAL_HOLD_WAIT: Duration = Duration::from_secs(2);
+const PROPOSAL_HOLD_WAIT: Duration = crate::cluster::timing::membership::PROPOSAL_HOLD_WAIT;
 /// The share of [`PROPOSAL_HOLD_WAIT`] spent taking the hold. A proposal that
 /// does not finish in it means quorum trouble; the handoff then proceeds
 /// without the hold, and a slow acquisition still leaves the rest for the
 /// match, the trigger and the step-down.
-const PROPOSAL_HOLD_ACQUIRE: Duration = Duration::from_millis(500);
+const PROPOSAL_HOLD_ACQUIRE: Duration = crate::cluster::timing::membership::PROPOSAL_HOLD_ACQUIRE;
 /// A committed self-removal must return to the HTTP layer promptly so the
 /// daemon can drain. The durable pending-removal row is already authoritative
 /// if this best-effort final tombstone write does not finish in time.
@@ -2722,7 +2725,7 @@ impl PassiveMembershipMetrics {
 /// applies first. The cost is at the long end: a caller with an eight-second
 /// or longer deadline that would have connected on the second retransmission,
 /// about three seconds in, now fails at two.
-const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const PEER_CONNECT_TIMEOUT: Duration = crate::cluster::timing::membership::PEER_CONNECT_TIMEOUT;
 
 /// How long an unused pooled connection is kept.
 ///
@@ -2732,7 +2735,7 @@ const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// request can be written into a socket the peer is closing and fail as
 /// unreachable on a healthy peer. reqwest's default of ninety seconds is
 /// longer than the server's close, so it is set here, with margin.
-const PEER_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const PEER_POOL_IDLE_TIMEOUT: Duration = crate::cluster::timing::membership::PEER_POOL_IDLE_TIMEOUT;
 
 /// The one pooled HTTP client for `PeerTransport` requests between this node
 /// and its peers. (The short-lived clients this module builds for the Hiqlite
@@ -3477,7 +3480,8 @@ async fn member_floor_ready(
     )
 }
 
-const SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS: i64 = 5_000;
+const SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS: i64 =
+    crate::cluster::timing::membership::SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS;
 
 /// What an advisory floor answer was read under. A change in the caller's
 /// serving-loss generation, the applied membership log or the known leader
@@ -3596,7 +3600,8 @@ impl<K: PartialEq + Send + Sync + 'static> FloorAdvisory<K> {
 }
 
 /// One floor read on its own task never holds the advisory longer than this.
-const SHARING_FLOOR_ADVISORY_READ_BOUND: Duration = Duration::from_secs(1);
+const SHARING_FLOOR_ADVISORY_READ_BOUND: Duration =
+    crate::cluster::timing::membership::SHARING_FLOOR_ADVISORY_READ_BOUND;
 
 async fn floor_advisory_key(
     client: &CountedClient,
