@@ -1166,6 +1166,7 @@ paths = [
   "crates/plurx-core/tests/fixtures/dv-runtime/**",
   "crates/plurx-core/tests/fixtures/dv-refit/**",
   "crates/plurxd/src/dv_runtime.rs",
+  "crates/plurxd/src/dv_tools.rs",
   "crates/plurxd/src/dv_refit_serving.rs",
   "crates/plurxd/src/dv_runtime/observe_tests.rs",
   "crates/plurxd/src/dv_segment/stage_clock.rs",
