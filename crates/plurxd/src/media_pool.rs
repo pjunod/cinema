@@ -1049,6 +1049,18 @@ fn catalogue_transport_cause(
         PeerTransportError::InvalidResponse => CatalogCause::PeerProtocol,
         PeerTransportError::Unreachable => CatalogCause::Transport,
         PeerTransportError::LocalUnavailable => CatalogCause::SnapshotUnavailable,
+        PeerTransportError::AuthenticationRefused(reason) => {
+            use crate::cluster::calls::PeerAuthRefusal;
+            match reason {
+                PeerAuthRefusal::RateLimited | PeerAuthRefusal::ReplayCapacity => {
+                    CatalogCause::PeerBusy
+                }
+                PeerAuthRefusal::AuthorityUnavailable => CatalogCause::SnapshotUnavailable,
+                PeerAuthRefusal::InvalidProof | PeerAuthRefusal::Unclassified => {
+                    CatalogCause::AuthorityRefused
+                }
+            }
+        }
     }
 }
 
