@@ -610,6 +610,10 @@ made-up URL and prevents the fork from being declared fully tracked.
   listener/WAL/writer shutdown acknowledgements release a claim; missing ACK,
   error, panic or cancelled cleanup retains the lease fail-closed. Pre-Client
   listener tasks are joined, rather than aborted without a terminal receipt.
+  SQLite shutdown also waits for the actual state-machine owner and every
+  detached snapshot builder before closing WAL and writer. OpenRaft shutdown
+  joins its core and tick tasks, but not its separate state-machine worker;
+  writer acknowledgement alone therefore cannot establish producer drainage.
   Core retains the actual root daemon file through that boundary for every
   temporary import, active reopen and join, then transfers directly into its
   post-Client guard. A startup refusal preserves its incoming tree while

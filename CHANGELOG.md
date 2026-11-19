@@ -55,6 +55,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Cancelled cluster startup retains directory custody until the state-machine
+  worker and detached snapshot builders drain, before closing the SQL writer.
 - Rust qualification reads fresh, exit-checked nextest JUnit results and authenticates
   complete evidence records, so captured test output cannot turn a failure into a reusable pass.
 - Source playback Start observes membership at its claim boundary after pure
