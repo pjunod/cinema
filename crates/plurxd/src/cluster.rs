@@ -608,6 +608,15 @@ impl Cluster {
         self.fence.try_restart_admission().await
     }
 
+    /// Resolves once, with the error, when this node's own database Raft
+    /// core has quit on a fatal error; never for an ordinary stop or an
+    /// unclustered process. The daemon drains and exits on it.
+    pub(crate) fn core_failure(
+        &self,
+    ) -> impl std::future::Future<Output = String> + Send + 'static {
+        self.membership.raft_core_failure()
+    }
+
     /// This node's standing and admission, from in-process state only: the
     /// applied Raft membership (the source `local_node_is_committed_voter`
     /// reads) and the two atomics the heartbeat publishes. No IO, no await.

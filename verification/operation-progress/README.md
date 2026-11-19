@@ -17,9 +17,13 @@ owns the delivery scope; its
 [status page](../../docs/cluster/OPERATION-PROGRESS-STATUS.md) owns review,
 qualification and merge evidence. `mapping.json` pins model/config/source
 hashes, expected errors and limits; an edited input invalidates its receipt.
-Whole-file source hashes are intentional: any `Cargo.lock` dependency bump
-requires a reviewed mapping refresh, even when unrelated to Tokio. Mapping
-drift is not itself a model regression.
+A source row pins the item its anchor selects, not its file, so only an edit
+inside a mapped item requires a reviewed mapping refresh
+([how item pins work](../durable-jobs/README.md#source-pins-cover-the-anchored-item)).
+This replaces the whole-file hashes this package once called intentional
+(Paul's ruling, 2026-11-15): the `Cargo.lock` row now pins Tokio's own
+`[[package]]` entry, and an unrelated dependency bump no longer needs a
+refresh. Mapping drift is not itself a model regression.
 
 For this package, formal governed inputs are exactly the executable model,
 registered configurations, mapped source files, `mapping.json`,

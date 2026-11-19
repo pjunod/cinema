@@ -10364,6 +10364,7 @@ async fn shutdown_handoff_wait_is_bounded() {
         (ShutdownHandoff::NoCandidate, false),
         (ShutdownHandoff::TimedOut, false),
         (ShutdownHandoff::Failed, false),
+        (ShutdownHandoff::CoreStopped, false),
     ] {
         assert_eq!(outcome.settled(), settled, "{outcome:?}");
     }
@@ -10378,6 +10379,9 @@ fn shutdown_handoff_reuses_the_one_handoff_and_writes_nothing() {
     let disable = outcome
         .find("inner.client.disable_local_db_elections()")
         .expect("every replicated stopping node switches its own elections off");
+    let stopped = outcome
+        .find("if metrics.running_state.is_err() {")
+        .expect("a dead core returns without touching the network");
     let leader = outcome
         .find("metrics.current_leader != Some(inner.identity.raft_id)")
         .expect("a non-leader returns without touching the network");
@@ -10391,7 +10395,11 @@ fn shutdown_handoff_reuses_the_one_handoff_and_writes_nothing() {
         .find("self.handoff_leadership(inner.identity.raft_id, &status)")
         .expect("the stop reuses the one existing handoff");
     assert!(
-        disable < leader && leader < sole && sole < bounded && bounded < handoff,
+        disable < stopped
+            && stopped < leader
+            && leader < sole
+            && sole < bounded
+            && bounded < handoff,
         "switch elections off first, then the local checks, then the bounded handoff"
     );
     assert_eq!(outcome.matches("handoff_leadership(").count(), 1);

@@ -7220,7 +7220,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 927 -> 926 with cluster7c: one MembershipManager.status observation moves
 # from the daemon facade to its core administrative service. This removes one
 # lexical .status() match from these roots, not a process or task owner.
-expected_occurrences = 926
+# Prepared delivery (#1736): +1 test-only `.vod.status()` observation in
+# processed_stream_format_reports_the_attached_carrier_not_its_pq_base.
+# It reads the existing VOD owner's status_publication snapshot: no child
+# launch, lease renewal, or ownership transfer. The broad matcher is unchanged.
+# Merged effort and main: 936 - 10 (facade slices 3, 4, 7c) + 1 (#1736) = 927.
+expected_occurrences = 927
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

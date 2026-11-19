@@ -1201,6 +1201,9 @@ pub enum ShutdownHandoff {
     TimedOut,
     /// Reading status, triggering the election or confirming it failed.
     Failed,
+    /// This node's Raft core had already stopped (a fatal storage error),
+    /// so nothing could move; its last metrics may still name it leader.
+    CoreStopped,
 }
 
 impl ShutdownHandoff {
@@ -1215,6 +1218,7 @@ impl ShutdownHandoff {
             Self::NoCandidate => "no_candidate",
             Self::TimedOut => "timed_out",
             Self::Failed => "failed",
+            Self::CoreStopped => "core_stopped",
         }
     }
 
@@ -1228,10 +1232,13 @@ impl ShutdownHandoff {
     }
 
     /// Whether the stop left leadership where it should be. Only the last
-    /// three outcomes mean the survivors elect on their own timers.
+    /// four outcomes mean the survivors elect on their own timers.
     #[must_use]
     pub const fn settled(self) -> bool {
-        !matches!(self, Self::NoCandidate | Self::TimedOut | Self::Failed)
+        !matches!(
+            self,
+            Self::NoCandidate | Self::TimedOut | Self::Failed | Self::CoreStopped
+        )
     }
 }
 
@@ -5686,6 +5693,23 @@ impl MembershipManager {
         self.inner.is_some()
     }
 
+    /// Resolves once, with OpenRaft's error, when this node's own database
+    /// Raft core quits on a fatal error (a storage error or a panic). It
+    /// never resolves for an ordinary `Raft::shutdown` or for a manager with
+    /// no replicated store: there is no local core to die. The core's own
+    /// terminal state on the metrics watch is the signal; nothing polls.
+    pub fn raft_core_failure(&self) -> impl std::future::Future<Output = String> + Send + 'static {
+        let watch = self.inner.as_ref().map(|inner| inner.local_metrics.clone());
+        async move {
+            if let Some(mut watch) = watch {
+                if let hiqlite::LocalDbCoreStop::Fatal(error) = watch.core_stopped().await {
+                    return error;
+                }
+            }
+            std::future::pending().await
+        }
+    }
+
     /// Deployment mode follows explicit configuration or the durable local
     /// peer, never peer reachability or the current voter count.
     #[must_use]
@@ -9136,6 +9160,12 @@ impl MembershipManager {
             Ok(metrics) => metrics,
             Err(error) => return (ShutdownHandoff::Failed, Some(error.into())),
         };
+        // A dead core's last metrics can still name this node leader, and no
+        // handoff can run through it: return at once instead of spending the
+        // bound on a core that will never answer.
+        if metrics.running_state.is_err() {
+            return (ShutdownHandoff::CoreStopped, None);
+        }
         if metrics.current_leader != Some(inner.identity.raft_id) {
             return (ShutdownHandoff::NotLeader, None);
         }
