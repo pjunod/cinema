@@ -47,7 +47,7 @@ function unexecutedPlaybackDestinationSec(p){
   // at 2:54 and every +10 would count from there. `pendingMediaChange` is the
   // retained route: set before the create, kept on refusal for Try again,
   // cleared when a successor attaches.
-  if(!p.pendingMediaChange) return null;
+  if(!p?.pendingMediaChange) return null;
   // Multipart audiobooks address the scrubber globally and the element
   // locally, and `controlSeek` is in the part-local timeline, so the two
   // numbers are not comparable. `bookOffset` is that delta, but a book that
