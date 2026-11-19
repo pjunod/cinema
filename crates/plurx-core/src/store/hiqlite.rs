@@ -316,10 +316,9 @@ const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize =
     crate::cluster::timing::store::IDEMPOTENT_WRITE_MAX_ATTEMPTS;
 pub(super) const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
 const AUTH_TOKEN_POLICY_WRITE_SQL: &str = "INSERT INTO settings (key, value, updated_at) \
-                   SELECT $1, $2, $3 WHERE \
-                     ($4 = '' AND NOT EXISTS (SELECT 1 FROM cluster_credential_guard_activation)) \
-                     OR EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_leases WHERE claim_id = $4) \
-                   ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at";
+     SELECT $1, $2, $3 WHERE EXISTS (\
+       SELECT 1 FROM cluster_cache_admin_revocation_leases WHERE claim_id = $4) \
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at";
 
 const CREDENTIAL_MUTATION_INTENT_BEGIN_SQL: &str =
     "INSERT INTO cluster_credential_mutation_intents (singleton) VALUES (1)";
@@ -7282,8 +7281,15 @@ impl SettingsStore for HiqliteAuthStore {
         if values.is_empty() {
             return Ok(true);
         }
+        let Some(claim) = claim else {
+            // Before membership activation the raw Store has no lease table.
+            // After activation the persisted policy guards reject this legacy
+            // path; only the claim-checked transaction below can then write.
+            self.put_settings(values).await?;
+            return Ok(true);
+        };
         let now = self.now()?;
-        let claim_id = claim.map_or("", CacheAdminMutationClaim::as_str);
+        let claim_id = claim.as_str();
         let sql = AUTH_TOKEN_POLICY_WRITE_SQL;
         let changed = self
             .credential_mutation(

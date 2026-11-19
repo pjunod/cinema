@@ -149,6 +149,10 @@ struct CachedAdminProofState {
     /// roster proof that every running member implements peer revocation.
     /// Standalone SQLite has no peer writer and initializes this to true.
     cluster_revocation_capability_ready: bool,
+    /// Local backends have no quorum read to save and no persisted protocol
+    /// guards on their direct Store writers. Only a replicated bootstrap can
+    /// admit general-token reuse, after its separate v5 readiness proof.
+    general_token_cache_enabled: bool,
     remote_revocations: BTreeMap<String, RemoteCacheOnlyAdminRevocation>,
     proofs: BTreeMap<String, CachedAdminProof>,
     token_proofs: BTreeMap<(String, &'static str), CachedTokenProof>,
@@ -161,6 +165,7 @@ impl Default for CachedAdminProofState {
             local_active_revocations: 0,
             local_ambiguity_expires_at: None,
             cluster_revocation_capability_ready: true,
+            general_token_cache_enabled: false,
             remote_revocations: BTreeMap::new(),
             proofs: BTreeMap::new(),
             token_proofs: BTreeMap::new(),
@@ -298,6 +303,9 @@ impl CachedAdminProofState {
 impl CacheOnlyAdminProofCache {
     pub(crate) fn new(replicated: bool) -> Self {
         let cache = Self::default();
+        if let Ok(mut state) = cache.inner.lock() {
+            state.general_token_cache_enabled = replicated;
+        }
         cache.set_cluster_revocation_capability_ready(!replicated);
         cache
     }
@@ -419,7 +427,7 @@ impl CacheOnlyAdminProofCache {
         let now = tokio::time::Instant::now();
         let wall = unix_seconds()?;
         state.prune_revocations(now);
-        if state.revocation_active() {
+        if !state.general_token_cache_enabled || state.revocation_active() {
             return None;
         }
         state
@@ -455,7 +463,10 @@ impl CacheOnlyAdminProofCache {
         };
         let now = tokio::time::Instant::now();
         state.prune_revocations(now);
-        if state.revocation_active() || state.generation != ticket.0 {
+        if !state.general_token_cache_enabled
+            || state.revocation_active()
+            || state.generation != ticket.0
+        {
             return;
         }
         state
@@ -1182,6 +1193,12 @@ mod tests {
         cache.record_authenticated(ticket, digest, user);
     }
 
+    fn token_cache() -> CacheOnlyAdminProofCache {
+        let cache = CacheOnlyAdminProofCache::new(true);
+        cache.set_cluster_revocation_capability_ready(true);
+        cache
+    }
+
     fn token_source() -> std::sync::Arc<dyn plurx_core::store::Store> {
         std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("source"))
     }
@@ -1209,8 +1226,16 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn general_token_proofs_bind_source_and_audience_and_never_slide_expiry() {
         use plurx_core::store::TokenAudience::{JellyfinCompatibility, Native, PlaybackHandoff};
-        let cache = CacheOnlyAdminProofCache::default();
+        let cache = token_cache();
         let source = token_source();
+        let standalone = CacheOnlyAdminProofCache::default();
+        record_token(&standalone, source.clone(), "standalone", Native);
+        assert!(
+            standalone
+                .authenticated_token("standalone", Native, &source)
+                .is_none(),
+            "a local bootstrap does not admit general proof reuse"
+        );
         let different = token_source();
         record_token(&cache, source.clone(), "native", Native);
         assert_eq!(
@@ -1243,7 +1268,7 @@ mod tests {
     #[tokio::test]
     async fn general_token_proofs_share_revocation_fences_and_reject_stale_publication() {
         use plurx_core::store::TokenAudience::Native;
-        let cache = CacheOnlyAdminProofCache::default();
+        let cache = token_cache();
         let source = token_source();
         record_token(&cache, source.clone(), "token", Native);
         let ticket = cache.authentication_ticket();
@@ -1288,7 +1313,7 @@ mod tests {
     #[tokio::test]
     async fn general_token_proofs_refuse_expired_and_future_witnesses_and_bound_memory() {
         use plurx_core::store::TokenAudience::Native;
-        let cache = CacheOnlyAdminProofCache::default();
+        let cache = token_cache();
         let source = token_source();
         let now = super::unix_seconds().unwrap();
         for (digest, observed, expires) in
