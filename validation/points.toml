@@ -1827,6 +1827,7 @@ paths = [
   "crates/plurxd/src/sharing_protocol_fixture.rs",
   "crates/plurxd/src/http/shared_source_playback.rs",
   "crates/plurxd/src/http/shared_source_playback/*.rs",
+  "crates/plurxd/src/http/source_voter_fixture.rs",
   "crates/plurxd/src/http/shared_source_forwarding.rs",
   "crates/plurxd/src/http/shared_source_forwarding_tests.rs",
   "crates/plurxd/src/http/shared_source_ingress.rs",
