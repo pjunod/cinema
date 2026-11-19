@@ -725,11 +725,18 @@ function exhaustHlsStartup(player,reason,sourceOwner=null){
     try{episode.hls.stopLoad()}catch(e){}
   }
   const seekSequence=player.controlSeekSequence||0;
-  setTimeout(()=>{
+  const diagnose=()=>{
     if(!hlsStartupCurrent(player,episode)
       ||(player.controlSeekSequence||0)!==seekSequence) return;
+    // Pause can land after the terminal response but before this task. Keep
+    // its source and seek fences intact when Play consumes the same result.
+    if(sourceOwner&&player.wantsPlayback===false){
+      episode.native.deferredDiagnosis=diagnose;
+      return;
+    }
     stallDiagnose(sourceOwner).catch(()=>{});
-  },0);
+  };
+  setTimeout(diagnose,0);
   return true;
 }
 function armHlsStartupRetry(video,player,episode){
@@ -906,6 +913,12 @@ function resumePausedStartupSeek(video,player,pending){
 function resumeHlsStartup(video,player){
   const episode=player&&player.hlsStartup;
   if(!episode||!hlsStartupCurrent(player,episode)) return false;
+  if(episode.state==='exhausted'&&episode.native?.deferredDiagnosis&&player.wantsPlayback!==false){
+    const diagnose=episode.native.deferredDiagnosis;
+    episode.native.deferredDiagnosis=null;
+    diagnose();
+    return true;
+  }
   if(['presenting','observation_unavailable'].includes(episode.state)){
     const suspended=episode.establishedSuspension;
     if(!suspended||suspended.attachment!==player.mediaAttachment

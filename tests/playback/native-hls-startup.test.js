@@ -422,6 +422,24 @@ test('native readiness without metadata diagnoses only a spent startup budget',a
  assert.equal(h.player.mediaAttachment.nativePositionPending,true);
 });
 
+test('pause after native exhaustion defers the owned retry surface until Play',async()=>{
+ const h=await readyNativeHarness(),surface=installNativeDiagnosis(h);
+ await failNativeStartupWithGone(h,'classification');
+ assert.equal(h.player.hlsStartup.state,'exhausted');
+ h.player.wantsPlayback=false;h.player.controlIntentGeneration++;
+ h.ctx.pauseHlsStartup(h.player);
+ h.advance(0);await flush();
+ assert.equal(surface().fault.source,'client_preparing');
+ assert.equal(h.stops.length,0);
+ h.player.wantsPlayback=true;h.player.controlIntentGeneration++;
+ h.ctx.resumeHlsStartup(h.video,h.player);
+ h.advance(0);await flush();
+ assert.equal(surface().fault.source,'startup_exhausted');
+ assert.ok(surface().actions.includes('retry'));
+ assert.equal(h.stops.length,1);
+ h.stop();
+});
+
 test('pausing before a native readiness failure prevents the cancelled response from diagnosing',async()=>{
  const h=harness(),surface=installNativeDiagnosis(h);await flush();
  let reply;
