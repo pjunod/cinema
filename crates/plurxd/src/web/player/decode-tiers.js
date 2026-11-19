@@ -1428,18 +1428,19 @@ function playbackInitialRoute(decision,audio,nativeHls,segmentedRemux,audioOffse
 // Commands arriving while a full open is awaiting a decision/session replace
 // that open with one snapshot of the newest destination and track choices.
 // Otherwise its late response would overwrite in-place mutations of PLAYER.
-function restartPendingPlaybackOpen(p,reason){
+function restartPendingPlaybackOpen(p,reason,reopenPositionSec=null){
   // Controls still describe the outgoing title until the new decision builds
   // its player. They must not reopen that title over the newer destination.
   if(p&&p.retiringOpenAttempt&&p.retiringOpenAttempt!==p.pendingOpenAttempt
      &&PLAY_OPEN_GATE.current(p.retiringOpenAttempt)) return true;
   if(p&&PLAYER===p&&p.pendingMediaChange){
+    if(reopenPositionSec!=null) p.pendingMediaChange={...p.pendingMediaChange,reopenPositionSec};
     executePlaybackMediaChange(p,p.pendingMediaChange);
     return true;
   }
   if(!p||PLAYER!==p||!p.pendingOpenAttempt||!PLAY_OPEN_GATE.current(p.pendingOpenAttempt)) return false;
   PENDING_ATTEMPT_REASON=reason;
-  const position=positionForPlaybackIntent(document.getElementById("video"),p);
+  const position=reopenPositionSec??positionForPlaybackIntent(document.getElementById("video"),p);
   play(p.fileId,p.title||"",Math.round(position*1000),p.knownDur||0,p.meta);
   return true;
 }

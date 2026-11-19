@@ -105,7 +105,14 @@ class TVNavigationTestCase: XCTestCase {
     /// would defeat a later user choice, so setup uses the ordinary menu.
     func establishPresentation(_ presentation: String, in app: XCUIApplication) {
         let view = app.buttons["library:view"]
-        reachForSetup(view, in: app, limit: 8)
+        let focusedResult = app.scrollViews["library-results"].descendants(matching: .any)
+            .matching(NSPredicate(format: "hasFocus == true")).firstMatch
+        if focusedResult.exists {
+            // Library Back returns from a focused result to the toolbar.
+            remote.press(.menu)
+        } else {
+            reachForSetup(view, in: app, limit: 8)
+        }
         assertFocus(view, in: app, context: "Presentation setup opener")
         remote.press(.select)
         let desired = app.buttons["choice:" + presentation]
