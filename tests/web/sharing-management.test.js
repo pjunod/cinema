@@ -35,7 +35,7 @@ test("sharing management parses and serializes exact wire integers without round
 test("sharing initial settings uses five bounded reads for connection and saved authorization while editors stay lazy",async()=>{
  const {m,requests}=harness(async(path)=>reply(path.endsWith("imports")?{imports:[imported()]}:path.endsWith("exports")?{exports:[exported()],next:null}:{}));
  await Promise.all([m.read("/sharing/status"),m.read("/sharing/imports"),m.read("/sharing/exports")]);assert.deepEqual(requests.map(r=>r.path),["/api/v1/sharing/status","/api/v1/sharing/imports","/api/v1/sharing/exports","/api/v1/sharing/endpoints","/api/v1/sharing/network-authorization"]);
- const settings=fs.readFileSync("crates/plurxd/src/web/pages/settings.js","utf8");assert.match(settings,/sharing:\{required:\["sharingStatus","sharingImports","sharingExports"\],secondary:\[\]/);
+ const settings=fs.readFileSync("crates/plurxd/src/web/pages/settings.js","utf8");assert.match(settings,/sharing:\{required:\["settings","sharingStatus","sharingImports","sharingExports"\],secondary:\["developerReadiness"\]/);
 });
 test("pair approval requires an explicitly entered matching code and keeps exact mutation generation with no409 retry",async()=>{
  const {m,requests}=harness(async()=>reply({message:"stale"},409));await m.open("approve",0);m.edit("text","aaaaaaaaaaaaaaaa");await m.save();assert.equal(requests.length,0);
