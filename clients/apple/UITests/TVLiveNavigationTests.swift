@@ -120,10 +120,7 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         let channel = app.buttons["live-tv-channel-12.1"]
         reachForSetup(channel, in: app, limit: 8)
         assertFocus(channel, in: app, context: "Live channel by number")
-        remote.press(.select)
-        let fullscreen = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Select · Fullscreen")).firstMatch
-        reachForSetup(fullscreen, in: app, limit: 10)
-        assertFocus(fullscreen, in: app, context: "Live fullscreen opener")
+        // One press: Select on the row tunes it and opens full screen.
         remote.press(.select)
         let pause = app.buttons["live-player-play"]
         XCTAssertTrue(pause.waitForExistence(timeout: 15), app.debugDescription)

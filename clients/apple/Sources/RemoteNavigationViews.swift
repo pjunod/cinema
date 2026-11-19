@@ -253,6 +253,20 @@ struct RemoteChoice: Identifiable {
     let choose: () -> Void
 }
 
+enum RemoteChoicePanelMetrics {
+    #if os(tvOS)
+    static let width: CGFloat = 640
+    static let cornerRadius: CGFloat = 32
+    static let edgeInset: CGFloat = 40
+    static let rowHeight: CGFloat = 76
+    static let rowFontSize: CGFloat = 25
+    static let rowSpacing: CGFloat = 6
+    static let coveredDim: Double = 0.6
+    #else
+    static let rowSpacing: CGFloat = 12
+    #endif
+}
+
 /// Content for the shared native presentation rather than a system Menu/Picker. Both input sources invoke
 /// the same choice closures, and selected values remain accessible.
 struct RemoteChoicePanel: View {
@@ -267,24 +281,16 @@ struct RemoteChoicePanel: View {
     let choices: [RemoteChoice]
     var admission: () -> RemoteNavigationCoordinator.Outcome? = { nil }
     @Environment(\.remoteChoiceBackdrop) private var backdrop
+    #if os(tvOS)
+    /// The shared right-hand side panel: full height, 640 pt wide; a list
+    /// longer than the panel scrolls inside it.
+    private var visibleRows: Int { 10 }
+    #else
     /// Over video the card stays clear of the transport row beneath it.
     private var visibleRows: Int { backdrop == .video ? 8 : 11 }
+    #endif
     var body: some View {
-        // Sized to its content: a short menu is a short card, and only a list
-        // longer than the card may grow scrolls inside a fixed height.
-        Group {
-            if choices.count + 1 > visibleRows {
-                ScrollView { list }.frame(height: CGFloat(visibleRows) * 60 + 110)
-            } else {
-                list
-            }
-        }
-        .frame(minWidth: 460, maxWidth: 640, alignment: .topLeading)
-        .fixedSize(horizontal: true, vertical: false)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(Palette.outline, lineWidth: 1)
-        }
+        framedList
         .remoteChoiceFocusScope(focusNamespace)
         .defaultFocus($nativeChoice, choices.first(where: \.selected).map { "choice:" + $0.id } ?? choices.first.map { "choice:" + $0.id } ?? "choice:close", priority: .userInitiated)
         .remoteScope(scope)
@@ -300,17 +306,74 @@ struct RemoteChoicePanel: View {
         .onAppear(perform: enterPanel)
         .background(RemoteChoiceFocusReadiness(ready: nativePresentationReady).allowsHitTesting(false))
     }
+    /// Sized to its content: a short menu is a short card, and only a list
+    /// longer than the card may grow scrolls inside a fixed height.
+    @ViewBuilder
+    private var framedList: some View {
+        #if os(tvOS)
+        Group {
+            if choices.count + 1 > visibleRows {
+                ScrollView { list }
+            } else {
+                list
+            }
+        }
+        .frame(width: RemoteChoicePanelMetrics.width, alignment: .topLeading)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: RemoteChoicePanelMetrics.cornerRadius, style: .continuous).fill(.thickMaterial)
+                RoundedRectangle(cornerRadius: RemoteChoicePanelMetrics.cornerRadius, style: .continuous).fill(Color.black.opacity(0.45))
+            }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: RemoteChoicePanelMetrics.cornerRadius, style: .continuous).stroke(Color.white.opacity(0.08), lineWidth: 1)
+        }
+        .environment(\.colorScheme, .dark)
+        #else
+        Group {
+            if choices.count + 1 > visibleRows {
+                ScrollView { list }.frame(height: CGFloat(visibleRows) * 60 + 110)
+            } else {
+                list
+            }
+        }
+        .frame(minWidth: 460, maxWidth: 640, alignment: .topLeading)
+        .fixedSize(horizontal: true, vertical: false)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(Palette.outline, lineWidth: 1)
+        }
+        #endif
+    }
     private var list: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: RemoteChoicePanelMetrics.rowSpacing) {
             Text(title)
+                #if os(tvOS)
+                .font(.system(size: 34, weight: .bold))
+                .padding(.horizontal, 12)
+                .padding(.bottom, 14)
+                #else
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(Palette.onBg)
                 .padding(.bottom, 6)
+                #endif
+                .foregroundStyle(Palette.onBg)
                 .accessibilityAddTraits(.isHeader)
             ForEach(choices) { choice in
                 Button {
                     navigation.performPhysicalAction { commit(choice) }
                 } label: {
+                    #if os(tvOS)
+                    HStack(spacing: 18) {
+                        // Selection stays a checkmark, independent of focus.
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 24, weight: .bold))
+                            .frame(width: 28)
+                            .opacity(choice.selected ? 1 : 0)
+                        Text(choice.label).lineLimit(2)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    #else
                     HStack(spacing: 20) {
                         Text(choice.label).lineLimit(2)
                         Spacer(minLength: 24)
@@ -318,6 +381,7 @@ struct RemoteChoicePanel: View {
                         Image(systemName: "checkmark").opacity(choice.selected ? 1 : 0)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    #endif
                 }
                 .focused($nativeChoice, equals: "choice:" + choice.id)
                 .remoteChoiceDefaultFocus(choice.selected || (!choices.contains(where: \.selected) && choice.id == choices.first?.id), in: focusNamespace)
@@ -332,7 +396,15 @@ struct RemoteChoicePanel: View {
             Button {
                 navigation.performPhysicalAction { if admission() == nil { navigation.closeModal() } }
             } label: {
+                #if os(tvOS)
+                HStack(spacing: 18) {
+                    Color.clear.frame(width: 28, height: 1)
+                    Text("Close")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                #else
                 Text("Close").frame(maxWidth: .infinity, alignment: .leading)
+                #endif
             }
                 .focused($nativeChoice, equals: "choice:close")
                 .remoteChoiceDefaultFocus(choices.isEmpty, in: focusNamespace)
@@ -341,7 +413,12 @@ struct RemoteChoicePanel: View {
                 .id("choice:close")
                 .remoteControl("choice:close", label: "Close", managesFocus: false, observesPhysicalActivation: false, admission: admission) { navigation.closeModal() }
         }
+        #if os(tvOS)
+        .padding(.horizontal, 28)
+        .padding(.vertical, 40)
+        #else
         .padding(28)
+        #endif
     }
 
     private func commit(_ choice: RemoteChoice) {
@@ -409,9 +486,9 @@ struct RemoteOwnedPresentationProbe: UIViewRepresentable {
     static func dismantleUIView(_ uiView: Probe, coordinator: ()) { uiView.attach = nil }
 }
 
-/// Where a choice card sits. A page keeps its content visible under a light
-/// scrim; playback keeps the picture unobscured and places the card in the
-/// upper corner, clear of the transport row, beside the video.
+/// What a choice card covers. On tvOS both a page and the video get the same
+/// right-hand side panel over a dimmed screen; the value still sizes the
+/// touch platforms' card.
 enum RemoteChoiceBackdrop { case page, video }
 
 private struct RemoteChoiceBackdropKey: EnvironmentKey {
@@ -450,12 +527,14 @@ private struct RemoteChoicePresentation<Panel: View>: ViewModifier {
         }) {
             // Still a native cover, so UIKit keeps the covered screen out of
             // the focus environment; only its painting is transparent.
-            ZStack(alignment: backdrop == .video ? .topTrailing : .center) {
-                Color.black.opacity(backdrop == .video ? 0 : 0.45).ignoresSafeArea()
+            // One right-hand side panel for every choice, page or video: the
+            // covered screen dims and the panel pins to the trailing edge.
+            ZStack(alignment: .trailing) {
+                Color.black.opacity(RemoteChoicePanelMetrics.coveredDim).ignoresSafeArea()
                 panel()
                     .environment(\.remoteChoiceBackdrop, backdrop)
-                    .padding(.top, backdrop == .video ? 80 : 0)
-                    .padding(.trailing, backdrop == .video ? 96 : 0)
+                    .padding(RemoteChoicePanelMetrics.edgeInset)
+                    .ignoresSafeArea()
             }
             .presentationBackground(.clear)
             .background(RemoteOwnedPresentationProbe(navigation: navigation, token: token, scope: scope))
@@ -488,7 +567,7 @@ private struct RemoteChoiceRowStyle: ButtonStyle {
     @ViewBuilder
     func makeBody(configuration: Configuration) -> some View {
         #if os(tvOS)
-        TVReadableButtonStyle(prominent: false, compact: true, focusScale: 1.03).makeBody(configuration: configuration)
+        RemoteChoiceTVRow(configuration: configuration)
         #else
         // iPhone/iPad keep a plain touch row; the TV house style is tvOS-only.
         configuration.label
@@ -500,6 +579,36 @@ private struct RemoteChoiceRowStyle: ButtonStyle {
         #endif
     }
 }
+
+#if os(tvOS)
+/// A side-panel row: plain text at rest, solid `Palette.onBg` with
+/// `Palette.bg` ink when focused. Reports actual native focus for admission.
+private struct RemoteChoiceTVRow: View {
+    let configuration: ButtonStyle.Configuration
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        configuration.label
+            .font(.system(size: RemoteChoicePanelMetrics.rowFontSize, weight: .semibold))
+            .foregroundStyle(isFocused ? Palette.bg : Palette.onBg)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, minHeight: RemoteChoicePanelMetrics.rowHeight, alignment: .leading)
+            .background(
+                isFocused ? Palette.onBg : Color.clear,
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.02 : (configuration.isPressed ? 0.98 : 1)))
+            .shadow(color: .black.opacity(isFocused ? 0.35 : 0), radius: 12, y: 6)
+            .opacity(isEnabled ? 1 : 0.45)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isFocused)
+            .remoteNativeFocus(isFocused)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: configuration.isPressed)
+    }
+}
+#endif
 
 private extension View {
     @ViewBuilder

@@ -317,20 +317,15 @@ private struct HomeDashboard: View {
                 #if os(iOS)
                 homeHeader
                 #endif
-                #if os(tvOS)
-                if model.layout == .standard {
-                HStack {
-                    Button("Libraries") { remoteNavigation.selectedTab = .libraries; remoteNavigation.synchronizeRoute() }
-                        .remoteControl("tab:libraries", label: "Libraries") { remoteNavigation.selectedTab = .libraries; remoteNavigation.synchronizeRoute() }
-                    Button("Search") { remoteNavigation.selectedTab = .search; remoteNavigation.synchronizeRoute() }
-                        .remoteControl("tab:search", label: "Search") { remoteNavigation.selectedTab = .search; remoteNavigation.synchronizeRoute() }
-                }
-                .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
-                .padding(.horizontal, screenHPad)
-                }
-                #endif
+                // Libraries and Search are destinations of the app's own
+                // navigation; Home no longer repeats them above the shelves.
                 if let error = model.homeError {
+                    #if os(tvOS)
+                    HomeRecoveryRow(error: error, scope: "home",
+                                    returnFocus: remoteKeys.first { $0.hasPrefix("shelf:") || $0.hasPrefix("home-feature:") })
+                    #else
                     HomeRecoveryRow(error: error, scope: "home", returnFocus: remoteKeys.first { $0.hasPrefix("shelf:") } ?? "tab:libraries")
+                    #endif
                 }
                 if model.homeLoading && featured == nil {
                     ProgressView().tint(Palette.accent)
@@ -393,13 +388,8 @@ private struct HomeDashboard: View {
             (1, .nextUp, model.hubs.nextUp ?? []), (4, .watchlist, model.watchlist), (5, .favorites, model.favorites),
             (2, .recentlyAdded, model.hubs.recentlyAdded ?? [])]
         let shelves: [(Int, [Item])] = all.filter { visible.contains($0.1) }.map { ($0.0, $0.2) }
-        #if os(tvOS)
-        let tabs = model.layout == .standard ? ["tab:libraries", "tab:search"] : []
-        #else
-        let tabs: [String] = []
-        #endif
         let featureKeys = theaterFeature == nil ? [] : ["home-feature:play", "home-feature:details"]
-        return tabs + featureKeys + (model.homeError == nil ? [] : ["home:retry"]) + shelves.flatMap { index, items in
+        return featureKeys + (model.homeError == nil ? [] : ["home:retry"]) + shelves.flatMap { index, items in
             items.map { "shelf:\(index):item:\($0.id)" }
         } + (visible.contains(.comingSoon) ? model.comingSoon.filter { $0.itemId != nil }.map { "shelf:3:comingsoon:" + $0.id } : [])
     }
@@ -610,7 +600,7 @@ private struct LibrariesDashboard: View {
         HStack {
             Text("Libraries")
                 #if os(tvOS)
-                .font(.title3.weight(.semibold))
+                .font(.system(size: 30, weight: .semibold))
                 #else
                 .font(.headline.weight(.semibold))
                 #endif
@@ -782,7 +772,7 @@ private struct FeaturedHero: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(item.showTitle ?? item.title)
                     #if os(tvOS)
-                    .font(.system(size: 52, weight: .bold))
+                    .font(.system(size: 78, weight: .bold))
                     #else
                     .font(compact ? .title.bold() : .largeTitle.bold())
                     #endif
@@ -790,21 +780,38 @@ private struct FeaturedHero: View {
                     .lineLimit(2)
                 if item.showTitle != nil {
                     Text(episodeSubtitleForHero(item))
+                        #if os(tvOS)
+                        .font(.system(size: 26, weight: .medium))
+                        #else
                         .font(.headline)
+                        #endif
                         .foregroundColor(.white.opacity(0.82))
                         .lineLimit(1)
                 }
                 if !heroMetadata.isEmpty {
                     Text(heroMetadata)
+                        #if os(tvOS)
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundColor(Palette.muted)
+                        #else
                         .font(.system(.callout, design: .monospaced).weight(.semibold))
                         .foregroundColor(.white.opacity(0.72))
+                        #endif
                         .lineLimit(1)
                 }
+                #if os(tvOS)
+                Label(heroAction, systemImage: "play.fill")
+                    .font(.system(size: 26, weight: .medium))
+                    .foregroundColor(Palette.onBg)
+                    .padding(.horizontal, 20).padding(.vertical, 10)
+                    .background(Palette.surfaceHi, in: Capsule())
+                #else
                 Label(heroAction, systemImage: "play.fill")
                     .font(.system(.headline, design: .monospaced).weight(.bold))
                     .foregroundColor(.white)
                     .padding(.horizontal, 16).padding(.vertical, 10)
                     .background(Palette.accent, in: Capsule())
+                #endif
             }
             .padding(.horizontal, screenHPad)
             .padding(.bottom, 24)
