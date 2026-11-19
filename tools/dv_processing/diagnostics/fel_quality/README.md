@@ -24,6 +24,8 @@ locations. Media, decoded frames and binaries stay outside Git.
 | `lattice_eval.py` | All-48-frame stride-8 lattice scoring on the imported frozen operators; gates on exact 0/24 equality with retained full-resolution RGB before scoring. |
 | `make_component_swaps.py` | Builds luma/chroma swap counterfactual YUV for the lattice evaluator; diagnostic only. |
 | `portable_lattice.py` | Reduces a private lattice report to the committed portable JSON with neutral path prefixes. |
+| `extract_served_refit.py` | Extracts the 48 Michael5400 RPUs from a captured Profile 8.1 publication, verifies the caller-supplied clock transform and binds copied BL slices to the source. |
+| `served_refit_eval.py` | Scores the extracted served F+ curves and identity on the same frozen four-model lattice, bound to the M5 capture and helper comparison receipt. |
 | `heldout_eval.py` | Frozen four-model scoring with observer metadata for fixtures that have no retained parsed metadata; full resolution or lattice; validated by exact reproduction of a retained result. |
 | `land_rate.py` | Lands an arm in the 128.5–130.0 Mb/s authored band by changing only the ABR target (secant, at most 4 encodes); the iso-rate rule for every coding arm. `--target T` lands a diagnostic rung at T ± 0.75 Mb/s instead. |
 | `make_export_oracle.py` | X0: oracle 10-bit 4:2:0 exports from the composition (rounded, truncated, swaps) and signed PRE−oracle plane statistics. |
@@ -59,6 +61,26 @@ clocks and hashes. The code deliberately refuses missing/mismatched inputs;
 it does not download media or manufacture absent evidence. Original request
 paths may need relocation using the private archive's location map, with a
 new request/provenance record; do not rewrite sealed original receipts.
+
+## Served F+ baseline and NP1 protocol
+
+Keep the actual HTTP init and fragments, then concatenate their bytes into
+the extractor's served MP4 input. Supply the capture events and the
+source-clock offset established from the publication. The extractor's
+receipt binds local bytes. Preserve the HTTP capture receipt with it.
+
+Use the extractor's readback, raw RPUs and receipt with the capture planes,
+metadata and exact helper comparison receipt in the scorer's request.
+The scorer reports per-frame and pooled results for the active-region
+lattice. Use those results to calibrate the per-title protocol.
+
+Before scoring NP1, freeze separate calibration and evaluation windows,
+the rate envelope, exact recipe and tool identities, and the measures for
+pooled quality and shadow tails. Record how the served baseline and
+measurement repeatability justify the improvement margin. The earlier
+Z6 threshold belongs to the earlier comparison. The
+[M7 plan](../../../../docs/streaming/FEL-RPU-REFIT-GRADUATION-AND-M7.md#milestone-7-sequence)
+governs evaluation and full-title promotion.
 
 ## Source deltas stay experimental
 
