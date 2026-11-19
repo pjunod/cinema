@@ -900,6 +900,38 @@ class HistoricalRetentionExecutorCase(unittest.TestCase):
                 with self.subTest(altered=altered[:400]), self.assertRaises(receipts.ReceiptError):
                     q.authenticate_scope(api, 42, run, altered, {}, source, 1)
 
+    def test_tags_store_accepts_only_the_complete_native_job(self):
+        run = {'id': 8516, 'commit_sha': q.TAGS_STORE_SOURCE}
+        job = {'id': 80913, 'task_id': 35134, 'attempt': 1, 'status': 'success',
+               'runs_on': ['ci-nonvoter-store']}
+        workflow = q.retention.git_bytes(q.TAGS_STORE_SOURCE, '.github/workflows/ci.yml')
+        inputs = {'promotion_pr': '1660', 'promotion_base_sha': q.TAGS_STORE_BASE,
+                  'retained_units_sha256': q.TAGS_STORE_ANDROID_DIGEST,
+                  'retained_units_attachment_id': '160',
+                  'retained_units_attachment_uuid': q.TAGS_STORE_ANDROID_UUID}
+        manifest = {
+            'version': 1, 'repository': 1, 'pr': 1660, 'source_commit': q.TAGS_STORE_SOURCE,
+            'base_sha': q.TAGS_STORE_BASE, 'branch': 'effort/custom-tags', 'windows_waiver': None,
+            'lanes': {'android_device': [], 'android_jvm': []},
+        }
+        raw = (b'info: default host tuple is x86_64-unknown-linux-gnu\n'
+               b'docker run image=node:22-bookworm platform=linux/amd64 entrypoint=[]\n')
+        api = Mock()
+        with patch.object(q.retention, 'attachment_bytes', return_value=json.dumps(manifest).encode()) as attachment:
+            q.authenticate_tags_store_ci(api, run, job, workflow, inputs, 1, raw)
+            attachment.assert_called_once_with(api, 1660, 160, q.TAGS_STORE_ANDROID_UUID,
+                                               q.TAGS_STORE_ANDROID_DIGEST)
+            for status in ('running', 'failure', 'cancelled'):
+                with self.subTest(status=status), self.assertRaises(receipts.ReceiptError):
+                    q.authenticate_tags_store_ci(api, run, {**job, 'status': status}, workflow, inputs, 1, raw)
+            with self.assertRaises(receipts.ReceiptError):
+                q.authenticate_tags_store_ci(api, run, {**job, 'attempt': 2}, workflow, inputs, 1, raw)
+            with self.assertRaises(receipts.ReceiptError):
+                q.authenticate_tags_store_ci(api, run, job, workflow, inputs, 1, raw.replace(b'amd64', b'arm64'))
+            attachment.return_value = json.dumps({**manifest, 'command_units': {'store_contract': {}}}).encode()
+            with self.assertRaises(receipts.ReceiptError):
+                q.authenticate_tags_store_ci(api, run, job, workflow, inputs, 1, raw)
+
     def test_actual_conditional_rust_executors_keep_the_make_branch_available(self):
         workflow = self.workflow()
         for kind in ('store_contract', 'wal', 'topology', 'transport'):

@@ -1753,6 +1753,59 @@ def authenticated_ids(identity):
     return tuple(receipts.positive(int(value)) for value in match.groups())
 
 
+# The tags effort's first-attempt Store job ran the native suite on the
+# nonvoter runner after admitting only Android results. Its old main base
+# can move while the Store input tree and measured outcomes stay intact.
+TAGS_STORE_RUN = (8516, 80913)
+TAGS_STORE_SOURCE = '3d8f02d152494a2f698ed493cb0f779c0f226453'
+TAGS_STORE_BASE = '8a931e3152be5773e218bd54ac533e909f8e201f'
+TAGS_STORE_ANDROID_DIGEST = '5018d6b114431d4c54af6df775823296d24c697047e07df16afa9b354af39f75'
+TAGS_STORE_ANDROID_UUID = '1ce940f5-2b1e-4ddd-b971-001279de2874'
+
+
+def authenticate_tags_store_ci(api, run, job, workflow, inputs, repository, raw):
+    from validation.retained_lane_commands import scoped_workflow
+
+    receipts.require(
+        (run['id'], job['id']) == TAGS_STORE_RUN and run['commit_sha'] == TAGS_STORE_SOURCE
+        and job['task_id'] == 35134 and job['attempt'] == 1 and job['status'] == 'success'
+        and job['runs_on'] == ['ci-nonvoter-store'] and repository == 1
+        and inputs['promotion_pr'] == '1660' and inputs['promotion_base_sha'] == TAGS_STORE_BASE,
+        'Tags Store receipt needs the complete first native job')
+    for name, digest in {
+        'scope': '367152ef6e10fd2d0860e8b65f8f94bcc09edf6f37d0e343aed450cb588ddd95',
+        'cluster_store_legacy': 'f752a05d15d588ed23b1ac32a41b324dd0b41d923584d2e597c79aa67834d617',
+    }.items():
+        receipts.require(retention.digest(scoped_workflow(workflow, name)[-1].encode()) == digest,
+                         'Tags Store historical workflow differs')
+    receipts.require(historical_command(workflow.decode(), 'store_contract'),
+                     'Tags Store historical command differs')
+    for path, digest in {
+        '.github/actions/cargo-cache/action.yml': 'e7b927250675bb0b0f19a6b41b1b03503e33e0fdffb2c2c6b470422020f1b3a6',
+        'rust-toolchain.toml': '03cbfb27fcdc8253524b3e4c71c832457a504f7e9b1da5e6220178404b77f4e4',
+    }.items():
+        receipts.require(retention.digest(retention.git_bytes(TAGS_STORE_SOURCE, path)) == digest,
+                         'Tags Store historical toolchain or cache action differs')
+    receipts.require((inputs.get('retained_units_sha256'), inputs.get('retained_units_attachment_id'),
+                      inputs.get('retained_units_attachment_uuid')) ==
+                     (TAGS_STORE_ANDROID_DIGEST, '160', TAGS_STORE_ANDROID_UUID),
+                     'Tags Store historical scope carried different retained results')
+    enrolled = receipts.bounded_json(retention.attachment_bytes(
+        api, 1660, 160, TAGS_STORE_ANDROID_UUID, TAGS_STORE_ANDROID_DIGEST))
+    receipts.require(
+        set(enrolled) == {'version', 'repository', 'pr', 'source_commit', 'base_sha',
+                          'branch', 'lanes', 'windows_waiver'}
+        and enrolled['version'] == 1 and enrolled['repository'] == repository and enrolled['pr'] == 1660
+        and enrolled['source_commit'] == TAGS_STORE_SOURCE and enrolled['base_sha'] == TAGS_STORE_BASE
+        and enrolled['branch'] == 'effort/custom-tags' and enrolled['windows_waiver'] is None
+        and set(enrolled['lanes']) == {'android_device', 'android_jvm'},
+        'Tags Store historical results must have executed natively')
+    lines = clean_log(raw.decode()).splitlines()
+    receipts.require('info: default host tuple is x86_64-unknown-linux-gnu' in lines
+                     and any('docker run image=node:22-bookworm platform=linux/amd64 ' in line for line in lines),
+                     'Tags Store historical executor platform differs')
+
+
 def expanded_commands(proof, candidate, objects=None):
     """Resolve only declared command slots; ordinary authority checks still follow."""
     from validation.unit_evidence_objects import Objects
@@ -1827,7 +1880,11 @@ def authenticate(api, proof, document, repository, live_logs=None):
                              'Historical commands did not run on this main-bound effort')
             workflow = retention.git_bytes(record['source_commit'], '.github/workflows/ci.yml')
             receipts.require(workflow is not None, 'Historical workflow unavailable')
-            if execution.get('native_discovery') is True:
+            raw = live_logs.get(api, run_id, job_id)
+            tags_store = kind == 'store_contract' and (run_id, job_id) == TAGS_STORE_RUN
+            if tags_store:
+                authenticate_tags_store_ci(api, run, jobs[0], workflow, inputs, repository, raw)
+            elif execution.get('native_discovery') is True:
                 from validation.native_python_discovery import native_event
                 receipts.require(item.get('protocol') == 'source-cohort-v1'
                                  and kind in {'validation', 'operations'} and jobs[0]['status'] == 'success',
@@ -1845,13 +1902,13 @@ def authenticate(api, proof, document, repository, live_logs=None):
             if key not in scopes:
                 authenticate_scope(api,run_id,run,workflow.decode(),document,record['source_commit'],repository)
                 scopes.add(key)
-            raw = live_logs.get(api, run_id, job_id)
             if kind in RUST_KINDS:
-                historical_rust_environment_contract(record['source_commit'],workflow.decode(),kind)
                 text=clean_log(raw.decode())
                 receipts.require(re.search(r'^'+re.escape(RUSTC_VERSION)+r'$',text,re.M), 'Actual historical pinned compiler version unavailable')
-                job_header=workflow.decode().split('  '+{'store_contract':'cluster_store_legacy','wal':'cluster_wal','topology':'cluster_topology','transport':'cluster_transport_recovery_contracts'}[kind]+':',1)[1].split('    steps:',1)[0]
-                receipts.require(re.search(r'^    runs-on: \[self-hosted, Linux, X64,',job_header,re.M), 'Historical compiler platform authority differs')
+                if not tags_store:
+                    historical_rust_environment_contract(record['source_commit'],workflow.decode(),kind)
+                    job_header=workflow.decode().split('  '+{'store_contract':'cluster_store_legacy','wal':'cluster_wal','topology':'cluster_topology','transport':'cluster_transport_recovery_contracts'}[kind]+':',1)[1].split('    steps:',1)[0]
+                    receipts.require(re.search(r'^    runs-on: \[self-hosted, Linux, X64,',job_header,re.M), 'Historical compiler platform authority differs')
             receipts.require(retention.digest(raw) == record['log']['sha256_ref']
                              and command_log(proof, record).encode() == raw, 'Authenticated command log mismatch')
 
