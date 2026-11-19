@@ -1661,6 +1661,42 @@ impl MediaPool {
         )
     }
 
+    async fn catalogue_observation<F>(
+        &self,
+        scope: Option<([u8; 32], tokio::time::Instant)>,
+        binding: Option<&PlanningBinding>,
+        observed_at: tokio::time::Instant,
+        fetch: F,
+    ) -> QualityCatalogResult
+    where
+        F: std::future::Future<Output = QualityCatalogResult>,
+    {
+        if let (Some((key, _)), Some(_)) = (scope, binding) {
+            let cached = self
+                .catalogues
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&key, observed_at);
+            if let Some(result) = cached {
+                return result;
+            }
+        }
+        let result = fetch.await;
+        if let (Some((key, snapshot_expiry)), Some(binding)) = (scope, binding) {
+            self.catalogues
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    key,
+                    snapshot_expiry.min(observed_at + SNAPSHOT_INTERVAL),
+                    binding,
+                    &result,
+                    tokio::time::Instant::now(),
+                );
+        }
+        result
+    }
+
     /// Local and remote catalogs share one deadline. Missing/old/busy workers
     /// contribute no evidence; a successful worker stays explicitly attached
     /// to its exact recipe so placement cannot spend another worker's proof.
@@ -1779,15 +1815,7 @@ impl MediaPool {
                                     })
                                 })
                             };
-                            if let Some((key, _)) = scope {
-                                let cached = self.catalogues
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .get(&key, observed_at);
-                                if let Some(result) = cached {
-                                    return result;
-                                }
-                            }
+                            let fetch = async {
                             // Clock independent duration: subtract both transit reserves before
                             // signing, and never restart the parent deadline on fallback.
                             let budget_ms = deadline
@@ -1927,21 +1955,11 @@ impl MediaPool {
                                     CatalogCause::PeerProtocol,
                                 );
                             }
-                            if let (false, Some((key, snapshot_expiry)), Some(binding)) =
-                                (legacy, scope, expected_binding.as_ref())
-                            {
-                                    self.catalogues
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                        .insert(
-                                            key,
-                                            snapshot_expiry.min(observed_at + SNAPSHOT_INTERVAL),
-                                            binding,
-                                            &outcome,
-                                            tokio::time::Instant::now(),
-                                        );
-                            }
                             outcome
+                            };
+                            self.catalogue_observation(
+                                scope, expected_binding.as_ref(), observed_at, fetch,
+                            ).await
                         }
                     }),
             )
@@ -3119,6 +3137,51 @@ mod tests {
         );
         assert_eq!(answer.candidates[0].binding, good.candidates[0].binding);
         assert!(held.get(&[1; 32], now + SNAPSHOT_INTERVAL).is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn warm_catalogue_observations_skip_peer_work_and_expiry_reenters_it() {
+        let pool = MediaPool::new(
+            crate::cluster::test_calls(MembershipManager::unavailable()),
+            crate::cluster::Directory::new(MembershipManager::unavailable()),
+        );
+        let binding = PlanningBinding {
+            generation: 1,
+            source_digest: "a".repeat(64),
+        };
+        let answer = catalogue_answer(&binding);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
+        let scope = Some(([1; 32], started + SNAPSHOT_EXPIRY));
+        for expected_calls in [1, 1] {
+            let observed = pool
+                .catalogue_observation(scope, Some(&binding), started, async {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    answer.clone()
+                })
+                .await;
+            assert_eq!(
+                observed.candidates[0].candidate.id,
+                answer.candidates[0].candidate.id
+            );
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::Relaxed),
+                expected_calls
+            );
+        }
+        tokio::time::advance(SNAPSHOT_INTERVAL).await;
+        pool.catalogue_observation(scope, Some(&binding), tokio::time::Instant::now(), async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            answer.clone()
+        })
+        .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+        pool.catalogue_observation(None, Some(&binding), tokio::time::Instant::now(), async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            answer
+        })
+        .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 3);
     }
 
     #[test]

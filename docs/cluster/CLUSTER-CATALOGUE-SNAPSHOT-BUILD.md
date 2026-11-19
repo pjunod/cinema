@@ -69,7 +69,7 @@ integration. The active facade promotion remains independently owned.
 
 ## 5. Validation ledger
 
-The bounded cache and three focused scope/refusal/expiry regressions are
+The bounded cache and four focused scope/refusal/expiry and production-fetch regressions are
 implemented. Pinned rustfmt and diff checks pass; execution, final review and
 qualification remain pending.
 The source-only compiler slot is available; its exact-base daemon check reports
