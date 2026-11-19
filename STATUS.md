@@ -5,6 +5,7 @@
 
 - **2026-11-19 · MPV live opening delay:** Codex. ROG baseline seek passed. Patched Play and seek measurements are pending. [Ledger](docs/streaming/MPV-LIVE-STARTUP.md).
 - **2026-11-19 · Dolby Vision F+ curve fit (FEL RPU re-fit):** Owner Claude (claude-opus-5-5, from Codex 2026-11-18). Milestones 1–6 landed as #1565 (`8630ee431`) through `scripts/land` with the train off; all 50 Regression-Test lines carried. The nearest-Q12 production RPU passes all 48 native points and controls, and the full lane passed on `f8a7f5ab3`. The landed main merge ran preflight only (`Landed-Untested`, by Paul's order), so the combined tree has no lane run. Not deployed; physical playback and milestone 7 re-encode trials remain. [Ledger](docs/streaming/FEL-RPU-REFIT-BUILD.md).
+- **2026-11-18 · Settings → Cluster rebuilt:** owner Claude, branch `claude/cluster-settings-layout`. Status strip, alert slot, nodes table with per-node drawers, one settings list with advisory readiness chips, ledger, Maintenance, Backup, log; no folds or tabs. PR #1798. ([operator docs](docs/OPERATIONS.md))
 - **2026-11-16 · Native prepared forward rendezvous:** owner GPT. New Moon's
   native seeks trailed 90–97 ms; buffered forward aim+existing hold preserves the guard.
   Astra review and 103 focused tests pass; Safari acceptance, seam and deadline
@@ -93,10 +94,6 @@ B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; sim
 
 **Source correction built; PR review pending.** The first tray promotion packaged the companion for release archives but left `make install-macos` on the daemon-only path. Source installation now stages a complete native runtime and companion before migration; the explicit server-only path retains legacy prefix installs. [Desktop controls](docs/server/DESKTOP-CONTROL.md) explains installation, opening the app and separate login preferences. The focused controller/migration and installer regressions pass; independent PR review remains pending.
 
-## Native server tray, startup policy and release upgrades
-
-**Source built and reviewed on `effort/desktop-tray`; [PR #1213](http://forge.lan:3000/noirr/plurx/pulls/1213) records main promotion; not deployed.** The [implementation ledger](docs/features/DESKTOP-TRAY-IMPLEMENTATION.md) tracks macOS and Linux desktop controls, separate server/tray startup choices, and signed GitHub artifact upgrades. Astra completed the PR #1220 review; root addresses all eight findings and owns passing unit tests and merge gates. Controller, daemon, native UI and packaging source is built in cohort PR #1220. The [qualification ledger](docs/features/DESKTOP-TRAY-QUALIFICATION.md) distinguishes passing review regressions, repository merge evidence and remaining native distribution acceptance.
-
 ## Older efforts — where each one now lives
 
 Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19, 2026-10-26, 2026-11-07, 2026-11-15 and 2026-11-18 into the status history of their subject folder. One row per section, newest first.
@@ -177,3 +174,4 @@ Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-0
 | 2026-09-02 | Everything a read-only cluster member could not do | [docs/cluster/STATUS-HISTORY.md](docs/cluster/STATUS-HISTORY.md) |
 | 2026-09-01 | Artwork repair-fence claim flake (same CI job) | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-09-01 | Exact-count cluster assertions (the `v0.3.0` release blocker) | [docs/cluster/STATUS-HISTORY.md](docs/cluster/STATUS-HISTORY.md) |
+| 2026-10-19 | Native server tray, startup policy and release upgrades | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |

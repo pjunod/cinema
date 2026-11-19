@@ -19,9 +19,10 @@
   // passes `clenv()` and tests pass their own. The dependency surface is
   // therefore written in the signatures.
   //
-  // Templates that touch the document (the node cards, the panel shell, the
-  // fold glue) deliberately stay inline in index.html: the boundary is "no
-  // DOM, no module state", applied honestly rather than perfectly.
+  // Templates that read module state or touch the document (the node table
+  // and its drawers, the alerts, the panel shell) deliberately stay in the
+  // shell's pages/cluster*.js: the boundary is "no DOM, no module state",
+  // applied honestly rather than perfectly.
 
   // ---- quorum, state, and refusals ---------------------------------------
   // A Raft majority is floor(n/2)+1, so the number of voters that may be lost is
@@ -94,10 +95,10 @@
         "it can read the source; otherwise it fails the package cleanly so the client can request it again.",
       cluster_leader_removal_refused:
         "That node is the cluster's current leader, so another voter cannot remove it remotely. Open Cinema "+
-        "on the leader itself and use Leave this cluster; it coordinates its own removal with the surviving "+
+        "on the leader itself and use Leave cluster in its own row; it coordinates its own removal with the surviving "+
         "quorum and then shuts down.",
       self_removal_requires_leave:
-        "That row is this server. Use Leave this cluster on the Maintenance card so the daemon settles local "+
+        "That row is this server. Use Leave cluster in this node's own row so the daemon settles local "+
         "work, commits its own removal, drains active connections, and shuts down instead of leaving a "+
       "tombstoned process online.",
       leave_node_mismatch:
@@ -432,194 +433,6 @@
       permanent_majority_loss_supported:false};
   }
 
-  // ---- the operations rail -------------------------------------------------
-  // Every action this screen can take, with its precondition evaluated before
-  // the click rather than after it. The server still refuses what it refuses —
-  // these rows never widen what is allowed — but a refusal you can read while
-  // deciding is worth more than the same paragraph arriving as a failure.
-  //
-  // Rows only claim what the roster and the direct status can prove. Offline
-  // work owned by a node, for instance, is not in either, so "Remove" says what
-  // it does know (quorum, leadership, pending changes) and leaves the rest to
-  // the server's own answer.
-  function clusterRailRow(row){
-    const state=row.blocked?"blocked":row.destructive?"destructive":"ready";
-    // A row that decides a membership change also carries the control for it.
-    // The shell supplies the markup (those panels read module state the model
-    // cannot see); the row owns whether it is showing.
-    const panel=row.expansion
-      ? `<div class="clrailpanel" id="clrail-${row.expand}"${row.expanded?"":" hidden"}>${row.expansion}</div>`
-      : "";
-    const chip=row.blocked
-      ? `<span class="pill" style="color:var(--muted)">Blocked</span>`
-      : row.destructive
-        ? `<span class="pill" style="color:var(--bad);border-color:var(--bad)">Permanent</span>`
-        : `<span class="pill" style="color:var(--good);border-color:var(--good)">Ready</span>`;
-    const action=row.action||"";
-    return `<div class="clrailrow ${state}"><div class="clrailtext"><div class="t">${row.title}</div>
-        <div class="r">${row.reason}</div></div>
-      <div class="clrailside">${chip}${action}</div>${panel}</div>`;
-  }
-  // A server verdict ships the condition it actually hit. Naming it is the
-  // whole point of stating a precondition, so a row reports the blocker rather
-  // than a plausible one.
-  function clusterRailBlocker(env,blockers,fallback){
-    const {esc}=env;
-    const first=(blockers||[])[0];
-    if(!first) return fallback;
-    return `${esc(clusterOperationReason(first.code))}${first.node_id?` on ${esc(first.node_id)}`:""}${
-      (blockers||[]).length>1?`, and ${blockers.length-1} more`:""}.`;
-  }
-  function clusterOperationRows(env,cluster,ops,expanded){
-    const {esc,fmtBytes}=env;
-    const showing=id=>(expanded||[]).indexOf(id)!==-1;
-    const disclose=(id,label,tone)=>`<button class="${tone} sm" aria-controls="clrail-${id}" `+
-      `aria-expanded="${showing(id)?"true":"false"}" onclick="toggleClusterRailPanel('${id}')">${
-        showing(id)?"Hide":label}</button>`;
-    const nodes=cluster.nodes||[];
-    const name=n=>esc(n.hostname||n.node_id);
-    const arg=n=>esc(JSON.stringify(n.node_id));
-    const local=nodes.find(n=>n.node_id===cluster.local_node_id);
-    const voters=nodes.filter(n=>n.is_voter);
-    const q=clusterQuorum(voters.length);
-    const pending=nodes.find(n=>n.removal_pending);
-    const fenced=nodes.find(n=>n.maintenance);
-    const lifecycle=fenced||pending;
-    const recovery=clusterRecoveryState(cluster);
-    const rows=[];
-
-    // Adding a node mints a credential, and this row is where that decision is
-    // already made — so the panel that shows the token once is this row's own
-    // expansion rather than a second surface further down the card.
-    // Recovery locks every membership change: issuing a token and removing a
-    // member both need a leader and a committed quorum read.
-    const locked=recovery.required?{reason:"The cluster cannot prove both an elected leader and a reachable voter majority, so a membership change cannot commit."}:null;
-    rows.push(locked
-      ? {title:"Add a node",blocked:true,reason:locked.reason,
-         action:`<button class="ghost sm" disabled>Add</button>`}
-      : lifecycle
-      ? {title:"Add a node",blocked:true,
-         reason:`A membership change is already in flight on ${name(lifecycle)}. Finish it before admitting another node.`,
-         action:`<button class="ghost sm" disabled>Add</button>`}
-      : {title:"Add a node",expand:"add",expanded:showing("add"),
-         reason:"Mints one single-use join token, shown once, for a machine with a fresh data directory.",
-         action:disclose("add","Add","ghost")});
-
-    // Promotion is refused until the learner has published a fresh zero-lag
-    // apply proof and its filesystem has proved the voter reserve. Both are on
-    // the roster, so both can be said here instead of after the attempt.
-    nodes.filter(n=>!n.is_voter&&n.role==="learner").forEach(n=>{
-      const ready=n.bounded_read_ready&&n.voter_storage_ready&&!lifecycle;
-      const why=lifecycle?`A membership change is in flight on ${name(lifecycle)}.`
-        :!n.bounded_read_ready?"It has not published a fresh zero-lag apply proof yet — leave it running until its read-worker badge says ready."
-        :`Its data root has not proved the durable free-space reserve a voter must hold${
-            n.storage_headroom_bytes!=null?` (${esc(fmtBytes(n.storage_headroom_bytes)||"0 B")} free)`:""}. Free space or move the data root.`;
-      rows.push({title:`Promote ${name(n)} to voter`,blocked:!ready,
-        reason:ready?"Catch-up and the storage preflight both pass; this adds one vote to quorum.":why,
-        action:`<button class="ghost sm" ${ready?"":"disabled"} onclick='promoteNode(${arg(n)})'>Promote</button>`});
-    });
-
-    // Maintenance is a local action by design: the fence has to be acknowledged
-    // by the process being fenced.
-    if(fenced){
-      const resume=clusterMaintenanceResumeReady(fenced,ops);
-      const here=fenced.node_id===cluster.local_node_id;
-      rows.push({title:`Resume service on ${name(fenced)}`,blocked:!(here&&resume),
-        reason:here?(resume?"Fenced, caught up, and directly observed with no local work left."
-          :"Still draining: waiting for direct acknowledgement, leader handoff, catch-up, or drain proof.")
-          :`Open ${name(fenced)} directly to resume it — a node lifts its own fence.`,
-        action:`<button class="sm" ${here&&resume?"":"disabled"} onclick='setNodeMaintenance(${arg(fenced)},false)'>Resume</button>`});
-    }else if(local){
-      const verdict=clusterMaintenanceEntryVerdict(ops,local.node_id);
-      const safe=Boolean(verdict&&verdict.safe_to_enter);
-      const ready=safe&&local.reachable&&!local.removal_pending&&!pending;
-      const why=!local.reachable?"This node's own heartbeat is not fresh."
-        :pending?`A removal is pending on ${name(pending)}.`
-        :verdict?clusterRailBlocker(env,verdict.blockers,"The direct maintenance preflight has not approved this node.")
-        :ops&&ops.unavailable?"The direct status could not be collected, and a heartbeat is not a substitute for it."
-        :"The direct maintenance preflight has not answered yet.";
-      rows.push({title:`Enter maintenance on ${name(local)}`,blocked:!ready,
-        reason:ready?"Fences new work, hands off leadership, and drains existing streams. Reversible; membership is unchanged."
-          :why,
-        action:`<button class="ghost sm" ${ready?"":"disabled"} onclick='setNodeMaintenance(${arg(local)},true)'>Fence</button>`});
-    }
-
-    // Election and restart preparation are cluster-wide and already carry a
-    // server-side verdict; the rail just stops hiding it behind the button.
-    if(voters.length>1){
-      const candidate=voters.some(n=>!n.is_leader&&n.reachable&&n.apply_lag_entries===0&&!n.removal_pending);
-      const ready=candidate&&!lifecycle&&recovery.quorum_available;
-      const why=!recovery.quorum_available?"A voter majority cannot be proved, and an election cannot bypass quorum."
-        :lifecycle?`A membership change is in flight on ${name(lifecycle)}.`
-        :"No reachable, fully caught-up follower is available to campaign.";
-      rows.push({title:"Force a leader election",blocked:!ready,
-        reason:ready?"Asks a caught-up follower to campaign. Raft still chooses the winner; writes pause briefly."
-          :why,
-        action:`<button class="ghost sm" ${ready?"":"disabled"} onclick="openElectionDialog()">Elect</button>`});
-    }
-
-    const verdict=ops&&!ops.unavailable&&ops.verdict;
-    if(verdict){
-      const candidateHere=verdict.candidate_node_id&&local&&verdict.candidate_node_id===local.node_id;
-      const ready=Boolean(verdict.safe_to_restart_one&&candidateHere);
-      const blockers=(verdict.blockers||[]);
-      const why=!verdict.safe_to_restart_one
-        ? (blockers.length?`${esc(clusterOperationReason(blockers[0].code))}${blockers[0].node_id?` on ${esc(blockers[0].node_id)}`:""}${blockers.length>1?`, and ${blockers.length-1} more`:""}.`
-           :"At least one direct safety condition is missing.")
-        : `The safe candidate is ${esc(verdict.candidate_node_id)} — open that node directly to prepare it.`;
-      rows.push({title:"Prepare this voter for restart",blocked:!ready,
-        reason:ready?"Blocks new admissions here and drains owned sessions, leaving the majority intact."
-          :why,
-        action:`<button class="ghost sm" ${ready?"":"disabled"} ${ready?`onclick='prepareLocalRestart(this,${arg(local)})'`:""}>Prepare</button>`});
-    }
-
-    // Removal is the one action whose commonest refusal — offline work owned by
-    // the node — is not in any payload this page reads. The row says what it can
-    // prove and routes to the card that carries the per-node control.
-    const removable=nodes.filter(n=>n.node_id!==cluster.local_node_id);
-    if(removable.length){
-      // A learner leaves by a different path and is not held to the voter
-      // arithmetic, so the quorum bar only applies while a voter is removable.
-      const voterRemovable=removable.some(n=>n.is_voter);
-      const quorumHolds=voters.length>=3||!voterRemovable;
-      const ready=quorumHolds&&!lifecycle&&!recovery.required;
-      const leader=removable.find(n=>n.is_leader);
-      rows.push({title:"Remove a node permanently",blocked:!ready,
-        reason:ready
-          ? `Use Remove permanently on that node's card. At least three voters must remain a voter removal, `+
-            `${leader?`${name(leader)} is the current leader and can only leave from its own screen, `:""}`+
-            `and a node still holding offline work is refused until that work is resolved.`
-          : recovery.required
-            ? locked.reason
-            : !quorumHolds
-              ? `A voter removal needs at least three voters and this cluster has ${voters.length}. Add a node first.`
-              : `A membership change is in flight on ${name(lifecycle)}.`,
-        action:""});
-    }
-
-    // A graceful leave is a membership change like any other, and it was the one
-    // row on a card headed "with its precondition already evaluated" that had
-    // none. It states exactly what the server states and nothing more:
-    // `leave_voter` needs a current leader (so a recovery locks it), refuses a
-    // voter self-leave below three voters with the same quorum arithmetic the
-    // Remove row already reports, and a maintenance fence is a cluster-wide
-    // conflict. A removal pending on some OTHER node is deliberately not here —
-    // the server's fence is per-node, so blocking on it would refuse something
-    // that works.
-    const voterLeave=Boolean(local&&local.is_voter);
-    const leaveQuorum=!voterLeave||voters.length>=3;
-    const leaveBlocked=locked||fenced||!leaveQuorum;
-    rows.push({title:"Leave this cluster",destructive:true,expand:"leave",
-      expanded:showing("leave"),blocked:Boolean(leaveBlocked),
-      reason:locked?locked.reason
-        :fenced?`Maintenance is active on ${name(fenced)}, and membership changes are refused while it is. Resume that node first.`
-        :!leaveQuorum?`A voter can only leave while at least three voters remain, and this cluster has ${voters.length}. Add a node first.`
-        :"This node resolves its owned work, commits its own removal, drains and shuts down. Rejoining needs a fresh data directory and a new token.",
-      action:leaveBlocked?`<button class="btn-danger sm" disabled>Leave</button>`
-        :disclose("leave","Leave","btn-danger")});
-    return rows;
-  }
-
   // ---- words -----------------------------------------------------------------
   function clusterOperationAge(ms){
     if(ms===null||ms===undefined) return "unknown age";
@@ -753,24 +566,6 @@
       :tone==="warn"?"color:var(--warn);border-color:var(--warn)":"";
     return `<span class="pill" style="${colour}">${esc(label)}</span>`;
   }
-  // What survives folding. Collapsing the section hides the detail, never the
-  // verdict: the health pill stays in the header and this line keeps the six
-  // readings somebody would check before deciding whether to expand it again.
-  function clusterDatabaseSummary(env,cluster,replication,ops){
-    const {esc,fmtAgo}=env;
-    const status=clusterDatabaseStatus(cluster,ops), raft=(status&&status.raft)||{};
-    const leader=(cluster.nodes||[]).find(n=>n.is_leader);
-    const known=value=>value!==null&&value!==undefined;
-    const parts=[`leader <b>${leader?esc(leader.hostname||leader.node_id):"unknown"}</b>`];
-    if(known(raft.current_term)) parts.push(`term <b>${esc(String(raft.current_term))}</b>`);
-    if(known(raft.commit_index)) parts.push(`commit <b>${esc(String(raft.commit_index))}</b>`);
-    if(replication&&known(replication.last_applied_index))
-      parts.push(`applied <b>${esc(String(replication.last_applied_index))}</b>`);
-    if(known(raft.apply_lag_entries)) parts.push(`lag <b>${esc(String(raft.apply_lag_entries))}</b>`);
-    if(replication&&replication.last_converged_at)
-      parts.push(`converged <b>${esc(fmtAgo(replication.last_converged_at))}</b>`);
-    return parts.join(" · ");
-  }
   // The WAL says one of three things: it was never observed, it is proven
   // unavailable, or it answered — and an answer that is `open` with a live error
   // or unflushed entries is a fault, which is exactly the predicate the node
@@ -790,7 +585,7 @@
     const wal=status.wal&&status.wal.snapshot;
     if(!wal) return `<span style="color:var(--bad)">unavailable${
       status.wal&&status.wal.reason?` · ${esc(clusterOperationReason(status.wal.reason))}`:""}</span>`;
-    const healthy=wal.state==="open"&&wal.lock_owned&&!wal.last_error&&wal.last_log_index===wal.last_durable_index;
+    const healthy=clusterWalHealthy(wal);
     const durable=wal.last_durable_index===null||wal.last_durable_index===undefined
       ? "unknown":esc(String(wal.last_durable_index));
     const fault=wal.last_error?` · ${esc(wal.last_error.message||"error")}`
@@ -819,34 +614,451 @@
         ["Peers","none — watch state is durable here and has nowhere to fall behind",false]];
     const status=clusterDatabaseStatus(cluster,ops);
     const raft=(status&&status.raft)||{}, snap=(status&&status.snapshot)||{};
-    const wal=status&&status.wal&&status.wal.snapshot;
     const leader=(cluster.nodes||[]).find(n=>n.is_leader);
-    const num=value=>(value===null||value===undefined)?"unknown":esc(String(value));
-    const sampled=raft.applied_index!==null&&raft.applied_index!==undefined;
+    const known=value=>value!==null&&value!==undefined;
+    const num=value=>known(value)?esc(String(value)):"unknown";
+    const sampled=known(raft.applied_index);
     const applied=sampled?esc(String(raft.applied_index))
-      :(replication&&replication.last_applied_index!==null&&replication.last_applied_index!==undefined
-        ? esc(String(replication.last_applied_index)):"unknown");
-    const behindKnown=replication&&(replication.behind_by!==null&&replication.behind_by!==undefined
-      ? true:replication.health!=="degraded");
+      :(replication&&known(replication.last_applied_index)?esc(String(replication.last_applied_index)):"unknown");
+    const behindKnown=replication&&(known(replication.behind_by)?true:replication.health!=="degraded");
     const behind=behindKnown?Number(replication.behind_by||0):null;
-    const lag=raft.apply_lag_entries===null||raft.apply_lag_entries===undefined
-      ? "unknown":`${esc(String(raft.apply_lag_entries))} entr${raft.apply_lag_entries===1?"y":"ies"}`;
+    const lag=known(raft.apply_lag_entries)?`lag ${esc(String(raft.apply_lag_entries))}`:"lag unknown";
+    const capacity=cluster.capacity?clusterCapacityText(cluster.capacity):null;
     return [
-      ["Backend",replication?(replication.backend==="sqlite"?"SQLite · single node":"hiqlite · Raft"):"unknown",false],
-      ["Leader",leader?`${esc(leader.hostname||leader.node_id)}${leader.node_id===cluster.local_node_id?' <span class="muted">this node</span>':""}`:"none elected",false],
-      ["Term",num(raft.current_term),true],
+      ["Backend",replication?"hiqlite · Raft":"unknown",false],
+      ["Leader · term",`${leader?`${esc(leader.hostname||leader.node_id)}${leader.node_id===cluster.local_node_id?' <span class="muted">this node</span>':""}`:"none elected"} · ${num(raft.current_term)}`,true],
       ["Quorum commit",num(raft.commit_index),true],
-      ["Applied here",`${applied}${!sampled&&replication&&replication.last_applied_term!==null&&replication.last_applied_term!==undefined?` <span class="muted">term ${esc(String(replication.last_applied_term))}</span>`:""}`,true],
-      ["Apply lag",lag,true],
+      ["Applied on this node",`${applied}${!sampled&&replication&&known(replication.last_applied_term)?` <span class="muted">term ${esc(String(replication.last_applied_term))}</span>`:""} · ${lag}`,true],
       ["Behind by",behind===null?"unknown":`${behind} change${behind===1?"":"s"}`,true],
-      ["Last converged",replication&&replication.last_converged_at?esc(fmtAgo(replication.last_converged_at)):"not yet observed",true],
-      ["Snapshots",status?(snap.available
-        ? `build ${num(snap.build_ok_count)} ok / ${num(snap.build_error_count)} error · install ${num(snap.install_ok_count)} ok / ${num(snap.install_error_count)} error · DB ${snap.db_bytes===null||snap.db_bytes===undefined?"unknown":esc(fmtBytes(snap.db_bytes)||"0 B")}`
-        : `<span style="color:var(--bad)">unavailable</span>`):"unknown",true],
+      // In sync needs no sentence; degraded does, and the server's says which
+      // node is behind and what to do about it.
+      ...(replication&&replication.health==="degraded"&&replication.explanation
+        ?[["Watch state",esc(replication.explanation),false]]:[]),
+      ["Last converged",replication&&replication.last_converged_at?esc(fmtAgo(replication.last_converged_at)):"not yet observed",true,"cldb-converged"],
       ["WAL",clusterDatabaseWal(env,status),true],
+      ["Snapshots",status?(snap.available
+        ? `build ${num(snap.build_ok_count)} ok / ${num(snap.build_error_count)} error · install ${num(snap.install_ok_count)} ok / ${num(snap.install_error_count)} error`
+        : `<span style="color:var(--bad)">unavailable</span>`):"unknown",true],
+      ["Database size",status&&snap.available&&known(snap.db_bytes)?esc(fmtBytes(snap.db_bytes)||"0 B"):"unknown",true],
+      ["Read capacity",capacity?`<span title="${esc(capacity.detail)}">${esc(capacity.headline)}</span>`:"unknown",false],
       ["Protocol",status?`${num(status.protocol_min)}–${num(status.protocol_max)}`:"unknown",true],
       ["Reading age",clusterReadingAge(env,cluster,ops),false,"cldb-reading-age"],
     ];
+  }
+
+  // ---- the page's summary readings -------------------------------------------
+  // The status strip, the node table and the readiness chips are the same
+  // facts the node cards, the operations card and the banner used to state
+  // three times over. Each is derived once here, from the roster and the direct
+  // status, so the arithmetic is tested in one place and painted in one place.
+  function clusterHost(cluster,nodeId){
+    const n=((cluster&&cluster.nodes)||[]).find(row=>row.node_id===nodeId);
+    return n?(n.hostname||n.node_id):nodeId;
+  }
+  function clusterAnswered(ops){
+    if(!ops||ops.unavailable) return [];
+    return (ops.nodes||[]).filter(row=>row.observation==="answered"&&row.status);
+  }
+  // The WAL is healthy only when it is open, this process holds its lock, it
+  // carries no error and everything logged is durable. One predicate: the node
+  // status, the WAL cell and the database ledger all colour by it.
+  function clusterWalHealthy(wal){
+    return Boolean(wal&&wal.state==="open"&&wal.lock_owned&&!wal.last_error&&wal.last_log_index===wal.last_durable_index);
+  }
+  // A server verdict names the condition it actually hit; this says it with the
+  // machine's hostname rather than its node id. No trailing period, so a strip
+  // cell and a sentence can both use it.
+  function clusterBlockerText(env,blockers,cluster){
+    const {esc}=env;
+    const list=blockers||[], first=list[0];
+    if(!first) return null;
+    return `${esc(clusterOperationReason(first.code))}${first.node_id?` on ${esc(clusterHost(cluster,first.node_id))}`:""}${
+      list.length>1?`, and ${list.length-1} more`:""}`;
+  }
+  // The strip's six cells, left to right. `tone` is good / warn / bad / calm or
+  // empty; the first cell's tone is the page's.
+  function clusterStripCells(env,cluster,ops){
+    const {esc}=env;
+    const plural=(k,one,many)=>`${k} ${k===1?one:many}`;
+    const dash="—";
+    if(!cluster||cluster.unavailable)
+      return [
+        {key:"cluster",label:"Cluster",value:"Status unavailable",sub:"the roster could not be read",tone:"warn"},
+        {key:"leader",label:"Leader",value:dash,sub:"",tone:""},
+        {key:"reachable",label:"Nodes reachable",value:dash,sub:"",tone:""},
+        {key:"replication",label:"Replication",value:dash,sub:"",tone:""},
+        {key:"build",label:"Build",value:dash,sub:"",tone:""},
+        {key:"restart",label:"Rolling restart",value:dash,sub:"",tone:""},
+      ];
+    const nodes=cluster.nodes||[];
+    const name=n=>esc(n.hostname||n.node_id);
+    const voters=nodes.filter(n=>n.is_voter);
+    const reachableVoters=voters.filter(n=>n.reachable).length;
+    const cap=cluster.capacity;
+    const q=cap?{voters:cap.voting_nodes,majority:cap.voting_quorum,tolerates:cap.voting_failure_tolerance}
+      :Object.assign({voters:voters.length},clusterQuorum(voters.length));
+    const recovery=clusterRecoveryState(cluster);
+    const fenced=nodes.find(n=>n.maintenance);
+    const answered=clusterAnswered(ops);
+
+    const unobserved=clusterUnobservedVoters(cluster,ops);
+    const verdict=ops&&!ops.unavailable&&ops.verdict;
+    let health;
+    if(recovery.required)
+      health={value:"Recovery required",tone:"bad",
+        sub:`${recovery.reachable_voters} reachable · ${recovery.required_voters} needed for quorum`};
+    else if(fenced){
+      const direct=clusterDirectMaintenanceStatus(ops,fenced.node_id);
+      const sessions=direct&&direct.media?Number(direct.media.local_active_sessions||0):Number(fenced.active_media_sessions||0);
+      health={value:"Maintenance",tone:"warn",
+        sub:`${name(fenced)} fenced · ${sessions?`draining ${plural(sessions,"stream","streams")}`:"drained"}`};
+    }else if(cluster.availability==="degraded_reconfiguration")
+      health={value:"Reconfiguring",tone:"warn",sub:`${plural(q.voters,"voter","voters")} · quorum ${q.majority} · survives no failure`};
+    else if(reachableVoters<voters.length)
+      health={value:"Degraded",tone:"warn",
+        sub:`${reachableVoters} of ${voters.length} voters reachable · tolerates ${Math.max(0,reachableVoters-q.majority)} more`};
+    // The roster says every voter is reachable; the direct status, already
+    // fetched, may know better. A collection that failed, a voter it could not
+    // observe, a blocked rollout verdict or degraded replication is not
+    // "Healthy". Still collecting (`ops === null`) degrades nothing.
+    else if(cluster.availability==="high_availability"&&ops&&ops.unavailable)
+      health={value:"Status unavailable",tone:"warn",sub:"direct status could not be collected"};
+    else if(cluster.availability==="high_availability"&&(unobserved.length||(verdict&&!verdict.safe_to_restart_one)))
+      health={value:"Degraded",tone:"warn",
+        sub:(verdict&&!verdict.safe_to_restart_one&&clusterBlockerText(env,verdict.blockers,cluster))
+          ||`${voters.length-unobserved.length} of ${voters.length} voters answered`};
+    else if(cluster.availability==="high_availability"&&cluster.replication&&cluster.replication.health==="degraded")
+      health={value:"Degraded",tone:"warn",sub:"replication degraded"};
+    else if(cluster.availability==="high_availability")
+      health={value:"Healthy",tone:"good",
+        sub:`${plural(q.voters,"voter","voters")} · quorum ${q.majority} · tolerates ${plural(q.tolerates,"failure","failures")}`};
+    else health={value:"One node",tone:"calm",sub:`${plural(q.voters,"voter","voters")} · quorum ${q.majority}`};
+
+    const leader=nodes.find(n=>n.is_leader);
+    const terms=[...new Set(answered.map(row=>row.status.raft&&row.status.raft.current_term)
+      .filter(value=>value!==null&&value!==undefined))];
+
+    const reach=nodes.filter(n=>n.reachable).length;
+    const down=nodes.filter(n=>!n.reachable);
+    const others=nodes.length-voters.length;
+
+    const dbHealth=clusterDatabaseHealth(cluster.replication);
+    const lags=answered.map(row=>row.status.raft&&row.status.raft.apply_lag_entries)
+      .filter(value=>value!==null&&value!==undefined);
+
+    // A build string breaks after its "+" before it breaks anywhere else, so
+    // a narrow cell keeps the version and the commit hash whole.
+    let build;
+    if(!ops) build={value:dash,sub:"collecting",tone:""};
+    else if(ops.unavailable) build={value:dash,sub:"status unavailable",tone:"warn"};
+    else{
+      const builds=[...new Set(answered.map(row=>String(row.status.build)))].sort();
+      const skew=clusterWireSkew(ops);
+      const counted=answered.length===nodes.length?`all ${plural(nodes.length,"node","nodes")} match`
+        :`${answered.length} of ${nodes.length} answered`;
+      build=!builds.length?{value:dash,sub:`0 of ${nodes.length} answered`,tone:"warn"}
+        :builds.length===1?{value:esc(builds[0]).replace(/\+/g,"+<wbr>"),sub:counted,tone:answered.length===nodes.length?"":"warn"}
+        :{value:`${builds.length} builds`,sub:`${answered.length} of ${nodes.length} answered`,tone:"warn"};
+      if(skew.protocolSkew) build=Object.assign(build,{tone:"bad",sub:`protocol skew ${esc(skew.protocols.join(" / "))}`});
+    }
+
+    let restart;
+    if(!ops) restart={value:"Collecting…",sub:"direct status not collected yet",tone:""};
+    else if(ops.unavailable||!verdict) restart={value:"Unavailable",sub:"direct status could not be collected",tone:"warn"};
+    else if(verdict.safe_to_restart_one)
+      restart={value:"Safe",tone:"good",
+        sub:verdict.candidate_node_id?`next: ${esc(clusterHost(cluster,verdict.candidate_node_id))}`:"no candidate named"};
+    else restart={value:"Blocked",tone:"warn",
+      sub:clusterBlockerText(env,verdict.blockers,cluster)||"a direct safety condition is missing"};
+
+    return [
+      Object.assign({key:"cluster",label:"Cluster"},health),
+      {key:"leader",label:"Leader",value:leader?name(leader):dash,
+        sub:terms.length===1?`term ${esc(String(terms[0]))}`:terms.length>1?"term disagreement":"term unknown",
+        tone:terms.length>1||!leader?"warn":""},
+      {key:"reachable",label:"Nodes reachable",value:`${reach} / ${nodes.length}`,tone:down.length?"warn":"",
+        sub:down.length?(down.length===1?`${name(down[0])} unreachable`:`${down.length} unreachable`)
+          :`${plural(voters.length,"voter","voters")} · ${plural(others,"learner","learners")}`},
+      {key:"replication",label:"Replication",value:esc(dbHealth.label),tone:dbHealth.tone==="good"?"":dbHealth.tone,
+        sub:lags.length?`max apply lag ${Math.max(...lags)}`:"apply lag unknown"},
+      Object.assign({key:"build",label:"Build"},build),
+      Object.assign({key:"restart",label:"Rolling restart"},restart),
+    ];
+  }
+  // One row of the nodes table. A cell the direct status did not sample shows
+  // a dash: a roster heartbeat is not a substitute for a direct peer
+  // observation, so nothing here is filled in from it.
+  function clusterNodeCells(env,n,ops){
+    const {esc,fmtAgo,fmtBytes}=env;
+    const dash="—";
+    const row=clusterDirectOperationRow(ops,n.node_id);
+    const s=row&&row.observation==="answered"?row.status:null;
+    const raft=s&&s.raft, wal=s&&s.wal&&s.wal.snapshot;
+    let status;
+    if(n.maintenance) status={label:"Maintenance",tone:"warn"};
+    else if(!n.reachable) status={label:"Unreachable",tone:"bad"};
+    else if(!ops) status={label:"Collecting…",tone:""};
+    else if(ops.unavailable) status={label:"Status unavailable",tone:"warn"};
+    else if(!s) status={label:"Not observed",tone:"bad",
+      why:clusterObservationReason(row&&(row.error_class||row.observation)||"not_observed")};
+    else if(!s.process||!s.process.live||!s.serving||!s.serving.ready||!raft||!raft.sample_valid
+      ||!raft.watermark_valid||!clusterWalHealthy(wal)) status={label:"Needs attention",tone:"warn"};
+    else if(!n.is_voter&&!n.bounded_read_ready) status={label:"Catching up",tone:"warn"};
+    else status={label:"Ready",tone:"good"};
+    const roleWord=raft&&raft.is_leader===true?"leader":n.is_voter?"follower":"learner";
+    const raftCell=raft
+      ? (raft.sample_valid&&raft.watermark_valid
+        ? {text:`${roleWord} · lag ${raft.apply_lag_entries===null||raft.apply_lag_entries===undefined?"unknown":esc(String(raft.apply_lag_entries))}`,tone:""}
+        : {text:`${roleWord} · stale proof`,tone:"bad"})
+      : n.reachable&&n.apply_lag_entries!==null&&n.apply_lag_entries!==undefined
+        ? {text:`${n.is_leader?"leader":n.is_voter?"follower":"learner"} · lag ${esc(String(n.apply_lag_entries))}`,tone:""}
+        : {text:dash,tone:""};
+    const walCell=wal?{text:`${esc(clusterOperationReason(wal.state))} · ${esc(fmtBytes(wal.allocated_bytes)||"0 B")}`,
+        tone:clusterWalHealthy(wal)?"":"bad"}
+      : s?{text:"unavailable",tone:"bad"}:{text:dash,tone:""};
+    const snap=s&&s.snapshot;
+    return {
+      role:n.is_voter?"voter":n.role==="voter"?"joining voter":"learner",
+      status,
+      heartbeat:{text:n.last_seen_at?esc(fmtAgo(Math.floor(n.last_seen_at/1000))):"never",tone:n.reachable?"":"bad"},
+      raft:raftCell,
+      wal:walCell,
+      database:{text:snap&&snap.db_bytes!==null&&snap.db_bytes!==undefined?esc(fmtBytes(snap.db_bytes)||"0 B"):dash,tone:""},
+      streams:{text:s&&s.media?esc(String(Number(s.media.local_active_sessions||0)))
+        :n.reachable?esc(String(Number(n.active_media_sessions||0))):dash,tone:""},
+      build:{text:s?esc(String(s.build)).replace(/\+/g,"+<wbr>"):dash,tone:""},
+    };
+  }
+  // A readiness chip counts only the requirements the server reported a
+  // status for; a requirement it said nothing about is neither met nor unmet.
+  // `rows` are the requirement rows a card lists, each the server's row or null.
+  function clusterReadinessChip(readiness,rows){
+    if(!readiness) return {tone:"",label:"checking…"};
+    if(readiness.unavailable) return {tone:"warn",label:"checks unavailable"};
+    const reported=(rows||[]).filter(row=>row&&row.status);
+    if(!reported.length) return {tone:"",label:"not reported"};
+    const met=reported.filter(row=>row.status==="met").length;
+    return {tone:met===reported.length?"ok":"warn",label:`${met} of ${reported.length} checks`};
+  }
+  // Voters the roster calls reachable that the direct status did not answer
+  // for. Nothing while the status is collecting or failed: those are stated
+  // on their own.
+  function clusterUnobservedVoters(cluster,ops){
+    if(!ops||ops.unavailable) return [];
+    const answered=clusterAnswered(ops);
+    return ((cluster&&cluster.nodes)||[]).filter(n=>n.is_voter&&n.reachable&&!n.maintenance
+      &&!answered.some(row=>row.membership&&row.membership.node_id===n.node_id));
+  }
+  // What needs saying above the table, most severe first. Recovery carries the
+  // maintenance target and the down voters inside it, so neither is repeated
+  // beside it. `context.refusal` is the shell's module state.
+  function clusterAlertKinds(cluster,ops,context={}){
+    const kinds=[];
+    if(cluster&&!cluster.unavailable){
+      const nodes=cluster.nodes||[];
+      const recovery=clusterRecoveryState(cluster);
+      if(recovery.required) kinds.push({kind:"recovery",tone:"bad"});
+      if(!recovery.required&&nodes.some(n=>n.maintenance)) kinds.push({kind:"maintenance",tone:"warn"});
+      const local=clusterDirectMaintenanceStatus(ops,cluster.local_node_id);
+      const media=local&&local.media;
+      if(media&&media.new_admissions_blocked) kinds.push({kind:"restart",tone:media.drained?"good":"warn"});
+      const down=!recovery.required&&nodes.some(n=>n.is_voter&&!n.reachable&&!n.maintenance);
+      if(down) kinds.push({kind:"voter_down",tone:"warn"});
+      // The direct verdict alone can say "do not restart": a voter the status
+      // could not observe, a WAL fault, a stale proof. The voter-down block
+      // already names the blocked restart, and maintenance and recovery
+      // explain their own; a one- or two-voter cluster states its own shape.
+      const verdict=ops&&!ops.unavailable&&ops.verdict;
+      if(verdict&&!verdict.safe_to_restart_one&&!down&&!recovery.required&&!nodes.some(n=>n.maintenance)
+        &&cluster.availability==="high_availability") kinds.push({kind:"restart_blocked",tone:"warn"});
+      if(ops&&ops.unavailable) kinds.push({kind:"ops_unavailable",tone:"warn"});
+      if(cluster.availability==="degraded_reconfiguration") kinds.push({kind:"reconfiguration",tone:"warn"});
+    }
+    if(context.refusal) kinds.push({kind:"refusal",tone:"bad"});
+    if(!cluster||(cluster.unavailable&&cluster.code!=="membership_unavailable")) kinds.push({kind:"roster_failed",tone:"warn"});
+    return kinds.filter(k=>k.tone==="bad").concat(kinds.filter(k=>k.tone!=="bad"));
+  }
+  // Which voter stopped answering, for how long, and what that now blocks.
+  // Quorum arithmetic is the roster's; the blocked operation is named only
+  // when the server's own verdict says it is blocked.
+  function clusterVoterDownText(env,cluster,ops){
+    const {esc,fmtAgo}=env;
+    const nodes=cluster.nodes||[];
+    const voters=nodes.filter(n=>n.is_voter);
+    const down=voters.filter(n=>!n.reachable&&!n.maintenance);
+    if(!down.length) return "";
+    const q=clusterQuorum(voters.length);
+    const up=voters.length-down.length;
+    const spare=up-q.majority;
+    const who=down.map(n=>`${esc(n.hostname||n.node_id)}${n.last_seen_at?` (last heartbeat ${esc(fmtAgo(Math.floor(n.last_seen_at/1000)))})`:""}`).join(", ");
+    const verdict=ops&&!ops.unavailable&&ops.verdict;
+    const blocked=verdict&&!verdict.safe_to_restart_one
+      ? ` Rolling restart is blocked: ${clusterBlockerText(env,verdict.blockers,cluster)||"a direct safety condition is missing"}.`:"";
+    return `<b>${down.length===1?"A voter is":`${down.length} voters are`} not answering: ${who}.</b> Quorum holds at ${up} of ${voters.length}; ${
+      spare<=0?"one more voter failure stops writes":`${spare} more voter failure${spare===1?" is":"s are"} tolerated`}.${blocked}`;
+  }
+  // The header's freshness: the oldest direct sample, aged by the time since
+  // the aggregate was taken so it moves without a fetch.
+  function clusterSampledText(ops){
+    if(!ops) return "collecting status";
+    if(ops.unavailable) return "status unavailable";
+    const ages=(ops.nodes||[]).map(row=>row.sample_age_ms).filter(age=>age!==null&&age!==undefined);
+    if(!ages.length) return "not sampled";
+    return `sampled ${clusterOperationAge(clusterSampleAge(ops,Math.max(...ages)))}`;
+  }
+
+  // ---- actions, with their preconditions already evaluated ---------------------
+  // Every action this page can take states its precondition before the click.
+  // The server still refuses what it refuses — nothing here widens what is
+  // allowed — but a blocked button carries the reason beside it. Membership
+  // actions live on the node they act on; the cluster-wide ones are the
+  // Maintenance card's rows.
+  function clusterLifecycle(cluster){
+    const nodes=cluster.nodes||[];
+    const pending=nodes.find(n=>n.removal_pending);
+    const fenced=nodes.find(n=>n.maintenance);
+    const recovery=clusterRecoveryState(cluster);
+    // Recovery locks every membership change: issuing a token and removing a
+    // member both need a leader and a committed quorum read.
+    return {pending,fenced,lifecycle:fenced||pending,recovery,
+      locked:recovery.required?"The cluster cannot prove both an elected leader and a reachable voter majority, so a membership change cannot commit.":null};
+  }
+  // Adding a node mints a credential; the control that shows it once is this
+  // action's own expansion.
+  function clusterAddNodeAction(env,cluster){
+    const {esc}=env;
+    const {lifecycle,locked}=clusterLifecycle(cluster);
+    if(locked) return {blocked:true,reason:locked};
+    if(lifecycle) return {blocked:true,
+      reason:`A membership change is already in flight on ${esc(lifecycle.hostname||lifecycle.node_id)}. Finish it before admitting another node.`};
+    return {blocked:false,reason:""};
+  }
+  // The actions in one node's drawer. This node: maintenance, restart
+  // preparation and leave. Another member: remove, and promote for a learner.
+  // Maintenance is a local action by design — the fence has to be
+  // acknowledged by the process being fenced.
+  function clusterNodeActions(env,cluster,ops,n){
+    const {esc,fmtBytes}=env;
+    const nodes=cluster.nodes||[];
+    const name=x=>esc(x.hostname||x.node_id);
+    const arg=x=>esc(JSON.stringify(x.node_id));
+    const voters=nodes.filter(x=>x.is_voter);
+    const {pending,fenced,lifecycle,locked}=clusterLifecycle(cluster);
+    const button=(cls,label,ready,onclick)=>`<button class="${cls?`${cls} `:""}sm" ${ready?"":"disabled"} ${ready?`onclick='${onclick}'`:""}>${label}</button>`;
+    const actions=[];
+    if(n.node_id===cluster.local_node_id){
+      if(n.maintenance){
+        const resume=clusterMaintenanceResumeReady(n,ops);
+        actions.push({id:"resume",blocked:!resume,
+          reason:resume?"":"Still draining: waiting for direct acknowledgement, leader handoff, catch-up, or drain proof.",
+          html:button("","Resume service",resume,`setNodeMaintenance(${arg(n)},false)`)});
+      }else{
+        const verdict=clusterMaintenanceEntryVerdict(ops,n.node_id);
+        const safe=Boolean(verdict&&verdict.safe_to_enter);
+        const ready=safe&&n.reachable&&!n.removal_pending&&!pending;
+        const why=!n.reachable?"This node's own heartbeat is not fresh."
+          :pending?`A removal is pending on ${name(pending)}.`
+          :verdict?(blockerText=>blockerText?`${blockerText}.`:"The direct maintenance preflight has not approved this node.")(clusterBlockerText(env,verdict.blockers,cluster))
+          // With a verdict, the server names a conflicting fence itself
+          // (maintenance_already_active); without one, the roster still can.
+          :fenced?`Maintenance is already active on ${name(fenced)}; resume it before fencing another node.`
+          :ops&&ops.unavailable?"The direct status could not be collected, and a heartbeat is not a substitute for it."
+          :"The direct maintenance preflight has not answered yet.";
+        actions.push({id:"maintenance",blocked:!ready,reason:ready?"":why,
+          html:button("ghost","Enter maintenance",ready,`setNodeMaintenance(${arg(n)},true)`)});
+      }
+      const verdict=ops&&!ops.unavailable&&ops.verdict;
+      const candidate=verdict&&verdict.candidate_node_id;
+      const here=Boolean(verdict&&verdict.safe_to_restart_one&&candidate===n.node_id);
+      const why=!ops?"The direct rollout verdict has not answered yet."
+        :!verdict?"The direct status could not be collected, and a heartbeat is not a substitute for it."
+        :!verdict.safe_to_restart_one?`${clusterBlockerText(env,verdict.blockers,cluster)||"At least one direct safety condition is missing"}.`
+        :candidate?`The safe candidate is ${esc(clusterHost(cluster,candidate))} — open that node directly to prepare it.`
+        :"The direct rollout verdict names no candidate.";
+      actions.push({id:"restart",blocked:!here,reason:here?"":why,
+        html:button("ghost","Prepare for restart",here,`prepareLocalRestart(this,${arg(n)})`)});
+      // A graceful leave is a membership change like any other: it needs a
+      // current leader, a voter self-leave keeps three voters, and a
+      // maintenance fence is a cluster-wide conflict. A removal pending on some
+      // OTHER node is deliberately not here — the server's fence is per-node.
+      const leaveQuorum=!n.is_voter||voters.length>=3;
+      const leaveWhy=locked?locked
+        :fenced?`Maintenance is active on ${name(fenced)}, and membership changes are refused while it is. Resume that node first.`
+        :!leaveQuorum?`A voter can only leave while at least three voters remain, and this cluster has ${voters.length}. Add a node first.`:"";
+      actions.push({id:"leave",destructive:true,expand:"leave",blocked:Boolean(leaveWhy),reason:leaveWhy,html:""});
+    }
+    // A learner is promoted from any node's screen, its own included.
+    if(!n.is_voter&&n.role==="learner"){
+      // Promotion is refused until the learner has published a fresh zero-lag
+      // apply proof and its filesystem has proved the voter reserve.
+      const ready=n.bounded_read_ready&&n.voter_storage_ready&&!lifecycle;
+      const why=lifecycle?`A membership change is in flight on ${name(lifecycle)}.`
+        :!n.bounded_read_ready?"It has not published a fresh zero-lag apply proof yet — leave it running until its read-worker badge says ready."
+        :`Its data root has not proved the durable free-space reserve a voter must hold${
+            n.storage_headroom_bytes!=null?` (${esc(fmtBytes(n.storage_headroom_bytes)||"0 B")} free)`:""}. Free space or move the data root.`;
+      actions.push({id:"promote",blocked:!ready,reason:ready?"":why,
+        html:button("ghost","Promote to voter",ready,`promoteNode(${arg(n)})`)});
+    }
+    // This node leaves; it is not removed from its own screen.
+    if(n.node_id===cluster.local_node_id) return actions;
+    // A learner leaves by a different path and is not held to the voter
+    // arithmetic. A removal pending elsewhere is not a reason here: the
+    // server's removal fence is per node and it refuses what it refuses.
+    const quorumHolds=voters.length>=3||!n.is_voter;
+    const removeWhy=locked?locked
+      :fenced?"Finish maintenance before changing membership."
+      :!quorumHolds?`A voter removal needs at least three voters and this cluster has ${voters.length}. Add a node first.`
+      :n.is_leader?`${name(n)} is the current leader and can only leave from its own screen.`:"";
+    actions.push({id:"remove",destructive:true,blocked:Boolean(removeWhy),reason:removeWhy,
+      html:button("danger",n.removal_pending?"Retry removal":"Remove permanently…",!removeWhy,`removeNode(${arg(n)})`)});
+    return actions;
+  }
+  // The Maintenance card: cluster-wide actions only.
+  function clusterMaintenanceRows(env,cluster,ops){
+    const {esc}=env;
+    const nodes=cluster.nodes||[];
+    const voters=nodes.filter(n=>n.is_voter);
+    const {lifecycle,recovery}=clusterLifecycle(cluster);
+    const blocked=why=>`<span style="color:var(--warn)">Blocked</span> — ${why}`;
+    const rows=[];
+    const verdict=ops&&!ops.unavailable&&ops.verdict;
+    // Every finding the server reported, blockers and warnings alike: a
+    // warning on a safe verdict is still something to read before restarting.
+    const findingList=findings=>findings.length?`<ul class="clopsblockers">${findings.map(f=>`<li><b>${esc(clusterOperationReason(f.code))}</b>${
+      f.node_id?` on ${esc(clusterHost(cluster,f.node_id))}`:""}: ${esc(f.message)}</li>`).join("")}</ul>`:"";
+    const prepare=ready=>`<button class="ghost sm" ${ready?`onclick='prepareLocalRestart(this,${esc(JSON.stringify(cluster.local_node_id))})'`:"disabled"}>Prepare</button>`;
+    if(!ops) rows.push({id:"restart",title:"Rolling restart",text:"Collecting the direct rollout verdict…",action:prepare(false)});
+    else if(!verdict) rows.push({id:"restart",title:"Rolling restart",
+      text:blocked("the direct status could not be collected, and a heartbeat is not a substitute for it."),action:prepare(false)});
+    else if(verdict.safe_to_restart_one){
+      const named=Boolean(verdict.candidate_node_id);
+      const candidate=esc(clusterHost(cluster,verdict.candidate_node_id));
+      const here=named&&verdict.candidate_node_id===cluster.local_node_id;
+      rows.push({id:"restart",title:"Rolling restart",
+        text:`The observed voters preserve majority after one restart.${named?` Prepare only <b>${candidate}</b> and re-check before touching another node.`:""}`+
+          findingList(verdict.warnings||[]),
+        action:here||!named?prepare(here):`<span class="clwhy">Open ${candidate} to prepare it</span>`});
+    }else{
+      // The verdict's own sentences, then every finding it reported.
+      rows.push({id:"restart",title:"Rolling restart",
+        text:blocked("Do not restart another voter.")+
+          " At least one direct safety condition is missing or unhealthy. Keep the available voters running until every blocker below clears."+
+          findingList([...(verdict.blockers||[]),...(verdict.warnings||[])]),
+        action:prepare(false)});
+    }
+    if(voters.length>1){
+      const candidate=voters.some(n=>!n.is_leader&&n.reachable&&n.apply_lag_entries===0&&!n.removal_pending);
+      const ready=candidate&&!lifecycle&&recovery.quorum_available;
+      const why=!recovery.quorum_available?"A voter majority cannot be proved, and an election cannot bypass quorum."
+        :lifecycle?`A membership change is in flight on ${esc(lifecycle.hostname||lifecycle.node_id)}.`
+        :"No reachable, fully caught-up follower is available to campaign.";
+      rows.push({id:"election",title:"Leader election",
+        text:ready?"Asks a caught-up follower to campaign. Raft still chooses the winner; writes pause briefly.":blocked(why),
+        action:`<button class="ghost sm" ${ready?"":"disabled"} onclick="openElectionDialog()">Force election…</button>`});
+    }
+    rows.push({id:"diagnostics",title:"Diagnostics",text:"Support bundle and roster snapshot for a report.",
+      action:`<button class="ghost sm" onclick="downloadClusterSupportBundle(this)">Support bundle</button><button class="ghost sm" onclick="downloadClusterDiagnostics()">Roster snapshot</button>`});
+    return rows;
   }
 
   // ---- what a repaint is actually for --------------------------------------
@@ -913,34 +1125,24 @@
     return JSON.stringify(root);
   }
 
-  // ---- folding, and remembering it -----------------------------------------
-  // Which sections are open is a per-browser convenience, so it is kept in this
-  // browser and never in the cluster. Nodes are keyed by node id rather than by
-  // position, so a node leaving the cluster drops out of the stored set instead
-  // of collapsing whichever card inherits its row. Every read and write is
-  // guarded: a browser with site data blocked throws on access, and the panel
-  // still has to render with no stored value at all.
-  // A function rather than a bare const so the key travels with the two helpers
-  // that use it: tests extract these by declaration, and a free const between
-  // functions is picked up only by accident.
-  function clusterFoldKey(){ return "plurx.cluster.fold"; }
-  function clusterFoldRead(storage){
-    try{
-      const raw=storage.getItem(clusterFoldKey());
-      if(!raw) return null;
-      const state=JSON.parse(raw);
-      if(!state||typeof state!=="object"||Array.isArray(state)) return null;
-      const kept={};
-      if(typeof state.database==="boolean") kept.database=state.database;
-      if(Array.isArray(state.nodes_closed)) kept.nodes_closed=state.nodes_closed.filter(id=>typeof id==="string");
-      if(typeof state.tab==="string") kept.tab=state.tab;
-      return kept;
-    }catch(e){ return null; }
-  }
-  function clusterFoldWrite(storage,patch){
-    try{
-      storage.setItem(clusterFoldKey(),JSON.stringify(Object.assign({},clusterFoldRead(storage)||{},patch)));
-    }catch(e){ /* storage blocked: the panel keeps working, it just forgets */ }
+  // The roster's counterpart of the projection above, for the tick that
+  // re-reads it on the same gate. Its self-ticking fields: each node's
+  // heartbeat `last_seen_at` and the store's `last_converged_at`, both shown
+  // as ages and patched in place (patchClusterReadingAge), and the store's
+  // `last_applied_index`, which advances on every commit and is shown only
+  // when the direct sample has no applied index of its own — the direct
+  // sample's commit watermark, in the projection above, already moves the
+  // screen when the store does.
+  function clusterRosterProjection(cluster){
+    const skip=key=>key==="last_seen_at"||key==="last_converged_at"||key==="last_applied_index";
+    const walk=value=>{
+      if(Array.isArray(value)) return value.map(walk);
+      if(!value||typeof value!=="object") return value;
+      const out={};
+      for(const key of Object.keys(value).sort()) if(!skip(key)) out[key]=walk(value[key]);
+      return out;
+    };
+    return JSON.stringify(walk(cluster===undefined?null:cluster));
   }
 
   return Object.freeze({
@@ -955,9 +1157,6 @@
     clusterMaintenanceReady,
     clusterMaintenanceResumeReady,
     clusterRecoveryState,
-    clusterRailRow,
-    clusterRailBlocker,
-    clusterOperationRows,
     clusterOperationAge,
     clusterOperationReason,
     clusterObservationReason,
@@ -969,14 +1168,26 @@
     clusterCapacityText,
     clusterDatabaseHealth,
     clusterHealthPill,
-    clusterDatabaseSummary,
     clusterSampleAge,
     clusterDatabaseWal,
     clusterReadingAge,
     clusterDatabaseRows,
+    clusterHost,
+    clusterAnswered,
+    clusterWalHealthy,
+    clusterBlockerText,
+    clusterStripCells,
+    clusterNodeCells,
+    clusterReadinessChip,
+    clusterAlertKinds,
+    clusterUnobservedVoters,
+    clusterVoterDownText,
+    clusterRosterProjection,
+    clusterSampledText,
+    clusterLifecycle,
+    clusterAddNodeAction,
+    clusterNodeActions,
+    clusterMaintenanceRows,
     clusterOpsProjection,
-    clusterFoldKey,
-    clusterFoldRead,
-    clusterFoldWrite,
   });
 });
