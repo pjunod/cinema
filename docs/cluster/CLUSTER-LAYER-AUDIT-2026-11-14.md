@@ -1,12 +1,21 @@
 # Cluster layer audit — what the quorum costs, who goes around it, and what to change
 
-**Status:** open — findings and action items; nothing here is built ·
+**Status:** open — original findings; implementation and qualification tracked in the linked build records ·
 **Owner:** Claude (Fable 5.2), session `session_01BCWLA3JD1HCNMEid3AZrc3` ·
 **Verified against:** `main @ 8785492be` ·
 **Fleet measured:** 2026-11-14 20:32–20:34 UTC (media1, lab6, lab4 voters;
 lab3 learner) · **Written:** 2026-11-14 ·
 **Reviewed:** one adversarial agent review (Fable), 12 findings, all
 addressed in this revision
+
+**Progress, 2026-11-19:** the original measurements and findings below are
+historical. C7 has landed. The facade, applied-mark and learner-discovery
+promotion is still under qualification; the remaining watch, peer-proof,
+catalogue and timing work is implemented in the owned integration branch,
+with final qualification and landing pending. Follow the linked build records
+in [the cluster index](README.md) for each contract and its evidence. C4
+still needs qualified passive instrumentation and actual fleet observations;
+no election-floor change or completed fleet acceptance is claimed.
 
 > **Who reads this.** Paul: §1 for the verdict, §8 for the rulings made.
 > This is the review, not a build plan. The P0 items in §7 are small enough
