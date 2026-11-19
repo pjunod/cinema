@@ -39,9 +39,17 @@ pub(crate) async fn start_token_expiry_clock(
     store: &dyn Store,
     now: i64,
 ) -> Result<i64, StoreError> {
-    let stored = store
-        .get_or_init_setting(keys::AUTH_TOKEN_EXPIRY_SINCE, &now.to_string())
-        .await?;
+    // A guarded policy row must not be submitted as an INSERT merely to
+    // read it: SQLite's BEFORE INSERT guard also runs for ON CONFLICT DO
+    // NOTHING. Only a genuinely absent pre-activation clock is initialized.
+    let stored = match store.get_setting(keys::AUTH_TOKEN_EXPIRY_SINCE).await? {
+        Some(stored) => stored,
+        None => {
+            store
+                .get_or_init_setting(keys::AUTH_TOKEN_EXPIRY_SINCE, &now.to_string())
+                .await?
+        }
+    };
     Ok(stored.trim().parse().unwrap_or(now))
 }
 
@@ -283,7 +291,9 @@ pub async fn update(
         }
         None => None,
     };
-    let needs_revocation = req.is_admin == Some(false) || password_hash.is_some();
+    // General token proofs include the user's role, so promotion as well as
+    // demotion invalidates the old role before the new one is published.
+    let needs_revocation = req.is_admin.is_some() || password_hash.is_some();
     let mut proof_revocation = if needs_revocation {
         Some(ClusterCacheRevocation::begin_user(&state, id).await?)
     } else {

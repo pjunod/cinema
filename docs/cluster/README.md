@@ -14,6 +14,13 @@ failures.
 
 | File | Answers | |
 |---|---|---|
+| [CLUSTER-TIMING-BOUNDED-FIXES.md](CLUSTER-TIMING-BOUNDED-FIXES.md) | How delayed activation consumes one lease and optional reconciliation cannot starve renewal. | open |
+| [VOTER-TIMING-OBSERVATION-BUILD.md](VOTER-TIMING-OBSERVATION-BUILD.md) | Passive voter timing instrumentation, bounded collection and limits. | open |
+| [CLUSTER-CATALOGUE-SNAPSHOT-BUILD.md](CLUSTER-CATALOGUE-SNAPSHOT-BUILD.md) | How complete source-bound peer catalogue descriptions are reused without caching execution authority. | open |
+| [CLUSTER-WATCH-BUILD.md](CLUSTER-WATCH-BUILD.md) | General table-change watch contract and consumer migration. | open |
+| [OPENRAFT-010-EVALUATION.md](OPENRAFT-010-EVALUATION.md) | Which native 0.10 mechanisms can replace fork patches 4, 6 and 28, and what exact 0.9.25 source proves about starved voters. | open |
+| [CLUSTER-TIMING-BUILD.md](CLUSTER-TIMING-BUILD.md) | How one shared timing table preserves current budgets and tracks their unresolved relationships and OpenRaft evaluation. | open |
+| [PEER-PROOFS-AND-HYDRATION-BUILD.md](PEER-PROOFS-AND-HYDRATION-BUILD.md) | How bounded artifact races and source-bound authentication proofs complete B5/B3a. | open |
 | [CLUSTER-FACADE-BOUNDARY-DECISION.md](CLUSTER-FACADE-BOUNDARY-DECISION.md) | How core-private mechanisms cross into one daemon facade without fake privacy. | open |
 | [CLUSTER-FACADE-SLICE-7-BUILD.md](CLUSTER-FACADE-SLICE-7-BUILD.md) | The serialized final ownership migrations and evidence required for honest zero. | open |
 | [CLUSTER-FACADE-SLICE-6-BUILD.md](CLUSTER-FACADE-SLICE-6-BUILD.md) | How sharing, Source and receiver custody retain fresh typed witnesses through the facade. | open |

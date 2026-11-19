@@ -10,6 +10,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Passive cluster timing metrics report bounded AppendEntries RPC-attempt and receiver-handler gaps, handler latency and existing serving-monitor wake lateness. A finite read-only collector records source, role, term and process cohorts; these observations do not change Raft or serving deadlines.
+
 - A per-title `dv_refit` background job fits F+ mapping curves for Profile 7
   FEL titles (FEL-RPU-REFIT-BUILD.md milestone 3), while an explicit FEL disk
   conversion is waiting or any of four new Developer switches is on (`playback.dolby_vision_refit_web`, `_apple`,
@@ -54,6 +56,11 @@ bump may break compatibility and a **patch** bump never does.
   and its evaluation never ran (the study PR #1262 is closed unmerged).
 
 ### Fixed
+
+- Repeated quality discovery reuses complete peer catalogue descriptions for
+  the same source, client request, endpoint and fresh peer advertisement.
+  Refusals and partial answers remain uncached; selected-owner recipe and
+  admission checks still run before execution.
 
 - F+ publishes chroma MMR coefficients on the Q12 grid tested on the native path and
   qualifies their actual stored precision. The new fitting method reuses

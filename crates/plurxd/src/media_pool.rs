@@ -27,7 +27,8 @@ use crate::state::AppState;
 pub(crate) const SNAPSHOT_PATH: &str = "/internal/v1/media/snapshot";
 pub(crate) const QUALITY_CANDIDATES_V2_PATH: &str = "/internal/v2/media/quality-candidates";
 pub(crate) const QUALITY_CANDIDATES_PATH: &str = "/internal/v1/media/quality-candidates";
-pub(crate) const QUALITY_CATALOG_DEADLINE: Duration = Duration::from_secs(2);
+pub(crate) const QUALITY_CATALOG_DEADLINE: Duration =
+    plurx_core::cluster::timing::pool::QUALITY_CATALOG_DEADLINE;
 pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
 /// Protocol 11 adds the server-selected F+ curve digest to strict SessionRequest.
 /// Protocol 10 retains the original descriptive catalog query in the strict
@@ -35,21 +36,23 @@ pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
 /// placement excludes older workers, so rolling upgrades retain an eligible
 /// owner in each cohort and drain old ingress/sessions before the last old node.
 pub(crate) const PROTOCOL_VERSION: i64 = 11;
-pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
-pub(crate) const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(2);
-pub(crate) const SNAPSHOT_EXPIRY: Duration = Duration::from_secs(15);
-pub(crate) const OFFER_DEADLINE: Duration = Duration::from_millis(200);
+pub(crate) const SNAPSHOT_INTERVAL: Duration = plurx_core::cluster::timing::pool::SNAPSHOT_INTERVAL;
+pub(crate) const SNAPSHOT_DEADLINE: Duration = plurx_core::cluster::timing::pool::SNAPSHOT_DEADLINE;
+pub(crate) const SNAPSHOT_EXPIRY: Duration = plurx_core::cluster::timing::pool::SNAPSHOT_EXPIRY;
+pub(crate) const OFFER_DEADLINE: Duration = plurx_core::cluster::timing::pool::OFFER_DEADLINE;
 const MAX_SNAPSHOT_BYTES: usize = 64 * 1024;
 const MAX_OFFER_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_PEERS: usize = 64;
+const MAX_CATALOGUE_SNAPSHOTS: usize = 64;
 const MAX_CAPABILITIES: usize = 16;
 const MAX_CAPABILITY_BYTES: usize = 64;
 const MAX_TRACK_INDEX: i64 = 1_024;
 const MAX_START_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
-const ROOT_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
-const ROOT_READABILITY_TTL: Duration = Duration::from_secs(45);
-const ROOT_PROBE_COLLECTION_DEADLINE: Duration = Duration::from_secs(2);
+const ROOT_REFRESH_INTERVAL: Duration = plurx_core::cluster::timing::pool::ROOT_REFRESH_INTERVAL;
+const ROOT_READABILITY_TTL: Duration = plurx_core::cluster::timing::pool::ROOT_READABILITY_TTL;
+const ROOT_PROBE_COLLECTION_DEADLINE: Duration =
+    plurx_core::cluster::timing::pool::ROOT_PROBE_COLLECTION_DEADLINE;
 const MAX_LIBRARY_ROOTS: usize = 64;
 // One complete timed-out predecessor generation cannot prevent the current
 // configured generation from being observed. The process ceiling remains
@@ -387,7 +390,8 @@ struct CreatePlanFlags {
 
 /// Keeps the viewer's end a finite instant whatever a client sends; the
 /// claim's window bounds an owner long before this does.
-const VIEWER_REMAINING_CEILING_MS: u64 = 600_000;
+const VIEWER_REMAINING_CEILING_MS: u64 =
+    plurx_core::cluster::timing::pool::VIEWER_REMAINING_CEILING_MS;
 
 /// The per-phase split of one create, logged on its read-budget line.
 ///
@@ -972,6 +976,122 @@ struct CachedSnapshot {
     expires_at: tokio::time::Instant,
 }
 
+/// Descriptions only: no execution context, token or admission proof is held.
+struct CachedCatalogue {
+    result: QualityCatalogResult,
+    expires_at: tokio::time::Instant,
+    inserted_at: tokio::time::Instant,
+}
+
+#[derive(Default)]
+struct CatalogueSnapshots {
+    entries: BTreeMap<[u8; 32], CachedCatalogue>,
+}
+
+impl CatalogueSnapshots {
+    fn get(&mut self, key: &[u8; 32], now: tokio::time::Instant) -> Option<QualityCatalogResult> {
+        self.entries.retain(|_, row| now < row.expires_at);
+        self.entries.get(key).map(|row| row.result.clone())
+    }
+
+    fn insert(
+        &mut self,
+        key: [u8; 32],
+        expires_at: tokio::time::Instant,
+        binding: &PlanningBinding,
+        result: &QualityCatalogResult,
+        now: tokio::time::Instant,
+    ) {
+        // Never turn an incomplete/refused/legacy answer into a reusable fact.
+        if now >= expires_at
+            || !result.complete
+            || result.authority_refused
+            || !result.causes.is_empty()
+            || result.candidates.len() > 32
+            || result.candidates.iter().any(|row| {
+                row.partial
+                    || row.binding.as_ref() != Some(binding)
+                    || !row.candidate.identity_matches()
+            })
+        {
+            return;
+        }
+        if !serde_json::to_vec(result).is_ok_and(|bytes| bytes.len() <= MAX_OFFER_BYTES) {
+            return;
+        }
+        self.entries.retain(|_, row| now < row.expires_at);
+        if !self.entries.contains_key(&key) && self.entries.len() >= MAX_CATALOGUE_SNAPSHOTS {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, row)| row.inserted_at)
+                .map(|(key, _)| *key)
+                .expect("a full catalogue cache has an oldest entry");
+            self.entries.remove(&oldest);
+        }
+        self.entries.insert(
+            key,
+            CachedCatalogue {
+                result: result.clone(),
+                expires_at,
+                inserted_at: now,
+            },
+        );
+    }
+}
+
+fn catalogue_transport_cause(
+    error: crate::http::peer_transport::PeerTransportError,
+) -> CatalogCause {
+    use crate::http::peer_transport::PeerTransportError;
+    match error {
+        PeerTransportError::TimedOut => CatalogCause::PeerDeadline,
+        PeerTransportError::InvalidResponse => CatalogCause::PeerProtocol,
+        PeerTransportError::Unreachable => CatalogCause::Transport,
+        PeerTransportError::LocalUnavailable => CatalogCause::SnapshotUnavailable,
+        PeerTransportError::AuthenticationRefused(reason) => {
+            use crate::cluster::calls::PeerAuthRefusal;
+            match reason {
+                PeerAuthRefusal::RateLimited | PeerAuthRefusal::ReplayCapacity => {
+                    CatalogCause::PeerBusy
+                }
+                PeerAuthRefusal::AuthorityUnavailable => CatalogCause::SnapshotUnavailable,
+                PeerAuthRefusal::InvalidProof | PeerAuthRefusal::Unclassified => {
+                    CatalogCause::AuthorityRefused
+                }
+            }
+        }
+    }
+}
+
+/// Scope from the current roster and a still-fresh actual advertisement.
+/// The selected owner reconstructs its exact recipe before execution.
+fn catalogue_snapshot_scope(
+    request: &QualityCatalogRequest,
+    binding: &PlanningBinding,
+    peer: &ActivityPeer,
+    snapshot: &CachedSnapshot,
+    now: tokio::time::Instant,
+) -> Option<([u8; 32], tokio::time::Instant)> {
+    if !peer.reachable
+        || peer.http_base.is_none()
+        || peer.node_id != snapshot.snapshot.node_id
+        || snapshot.snapshot.protocol_version != PROTOCOL_VERSION
+        || now >= snapshot.expires_at
+    {
+        return None;
+    }
+    let scope = serde_json::to_vec(&(
+        request,
+        binding,
+        &peer.node_id,
+        &peer.http_base,
+        &snapshot.snapshot,
+    ))
+    .ok()?;
+    Some((Sha256::digest(scope).into(), snapshot.expires_at))
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RootReadability {
     readable: bool,
@@ -996,6 +1116,7 @@ pub(crate) struct MediaPool {
     directory: crate::cluster::Directory,
     transport: PeerTransport,
     snapshots: Arc<RwLock<BTreeMap<String, CachedSnapshot>>>,
+    catalogues: Arc<Mutex<CatalogueSnapshots>>,
     root_readability: Arc<RwLock<BTreeMap<PathBuf, RootReadability>>>,
     root_probes: Arc<Mutex<RootProbeRegistry>>,
     root_probe_launcher: Arc<tokio::sync::Semaphore>,
@@ -1085,6 +1206,7 @@ impl MediaPool {
             transport,
             directory,
             snapshots: Arc::new(RwLock::new(BTreeMap::new())),
+            catalogues: Arc::new(Mutex::new(CatalogueSnapshots::default())),
             root_readability: Arc::new(RwLock::new(BTreeMap::new())),
             root_probes: Arc::new(Mutex::new(RootProbeRegistry::default())),
             root_probe_launcher: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -1566,6 +1688,42 @@ impl MediaPool {
         )
     }
 
+    async fn catalogue_observation<F>(
+        &self,
+        scope: Option<([u8; 32], tokio::time::Instant)>,
+        binding: Option<&PlanningBinding>,
+        observed_at: tokio::time::Instant,
+        fetch: F,
+    ) -> QualityCatalogResult
+    where
+        F: std::future::Future<Output = QualityCatalogResult>,
+    {
+        if let (Some((key, _)), Some(_)) = (scope, binding) {
+            let cached = self
+                .catalogues
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&key, observed_at);
+            if let Some(result) = cached {
+                return result;
+            }
+        }
+        let result = fetch.await;
+        if let (Some((key, snapshot_expiry)), Some(binding)) = (scope, binding) {
+            self.catalogues
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    key,
+                    snapshot_expiry.min(observed_at + SNAPSHOT_INTERVAL),
+                    binding,
+                    &result,
+                    tokio::time::Instant::now(),
+                );
+        }
+        result
+    }
+
     /// Local and remote catalogs share one deadline. Missing/old/busy workers
     /// contribute no evidence; a successful worker stays explicitly attached
     /// to its exact recipe so placement cannot spend another worker's proof.
@@ -1670,54 +1828,45 @@ impl MediaPool {
                             let Some(base) = peer.http_base.as_deref() else {
                                 return QualityCatalogResult::unavailable(CatalogCause::Transport);
                             };
-                            // Clock independent duration: subtract both transit reserves before
-                            // signing, and never restart the parent deadline on fallback.
-                            let budget_ms = deadline
-                                .saturating_duration_since(tokio::time::Instant::now())
-                                .saturating_sub(Duration::from_millis(500))
-                                .as_millis()
-                                .min(1500) as u32;
-                            if budget_ms == 0 {
+                            let observed_at = tokio::time::Instant::now();
+                            if observed_at >= deadline {
                                 return QualityCatalogResult::unavailable(
                                     CatalogCause::PeerDeadline,
                                 );
                             }
-                            let Ok(body) = serde_json::to_vec(&BudgetedCatalogRequest {
-                                budget_ms,
-                                request: request.clone(),
-                                expected_binding,
-                            }) else {
-                                return QualityCatalogResult::unavailable(
-                                    CatalogCause::PeerProtocol,
-                                );
+                            let scope = {
+                                let snapshots = self.snapshots.read().await;
+                                expected_binding.as_ref().and_then(|binding| {
+                                    snapshots.get(&peer.node_id).and_then(|snapshot| {
+                                        catalogue_snapshot_scope(
+                                            &request,
+                                            binding,
+                                            &peer,
+                                            snapshot,
+                                            observed_at,
+                                        )
+                                    })
+                                })
                             };
-                            if body.len() > MAX_REQUEST_BYTES {
-                                return QualityCatalogResult::unavailable(
-                                    CatalogCause::PeerProtocol,
-                                );
-                            }
-                            let response = self
-                                .transport
-                                .request(
-                                    &peer.node_id,
-                                    base,
-                                    reqwest::Method::POST,
-                                    QUALITY_CANDIDATES_V2_PATH,
-                                    body,
-                                    deadline,
-                                    MAX_OFFER_BYTES,
-                                    PeerAuthMode::ExactRequest,
-                                )
-                                .await;
-                            let mut response = match response {
-                                Ok(response) => response,
-                                Err(crate::http::peer_transport::PeerTransportError::TimedOut) => return QualityCatalogResult::unavailable(CatalogCause::PeerDeadline),
-                                Err(crate::http::peer_transport::PeerTransportError::InvalidResponse) => return QualityCatalogResult::unavailable(CatalogCause::PeerProtocol),
-                                Err(crate::http::peer_transport::PeerTransportError::Unreachable) => return QualityCatalogResult::unavailable(CatalogCause::Transport),
-                            };
-                            let legacy = response.status == reqwest::StatusCode::NOT_FOUND;
-                            if legacy {
-                                let Ok(body) = serde_json::to_vec(&request) else {
+                            let fetch = async {
+                                // Clock independent duration: subtract both transit reserves before
+                                // signing, and never restart the parent deadline on fallback.
+                                let budget_ms = deadline
+                                    .saturating_duration_since(tokio::time::Instant::now())
+                                    .saturating_sub(Duration::from_millis(500))
+                                    .as_millis()
+                                    .min(1500)
+                                    as u32;
+                                if budget_ms == 0 {
+                                    return QualityCatalogResult::unavailable(
+                                        CatalogCause::PeerDeadline,
+                                    );
+                                }
+                                let Ok(body) = serde_json::to_vec(&BudgetedCatalogRequest {
+                                    budget_ms,
+                                    request: request.clone(),
+                                    expected_binding: expected_binding.clone(),
+                                }) else {
                                     return QualityCatalogResult::unavailable(
                                         CatalogCause::PeerProtocol,
                                     );
@@ -1727,31 +1876,63 @@ impl MediaPool {
                                         CatalogCause::PeerProtocol,
                                     );
                                 }
-                                response = match self
+                                let response = self
                                     .transport
                                     .request(
                                         &peer.node_id,
                                         base,
                                         reqwest::Method::POST,
-                                        QUALITY_CANDIDATES_PATH,
+                                        QUALITY_CANDIDATES_V2_PATH,
                                         body,
                                         deadline,
                                         MAX_OFFER_BYTES,
                                         PeerAuthMode::ExactRequest,
                                     )
-                                    .await
-                                {
+                                    .await;
+                                let mut response = match response {
                                     Ok(response) => response,
-                                    Err(_) => {
+                                    Err(error) => {
                                         return QualityCatalogResult::unavailable(
-                                            CatalogCause::Transport,
+                                            catalogue_transport_cause(error),
                                         )
                                     }
                                 };
-                            }
-                            if !response.status.is_success() {
-                                let cause =
-                                    match response.status.as_u16() {
+                                let legacy = response.status == reqwest::StatusCode::NOT_FOUND;
+                                if legacy {
+                                    let Ok(body) = serde_json::to_vec(&request) else {
+                                        return QualityCatalogResult::unavailable(
+                                            CatalogCause::PeerProtocol,
+                                        );
+                                    };
+                                    if body.len() > MAX_REQUEST_BYTES {
+                                        return QualityCatalogResult::unavailable(
+                                            CatalogCause::PeerProtocol,
+                                        );
+                                    }
+                                    response = match self
+                                        .transport
+                                        .request(
+                                            &peer.node_id,
+                                            base,
+                                            reqwest::Method::POST,
+                                            QUALITY_CANDIDATES_PATH,
+                                            body,
+                                            deadline,
+                                            MAX_OFFER_BYTES,
+                                            PeerAuthMode::ExactRequest,
+                                        )
+                                        .await
+                                    {
+                                        Ok(response) => response,
+                                        Err(error) => {
+                                            return QualityCatalogResult::unavailable(
+                                                catalogue_transport_cause(error),
+                                            )
+                                        }
+                                    };
+                                }
+                                if !response.status.is_success() {
+                                    let cause = match response.status.as_u16() {
                                         429 => CatalogCause::PeerBusy,
                                         504 => CatalogCause::PeerDeadline,
                                         400 => CatalogCause::PeerProtocol,
@@ -1770,46 +1951,54 @@ impl MediaPool {
                                             }
                                         }
                                     };
-                                return QualityCatalogResult::unavailable(cause);
-                            }
-                            let outcome = if legacy {
-                                serde_json::from_slice::<Vec<WorkerQualityCandidate>>(
-                                    &response.body,
-                                )
-                                .map(|candidates| {
-                                    QualityCatalogResult {
-                                        candidates,
-                                        complete: false,
-                                        causes: vec![CatalogCause::PeerProtocol],
-                                        authority_refused: false,
-                                    }
-                                })
-                            } else {
-                                serde_json::from_slice::<QualityCatalogResult>(&response.body)
+                                    return QualityCatalogResult::unavailable(cause);
+                                }
+                                let outcome = if legacy {
+                                    serde_json::from_slice::<Vec<WorkerQualityCandidate>>(
+                                        &response.body,
+                                    )
+                                    .map(|candidates| {
+                                        QualityCatalogResult {
+                                            candidates,
+                                            complete: false,
+                                            causes: vec![CatalogCause::PeerProtocol],
+                                            authority_refused: false,
+                                        }
+                                    })
+                                } else {
+                                    serde_json::from_slice::<QualityCatalogResult>(&response.body)
+                                };
+                                let Ok(outcome) = outcome else {
+                                    return QualityCatalogResult::unavailable(
+                                        CatalogCause::PeerProtocol,
+                                    );
+                                };
+                                if outcome.candidates.len() > 32
+                                    || outcome.causes.len() > 16
+                                    || outcome.candidates.iter().any(|entry| {
+                                        entry.node_id != peer.node_id
+                                            || !entry.candidate.identity_matches()
+                                            || !(1..=16_384).contains(&entry.candidate.width)
+                                            || !(1..=16_384).contains(&entry.candidate.height)
+                                            || entry.binding.as_ref().is_some_and(|binding| {
+                                                binding.generation < 0
+                                                    || binding.source_digest.len() != 64
+                                            })
+                                    })
+                                {
+                                    return QualityCatalogResult::unavailable(
+                                        CatalogCause::PeerProtocol,
+                                    );
+                                }
+                                outcome
                             };
-                            let Ok(outcome) = outcome else {
-                                return QualityCatalogResult::unavailable(
-                                    CatalogCause::PeerProtocol,
-                                );
-                            };
-                            if outcome.candidates.len() > 32
-                                || outcome.causes.len() > 16
-                                || outcome.candidates.iter().any(|entry| {
-                                    entry.node_id != peer.node_id
-                                        || !entry.candidate.identity_matches()
-                                        || !(1..=16_384).contains(&entry.candidate.width)
-                                        || !(1..=16_384).contains(&entry.candidate.height)
-                                        || entry.binding.as_ref().is_some_and(|binding| {
-                                            binding.generation < 0
-                                                || binding.source_digest.len() != 64
-                                        })
-                                })
-                            {
-                                return QualityCatalogResult::unavailable(
-                                    CatalogCause::PeerProtocol,
-                                );
-                            }
-                            outcome
+                            self.catalogue_observation(
+                                scope,
+                                expected_binding.as_ref(),
+                                observed_at,
+                                fetch,
+                            )
+                            .await
                         }
                     }),
             )
@@ -2811,6 +3000,259 @@ mod tests {
     use super::*;
     use plurx_core::domain::{AudioStream, SubtitleStream};
     use tokio::sync::mpsc;
+
+    fn catalogue_request() -> QualityCatalogRequest {
+        QualityCatalogRequest {
+            audio_claim: None,
+            audio_delivery: None,
+            copy_contract: None,
+            file_id: 1,
+            source_size: 10,
+            source_mtime: 1,
+            caps: serde_json::from_value(serde_json::json!({
+                "v": 2, "video": [{"codec": "h264", "present": ["sdr"]}]
+            }))
+            .expect("bounded client caps"),
+            audio_index: Some(1),
+            audio_offset_ms: 0,
+            subtitle_burn: None,
+            presentation: crate::transcode::Presentation::Vod,
+        }
+    }
+
+    fn catalogue_answer(binding: &PlanningBinding) -> QualityCatalogResult {
+        use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+        let recipe_digest = [7; 32];
+        QualityCatalogResult {
+            complete: true,
+            authority_refused: false,
+            causes: Vec::new(),
+            candidates: vec![WorkerQualityCandidate {
+                node_id: "worker".into(),
+                binding: Some(binding.clone()),
+                partial: false,
+                dispatch_supported: true,
+                candidate: QualityCandidate {
+                    id: CandidateId::for_recipe_digest(recipe_digest),
+                    recipe_digest,
+                    route: CandidateRoute::Remux,
+                    planned_codec: None,
+                    processed_dv: false,
+                    normalized_geometry: true,
+                    width: 1280,
+                    height: 720,
+                    target_height: 720,
+                    average_bps: Some(1000),
+                    peak_bps: None,
+                    grade: plurx_core::transcode::OutputGrade::Sdr,
+                    decoder_compatible: true,
+                    complete_cache: false,
+                    sustainable: true,
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn catalogue_snapshots_never_cross_request_source_endpoint_or_advertisement_scope() {
+        let now = tokio::time::Instant::now();
+        let request = catalogue_request();
+        let binding = PlanningBinding {
+            generation: 1,
+            source_digest: "a".repeat(64),
+        };
+        let peer = ActivityPeer {
+            node_id: "worker".into(),
+            raft_id: 2,
+            http_base: Some("http://worker:9080".into()),
+            reachable: true,
+        };
+        let advertised = CachedSnapshot {
+            snapshot: snapshot("worker", &["h264"], 1080),
+            expires_at: now + SNAPSHOT_EXPIRY,
+        };
+        let scope = |query: &QualityCatalogRequest,
+                     binding: &PlanningBinding,
+                     peer: &ActivityPeer,
+                     advertised: &CachedSnapshot| {
+            catalogue_snapshot_scope(query, binding, peer, advertised, now).map(|s| s.0)
+        };
+        let original = scope(&request, &binding, &peer, &advertised).expect("current scope");
+        let mut variants = Vec::new();
+        let mut query = request.clone();
+        query.source_mtime += 1;
+        variants.push(query);
+        let mut query = request.clone();
+        query.audio_index = Some(2);
+        variants.push(query);
+        let mut query = request.clone();
+        query.audio_offset_ms = 10;
+        variants.push(query);
+        let mut query = request.clone();
+        query.subtitle_burn = Some(3);
+        variants.push(query);
+        let mut query = request.clone();
+        query.copy_contract = Some((true, false, false));
+        variants.push(query);
+        for query in variants {
+            assert_ne!(scope(&query, &binding, &peer, &advertised), Some(original));
+        }
+        let mut changed_binding = binding.clone();
+        changed_binding.generation += 1;
+        assert_ne!(
+            scope(&request, &changed_binding, &peer, &advertised),
+            Some(original)
+        );
+        let mut changed_binding = binding.clone();
+        changed_binding.source_digest = "b".repeat(64);
+        assert_ne!(
+            scope(&request, &changed_binding, &peer, &advertised),
+            Some(original)
+        );
+        let mut moved = peer.clone();
+        moved.http_base = Some("http://replacement:9080".into());
+        assert_ne!(
+            scope(&request, &binding, &moved, &advertised),
+            Some(original)
+        );
+        let mut replaced = advertised.clone();
+        replaced.snapshot.build = "replacement".into();
+        assert_ne!(scope(&request, &binding, &peer, &replaced), Some(original));
+        moved.reachable = false;
+        assert!(scope(&request, &binding, &moved, &advertised).is_none());
+        replaced.snapshot.protocol_version -= 1;
+        assert!(scope(&request, &binding, &peer, &replaced).is_none());
+        assert!(catalogue_snapshot_scope(
+            &request,
+            &binding,
+            &peer,
+            &advertised,
+            advertised.expires_at
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn catalogue_snapshots_refuse_partial_failed_unbound_and_changed_recipe_answers() {
+        let now = tokio::time::Instant::now();
+        let binding = PlanningBinding {
+            generation: 1,
+            source_digest: "a".repeat(64),
+        };
+        let good = catalogue_answer(&binding);
+        let mut invalid = Vec::new();
+        let mut row = good.clone();
+        row.complete = false;
+        invalid.push(row);
+        let mut row = good.clone();
+        row.authority_refused = true;
+        invalid.push(row);
+        let mut row = good.clone();
+        row.causes.push(CatalogCause::StaleSource);
+        invalid.push(row);
+        let mut row = good.clone();
+        row.candidates[0].partial = true;
+        invalid.push(row);
+        let mut row = good.clone();
+        row.candidates[0].binding = None;
+        invalid.push(row);
+        let mut row = good.clone();
+        row.candidates[0]
+            .binding
+            .as_mut()
+            .expect("catalogue fixture carries its original planning binding")
+            .generation += 1;
+        invalid.push(row);
+        let mut row = good.clone();
+        row.candidates[0].candidate.recipe_digest = [8; 32];
+        invalid.push(row);
+        for answer in invalid {
+            let mut held = CatalogueSnapshots::default();
+            held.insert([1; 32], now + SNAPSHOT_INTERVAL, &binding, &answer, now);
+            assert!(held.get(&[1; 32], now).is_none());
+        }
+        let mut held = CatalogueSnapshots::default();
+        held.insert([1; 32], now + SNAPSHOT_INTERVAL, &binding, &good, now);
+        let answer = held.get(&[1; 32], now).expect("complete bound description");
+        assert_eq!(
+            answer.candidates[0].candidate.id,
+            good.candidates[0].candidate.id
+        );
+        assert_eq!(answer.candidates[0].binding, good.candidates[0].binding);
+        assert!(held.get(&[1; 32], now + SNAPSHOT_INTERVAL).is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn warm_catalogue_observations_skip_peer_work_and_expiry_reenters_it() {
+        let pool = MediaPool::new(
+            crate::cluster::test_calls(MembershipManager::unavailable()),
+            crate::cluster::Directory::new(MembershipManager::unavailable()),
+        );
+        let binding = PlanningBinding {
+            generation: 1,
+            source_digest: "a".repeat(64),
+        };
+        let answer = catalogue_answer(&binding);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
+        let scope = Some(([1; 32], started + SNAPSHOT_EXPIRY));
+        for expected_calls in [1, 1] {
+            let observed = pool
+                .catalogue_observation(scope, Some(&binding), started, async {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    answer.clone()
+                })
+                .await;
+            assert_eq!(
+                observed.candidates[0].candidate.id,
+                answer.candidates[0].candidate.id
+            );
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::Relaxed),
+                expected_calls
+            );
+        }
+        tokio::time::advance(SNAPSHOT_INTERVAL).await;
+        pool.catalogue_observation(scope, Some(&binding), tokio::time::Instant::now(), async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            answer.clone()
+        })
+        .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+        pool.catalogue_observation(None, Some(&binding), tokio::time::Instant::now(), async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            answer
+        })
+        .await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn catalogue_snapshot_storage_stays_bounded_and_never_renews_on_read() {
+        let now = tokio::time::Instant::now();
+        let binding = PlanningBinding {
+            generation: 1,
+            source_digest: "a".repeat(64),
+        };
+        let good = catalogue_answer(&binding);
+        let mut held = CatalogueSnapshots::default();
+        for index in 0..=MAX_CATALOGUE_SNAPSHOTS {
+            held.insert(
+                [index as u8; 32],
+                now + SNAPSHOT_INTERVAL,
+                &binding,
+                &good,
+                now + Duration::from_millis(index as u64),
+            );
+            assert!(held.entries.len() <= MAX_CATALOGUE_SNAPSHOTS);
+        }
+        assert!(held.get(&[0; 32], now).is_none());
+        let key = [MAX_CATALOGUE_SNAPSHOTS as u8; 32];
+        assert!(held
+            .get(&key, now + SNAPSHOT_INTERVAL - Duration::from_millis(1))
+            .is_some());
+        assert!(held.get(&key, now + SNAPSHOT_INTERVAL).is_none());
+    }
 
     #[tokio::test]
     async fn retained_receipt_receiver_requires_fresh_actual_peer_advertisement() {

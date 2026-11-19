@@ -695,6 +695,10 @@ async fn bounded<T: Serialize>(
                 "Source forwarding RPC {path} transport refused: {}",
                 match _error {
                     crate::http::peer_transport::PeerTransportError::Unreachable => "unreachable",
+                    crate::http::peer_transport::PeerTransportError::LocalUnavailable =>
+                        "local_unavailable",
+                    crate::http::peer_transport::PeerTransportError::AuthenticationRefused(_) =>
+                        "refused",
                     crate::http::peer_transport::PeerTransportError::TimedOut => "timed_out",
                     crate::http::peer_transport::PeerTransportError::InvalidResponse =>
                         "invalid_response",

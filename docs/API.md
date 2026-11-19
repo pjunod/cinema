@@ -4139,6 +4139,16 @@ predicates gate the routes — one for the activity snapshot (committed voters),
 one for exact request authority (any committed member, learners included), a
 read variant under a tighter window, and a voter-only variant.
 
+A private additive response header, `x-plurx-peer-auth-refusal`, distinguishes
+`invalid_proof`, `rate_limited`, `replay_capacity` and
+`authority_unavailable` on a peer-authentication **401**. The status and
+response body are unchanged. Ordinary user-token refusals have no header.
+This is advisory diagnostic metadata, never an acknowledgement, response
+signature or authority proof. Missing, unknown, repeated or over-32-byte
+values remain an unclassified refusal; metadata on a successful response is
+ignored and cannot replace its mandatory exact signature. It neither extends
+a deadline nor requests an automatic retry.
+
 Common checks: the target must be this node; the timestamp must be within
 **30 s** (**5 s** for the read variant); sender and target must differ; the
 signature must be 128 hex characters over the exact method, path and raw body;

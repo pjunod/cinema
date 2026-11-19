@@ -14,7 +14,7 @@
 //! | Is this node a voter, a learner, standalone or fenced? | `role()` | 1 |
 //! | Who can help, for this purpose? | `peers(purpose)` | 1 |
 //! | Read this, applied or linearizable? | `read(class)` | B3, reserved |
-//! | Tell me when this table changes | `watch(table)` | B4, reserved |
+//! | Tell me when this table changes | `watch(tables)` | B4 |
 //! | Call that peer | `call(peer, ..)` | A5/B5, reserved |
 //!
 //! The reserved names have no body yet. A feature that needs one of them
@@ -254,9 +254,11 @@ mod operations {
             path: &str,
             body: &[u8],
         ) -> Result<bool, MembershipError> {
-            self.protocol
-                .authorize_request(auth, method, path, body)
-                .await
+            super::calls::observe_authorization(
+                self.protocol
+                    .authorize_request(auth, method, path, body)
+                    .await,
+            )
         }
 
         pub(crate) fn request_still_fresh(
@@ -668,6 +670,7 @@ pub(crate) struct Cluster {
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     jobs: Jobs,
     access: plurx_core::cluster::membership::ClusterAccess,
+    mark: Option<hiqlite::AppliedMarkHandle>,
 }
 
 impl Cluster {
@@ -738,8 +741,9 @@ impl Cluster {
         let access = membership.cluster_access();
         Self {
             directory: Directory {
-                inner: access.directory(mark),
+                inner: access.directory(mark.clone()),
             },
+            mark,
             jobs: access.jobs(),
             access,
             fence,
@@ -969,10 +973,17 @@ impl Cluster {
     }
     pub(crate) fn observations(&self) -> Observations {
         Observations {
+            fence: self.fence.clone(),
             monitor: self.replication.clone(),
             raft: self.replication.metrics_handle(),
             members: self.membership.metrics_handle(),
         }
+    }
+
+    /// Arm before observing the tables. This wake is advisory, not authority;
+    /// unknown tables and unavailable images retain conservative polling.
+    pub(crate) fn watch(&self, tables: &[&str]) -> plurx_core::store::TableWatch {
+        plurx_core::store::TableWatch::from_applied_mark(self.mark.as_ref(), tables)
     }
 
     /// Change notification over the same local applied membership as role().
@@ -1328,11 +1339,19 @@ impl From<hiqlite::DbWriterAbandonedReplies> for WriterReplyObservation {
 /// HTTP composition or request attribution.
 #[derive(Clone)]
 pub(crate) struct Observations {
+    fence: ServingFence,
     monitor: plurx_core::cluster::migration::status::ReplicationMonitor,
     raft: plurx_core::cluster::migration::status::PassiveRaftMetrics,
     members: plurx_core::cluster::membership::PassiveMembershipMetrics,
 }
 impl Observations {
+    pub(crate) fn append_timing(&self) -> hiqlite::AppendTimingSnapshot {
+        hiqlite::append_timing_observations()
+    }
+    pub(crate) fn monitor_wake(&self) -> crate::serving_fence::MonitorWakeObservation {
+        self.fence.monitor_wake_observation()
+    }
+
     /// Process-wide atomics copied at scrape time, with no Store query.
     pub(crate) fn read_pool_wait(&self) -> ReadPoolWait {
         hiqlite::db_read_pool_wait().into()
@@ -1857,6 +1876,26 @@ pub(crate) mod calls {
     pub(crate) const SIGNATURE_HEADER: &str = "x-plurx-cluster-signature";
     pub(crate) const RESPONSE_SIGNATURE_HEADER: &str = "x-plurx-response-signature";
 
+    /// Race bounded, lookup-owned holder futures. Dropping the stream cancels
+    /// pending requests; callers validate each answer before selecting a winner.
+    /// The same absolute deadline bounds all candidate work, including
+    /// best-effort cleanup. Callers pass it to each wire request as well.
+    pub(crate) fn race_holders<F: Future>(
+        requests: impl IntoIterator<Item = F>,
+        deadline: tokio::time::Instant,
+    ) -> impl futures_util::Stream<Item = F::Output> {
+        use futures_util::StreamExt;
+        futures_util::stream::iter(requests)
+            .buffer_unordered(4)
+            .take_until(tokio::time::sleep_until(deadline))
+            // A candidate can cross the deadline during a synchronous poll
+            // (for example digest validation). The timer was checked before
+            // that poll; refuse a late Ready item at the yield boundary too.
+            .take_while(move |_| {
+                futures_util::future::ready(tokio::time::Instant::now() < deadline)
+            })
+    }
+
     #[derive(Clone, Copy)]
     pub(crate) enum PeerAuthMode {
         LegacyActivity,
@@ -1877,11 +1916,208 @@ pub(crate) mod calls {
             Option<(i64, i64, plurx_core::cluster::clock::ClockDecisionTicket)>,
     }
 
+    pub(crate) const AUTH_REFUSAL_HEADER: &str = "x-plurx-peer-auth-refusal";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum PeerAuthRefusal {
+        InvalidProof,
+        RateLimited,
+        ReplayCapacity,
+        AuthorityUnavailable,
+        Unclassified,
+    }
+
+    impl PeerAuthRefusal {
+        fn wire(self) -> Option<&'static str> {
+            match self {
+                Self::InvalidProof => Some("invalid_proof"),
+                Self::RateLimited => Some("rate_limited"),
+                Self::ReplayCapacity => Some("replay_capacity"),
+                Self::AuthorityUnavailable => Some("authority_unavailable"),
+                Self::Unclassified => None,
+            }
+        }
+    }
+
+    tokio::task_local! {
+        static AUTH_REFUSAL: std::cell::Cell<Option<PeerAuthRefusal>>;
+    }
+
+    pub(super) fn observe_authorization(
+        result: Result<bool, plurx_core::cluster::membership::MembershipError>,
+    ) -> Result<bool, plurx_core::cluster::membership::MembershipError> {
+        use plurx_core::cluster::membership::{MembershipError, PeerAuthAdmissionRefusal};
+        let refusal = match &result {
+            Ok(true) => None,
+            Ok(false) => Some(PeerAuthRefusal::InvalidProof),
+            Err(MembershipError::PeerAuthenticationAdmission(
+                PeerAuthAdmissionRefusal::RateLimited,
+            )) => Some(PeerAuthRefusal::RateLimited),
+            Err(MembershipError::PeerAuthenticationAdmission(
+                PeerAuthAdmissionRefusal::ReplayCapacity,
+            )) => Some(PeerAuthRefusal::ReplayCapacity),
+            Err(_) => Some(PeerAuthRefusal::AuthorityUnavailable),
+        };
+        // Success clears an earlier attempted mechanism. Outside an HTTP
+        // scope this remains diagnostic metadata and changes nothing.
+        let _ = AUTH_REFUSAL.try_with(|slot| slot.set(refusal));
+        // These cases used to be Ok(false). Keep each route's existing
+        // status/body behavior while carrying their real diagnostic class in
+        // the response-only context. No refusal becomes an authorization.
+        match result {
+            Err(MembershipError::PeerAuthenticationAdmission(_)) => Ok(false),
+            result => result,
+        }
+    }
+
+    pub(crate) async fn auth_refusal_response(
+        request: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> axum::response::Response {
+        let (mut response, refusal) = AUTH_REFUSAL
+            .scope(std::cell::Cell::new(None), async move {
+                let response = next.run(request).await;
+                let refusal = AUTH_REFUSAL.with(std::cell::Cell::get);
+                (response, refusal)
+            })
+            .await;
+        // Never reflect an incoming/proxied or inner-handler hint. Only this
+        // request's actual observed peer refusal can publish the private header.
+        response.headers_mut().remove(AUTH_REFUSAL_HEADER);
+        if response.status() == axum::http::StatusCode::UNAUTHORIZED {
+            if let Some(value) = refusal.and_then(PeerAuthRefusal::wire) {
+                response.headers_mut().insert(
+                    AUTH_REFUSAL_HEADER,
+                    axum::http::HeaderValue::from_static(value),
+                );
+            }
+        }
+        response
+    }
+
+    fn authentication_refusal(
+        status: reqwest::StatusCode,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Option<PeerAuthRefusal> {
+        if status != reqwest::StatusCode::UNAUTHORIZED {
+            return None;
+        }
+        let mut values = headers.get_all(AUTH_REFUSAL_HEADER).iter();
+        let value = values.next();
+        let parsed = if values.next().is_none() {
+            value
+                .filter(|value| value.as_bytes().len() <= 32)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| match value {
+                    "invalid_proof" => Some(PeerAuthRefusal::InvalidProof),
+                    "rate_limited" => Some(PeerAuthRefusal::RateLimited),
+                    "replay_capacity" => Some(PeerAuthRefusal::ReplayCapacity),
+                    "authority_unavailable" => Some(PeerAuthRefusal::AuthorityUnavailable),
+                    _ => None,
+                })
+        } else {
+            None
+        };
+        Some(parsed.unwrap_or(PeerAuthRefusal::Unclassified))
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum PeerTransportError {
+        /// This node could not construct/sign the request; no peer failure
+        /// has been observed and no negative health receipt may be published.
+        LocalUnavailable,
+        /// Advisory refusal metadata is never an authenticated response or ack.
+        AuthenticationRefused(PeerAuthRefusal),
         Unreachable,
         TimedOut,
         InvalidResponse,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum PeerCallOutcome {
+        Responded(u16),
+        Refused(PeerAuthRefusal),
+        Unreachable,
+        TimedOut,
+        InvalidResponse,
+    }
+
+    impl PeerCallOutcome {
+        fn failure(error: PeerTransportError) -> Option<Self> {
+            match error {
+                PeerTransportError::LocalUnavailable => None,
+                PeerTransportError::AuthenticationRefused(refusal) => Some(Self::Refused(refusal)),
+                PeerTransportError::Unreachable => Some(Self::Unreachable),
+                PeerTransportError::TimedOut => Some(Self::TimedOut),
+                PeerTransportError::InvalidResponse => Some(Self::InvalidResponse),
+            }
+        }
+    }
+
+    struct PeerCallObservation {
+        origin: String,
+        observed_at: tokio::time::Instant,
+        outcome: PeerCallOutcome,
+    }
+
+    /// Passive receipts, bounded by the maximum committed roster. A receipt
+    /// ranks attempts only; it never grants authority or removes a candidate.
+    #[derive(Default)]
+    struct PeerOutcomes(std::sync::Mutex<std::collections::BTreeMap<String, PeerCallObservation>>);
+
+    impl PeerOutcomes {
+        fn observe(&self, node_id: &str, origin: &str, outcome: PeerCallOutcome) {
+            if node_id.len() > 256 || origin.len() > 8192 {
+                return;
+            }
+            let Ok(mut peers) = self.0.lock() else { return };
+            if !peers.contains_key(node_id) && peers.len() >= 64 {
+                let oldest = peers
+                    .iter()
+                    .min_by_key(|(_, receipt)| receipt.observed_at)
+                    .map(|(node, _)| node.clone());
+                if let Some(oldest) = oldest {
+                    peers.remove(&oldest);
+                }
+            }
+            peers.insert(
+                node_id.to_owned(),
+                PeerCallObservation {
+                    origin: origin.to_owned(),
+                    observed_at: tokio::time::Instant::now(),
+                    outcome,
+                },
+            );
+        }
+
+        fn preference(&self, node_id: &str, origin: &str, max_age: Duration) -> u8 {
+            let Ok(peers) = self.0.lock() else { return 1 };
+            let Some(receipt) = peers.get(node_id) else {
+                return 1;
+            };
+            if receipt.origin != origin || receipt.observed_at.elapsed() >= max_age {
+                return 1;
+            }
+            match receipt.outcome {
+                PeerCallOutcome::Responded(status)
+                    if status < 500 && !matches!(status, 401 | 403 | 429) =>
+                {
+                    0
+                }
+                PeerCallOutcome::Refused(
+                    PeerAuthRefusal::RateLimited
+                    | PeerAuthRefusal::ReplayCapacity
+                    | PeerAuthRefusal::AuthorityUnavailable,
+                ) => 1,
+                PeerCallOutcome::Refused(
+                    PeerAuthRefusal::InvalidProof | PeerAuthRefusal::Unclassified,
+                )
+                | PeerCallOutcome::Responded(_)
+                | PeerCallOutcome::Unreachable
+                | PeerCallOutcome::TimedOut
+                | PeerCallOutcome::InvalidResponse => 2,
+            }
+        }
     }
 
     /// Exact inbound authorization and response signing share the existing
@@ -1898,7 +2134,7 @@ pub(crate) mod calls {
             &self,
             auth: &ActivityPeerAuth,
         ) -> Result<bool, plurx_core::cluster::membership::MembershipError> {
-            self.membership.authorize_activity_request(auth).await
+            observe_authorization(self.membership.authorize_activity_request(auth).await)
         }
         pub(crate) async fn authorize_read_request(
             &self,
@@ -1907,9 +2143,11 @@ pub(crate) mod calls {
             path: &str,
             body: &[u8],
         ) -> Result<bool, plurx_core::cluster::membership::MembershipError> {
-            self.membership
-                .authorize_internal_peer_read_request(auth, method, path, body)
-                .await
+            observe_authorization(
+                self.membership
+                    .authorize_internal_peer_read_request(auth, method, path, body)
+                    .await,
+            )
         }
         pub(crate) async fn authorize_voter_request(
             &self,
@@ -1918,9 +2156,11 @@ pub(crate) mod calls {
             path: &str,
             body: &[u8],
         ) -> Result<bool, plurx_core::cluster::membership::MembershipError> {
-            self.membership
-                .authorize_internal_peer_voter_request(auth, method, path, body)
-                .await
+            observe_authorization(
+                self.membership
+                    .authorize_internal_peer_voter_request(auth, method, path, body)
+                    .await,
+            )
         }
         pub(crate) async fn authorize_exact_request(
             &self,
@@ -1929,9 +2169,11 @@ pub(crate) mod calls {
             path: &str,
             body: &[u8],
         ) -> Result<bool, plurx_core::cluster::membership::MembershipError> {
-            self.membership
-                .authorize_internal_peer_request(auth, method, path, body)
-                .await
+            observe_authorization(
+                self.membership
+                    .authorize_internal_peer_request(auth, method, path, body)
+                    .await,
+            )
         }
         pub(crate) fn sign_exact_response(
             &self,
@@ -1949,6 +2191,7 @@ pub(crate) mod calls {
     pub(crate) struct PeerTransport {
         membership: MembershipManager,
         client: Result<reqwest::Client, String>,
+        outcomes: std::sync::Arc<PeerOutcomes>,
     }
 
     impl PeerTransport {
@@ -1957,7 +2200,17 @@ pub(crate) mod calls {
         /// membership shares one connection pool, however many callers make one.
         pub(super) fn new(membership: MembershipManager) -> Self {
             let client = membership.peer_http().into_result();
-            Self { membership, client }
+            Self {
+                membership,
+                client,
+                outcomes: std::sync::Arc::new(PeerOutcomes::default()),
+            }
+        }
+
+        /// Prefer recent responding peers without excluding any directory
+        /// candidate. The caller supplies its existing lookup budget as age.
+        pub(crate) fn preference(&self, node_id: &str, origin: &str, max_age: Duration) -> u8 {
+            self.outcomes.preference(node_id, origin, max_age)
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -2083,11 +2336,51 @@ pub(crate) mod calls {
             extra_header: Option<(&'static str, &'static str)>,
             clock_guard: Option<&plurx_core::cluster::clock::ClusterClockGuard>,
         ) -> Result<(PeerResponse, Option<u32>), PeerTransportError> {
+            let result = self
+                .request_with_optional_header_inner(
+                    expected_node_id,
+                    base,
+                    method,
+                    path,
+                    body,
+                    deadline,
+                    max_response_bytes,
+                    auth_mode,
+                    extra_header,
+                    clock_guard,
+                )
+                .await;
+            let outcome = match &result {
+                Ok((response, _)) => Some(PeerCallOutcome::Responded(response.status.as_u16())),
+                Err(error) => PeerCallOutcome::failure(*error),
+            };
+            // Cancelled requests have no terminal outcome and never mark a
+            // healthy peer bad merely because another holder won the race.
+            if let Some(outcome) = outcome {
+                self.outcomes.observe(expected_node_id, base, outcome);
+            }
+            result
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn request_with_optional_header_inner(
+            &self,
+            expected_node_id: &str,
+            base: &str,
+            method: reqwest::Method,
+            path: &str,
+            body: Vec<u8>,
+            deadline: tokio::time::Instant,
+            max_response_bytes: usize,
+            auth_mode: PeerAuthMode,
+            extra_header: Option<(&'static str, &'static str)>,
+            clock_guard: Option<&plurx_core::cluster::clock::ClusterClockGuard>,
+        ) -> Result<(PeerResponse, Option<u32>), PeerTransportError> {
             let Some(url) = peer_url(base, path) else {
-                return Err(PeerTransportError::Unreachable);
+                return Err(PeerTransportError::LocalUnavailable);
             };
             let Some(client) = self.client.as_ref().ok() else {
-                return Err(PeerTransportError::Unreachable);
+                return Err(PeerTransportError::LocalUnavailable);
             };
             let clock_ticket = clock_guard.map(|guard| guard.ticket());
             let timestamp_ms = unix_ms();
@@ -2111,7 +2404,7 @@ pub(crate) mod calls {
                     )
                     .map(SignedPeerAuth::Exact),
             }
-            .map_err(|_| PeerTransportError::Unreachable)?;
+            .map_err(|_| PeerTransportError::LocalUnavailable)?;
             let response_binding = match &auth {
                 SignedPeerAuth::Exact(auth) => match auth_mode {
                     PeerAuthMode::ExactRequestAndResponse => {
@@ -2153,6 +2446,7 @@ pub(crate) mod calls {
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_owned);
             let retry_after = retry_after_seconds(response.headers());
+            let refusal = authentication_refusal(response.status(), response.headers());
             read_then_verify(
                 response,
                 deadline,
@@ -2160,6 +2454,9 @@ pub(crate) mod calls {
                 timestamp_ms,
                 clock_guard.zip(clock_ticket),
                 |response| async move {
+                    if let Some(refusal) = refusal {
+                        return Err(PeerTransportError::AuthenticationRefused(refusal));
+                    }
                     if let Some((target, nonce, member_scoped)) = response_binding {
                         #[cfg(test)]
                         if signature.is_none() {
@@ -2180,8 +2477,8 @@ pub(crate) mod calls {
                                 ),
                             )
                             .await
-                            .map_err(|_| PeerTransportError::TimedOut)?
-                            .map_err(|_| PeerTransportError::InvalidResponse)?
+                            .map_err(|_| PeerTransportError::LocalUnavailable)?
+                            .map_err(|_| PeerTransportError::LocalUnavailable)?
                         } else {
                             tokio::time::timeout_at(
                                 deadline,
@@ -2195,8 +2492,8 @@ pub(crate) mod calls {
                                 ),
                             )
                             .await
-                            .map_err(|_| PeerTransportError::TimedOut)?
-                            .map_err(|_| PeerTransportError::InvalidResponse)?
+                            .map_err(|_| PeerTransportError::LocalUnavailable)?
+                            .map_err(|_| PeerTransportError::LocalUnavailable)?
                         };
                         if !verified {
                             #[cfg(test)]
@@ -2225,11 +2522,45 @@ pub(crate) mod calls {
             deadline: tokio::time::Instant,
             auth_mode: PeerAuthMode,
         ) -> Result<reqwest::Response, PeerTransportError> {
+            let result = self
+                .request_stream_inner(
+                    expected_node_id,
+                    base,
+                    method,
+                    path,
+                    body,
+                    deadline,
+                    auth_mode,
+                )
+                .await;
+            let outcome = match &result {
+                Ok(response) => Some(PeerCallOutcome::Responded(response.status().as_u16())),
+                Err(error) => PeerCallOutcome::failure(*error),
+            };
+            // This receipt proves response headers only. Stream body and
+            // lifecycle authority stay with the caller's existing checks.
+            if let Some(outcome) = outcome {
+                self.outcomes.observe(expected_node_id, base, outcome);
+            }
+            result
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn request_stream_inner(
+            &self,
+            expected_node_id: &str,
+            base: &str,
+            method: reqwest::Method,
+            path: &str,
+            body: Vec<u8>,
+            deadline: tokio::time::Instant,
+            auth_mode: PeerAuthMode,
+        ) -> Result<reqwest::Response, PeerTransportError> {
             let Some(url) = peer_url(base, path) else {
-                return Err(PeerTransportError::Unreachable);
+                return Err(PeerTransportError::LocalUnavailable);
             };
             let Some(client) = self.client.as_ref().ok() else {
-                return Err(PeerTransportError::Unreachable);
+                return Err(PeerTransportError::LocalUnavailable);
             };
             let timestamp_ms = unix_ms();
             let method_name = method.as_str();
@@ -2241,7 +2572,7 @@ pub(crate) mod calls {
                 // A stream has no complete body to authenticate at this layer.
                 PeerAuthMode::ExactRequestAndResponse
                 | PeerAuthMode::ExactRequestAndMemberResponse => {
-                    return Err(PeerTransportError::InvalidResponse);
+                    return Err(PeerTransportError::LocalUnavailable);
                 }
                 PeerAuthMode::ExactRequest => self
                     .membership
@@ -2255,7 +2586,7 @@ pub(crate) mod calls {
                     )
                     .map(SignedPeerAuth::Exact),
             }
-            .map_err(|_| PeerTransportError::Unreachable)?;
+            .map_err(|_| PeerTransportError::LocalUnavailable)?;
             let mut request = client.request(method, url);
             request = match auth {
                 SignedPeerAuth::Activity(auth) => signed_headers(request, &auth),
@@ -2266,7 +2597,7 @@ pub(crate) mod calls {
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
                     .body(body);
             }
-            tokio::time::timeout_at(deadline, request.send())
+            let response = tokio::time::timeout_at(deadline, request.send())
                 .await
                 .map_err(|_| PeerTransportError::TimedOut)?
                 .map_err(|error| {
@@ -2275,7 +2606,11 @@ pub(crate) mod calls {
                     } else {
                         PeerTransportError::Unreachable
                     }
-                })
+                })?;
+            if let Some(refusal) = authentication_refusal(response.status(), response.headers()) {
+                return Err(PeerTransportError::AuthenticationRefused(refusal));
+            }
+            Ok(response)
         }
     }
 
@@ -2518,6 +2853,469 @@ pub(crate) mod calls {
         /// Every transport must take the membership manager's pooled client. A
         /// client built here is a connection pool per caller, which is what made
         /// node-to-node requests redial on every use.
+        #[tokio::test]
+        async fn refusal_adapter_preserves_status_body_and_only_adds_actual_peer_metadata() {
+            use axum::extract::Path;
+            use plurx_core::cluster::membership::{MembershipError, PeerAuthAdmissionRefusal};
+            use tower::ServiceExt;
+            let app = Router::new()
+                .route(
+                    "/{kind}",
+                    get(|Path(kind): Path<String>| async move {
+                        let result = match kind.as_str() {
+                            "rate" => Some(Err(MembershipError::PeerAuthenticationAdmission(
+                                PeerAuthAdmissionRefusal::RateLimited,
+                            ))),
+                            "capacity" => Some(Err(MembershipError::PeerAuthenticationAdmission(
+                                PeerAuthAdmissionRefusal::ReplayCapacity,
+                            ))),
+                            "store" => Some(Err(MembershipError::Unavailable)),
+                            "bad" | "fallback" | "ok" => Some(Ok(false)),
+                            _ => None,
+                        };
+                        if let Some(result) = result {
+                            let _ = observe_authorization(result);
+                        }
+                        if kind == "fallback" {
+                            assert!(observe_authorization(Ok(true))
+                                .expect("successful fallback authorization preserves its verdict"));
+                        }
+                        let mut headers = axum::http::HeaderMap::new();
+                        // A business handler/proxy cannot spoof the private metadata.
+                        if kind == "user" || kind == "ok" {
+                            headers.insert(
+                                AUTH_REFUSAL_HEADER,
+                                axum::http::HeaderValue::from_static("rate_limited"),
+                            );
+                        }
+                        (
+                            if kind == "ok" {
+                                StatusCode::OK
+                            } else {
+                                StatusCode::UNAUTHORIZED
+                            },
+                            headers,
+                        )
+                    }),
+                )
+                .layer(axum::middleware::from_fn(auth_refusal_response));
+            for (kind, expected) in [
+                ("rate", Some("rate_limited")),
+                ("capacity", Some("replay_capacity")),
+                ("store", Some("authority_unavailable")),
+                ("bad", Some("invalid_proof")),
+                ("user", None),
+                ("fallback", None),
+                ("ok", None),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri(format!("/{kind}"))
+                            .header(AUTH_REFUSAL_HEADER, "rate_limited")
+                            .body(Body::empty())
+                            .expect("build peer refusal adapter request"),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    if kind == "ok" {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    }
+                );
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(AUTH_REFUSAL_HEADER)
+                        .and_then(|value| value.to_str().ok()),
+                    expected,
+                    "{kind}"
+                );
+                assert!(
+                    axum::body::to_bytes(response.into_body(), 1024)
+                        .await
+                        .expect("read unchanged refusal response body")
+                        .is_empty(),
+                    "the original empty response body is unchanged"
+                );
+            }
+            assert!(
+                !observe_authorization(Ok(false))
+                    .expect("non-HTTP refusal keeps its original denial"),
+                "non-HTTP callers keep the original result without panic"
+            );
+        }
+
+        #[tokio::test]
+        async fn simultaneous_peer_and_user_refusals_never_share_classification() {
+            use axum::extract::{Path, State};
+            use tower::ServiceExt;
+            let app = Router::new()
+                .route(
+                    "/{kind}",
+                    get(
+                        |Path(kind): Path<String>,
+                         State(barrier): State<Arc<tokio::sync::Barrier>>| async move {
+                            if kind == "peer" {
+                                let _ = observe_authorization(Err(
+                                    plurx_core::cluster::membership::MembershipError::Unavailable,
+                                ));
+                            }
+                            barrier.wait().await;
+                            StatusCode::UNAUTHORIZED
+                        },
+                    ),
+                )
+                .with_state(Arc::new(tokio::sync::Barrier::new(2)))
+                .layer(axum::middleware::from_fn(auth_refusal_response));
+            let request = |path| {
+                axum::http::Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("build concurrent peer or user request")
+            };
+            let (peer, user) = tokio::join!(
+                app.clone().oneshot(request("/peer")),
+                app.oneshot(request("/user"))
+            );
+            assert_eq!(
+                peer.unwrap()
+                    .headers()
+                    .get(AUTH_REFUSAL_HEADER)
+                    .expect("actual peer refusal publishes its bounded classification"),
+                "authority_unavailable"
+            );
+            assert!(!user.unwrap().headers().contains_key(AUTH_REFUSAL_HEADER));
+        }
+
+        #[test]
+        fn refusal_headers_are_fixed_bounded_advisory_and_ignored_on_success() {
+            use reqwest::header::{HeaderMap, HeaderValue};
+            let mut headers = HeaderMap::new();
+            assert_eq!(
+                authentication_refusal(reqwest::StatusCode::UNAUTHORIZED, &headers),
+                Some(PeerAuthRefusal::Unclassified)
+            );
+            for (value, expected) in [
+                ("invalid_proof", PeerAuthRefusal::InvalidProof),
+                ("rate_limited", PeerAuthRefusal::RateLimited),
+                ("replay_capacity", PeerAuthRefusal::ReplayCapacity),
+                (
+                    "authority_unavailable",
+                    PeerAuthRefusal::AuthorityUnavailable,
+                ),
+            ] {
+                headers.insert(AUTH_REFUSAL_HEADER, HeaderValue::from_static(value));
+                assert_eq!(
+                    authentication_refusal(reqwest::StatusCode::UNAUTHORIZED, &headers),
+                    Some(expected)
+                );
+                assert_eq!(
+                    authentication_refusal(reqwest::StatusCode::OK, &headers),
+                    None,
+                    "a hint cannot replace successful response authentication"
+                );
+            }
+            for value in [
+                HeaderValue::from_static("unknown"),
+                HeaderValue::from_str(&"x".repeat(33))
+                    .expect("construct oversized but HTTP-valid refusal value"),
+                HeaderValue::from_bytes(&[0xff])
+                    .expect("construct opaque HTTP-valid refusal bytes"),
+            ] {
+                headers.insert(AUTH_REFUSAL_HEADER, value);
+                assert_eq!(
+                    authentication_refusal(reqwest::StatusCode::UNAUTHORIZED, &headers),
+                    Some(PeerAuthRefusal::Unclassified)
+                );
+            }
+            headers.clear();
+            headers.append(
+                AUTH_REFUSAL_HEADER,
+                HeaderValue::from_static("rate_limited"),
+            );
+            headers.append(
+                AUTH_REFUSAL_HEADER,
+                HeaderValue::from_static("invalid_proof"),
+            );
+            assert_eq!(
+                authentication_refusal(reqwest::StatusCode::UNAUTHORIZED, &headers),
+                Some(PeerAuthRefusal::Unclassified)
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn passive_peer_outcomes_rank_only_the_same_origin_and_expire_without_a_timer() {
+            let outcomes = PeerOutcomes::default();
+            let budget = Duration::from_secs(8);
+            assert_eq!(outcomes.preference("peer", "http://one", budget), 1);
+            outcomes.observe("peer", "http://one", PeerCallOutcome::Responded(200));
+            assert_eq!(outcomes.preference("peer", "http://one", budget), 0);
+            assert_eq!(
+                outcomes.preference("peer", "http://two", budget),
+                1,
+                "a changed endpoint has no receipt"
+            );
+            outcomes.observe("peer", "http://one", PeerCallOutcome::TimedOut);
+            assert_eq!(outcomes.preference("peer", "http://one", budget), 2);
+            outcomes.observe("peer", "http://one", PeerCallOutcome::Responded(404));
+            assert_eq!(
+                outcomes.preference("peer", "http://one", budget),
+                0,
+                "missing one artifact is a responding peer"
+            );
+            tokio::time::advance(budget).await;
+            assert_eq!(outcomes.preference("peer", "http://one", budget), 1);
+            for n in 0..100 {
+                outcomes.observe(
+                    &format!("peer-{n}"),
+                    "http://one",
+                    PeerCallOutcome::Responded(200),
+                );
+            }
+            assert!(
+                outcomes
+                    .0
+                    .lock()
+                    .expect("read bounded passive outcome receipts")
+                    .len()
+                    <= 64
+            );
+        }
+
+        #[tokio::test]
+        async fn local_signing_or_client_failure_never_publishes_negative_peer_health() {
+            let mut transport = PeerTransport::new(MembershipManager::unavailable());
+            transport.client = Ok(reqwest::Client::new());
+            let call = || async {
+                transport
+                    .request(
+                        "peer",
+                        "http://127.0.0.1:9",
+                        reqwest::Method::GET,
+                        "/internal/media/test",
+                        Vec::new(),
+                        deadline_after(Duration::from_secs(1)),
+                        1024,
+                        PeerAuthMode::ExactRequest,
+                    )
+                    .await
+            };
+            assert!(matches!(
+                call().await,
+                Err(PeerTransportError::LocalUnavailable)
+            ));
+            assert!(
+                transport
+                    .outcomes
+                    .0
+                    .lock()
+                    .expect("read outcomes after local signing failure")
+                    .is_empty(),
+                "local signing failed before any peer call"
+            );
+            transport.client = Err("local client construction failed".to_owned());
+            assert!(matches!(
+                transport
+                    .request(
+                        "peer",
+                        "http://127.0.0.1:9",
+                        reqwest::Method::GET,
+                        "/internal/media/test",
+                        Vec::new(),
+                        deadline_after(Duration::from_secs(1)),
+                        1024,
+                        PeerAuthMode::ExactRequest
+                    )
+                    .await,
+                Err(PeerTransportError::LocalUnavailable)
+            ));
+            assert!(transport
+                .outcomes
+                .0
+                .lock()
+                .expect("read outcomes after missing local client")
+                .is_empty());
+            assert_eq!(
+                PeerCallOutcome::failure(PeerTransportError::LocalUnavailable),
+                None
+            );
+            assert_eq!(
+                PeerCallOutcome::failure(PeerTransportError::TimedOut),
+                Some(PeerCallOutcome::TimedOut)
+            );
+        }
+
+        #[tokio::test]
+        async fn an_actual_stalled_peer_body_keeps_its_typed_timeout() {
+            use tokio::io::AsyncWriteExt;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind stalled-response fixture listener");
+            let address = listener
+                .local_addr()
+                .expect("read fixture listener address");
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept fixture peer connection");
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
+                    .await
+                    .expect("write fixture response headers");
+                std::future::pending::<()>().await;
+            });
+            let response = tokio::time::timeout(
+                Duration::from_secs(2),
+                reqwest::Client::new()
+                    .get(format!("http://{address}/stalled"))
+                    .send(),
+            )
+            .await
+            .expect("peer response headers arrive within fixture budget")
+            .expect("receive fixture response headers");
+            let result =
+                read_bounded(response, deadline_after(Duration::from_millis(50)), 1024).await;
+            server.abort();
+            assert!(matches!(result, Err(PeerTransportError::TimedOut)));
+        }
+
+        #[tokio::test]
+        async fn holder_race_is_bounded_and_drops_losers_after_a_later_holder_wins() {
+            struct Active(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+            impl Drop for Active {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let active = Arc::new(AtomicUsize::new(0));
+            let maximum = Arc::new(AtomicUsize::new(0));
+            let started = Arc::new(AtomicUsize::new(0));
+            {
+                let requests = (0..12).map(|holder| {
+                    let active = active.clone();
+                    let maximum = maximum.clone();
+                    let started = started.clone();
+                    async move {
+                        started.fetch_add(1, Ordering::SeqCst);
+                        let running = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        maximum.fetch_max(running, Ordering::SeqCst);
+                        let _active = Active(active);
+                        if holder != 1 {
+                            std::future::pending::<()>().await;
+                        }
+                        holder
+                    }
+                });
+                let responses = race_holders(requests, deadline_after(Duration::from_secs(8)));
+                futures_util::pin_mut!(responses);
+                assert_eq!(
+                    responses.next().await,
+                    Some(1),
+                    "the first holder is stalled"
+                );
+                assert!(maximum.load(Ordering::SeqCst) <= 4);
+                assert!(started.load(Ordering::SeqCst) <= 4);
+            }
+            assert_eq!(
+                active.load(Ordering::SeqCst),
+                0,
+                "no detached loser remains"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn queued_holder_requests_share_the_original_absolute_deadline() {
+            let started = tokio::time::Instant::now();
+            let deadline = started + Duration::from_secs(8);
+            let launched = Arc::new(AtomicUsize::new(0));
+            let requests = (0..12).map(|_| {
+                let launched = launched.clone();
+                async move {
+                    launched.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::timeout_at(deadline, std::future::pending::<()>()).await
+                }
+            });
+            let results: Vec<_> = race_holders(requests, deadline).collect().await;
+            assert!(
+                results.is_empty(),
+                "the lookup deadline wins over expired wire futures"
+            );
+            assert_eq!(
+                launched.load(Ordering::SeqCst),
+                4,
+                "queued holders receive no fresh budget"
+            );
+            assert_eq!(
+                tokio::time::Instant::now() - started,
+                Duration::from_secs(8)
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn all_invalid_holders_drop_blocked_cleanup_at_the_original_lookup_deadline() {
+            struct Cleanup(Arc<AtomicUsize>);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            let started = tokio::time::Instant::now();
+            let deadline = started + Duration::from_secs(8);
+            let cleaning = Arc::new(AtomicUsize::new(0));
+            let launched = Arc::new(AtomicUsize::new(0));
+            let requests = (0..12).map(|_| {
+                let cleaning = cleaning.clone();
+                let launched = launched.clone();
+                async move {
+                    launched.fetch_add(1, Ordering::SeqCst);
+                    // Every peer answered, but its bytes failed validation.
+                    // A Store cleanup that never completes must not keep
+                    // this lookup, or its other candidate futures, alive.
+                    cleaning.fetch_add(1, Ordering::SeqCst);
+                    let _cleanup = Cleanup(cleaning);
+                    std::future::pending::<()>().await;
+                    None::<Vec<u8>>
+                }
+            });
+            let results: Vec<_> = race_holders(requests, deadline).collect().await;
+            assert!(results.is_empty());
+            assert_eq!(tokio::time::Instant::now(), deadline);
+            assert_eq!(launched.load(Ordering::SeqCst), 4);
+            assert_eq!(
+                cleaning.load(Ordering::SeqCst),
+                0,
+                "all blocked cleanup was canceled with the lookup"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn holder_completed_after_deadline_in_one_poll_cannot_win() {
+            let started = tokio::time::Instant::now();
+            let budget = Duration::from_secs(8);
+            let deadline = started + budget;
+            let candidate = std::future::poll_fn(move |context| {
+                // Advance the paused clock inside the candidate's one poll,
+                // after the outer timer has already returned Pending. Poll
+                // advance without awaiting its trailing yield so this models
+                // synchronous validation crossing the deadline before Ready.
+                let mut advancing = Box::pin(tokio::time::advance(budget));
+                let _ = advancing.as_mut().poll(context);
+                std::task::Poll::Ready("verified too late")
+            });
+            let winners: Vec<_> = race_holders([candidate], deadline).collect().await;
+            assert_eq!(tokio::time::Instant::now(), deadline);
+            assert!(
+                winners.is_empty(),
+                "a late Ready candidate must never reach installation"
+            );
+        }
+
         #[test]
         fn a_transport_never_builds_its_own_http_client() {
             let source = include_str!("cluster.rs");

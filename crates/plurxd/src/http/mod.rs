@@ -2645,6 +2645,9 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             desktop_http_admission_gate,
         ))
+        .layer(axum::middleware::from_fn(
+            crate::cluster::calls::auth_refusal_response,
+        ))
         .layer(axum::middleware::from_fn(http_request_metrics))
         // Outermost: every layer inside reads the id back out of the request
         // headers, so this one has to have written it first.

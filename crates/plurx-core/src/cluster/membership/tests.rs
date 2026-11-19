@@ -3813,7 +3813,7 @@ fn server_commit_response_loss_and_crash_expire_cache_admin_exclusion_conservati
 fn cache_admin_exclusion_is_separate_rolling_safe_and_capability_v4() {
     assert_eq!(
         CACHE_ADMIN_REVOCATION_CAPABILITY,
-        "cache_admin_revocation_v4"
+        "cache_admin_revocation_v5"
     );
     assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| {
         statement.contains("CREATE TABLE IF NOT EXISTS cluster_operation_leases")
@@ -10778,4 +10778,229 @@ mod floor_advisory {
             SharingMemberFloor::COUNT
         );
     }
+}
+
+#[test]
+fn token_policy_guards_refuse_legacy_insert_update_delete_and_key_renaming() {
+    let mut connection = rusqlite::Connection::open_in_memory().expect("sqlite");
+    connection.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER);        CREATE TABLE cluster_credential_guard_activation(singleton INTEGER PRIMARY KEY);        CREATE TABLE cluster_credential_mutation_intents(singleton INTEGER PRIMARY KEY);        INSERT INTO settings VALUES('auth.token_idle_days','30',1),('ordinary','x',1);        INSERT INTO cluster_credential_guard_activation VALUES(1);").expect("install activated policy guard fixture");
+    for trigger in [
+        REQUIRE_CURRENT_AUTH_POLICY_INSERT_SQL,
+        REQUIRE_CURRENT_AUTH_POLICY_UPDATE_SQL,
+        REQUIRE_CURRENT_AUTH_POLICY_DELETE_SQL,
+    ] {
+        connection
+            .execute_batch(trigger)
+            .expect("install actual policy trigger");
+    }
+    for sql in [
+        "INSERT INTO settings VALUES('auth.token_expiry_enabled','0',2)",
+        "UPDATE settings SET value='1' WHERE key='auth.token_idle_days'",
+        "DELETE FROM settings WHERE key='auth.token_idle_days'",
+        "UPDATE settings SET key='ordinary-two' WHERE key='auth.token_idle_days'",
+        "UPDATE settings SET key='auth.token_expiry_since' WHERE key='ordinary'",
+    ] {
+        assert!(
+            connection
+                .execute(sql, [])
+                .expect_err("legacy policy mutation must be rejected")
+                .to_string()
+                .contains("requires current binary"),
+            "{sql}"
+        );
+    }
+    connection
+        .execute("UPDATE settings SET value='y' WHERE key='ordinary'", [])
+        .expect("ordinary setting remains writable");
+    let transaction = connection
+        .transaction()
+        .expect("begin current policy mutation transaction");
+    transaction
+        .execute(
+            "INSERT INTO cluster_credential_mutation_intents VALUES(1)",
+            [],
+        )
+        .expect("install transaction-local credential intent");
+    transaction
+        .execute(
+            "UPDATE settings SET value='1' WHERE key='auth.token_idle_days'",
+            [],
+        )
+        .expect("write policy with current transaction intent");
+    transaction
+        .execute("DELETE FROM cluster_credential_mutation_intents", [])
+        .expect("clear transaction-local credential intent");
+    transaction
+        .commit()
+        .expect("commit current policy mutation");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT value FROM settings WHERE key='auth.token_idle_days'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .expect("read committed policy value"),
+        "1"
+    );
+}
+
+#[test]
+fn general_token_cache_protocol_refuses_a_fresh_v4_member_among_v5_members() {
+    let connection =
+        rusqlite::Connection::open_in_memory().expect("open mixed-version protocol fixture");
+    connection.execute_batch("CREATE TABLE cluster_nodes(node_id TEXT PRIMARY KEY,raft_id INTEGER,last_seen_at INTEGER,removed_at INTEGER);        CREATE TABLE cluster_node_capabilities(node_id TEXT,capability TEXT,last_seen_at INTEGER);        CREATE TABLE cluster_credential_guard_activation(singleton INTEGER PRIMARY KEY);        CREATE TABLE cluster_cache_admin_revocation_leases(claim_id TEXT);        INSERT INTO cluster_nodes VALUES('voter',1,100,NULL),('learner',2,100,NULL);        INSERT INTO cluster_node_capabilities VALUES('voter','cache_admin_revocation_v5',100),('learner','cache_admin_revocation_v4',100);        INSERT INTO cluster_credential_guard_activation VALUES(1);").expect("install voter and learner capability fixture");
+    let blocked = || {
+        connection
+            .query_row(
+                &committed_cache_admin_revocation_ready_sql(),
+                rusqlite::params!["[1,2]"],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("read exact committed revocation readiness")
+    };
+    assert_eq!(
+        blocked(),
+        1,
+        "a current v4 heartbeat cannot activate general authentication reuse"
+    );
+    connection.execute("UPDATE cluster_node_capabilities SET capability='cache_admin_revocation_v5' WHERE node_id='learner'", []).expect("advance learner to current v5 capability");
+    assert_eq!(blocked(), 0);
+    connection
+        .execute(
+            "UPDATE cluster_nodes SET last_seen_at=101 WHERE node_id='learner'",
+            [],
+        )
+        .expect("advance learner heartbeat without its matching capability");
+    assert_eq!(
+        blocked(),
+        1,
+        "a rollback without a matching v5 heartbeat closes the cache"
+    );
+}
+
+fn peer_auth_stamp_fixture() -> PeerAuthorityStamp {
+    PeerAuthorityStamp {
+        membership: hiqlite::LocalDbMembershipSnapshot {
+            running: true,
+            node_id: 1,
+            membership_log: Some((1, 1, 10)),
+            members: BTreeSet::from([1, 2]),
+            voters: BTreeSet::from([1]),
+            committed: true,
+        },
+        image_generation: 2,
+        revisions: [3, 4, 5],
+    }
+}
+
+#[test]
+fn peer_proof_leases_never_cross_member_and_voter_roles() {
+    let stamp = peer_auth_stamp_fixture();
+    let now = Instant::now();
+    let mut authority = InternalReadAuthority {
+        member: None,
+        voter: None,
+        refresh: Arc::new(tokio::sync::Mutex::new(())),
+    };
+    authority.publish(
+        PeerAuthorityRole::CommittedMember,
+        PeerAuthorityLease {
+            stamp: stamp.clone(),
+            expires_at: now + Duration::from_secs(1),
+            reachable_through_ms: 10_000,
+        },
+    );
+    assert!(authority
+        .lease(PeerAuthorityRole::CommittedMember)
+        .expect("published member lease exists")
+        .admits(&stamp, now, 10_000));
+    assert!(authority.lease(PeerAuthorityRole::CommittedVoter).is_none());
+    authority.publish(
+        PeerAuthorityRole::CommittedVoter,
+        PeerAuthorityLease {
+            stamp: stamp.clone(),
+            expires_at: now,
+            reachable_through_ms: 10_000,
+        },
+    );
+    assert!(!authority
+        .lease(PeerAuthorityRole::CommittedVoter)
+        .expect("published expired voter lease exists")
+        .admits(&stamp, now, 10_000));
+    assert!(authority
+        .lease(PeerAuthorityRole::CommittedMember)
+        .expect("member lease survives independent voter publication")
+        .admits(&stamp, now, 10_000));
+}
+
+#[test]
+fn peer_proof_leases_expire_on_heartbeat_source_aba_or_image_movement() {
+    let stamp = peer_auth_stamp_fixture();
+    let now = Instant::now();
+    let lease = PeerAuthorityLease {
+        stamp: stamp.clone(),
+        expires_at: now + Duration::from_secs(1),
+        reachable_through_ms: 10_000,
+    };
+    assert!(lease.admits(&stamp, now, 10_000));
+    assert!(
+        !lease.admits(&stamp, now, 10_001),
+        "heartbeat freshness cannot be extended by a cache lease"
+    );
+    assert!(!lease.admits(&stamp, now + Duration::from_secs(1), 10_000));
+    let mut changed = stamp.clone();
+    changed.membership.membership_log = Some((2, 2, 11));
+    assert!(
+        !lease.admits(&changed, now, 10_000),
+        "the same member set in a later log is a different source"
+    );
+    for slot in 0..3 {
+        let mut changed = stamp.clone();
+        changed.revisions[slot] += 1;
+        assert!(!lease.admits(&changed, now, 10_000));
+    }
+    let mut changed = stamp.clone();
+    changed.image_generation += 2;
+    assert!(!lease.admits(&changed, now, 10_000));
+    let mut changed = stamp.clone();
+    changed.membership.running = false;
+    assert!(!lease.admits(&changed, now, 10_000));
+    let mut changed = stamp;
+    changed.membership.committed = false;
+    assert!(!lease.admits(&changed, now, 10_000));
+}
+
+#[test]
+fn peer_replay_capacity_is_distinct_from_an_actual_replay() {
+    assert_eq!(
+        MembershipError::PeerAuthenticationAdmission(PeerAuthAdmissionRefusal::RateLimited).code(),
+        "cluster_peer_auth_rate_limited"
+    );
+    assert_eq!(
+        MembershipError::PeerAuthenticationAdmission(PeerAuthAdmissionRefusal::ReplayCapacity)
+            .code(),
+        "cluster_peer_auth_replay_capacity"
+    );
+    let now = Instant::now();
+    let mut mutation = InternalAuthReplayWindow::default();
+    assert_eq!(mutation.admit_proof("same", now), Ok(true));
+    assert_eq!(mutation.admit_proof("same", now), Ok(false));
+    for n in 1..MAX_INTERNAL_REPLAYS_PER_PEER {
+        assert_eq!(mutation.admit_proof(&format!("nonce-{n}"), now), Ok(true));
+    }
+    assert_eq!(
+        mutation.admit_proof("new", now),
+        Err(PeerAuthAdmissionRefusal::ReplayCapacity)
+    );
+    assert_eq!(mutation.admit_proof("same", now), Ok(false));
+    let mut read = InternalReadReplayWindow::default();
+    for n in 0..MAX_INTERNAL_READ_REPLAYS_PER_PEER {
+        assert_eq!(read.admit_proof(&format!("nonce-{n}"), now), Ok(true));
+    }
+    assert_eq!(
+        read.admit_proof("new", now),
+        Err(PeerAuthAdmissionRefusal::ReplayCapacity)
+    );
+    assert_eq!(read.admit_proof("nonce-0", now), Ok(false));
 }

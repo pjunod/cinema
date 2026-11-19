@@ -4892,6 +4892,9 @@ pub async fn update_settings(
             .await?;
     }
     if req.auth_token_expiry.is_some() || req.auth_token_idle_days.is_some() {
+        let proof_revocation =
+            super::internal_auth_revocation::ClusterCacheRevocation::begin_token_policy(&state)
+                .await?;
         let mut values: Vec<(&str, String)> = Vec::new();
         if let Some(days) = req.auth_token_idle_days {
             values.push((keys::AUTH_TOKEN_IDLE_DAYS, days.to_string()));
@@ -4924,7 +4927,16 @@ pub async fn update_settings(
             .iter()
             .map(|(key, value)| (*key, value.as_str()))
             .collect::<Vec<_>>();
-        state.store.put_settings(&borrowed).await?;
+        let changed = state
+            .store
+            .put_auth_token_policy(&borrowed, proof_revocation.mutation_claim())
+            .await?;
+        proof_revocation.finish(&state).await?;
+        if !changed {
+            return Err(ApiError::Conflict(
+                "token policy lost its cache-revocation exclusion; retry the request".to_owned(),
+            ));
+        }
     }
     if let Some(on) = req.cinema_remote_invitations {
         // Readiness never rejects or rewrites the administrator's choice.
@@ -5108,6 +5120,7 @@ fn peer_status(outcome: &PeerActivityOutcome) -> &'static str {
         PeerActivityOutcome::Unhealthy => "unhealthy",
         PeerActivityOutcome::Unsupported => "unsupported",
         PeerActivityOutcome::Unreachable => "unreachable",
+        PeerActivityOutcome::LocalUnavailable => "local_unavailable",
         PeerActivityOutcome::TimedOut => "timed_out",
         PeerActivityOutcome::Refused => "refused",
         PeerActivityOutcome::HttpError => "http_error",
@@ -6150,6 +6163,37 @@ impl FromRef<AppState> for MetricsState {
     }
 }
 
+/// Correlatable timing signals, not Raft authority or physical delivery evidence.
+fn render_cluster_timing_metrics(
+    observations: &crate::cluster::Observations,
+    uptime: std::time::Duration,
+) -> String {
+    let append = observations.append_timing();
+    let wake = observations.monitor_wake();
+    let mut out = format!("# HELP plurx_cluster_timing_epoch_info Process-local timing observation epoch.\n# TYPE plurx_cluster_timing_epoch_info gauge\nplurx_cluster_timing_epoch_info{{epoch=\"{:016x}\"}} 1\nplurx_cluster_timing_uptime_seconds {}\nplurx_cluster_append_observation_evictions_total {}\n", append.process_epoch, uptime.as_secs_f64(), append.evictions);
+    for row in append.rows {
+        let labels = format!("group=\"db\",stage=\"{}\",local=\"{}\",remote=\"{}\",source=\"{}\",term=\"{}\",endpoint=\"{:016x}\"", row.stage.label(), row.local_node, row.remote_node, row.source_epoch, row.term, row.endpoint_fingerprint);
+        for (name, value) in [
+            ("samples_total", row.samples as f64),
+            ("heartbeats_total", row.heartbeats as f64),
+            ("errors_total", row.errors as f64),
+            ("gap_samples_total", row.gap_samples as f64),
+            ("gap_seconds_sum", row.gap_sum_seconds),
+            ("gap_seconds_max", row.gap_max_seconds),
+            ("elapsed_seconds_sum", row.elapsed_sum_seconds),
+            ("elapsed_seconds_max", row.elapsed_max_seconds),
+            ("last_sample_age_seconds", row.since_last_seconds),
+        ] {
+            out.push_str(&format!(
+                "plurx_cluster_append_observation_{name}{{{labels}}} {value}\n"
+            ));
+        }
+    }
+    let labels = format!("source=\"{}\"", wake.instance);
+    out.push_str(&format!("plurx_cluster_serving_monitor_wake_samples_total{{{labels}}} {}\nplurx_cluster_serving_monitor_wake_lateness_seconds_sum{{{labels}}} {}\nplurx_cluster_serving_monitor_wake_lateness_seconds_max{{{labels}}} {}\nplurx_cluster_serving_monitor_wake_lateness_seconds_last{{{labels}}} {}\n",wake.samples,wake.total.as_secs_f64(),wake.maximum.as_secs_f64(),wake.last.as_secs_f64()));
+    out
+}
+
 fn render_passive_membership_metrics(
     view: plurx_core::cluster::membership::PassiveMembershipMetricsView,
 ) -> String {
@@ -6734,7 +6778,8 @@ pub(crate) async fn metrics(
             &state.cluster_observations.read_pool_wait(),
         )
         + &render_writer_abandoned_replies(state.cluster_observations.writer_replies())
-        + &render_cluster_directory_metrics(state.cluster_directory.reads());
+        + &render_cluster_directory_metrics(state.cluster_directory.reads())
+        + &render_cluster_timing_metrics(&state.cluster_observations, state.started_at.elapsed());
     let membership_metrics =
         render_passive_membership_metrics(state.cluster_observations.members());
     let process_metrics = format!(

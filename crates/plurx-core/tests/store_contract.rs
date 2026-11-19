@@ -171,6 +171,8 @@ mod subtitle_text;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/subtitle_translation_upgrade.rs"]
 mod subtitle_translation_upgrade;
+#[path = "store_contract/token_proofs.rs"]
+mod token_proofs;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;

@@ -187,6 +187,7 @@ pub enum PeerActivityOutcome {
     Unhealthy,
     Unsupported,
     Unreachable,
+    LocalUnavailable,
     TimedOut,
     Refused,
     HttpError,
@@ -249,7 +250,7 @@ struct PeerActivityReadGate {
 }
 
 static ACTIVITY_AGGREGATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
-static ACTIVITY_PEER_OUTCOMES: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+static ACTIVITY_PEER_OUTCOMES: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
 
 fn record_aggregation(path: usize) {
     ACTIVITY_AGGREGATIONS[path].fetch_add(1, Ordering::Relaxed);
@@ -265,6 +266,7 @@ fn record_peer_outcome(outcome: &PeerActivityOutcome) {
         PeerActivityOutcome::Refused => 5,
         PeerActivityOutcome::HttpError => 6,
         PeerActivityOutcome::InvalidResponse => 7,
+        PeerActivityOutcome::LocalUnavailable => 8,
     };
     ACTIVITY_PEER_OUTCOMES[slot].fetch_add(1, Ordering::Relaxed);
 }
@@ -298,6 +300,7 @@ pub fn prometheus_cluster_activity() -> String {
         "refused",
         "http_error",
         "invalid_response",
+        "local_unavailable",
     ]
     .iter()
     .enumerate()
@@ -423,6 +426,8 @@ impl PeerActivityClient {
             Err(PeerTransportError::TimedOut) => PeerActivityOutcome::TimedOut,
             Err(PeerTransportError::InvalidResponse) => PeerActivityOutcome::InvalidResponse,
             Err(PeerTransportError::Unreachable) => PeerActivityOutcome::Unreachable,
+            Err(PeerTransportError::LocalUnavailable) => PeerActivityOutcome::LocalUnavailable,
+            Err(PeerTransportError::AuthenticationRefused(_)) => PeerActivityOutcome::Refused,
         }
     }
 }
@@ -507,6 +512,8 @@ async fn read_snapshot_response(
         Err(PeerTransportError::TimedOut) => PeerActivityOutcome::TimedOut,
         Err(PeerTransportError::InvalidResponse) => PeerActivityOutcome::InvalidResponse,
         Err(PeerTransportError::Unreachable) => PeerActivityOutcome::Unreachable,
+        Err(PeerTransportError::LocalUnavailable) => PeerActivityOutcome::LocalUnavailable,
+        Err(PeerTransportError::AuthenticationRefused(_)) => PeerActivityOutcome::Refused,
     }
 }
 
@@ -1774,6 +1781,7 @@ mod tests {
             "refused",
             "http_error",
             "invalid_response",
+            "local_unavailable",
         ] {
             assert!(metrics.contains(&format!("outcome=\"{outcome}\"")));
         }
