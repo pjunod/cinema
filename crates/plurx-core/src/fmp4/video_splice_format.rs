@@ -2,7 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use super::video_splice::{retime_video_fragment, unsupported, VideoSpliceClock};
+use super::video_splice::{
+    author_video_fragment, copy_picture_schedule, retime_video_fragment, unsupported,
+    CopyPictureTime, VideoSpliceClock,
+};
 use super::{
     be_u32, classify, copy_box_end, copy_video_sample_entry_facts,
     declare_hevc_parameter_sets_in_band, dolby_vision_record, find_child,
@@ -164,6 +167,60 @@ impl SpliceVideoRendition<'_> {
                 )
             },
         )?;
+        self.validate_authored(result, boundary)
+    }
+
+    /// Author a witnessed FEL window on the exact copy presentation times.
+    /// A different encoder may reorder the same pictures and use a different
+    /// clock or cadence rounding.
+    pub fn fragment_at_copy_times(
+        &self,
+        input: &Fragment,
+        copy_times: &[CopyPictureTime],
+        copy_timescale: u32,
+        decode_start: u64,
+        sequence: u32,
+        boundary: SpliceBoundary,
+    ) -> Result<Fragment, Fmp4Error> {
+        let source = &self.producer.tracks[0];
+        let output = &self.format.init.tracks[0];
+        validate_hevc_sample_description_reference(self.producer, input)?;
+        let mut schedule =
+            copy_picture_schedule(input, source, output, copy_times, copy_timescale)?;
+        let result = author_video_fragment(
+            input,
+            source,
+            output,
+            decode_start,
+            sequence,
+            |pts, _| {
+                schedule.remove(&pts).ok_or_else(|| {
+                    unsupported("replacement picture is absent from the copy schedule")
+                })
+            },
+            |bytes, sample, first| {
+                self.verify_sample(
+                    bytes,
+                    sample,
+                    if first {
+                        boundary
+                    } else {
+                        SpliceBoundary::Fragment
+                    },
+                )
+            },
+        )?;
+        if !schedule.is_empty() {
+            return Err(unsupported("replacement omitted a witnessed copy picture"));
+        }
+        self.validate_authored(result, boundary)
+    }
+
+    fn validate_authored(
+        &self,
+        result: Fragment,
+        boundary: SpliceBoundary,
+    ) -> Result<Fragment, Fmp4Error> {
         validate_hevc_sample_description_reference(&self.format.init, &result)?;
         if boundary != SpliceBoundary::Fragment && !classify(&result, &self.format.init).is_clean()
         {

@@ -1540,6 +1540,7 @@ impl TranscodeManager {
             cache_location: None,
             control,
             publication: Mutex::new(RollingPublicationClock::default()),
+            native_split: None,
             publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
             file_id,
@@ -1807,6 +1808,7 @@ impl TranscodeManager {
             None,
             None,
             false,
+            false,
             None,
         )
         .await
@@ -1830,6 +1832,7 @@ impl TranscodeManager {
         audio_delivery: Option<&plurx_core::playback::audio::AudioDelivery>,
         sdr_master_codecs: Option<bool>,
         source_telemetry: bool,
+        allow_native_split: bool,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<StartInfo, String> {
         // One Store read for the file, its probe and its settings (D4), or
@@ -1840,7 +1843,17 @@ impl TranscodeManager {
             settings,
             item_title,
         } = self.rolling_start_inputs(file_id, None, plan).await?;
-        let retained_budget = Self::rolling_retained_budget_from(&settings);
+        let native_split = allow_native_split
+            && start_seconds == 0.0
+            && audio_offset_ms == 0
+            && options.convert_dolby_vision
+            && takeover.is_none()
+            && replacement_deadline.is_none();
+        let retained_budget = if native_split {
+            None
+        } else {
+            Self::rolling_retained_budget_from(&settings)
+        };
         // Same make-before-break rule as the transcode path. A takeover
         // continues an existing incarnation and supersedes nothing.
         if replacement_deadline.is_none() && takeover.is_none() {
@@ -2303,6 +2316,7 @@ impl TranscodeManager {
             cache_location: None,
             control,
             publication: Mutex::new(RollingPublicationClock::default()),
+            native_split: native_split.then(|| Arc::new(crate::copyseg::NativeSplitInventory::default())),
             publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
             file_id,

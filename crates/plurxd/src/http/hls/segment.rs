@@ -154,6 +154,27 @@ pub(super) async fn child_playlist_local_before(
     deadline: Instant,
 ) -> Result<Response, ApiError> {
     let (media_deadline, _) = playlist_request_deadlines_before(state, deadline);
+    if let Some((bytes, owner)) = state
+        .transcode
+        .native_split_child_playlist(session, role, rendition)
+        .await
+    {
+        let publication_deadline = response_publication_deadline_before(deadline);
+        let object = format!("{role}/{rendition}/index.m3u8");
+        return complete_buffered_response_before(
+            state,
+            session,
+            &owner,
+            crate::transcode::MediaResponsePublication::attempt_media(
+                "continuous-child-playlist",
+                Some(&object),
+            ),
+            true,
+            playlist_response(bytes),
+            publication_deadline,
+        )
+        .await;
+    }
     let answer = tokio::time::timeout_at(
         tokio::time::Instant::from_std(media_deadline),
         state
@@ -259,6 +280,21 @@ pub(super) async fn child_segment_local_before(
     deadline: Instant,
 ) -> Result<Response, ApiError> {
     let name = child.media_name().ok_or(ApiError::NotFound("segment"))?;
+    if state
+        .transcode
+        .native_split_matches_child(session, child)
+        .await
+    {
+        return Box::pin(segment_local_answer(
+            state,
+            session,
+            &name,
+            headers,
+            deadline,
+            Some(child),
+        ))
+        .await;
+    }
     let answer = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         state
@@ -1151,6 +1187,7 @@ pub(super) async fn segment_local_before(
         seg,
         headers,
         request_deadline,
+        None,
     ))
     .await
 }
@@ -1161,6 +1198,7 @@ async fn segment_local_answer(
     seg: &str,
     headers: &RelayHeaders,
     request_deadline: Instant,
+    split_child: Option<&crate::vodserve::ChildMediaRequest>,
 ) -> Result<Response, ApiError> {
     const APPLE_INIT_REWRITE_LIMIT_BYTES: u64 = INIT_INSPECTION_LIMIT_BYTES;
 
@@ -1180,12 +1218,24 @@ async fn segment_local_answer(
         .await;
     }
 
-    let rolling = tokio::time::timeout_at(
-        tokio::time::Instant::from_std(request_deadline),
-        state.transcode.segment_for_publication(session, seg),
-    )
-    .await
-    .map_err(|_| response_publication_timeout())?;
+    let rolling =
+        tokio::time::timeout_at(tokio::time::Instant::from_std(request_deadline), async {
+            if let Some(child) = split_child {
+                state
+                    .transcode
+                    .segment_for_publication_role_before(
+                        session,
+                        seg,
+                        Some(child),
+                        request_deadline,
+                    )
+                    .await
+            } else {
+                state.transcode.segment_for_publication(session, seg).await
+            }
+        })
+        .await
+        .map_err(|_| response_publication_timeout())?;
     let mut opened = match rolling {
         Ok(crate::transcode::SegmentPublication::Ready(opened)) => *opened,
         Ok(crate::transcode::SegmentPublication::Missing(owner)) => {
@@ -1364,7 +1414,10 @@ async fn segment_local_answer(
                 return Ok(response);
             }
         };
-    if crate::transcode::is_init_object(seg) && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
+    if split_child.is_none()
+        && crate::transcode::is_init_object(seg)
+        && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES
+    {
         let publication_deadline = response_publication_deadline_before(request_deadline);
         let mut init = Vec::with_capacity(opened.len.min(64 * 1024) as usize);
         let mut delivery = opened.delivery;

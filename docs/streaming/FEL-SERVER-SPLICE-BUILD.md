@@ -39,9 +39,10 @@ about whether the title and renderer can produce the enhanced interval.
    their first complete playable window. Continue ordinary playback
    when split admission declines.
 2. Bind the ordinary output clock to the same demuxed packet actually
-   fed into the copy mux. Use the copy packet observer and the source
-   census. Retain the original qualified track choice and absolute
-   source identity through seeks and producer attempts.
+   fed into the copy mux. The renderer hashes every framed base-layer
+   VCL NAL of an accepted source picture. The publisher compares the
+   complete, ordered witness with the next ordinary video object and
+   copies its presentation timestamps picture by picture.
 3. Prepare a future FEL interval through the existing renderer and
    its exact source-picture grid. Select only a boundary beyond the
    last publicly advertised video segment. Check source adjacency,
@@ -68,6 +69,12 @@ about whether the title and renderer can produce the enhanced interval.
 | Publisher | Copy packet witness and the rolling writer, its immutable segments, retention and splice snapshot. | Producer supersession, seek, late window and partial publish keep valid media available. |
 | Delivery | Native capability admission, HLS resources, trial hookup and delivered FEL evidence. | Same player and audio rendition across the cut, correct metadata, fallback and ordinary cold start. |
 | Promotion | Astra review of the integrated tree, local gates, effort gate and the required main promotion. | Owner rebuilds the server. Twilight in Safari upgrades to Profile 8.1 FEL and plays through the cut without picture or sound interruption. |
+
+The initial route covers fresh, local Auto playback from the film head
+in Safari 27.2 with the qualified in-band HEVC and AAC shape. Resumed
+starts use the existing playback route. The independent IDR checked
+on the next ordinary segment is the safe fallback if rendering
+cannot supply the next extent.
 
 The integration branch is `effort/fel-server-splice`. Use the project's
 [development pipeline](../DEVELOPMENT_PIPELINE.md) and

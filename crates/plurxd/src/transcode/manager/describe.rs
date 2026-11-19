@@ -27,9 +27,41 @@ impl TranscodeManager {
         session_id: &str,
         incarnation_id: &str,
     ) -> Option<plurx_core::transcode::dv_processing::DvEffectiveProcessingReport> {
-        self.vod
+        let vod = self
+            .vod
             .dv_effective_report(session_id, incarnation_id)
-            .await
+            .await;
+        if vod.is_some() {
+            return vod;
+        }
+        let session = self.sessions.lock().await.get(session_id).cloned()?;
+        let split = session.native_split.as_ref()?;
+        split.active_ids()?;
+        let lease = session.control.snapshot().await?;
+        let demand = lease.demand.as_ref()?;
+        if lease.retired || demand.render_state != crate::playback_control::RenderState::Rendering {
+            return None;
+        }
+        let media_origin = (session.media_origin_seconds * 1_000.0).round() as i64;
+        let position = demand.position_ms.saturating_sub(media_origin);
+        let clock = session.publication.lock().await;
+        let served = clock.served.as_ref().filter(|snapshot| {
+            snapshot.producer_attempt == session.control.current_producer_attempt()
+        })?;
+        let index = session.segments.lock().await;
+        let segment = index.segs.iter().find(|segment| {
+            served.first_segment <= segment.index
+                && segment.index <= served.last_segment
+                && segment.start_ms <= position
+                && position < segment.end_ms
+        })?;
+        let report = split.fel_at(u64::try_from(segment.index).ok()?, incarnation_id)?;
+        if split.first_fel_presentation() {
+            tracing::info!(target: "plurxd::http::hls", session = %session_log_id(session_id),
+                segment = segment.index, phase = "committed", mode = "native_server_splice",
+                "prepared_replacement");
+        }
+        Some(report)
     }
     #[cfg(test)]
     pub(crate) fn test_hold_source_software_capacity(&self) -> Option<crate::admission::SwPermit> {
