@@ -25,16 +25,16 @@ class PreparedControlHandoffTest {
     private val predecessor = "11111111-1111-4111-8111-111111111111"
     private val successor = "22222222-2222-4222-8222-222222222222"
     private val actionId = "33333333-3333-4333-8333-333333333333"
-    private val predecessorCandidateId = "1".repeat(32)
-    private val successorCandidateId = "2".repeat(32)
     private val bootstrap = ControlBootstrap(PlaybackControl.PROTOCOL,
         "/api/v1/hls/$successor/control", successor, 1L, 1000L, 30000L)
-    private val standing = ClientSelection(quality = QualitySelection.AutoCandidate(2160, predecessorCandidateId),
+    private val originalCandidate = "11111111222222223333333344444444"
+    private val successorCandidate = "55555555666666667777777788888888"
+    private val standing = ClientSelection(quality = QualitySelection.AutoCandidate(2160, originalCandidate),
         codec = CodecPolicy.AUTO, dynamicRange = DynamicRangePolicy.AUTO, audioTrack = 0,
         audioOffsetMs = 0, subtitle = SubtitleSelection(SubtitleMode.OFF))
     private fun handoff() = PreparedControlHandoff(ControlAction(type = "prepare", actionId = actionId,
         sessionId = successor, playlistUrl = "/api/v1/hls/$successor/index.m3u8", mediaOriginMs = 0,
-        control = bootstrap, effectiveSelection = EffectiveSelection(candidateId = successorCandidateId, qualityAuto = true,
+        control = bootstrap, effectiveSelection = EffectiveSelection(candidateId = successorCandidate, qualityAuto = true,
             height = 2160, audioOffsetMs = 0, codec = "server_selected")), standing, 1L)
     private fun committed() = ActionAcknowledgement(actionId, AcknowledgementState.COMMITTED,
         committedMediaOriginMs = 0, firstFrameUnixMs = 1234)
@@ -48,17 +48,18 @@ class PreparedControlHandoffTest {
         assertFalse(handoff.owns(committed().copy(actionId = successor)))
         assertFalse(handoff.framePresented)
         val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
-        intent.requestAutomaticCandidate(predecessorCandidateId, 2160)
+        intent.requestAutomaticCandidate(originalCandidate, 2160)
         val owned = handoff.copy(candidateOwner = intent.automaticCandidateOwner(),
             action = handoff.action.copy(control = null))
         assertTrue(owned.adoptInto(intent))
-        assertEquals(successorCandidateId, intent.automaticCandidateId)
+        assertEquals(successorCandidate, intent.automaticCandidateId)
         val stale = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
-        stale.requestAutomaticCandidate(predecessorCandidateId, 2160)
+        stale.requestAutomaticCandidate(originalCandidate, 2160)
         val staleOwner = stale.automaticCandidateOwner()
-        stale.requestAutomaticCandidate("viewer-newer", 1080)
+        val newerCandidate = "99999999aaaaaaaabbbbbbbbcccccccc"
+        stale.requestAutomaticCandidate(newerCandidate, 1080)
         assertFalse(handoff.copy(candidateOwner = staleOwner).adoptInto(stale))
-        assertEquals("viewer-newer", stale.automaticCandidateId)
+        assertEquals(newerCandidate, stale.automaticCandidateId)
     }
 
     @Test fun serverPrepareCarriesItsOwnControlBootstrap() {
@@ -104,19 +105,19 @@ class PreparedControlHandoffTest {
 
     @Test fun localPictureAndRollbackLeaveCandidateUntouchedUntilCommitAcceptance() {
         val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
-        intent.requestAutomaticCandidate(predecessorCandidateId, 2160)
+        intent.requestAutomaticCandidate(originalCandidate, 2160)
         val pending = handoff().copy(candidateOwner = intent.automaticCandidateOwner())
-        assertEquals(predecessorCandidateId, intent.automaticCandidateId)
+        assertEquals(originalCandidate, intent.automaticCandidateId)
         assertEquals(standing, pending.standingSelection)
         assertFalse(pending.accepted(committed(), "offered", "prepare", successor))
-        assertEquals(predecessorCandidateId, intent.automaticCandidateId)
+        assertEquals(originalCandidate, intent.automaticCandidateId)
         if (pending.accepted(committed(), "none", "none", successor)) {
             val effective = pending.action.effectiveSelection!!
             assertTrue(intent.adoptCommittedAutomaticCandidate(effective.candidateId, effective.height,
                 effective.qualityAuto, pending.candidateOwner))
         }
-        assertEquals(successorCandidateId, intent.automaticCandidateId)
-        assertEquals(predecessorCandidateId, (pending.standingSelection.quality as QualitySelection.AutoCandidate).candidateId)
+        assertEquals(successorCandidate, intent.automaticCandidateId)
+        assertEquals(originalCandidate, (pending.standingSelection.quality as QualitySelection.AutoCandidate).candidateId)
     }
 
     @Test fun acceptedWireCommitTransfersTheRealSessionCallbackAfterItsResponse() = runBlocking {
@@ -132,7 +133,7 @@ class PreparedControlHandoffTest {
         val session = PlaybackControlSession(scope)
         val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
         val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
-        intent.requestAutomaticCandidate(predecessorCandidateId, 2160)
+        intent.requestAutomaticCandidate(originalCandidate, 2160)
         val pending = handoff().copy(candidateOwner = intent.automaticCandidateOwner())
         val oldBootstrap = bootstrap.copy(url = "/api/v1/hls/$predecessor/control", generation = predecessor)
         val initial = PlayerControlObservation(positionMs = 1_860_000, durationMs = 7_200_000,
@@ -190,7 +191,7 @@ class PreparedControlHandoffTest {
             observed.set(initial.copy(acknowledgement = committed()))
             session.reportEvidence()
             assertTrue(commitReceived.await(5, TimeUnit.SECONDS))
-            assertEquals(predecessorCandidateId, intent.automaticCandidateId)
+            assertEquals(originalCandidate, intent.automaticCandidateId)
             assertEquals(0, requests.count { it.first == bootstrap.url })
             val commit = requests.single { it.second.acknowledgement?.state == AcknowledgementState.COMMITTED }.second
             assertEquals(pending.standingSelection, commit.selection)
@@ -200,10 +201,10 @@ class PreparedControlHandoffTest {
                 val next = successorRequest.poll(5, TimeUnit.SECONDS)
                 assertNotNull(next)
                 assertEquals(successor, next!!.generation)
-                assertEquals(QualitySelection.AutoCandidate(2160, successorCandidateId), next.selection.quality)
+                assertEquals(QualitySelection.AutoCandidate(2160, successorCandidate), next.selection.quality)
                 assertNull(next.acknowledgement)
             } else {
-                assertEquals(predecessorCandidateId, intent.automaticCandidateId)
+                assertEquals(originalCandidate, intent.automaticCandidateId)
                 assertEquals(0, requests.count { it.first == bootstrap.url })
             }
             assertFalse(requests.any { it.second.demand == PlaybackDemand.END })
