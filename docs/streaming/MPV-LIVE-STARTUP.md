@@ -1,8 +1,8 @@
 # MPV live startup admission
 
 **Owner:** Codex; Sol implements the Linux Player request and request regressions.
-**Status:** revised reload bound and capacity semantics await review and Rust validation; runtime acceptance pending.
-**Updated:** 2026-11-17.
+**Status:** source reviewed and focused cases passed; integrated validation and runtime acceptance pending.
+**Updated:** 2026-11-18.
 
 A normal Linux Player seek recreated a live copy session. The first frame
 arrived 26.993 seconds after the OSC click. A complete 2.795-second fragment existed;
@@ -126,12 +126,12 @@ A deterministic real-process regression injects a source error after child reap
 and verifies worker join, error propagation and zero remaining raw ownership.
 The captured timeout's exact worker outcome remains unknown.
 
-Sharing-control failures now collect bounded, sanitized fixture observations
-through existing APIs. Requests, assertions, authority checks and deadlines are
-unchanged. The [manual exact-case selector](../ci/RUST-UNIT-FANOUT.md#5-re-running)
-permits focused diagnosis; its partial passes do not replace full merge coverage.
-Source review closed its findings; focused execution and runtime qualification
-remain pending.
+Four focused cases passed on the pre-integration source. These exercised
+the real H1/H2 control path, the original retirement case, the joined-worker
+error regression and the child-group reaping case. The sharing failure did
+not recur. Its earlier cause remains unknown. The focused diagnostic changes
+were removed before integrated validation. Runtime qualification remains
+pending.
 
 ## Acceptance
 
@@ -151,8 +151,8 @@ socket-path/Bash limitations and package-version metadata. All 55 passed with
 no skips. The 0.5.2 frontend package is built. The source-35def Rust run exposed the
 steady-state reload counterexample and two publication/capacity test failures;
 the revised bound, explicit short-admission debt and coherent worker-clock
-fixture require review and affected Rust validation. Normal-route runtime
-acceptance remains open.
+fixture subsequently passed review and the added MPV cases. Integrated checks
+and normal-route runtime acceptance remain open.
 
 Before-change metrics were retained privately from the same lab node. Its
 `plurx_ttff_ms` and `plurx_seek_to_picture_ms` series have zero observations, so

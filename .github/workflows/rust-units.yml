@@ -38,13 +38,6 @@ on:
         required: false
         default: origin/main
         type: string
-      tests:
-        description: >-
-          Comma-separated nextest test ids. When set, exactly those tests run,
-          regardless of content keys, and nothing is adopted or baselined for them.
-        required: false
-        default: ""
-        type: string
 
 env:
   CARGO_TERM_COLOR: never

@@ -3,7 +3,7 @@
 **Updated:** 2026-11-13 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
-- **2026-11-18 · MPV live opening delay:** Codex. Four focused probes and sharing cases passed. Integrated validation and ROG acceptance remain open. [Ledger](docs/streaming/MPV-LIVE-STARTUP.md).
+- **2026-11-18 · MPV live opening delay:** Codex. All four focused cleanup and sharing cases passed. Integrated validation and ROG acceptance remain open. [Ledger](docs/streaming/MPV-LIVE-STARTUP.md).
 
 - **2026-11-16 · Native prepared forward rendezvous:** owner GPT. New Moon's
   native seeks trailed 90–97 ms; buffered forward aim+existing hold preserves the guard.

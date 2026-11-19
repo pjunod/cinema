@@ -195,19 +195,6 @@ literal re-keys only its reader.
 - **Any branch, by hand:** `POST /actions/workflows/rust-units.yml/dispatches`
   with `{"ref": "<branch>", "inputs": {"base": "<sha or origin/main>"}}`.
 
-For an owner-invoked diagnostic run, the same manual dispatch accepts optional
-`inputs.tests`: comma-separated exact nextest ids (`<binary-id> <test name>`).
-Only those named cases run; adoption and merge-base comparison are bypassed
-for them. Invoke this through the owner's normal manual workflow access;
-do not impersonate a bot or introduce a private caller to publish receipts.
-Leaving `tests` empty preserves the normal full content-selected stage.
-
-Named-case passes publish normal authenticated receipts with the **full crate
-inventory** listing, but only the cases actually run can supply passes. The
-full/default merge gate still covers every due test and adopts only passes
-proved by the receipt's authenticated shard logs; a diagnostic subset cannot
-stand in for the rest of the crate.
-
 ## 6. Known constraints carried over
 
 - Environment: the `plurx-ci@sha256:6a989b4d…` image (Jellyfin FFmpeg 8, Rust
