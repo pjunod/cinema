@@ -315,7 +315,8 @@ async fn sharing_source_direct_counts_grant_and_source_slots() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_direct_range_matches_local_serve_file_range() {
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    fixture.keep_fixture_membership_stable().await;
     let session = started(&fixture).await;
     let peer = peer(&fixture, None).await;
     let len = session.length;
