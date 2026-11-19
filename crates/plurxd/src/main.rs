@@ -4114,7 +4114,18 @@ async fn drain_serving_state(
     progress: Arc<crate::progress::ProgressCoalescer>,
     mdns: Option<discovery::Owner>,
 ) -> anyhow::Result<()> {
-    match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, progress.drain()).await {
+    // The progress flush and the Bonjour withdrawal are independent, so they
+    // drain together and the stop takes the longer of the two, not the sum.
+    let withdrawn = async {
+        if let Some(discovery) = mdns {
+            discovery.shutdown().await;
+        }
+    };
+    let ((), flushed) = tokio::join!(
+        withdrawn,
+        tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, progress.drain())
+    );
+    match flushed {
         Ok(Ok(flushed)) if flushed > 0 => {
             tracing::info!(
                 flushed,
@@ -4131,9 +4142,6 @@ async fn drain_serving_state(
                 "timed out flushing coalesced playback progress during shutdown"
             );
         }
-    }
-    if let Some(discovery) = mdns {
-        discovery.shutdown().await;
     }
     Ok(())
 }
@@ -4631,10 +4639,13 @@ fn init_companion_logging() {
 ///
 /// Bounded, because the companion's whole loop is "ask again in two seconds":
 /// a request with no timeout against a half-open connection would hang the
-/// retry loop forever and the server would never be advertised.
+/// retry loop forever and the server would never be advertised. It follows
+/// no redirect: the companion asks the server's own HTTP port directly, so a
+/// redirect is a misconfiguration to report, not a hop to take.
 fn discovery_client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("building discovery HTTP client")
 }

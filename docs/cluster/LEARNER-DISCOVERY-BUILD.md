@@ -1,11 +1,11 @@
 # Learner discovery — advertise client-serving membership only
 
-**Status:** open — implemented and focused local regressions passed; current-effort integration, complete-diff review and qualification remain pending. **Owner:** Codex.
+**Status:** open — integrated on the finished facade, reviewed and fixed; Effort gate, landing on the effort and main qualification remain. **Owner:** Claude (effort `E-E154B131A2`); implemented by Codex.
 **Decision:** Paul, 2026-11-16: “Hide learners from discovery.”
 
 C8 from the [cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md).
-Implementation branch: `codex/cluster-learner-discovery`; integration target:
-`effort/cluster-facade`. This is discovery policy, not an admission change.
+Implementation branch: `codex/cluster-learner-discovery` (`9b8c85e`), integrated on
+`claude/cluster-learner-discovery`; target: `effort/cluster-facade`. This is discovery policy, not an admission change.
 
 ## Contract
 
@@ -95,3 +95,29 @@ These are local source results on the effort snapshot, not final qualification
 or fleet acceptance. Integrate current effort/C7 before final review and
 exact-head gate. Reconcile inherited Clippy/census failures on that base
 without suppressions, raised pins or duplicate ownership fixes.
+
+## Integration on the finished facade (2026-11-19)
+
+- **Merge.** Merged onto `effort/cluster-facade` at `04bff7f`, after the facade
+  slices 2–7 and C7. The drain keeps the facade operations and the C7
+  core-failure watch, and adds the standing watch. The joining-learner startup
+  test keeps the plain authenticated request (no second clock capture) through
+  the facade's test transport. The census stays at zero: discovery reads
+  standing only through `Cluster::standing_watch`.
+- **Focused regressions.** 146 tests passed: discovery, the three route
+  matrices, every `startup_tests` case, the real learner join, the clock
+  response security test and the census.
+- **One whole-diff review.** It asked for changes. All fixed:
+  - With HTTPS enabled, `/api/v1/server/discovery` was redirected, so the
+    companion lost every node's advertisement. It is now a machine endpoint,
+    and the companion's client follows no redirect.
+  - A failed or unconfirmed Bonjour withdrawal dropped the daemon handle. The
+    handle is now kept and the withdrawal retried every second. A daemon whose
+    thread has exited (`DaemonShutdown`) holds no record.
+  - The progress flush and the Bonjour withdrawal now drain concurrently, so
+    the stop takes the longer of the two rather than the sum.
+  - `visible` has a truth-table test for the handler's answer.
+- **Not yet covered.** Nothing tests that `StandingWatch` ignores Raft metric
+  updates that change no standing. That needs a replicated store; its loop
+  compares the standing before returning.
+

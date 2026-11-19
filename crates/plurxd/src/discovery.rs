@@ -37,23 +37,38 @@ impl StandingSource for StandingWatch {
 
 struct Advertisement(Option<mdns_sd::ServiceDaemon>);
 impl Advertisement {
+    /// Withdraw the record and keep the daemon handle until the withdrawal
+    /// is acknowledged, so an unconfirmed attempt can be retried. A daemon
+    /// whose thread has already exited holds no record.
     async fn withdraw(&mut self) -> anyhow::Result<()> {
-        if let Some(daemon) = self.0.take() {
-            let acknowledgement = daemon
-                .shutdown()
-                .context("shutting down Bonjour advertiser")?;
-            let status = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                acknowledgement.recv_async(),
-            )
-            .await
-            .context("Bonjour withdrawal acknowledgement timed out")?
-            .context("Bonjour withdrawal acknowledgement closed")?;
-            anyhow::ensure!(
-                matches!(status, mdns_sd::DaemonStatus::Shutdown),
-                "Bonjour withdrawal was not acknowledged"
-            );
-        }
+        let Some(daemon) = self.0.as_ref() else {
+            return Ok(());
+        };
+        let acknowledgement = match daemon.shutdown() {
+            Ok(acknowledgement) => acknowledgement,
+            Err(mdns_sd::Error::DaemonShutdown) => {
+                // Nothing further can be withdrawn through this handle, and
+                // this owner did not confirm a goodbye: report it, and let a
+                // later promotion register afresh.
+                self.0 = None;
+                anyhow::bail!(
+                    "the Bonjour advertiser had already stopped; its records expire on their own"
+                );
+            }
+            Err(error) => return Err(error).context("shutting down Bonjour advertiser"),
+        };
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            acknowledgement.recv_async(),
+        )
+        .await
+        .context("Bonjour withdrawal acknowledgement timed out")?
+        .context("Bonjour withdrawal acknowledgement closed")?;
+        anyhow::ensure!(
+            matches!(status, mdns_sd::DaemonStatus::Shutdown),
+            "Bonjour withdrawal was not acknowledged"
+        );
+        self.0 = None;
         Ok(())
     }
 }
@@ -119,10 +134,21 @@ impl Owner {
                         advertisement.0 = register();
                     }
                 } else if let Err(error) = advertisement.withdraw().await {
-                    // Do not race a new record against an unconfirmed old
-                    // withdrawal. The independently owned GDM task continues.
-                    tracing::warn!(%error, "Bonjour discovery owner stopped after unconfirmed withdrawal");
-                    return;
+                    if advertisement.0.is_none() {
+                        // The advertiser had already stopped: nothing to retry.
+                        tracing::warn!(%error, "Bonjour withdrawal was not confirmed by this owner");
+                    } else {
+                        // The handle is kept, so no new record races the old
+                        // one; retry until the withdrawal is acknowledged or
+                        // the owner stops. The GDM task continues on its own.
+                        tracing::warn!(%error, "Bonjour withdrawal unconfirmed; retrying");
+                        tokio::select! {
+                            biased;
+                            () = mdns_stop.cancelled() => break,
+                            () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                        }
+                        continue;
+                    }
                 }
                 tokio::select! {
                     biased;
@@ -318,6 +344,20 @@ mod tests {
         .expect("advertisement withdrawn");
     }
 
+    #[test]
+    fn only_standalone_and_voters_are_advertised() {
+        // `GET /api/v1/server/discovery` answers exactly this for the node's
+        // applied standing (`http::system::discovery_eligibility`).
+        use crate::cluster::Standing;
+        assert!(visible(Standing::Standalone));
+        assert!(visible(Standing::Voter));
+        assert!(!visible(Standing::Learner), "a learner is never advertised");
+        assert!(
+            !visible(Standing::Absent),
+            "a removed node is never advertised"
+        );
+    }
+
     #[tokio::test]
     async fn applied_standing_changes_register_withdraw_and_promote_without_restart() {
         let (source, standing) = tokio::sync::watch::channel(Standing::Learner);
@@ -364,8 +404,12 @@ mod tests {
         owner.shutdown().await;
     }
 
+    /// An advertiser whose daemon already stopped cannot be withdrawn by this
+    /// owner. While the node is a learner nothing is registered in its place;
+    /// a later promotion registers afresh instead of leaving the node
+    /// unadvertised until restart.
     #[tokio::test]
-    async fn failed_withdrawal_never_republishes_from_the_same_owner() {
+    async fn a_stopped_advertiser_is_not_replaced_until_promotion() {
         let (source, standing) = tokio::sync::watch::channel(Standing::Voter);
         let registrations = Arc::new(AtomicUsize::new(0));
         let seen = Arc::new(Mutex::new(None));
@@ -392,19 +436,21 @@ mod tests {
             .await
             .expect("external shutdown acknowledged");
         source.send_replace(Standing::Learner);
-        until(|| {
-            owner.tasks[0]
-                .as_ref()
-                .expect("Bonjour owner")
-                .is_finished()
-        })
-        .await;
-        source.send_replace(Standing::Voter);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(
             registrations.load(Ordering::SeqCst),
             1,
-            "an unconfirmed withdrawal cannot race a new record"
+            "a learner never gets a record in place of the stopped one"
         );
+        assert!(
+            !owner.tasks[0]
+                .as_ref()
+                .expect("Bonjour owner")
+                .is_finished(),
+            "the owner keeps following standing"
+        );
+        source.send_replace(Standing::Voter);
+        until(|| registrations.load(Ordering::SeqCst) == 2).await;
         owner.shutdown().await;
     }
 
