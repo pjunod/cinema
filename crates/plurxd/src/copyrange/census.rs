@@ -6,7 +6,7 @@ use plurx_core::{
     domain::MediaFile,
     fmp4::{Fragment, FragmentReader, Init, Unit},
     segplan::{
-        packet_clock::{PacketClockParser, SourcePacketObservation},
+        packet_clock::{first_video_packet_matches, PacketClockParser, SourcePacketObservation},
         ranges::SourceTimestamp,
     },
     transcode::CopyVideoOptions,
@@ -343,18 +343,8 @@ pub(crate) async fn run_source_census(
     let (raw_canonical_init, raw_canonical_fragment) = one_fragment(&canonical)?;
     let (raw_av_init, _) = one_fragment(&av)?;
     let packet = one_clock(&clock)?;
-    let track = raw_canonical_fragment
-        .track(
-            raw_canonical_init
-                .video()
-                .ok_or("copy_head_missing_video")?
-                .id,
-        )
-        .ok_or("copy_head_missing_video")?;
-    if track
-        .samples()
-        .next()
-        .is_none_or(|sample| u64::from(sample.size) != packet.size)
+    if !first_video_packet_matches(&raw_canonical_fragment, &raw_canonical_init, &packet)
+        .ok_or("copy_head_missing_video")?
     {
         return Err("copy_head_clock_sample_mismatch".into());
     }

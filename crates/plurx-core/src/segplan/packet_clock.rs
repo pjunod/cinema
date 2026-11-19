@@ -2,6 +2,8 @@
 //! Packet order and clocks are mathematical observations, not authenticated
 //! source identity, grant authority or proof of fragment/sample equivalence.
 
+use crate::fmp4::{Fragment, Init, Sample, Track, VideoCodec};
+
 pub const MAX_PACKET_CLOCK_LINE_BYTES: usize = 4_096;
 pub const MAX_PACKET_CLOCK_HEADER_BYTES: usize = 16_384;
 
@@ -47,13 +49,93 @@ pub struct SourceFragmentClock {
     pub next_packet_sequence: u64,
 }
 
+/// Check the census packet against the first canonical video sample.
+/// Returns `None` if the fragment has no matching video track.
+pub fn first_video_packet_matches(
+    fragment: &Fragment,
+    init: &Init,
+    packet: &SourcePacketObservation,
+) -> Option<bool> {
+    let video = init.video()?;
+    let track = fragment.track(video.id)?;
+    let matches = track.runs.iter().find_map(|run| {
+        run.samples
+            .first()
+            .map(|sample| sample_matches_packet(fragment, video, sample, run.data_offset, packet))
+    });
+    Some(matches.unwrap_or(false))
+}
+
+fn sample_matches_packet(
+    fragment: &Fragment,
+    video: &Track,
+    sample: &Sample,
+    offset: usize,
+    packet: &SourcePacketObservation,
+) -> bool {
+    if packet.size == u64::from(sample.size) {
+        return true;
+    }
+    if video.codec != Some(VideoCodec::Hevc) {
+        return false;
+    }
+    let end = offset.saturating_add(sample.size as usize);
+    if offset < fragment.mdat_payload.start || end > fragment.mdat_payload.end {
+        return false;
+    }
+    fragment.bytes.get(offset..end).is_some_and(|bytes| {
+        hevc_annex_b_clock(bytes, usize::from(video.nal_length_size))
+            == Some((packet.size, packet.checksum))
+    })
+}
+
+// FFmpeg's HEVC coded-bitstream filter emits a four-byte start code for the
+// first NAL and for parameter sets, and a three-byte code for other NALs.
+// The MP4 muxer uses length prefixes. Compare the clock's size and seed-zero
+// Adler-32 in its original framing before accepting a size difference.
+fn hevc_annex_b_clock(mut bytes: &[u8], length_size: usize) -> Option<(u64, u32)> {
+    if bytes.is_empty() || !(1..=4).contains(&length_size) {
+        return None;
+    }
+    let mut size = 0;
+    let mut low = 0u32;
+    let mut high = 0u32;
+    while !bytes.is_empty() {
+        let (length, payload) = bytes.split_at_checked(length_size)?;
+        let length = length
+            .iter()
+            .fold(0usize, |length, &byte| (length << 8) | usize::from(byte));
+        let (nal, rest) = payload.split_at_checked(length)?;
+        if nal.len() < 2 {
+            return None;
+        }
+        let kind = (nal[0] >> 1) & 0x3f;
+        let start: &[u8] = if size == 0 || (32..=34).contains(&kind) {
+            &[0, 0, 0, 1]
+        } else {
+            &[0, 0, 1]
+        };
+        size += (start.len() + nal.len()) as u64;
+        for chunk in std::iter::once(start).chain(nal.chunks(4096)) {
+            for &byte in chunk {
+                low += u32::from(byte);
+                high += low;
+            }
+            low %= 65_521;
+            high %= 65_521;
+        }
+        bytes = rest;
+    }
+    Some((size, (high << 16) | low))
+}
+
 /// Associate every selected-video sample with its same-input clock packet.
 /// Run before Rust sample conversion. The final canonical row's byte counts
 /// must be observed again after conversion; these packet sizes cannot replace
 /// them. No packet may be dropped, duplicated or guessed by pipe arrival time.
 pub fn associate_fragment_clock(
-    fragment: &crate::fmp4::Fragment,
-    init: &crate::fmp4::Init,
+    fragment: &Fragment,
+    init: &Init,
     packets: &[SourcePacketObservation],
     expected_sequence: u64,
     whole_title_origin: super::ranges::SourceTimestamp,
@@ -79,14 +161,21 @@ pub fn associate_fragment_clock(
     // DTS, as the mov muxer itself uses: each sample's duration must equal its
     // DTS delta. The fragment's last sample is closed by the next fragment's
     // first DTS, which range continuity checks against this row's end.
-    for (at, (sample, packet)) in track.samples().zip(packets).enumerate() {
+    let samples = track.runs.iter().flat_map(|run| {
+        run.samples.iter().scan(run.data_offset, |offset, sample| {
+            let start = *offset;
+            *offset = offset.saturating_add(sample.size as usize);
+            Some((sample, start))
+        })
+    });
+    for (at, ((sample, offset), packet)) in samples.zip(packets).enumerate() {
         if packet.sequence != next_sequence
             || packet.time_base_num == 0
             || packet.time_base_den == 0
             || packet.time_base_num != first.time_base_num
             || packet.time_base_den != first.time_base_den
             || packet.duration == 0
-            || packet.size != u64::from(sample.size)
+            || !sample_matches_packet(fragment, video, sample, offset, packet)
             || sample.duration == 0
         {
             return Err(PacketClockError::FragmentMismatch);
@@ -384,6 +473,17 @@ mod association_tests {
     use super::*;
     use crate::fmp4::{FragmentReader, Unit};
     use crate::segplan::ranges::SourceTimestamp;
+
+    #[test]
+    fn hevc_clock_requires_the_exact_annex_b_size_and_checksum() {
+        let mut bytes = [0, 0, 0, 3, 78, 1, 136, 0, 0, 0, 3, 40, 1, 128];
+        let expected = Some((13, 0x0786_0182));
+        assert_eq!(hevc_annex_b_clock(&bytes, 4), expected);
+        bytes[13] ^= 1;
+        assert_ne!(hevc_annex_b_clock(&bytes, 4), expected);
+        bytes[3] = 0xff;
+        assert_eq!(hevc_annex_b_clock(&bytes, 4), None);
+    }
 
     #[test]
     fn every_fragment_sample_requires_its_exact_ordered_source_clock() {
