@@ -95,6 +95,10 @@ struct LibraryView: View {
                 libraryHeader(proxy: proxy)
                 #endif
                 #if os(tvOS)
+                // One header line: title and count on the left, the tools
+                // and the title filter on the right. It replaces the stacked
+                // title, counter, field and letter index that cost about
+                // 460 pt before the first poster.
                 tvToolbar
                     .remoteContentReturn(to: toolbarReturn ?? contentBookmark ?? visibleItems.first.map { "item:\($0.id)" }) { toolbarReturn = nil }
                 #endif
@@ -104,11 +108,12 @@ struct LibraryView: View {
                     // toolbar. Back from the toolbar is outside this adapter
                     // and leaves the library natively.
                     VStack(alignment: .leading, spacing: 12) {
-                        // Keep the preamble in the results scroll. Pinning it
-                        // above this viewport leaves less height than a complete
-                        // poster card, so native focus clips the artwork's top
-                        // while revealing its title and metadata.
-                        libraryHeader(proxy: proxy)
+                        // Keep the preamble in the results scroll. Only the
+                        // occasional lines (other libraries, clear filters,
+                        // an incomplete load) remain; the one-line header
+                        // above is short enough that a whole poster card,
+                        // title and metadata still fit under it.
+                        tvPreamble
                         stateContent.padding(.bottom, 36)
                             .remoteContentBack(to: "library:view") {
                                 // Where Back left the content; Down returns there.
@@ -194,17 +199,45 @@ struct LibraryView: View {
         }
     }
 
+    #if os(tvOS)
+    @ViewBuilder
+    private var tvPreamble: some View {
+        let others = collection.libraries.count > 1
+        let filtered = filter != .all || !query.isEmpty
+        if others || filtered {
+            HStack(alignment: .firstTextBaseline, spacing: 24) {
+                if others {
+                    Text(collection.libraries.map(\.name).joined(separator: ", "))
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundStyle(Palette.muted)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                if filtered {
+                    Button("Clear filters") { filter = .all; query = "" }
+                        .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 8)
+        }
+        if let error {
+            HStack(spacing: 24) {
+                Text("Incomplete library: \(error)")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(Palette.muted)
+                Button("Retry") { Task { await state.retry() } }
+                    .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
+            }
+            .padding(.horizontal, 24)
+        }
+    }
+    #endif
+
     @ViewBuilder
     private func libraryHeader(proxy: ScrollViewProxy) -> some View {
-        #if os(tvOS)
-        Text(collection.title).font(.title2.bold()).foregroundStyle(Palette.onBg)
-            .accessibilityAddTraits(.isHeader)
-        #endif
         summary
         TextField("Find a title in this library", text: $query, prompt: searchPrompt)
-            #if os(tvOS)
-            .foregroundStyle(Palette.onBg)
-            #endif
             #if os(iOS)
             .textFieldStyle(.roundedBorder)
             #endif
@@ -286,7 +319,23 @@ struct LibraryView: View {
         } else if rows {
             LazyVStack(alignment: .leading, spacing: 28) {
                 ForEach(state.groups) { group in
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: rowHeadingSpacing) {
+                        #if os(tvOS)
+                        // A heading is text. Its action is the tile at the
+                        // end of the row, so Down from a poster reaches the
+                        // next row's posters instead of a right-hand button.
+                        HStack(alignment: .firstTextBaseline, spacing: 14) {
+                            Text(group.label)
+                                .font(.system(size: 30, weight: .semibold))
+                                .foregroundStyle(Palette.onBg)
+                                .accessibilityAddTraits(.isHeader)
+                                .accessibilityIdentifier("library-group-heading-\(group.id)")
+                            Text("\(group.items.count)\(complete ? "" : " loaded")")
+                                .font(.system(size: 22, weight: .medium))
+                                .foregroundStyle(Palette.muted)
+                        }
+                        .padding(.horizontal, 24)
+                        #else
                         HStack {
                             Text(group.label).font(.title2.bold()).accessibilityAddTraits(.isHeader)
                                 .accessibilityIdentifier("library-group-heading-\(group.id)")
@@ -299,14 +348,11 @@ struct LibraryView: View {
                             .accessibilityLabel("View all \(group.label) items")
                             .remoteControl("group:\(group.id)", label: "View all \(group.label) items") { expandedGroup = group.id }
                         }
-                        #if os(tvOS)
-                        .padding(.horizontal, 24)
                         #endif
-                        .tvNavigationFocusSection()
                         ScrollViewReader { rowProxy in
                         ScrollView(.horizontal) {
                             LazyHStack(alignment: .top, spacing: 18) {
-                                ForEach(group.items) { item in
+                                ForEach(rowItems(group)) { item in
                                     NavigationLink(value: Route.item(item.id)) {
                                         if collection.supportsRecordedSort {
                                             LandscapeCard(item: item, width: model.posterSize.landscapeWidth)
@@ -319,19 +365,36 @@ struct LibraryView: View {
                                     .accessibilityIdentifier("item:\(item.id)")
                                     .remoteControl("item:\(item.id)", label: item.title) { remoteNavigation.navigate(to: .item(item.id)) }
                                 }
+                                #if os(tvOS)
+                                if group.items.count > Self.tvRowCap {
+                                Button { expandedGroup = group.id } label: {
+                                    LibraryGroupAllTile(count: group.items.count,
+                                                        width: collection.supportsRecordedSort ? model.posterSize.landscapeWidth : model.posterSize.posterWidth,
+                                                        landscape: collection.supportsRecordedSort)
+                                }
+                                .posterButtonStyle()
+                                .accessibilityLabel("View all \(group.label) items")
+                                .remoteControl("group:\(group.id)", label: "View all \(group.label) items") { expandedGroup = group.id }
+                                }
+                                #endif
                             }
                             #if os(tvOS)
                             // Keep the lifted first/last card and its ring inside
                             // the horizontal viewport, including large posters.
-                            .padding(24)
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 16)
                             #else
                             .padding(.vertical, 12)
                             #endif
                         }
                         .accessibilityIdentifier("library-row-\(group.id)")
+                        // Each row is its own focus section: Down from any
+                        // poster lands in the next row in one press, even when
+                        // that row is shorter and nothing sits directly below.
+                        .tvNavigationFocusSection()
                         .onChange(of: remoteNavigation.focusRequestRevision) { _, _ in
                             let key = remoteNavigation.requestedFocus
-                            guard remoteNavigation.activeScope == remoteScope, let key, key.hasPrefix("item:"), let id = Int(key.dropFirst(5)), group.items.contains(where: { $0.id == id }) else { return }
+                            guard remoteNavigation.activeScope == remoteScope, let key, key.hasPrefix("item:"), let id = Int(key.dropFirst(5)), rowItems(group).contains(where: { $0.id == id }) else { return }
                             rowProxy.scrollTo(id, anchor: .center)
                         }
                         }
@@ -372,7 +435,16 @@ struct LibraryView: View {
     }
 
     private var remoteScope: String { "library:" + collection.id }
+    #if os(tvOS)
+    /// A row shows its first 20 titles; a longer group ends in an "All <n>"
+    /// tile, so opening the group costs at most 20 Right presses.
+    static let tvRowCap = 20
+    private func rowItems(_ group: LibraryGroup) -> [Item] { Array(group.items.prefix(Self.tvRowCap)) }
+    private var remoteKeys: [String] { ["library:view", "library:sort", "library:filter", "library:files", "library:jump", "library:search"] + (rows ? state.groups.flatMap { group in rowItems(group).map { "item:\($0.id)" } + (group.items.count > Self.tvRowCap ? ["group:\(group.id)"] : []) } : visibleItems.map { "item:\($0.id)" }) }
+    #else
+    private func rowItems(_ group: LibraryGroup) -> [Item] { group.items }
     private var remoteKeys: [String] { ["library:view", "library:sort", "library:filter", "library:files", "library:jump", "library:search"] + (rows ? state.groups.flatMap { ["group:\($0.id)"] + $0.items.map { "item:\($0.id)" } } : visibleItems.map { "item:\($0.id)" }) }
+    #endif
     private func updateRemoteOrder() {
         remoteNavigation.setOrder(scope: remoteScope, keys: remoteKeys, columns: rows ? 1 : gridColumns)
     }
@@ -381,18 +453,41 @@ struct LibraryView: View {
         remoteNavigation.openModal(scope: scope, opener: "library:" + menu) { choiceMenu = nil }
         if remoteNavigation.activeScope == scope { choiceMenu = menu }
     }
+    private var rowHeadingSpacing: CGFloat {
+        #if os(tvOS)
+        return 4
+        #else
+        return 12
+        #endif
+    }
+
     #if os(tvOS)
-    /// One compact row under the title, the same size and style as the Live
-    /// TV toolbar. Each control names its current value.
+    /// The page's one header line: title and count, then the compact tools
+    /// (each naming its current value) and the in-library title filter.
     private var tvToolbar: some View {
-        HStack(spacing: 16) {
+        HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 20) {
+                Text(collection.title)
+                    .font(.system(size: 44, weight: .bold))
+                    .foregroundStyle(Palette.onBg)
+                    .lineLimit(1)
+                    .accessibilityAddTraits(.isHeader)
+                    .layoutPriority(1)
+                Text(state.summary)
+                    .font(.system(size: 24, weight: .medium))
+                    .foregroundStyle(Palette.muted)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("library-loaded-summary")
+            }
+            Spacer(minLength: 16)
             ForEach(["view", "sort", "filter", "files"], id: \.self) { menu in
                 Button { openChoices(menu) } label: {
-                    HStack(spacing: 10) {
+                    HStack(spacing: 12) {
                         Text(menu.capitalized)
                         Text(menu == "view" ? presentation.capitalized : menu == "sort" ? sort.label : menu == "files" ? presence.label : filter.label)
-                            .foregroundStyle(Palette.muted).lineLimit(1)
+                            .opacity(0.62).lineLimit(1)
                     }
+                    .lineLimit(1)
                 }
                 .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
                 .accessibilityIdentifier("library:" + menu)
@@ -401,12 +496,19 @@ struct LibraryView: View {
             Button { prepareJump() } label: {
                 Text(preparingJump ? "Loading index…" : "Jump to…")
             }
+                .fixedSize()
                 .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
                 .disabled(visibleItems.isEmpty)
                 .accessibilityIdentifier("library:jump")
                 .remoteControl("library:jump", label: "Jump to group", enabled: !visibleItems.isEmpty) { prepareJump() }
-            Spacer(minLength: 0)
+            TextField("Find a title in this library", text: $query, prompt: searchPrompt)
+                .font(.system(size: 22, weight: .medium))
+                .foregroundStyle(Palette.onBg)
+                .frame(minWidth: 200, maxWidth: 320)
+                .accessibilityLabel("Find a title in this library")
+                .remoteControl("library:search", label: "Find a title") {}
         }
+        .padding(.top, 8)
         .focusSection()
     }
     #endif
@@ -515,12 +617,12 @@ private struct LibraryGroupView: View {
             HStack(alignment: .top, spacing: 32) {
                 #if os(tvOS)
                 VStack(alignment: .leading, spacing: 22) {
-                    Text("Library tools").font(.headline).foregroundStyle(Palette.muted)
+                    Text("Library tools").font(.system(size: 22, weight: .medium)).foregroundStyle(Palette.muted)
                     Button("Library tools") { returningToTools = true; dismiss() }
                         .buttonStyle(TVReadableButtonStyle(prominent: false))
                         .accessibilityIdentifier("group:tools")
                         .remoteControl("group:tools", label: "Library tools") { returningToTools = true; dismiss() }
-                    Text("Left reaches tools. Right returns to your title.").font(.caption).foregroundStyle(Palette.muted)
+                    Text("Left reaches tools. Right returns to your title.").font(.system(size: 22, weight: .medium)).foregroundStyle(Palette.muted)
                     Spacer(minLength: 0)
                 }
                 .frame(width: 240)
@@ -530,7 +632,7 @@ private struct LibraryGroupView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     #if os(tvOS)
-                    Text(title).font(.title2.bold()).foregroundStyle(Palette.onBg)
+                    Text(title).font(.system(size: 44, weight: .bold)).foregroundStyle(Palette.onBg)
                         .accessibilityAddTraits(.isHeader)
                     #endif
                     Text("\(items.count)\(state.complete ? " items" : " loaded · library still loading")")
@@ -614,3 +716,26 @@ private struct LibraryGroupView: View {
         .task { await reload() }
     }
 }
+
+#if os(tvOS)
+/// The last tile of a library row: the same size as the row's artwork, so
+/// it is one more step to the right rather than a control above the row.
+private struct LibraryGroupAllTile: View {
+    let count: Int
+    let width: CGFloat
+    let landscape: Bool
+    var body: some View {
+        RoundedRectangle(cornerRadius: landscape ? 11 : 10, style: .continuous)
+            .fill(Palette.surfaceHi)
+            .frame(width: width, height: landscape ? width * 9 / 16 : width * 1.5)
+            .overlay {
+                HStack(spacing: 12) {
+                    Text("All \(count)")
+                    Image(systemName: "chevron.right")
+                }
+                .font(.system(size: 26, weight: .medium))
+                .foregroundStyle(Palette.onBg)
+            }
+    }
+}
+#endif

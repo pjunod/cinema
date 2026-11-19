@@ -23,7 +23,7 @@ final class TVRemoteManagementNavigationTests: TVNavigationTestCase {
         reachForSetup(developer, in: app, limit: 12)
         assertFocus(developer, in: app, context: "Developer category")
         remote.press(.right)
-        let features = app.buttons["Shared libraries, Cinema remotes and other features awaiting evidence"]
+        let features = app.buttons["settings-developer-features"]
         reachForSetup(features, in: app, limit: 6)
         assertFocus(features, in: app, context: "Developer settings entry")
         remote.press(.select)
