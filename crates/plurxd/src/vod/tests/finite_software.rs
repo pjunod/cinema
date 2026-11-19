@@ -2493,3 +2493,118 @@ async fn returned_original_driver_destructor_panic_remains_failed_on_every_join(
     assert_eq!(after.used, held.used);
     assert_eq!(after.unknown_peak_producers, held.unknown_peak_producers);
 }
+
+#[tokio::test]
+async fn finite_vod_reclaims_running_index_only_after_its_original_close() {
+    finite_vod_reclaim_fixture(false).await;
+}
+
+#[tokio::test]
+async fn finite_vod_prepare_deadline_keeps_original_index_charge() {
+    finite_vod_reclaim_fixture(true).await;
+}
+
+async fn finite_vod_reclaim_fixture(exhaust_deadline: bool) {
+    let mut fixture = finite_cancellation_fixture().await;
+    if exhaust_deadline {
+        fixture.settings.materialize_budget = Duration::from_secs(3);
+    }
+    let manager = Arc::new(crate::transcode::TranscodeManager::new(
+        Arc::clone(&fixture.serve.shared.store),
+        fixture._base.path().join("reclaim-index"),
+        plurx_core::transcode::EncoderCaps::default(),
+        plurx_core::transcode::Pipeline::Cpu,
+    ));
+    fixture
+        .serve
+        .shared
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
+        .await
+        .expect("same saved pool bound for index and foreground");
+    let mut recipe = fixture.recipe.clone();
+    let encoding = recipe.encoding.as_ref().expect("ordinary selected software recipe");
+    recipe.encoding = Some(
+        encoding
+            .clone_with_admissions_for_test(manager.admissions())
+            .await,
+    );
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let closed = crate::seam_hooks::AsyncPause::new("original index work closed");
+    let index = {
+        let manager = Arc::clone(&manager);
+        let started = Arc::clone(&started);
+        let closed = Arc::clone(&closed);
+        let cache = fixture._base.path().join("index-cache");
+        std::fs::create_dir_all(&cache).expect("index cache");
+        tokio::spawn(async move {
+            crate::fragindex::paced_index_until_reclaimed(&manager, &cache, &started, &closed)
+                .await;
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(15), started.notified())
+        .await
+        .expect("actual index child reached its output stage");
+    let background = manager.admissions().snapshot();
+    let baseline = fixture.runtime.accounting().expect("pre-R ledger").used;
+    assert!(background.background_active);
+    assert_eq!(background.software_used, 2);
+
+    let key = "d".repeat(64);
+    let mut foreground = Box::pin(finite_software::build(
+        &fixture.serve.shared,
+        &key,
+        None,
+        recipe,
+        fixture.plan.clone(),
+        &fixture.settings,
+    ));
+    let close = tokio::select! {
+        held = closed.reached() => held,
+        _ = &mut foreground => panic!("the original index still owns its compatibility permit"),
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut foreground)
+            .await
+            .is_err(),
+        "a cleanup request or joined child alone cannot release the original admission"
+    );
+    assert_eq!(manager.admissions().snapshot().software_used, 2);
+    assert_eq!(fixture.runtime.accounting().expect("still pre-R").used, baseline);
+    if exhaust_deadline {
+        let error = match foreground.await {
+            Ok(_) => panic!("an expired foreground request must have no R owner"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            crate::transcode::vod_refusal(&error),
+            Some((
+                "vod_family_capacity",
+                "the original fragment index still owns capacity at the prepare deadline"
+            ))
+        );
+        assert_eq!(manager.admissions().snapshot().software_used, 2);
+        assert_eq!(fixture.runtime.accounting().expect("expired pre-R").used, baseline);
+        drop(close);
+        index.await.expect("join the original index attempt");
+        assert_eq!(manager.admissions().snapshot().software_used, 0);
+        return;
+    }
+    drop(close);
+    index.await.expect("join the original index attempt");
+
+    let rendition = foreground.await.expect("same foreground request rechecks and admits");
+    assert!(!manager.admissions().snapshot().background_active);
+    let cleanup = rendition
+        .dir
+        .finite_build_cleanup_selector()
+        .expect("original foreground R cleanup selector");
+    drop(rendition);
+    fixture.serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
+    wait_until("foreground cleanup", Duration::from_secs(30), || async {
+        cleanup.known_closed()
+    })
+    .await;
+    assert_eq!(manager.admissions().snapshot().software_used, 0);
+}

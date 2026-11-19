@@ -32,7 +32,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
+use tokio_util::sync::CancellationToken;
 
 use plurx_core::domain::MediaFile;
 use plurx_core::transcode::{DecodeBackend, Encoder, ResolvedTranscode};
@@ -134,6 +135,9 @@ struct PermitState {
     software_background_permits: usize,
     software_live_used: usize,
     software_background_used: usize,
+    /// The current disposable read's yield request. Its original permit still
+    /// owns the capacity; waiting starts hold only a weak reference here.
+    disposable_background: Weak<DisposableBackground>,
     /// Capacity a predecessor handed to its own viewer's prepared successor.
     /// Created before the predecessor's permit is released, so between that
     /// reap and the successor's retry no other start can take it; only the
@@ -566,7 +570,50 @@ pub struct TranscodePermit {
     software: Option<SwPermit>,
 }
 
+/// A cooperatively interruptible read enrolled by its original owner.
+#[derive(Debug, Default)]
+pub(crate) struct DisposableBackground {
+    pub(crate) cancel: CancellationToken,
+    cleanup_unknown: std::sync::atomic::AtomicBool,
+}
+
+impl DisposableBackground {
+    /// Returns true once so the read's exact permit can be retained.
+    pub(crate) fn mark_cleanup_unknown(&self) -> bool {
+        !self.cleanup_unknown.swap(true, Ordering::AcqRel)
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) enum BackgroundYield {
+    None,
+    Requested,
+    CleanupUnknown,
+}
+
 impl TranscodePermit {
+    pub(crate) fn register_disposable_background(&self) -> Option<Arc<DisposableBackground>> {
+        let software = self.software.as_ref()?;
+        if software.owner != PermitOwner::Background {
+            return None;
+        }
+        let mut permits = software
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if permits.disposable_background.strong_count() > 0 {
+            return None;
+        }
+        let original = Arc::new(DisposableBackground::default());
+        permits.disposable_background = Arc::downgrade(&original);
+        let foreground_blocked = permits.live_capacity_waiting > 0;
+        drop(permits);
+        if foreground_blocked {
+            original.cancel.cancel();
+        }
+        Some(original)
+    }
+
     /// Inspect this exact held bundle without acquiring or cloning capacity.
     pub(crate) fn retained_resources(&self) -> RetainedTranscodePermit<'_> {
         RetainedTranscodePermit {
@@ -629,6 +676,26 @@ impl LiveWait {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         permits.live_capacity_waiting += 1;
         self.capacity_blocked = true;
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn request_disposable_background_yield(&self) -> BackgroundYield {
+        let original = self
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .disposable_background
+            .upgrade();
+        match original {
+            Some(original) if original.cleanup_unknown.load(Ordering::Acquire) => {
+                BackgroundYield::CleanupUnknown
+            }
+            Some(original) => {
+                original.cancel.cancel();
+                BackgroundYield::Requested
+            }
+            None => BackgroundYield::None,
+        }
     }
 }
 

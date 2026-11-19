@@ -3071,7 +3071,8 @@ pattern = "purge_if_dormant"
 # Adaptive source audit e1d42fb2: One maintain() call reconciles actual idle/dormant state;
 # three new selected finite/restart test calls exercise existing purge settlement. Existing
 # processed-instance test reformatting is count-neutral.
-expected_occurrences = 23
+# The real index-reclaim fixture closes its newly admitted foreground R in the existing dormant collector.
+expected_occurrences = 24
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or
@@ -4287,7 +4288,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Shared: both sides carried the Twilight/reader source (title-lane scheduling and reader
 # reclamation), so main's figure already counts admission.rs +1 and source_probe/title_work_tests.rs +4.
 # Union 1153 + 15 (F+) + 13 (main) = 1181, less those 5 counted twice = 1176.
-expected_occurrences = 1261
+# The index-reclaim fixture drives the real paced index in one joined test task.
+expected_occurrences = 1262
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -6283,7 +6285,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # source_probe/title_work_tests.rs +8 and transcode/manager/construct.rs +1 (the bounded
 # production qualification-admission timeout, QUEUE_WAIT in admit_dv_title).
 # Union 2212 + 20 + 39 = 2271, less those 11 counted twice = 2260.
-expected_occurrences = 2511
+# The paced index-reclaim fixture bounds its stage observer, original join observation and pre-release pending check.
+expected_occurrences = 2514
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

@@ -1923,6 +1923,7 @@ struct DvTitleScanInput {
     index: String,
     cancel: tokio_util::sync::CancellationToken,
     keeper: Option<Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper>>,
+    pause: Option<plurx_core::process::bounded::SourcePauseController>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1940,6 +1941,7 @@ impl DvTitleScanInput {
             index,
             cancel: cancel.clone(),
             keeper: plurx_core::process::bounded::original_keeper(),
+            pause: plurx_core::process::bounded::source_pause_controller(),
         };
         let task = tokio::spawn(async move { input.run(wall_time).await });
         DvTitleScan { task, cancel }
@@ -1953,6 +1955,7 @@ impl DvTitleScanInput {
         use std::os::fd::AsRawFd;
         let keeper = self.keeper.clone();
         let cancel = self.cancel.clone();
+        let pause = self.pause.clone();
         let work = async move {
             let mut command = tokio::process::Command::new(&self.scanner);
             command.args(["/proc/self/fd/3", &self.index]);
@@ -1975,6 +1978,12 @@ impl DvTitleScanInput {
             output
         };
         let work = bounded::cancellable(cancel, work);
+        let work = async {
+            match pause {
+                Some(pause) => bounded::pausable(pause, work).await,
+                None => work.await,
+            }
+        };
         match keeper {
             Some(keeper) => bounded::with_original_work_keeper(keeper, work).await,
             None => work.await,
@@ -3393,6 +3402,17 @@ async fn build_with_args_shared(
     .await
 }
 
+#[cfg(target_os = "linux")]
+async fn settle_original_index_group(pid: u32) {
+    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    while !plurx_core::process::bounded::source_group_quiescent(pid as i32, false)
+        .await
+        .unwrap_or(false)
+    {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn build_with_args_owned(
     file: &MediaFile,
@@ -3657,6 +3677,10 @@ async fn build_with_args_owned(
                     Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
                 }
             }
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(pid) = source_pause_pid {
+            settle_original_index_group(pid).await;
         }
         return all(IndexOutcome::Failed(Box::new(IndexFailure::new(
             IndexFailureCode::IndexProcessFailed,
@@ -3924,13 +3948,7 @@ async fn build_with_args_owned(
     }
     #[cfg(target_os = "linux")]
     if let Some(pid) = source_pause_pid {
-        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-        while !plurx_core::process::bounded::source_group_quiescent(pid as i32, false)
-            .await
-            .unwrap_or(false)
-        {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        settle_original_index_group(pid).await;
     }
     // `scan` is `None` unless the reader ran to the end of the stream: a
     // scan that did not finish cannot vouch that no slave failed.
@@ -4212,6 +4230,8 @@ mod equality_tests;
 /// future is dropped.
 #[cfg(test)]
 mod ride_along_tests;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use ride_along_tests::paced_index_until_reclaimed;
 
 #[cfg(test)]
 #[path = "fragindex/refit_acceptance_tests.rs"]

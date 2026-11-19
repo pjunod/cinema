@@ -978,9 +978,10 @@ impl VodServe {
                 finalized_encoder_threads,
                 true,
                 deadline,
+                None,
             )
             .await
-            .ok_or("static software compatibility pool is occupied")?;
+            .map_err(|error| format!("static software compatibility admission: {error}"))?;
         let cache_grant = tokio::time::timeout_at(
             deadline.into(),
             crate::playback_cache::reserve_finite(

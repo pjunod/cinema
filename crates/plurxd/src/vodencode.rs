@@ -980,6 +980,19 @@ impl Drop for FiniteSoftwareCompatibility {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum FiniteCompatibilityRefusal {
+    #[error("finite software compatibility pool is occupied")]
+    Capacity,
+    #[error("the original finite software prepare deadline elapsed")]
+    Deadline,
+    #[error("the original fragment index still owns capacity at the prepare deadline")]
+    BackgroundYieldDeadline,
+    #[error("the original fragment index has unresolved cleanup and still owns capacity")]
+    BackgroundCleanupUnknown,
+}
+
+#[cfg(target_os = "linux")]
 impl Encoding {
     /// Call only after the finite command is finalized under this same saved
     /// software policy. Unlike the legacy frozen-command floor, the selected
@@ -992,14 +1005,19 @@ impl Encoding {
         finalized_encoder_threads: u32,
         background: bool,
         deadline: Instant,
-    ) -> Option<FiniteSoftwareCompatibility> {
-        let software_budget = usize::try_from(software_pool_threads).ok()?;
+        continuous: Option<&plurx_core::cluster::clock::ContinuousDeadline>,
+    ) -> Result<FiniteSoftwareCompatibility, FiniteCompatibilityRefusal> {
+        use crate::admission::BackgroundYield;
+        use FiniteCompatibilityRefusal as Refusal;
+
+        let software_budget =
+            usize::try_from(software_pool_threads).map_err(|_| Refusal::Capacity)?;
         let mut resources = self.resources();
         if finalized_encoder_threads == 0
             || resources.hardware_slot
             || self.plan.encoder() != plurx_core::transcode::Encoder::Software
         {
-            return None;
+            return Err(Refusal::Capacity);
         }
         // The actual finite compiler can choose more encoder threads than
         // the old whole-pipeline estimate (e.g. inherited None on a large
@@ -1007,7 +1025,7 @@ impl Encoding {
         // arithmetic, not a measured sumless decoder/filter/native peak.
         resources.cpu_threads = resources
             .cpu_threads
-            .max(usize::try_from(finalized_encoder_threads).ok()?);
+            .max(usize::try_from(finalized_encoder_threads).map_err(|_| Refusal::Capacity)?);
         let priority = if background {
             Priority::Background
         } else if self.nonpreemptive_trial || self.is_speculative() {
@@ -1015,31 +1033,50 @@ impl Encoding {
         } else {
             Priority::Live
         };
-        // Same borrowed preemption protocol as ordinary frozen preparation:
-        // only foreground demand waits for actual background retirement, under
-        // the caller's original deadline. Cancellation drops this waiter only.
+        let expired = || {
+            Instant::now() >= deadline || continuous.is_some_and(|d| d.entry_remaining().is_err())
+        };
         let mut waiting = (priority == Priority::Live).then(|| self.admissions.queue_for_slot());
+        let mut requested_yield = false;
         loop {
-            if Instant::now() >= deadline {
-                return None;
+            if expired() {
+                return Err(if requested_yield {
+                    Refusal::BackgroundYieldDeadline
+                } else {
+                    Refusal::Deadline
+                });
             }
+            let background_before_attempt =
+                waiting.is_some() && self.admissions.background_is_active();
             if let Some(bundle) =
                 self.admissions
                     .try_admit_bundle(0, software_budget, &resources, priority)
             {
-                if Instant::now() >= deadline {
-                    return None;
+                if expired() {
+                    return Err(Refusal::Deadline);
                 }
-                let original = EncodePermit::from(bundle).try_claim_worker()?;
-                return Some(FiniteSoftwareCompatibility {
+                let original = EncodePermit::from(bundle)
+                    .try_claim_worker()
+                    .ok_or(Refusal::Capacity)?;
+                return Ok(FiniteSoftwareCompatibility {
                     original: Some(original),
                     possible_entry: false,
                 });
             }
-            if priority != Priority::Live || !self.admissions.background_is_active() {
-                return None;
+            let Some(waiting) = waiting.as_mut().filter(|_| background_before_attempt) else {
+                return Err(Refusal::Capacity);
+            };
+            waiting.mark_capacity_blocked();
+            match waiting.request_disposable_background_yield() {
+                BackgroundYield::Requested => requested_yield = true,
+                BackgroundYield::CleanupUnknown => return Err(Refusal::BackgroundCleanupUnknown),
+                BackgroundYield::None => {}
             }
-            waiting.as_mut()?.mark_capacity_blocked();
+            // A release between the failed admission and this observation
+            // still merits one real reservation attempt under the same cap.
+            if !self.admissions.background_is_active() {
+                continue;
+            }
             tokio::time::sleep_until(
                 deadline
                     .min(Instant::now() + crate::transcode::ADMISSION_POLL)

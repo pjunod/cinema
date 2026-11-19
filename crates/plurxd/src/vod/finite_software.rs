@@ -810,6 +810,21 @@ async fn build_inner(
             .map(|rendition| (rendition, None))
             .map_err(|(error, _rendition)| error);
     }
+    let started = Instant::now();
+    let mut admission_deadline =
+        crate::media_pool::create_stage_deadline(settings.materialize_budget).into_std();
+    let continuous_entry_deadline =
+        continuous_entry_deadline.or_else(crate::media_pool::create_continuous_entry_deadline);
+    let original_policy_cutoff = match continuous_entry_deadline.as_ref() {
+        Some(cutoff) => {
+            let original = cutoff
+                .monotonic_cutoff()
+                .map_err(|error| format!("the original finite software prepare cutoff: {error}"))?;
+            admission_deadline = admission_deadline.min(original);
+            original
+        }
+        None => started,
+    };
     // Read coherent saved intent before acquisition. Automatic/absent retain
     // the conservative local default until actual learning authorizes a plan;
     // this does not rewrite numeric rollback values or provenance.
@@ -823,13 +838,6 @@ async fn build_inner(
         .transpose()
         .map_err(|_| "finite software pool policy is invalid".to_owned())?
         .unwrap_or_else(|| crate::admission::software_budget() as u64);
-    let admission_deadline = Instant::now() + settings.materialize_budget;
-    // Adaptive creates already reserved activation upstream. A fresh local
-    // materialization budget must never extend their original policy cutoff.
-    let original_policy_cutoff = continuous_entry_deadline
-        .as_ref()
-        .and_then(|cutoff| cutoff.monotonic_cutoff().ok())
-        .unwrap_or_else(Instant::now);
     let epoch = runtime
         .refresh_admission_capacity(admission_deadline)
         .await
@@ -894,20 +902,23 @@ async fn build_inner(
             finalized_encoder_threads,
             false,
             admission_deadline,
+            request.continuous_entry_deadline.as_ref(),
         )
         .await
-        .ok_or_else(|| {
-            if application_owner_bytes.is_some() {
+        .map_err(|error| {
+            if application_owner_bytes.is_some()
+                && matches!(
+                    error,
+                    crate::vodencode::FiniteCompatibilityRefusal::Capacity
+                )
+            {
                 *failed_attempt_trial_refusal = Some(runtime.finite_trial_refusal(
                     &request,
                     original_policy_cutoff,
                     Instant::now(),
                 ));
             }
-            crate::transcode::vod_refusal_error(
-                "vod_family_capacity",
-                "finite software compatibility pool is occupied",
-            )
+            crate::transcode::vod_refusal_error("vod_family_capacity", error.to_string())
         })?;
     // Reserve before the cleanup-map lock: global pressure calls back into
     // owners. No R/output IO exists while this borrowed await is pending.

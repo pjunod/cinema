@@ -2645,6 +2645,37 @@ fn measured_index_budget_secs(
     )
 }
 
+struct OriginalLocalIndexRead {
+    admission: Arc<crate::transcode::FragmentAdmission>,
+    pressure: Arc<crate::admission::DisposableBackground>,
+}
+
+impl plurx_core::process::bounded::OriginalWorkKeeper for OriginalLocalIndexRead {
+    fn retain_uncertainty(&self, reason: plurx_core::process::bounded::OriginalWorkUncertainty) {
+        plurx_core::process::bounded::OriginalWorkKeeper::retain_uncertainty(
+            self.admission.as_ref(),
+            reason,
+        );
+        if self.pressure.mark_cleanup_unknown() {
+            // Keep the exact CPU, heavy-lane and restart admissions charged
+            // when this read loses its positive cleanup evidence.
+            std::mem::forget((Arc::clone(&self.admission), Arc::clone(&self.pressure)));
+        }
+    }
+}
+
+struct LocalIndexClose(Option<Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper>>);
+
+impl Drop for LocalIndexClose {
+    fn drop(&mut self) {
+        if let Some(original) = self.0.take() {
+            original.retain_uncertainty(
+                plurx_core::process::bounded::OriginalWorkUncertainty::CollectorDropped,
+            );
+        }
+    }
+}
+
 /// A local whole-file read owes viewers the same preemption as a queued
 /// cluster pass. Cancellation must join the child and companion and remove
 /// the partial subtitle stage before the admission can be released. Callers
@@ -2664,16 +2695,31 @@ pub(crate) async fn local_index_until_foreground<T>(
     admission: &Arc<crate::transcode::FragmentAdmission>,
     build: impl std::future::Future<Output = T>,
 ) -> Option<T> {
-    let keeper: Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper> = admission.clone();
+    let pressure = admission.register_disposable_background()?;
+    let cancel = pressure.cancel.clone();
+    let keeper: Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper> =
+        Arc::new(OriginalLocalIndexRead {
+            admission: Arc::clone(admission),
+            pressure,
+        });
+    let mut close = LocalIndexClose(Some(Arc::clone(&keeper)));
     let build = plurx_core::process::bounded::with_original_work_keeper(keeper, build);
-    let cancel = tokio_util::sync::CancellationToken::new();
+    #[cfg(target_os = "linux")]
+    let build = plurx_core::process::bounded::pausable(
+        plurx_core::process::bounded::SourcePauseController::new(Duration::ZERO),
+        build,
+    );
     // Local builders inherit this token through every probe/child stage. Keep
     // polling the owner after cancellation: dropping it skips its explicit
     // child wait, source bridge closure and joined DV companion cleanup.
     let build = plurx_core::process::bounded::cancellable(cancel.clone(), build);
     tokio::pin!(build);
-    tokio::select! {
+    let result = tokio::select! {
         biased;
+        () = cancel.cancelled() => {
+            let _ = build.await;
+            None
+        },
         () = async {
             while !transcode.fragment_must_yield(admission) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2684,7 +2730,9 @@ pub(crate) async fn local_index_until_foreground<T>(
             None
         },
         result = &mut build => Some(result),
-    }
+    };
+    close.0 = None;
+    result
 }
 
 /// Stable, wrapping order for one bounded pass. The cursor is the last file a

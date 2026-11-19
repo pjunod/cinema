@@ -248,6 +248,62 @@ async fn a_riding_pass_reports_its_tracks_and_bytes_with_its_progress() {
     drop(build);
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) async fn paced_index_until_reclaimed(
+    manager: &crate::transcode::TranscodeManager,
+    cache: &Path,
+    started: &tokio::sync::Notify,
+    closed: &crate::seam_hooks::AsyncPause,
+) {
+    let fixture = fixture(72_003, &[Sub::Pgs]);
+    let plan =
+        RideAlongPlan::standalone(cache, fixture.file.id, stamp_of(&fixture.source), vec![0])
+            .expect("partial stage");
+    let stage = plan.stage().to_owned();
+    let mut pass = pass_over(&fixture.source, &fixture.file, Some(plan));
+    let input = pass.args.iter().position(|arg| arg == "-i").expect("input");
+    pass.args.insert(input, "-re".to_owned());
+    let admission = Arc::new(
+        manager
+            .admit_fragment()
+            .await
+            .expect("original index admission"),
+    );
+    let mut build = Box::pin(crate::state::local_index_until_foreground(
+        manager,
+        &admission,
+        build_with_args(
+            &fixture.file,
+            pass,
+            None,
+            None,
+            cache,
+            Duration::from_secs(60),
+            Instant::now(),
+            None,
+            None,
+        ),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !stage.join("s0.crc").exists() {
+        assert!(Instant::now() < deadline, "ffmpeg never opened its output");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut build)
+                .await
+                .is_err(),
+            "the indexer must still own the running read"
+        );
+    }
+    started.notify_one();
+    assert!(build.await.is_none(), "the active index read must yield");
+    assert!(!stage.exists(), "the original partial stage must be closed");
+    assert!(
+        closed.hold().await,
+        "foreground must observe original cleanup"
+    );
+    drop(admission);
+}
+
 /// A standalone pass must stop a running source read when a viewer
 /// arrives, remove its partial stage, and permit a later retry.
 #[tokio::test]
