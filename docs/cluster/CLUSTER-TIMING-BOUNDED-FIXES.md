@@ -80,3 +80,14 @@ A renewal ACK retains the expiry proposed at dispatch, even if a stalled
 runtime polls it late. Still-live ACKs remain valid; a receipt at or beyond
 the fixed expiry joins the exact-owner fence path immediately. Its boundary
 control tests before/at/after expiry without starting another lease.
+
+## 4. Timing extraction tooling follow-through
+
+Keep deployment startup budgeting tied to the canonical startup timing module
+and verify each migration alias before using its value. Reject missing, duplicate
+or unexpected definitions rather than copying the Rust policy into Python.
+Update the existing deployment contract to consume this checked source reader.
+Formal negative controls must separately distinguish an unchanged anchor with
+an edited item from a removed or duplicated anchor; a declaration-only alias
+anchor must still reject body drift. Run the focused Python controls without
+starting another compiler.
