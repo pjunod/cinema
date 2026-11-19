@@ -1480,25 +1480,24 @@ def stress_long_track_containment(page, name, layout_id):
         raise Fail(f"{name}/{layout_id}: unbroken fallback audio text did not wrap at the narrow viewport")
 
 
-def stress_cluster_metric_containment(page, name, layout_id):
-    """Exercise a dynamic hostname in the zero-floored cluster health grid."""
+def stress_cluster_strip_containment(page, name, layout_id):
+    """Exercise a dynamic hostname in the zero-floored cluster status strip."""
     if name != "item":
         return
     metrics = page.evaluate("""() => {
       const fixture = document.createElement("div");
-      fixture.className = "cluster-health";
+      fixture.className = "clcard clstrip";
       fixture.style.cssText = "grid-template-columns:repeat(3,minmax(0,1fr));max-width:700px";
-      fixture.innerHTML = `<div class="clmetric"><strong>ClusterLeaderHostnameWithoutAnyNaturalBreakOpportunity0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ</strong><span>Current leader</span></div>
-        <div class="clmetric"><strong>3 / 3</strong><span>Fresh heartbeats</span></div>
-        <div class="clmetric"><strong>3 · q2</strong><span>Voters · quorum</span></div>`;
+      fixture.innerHTML = `<div><div class="clk">Leader</div><div class="clv">ClusterLeaderHostnameWithoutAnyNaturalBreakOpportunity0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ</div><div class="cls">term 412</div></div>
+        <div><div class="clk">Nodes reachable</div><div class="clv">3 / 3</div><div class="cls">3 voters</div></div>
+        <div><div class="clk">Build</div><div class="clv">0.71.2</div><div class="cls">all 3 nodes match</div></div>`;
       document.querySelector("main").append(fixture);
-      const metric = fixture.querySelector(".clmetric");
-      const value = metric.querySelector("strong");
+      const metric = fixture.firstElementChild;
+      const value = metric.querySelector(".clv");
       const fixtureBox = fixture.getBoundingClientRect();
       const metricBox = metric.getBoundingClientRect();
       const valueBox = value.getBoundingClientRect();
-      const range = document.createRange();
-      range.selectNodeContents(value);
+      const style = getComputedStyle(value);
       return {
         documentOverflow: document.documentElement.scrollWidth
           - document.documentElement.clientWidth,
@@ -1506,23 +1505,19 @@ def stress_cluster_metric_containment(page, name, layout_id):
         metricPastFixture: metricBox.right - fixtureBox.right,
         valuePastMetric: valueBox.right - metricBox.right,
         valueBeforeMetric: metricBox.left - valueBox.left,
-        valueInternalOverflow: value.scrollWidth - value.clientWidth,
         valueHeight: valueBox.height,
-        valueLines: range.getClientRects().length,
-        viewportWidth: document.documentElement.clientWidth,
+        clipped: style.overflowX === "hidden" && style.textOverflow === "ellipsis" ? 0 : 2,
       };
     }""")
     leaks = {
         key: value for key, value in metrics.items()
-        if key not in {"valueHeight", "valueLines", "viewportWidth"} and value > 1
+        if key not in {"valueHeight"} and value > 1
     }
     if leaks:
         rendered = ", ".join(f"{key}={value:.1f}px" for key, value in leaks.items())
-        raise Fail(f"{name}/{layout_id}: cluster metric escaped its owner ({rendered})")
+        raise Fail(f"{name}/{layout_id}: cluster strip value escaped its cell ({rendered})")
     if metrics["valueHeight"] <= 0:
-        raise Fail(f"{name}/{layout_id}: cluster metric stress fixture did not render")
-    if metrics["viewportWidth"] <= 720 and metrics["valueLines"] < 2:
-        raise Fail(f"{name}/{layout_id}: cluster hostname did not wrap at the narrow viewport")
+        raise Fail(f"{name}/{layout_id}: cluster strip stress fixture did not render")
 
 
 def counted_api_calls(name, route, api_calls):
@@ -2013,7 +2008,7 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         page.screenshot(path=str(shot), full_page=not args.viewport_only)
         stress_classic_header(page, name, layout_id)
         stress_long_track_containment(page, name, layout_id)
-        stress_cluster_metric_containment(page, name, layout_id)
+        stress_cluster_strip_containment(page, name, layout_id)
         # Refusals annotate a capture that is already failing; they never
         # fail one on their own. Some fetches are non-ok by design — the
         # segment-playlist probe, the subtitle sidecar, the reader search —

@@ -98,7 +98,7 @@ const SETTINGS_ENDPOINTS={
     // A refused recovery read is a fact about the cluster, so it is reported
     // by the panel that reports the cluster — named, dated and retryable —
     // rather than as a page-level failure or, as it once was, as the end of
-    // the operator's session. `clusterOperationsCard` already knows this
+    // the operator's session. The cluster page's alert slot already knows this
     // shape; it is the same one `/cluster/nodes` uses when it cannot answer.
     clusterOpsStamp();
     return {unavailable:true,code:(error&&error.code)||null,
@@ -352,6 +352,7 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
   // the operator who switched away is done with it whether or not they said so.
   if(SETTINGS_SHOWN_TAB!==tab) forgetJoinToken();
   if(SETTINGS_SHOWN_TAB!==tab&&typeof sharingRetire==="function")sharingRetire();
+  if(reset||SETTINGS_SHOWN_TAB!==tab) CLUSTER_OPEN_NODES=[];
   SETTINGS_SHOWN_TAB=tab; LIB_DRAWER=null; USER_DRAWER=null; DEVICE_DRAWER=null;
   try{ localStorage.setItem("plurx_settings_tab",tab); }catch(e){}
   layoutChrome("settings",settingsShell(tab));

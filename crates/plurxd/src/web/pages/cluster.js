@@ -38,6 +38,10 @@ let CLUSTER_TOKEN=null;
 // fresh page is always collapsed. Because it is state rather than markup, a
 // repaint cannot yank the form shut under someone mid-mint.
 let CLUSTER_RAIL_EXPANDED=[];
+// Which node rows have their drawer open. Module state like the rail's
+// expansions, so a status repaint redraws them open; never written to storage,
+// and dropped when the operator leaves the section.
+let CLUSTER_OPEN_NODES=[];
 function forgetJoinToken(){ CLUSTER_TOKEN=null; CLUSTER_REFUSAL=null; CLUSTER_RAIL_EXPANDED=[]; }
 async function loadCluster(){
   const generation=PAGE_RENDER_GENERATION;
@@ -79,39 +83,23 @@ function clusterOpsElapsed(ops){
 function clusterRepaintDeferred(){
   return Boolean(document.querySelector(".clusterwrap dialog[open]"));
 }
-// Which node cards have their "WAL, snapshot, and protocol details" open. A
-// drill-down is not layout, so it is never persisted to storage — it just has
-// to survive the repaint happening underneath it.
-function clusterOpenDetailNodes(){
-  const open=[];
-  document.querySelectorAll("#cluster-node-list .clnodebody").forEach(body=>{
-    const detail=body.querySelector(".clnodedetail");
-    const id=body.getAttribute("data-node");
-    if(detail&&detail.open&&id) open.push(id);
-  });
-  return open;
-}
-// renderSettings() rewrites the whole tab. The folds and the troubleshooting tab
-// already come back (applyClusterFolds restores them from storage) and the join
-// token is module state, but the roster's scroll position and the open
-// drill-downs are in the markup that just got thrown away. Every repaint path on
-// this tab goes through here so all three behave the same way. Text selection
+// renderSettings() rewrites the whole tab. Open drawers, the expansions and the
+// join token are module state and come back on their own; what lives only in
+// the markup — every select and input the operator has touched, and which of
+// them has focus — is captured here and put back. Every repaint path on this
+// tab goes through here so all of them behave the same way. Text selection
 // cannot be preserved across innerHTML at all — which is exactly why repaints
 // are change-driven rather than periodic.
 function repaintClusterPreserving(paint){
-  const list=document.getElementById("cluster-node-list");
-  const scroll=list?list.scrollTop:0;
-  const open=clusterOpenDetailNodes();
   const controls=clusterControlValues();
+  const active=document.activeElement;
+  const focused=active&&active.id&&active.closest&&active.closest(".clusterwrap")?active.id:null;
   paint();
-  const painted=document.getElementById("cluster-node-list");
-  if(painted) painted.scrollTop=scroll;
   clusterRestoreControlValues(controls);
-  if(!open.length) return;
-  document.querySelectorAll("#cluster-node-list .clnodebody").forEach(body=>{
-    const detail=body.querySelector(".clnodedetail");
-    if(detail&&open.indexOf(body.getAttribute("data-node"))!==-1) detail.open=true;
-  });
+  if(focused){
+    const again=document.getElementById(focused);
+    if(again&&again!==document.activeElement&&again.focus) again.focus();
+  }
 }
 // Every choice the operator has made in this panel that lives only in the
 // markup: the token's lifetime and role, the log level, the auto-refresh box.
@@ -133,186 +121,187 @@ function clusterRestoreControlValues(values){
     else if(saved.value!==undefined&&saved.value!==null) control.value=saved.value;
   });
 }
-// The one reading that moves without a new fetch. When the projection has not
-// changed there is no repaint, so this cell is patched on its own; without it
-// the row whose only job is freshness would say "now" indefinitely.
+// The readings that move without a new fetch. When the projection has not
+// changed there is no repaint, so these cells are patched on their own; without
+// it the rows whose only job is freshness would say "now" indefinitely.
 function patchClusterReadingAge(){
-  const cell=document.getElementById("cldb-reading-age");
-  if(!cell) return;
   const data=SETTINGS_DATA||{};
-  cell.innerHTML=PlurxClusterPanel.clusterReadingAge(clenv(),data.cluster,data.clusterOps);
+  const cell=document.getElementById("cldb-reading-age");
+  if(cell) cell.innerHTML=PlurxClusterPanel.clusterReadingAge(clenv(),data.cluster,data.clusterOps);
+  const sampled=document.getElementById("cl-sampled");
+  if(sampled) sampled.textContent=PlurxClusterPanel.clusterSampledText(data.clusterOps);
 }
-function clusterNodeOperationsBadge(n,ops){
-  if(!ops) return `<span class="pill">Collecting status</span>`;
-  if(ops.unavailable) return `<span class="pill" style="color:var(--bad);border-color:var(--bad)">Status unavailable</span>`;
-  const row=PlurxClusterPanel.clusterDirectOperationRow(ops,n.node_id), s=row&&row.status;
-  if(!row||row.observation!=="answered"||!s)
-    return `<span class="pill" style="color:var(--bad);border-color:var(--bad)">Not observed</span>`;
-  const wal=s.wal&&s.wal.snapshot;
-  const walHealthy=wal&&wal.state==="open"&&wal.lock_owned&&!wal.last_error&&wal.last_log_index===wal.last_durable_index;
-  if(!s.process||!s.process.live||!s.serving||!s.serving.ready||!s.raft||!s.raft.sample_valid||!s.raft.watermark_valid||!walHealthy)
-    return `<span class="pill" style="color:var(--warn);border-color:var(--warn)">Needs attention</span>`;
-  return `<span class="pill" style="color:var(--good);border-color:var(--good)">Direct status ready</span>`;
+// One node's drawer: the three ledgers that used to be its card — membership,
+// Raft and WAL, snapshot and media — then that node's own actions. Every
+// reading is the direct status's; the roster's heartbeat is never a
+// substitute for a direct peer sample, so an unobserved node says so instead.
+function clusterNodeLedger(title,rows){
+  return `<div><h4>${title}</h4><dl class="kvgrid">${rows.map(([label,value])=>`<dt>${label}</dt><dd>${value}</dd>`).join("")}</dl></div>`;
 }
-function clusterNodeOperationsHtml(n,ops){
-  if(!ops) return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
-    <div class="clnodeunknown">Collecting direct process, serving, Raft, WAL, snapshot, media, and build evidence…</div></section>`;
-  if(ops.unavailable) return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
-    <div class="clnodeunknown" style="color:var(--bad)">Direct status is unavailable. Keep every available voter running and retry status above.</div></section>`;
-  const row=PlurxClusterPanel.clusterDirectOperationRow(ops,n.node_id), s=row&&row.status;
-  const transport=PlurxClusterPanel.clusterTransportExplanation(
-    ops,n.raft_id,n.bounded_read_ready,clusterOpsElapsed(ops));
-  const transportObservation=transport.observation;
-  const transportText=transportObservation
-    ? `${esc(transport.text)} · observer ${esc(String(transportObservation.observing_node_id))} · ${esc(PlurxClusterPanel.clusterOperationAge(transportObservation.sample_age_ms))}`
+function clusterNodeDrawer(n,cluster,ops){
+  const P=PlurxClusterPanel;
+  const unknown=`<span class="muted">unknown</span>`;
+  const ago=ms=>ms?esc(fmtAgo(Math.floor(ms/1000))):"";
+  const lag=n.apply_lag_entries==null?"unavailable":`${n.apply_lag_entries} entr${n.apply_lag_entries===1?"y":"ies"}`;
+  const membership=[["Node ID",`<span class="clmono">${esc(n.node_id)}</span>`],["Raft ID",esc(String(n.raft_id))],
+    ["Advertised",n.advertised_host?esc(n.advertised_host):unknown],
+    ["Heartbeat",`${n.reachable?`<span class="clgood">fresh</span>`:`<span class="clbad">stale</span>`} · ${n.last_seen_at?ago(n.last_seen_at):`<span class="muted">never</span>`}`],
+    ["Apply lag",esc(lag)]];
+  const transport=P.clusterTransportExplanation(ops,n.raft_id,n.bounded_read_ready,clusterOpsElapsed(ops));
+  const seen=transport.observation;
+  const transportText=seen
+    ? `${esc(transport.text)} · observer ${esc(String(seen.observing_node_id))} · ${esc(P.clusterOperationAge(seen.sample_age_ms))}`
     : `<span class="muted">${esc(transport.text)}</span>`;
-  if(!row||row.observation!=="answered"||!s){
-    const why=PlurxClusterPanel.clusterObservationReason(row&&(row.error_class||row.observation)||"not_observed");
-    return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
-      <div class="clnodeunknown" style="color:var(--bad)">Not observed · ${esc(why)}. Membership heartbeat state is not a substitute for a direct peer sample.</div>
-      <div class="clnodeopmeta"><div><span>Transport</span>${transportText}</div></div></section>`;
+  const row=P.clusterDirectOperationRow(ops,n.node_id), s=row&&row.observation==="answered"?row.status:null;
+  let body;
+  if(!s){
+    const why=!ops?"Collecting direct process, serving, Raft, WAL, snapshot, media, and build evidence…"
+      :ops.unavailable?"Direct status is unavailable. Keep every available voter running and retry status above."
+      :`Not observed · ${esc(P.clusterObservationReason(row&&(row.error_class||row.observation)||"not_observed"))}. Membership heartbeat state is not a substitute for a direct peer sample.`;
+    body=`${clusterNodeLedger("Membership",membership)}${clusterNodeLedger("Raft &amp; WAL",[["Direct status",`<span class="${ops&&!ops.unavailable?"clbad":"muted"}">${why}</span>`]])}${
+      clusterNodeLedger("Snapshot &amp; media",[["Transport",transportText]])}`;
+  }else{
+    const raft=s.raft||{}, wal=s.wal&&s.wal.snapshot, snap=s.snapshot||{}, media=s.media||{};
+    const known=value=>value!==null&&value!==undefined;
+    const num=value=>known(value)?esc(String(value)):unknown;
+    const wire=P.clusterWireFacts(ops,n.node_id), skew=P.clusterWireSkew(ops);
+    const raftRole=raft.is_leader===true?"Leader":raft.is_leader===false?"Follower":"Unknown role";
+    membership.push(
+      ["Process",s.process&&s.process.live?`<span class="clgood">live</span> · ${esc(P.clusterOperationAge(row.sample_age_ms))}`:`<span class="clbad">not live</span>`],
+      ["Serving",s.serving&&s.serving.ready?`<span class="clgood">ready</span>`:`<span class="clbad">fenced: ${esc(P.clusterOperationReason(s.serving&&s.serving.reason))}</span>`],
+      ["Protocol",`${num(s.protocol_min)}–${num(s.protocol_max)} · ${wire.protocol===null?`<span class="clwarn">media protocol unreported</span>`:`media protocol ${esc(String(wire.protocol))}`}${
+        skew.protocolSkew?` · <span class="clbad">Protocol skew: ${esc(skew.protocols.join(" / "))} — placement splits into cohorts</span>`:""}`],
+      ["Build",`<span class="clmono">${esc(s.build)}</span>`]);
+    const walHealthy=P.clusterWalHealthy(wal);
+    const raftRows=[
+      ["Raft",raft.sample_valid&&raft.watermark_valid
+        ? `${raftRole} · term ${num(raft.current_term)} · lag ${known(raft.apply_lag_entries)?esc(String(raft.apply_lag_entries)):"unknown"}`
+        : `<span class="clbad">${raftRole} · stale or incomplete proof</span>`],
+      ["Applied / commit",`${num(raft.applied_index)} / ${num(raft.commit_index)}`],
+      ["Raft sample",`${esc(P.clusterOperationAge((raft.sample_age_seconds||0)*1000))}; watermark ${esc(P.clusterOperationAge(raft.watermark_age_millis))}`],
+      ["WAL",wal?`<span class="${walHealthy?"clgood":"clbad"}">${esc(P.clusterOperationReason(wal.state))}</span> · ${esc(String(wal.segment_count))} segment${wal.segment_count===1?"":"s"} · ${esc(fmtBytes(wal.allocated_bytes)||"0 B")}`:`<span class="clbad">unavailable</span>`],
+      ["Durable index",wal&&known(wal.last_durable_index)?esc(String(wal.last_durable_index)):unknown],
+      ["Retained / purged",wal?`${known(wal.first_retained_index)?esc(String(wal.first_retained_index)):"unknown"} / ${known(wal.last_purged_index)?esc(String(wal.last_purged_index)):"none"}`:unknown],
+      ["Last WAL sync",wal&&wal.last_sync_unix_ms?ago(wal.last_sync_unix_ms):unknown],
+      ["Last WAL error",esc(wal&&wal.last_error?wal.last_error.message:"none")],
+      ["Last recovery",esc(wal&&wal.last_recovery?`${wal.last_recovery.operation}: ${wal.last_recovery.outcome}`:"none observed")]];
+    const db=known(snap.db_bytes)?esc(fmtBytes(snap.db_bytes)||"0 B"):unknown;
+    const sessions=Number(media.local_active_sessions||0);
+    const snapshotRows=snap.available?[
+      ["Database",db],
+      ["Last snapshot",snap.last_build_outcome?`build ${esc(snap.last_build_outcome)} · ${snap.last_build_unix_ms?ago(snap.last_build_unix_ms):"at unknown time"}`:"none observed"],
+      ["Snapshot totals",`build ${esc(String(snap.build_ok_count||0))} ok / ${esc(String(snap.build_error_count||0))} error; install ${esc(String(snap.install_ok_count||0))} ok / ${esc(String(snap.install_error_count||0))} error`],
+      ["Last install",snap.last_install_outcome?`${esc(snap.last_install_outcome)} · ${snap.last_install_unix_ms?ago(snap.last_install_unix_ms):"at unknown time"}`:"none observed"]]
+      : [["Snapshot",`<span class="clbad">unavailable</span>`]];
+    snapshotRows.push(
+      ["Streams owned",`${esc(String(sessions))} · ${media.drained?"drained":"draining"}`],
+      ["Placement",wire.eligible===null?unknown:wire.eligible?`<span class="clgood">eligible owner</span>`:`<span class="clwarn">not an owner: ${esc(wire.reason||"unknown")}</span>`],
+      ["Transport",transportText],
+      ["Direct play","unknown here — drain proxy connections separately"]);
+    body=`${clusterNodeLedger("Membership",membership)}${clusterNodeLedger("Raft &amp; WAL",raftRows)}${clusterNodeLedger("Snapshot &amp; media",snapshotRows)}`;
   }
-  const raft=s.raft||{}, wal=s.wal&&s.wal.snapshot, snap=s.snapshot||{}, media=s.media||{};
-  const process=s.process&&s.process.live
-    ? `<span style="color:var(--good)">Live</span> · ${esc(PlurxClusterPanel.clusterOperationAge(row.sample_age_ms))}`
-    : `<span style="color:var(--bad)">Not live</span>`;
-  const serving=s.serving&&s.serving.ready
-    ? `<span style="color:var(--good)">Ready</span>`
-    : `<span style="color:var(--bad)">Fenced: ${esc(PlurxClusterPanel.clusterOperationReason(s.serving&&s.serving.reason))}</span>`;
-  const raftRole=raft.is_leader===true?"Leader":raft.is_leader===false?"Follower":"Unknown role";
-  const raftText=raft.sample_valid&&raft.watermark_valid
-    ? `${raftRole} · term ${esc(String(raft.current_term))} · lag ${raft.apply_lag_entries===null?"unknown":esc(String(raft.apply_lag_entries))}`
-    : `<span style="color:var(--bad)">${raftRole} · stale or incomplete proof</span>`;
-  const walHealthy=wal&&wal.state==="open"&&wal.lock_owned&&!wal.last_error&&wal.last_log_index===wal.last_durable_index;
-  const walText=wal
-    ? `<span style="color:var(--${walHealthy?"good":"bad"})">${esc(PlurxClusterPanel.clusterOperationReason(wal.state))}</span> · ${esc(String(wal.segment_count))} segment${wal.segment_count===1?"":"s"} · ${esc(fmtBytes(wal.allocated_bytes)||"0 B")}`
-    : `<span style="color:var(--bad)">Unavailable</span>`;
-  const snapshotText=snap.available
-    ? snap.last_build_outcome
-      ? `build ${esc(snap.last_build_outcome)} ${snap.last_build_unix_ms?esc(fmtAgo(Math.floor(snap.last_build_unix_ms/1000))):"at unknown time"} · DB ${snap.db_bytes===null||snap.db_bytes===undefined?"unknown":esc(fmtBytes(snap.db_bytes)||"0 B")}`
-      : `builds ${esc(String(snap.build_ok_count))} ok · ${esc(String(snap.build_error_count))} errors · DB ${snap.db_bytes===null||snap.db_bytes===undefined?"unknown":esc(fmtBytes(snap.db_bytes)||"0 B")}`
-    : `<span style="color:var(--bad)">Unavailable</span>`;
-  const mediaText=`${esc(String(media.local_active_sessions||0))} session${Number(media.local_active_sessions||0)===1?"":"s"} · ${media.drained?"drained":"draining"}`;
-  const wire=PlurxClusterPanel.clusterWireFacts(ops,n.node_id), skew=PlurxClusterPanel.clusterWireSkew(ops);
-  const protocolText=wire.protocol===null?`<span style="color:var(--warn)">media protocol unreported</span>`:`media protocol ${esc(String(wire.protocol))}`;
-  const ownerText=wire.eligible===null?"":wire.eligible
-    ? ` · <span style="color:var(--good)">eligible owner</span>`
-    : ` · <span style="color:var(--warn)">not an owner: ${esc(wire.reason||"unknown")}</span>`;
-  const skewText=skew.protocolSkew
-    ? `<br><span style="color:var(--bad)">Protocol skew: ${esc(skew.protocols.join(" / "))} — placement splits into cohorts</span>`
-    : "";
-  const lastError=wal&&wal.last_error?wal.last_error.message:"None";
-  const recovery=wal&&wal.last_recovery?`${wal.last_recovery.operation}: ${wal.last_recovery.outcome}`:"None observed";
-  return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
-    <div class="clnodeopmeta"><div><span>Process</span>${process}</div><div><span>Serving</span>${serving}</div>
-      <div><span>Raft</span>${raftText}</div><div><span>WAL</span>${walText}</div>
-      <div><span>Snapshot</span>${snapshotText}</div><div><span>Transport</span>${transportText}</div>
-      <div><span>Media / build</span>${mediaText}<br><span class="clopscode">${esc(s.build)}</span><br>${protocolText}${ownerText}${skewText}</div></div>
-    <details class="clnodedetail"><summary>WAL, snapshot, and protocol details</summary>
-      <dl class="kvgrid"><dt>Node / Raft id</dt><dd class="clopscode">${esc(n.node_id)} / ${esc(String(n.raft_id))}</dd>
-        <dt>Protocol range</dt><dd>${s.protocol_min===undefined?"unknown":esc(String(s.protocol_min))}–${s.protocol_max===undefined?"unknown":esc(String(s.protocol_max))}</dd>
-        <dt>Applied / commit</dt><dd>${raft.applied_index===null||raft.applied_index===undefined?"unknown":esc(String(raft.applied_index))} / ${raft.commit_index===null||raft.commit_index===undefined?"unknown":esc(String(raft.commit_index))}</dd>
-        <dt>Raft sample</dt><dd>${esc(PlurxClusterPanel.clusterOperationAge((raft.sample_age_seconds||0)*1000))}; watermark ${esc(PlurxClusterPanel.clusterOperationAge(raft.watermark_age_millis))}</dd>
-        <dt>WAL retained / purged</dt><dd>${wal?(wal.first_retained_index===null?"unknown":esc(String(wal.first_retained_index))):"unknown"} / ${wal?(wal.last_purged_index===null?"none":esc(String(wal.last_purged_index))):"unknown"}</dd>
-        <dt>WAL durable index</dt><dd>${wal&&wal.last_durable_index!==null?esc(String(wal.last_durable_index)):"unknown"}</dd>
-        <dt>Last WAL sync</dt><dd>${wal&&wal.last_sync_unix_ms?esc(fmtAgo(Math.floor(wal.last_sync_unix_ms/1000))):"unknown"}</dd>
-        <dt>Last WAL error</dt><dd>${esc(lastError)}</dd><dt>Last recovery</dt><dd>${esc(recovery)}</dd>
-        <dt>Snapshot outcomes</dt><dd>build ${esc(String(snap.build_ok_count||0))} ok / ${esc(String(snap.build_error_count||0))} error; install ${esc(String(snap.install_ok_count||0))} ok / ${esc(String(snap.install_error_count||0))} error</dd>
-        <dt>State-machine database</dt><dd>${snap.db_bytes===null||snap.db_bytes===undefined?"unknown":esc(fmtBytes(snap.db_bytes)||"0 B")}</dd>
-        <dt>Last snapshot install</dt><dd>${snap.last_install_outcome?`${esc(snap.last_install_outcome)} ${snap.last_install_unix_ms?esc(fmtAgo(Math.floor(snap.last_install_unix_ms/1000))):"at unknown time"}`:"none observed"}</dd>
-        <dt>Bounded-read recovery evidence</dt><dd>${transportText}</dd>
-        <dt>Direct play</dt><dd>Unknown here — drain proxy connections separately.</dd></dl></details>
-  </section>`;
+  return `<div class="cldrawer">${body}<div class="cldraweract">${clusterNodeActionsHtml(n,cluster,ops)}</div></div>`;
 }
-function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
-  const voter=n.is_voter;
-  const admittedVoter=n.role==="voter";
-  const role=voter
-    ? `<span class="pill" style="color:var(--accent);border-color:var(--accent)">voter</span>`
-    : admittedVoter
+// The action row. A blocked action shows its reason beside it; a blocked
+// expansion renders no expansion (its reason is its whole content).
+function clusterNodeActionsHtml(n,cluster,ops){
+  const actions=PlurxClusterPanel.clusterNodeActions(clenv(),cluster,ops,n);
+  const local=n.node_id===cluster.local_node_id;
+  const why=a=>a.blocked&&a.reason?`<span class="clwhy">${a.reason}</span>`:"";
+  const lead=local?"":`<span class="clwhy">Maintenance and restart run from the node itself.</span>`;
+  const plain=actions.filter(a=>!a.destructive).map(a=>`${a.html}${why(a)}`).join("");
+  const destructive=actions.filter(a=>a.destructive).map(a=>{
+    if(a.expand!=="leave") return `<span class="clpush">${why(a)}${a.html}</span>`;
+    const open=!a.blocked&&CLUSTER_RAIL_EXPANDED.indexOf("leave")!==-1;
+    const button=`<button class="danger sm" ${a.blocked?"disabled":""} aria-controls="clexp-leave" aria-expanded="${open}" onclick="toggleClusterExpansion('leave')">${open?"Hide":"Leave cluster…"}</button>`;
+    return `<span class="clpush">${why(a)}${button}</span>${a.blocked?"":`<div class="clexpansion" id="clexp-leave"${open?"":" hidden"}>${leavePanel(cluster.local_node_id,Boolean(a.blocked))}</div>`}`;
+  }).join("");
+  return `${lead}${plain}${destructive}`;
+}
+// The nodes table: one row per member, every column a direct reading, a dash
+// where there is none. A real table in the .adminwrap conventions, so the
+// phone-width rules reflow each row into a labelled card. It grows with the
+// roster; nothing here scrolls inside the page.
+function clusterTone(tone){ return tone==="good"?"clgood":tone==="warn"?"clwarn":tone==="bad"?"clbad":""; }
+function clusterNodeTableRow(n,cluster,ops){
+  const cells=PlurxClusterPanel.clusterNodeCells(clenv(),n,ops);
+  const open=CLUSTER_OPEN_NODES.indexOf(n.node_id)!==-1;
+  const id=esc(n.node_id);
+  const role=n.is_voter
+    ? `<span class="pill acc">voter</span>`
+    : n.role==="voter"
       ? `<span class="pill" title="Admitted as a voter and currently joining or catching up. It is not counted toward quorum until Raft commits its vote.">joining voter</span>`
       : `<span class="pill" title="A non-voting capacity role. A learner receives replication and may serve gated work; explicit promotion adds its vote only after catch-up and storage preflight.">learner</span>`;
-  const heartbeat=n.reachable
-    ? `<span style="color:var(--good)">fresh</span>`
-    : `<span style="color:var(--bad)">stale</span>`;
-  const seen=n.last_seen_at?esc(fmtAgo(Math.floor(n.last_seen_at/1000))):`<span class="muted">never</span>`;
-  const leader=n.is_leader?`<span class="pill clleader">Leader</span>`:"";
-  const local=n.node_id===localNodeId?`<span class="pill">This node</span>`:"";
-  const pending=n.removal_pending?`<span class="pill" style="color:var(--warn);border-color:var(--warn)">Removal pending</span>`:"";
-  const maintenance=n.maintenance?`<span class="pill" style="color:var(--warn);border-color:var(--warn)">Maintenance</span>`:"";
-  const worker=!voter&&n.role==="learner"
-    ? n.bounded_read_ready
-      ? `<span class="pill" style="color:var(--good);border-color:var(--good)">Read worker ready</span>`
-      : `<span class="pill" style="color:var(--warn);border-color:var(--warn)">Catching up</span>`
-    : "";
-  const hostname=n.hostname||n.node_id;
-  const advertised=n.advertised_host
-    ? `<div class="claddr">Advertised host ${esc(n.advertised_host)}</div>`:"";
-  const lifecycleLocked=Boolean(context.lifecycleLocked);
-  const localTarget=n.node_id===localNodeId;
-  const directReady=PlurxClusterPanel.clusterMaintenanceReady(n,context.operations);
-  const resumeReady=PlurxClusterPanel.clusterMaintenanceResumeReady(n,context.operations);
-  const promote=!voter&&n.role==="learner"
-    ? `<button class="ghost sm" ${n.bounded_read_ready&&n.voter_storage_ready&&!lifecycleLocked?"":"disabled"} onclick='promoteNode(${esc(JSON.stringify(n.node_id))})'>Promote to voter</button>`
-    : "";
-  const maintenanceAction=n.maintenance
-    ? `<button class="sm" ${localTarget&&resumeReady?"":"disabled"} title="${localTarget?'Resume only after direct process drain proof is complete; leadership is handed off first when needed.':'Open this node directly to resume it.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(n.node_id))},false)'>Resume service</button>`
-    : `<button class="ghost sm" ${!maintenanceAllowed||!localTarget||!n.reachable||n.removal_pending?"disabled":""} title="${!localTarget?'Open this node directly to fence and drain it.':!maintenanceAllowed?'Direct maintenance preflight has not approved this node.':'Fence new work, hand off leadership when needed, and let existing work drain.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(n.node_id))},true)'>Enter maintenance</button>`;
-  const remove=n.node_id===localNodeId
-    ? `<span class="muted">Use Leave this cluster on the Maintenance card</span>`
-    : `<button class="ghost sm" ${lifecycleLocked?"disabled":""} title="${lifecycleLocked?'Finish maintenance before changing membership.':'Permanently remove this member.'}" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>${n.removal_pending?"Retry removal":"Remove permanently"}</button>`;
-  const direct=PlurxClusterPanel.clusterDirectMaintenanceStatus(context.operations,n.node_id);
-  const sessions=direct&&direct.media?Number(direct.media.local_active_sessions||0):Number(n.active_media_sessions||0);
-  const lag=n.apply_lag_entries==null?"unavailable":`${n.apply_lag_entries} entr${n.apply_lag_entries===1?"y":"ies"}`;
-  const transportProgress=PlurxClusterPanel.clusterTransportExplanation(
-    context.operations,n.raft_id,n.bounded_read_ready,clusterOpsElapsed(context.operations));
-  const note=n.maintenance
-    ? directReady
-      ? "Fenced, caught up, and directly observed with no local work. Resume from this node after the update or reboot."
-      : `New work is fenced. ${sessions?`${sessions} local media operation${sessions===1?" is":"s are"} still draining.`:"Waiting for direct acknowledgement, leader handoff, catch-up, or drain proof."}`
-    : !n.bounded_read_ready&&n.role==="learner"
-      ? `Bounded-read permit remains off: ${transportProgress.text}. Transport progress never grants serving authority.`
-      : "Maintenance is reversible and does not remove this node from membership.";
-  return `<details class="clnode${n.maintenance?" maintenance":""}${n.reachable?"":" stale"}" open ontoggle="syncClusterNodeToggle()" onclick="clusterNodeFoldLater(this)">
-    <summary><div class="clnodesummary"><div class="clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}${maintenance}${worker}</div>
-      ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></div><div class="clnodesummaryright">${role}${clusterNodeOperationsBadge(n,context.operations)}</div></div></summary>
-    <div class="clnodebody" data-node="${esc(n.node_id)}"><div class="clnodegroups"><section class="clnodegroup"><div class="clgrouptitle">Membership</div>
-      <div class="clnodemeta"><div><span>Heartbeat</span>${heartbeat} · ${seen}</div><div><span>Raft ID</span>${esc(String(n.raft_id))}</div>
-        <div><span>Apply lag</span>${esc(lag)}</div><div><span>Active streams</span>${sessions}</div></div></section>
-      ${clusterNodeOperationsHtml(n,context.operations)}</div>
-      <div class="clnodefoot"><div class="hint">${esc(note)}</div><div class="row">${promote}${maintenanceAction}${remove}</div></div></div>
-  </details>`;
+  const pills=`${n.is_leader?`<span class="pill acc">Leader</span>`:""}${n.node_id===cluster.local_node_id?`<span class="pill">This node</span>`:""}${
+    n.removal_pending?`<span class="pill warn">Removal pending</span>`:""}${!n.is_voter&&n.role==="learner"&&n.bounded_read_ready?`<span class="pill ok">read worker</span>`:""}`;
+  const cell=(label,c)=>`<td data-label="${label}" class="num${c.tone?` ${clusterTone(c.tone)}`:""}">${c.text}</td>`;
+  const status=cells.status;
+  return `<tr class="clrow${open?" setopen":""}${n.reachable?"":" stale"}" id="clrow-${id}" data-node="${id}" tabindex="0" aria-expanded="${open}" aria-controls="cldrawer-${id}"
+      onclick="toggleClusterNode(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleClusterNode(this)}">
+    <td class="clname"><span class="clchev" aria-hidden="true">${open?"▾":"▸"}</span><span class="clhost">${esc(n.hostname||n.node_id)}</span>${pills}${
+      n.advertised_host?`<div class="clsub">${esc(n.advertised_host)}</div>`:""}</td>
+    <td data-label="Role">${role}</td>
+    <td data-label="Status"${status.why?` title="${esc(status.why)}"`:""}><span class="cldot ${status.tone}"></span><span class="${clusterTone(status.tone==="good"?"":status.tone)}">${esc(status.label)}</span></td>
+    ${cell("Heartbeat",cells.heartbeat)}${cell("Raft",cells.raft)}${cell("WAL",cells.wal)}${cell("Database",cells.database)}${cell("Streams",cells.streams)}${cell("Build",cells.build)}</tr>
+    <tr class="setdrawer" id="cldrawer-${id}" data-node="${id}"${open?"":" hidden"}><td colspan="9">${clusterNodeDrawer(n,cluster,ops)}</td></tr>`;
 }
-function clusterRecoveryPanel(cluster,recovery,active,ops){
+function clusterNodesCard(cluster,ops){
+  const nodes=cluster.nodes||[];
+  const voters=nodes.filter(n=>n.is_voter).length, others=nodes.length-voters;
+  const add=PlurxClusterPanel.clusterAddNodeAction(clenv(),cluster);
+  const open=!add.blocked&&CLUSTER_RAIL_EXPANDED.indexOf("add")!==-1;
+  const lifecycleLocked=nodes.some(n=>n.maintenance);
+  return `<section class="clcard" id="cluster-nodes"><div class="clcardhead"><h2>Nodes<small>${nodes.length} member${nodes.length===1?"":"s"} · ${voters} voter${voters===1?"":"s"} · ${others} learner${others===1?"":"s"}</small></h2>
+      <div class="row">${add.blocked?`<span class="clwhy">${add.reason}</span>`:""}<button class="ghost sm" ${add.blocked?"disabled":""} aria-controls="clexp-add" aria-expanded="${open}" onclick="toggleClusterExpansion('add')">${open?"Hide":"+ Add node"}</button></div></div>
+    ${add.blocked?"":`<div class="clexpansion" id="clexp-add"${open?"":" hidden"}>${joinPanel(lifecycleLocked)}</div>`}
+    ${nodes.length?`<table class="clnodetable"><thead><tr><th>Node</th><th>Role</th><th>Status</th><th>Heartbeat</th><th>Raft</th><th>WAL</th><th>Database</th><th>Streams</th><th>Build</th></tr></thead>
+      <tbody id="cluster-node-list">${nodes.map(n=>clusterNodeTableRow(n,cluster,ops)).join("")}</tbody></table>`
+      :`<div class="empty">No node records yet.</div>`}</section>`;
+}
+// Opening a drawer is state, not a repaint: the row and its drawer flip in
+// place and the module state records it, so the next status repaint draws it
+// open again. More than one may be open.
+function toggleClusterNode(row){
+  const id=row&&row.getAttribute("data-node");
+  if(!id) return;
+  const open=CLUSTER_OPEN_NODES.indexOf(id)===-1;
+  CLUSTER_OPEN_NODES=open?CLUSTER_OPEN_NODES.concat([id]):CLUSTER_OPEN_NODES.filter(node=>node!==id);
+  const drawer=document.getElementById("cldrawer-"+id);
+  if(drawer) drawer.hidden=!open;
+  row.classList.toggle("setopen",open);
+  row.setAttribute("aria-expanded",String(open));
+  const chev=row.querySelector(".clchev");
+  if(chev) chev.textContent=open?"▾":"▸";
+}
+// Recovery is the most severe thing this page can say, so it leads the alert
+// slot. The voter list is the table's now; this keeps the arithmetic, the
+// sentence and the controls.
+function clusterRecoveryAlert(cluster,recovery,active,ops){
   const voters=(cluster.nodes||[]).filter(n=>n.is_voter);
   const maintenanceActive=Boolean(active);
   const electionCandidate=voters.some(n=>n.reachable&&n.apply_lag_entries===0&&!n.removal_pending);
   const electionReady=recovery.quorum_available&&electionCandidate&&!maintenanceActive;
   const title=recovery.quorum_available?"Leader election required":"Recovery required";
-  const badge=recovery.quorum_available?"Leader unavailable":"Quorum unavailable";
-  const rows=voters.map(n=>`<div class="clvoter"><span>${esc(n.hostname||n.node_id)}${n.is_leader?" · last known leader":""}</span>
-    <b style="color:${n.reachable?'var(--good)':'var(--bad)'}">${n.reachable?"heartbeat fresh":"unreachable / stale"}</b></div>`).join("");
   const recoverySummary=recovery.quorum_available
     ? maintenanceActive
       ? "A voter majority is reachable, but maintenance is still active. Restore and resume the fenced target before requesting an election."
       : "A voter majority is reachable, but no leader is currently elected. A bounded election is safe to request."
     : "The voter majority cannot be proved. Normal cluster mutations are locked.";
-  const maintained=active?`<div class="claction"><b>Restore the maintenance target first: ${esc(active.hostname||active.node_id)}</b><p>Its durable work fence is still active. Start this original node with its existing data and identity, then open it directly to verify catch-up and local drain before resuming service.</p></div>${clusterMaintenanceProgress(active,ops,cluster.local_node_id,true)}`:"";
-  return `<section class="cluster-card clrecovery"><div class="clophead"><div><h3>${title}</h3>
-      <p>${recoverySummary}</p></div><span class="pill" style="color:var(--bad);border-color:var(--bad)">${badge}</span></div>
-    <div class="recovery-count">${recovery.reachable_voters} / ${recovery.required_voters}</div><p>reachable voters needed for quorum</p>
-    <div class="clvoters">${rows}</div>
-    ${maintained}
-    ${recovery.quorum_available?`<div class="claction"><b>Request an election</b><p>A healthy caught-up voter will campaign. Raft still requires the reachable majority and chooses the winner.</p><div class="row"><button class="ghost sm" ${electionReady?"":"disabled"} onclick="openElectionDialog()">Force election</button></div></div>${forceElectionDialog(electionReady)}`:
-    `<div class="claction"><b>Recommended recovery</b><p>Restore any missing original voter with its existing data directory and identity. Do not initialize a replacement cluster over these files.</p></div>
-    <div class="claction"><b>Permanent majority loss</b><p>This release does not support force-reconfiguring around lost voters. Preserve every surviving data directory before taking any recovery action.</p>
-      <div class="row"><button class="ghost sm" onclick="downloadClusterSupportBundle(this)">Export support bundle</button>
+  const maintained=active?`<p><b>Restore the maintenance target first: ${esc(active.hostname||active.node_id)}.</b> Its durable work fence is still active. Start this original node with its existing data and identity, then open it directly to verify catch-up and local drain before resuming service.</p>${clusterMaintenanceProgress(active,ops,cluster.local_node_id,true)}`:"";
+  const actions=recovery.quorum_available
+    ? `<button class="ghost sm" ${electionReady?"":"disabled"} onclick="openElectionDialog()">Force election…</button>`
+    : `<button class="ghost sm" onclick="downloadClusterSupportBundle(this)">Export support bundle</button>
       <button class="ghost sm" onclick="downloadClusterDiagnostics()">Download roster snapshot</button>
-      <button class="ghost sm" onclick="toggleRecoveryChecklist(this)">Preservation checklist</button></div>
-      <div id="clpreserve" class="hint" hidden>Stop writes, copy each surviving data directory independently, record node IDs and Raft IDs, and keep the originals untouched until recovery is verified.</div></div>
-    <button class="ghost sm" disabled title="Raft cannot elect a leader without quorum">Force election unavailable without quorum</button>`}
-  </section>`;
+      <button class="ghost sm" onclick="toggleRecoveryChecklist(this)">Preservation checklist</button>
+      <button class="ghost sm" disabled title="Raft cannot elect a leader without quorum">Force election unavailable without quorum</button>`;
+  const guidance=recovery.quorum_available?`<p>A healthy caught-up voter will campaign. Raft still requires the reachable majority and chooses the winner.</p>`:`<p>Restore any missing original voter with its existing data directory and identity. Do not initialize a replacement cluster over these files.
+      This release does not support force-reconfiguring around lost voters. Preserve every surviving data directory before taking any recovery action.</p>
+    <div id="clpreserve" class="hint" hidden>Stop writes, copy each surviving data directory independently, record node IDs and Raft IDs, and keep the originals untouched until recovery is verified.</div>`;
+  return `<div class="clalert bad" role="status"><div><b>${title}: ${recovery.reachable_voters} / ${recovery.required_voters} reachable voters needed for quorum.</b> ${recoverySummary}
+    ${guidance}${maintained}</div><div class="row">${actions}</div></div>`;
 }
+// The four steps a maintenance target walks through, inline, then the state
+// they add up to and the one control that ends it.
 function clusterMaintenanceProgress(active,ops,localNodeId,recovering=false){
   const direct=PlurxClusterPanel.clusterDirectMaintenanceStatus(ops,active.node_id);
   const media=direct&&direct.media;
@@ -320,12 +309,18 @@ function clusterMaintenanceProgress(active,ops,localNodeId,recovering=false){
   const directReady=PlurxClusterPanel.clusterMaintenanceReady(active,ops);
   const resumeReady=PlurxClusterPanel.clusterMaintenanceResumeReady(active,ops);
   const localTarget=active.node_id===localNodeId;
-  return `<ol class="clsteps"><li class="${active.maintenance_acknowledged?'done':''}">Target acknowledged the replicated work fence</li>
-    <li class="${!active.is_leader?'done':''}">Leadership is on another voter</li>
-    <li class="${active.reachable&&active.apply_lag_entries===0?'done':''}">Node is reachable and fully caught up</li>
-    <li class="${media&&media.drained&&Number(media.admissions_in_flight||0)===0?'done':''}">Direct process work drained (${sessions} local operation${sessions===1?'':'s'})</li></ol>
-    <div class="claction"><b>${directReady?"Ready to update, reboot, or resume":resumeReady&&active.is_leader?"Ready to hand off leadership and resume":recovering?"Restore this fenced node":"Keep the node running while it drains"}</b><p>The maintenance fence survives a process restart. Resume only from the target node after direct process evidence is current; if it became leader during recovery, resume first hands leadership to a caught-up voter.</p>
-      <div class="row"><button class="sm" ${localTarget&&resumeReady?"":"disabled"} title="${localTarget?'Direct drain proof is required.':'Open the maintenance target directly to resume it.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(active.node_id))},false)'>Resume service</button></div></div>`;
+  const step=(done,text)=>`<span class="${done?"done":"wait"}">${text}</span>`;
+  return `<div class="clalertsteps">${step(active.maintenance_acknowledged,"Target acknowledged the replicated work fence")}${
+      step(!active.is_leader,"Leadership is on another voter")}${
+      step(active.reachable&&active.apply_lag_entries===0,"Node is reachable and fully caught up")}${
+      step(media&&media.drained&&Number(media.admissions_in_flight||0)===0,`Direct process work drained (${sessions} local operation${sessions===1?"":"s"})`)}</div>
+    <div class="clalertnext"><b>${directReady?"Ready to update, reboot, or resume.":resumeReady&&active.is_leader?"Ready to hand off leadership and resume.":recovering?"Restore this fenced node.":"Keep the node running while it drains."}</b>
+      <button class="sm" ${localTarget&&resumeReady?"":"disabled"} title="${localTarget?"Direct drain proof is required.":"Open the maintenance target directly to resume it."}" onclick='setNodeMaintenance(${esc(JSON.stringify(active.node_id))},false)'>Resume service</button></div>`;
+}
+function clusterMaintenanceAlert(active,ops,localNodeId){
+  return `<div class="clalert" role="status"><div><b>Maintenance in progress on ${esc(active.hostname||active.node_id)}${active.node_id===localNodeId?" (this node)":""}.</b>
+    Membership changes are locked until it resumes. The fence survives a process restart; resume only from the target node.
+    ${clusterMaintenanceProgress(active,ops,localNodeId)}</div></div>`;
 }
 
 // ---- cluster settings ----------------------------------------------------

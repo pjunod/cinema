@@ -99,7 +99,7 @@ function renderSettings(){
   restoreSettingsMounts(keep);
   revealSettingsAnchor(tab);
   if(tab==="developer")cinemaRemoteLoadManagement();
-  if(tab==="cluster"&&settingsClusterEnabled()){ applyClusterFolds(); return refreshClusterLogs(); }
+  if(tab==="cluster"&&settingsClusterEnabled()) return refreshClusterLogs();
 }
 function settingsPanel(tab,d){
   if(tab==="metadata")     return metadataPanel(d.settings,d.developerReadiness);

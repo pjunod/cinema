@@ -1384,29 +1384,13 @@
      short OS hostname, keep the advertised host and node id as copyable
      details, and put leadership beside the host it belongs to instead of
      making the operator infer it from a removal refusal. */
-  .clidentity{min-width:190px}
-  .clhostline{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
   .clhost{font-size:15px;font-weight:700;line-height:1.3;overflow-wrap:anywhere}
-  .claddr{margin-top:4px;color:var(--text);font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
-    font-size:11.5px;font-weight:500;line-height:1.35;overflow-wrap:anywhere}
   .clid{margin-top:3px;color:var(--muted);font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
     font-size:10.5px;font-weight:400;line-height:1.35;word-break:break-all}
   /* The same idea one table row deep: the machine name leads, the id keeps its
-     own treatment underneath instead of disappearing into a tooltip.
-     NOT `.clnode` — that is the cluster page's node *card* further down this
-     sheet, and at equal specificity the later rule wins, so a label wearing
-     that name renders as a bordered, panel-tinted box inside a table cell. */
+     own treatment underneath instead of disappearing into a tooltip. */
   .nodename{font-weight:600;line-height:1.3;overflow-wrap:anywhere}
-  .clleader{color:var(--accent);border-color:var(--accent)}
-  .clopshead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
-  .clopsfacts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px 14px;margin:12px 0 4px}
-  .clopsfact{border:1px solid var(--line);border-radius:8px;background:var(--panel2);padding:9px 11px;font-size:12px;line-height:1.45}
-  .clopsfact b{display:block;font-size:13px;color:var(--text)}
   .clopsblockers{margin:8px 0 0;padding-left:20px;font-size:13px;line-height:1.5}
-  .clopsdetail{padding:6px 0;color:var(--muted);font-size:12px}
-  .clopsdetail summary{cursor:pointer;color:var(--text);font-weight:600}
-  .clopsdetail .kvgrid{margin-top:8px}
-  .clopscode{font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;font-size:11px;word-break:break-all}
   /* A join token is a complete cluster credential shown exactly once. It gets
      its own loud box so nobody mistakes it for an id they can leave on screen,
      and `user-select:all` makes copying it one gesture on a machine with no
@@ -1417,141 +1401,128 @@
   .clrefusal{border:1px solid var(--warn,#fbbf24);border-radius:8px;background:var(--panel2);
     padding:11px 14px;margin-top:12px;font-size:13px;line-height:1.55}
   .clrefusal b{display:block;margin-bottom:3px;color:var(--text)}
-  .cluster-dashboard{display:grid;gap:16px}
-  .cluster-health{display:grid;grid-template-columns:minmax(260px,1.7fr) repeat(3,minmax(105px,.55fr));gap:12px;align-items:stretch}
-  .cluster-health>.clstate{margin:0}
-  .clmetric{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:12px 14px;display:flex;flex-direction:column;justify-content:center}
-  .clmetric strong{font-size:20px;line-height:1.15;color:var(--text);min-width:0;overflow-wrap:anywhere}
-  .clmetric span{margin-top:5px;color:var(--muted);font-size:11px;line-height:1.35}
-  .cluster-main{display:grid;gap:16px}
-  /* Two components, two columns. The store never shares a card with the
-     machines carrying it, so a number on this screen always belongs to
-     exactly one of them. */
-  .cluster-board{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:16px;align-items:start}
-  .cluster-board.clsolo{grid-template-columns:minmax(0,1fr)}
-  .clcolumn{min-width:0;display:grid;gap:16px;align-content:start}
-  /* The roster is the one part of this screen that changes size while you use
-     it: opening a node card used to move every section below it by as much as
-     1259px, and left the store's column 1259px shorter than the machines'.
-     Capping the list turns it into a scroller whose height no longer depends
-     on what is expanded, so the page stops moving and the two columns end up
-     the same length. Narrow or short windows keep the ordinary page scroll —
-     a phone has no room to give a nested one. */
-  @media(min-width:1100px) and (min-height:720px){
-    /* Fixed, not capped: a maximum still shrinks when every card is closed,
-       which moves whatever sits below the taller column. Only applied from
-       three nodes up, where the list fills it — a two-node cluster would just
-       get an empty box. */
-    /* Flex, not the grid the unbounded list uses: auto grid rows inside a
-       definite height are compressed to fit, and .clnode hides its overflow,
-       so every expanded card silently lost its body. */
-    .clnodes.clnodes-capped{display:flex;flex-direction:column;
-      height:min(var(--clnodes-h,570px),max(360px,calc(100vh - 330px)));overflow-y:auto;
-      overscroll-behavior:contain;scrollbar-width:thin;padding-right:3px;
-      scroll-padding-block-end:34px;
-      -webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 18px),transparent);
-      mask-image:linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}
-    .clnodes.clnodes-capped>.clnode{flex:0 0 auto}
-    .clnode{scroll-margin:6px 0 34px}
-  }
-  /* What a folded database section still says. Collapsing hides the detail,
-     never the verdict: the health pill stays in the header and this line keeps
-     the readings somebody checks before expanding it again. */
-  .cldbsumm{margin-top:11px;font-family:var(--font-mono);font-size:11.5px;line-height:1.7;
-    color:var(--muted);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-  .cldbsumm b{color:var(--text);font-weight:500}
-  .cldbledger{display:grid;grid-template-columns:minmax(112px,auto) minmax(0,1fr);gap:7px 14px;
-    margin:12px 0 0;font-size:12.5px;font-variant-numeric:tabular-nums}
-  .cldbledger dt{color:var(--muted)}
-  .cldbledger dd{margin:0;color:var(--text);overflow-wrap:anywhere}
-  .cldbledger dd.num{font-family:var(--font-mono);font-size:12px}
-  .cltabs{display:flex;gap:4px;margin-top:13px;border-bottom:1px solid var(--line);flex-wrap:wrap}
-  .cltab{border:0;background:none;color:var(--muted);font-size:12.5px;font-weight:600;
-    padding:8px 12px;cursor:pointer;border-bottom:2px solid transparent;border-radius:7px 7px 0 0;width:auto}
-  .cltab:hover{color:var(--text)}
-  .cltab[aria-selected="true"]{color:var(--text);border-bottom-color:var(--accent)}
-  .cltab:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
-  .clpane{padding-top:12px}
-  .cluster-card{border:1px solid var(--line);border-radius:11px;background:var(--panel2);padding:15px}
-  .cluster-card .cluster-card{border:0;border-radius:0;background:none;padding:15px 0 0;margin-top:15px;border-top:1px solid var(--line)}
-  .cluster-card h3{font-size:15px;margin:0 0 5px}
-  .cluster-card p{font-size:12.5px;line-height:1.5;color:var(--muted);margin:0}
-  .clcontextfacts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:12px}
-  .clcontextfact{border:1px solid var(--line);border-radius:9px;background:var(--panel);padding:10px 12px}
-  .clcontextfact>span{display:block;color:var(--muted);font-size:10.5px;margin-bottom:4px}
-  .clcontextfact>b{display:block;font-size:12.5px;line-height:1.45;color:var(--text)}
-  .clcontextfact>small{display:block;margin-top:4px;color:var(--muted);font-size:10.5px;line-height:1.4}
-  .clrail{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);
-    border-radius:10px;overflow:hidden;margin-top:12px}
-  .clrailrow{background:var(--panel);padding:11px 13px;display:flex;align-items:flex-start;
-    justify-content:space-between;gap:12px;flex-wrap:wrap}
-  .clrailtext{min-width:180px;flex:1 1 240px}
-  .clrailrow .t{font-size:13px;font-weight:650;line-height:1.35}
-  .clrailrow .r{font-size:11.5px;color:var(--muted);line-height:1.5;margin-top:3px}
-  .clrailside{display:flex;align-items:center;gap:8px;flex:0 0 auto}
-  .clrailrow.blocked .t{color:var(--muted)}
-  .clrailrow.destructive{background:color-mix(in srgb,var(--bad) 7%,var(--panel))}
-  .clrailrow.destructive .t{color:var(--bad)}
-  .btn-danger{background:transparent;color:var(--bad);border:1px solid var(--bad)}
-  .btn-danger:hover{background:color-mix(in srgb,var(--bad) 12%,transparent)}
-  .clopssummary{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
-  .clopssummary .clstate{margin:10px 0 0}
-  .clopssummary h4{margin:0 0 3px;font-size:13.5px}
-  .clnodes{display:grid;gap:10px;margin-top:12px}
-  .clnode{border:1px solid var(--line);border-radius:10px;background:var(--panel);overflow:hidden}
-  .clnode.maintenance{border-color:var(--warn,#fbbf24);background:color-mix(in srgb,var(--warn) 5%,var(--panel))}
-  .clnode.stale{border-color:color-mix(in srgb,var(--bad) 55%,var(--line))}
-  .clnode>summary{position:relative;cursor:pointer;list-style:none;padding:13px 42px 13px 13px}
-  .clnode>summary::-webkit-details-marker{display:none}
-  .clnode>summary::after{content:"›";position:absolute;right:15px;top:50%;color:var(--muted);font-size:22px;line-height:1;transform:translateY(-50%) rotate(90deg);transition:transform .15s ease}
-  .clnode:not([open])>summary::after{transform:translateY(-50%) rotate(0)}
-  .clnode>summary:hover{background:color-mix(in srgb,var(--accent) 6%,transparent)}
-  .clnodesummary,.clnodefoot,.clophead{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
-  .clnodesummaryright{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}
-  .clnodebody{padding:0 13px 13px;border-top:1px solid var(--line)}
-  .clnodegroups{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,215px),1fr));gap:14px}
-  .clnodegroup{min-width:0;padding-top:11px}
-  .clgrouptitle{margin-bottom:8px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
-  .clnodemeta{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,92px),1fr));gap:7px}
-  .clnodemeta div,.clnodeopmeta div{border-top:1px solid var(--line);padding-top:7px;font-size:12px;color:var(--text);min-width:0;overflow-wrap:anywhere}
-  .clnodemeta span,.clnodeopmeta span{display:block;color:var(--muted);font-size:10.5px;margin-bottom:3px}
-  .clnodeopmeta{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,118px),1fr));gap:7px}
-  .clnodeunknown{border:1px solid var(--line);border-radius:8px;padding:9px 10px;color:var(--muted);font-size:12px;line-height:1.45}
-  .clnodedetail{margin-top:9px;color:var(--muted);font-size:11.5px}
-  .clnodedetail>summary{cursor:pointer;color:var(--text);font-weight:600}
-  .clnodedetail .kvgrid{margin-top:8px}
-  .clnodefoot{align-items:center;margin-top:12px}
-  .clnodefoot .hint{margin:0;max-width:450px}
-  .clactions{display:grid;gap:9px;margin-top:14px}
-  .claction{border:1px solid var(--line);border-radius:9px;padding:11px 12px;background:var(--panel)}
-  .claction .row{margin-top:9px}
   .clsteps{display:grid;gap:7px;margin:12px 0 0;padding:0;list-style:none}
   .clsteps li{position:relative;padding-left:25px;color:var(--muted);font-size:12px;line-height:1.4}
   .clsteps li::before{content:"";position:absolute;left:1px;top:1px;width:15px;height:15px;border:1px solid var(--line);border-radius:50%}
   .clsteps li.done{color:var(--text)}
   .clsteps li.done::before{content:"✓";display:grid;place-items:center;color:var(--good);border-color:var(--good);font-size:10px;font-weight:800}
-  .clrecovery{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 5%,var(--panel2))}
-  .clrecovery .recovery-count{font-size:25px;font-weight:750;color:var(--text);margin:12px 0 2px}
-  .clvoters{display:grid;gap:6px;margin:12px 0}
-  .clvoter{display:flex;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12px}
-  .clrailpanel{flex-basis:100%;margin-top:11px;padding-top:11px;border-top:1px solid var(--line)}
-  .clrailrow.destructive .clrailpanel{border-top-color:color-mix(in srgb,var(--bad) 35%,var(--line))}
   .cldialog{width:min(540px,calc(100vw - 30px));border:1px solid var(--line);border-radius:13px;background:var(--panel);color:var(--text);padding:0;box-shadow:0 22px 70px #0009}
   .cldialog::backdrop{background:#0009}
   .cldialogbody{padding:20px}
   .cldialogbody h3{margin:0 0 7px}
   .cldialogbody p{color:var(--muted);font-size:13px;line-height:1.55}
   .cldialogactions{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
-  @media(max-width:900px){
-    .cluster-board{grid-template-columns:minmax(0,1fr)}
-    .cluster-health{grid-template-columns:repeat(3,minmax(0,1fr))}
-    .cluster-health>.clstate{grid-column:1/-1}
+  /* Settings → Cluster. A header, a six-cell status strip, an alert only when
+     something needs action, the nodes table, then two-up cards and the log.
+     Every colour is a token; tone rides on dots, borders and short words. */
+  .clpage{display:grid;gap:18px;min-width:0}
+  .clpage .sethead{margin:0}
+  .clpage>.clstate{margin:0}
+  .clcard{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);min-width:0;overflow:hidden}
+  .clcardhead{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 18px;border-bottom:1px solid var(--line)}
+  .clcardhead h2{margin:0;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.08em}
+  .clcardhead h2 small{font-weight:500;color:var(--muted);letter-spacing:0;text-transform:none;font-size:12.5px;margin-left:8px}
+  .clcardhead .row{gap:8px;flex-wrap:nowrap;align-items:center}
+  .clcardhead select{width:auto;font-size:12.5px;padding:4px 8px}
+  .clcardhead label.chk{padding:0;font-size:12.5px;color:var(--muted)}
+  .clcardhead label.chk input{width:15px;height:15px}
+  .clgood{color:var(--good)} .clwarn{color:var(--warn)} .clbad{color:var(--bad)}
+  .clmono{font-family:var(--font-mono);font-size:12px;overflow-wrap:anywhere}
+  .clwhy{font-size:12px;color:var(--muted);line-height:1.4}
+  .cldot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-right:8px;vertical-align:1px;flex:0 0 auto}
+  .cldot.good{background:var(--good)} .cldot.warn{background:var(--warn)} .cldot.bad{background:var(--bad)}
+  /* The strip: the page's verdict and five readings. Values never wrap; a
+     long hostname ellipsizes inside its own cell instead of widening the row. */
+  .clstrip{display:grid;grid-template-columns:minmax(250px,1.7fr) repeat(5,minmax(0,1fr))}
+  .clstrip>div{padding:13px 16px 14px;border-left:1px solid var(--line);min-width:0}
+  .clstrip>div:first-child{border-left:3px solid var(--line)}
+  .clstrip[data-tone=good]>div:first-child{border-left-color:var(--good)}
+  .clstrip[data-tone=warn]>div:first-child{border-left-color:var(--warn)}
+  .clstrip[data-tone=bad]>div:first-child{border-left-color:var(--bad)}
+  .clk{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)}
+  .clv{font-size:17px;font-weight:700;margin-top:3px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+  .cls{font-size:12px;color:var(--muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* Alerts: one block per condition, most severe first, none when healthy. */
+  .clalert{display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:12px 16px;border-radius:10px;font-size:13px;line-height:1.5;
+    background:color-mix(in srgb,var(--warn) 9%,var(--panel));border:1px solid color-mix(in srgb,var(--warn) 45%,var(--line))}
+  .clalert.bad{background:color-mix(in srgb,var(--bad) 9%,var(--panel));border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}
+  .clalert.good{background:color-mix(in srgb,var(--good) 7%,var(--panel));border-color:color-mix(in srgb,var(--good) 40%,var(--line))}
+  .clalert>div:first-child{flex:1 1 0;min-width:260px}
+  .clalert>.row{flex:0 1 auto;flex-wrap:wrap;justify-content:flex-end}
+  .clalert p{margin:6px 0 0}
+  .clalert .kvgrid{margin:6px 0}
+  .clalertsteps{display:flex;gap:6px 18px;flex-wrap:wrap;margin-top:5px;font-size:12.5px;color:var(--muted)}
+  .clalertsteps span.done{color:var(--text)}
+  .clalertsteps span.done::before{content:"✓ ";color:var(--good)}
+  .clalertsteps span.wait::before{content:"○ ";color:var(--warn)}
+  .clalertnext{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px}
+  #cluster-operations:empty{display:none}
+  .clexpansion{padding:14px 18px;border-bottom:1px solid var(--line);background:var(--panel2)}
+  /* The nodes table. It grows with the roster: no height cap, no inner scroll. */
+  .clnodetable{margin:0}
+  .clnodetable th,.clnodetable td{padding:10px 12px;font-size:13px;vertical-align:middle;white-space:nowrap}
+  .clnodetable th{font-size:10.5px;letter-spacing:.08em;background:color-mix(in srgb,var(--panel2) 55%,var(--panel))}
+  .clnodetable th:first-child,.clnodetable td:first-child{padding-left:18px}
+  .clnodetable th:last-child,.clnodetable td:last-child{padding-right:18px;text-align:right}
+  .clnodetable tbody tr:last-child>td{border-bottom:0}
+  .clnodetable td.num{font-variant-numeric:tabular-nums}
+  .clnodetable tr.clrow{cursor:pointer}
+  .clnodetable tr.clrow:hover>td{background:color-mix(in srgb,var(--accent) 5%,transparent)}
+  .clnodetable tr.clrow:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+  .clnodetable tr.stale>td{color:var(--muted)}
+  .clnodetable tr[hidden]{display:none}
+  .clnodetable tr.setdrawer>td{text-align:left;padding:16px 18px;white-space:normal}
+  .clname .clhost{font-size:14px}
+  .clname .pill{margin-left:6px}
+  .clsub{font-family:var(--font-mono);font-size:11px;color:var(--muted);margin:1px 0 0 14px}
+  .clchev{color:var(--muted);font-size:11px;display:inline-block;width:14px}
+  .cldrawer{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px 28px}
+  .cldrawer h4{margin:0 0 8px;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)}
+  .cldrawer .kvgrid{font-size:12.5px;gap:5px 14px}
+  .cldrawer .kvgrid dd{overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+  .cldraweract{grid-column:1/-1;display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+  .cldraweract .clpush{margin-left:auto;display:flex;gap:10px;align-items:center}
+  .cldraweract .clexpansion{flex-basis:100%;border:1px solid var(--line);border-radius:8px}
+  /* Two-up: settings beside the store, maintenance beside backup. */
+  .cltwo{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,.75fr);gap:18px;align-items:start}
+  .clstack{display:grid;gap:18px;min-width:0}
+  .clstack:empty{display:none}
+  .clledger{display:grid;grid-template-columns:max-content minmax(0,1fr);margin:0;font-size:13px}
+  .clledger dt,.clledger dd{padding:7px 18px;border-top:1px solid color-mix(in srgb,var(--line) 60%,transparent);margin:0}
+  .clledger dt:first-of-type,.clledger dt:first-of-type+dd{border-top:0}
+  .clledger dt{color:var(--muted);padding-right:8px}
+  .clledger dd{text-align:right;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+  .clact{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:12px 18px;border-top:1px solid var(--line)}
+  .clact:first-of-type{border-top:0}
+  .clact .t{font-size:13.5px;font-weight:600}
+  .clact .d{font-size:12px;color:var(--muted);line-height:1.4;margin-top:1px}
+  .clact .clopsblockers{margin:6px 0 0;font-size:12px}
+  .clact .row{flex-wrap:nowrap;gap:8px}
+  .cllog{margin:0;border:0;border-radius:0;height:176px;overflow:auto;padding:12px 18px;font-size:12px;line-height:1.6}
+  @media(max-width:1100px){
+    .clstrip{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .clstrip>div:first-child{grid-column:1/-1;border-bottom:1px solid var(--line)}
+    .clstrip>div:nth-child(2),.clstrip>div:nth-child(5){border-left:0}
+    .clstrip>div:nth-child(n+5){border-top:1px solid var(--line)}
   }
-  @media(max-width:620px){
-    .cluster-health{grid-template-columns:minmax(0,1fr)}
-    .cluster-health>.clstate{grid-column:auto}
-    .clcontextfacts{grid-template-columns:minmax(0,1fr)}
-    .clnodesummaryright{justify-content:flex-start}
+  @media(max-width:900px){ .cltwo{grid-template-columns:minmax(0,1fr)} .cldrawer{grid-template-columns:minmax(0,1fr);gap:16px} }
+  @media(max-width:640px){
+    .clstrip{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .clstrip>div{border-left:0;border-top:1px solid var(--line)}
+    .clstrip>div:nth-child(even){border-right:1px solid var(--line)}
+    .clstrip>div:first-child{border-top:0;border-right:0}
+    .clstrip>div:nth-child(n+5){border-top:1px solid var(--line)}
+    .clnodetable{padding:10px 12px 2px}
+    .clnodetable td{white-space:normal}
+    .clnodetable td:last-child{text-align:left}
+    .clnodetable tr.clrow{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:2px 12px}
+    .clnodetable tr.clrow>td.clname{grid-column:1/-1;padding-bottom:6px}
+    .clnodetable th:first-child,.clnodetable td:first-child{padding-left:0}
+    .clcardhead{flex-wrap:wrap}
+    .clcardhead .row{flex-wrap:wrap}
+    .clact{grid-template-columns:minmax(0,1fr)}
+    .clact .row{flex-wrap:wrap}
+    .clledger dd{text-align:left}
   }
   /* Trakt device-link code: big, mono, unmissable — you type it on another screen */
   .traktcode{font-family:var(--font-mono);font-size:34px;font-weight:700;letter-spacing:.18em;color:var(--accent);margin:10px 0 2px;user-select:all}

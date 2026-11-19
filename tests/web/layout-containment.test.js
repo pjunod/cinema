@@ -210,10 +210,10 @@ assert.match(index, /\.specs\{[^}]*grid-template-columns:84px minmax\(0,1fr\)/);
 assert.match(index, /\.specs dd\{[^}]*min-width:0[^}]*overflow-wrap:anywhere/);
 assert.match(index, /\.specs \.trk\{[^}]*max-width:100%[^}]*overflow-wrap:anywhere/);
 assert.match(index, /\.specs \.trkfold summary\{[^}]*width:fit-content[^}]*max-width:100%/);
-assert.match(index, /\.clmetric strong\{[^}]*min-width:0[^}]*overflow-wrap:anywhere/);
+assert.match(index, /\.clv\{[^}]*min-width:0[^}]*overflow:hidden;text-overflow:ellipsis/);
 
 const baseline = fs.readFileSync(path.join(ROOT, "scripts/ui-baseline"), "utf8");
-for (const stress of ["stress_long_track_containment", "stress_cluster_metric_containment"]) {
+for (const stress of ["stress_long_track_containment", "stress_cluster_strip_containment"]) {
   assert.equal(
     (baseline.match(new RegExp(`${stress}\\(page, name, layout_id\\)`, "g")) || []).length,
     2,
