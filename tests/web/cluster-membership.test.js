@@ -4859,6 +4859,364 @@ test("late readiness redraws only the chips and their text, never a switch", () 
   assert.match(mores.get("subcluster").innerHTML, /The prerequisite reading failed: offline/);
 });
 
+// ---- review fixes: what the page does, pinned where it is painted ----------
+
+// The header's Refresh, run against a page whose controls are rebuilt from
+// their defaults on every paint — exactly what renderSettings() does to them.
+function refreshHarness({ cluster, ops, fresh, freshOps, dialog = false }) {
+  const calls = [];
+  let active = null;
+  const control = (props) => Object.assign({
+    closest: () => ({}),
+    focus() { active = this; },
+  }, props);
+  const defaults = () => ({
+    clttl: control({ id: "clttl", value: "600" }),
+    clrole: control({ id: "clrole", value: "voter" }),
+    clloglvl: control({ id: "clloglvl", value: "info" }),
+    cllogauto: control({ id: "cllogauto", type: "checkbox", checked: true, value: "on" }),
+    "cluster-clock-enforced": control({ id: "cluster-clock-enforced", type: "checkbox", checked: false, value: "on" }),
+  });
+  let dom = defaults();
+  const document = {
+    querySelectorAll: () => Object.values(dom),
+    getElementById: (id) => dom[id] || null,
+    querySelector: (selector) => (selector.includes("dialog[open]") && dialog ? {} : null),
+    get activeElement() { return active; },
+  };
+  const page = new Function(
+    "document", "calls", "rebuild", "fresh", "freshOps", "initial",
+    `let PAGE_RENDER_GENERATION=7,CLUSTER_LOADED=true;
+     const SETTINGS_DATA={cluster:initial.cluster,clusterOps:initial.ops};
+     const SETTINGS_LOADED=new Set(["cluster","clusterOps"]);
+     const SETTINGS_ENDPOINTS={
+       cluster:()=>{calls.push("/cluster/nodes");return Promise.resolve(fresh);},
+       clusterOps:()=>{calls.push("/cluster/status");return Promise.resolve(freshOps);},
+     };
+     const settingsCurrent=(generation,tab)=>generation===PAGE_RENDER_GENERATION&&tab==="cluster";
+     const renderSettings=()=>{calls.push("paint");rebuild();};
+     const viewSettings=()=>calls.push("viewSettings");
+     const layoutChrome=()=>calls.push("layoutChrome");
+     const patchClusterReadingAge=()=>calls.push("age");
+     ${shippedSource("clusterRepaintDeferred")}
+     ${shippedSource("repaintClusterPreserving")}
+     ${shippedSource("clusterControlValues")}
+     ${shippedSource("clusterRestoreControlValues")}
+     ${shippedSource("refreshClusterPage")}
+     return {refresh:refreshClusterPage,data:()=>SETTINGS_DATA,generation:()=>PAGE_RENDER_GENERATION};`,
+  )(document, calls, () => { dom = defaults(); }, fresh, freshOps, { cluster, ops });
+  return { page, calls, dom: () => dom, active: () => active };
+}
+
+test("Refresh re-reads roster and status and keeps every choice on the page", async () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const fresh = labCluster();
+  fresh.nodes[3].reachable = false;
+  const freshOps = operationStatus(fresh);
+  const { page, calls, dom, active } = refreshHarness({ cluster, ops, fresh, freshOps });
+  // The operator chose a one-hour read-worker token, a log level, turned off
+  // auto-refresh, flipped a setting without saving, and is on the role select.
+  dom().clttl.value = "3600";
+  dom().clrole.value = "learner";
+  dom().clloglvl.value = "warn";
+  dom().cllogauto.checked = false;
+  dom()["cluster-clock-enforced"].checked = true;
+  dom().clrole.focus();
+  const button = { disabled: false };
+  const done = page.refresh(button);
+  assert.equal(button.disabled, true, "the button says it is working");
+  await done;
+  assert.deepEqual(calls, ["/cluster/nodes", "/cluster/status", "paint"],
+    "both reads, then one preserving paint — never the loading shell");
+  assert.equal(page.generation(), 7, "no generation bump: an operation in flight keeps its answer");
+  assert.equal(page.data().cluster, fresh);
+  assert.equal(page.data().clusterOps, freshOps);
+  assert.equal(dom().clttl.value, "3600");
+  assert.equal(dom().clrole.value, "learner", "a repaint must never turn this into a voter token");
+  assert.equal(dom().clloglvl.value, "warn");
+  assert.equal(dom().cllogauto.checked, false);
+  assert.equal(dom()["cluster-clock-enforced"].checked, true, "the unsaved toggle survives");
+  assert.equal(active(), dom().clrole, "focus is put back on the rebuilt control");
+  assert.equal(button.disabled, false);
+});
+
+test("Refresh holds both samples under an open dialog, and polls nothing on one machine", async () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const fresh = labCluster();
+  fresh.nodes[3].reachable = false;
+  const held = refreshHarness({ cluster, ops, fresh, freshOps: operationStatus(fresh), dialog: true });
+  await held.page.refresh(null);
+  assert.deepEqual(held.calls, ["/cluster/nodes", "/cluster/status", "age"]);
+  assert.equal(held.page.data().cluster, cluster, "a roster the page did not paint is not stored");
+  assert.equal(held.page.data().clusterOps, ops);
+
+  const solo = { unavailable: true, code: "membership_unavailable" };
+  const single = refreshHarness({ cluster: solo, ops: null, fresh: solo, freshOps: null });
+  await single.page.refresh(null);
+  assert.deepEqual(single.calls, ["/cluster/nodes", "paint"], "no fan-out for a machine that is not clustered");
+});
+
+test("recovery outranks maintenance in the strip and the alert slot", () => {
+  const cluster = labCluster();
+  cluster.nodes[2].maintenance = true;
+  cluster.recovery = { required: true, quorum_available: false, reachable_voters: 1, required_voters: 3, leader_elected: false };
+  const ops = operationStatus(cluster);
+  const health = stripMap(PANEL.clusterStripCells(sandbox().env, cluster, ops)).get("cluster");
+  assert.equal(health.value, "Recovery required");
+  assert.equal(health.tone, "bad");
+  const kinds = PANEL.clusterAlertKinds(cluster, ops).map((k) => k.kind);
+  assert.equal(kinds[0], "recovery");
+  assert.equal(kinds.includes("maintenance"), false, "recovery carries the fenced target inside it");
+});
+
+test("the two-voter sentence reaches the alert slot whole", () => {
+  const ui = sandbox();
+  const two = status("degraded_reconfiguration", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+  ]);
+  const state = PANEL.clusterStateView(two);
+  assert.ok(state.body.length > 80, "the state carries its full sentence");
+  const html = ui.clusterAlerts(two, operationStatus(two));
+  assert.ok(html.includes(`<b>${ui.esc(state.title)}.</b> ${ui.esc(state.body)}`),
+    "the painted alert carries the unshortened two-voter body");
+});
+
+test("a drawer is opened by a real button, and the row only delegates to it", () => {
+  const ui = sandbox();
+  const cluster = labCluster();
+  const row = ui.clusterNodeTableRow(cluster.nodes[1], cluster, null);
+  const [summary] = row.split('<tr class="setdrawer"');
+  assert.doesNotMatch(summary, /<tr[^>]*(tabindex|onkeydown|aria-expanded|aria-controls)/,
+    "the row is not a control; the button is");
+  assert.match(summary, /<button type="button" class="clnodebtn" data-node="node-2" aria-expanded="false" aria-controls="cldrawer-node-2" onclick="toggleClusterNode\(this\)">[\s\S]*lab2<\/span><\/button>/);
+  assert.match(row, /<tr class="setdrawer" id="cldrawer-node-2"/, "aria-controls names a panel that exists");
+
+  const toggled = [];
+  const click = (selection) => new Function(
+    "getSelection", "toggleClusterNode",
+    `${shippedSource("clusterRowClick")}
+     return clusterRowClick;`,
+  )(() => selection, (button) => toggled.push(button));
+  const button = { id: "toggle" };
+  const rowEl = { querySelector: (selector) => (selector === ".clnodebtn" ? button : null) };
+  const plain = { target: { closest: () => null } };
+  click({ isCollapsed: true, toString: () => "" })(plain, rowEl);
+  assert.deepEqual(toggled, [button], "a click on the row is the button's toggle");
+  click({ isCollapsed: false, toString: () => "lab2" })(plain, rowEl);
+  assert.equal(toggled.length, 1, "finishing a text selection does not toggle the drawer");
+  click({ isCollapsed: true, toString: () => "" })({ target: { closest: () => ({}) } }, rowEl);
+  assert.equal(toggled.length, 1, "a control inside the row handles its own click");
+});
+
+test("open drawers are dropped when the operator leaves the section", async () => {
+  const run = async ({ shown, tab, reset }) => {
+    const view = new Function(
+      "shown", "tab",
+      `let SETTINGS=null,TRAKT=null,TRAKT_EDIT=false,SETTINGS_DATA={},DV_SETTINGS_POLL_AT=0,CLUSTER_LOADED=true;
+       let SETTINGS_PENDING_KEEP=null,SETTINGS_SHOWN_TAB=shown,LIB_DRAWER=null,USER_DRAWER=null,DEVICE_DRAWER=null;
+       let CLUSTER_OPEN_NODES=["node-2"],PAGE_RENDER_GENERATION=1;
+       const SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
+       const ME={is_admin:true},location={hash:"#/settings/"+tab},localStorage={setItem(){}};
+       const settingsTab=()=>tab,captureSettingsMounts=()=>null,forgetJoinToken=()=>{};
+       const layoutChrome=()=>{},settingsShell=()=>"",setPagePhase=()=>{},setPageTimer=()=>{};
+       const loadSettingsTab=async()=>false,settingsClusterEnabled=()=>true;
+       ${shippedSource("viewSettings")}
+       return async(reset)=>{await viewSettings(1,reset);return CLUSTER_OPEN_NODES;};`,
+    )(shown, tab);
+    return view(reset);
+  };
+  assert.deepEqual(await run({ shown: "cluster", tab: "cluster", reset: false }), ["node-2"],
+    "a same-section reload keeps them");
+  assert.deepEqual(await run({ shown: "cluster", tab: "system", reset: false }), [],
+    "another section drops them");
+  assert.deepEqual(await run({ shown: "cluster", tab: "cluster", reset: true }), [],
+    "a fresh visit starts closed");
+});
+
+test("the strip is not Healthy over a status that says otherwise", () => {
+  const env = sandbox().env;
+  const health = (cluster, ops) => stripMap(PANEL.clusterStripCells(env, cluster, ops)).get("cluster");
+  const cluster = labCluster();
+  // Still collecting degrades nothing.
+  assert.equal(health(cluster, null).value, "Healthy");
+  // A failed collection.
+  const failed = health(cluster, { unavailable: true, message: "gateway" });
+  assert.deepEqual([failed.value, failed.tone, failed.sub],
+    ["Status unavailable", "warn", "direct status could not be collected"]);
+  // A voter the status did not observe, with the server's blocker as the reason.
+  const unobserved = operationStatus(cluster, { unreachable: true });
+  const down = health(cluster, unobserved);
+  assert.deepEqual([down.value, down.tone], ["Degraded", "warn"]);
+  assert.equal(down.sub, "voter not observed on lab2");
+  // …and with no blocker to name, the count.
+  unobserved.verdict = { safe_to_restart_one: true, candidate_node_id: "node-3", blockers: [], warnings: [] };
+  assert.equal(health(cluster, unobserved).sub, "3 of 4 voters answered");
+  assert.equal(PANEL.clusterUnobservedVoters(cluster, null).length, 0);
+  // Degraded replication.
+  const behind = labCluster({ replication: { ...REPLICATION, health: "degraded", explanation: "This node is behind." } });
+  assert.deepEqual([health(behind, operationStatus(behind)).value, health(behind, operationStatus(behind)).sub],
+    ["Degraded", "replication degraded"]);
+});
+
+test("a blocked verdict alone puts the base warning in the alert slot", () => {
+  const ui = sandbox();
+  const cluster = labCluster();
+  const ops = operationStatus(cluster, { unreachable: true });
+  assert.ok(PANEL.clusterAlertKinds(cluster, ops).some((k) => k.kind === "restart_blocked"));
+  const html = ui.clusterAlerts(cluster, ops);
+  assert.match(html, /<b>Do not restart another voter\.<\/b> Rolling restart is blocked: voter not observed on lab2\./);
+  // Not repeated where another block already says it, and not on a safe verdict.
+  assert.equal(PANEL.clusterAlertKinds(cluster, operationStatus(cluster)).length, 0);
+  const downCluster = labCluster();
+  downCluster.nodes[1].reachable = false;
+  const kinds = PANEL.clusterAlertKinds(downCluster, operationStatus(downCluster, { unreachable: true })).map((k) => k.kind);
+  assert.deepEqual(kinds, ["voter_down"]);
+});
+
+test("degraded replication shows the server's explanation in the ledger", () => {
+  const env = sandbox().env;
+  const behind = { ...REPLICATION, health: "degraded", explanation: "This node is behind. Keep it running while it catches up." };
+  const cluster = labCluster({ replication: behind });
+  const rows = PANEL.clusterDatabaseRows(env, cluster, behind, operationStatus(cluster));
+  const watch = rows.find((row) => row[0] === "Watch state");
+  assert.ok(watch, "a degraded store says why");
+  assert.equal(watch[1], "This node is behind. Keep it running while it catches up.");
+  const healthy = PANEL.clusterDatabaseRows(env, labCluster(), REPLICATION, null);
+  assert.equal(healthy.some((row) => row[0] === "Watch state"), false, "in sync needs no sentence");
+});
+
+test("a learner can be promoted from its own screen", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  cluster.local_node_id = "node-5";
+  cluster.nodes[4].voter_storage_ready = true;
+  const actions = PANEL.clusterNodeActions(env, cluster, operationStatus(cluster), cluster.nodes[4]);
+  assert.deepEqual(actions.map((a) => a.id), ["maintenance", "restart", "leave", "promote"]);
+  assert.equal(actions.find((a) => a.id === "promote").blocked, false);
+});
+
+test("requirement details are printed, not hidden in a tooltip", () => {
+  const ui = sandbox();
+  const row = ui.clusterSettingRows().find((r) => r.reqs && r.reqs.length);
+  const checks = row.reqs.map(([, title, detail]) => ({ title, detail, status: "met", evidence: "observed" }));
+  const html = ui.clusterChecksMore(row, checks);
+  assert.equal(/title="/.test(html), false);
+  for (const [, , detail] of row.reqs) assert.ok(html.includes(`<small>${ui.esc(detail)}</small>`), detail);
+});
+
+test("the ages move on every tick, fetch or no fetch", async () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const now = { value: 1_000_000 };
+  const { harness, requests, readingAge } = tickHarness({ cluster, ops, now });
+  const first = harness.settingsTick(1, "cluster");
+  await tickSettle();
+  requests[0].resolve(ops);
+  await first;
+  readingAge.innerHTML = "stale";
+  now.value += 2_000;
+  await harness.settingsTick(1, "cluster");
+  assert.equal(requests.length, 1, "nothing was due");
+  assert.notEqual(readingAge.innerHTML, "stale", "the age was patched without a fetch");
+});
+
+test("the roster on the status gate repaints for news, not for a heartbeat", async () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const now = { value: 1_000_000 };
+  const { harness, requests, painted } = tickHarness({ cluster, ops, now, manualRoster: true });
+  const gate = async (roster) => {
+    now.value += 15_000;
+    const tick = harness.settingsTick(1, "cluster");
+    requests.at(-1).resolve(roster);
+    await tickSettle();
+    requests.at(-1).resolve(ops);
+    await tick;
+  };
+  const beat = JSON.parse(JSON.stringify(cluster));
+  beat.nodes.forEach((n) => { n.last_seen_at += 15_000; });
+  beat.replication.last_converged_at = 1_760_000_100;
+  await gate(beat);
+  assert.deepEqual(painted, [], "a heartbeat is not a reason to rewrite the page");
+  assert.deepEqual(harness.cluster(), beat, "it is stored, and its ages are patched in place");
+
+  const lost = JSON.parse(JSON.stringify(beat));
+  lost.nodes[3].reachable = false;
+  harness.openDialog(true);
+  await gate(lost);
+  assert.deepEqual(painted, [], "never under a dialog");
+  assert.deepEqual(harness.cluster(), beat, "a roster that arrives under a dialog is dropped");
+  harness.openDialog(false);
+  await gate(lost);
+  assert.deepEqual(painted, ["render"], "a voter that stopped heartbeating repaints the page once");
+  assert.deepEqual(harness.cluster(), lost);
+  assert.deepEqual(requests.map((r) => r.url).filter((u) => u === "/cluster/nodes").length, 3);
+});
+
+test("heartbeat cells and the last-converged age are patched in place", () => {
+  const cluster = labCluster();
+  cluster.nodes[1].last_seen_at = Date.now() - 125_000;
+  cluster.replication = { ...REPLICATION, last_converged_at: Math.floor(Date.now() / 1000) - 600 };
+  const td = { tagName: "TD", innerHTML: "4s ago", getAttribute: () => "node-2" };
+  const span = { tagName: "SPAN", textContent: "4s ago", getAttribute: () => "node-2" };
+  const converged = { textContent: "3s ago" };
+  const patch = new Function(
+    "document", "SETTINGS_DATA", "PlurxClusterPanel",
+    `${shippedSource("esc")}
+     ${shippedSource("fmtAgo")}
+     ${shippedSource("fmtBytes")}
+     ${shippedSource("clenv")}
+     ${shippedSource("patchClusterReadingAge")}
+     return patchClusterReadingAge;`,
+  )({
+    getElementById: (id) => (id === "cldb-converged" ? converged : null),
+    querySelectorAll: (selector) => (selector === "[data-clhb]" ? [td, span] : []),
+  }, { cluster, clusterOps: null }, PANEL);
+  patch();
+  assert.match(td.innerHTML, /^2m/);
+  assert.match(span.textContent, /^2m/);
+  assert.match(converged.textContent, /^10m/);
+});
+
+test("aria-controls names only panels that exist, and a refusal is announced once", () => {
+  const recovering = labCluster();
+  recovering.recovery = { required: true, quorum_available: false, reachable_voters: 1, required_voters: 3, leader_elected: false };
+  const blocked = sandbox({ expanded: ["add"] }).clusterNodesCard(recovering, null);
+  assert.equal(blocked.includes('aria-controls="clexp-add"'), false);
+  assert.equal(blocked.includes('id="clexp-add"'), false);
+  const open = sandbox().clusterNodesCard(labCluster(), null);
+  assert.match(open, /aria-controls="clexp-add" aria-expanded="false"/);
+
+  const ui = sandbox({ refusal: { node_id: "node-2", code: "cluster_leader_removal_refused", message: "no" } });
+  assert.match(ui.clusterRefusalHtml(), /^<div class="clalert bad" role="alert">/);
+  assert.match(ui.clusterRefusalHtml(), /^<div class="clalert bad"><div>/, "a repaint does not re-announce it");
+});
+
+test("a safe verdict that names no candidate prints no empty name", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  ops.verdict = { safe_to_restart_one: true, candidate_node_id: null, blockers: [], warnings: [] };
+  const row = PANEL.clusterMaintenanceRows(env, cluster, ops)[0];
+  assert.equal(row.text, "The observed voters preserve majority after one restart.");
+  assert.doesNotMatch(row.action, /Open/);
+  const restart = PANEL.clusterNodeActions(env, cluster, ops, cluster.nodes[0]).find((a) => a.id === "restart");
+  assert.equal(restart.reason, "The direct rollout verdict names no candidate.");
+});
+
+test("a learner with a fault reads Needs attention, not Catching up", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  cluster.nodes[4].bounded_read_ready = false;
+  const ops = operationStatus(cluster);
+  assert.equal(PANEL.clusterNodeCells(env, cluster.nodes[4], ops).status.label, "Catching up");
+  ops.nodes[4].status.process.live = false;
+  assert.equal(PANEL.clusterNodeCells(env, cluster.nodes[4], ops).status.label, "Needs attention");
+});
+
 main().catch((error) => {
   failures += 1;
   process.stdout.write(`FAIL the suite itself threw\n${error && error.stack}\n`);
