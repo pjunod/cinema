@@ -3,14 +3,15 @@
 
 use super::{PreparedRootAdmission, Rendition};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex, Weak,
+    atomic::{AtomicBool, AtomicU8, Ordering},
+    Arc, Mutex, OnceLock, Weak,
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) struct OriginalProcessedRoot {
     driver: Mutex<OriginalDriver>,
+    released_owners: AtomicU8,
     // Set by the actual DV graph before entry and cleared only by its
     // encoder, helper, writer and SourceInput settlement path.
     pub(super) window_pending: AtomicBool,
@@ -21,14 +22,61 @@ enum OriginalDriver {
     AwaitingPublication,
     Running(Weak<Rendition>, JoinHandle<()>),
     Joined(Weak<Rendition>),
-    Retired(Weak<Rendition>),
+    Retired,
     NeverAttached,
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum ProcessedOwner {
+    Runtime = 1,
+    Admission = 2,
+    Instance = 4,
+    Rendition = 8,
+}
+
+/// Install as a last field of an actual owner. Arc's strong count reaches
+/// zero before that value's destructors run and cannot substitute for this.
+pub(crate) struct ProcessedOwnerRelease {
+    original: Arc<OriginalProcessedRoot>,
+    kind: ProcessedOwner,
+}
+
+impl std::fmt::Debug for ProcessedOwnerRelease {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_struct("ProcessedOwnerRelease")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for ProcessedOwnerRelease {
+    fn drop(&mut self) {
+        self.original
+            .released_owners
+            .fetch_or(self.kind as u8, Ordering::Release);
+    }
+}
+
 impl OriginalProcessedRoot {
+    pub(crate) fn bind_owner(
+        self: &Arc<Self>,
+        slot: &OnceLock<ProcessedOwnerRelease>,
+        kind: ProcessedOwner,
+    ) -> Result<(), String> {
+        let release = slot.get_or_init(|| ProcessedOwnerRelease {
+            original: Arc::clone(self),
+            kind,
+        });
+        if !Arc::ptr_eq(&release.original, self) || release.kind != kind {
+            return Err("processed resource already belongs to a different original owner".into());
+        }
+        Ok(())
+    }
+
     pub(super) fn install_driver(
-        &self,
+        self: &Arc<Self>,
         rendition: &Arc<Rendition>,
         spawn: impl FnOnce() -> JoinHandle<()>,
     ) -> Result<(), String> {
@@ -39,6 +87,10 @@ impl OriginalProcessedRoot {
         if !matches!(*driver, OriginalDriver::AwaitingPublication) {
             return Err("adaptive processed root already owns a driver".into());
         }
+        self.bind_owner(
+            &rendition.processed_owner_release,
+            ProcessedOwner::Rendition,
+        )?;
         *driver = OriginalDriver::Running(Arc::downgrade(rendition), spawn());
         Ok(())
     }
@@ -105,7 +157,7 @@ impl OriginalProcessedRoot {
         {
             return Err("private storage retired for a different or uncertain root".into());
         }
-        *driver = OriginalDriver::Retired(owner.clone());
+        *driver = OriginalDriver::Retired;
         Ok(())
     }
 
@@ -120,7 +172,7 @@ impl OriginalProcessedRoot {
 }
 
 impl Rendition {
-    pub(super) fn adaptive_processed_root(&self) -> Option<&OriginalProcessedRoot> {
+    pub(super) fn adaptive_processed_root(&self) -> Option<&Arc<OriginalProcessedRoot>> {
         self.recipe
             .encoding
             .as_ref()?
@@ -128,15 +180,12 @@ impl Rendition {
             .as_ref()?
             .adaptive_terminal
             .get()
-            .map(Arc::as_ref)
+            .map(|receipt| &receipt.original)
     }
 }
 
 pub(crate) struct AdoptedProcessedTerminal {
     original: Arc<OriginalProcessedRoot>,
-    runtime: Weak<crate::vodencode::dv_runtime::RuntimeRecipe>,
-    permit: crate::vodencode::EncodePermitObservation,
-    instance: Weak<tokio::sync::OwnedSemaphorePermit>,
 }
 
 pub(crate) struct ConfirmedAdoptedProcessedTerminal(());
@@ -156,19 +205,14 @@ impl AdoptedProcessedTerminal {
             .ok_or("missing original instance")?;
         let original = Arc::new(OriginalProcessedRoot {
             driver: Mutex::new(OriginalDriver::AwaitingPublication),
+            released_owners: AtomicU8::new(0),
             window_pending: AtomicBool::new(false),
             cancellation: CancellationToken::new(),
         });
-        runtime
-            .adaptive_terminal
-            .set(Arc::clone(&original))
-            .map_err(|_| "processed runtime already has an original adaptive owner")?;
-        Ok(Self {
-            original,
-            runtime: Arc::downgrade(runtime),
-            permit: root.permit.observe_original(),
-            instance: Arc::downgrade(instance),
-        })
+        original.bind_owner(&runtime.adaptive_terminal, ProcessedOwner::Runtime)?;
+        root.permit.bind_processed_owner(&original)?;
+        original.bind_owner(&instance.release, ProcessedOwner::Instance)?;
+        Ok(Self { original })
     }
 
     pub(crate) fn requested_heap_bytes() -> usize {
@@ -198,7 +242,7 @@ impl AdoptedProcessedTerminal {
         self.original.driver.lock().is_ok_and(|driver| {
             matches!(
                 *driver,
-                OriginalDriver::Retired(_) | OriginalDriver::NeverAttached
+                OriginalDriver::Retired | OriginalDriver::NeverAttached
             )
         })
     }
@@ -211,17 +255,17 @@ impl AdoptedProcessedTerminal {
             .driver
             .lock()
             .map_err(|_| "processed terminal state is uncertain")?;
-        let rendition_gone = match &*driver {
-            OriginalDriver::Retired(rendition) => rendition.strong_count() == 0,
-            OriginalDriver::NeverAttached => true,
-            _ => false,
+        let preattachment_owners = ProcessedOwner::Runtime as u8
+            | ProcessedOwner::Admission as u8
+            | ProcessedOwner::Instance as u8;
+        let owners = match *driver {
+            OriginalDriver::Retired => preattachment_owners | ProcessedOwner::Rendition as u8,
+            OriginalDriver::NeverAttached => preattachment_owners,
+            _ => return Ok(None),
         };
-        Ok((rendition_gone
-            && !self.original.window_pending.load(Ordering::Acquire)
-            && self.runtime.strong_count() == 0
-            && self.instance.strong_count() == 0
-            && self.permit.released())
-        .then_some(ConfirmedAdoptedProcessedTerminal(())))
+        Ok((!self.original.window_pending.load(Ordering::Acquire)
+            && self.original.released_owners.load(Ordering::Acquire) & owners == owners)
+            .then_some(ConfirmedAdoptedProcessedTerminal(())))
     }
 }
 
@@ -232,11 +276,12 @@ async fn processed_retirement_waits_for_its_exact_driver_and_rendition() {
     let other_base = crate::test_tempdir().expect("replacement test root");
     let rendition = super::tests::synthetic_rendition(base.path()).await;
     let other = super::tests::synthetic_rendition(other_base.path()).await;
-    let original = OriginalProcessedRoot {
+    let original = Arc::new(OriginalProcessedRoot {
         driver: Mutex::new(OriginalDriver::AwaitingPublication),
+        released_owners: AtomicU8::new(0),
         window_pending: AtomicBool::new(false),
         cancellation: CancellationToken::new(),
-    };
+    });
     let (release, wait) = tokio::sync::oneshot::channel();
     original
         .install_driver(&rendition, || {
@@ -278,14 +323,15 @@ async fn processed_retirement_waits_for_its_exact_driver_and_rendition() {
         .expect("exact native and storage owner");
     let alias = Arc::clone(&rendition);
     drop(rendition);
-    let OriginalDriver::Retired(retired) = &*original.driver.lock().expect("original state") else {
-        panic!("retirement lost the actual rendition identity");
-    };
-    assert_ne!(
-        retired.strong_count(),
+    let receipt = ProcessedOwner::Rendition as u8;
+    assert_eq!(
+        original.released_owners.load(Ordering::Acquire) & receipt,
         0,
         "an escaped response can hold the detached root"
     );
     drop(alias);
-    assert_eq!(retired.strong_count(), 0);
+    assert_eq!(
+        original.released_owners.load(Ordering::Acquire) & receipt,
+        receipt
+    );
 }

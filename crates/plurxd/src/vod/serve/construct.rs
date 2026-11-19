@@ -297,6 +297,8 @@ impl VodServe {
             finite_metadata_lease: None,
             #[cfg(target_os = "linux")]
             finite_client_lease: None,
+            #[cfg(target_os = "linux")]
+            processed_owner_release: std::sync::OnceLock::new(),
         });
 
         let lifecycle = self.shared.session_lifecycle(session_id);

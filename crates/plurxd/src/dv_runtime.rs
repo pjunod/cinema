@@ -799,7 +799,6 @@ use plurx_core::transcode::dv_processing::{
 
 #[cfg(target_os = "linux")]
 pub(crate) struct RuntimeRecipe {
-    pub(crate) adaptive_terminal: std::sync::OnceLock<Arc<crate::vodserve::OriginalProcessedRoot>>,
     pub(crate) tools: Arc<ToolSet>,
     pub(crate) source: Arc<crate::fragment_index_cluster::SourceFence>,
     pub(crate) source_offsets: Arc<tokio::sync::Semaphore>,
@@ -854,6 +853,9 @@ pub(crate) struct RuntimeRecipe {
             crate::vodencode::dv_report_lifetime::PublicationOwners,
         )>,
     >,
+    /// Last field. The source capability, reconstruction permit and verified
+    /// output are destroyed before this owner reports release.
+    pub(crate) adaptive_terminal: std::sync::OnceLock<crate::vodserve::ProcessedOwnerRelease>,
 }
 
 #[cfg(target_os = "linux")]

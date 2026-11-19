@@ -15,7 +15,7 @@ pub(super) struct Rendition {
     /// A private processing actor, never a complete-output cache artifact.
     /// Its plan and public candidate remain canonical across instances.
     pub(super) ephemeral_processing: bool,
-    pub(super) _processed_instance_allowance: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    pub(super) _processed_instance_allowance: Option<Arc<ProcessedInstanceAllowance>>,
     pub(super) key: String,
     pub(super) dir: RenditionDir,
     pub(super) recipe: Recipe,
@@ -157,6 +157,10 @@ pub(super) struct Rendition {
     #[cfg(target_os = "linux")]
     pub(super) finite_client_lease:
         Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientStateLease>,
+    /// Last field. A response's alias observes settlement only after this
+    /// exact rendition's source, manifest, reader and admission fields drop.
+    #[cfg(target_os = "linux")]
+    pub(super) processed_owner_release: std::sync::OnceLock<ProcessedOwnerRelease>,
 }
 
 /// The exact facts a retained-output attachment compares. It can exist

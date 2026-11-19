@@ -12,7 +12,8 @@ async fn processed_instance_cleanup_keeps_failed_unlink_charged_and_protects_liv
         ._processed_instance_allowance = Some(Arc::new(
         Arc::clone(&slots)
             .try_acquire_owned()
-            .expect("instance slot"),
+            .expect("instance slot")
+            .into(),
     ));
     assert!(serve
         .shared

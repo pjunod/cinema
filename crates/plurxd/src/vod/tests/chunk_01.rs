@@ -1077,6 +1077,8 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         finite_metadata_lease: None,
         #[cfg(target_os = "linux")]
         finite_client_lease: None,
+        #[cfg(target_os = "linux")]
+        processed_owner_release: std::sync::OnceLock::new(),
     })
 }
 

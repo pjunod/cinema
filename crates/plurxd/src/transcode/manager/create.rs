@@ -2563,7 +2563,7 @@ impl TranscodeManager {
                     crate::vodserve::PreparedRootAdmission {
                         reuse_scope,
                         reused_parent: None,
-                        instance_allowance: Some(Arc::new(instance_allowance)),
+                        instance_allowance: Some(Arc::new(instance_allowance.into())),
                         instance_nonce: Some(*uuid::Uuid::new_v4().as_bytes()),
                         encoding,
                         permit,

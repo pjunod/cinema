@@ -1475,7 +1475,7 @@ impl Shared {
         duration_ms: i64,
         settings: &VodSettings,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
-        canonical_processing_key: Option<(&str, Option<Arc<tokio::sync::OwnedSemaphorePermit>>)>,
+        canonical_processing_key: Option<(&str, Option<Arc<ProcessedInstanceAllowance>>)>,
     ) -> Result<Option<RenditionAttachment>, String> {
         if let Some(storage) = private_storage.as_ref() {
             storage.bind(key)?;
@@ -1524,7 +1524,7 @@ impl Shared {
         settings: VodSettings,
         build_guard: RenditionBuildGuard,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
-        canonical_processing_key: Option<(String, Option<Arc<tokio::sync::OwnedSemaphorePermit>>)>,
+        canonical_processing_key: Option<(String, Option<Arc<ProcessedInstanceAllowance>>)>,
     ) -> Result<Option<RenditionAttachment>, String> {
         let key = key.as_str();
         #[cfg(target_os = "linux")]
@@ -1838,7 +1838,7 @@ impl Shared {
         settings: &VodSettings,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
         ephemeral_processing: bool,
-        processed_instance_allowance: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+        processed_instance_allowance: Option<Arc<ProcessedInstanceAllowance>>,
     ) -> Result<Arc<Rendition>, String> {
         #[cfg(target_os = "linux")]
         if finite_software::selected(
@@ -2112,7 +2112,7 @@ impl Shared {
         settings: &VodSettings,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
         ephemeral_processing: bool,
-        processed_instance_allowance: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+        processed_instance_allowance: Option<Arc<ProcessedInstanceAllowance>>,
         manifest: Manifest,
         identity_state: IdentityState,
     ) -> Arc<Rendition> {
@@ -2197,6 +2197,8 @@ impl Shared {
             finite_metadata_lease: None,
             #[cfg(target_os = "linux")]
             finite_client_lease: None,
+            #[cfg(target_os = "linux")]
+            processed_owner_release: std::sync::OnceLock::new(),
         })
     }
 

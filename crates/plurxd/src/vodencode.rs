@@ -801,19 +801,15 @@ pub(crate) struct EncodePermit {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) struct EncodePermitObservation(std::sync::Weak<EncodeReservation>);
-
-#[cfg(target_os = "linux")]
-impl EncodePermitObservation {
-    pub(crate) fn released(&self) -> bool {
-        self.0.strong_count() == 0
-    }
-}
-
-#[cfg(target_os = "linux")]
 impl EncodePermit {
-    pub(crate) fn observe_original(&self) -> EncodePermitObservation {
-        EncodePermitObservation(Arc::downgrade(&self._reservation))
+    pub(crate) fn bind_processed_owner(
+        &self,
+        original: &Arc<crate::vodserve::OriginalProcessedRoot>,
+    ) -> Result<(), String> {
+        original.bind_owner(
+            &self._reservation.processed_release,
+            crate::vodserve::ProcessedOwner::Admission,
+        )
     }
 }
 
@@ -822,6 +818,9 @@ struct EncodeReservation {
     _hardware: Option<HwSlot>,
     _software: Option<SwPermit>,
     worker_claimed: std::sync::atomic::AtomicBool,
+    // Last field. Software and hardware permits return before this receipt.
+    #[cfg(target_os = "linux")]
+    processed_release: std::sync::OnceLock<crate::vodserve::ProcessedOwnerRelease>,
 }
 
 /// Weak link from one immutable rendition to its exact retained capacity.
@@ -948,6 +947,8 @@ impl From<crate::admission::TranscodePermit> for EncodePermit {
                 _hardware: hardware,
                 _software: software,
                 worker_claimed: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(target_os = "linux")]
+                processed_release: std::sync::OnceLock::new(),
             }),
         }
     }

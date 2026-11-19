@@ -1082,10 +1082,28 @@ impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
 #[cfg(target_os = "linux")]
 pub(crate) use vod_serve_create::bounded_adaptive_selected_recipe;
 
+/// The actual private graph slot. Its last field reports after returning
+/// the semaphore permit, even when the last alias is released off-task.
+pub(crate) struct ProcessedInstanceAllowance {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    #[cfg(target_os = "linux")]
+    release: std::sync::OnceLock<ProcessedOwnerRelease>,
+}
+
+impl From<tokio::sync::OwnedSemaphorePermit> for ProcessedInstanceAllowance {
+    fn from(permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+        Self {
+            _permit: permit,
+            #[cfg(target_os = "linux")]
+            release: std::sync::OnceLock::new(),
+        }
+    }
+}
+
 pub(crate) struct PreparedRootAdmission {
     pub(crate) reuse_scope: Option<[u8; 32]>,
     pub(crate) reused_parent: Option<ProcessedRootReuse>,
-    pub(crate) instance_allowance: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    pub(crate) instance_allowance: Option<Arc<ProcessedInstanceAllowance>>,
     pub(crate) instance_nonce: Option<[u8; 16]>,
     pub(crate) encoding: Arc<crate::vodencode::Encoding>,
     pub(crate) permit: crate::vodencode::EncodePermit,
@@ -1808,6 +1826,7 @@ mod shared;
 #[cfg(target_os = "linux")]
 pub(crate) use processed_terminal::{
     AdoptedProcessedTerminal, ConfirmedAdoptedProcessedTerminal, OriginalProcessedRoot,
+    ProcessedOwner, ProcessedOwnerRelease,
 };
 
 #[cfg(target_os = "linux")]
