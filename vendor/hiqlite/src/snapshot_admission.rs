@@ -1,4 +1,5 @@
 //! Target-local storage admission for SQLite snapshots. No Raft write occurs here.
+use std::future::Future;
 use std::io;
 use std::path::Path;
 use std::time::Duration;
@@ -13,12 +14,55 @@ struct StorageSample {
     available: u64,
 }
 
+#[cfg(test)]
+static DEFERRED_TEST_DATABASES: std::sync::Mutex<
+    std::collections::BTreeMap<std::path::PathBuf, std::sync::Arc<tokio::sync::Notify>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// A path-scoped filesystem probe override; the real builder, writer and
+/// admission loop still run, without filling or mutating the live database.
+#[cfg(test)]
+pub(crate) struct DeferredTestDatabase {
+    database: std::path::PathBuf,
+    observed: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+impl DeferredTestDatabase {
+    pub(crate) fn new(database: std::path::PathBuf) -> Self {
+        let observed = std::sync::Arc::new(tokio::sync::Notify::new());
+        assert!(
+            DEFERRED_TEST_DATABASES
+                .lock()
+                .unwrap()
+                .insert(database.clone(), observed.clone())
+                .is_none()
+        );
+        Self { database, observed }
+    }
+
+    pub(crate) async fn observed(&self) {
+        self.observed.notified().await;
+    }
+}
+
+#[cfg(test)]
+impl Drop for DeferredTestDatabase {
+    fn drop(&mut self) {
+        DEFERRED_TEST_DATABASES
+            .lock()
+            .unwrap()
+            .remove(&self.database);
+    }
+}
+
 /// What admission decided. `WriterGone` means the SQL writer has stopped, so
 /// the node is shutting down and the build must end instead of waiting.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Admission {
     Go,
     WriterGone,
+    Retiring,
 }
 
 /// Two database images, the live WAL (at least two Plurx WAL segments), and margin.
@@ -63,10 +107,18 @@ fn snapshot_storage_sample(database: &Path) -> io::Result<StorageSample> {
     let (image, wal) = image_and_wal_bytes(database)?;
     let required = required_snapshot_storage_bytes(image, wal);
     crate::snapshot_metrics::record_required_storage(required);
+    let available = fs4::available_space(database)?;
+    #[cfg(test)]
+    let available = if let Some(observed) = DEFERRED_TEST_DATABASES.lock().unwrap().get(database) {
+        observed.notify_one();
+        0
+    } else {
+        available
+    };
     Ok(StorageSample {
         minimum: minimum_snapshot_storage_bytes(image, wal),
         required,
-        available: fs4::available_space(database)?,
+        available,
     })
 }
 
@@ -74,9 +126,16 @@ pub(crate) async fn wait_for_storage(
     database: &Path,
     limit: Duration,
     writer_gone: impl FnMut() -> bool,
+    retirement: impl Future<Output = ()>,
 ) -> Admission {
     let database = database.to_owned();
-    wait_with_probe(limit, writer_gone, || snapshot_storage_sample(&database)).await
+    // Retirement interrupts only storage admission. Once Go is returned,
+    // the accepted build keeps its lifetime through writer and publication.
+    tokio::select! {
+        biased;
+        () = retirement => Admission::Retiring,
+        admitted = wait_with_probe(limit, writer_gone, || snapshot_storage_sample(&database)) => admitted,
+    }
 }
 
 /// Wait until a build may be attempted, re-probing every [`RETRY`].

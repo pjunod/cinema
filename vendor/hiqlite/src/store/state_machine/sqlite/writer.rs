@@ -1050,7 +1050,19 @@ CREATE TABLE IF NOT EXISTS _metadata
             error!("Error during 'PRAGMA optimize': {}", err);
         }
 
-        StateMachineSqlite::remove_lock_file(&path_lock_file);
+        // A positive shutdown reply is a physical terminal receipt: close
+        // SQLite (including its final checkpoint), then disconnect requests.
+        // A failed close drops the ACK so retained startup stays failclosed.
+        if let Err((conn, error)) = conn.close() {
+            error!(?error, "SQL writer connection close failed; no shutdown ACK");
+            drop(conn);
+            return;
+        }
+        if let Err(error) = StateMachineSqlite::remove_lock_file(&path_lock_file) {
+            error!(?error, "SQL writer lock removal failed; no shutdown ACK");
+            return;
+        }
+        drop(rx);
 
         if let Some(ack) = shutdown_ack {
             send_reply(WriterReply::Shutdown, sm_data.last_applied_log_id, ack, ());
@@ -1670,6 +1682,35 @@ mod snapshot_cut_tests {
             .unwrap();
         rx.await.unwrap();
         drop(writer);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_ack_follows_sqlite_close_and_request_disconnect() {
+        let (root, writer) = fixture().await;
+        std::fs::write(root.join("lock"), []).unwrap();
+        assert!(
+            root.join("live.db-wal").exists(),
+            "actual WAL connection is live"
+        );
+        let (ack, stopped) = oneshot::channel();
+        writer
+            .send_async(WriterRequest::Shutdown(ack))
+            .await
+            .unwrap();
+        stopped.await.unwrap();
+        assert!(
+            writer.is_disconnected(),
+            "ACK follows request receiver destruction"
+        );
+        assert!(
+            !root.join("live.db-wal").exists(),
+            "last SQLite connection closed/checkpointed before ACK"
+        );
+        assert!(!root.join("lock").exists());
+        let reopened = rusqlite::Connection::open(root.join("live.db")).unwrap();
+        assert_eq!(image_metadata(&reopened).last_applied_log_id, log(2));
+        drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }
 

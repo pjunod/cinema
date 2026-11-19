@@ -11,30 +11,57 @@ pub(crate) type Keepalive = Option<std::sync::Arc<dyn Send + Sync>>;
 /// receivers observe retirement only after the last producer has dropped.
 #[cfg(feature = "sqlite")]
 #[derive(Debug, Clone)]
-pub(crate) struct SqliteStorageOwner(tokio::sync::watch::Sender<()>);
+pub(crate) struct SqliteStorageOwner {
+    lifetime: tokio::sync::watch::Sender<()>,
+    retirement: tokio::sync::watch::Sender<bool>,
+}
 
 #[cfg(feature = "sqlite")]
 impl Default for SqliteStorageOwner {
     fn default() -> Self {
-        Self(tokio::sync::watch::channel(()).0)
+        Self {
+            lifetime: tokio::sync::watch::channel(()).0,
+            retirement: tokio::sync::watch::channel(false).0,
+        }
     }
 }
 
 #[cfg(feature = "sqlite")]
 impl SqliteStorageOwner {
     pub(crate) fn drain(&self) -> SqliteStorageDrain {
-        SqliteStorageDrain(self.0.subscribe())
+        SqliteStorageDrain {
+            lifetime: self.lifetime.subscribe(),
+            retirement: self.retirement.clone(),
+        }
+    }
+
+    pub(crate) async fn retirement_requested(&self) {
+        let mut retirement = self.retirement.subscribe();
+        while !*retirement.borrow_and_update() {
+            if retirement.changed().await.is_err() {
+                return;
+            }
+        }
     }
 }
 
 #[cfg(feature = "sqlite")]
 #[derive(Debug, Clone)]
-pub(crate) struct SqliteStorageDrain(tokio::sync::watch::Receiver<()>);
+pub(crate) struct SqliteStorageDrain {
+    lifetime: tokio::sync::watch::Receiver<()>,
+    retirement: tokio::sync::watch::Sender<bool>,
+}
 
 #[cfg(feature = "sqlite")]
 impl SqliteStorageDrain {
+    /// Stop only work still waiting for snapshot storage admission. Accepted
+    /// applies, installs, builds and publication retain their full lifetimes.
+    pub(crate) fn request_retirement(&self) {
+        self.retirement.send_replace(true);
+    }
+
     pub(crate) async fn wait(&self) {
-        let mut retired = self.0.clone();
+        let mut retired = self.lifetime.clone();
         while retired.changed().await.is_ok() {}
     }
 }
@@ -171,6 +198,7 @@ impl StartupStorageOwner {
         if self.enabled {
             self.protect(async move {
                 if let Some(producers) = producers {
+                    producers.request_retirement();
                     producers.wait().await;
                 }
                 let (tx, rx) = tokio::sync::oneshot::channel();
@@ -218,6 +246,7 @@ impl StartupStorageOwner {
             }
             // RaftCore termination is not state-machine termination. Keep
             // storage live through every accepted apply and snapshot build.
+            producers.request_retirement();
             producers.wait().await;
             if let Err(error) = wal.shutdown().await {
                 tracing::error!(
@@ -339,6 +368,135 @@ pub(crate) async fn start_wal<C: openraft::RaftTypeConfig>(
 
 #[cfg(feature = "sqlite")]
 type SqliteState = crate::store::state_machine::sqlite::state_machine::StateMachineSqlite;
+
+#[cfg(feature = "sqlite")]
+type DbRaft = openraft::Raft<crate::store::state_machine::sqlite::TypeConfigSqlite>;
+
+/// Raft::new can perform an inline snapshot build before spawning its core.
+/// Keep that constructor alive across caller cancellation, including its
+/// blocking filesystem work, rather than dropping its storage future.
+#[cfg(feature = "sqlite")]
+struct PendingDbRaft {
+    task: Option<tokio::task::JoinHandle<Result<DbRaft, openraft::error::Fatal<crate::NodeId>>>>,
+    cleanup: Option<DbRaftCleanup>,
+}
+
+#[cfg(feature = "sqlite")]
+struct DbRaftCleanup {
+    producers: SqliteStorageDrain,
+    wal: hiqlite_wal::ShutdownHandle,
+    writer: flume::Sender<crate::store::state_machine::sqlite::writer::WriterRequest>,
+    claim: CompletionClaim,
+}
+
+#[cfg(feature = "sqlite")]
+impl DbRaftCleanup {
+    async fn drain(mut self, raft: Option<DbRaft>) {
+        if let Some(raft) = raft {
+            if let Err(error) = raft.shutdown().await {
+                tracing::error!(?error, "cancelled Raft constructor core cleanup failed");
+                return;
+            }
+        }
+        self.producers.request_retirement();
+        self.producers.wait().await;
+        let wal = self.wal.shutdown().await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self
+            .writer
+            .send_async(crate::store::state_machine::sqlite::writer::WriterRequest::Shutdown(tx))
+            .await
+            .is_err()
+            || rx.await.is_err()
+        {
+            tracing::error!("cancelled Raft constructor writer cleanup is unconfirmed");
+            return;
+        }
+        if let Err(error) = wal {
+            tracing::error!(
+                ?error,
+                "cancelled Raft constructor WAL cleanup is unconfirmed"
+            );
+            return;
+        }
+        self.claim.confirmed();
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl Drop for PendingDbRaft {
+    fn drop(&mut self) {
+        if let (Some(task), Some(cleanup)) = (self.task.take(), self.cleanup.take()) {
+            // An inline constructor build can itself be waiting below its
+            // storage floor. Stop that unaccepted work before joining it.
+            cleanup.producers.request_retirement();
+            tokio::spawn(async move {
+                match task.await {
+                    Ok(Ok(raft)) => cleanup.drain(Some(raft)).await,
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            ?error,
+                            "cancelled Raft constructor returned a storage error"
+                        );
+                        cleanup.drain(None).await;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            ?error,
+                            "Raft constructor task is uncertain; retaining lease"
+                        );
+                        // Panic may have detached blocking I/O. Drop retains
+                        // the real lease instead of claiming terminal drain.
+                        drop(cleanup);
+                    }
+                }
+            });
+        }
+    }
+}
+
+#[cfg(feature = "sqlite")]
+pub(crate) async fn construct_db_raft<F>(
+    constructor: F,
+    producers: SqliteStorageDrain,
+    wal: hiqlite_wal::ShutdownHandle,
+    writer: flume::Sender<crate::store::state_machine::sqlite::writer::WriterRequest>,
+    keepalive: Keepalive,
+) -> Result<DbRaft, crate::Error>
+where
+    F: Future<Output = Result<DbRaft, openraft::error::Fatal<crate::NodeId>>> + Send + 'static,
+{
+    let cleanup = DbRaftCleanup {
+        producers,
+        wal,
+        writer,
+        claim: CompletionClaim::new(&keepalive),
+    };
+    let mut pending = PendingDbRaft {
+        task: Some(tokio::spawn(constructor)),
+        cleanup: Some(cleanup),
+    };
+    let result = pending.task.as_mut().expect("owned Raft constructor").await;
+    pending.task.take();
+    let mut cleanup = pending
+        .cleanup
+        .take()
+        .expect("owned Raft constructor cleanup");
+    match result {
+        Ok(Ok(raft)) => {
+            // No await between handoff and the caller's full-state guard.
+            cleanup.claim.confirmed();
+            Ok(raft)
+        }
+        Ok(Err(error)) => {
+            // A handled constructor error can still be cancelled while
+            // drainage waits. Its cleanup remains owned independently.
+            tokio::spawn(cleanup.drain(None)).await?;
+            Err(error.into())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
 
 #[cfg(feature = "sqlite")]
 struct PendingSqlite {
@@ -473,6 +631,174 @@ where
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    async fn producer_test_state(root: &std::path::Path) -> super::SqliteState {
+        super::SqliteState::new(
+            &root.join("data").to_string_lossy(),
+            "state.db",
+            1,
+            false,
+            16,
+            1,
+            std::time::Duration::from_secs(600),
+            #[cfg(feature = "s3")]
+            None,
+            false,
+            #[cfg(feature = "backup")]
+            30,
+            false,
+            crate::applied_mark::AppliedMark::new::<&str>(&[]),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn sqlite_retirement_wakes_below_floor_builder_without_closing_its_writer() {
+        use openraft::{RaftSnapshotBuilder, RaftStateMachine};
+        use std::future::Future as _;
+        let root = std::env::temp_dir().join(format!(
+            "sqlite-deferred-retirement-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let lease_path = root.join("root.lock");
+        let lease = std::fs::File::create(&lease_path).unwrap();
+        lease.lock().unwrap();
+        let probe = std::fs::File::open(&lease_path).unwrap();
+        let mut state = producer_test_state(&root).await;
+        let current = root.join("data/state_machine/snapshots/current");
+        let before = std::fs::read(&current).unwrap();
+        let writer = state.write_tx.clone();
+        let mut builder = state.get_snapshot_builder().await;
+        let deferred =
+            crate::snapshot_admission::DeferredTestDatabase::new(builder.database_path.clone());
+        let mut owner = super::StartupStorageOwner::new(true);
+        owner.retain(Some(std::sync::Arc::new(lease)));
+        owner.protect_sqlite_writer(writer.clone(), Some(state.storage_owner.drain()));
+        let build = tokio::spawn(async move { builder.build_snapshot().await });
+        deferred.observed().await;
+        drop(state);
+        let super::StorageCleanup {
+            mut work,
+            mut claim,
+        } = owner.cleanup.pop().unwrap();
+        drop(owner);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(work.as_mut().poll(cx).is_pending()))
+                .await
+        );
+        let result = build.await.unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("retired before storage admission")
+        );
+        assert!(
+            !writer.is_disconnected(),
+            "retirement wakes admission while the writer is live"
+        );
+        assert!(probe.try_lock().is_err(), "no writer ACK yet");
+        assert_eq!(
+            std::fs::read(&current).unwrap(),
+            before,
+            "deferred work never publishes"
+        );
+        assert!(work.await.is_ok());
+        claim.confirmed();
+        assert!(writer.is_disconnected());
+        probe
+            .try_lock()
+            .expect("actual lease released after physical writer shutdown");
+        drop(probe);
+        drop(deferred);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_raft_constructor_finishes_accepted_build_before_releasing_storage() {
+        use openraft::{RaftSnapshotBuilder, RaftStateMachine};
+        use std::future::Future as _;
+        let root = std::env::temp_dir().join(format!(
+            "sqlite-constructor-retirement-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let lease_path = root.join("root.lock");
+        let lease = std::fs::File::create(&lease_path).unwrap();
+        lease.lock().unwrap();
+        let probe = std::fs::File::open(&lease_path).unwrap();
+        let mut state = producer_test_state(&root).await;
+        let writer = state.write_tx.clone();
+        let producers = state.storage_owner.drain();
+        let mut builder = state.get_snapshot_builder().await;
+        assert!(
+            fs4::available_space(&builder.database_path).unwrap()
+                >= crate::snapshot_admission::snapshot_storage_requirement(&builder.database_path)
+                    .unwrap()
+        );
+        // Admission succeeds, then the actual builder waits for publication
+        // ownership. Cancellation must retain this accepted build's future.
+        let publication = builder.snapshot_files.clone().lock_owned().await;
+        let wal = hiqlite_wal::LogStore::<crate::store::state_machine::sqlite::TypeConfigSqlite>::start_staged(
+            root.join("wal").to_string_lossy().into_owned(), hiqlite_wal::LogSync::Immediate, 1024 * 1024,
+        ).await.unwrap();
+        let shutdown = wal.shutdown_handle();
+        let (entered, accepted) = tokio::sync::oneshot::channel();
+        let (persisted, built) = tokio::sync::oneshot::channel();
+        let writer_probe = writer.clone();
+        let request = tokio::spawn(super::construct_db_raft(
+            async move {
+                let mut build = Box::pin(builder.build_snapshot());
+                assert!(
+                    std::future::poll_fn(|cx| std::task::Poll::Ready(
+                        build.as_mut().poll(cx).is_pending()
+                    ))
+                    .await
+                );
+                entered.send(()).unwrap();
+                drop(build.await.unwrap());
+                persisted.send(()).unwrap();
+                drop(state);
+                Err(openraft::error::Fatal::Stopped)
+            },
+            producers,
+            shutdown,
+            writer,
+            Some(std::sync::Arc::new(lease)),
+        ));
+        accepted.await.unwrap();
+        request.abort();
+        assert!(matches!(request.await, Err(error) if error.is_cancelled()));
+        assert!(probe.try_lock().is_err());
+        assert!(!writer_probe.is_disconnected());
+        let released = tokio::task::spawn_blocking(move || {
+            probe.lock().unwrap();
+            probe
+        });
+        drop(publication);
+        built
+            .await
+            .expect("accepted builder persisted despite constructor requester cancellation");
+        let probe = released.await.unwrap();
+        assert!(writer_probe.is_disconnected());
+        assert!(
+            uuid::Uuid::parse_str(
+                std::fs::read_to_string(root.join("data/state_machine/snapshots/current"))
+                    .unwrap()
+                    .trim()
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            wal.status_handle().snapshot().state,
+            hiqlite_wal::WalRuntimeState::Stopped
+        );
+        drop(wal);
+        drop(probe);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn sqlite_retirement_waits_for_detached_snapshot_builder_before_writer_and_root_release()
     {
@@ -514,14 +840,25 @@ mod tests {
         owner.protect_sqlite_writer(writer.clone(), Some(state.storage_owner.drain()));
         let builder = state.get_snapshot_builder().await;
         let mut detached = builder.clone();
+        assert!(
+            fs4::available_space(&builder.database_path).unwrap()
+                >= crate::snapshot_admission::snapshot_storage_requirement(&builder.database_path)
+                    .unwrap()
+        );
+        let publication = builder.snapshot_files.clone().lock_owned().await;
         let (entered, started) = tokio::sync::oneshot::channel();
-        let (release, released) = tokio::sync::oneshot::channel();
         let build = tokio::spawn(async move {
+            let mut build = Box::pin(detached.build_snapshot());
+            assert!(
+                std::future::poll_fn(|cx| std::task::Poll::Ready(
+                    build.as_mut().poll(cx).is_pending()
+                ))
+                .await
+            );
             entered.send(()).unwrap();
-            released.await.unwrap();
             // This is the actual writer-backed builder, after its parent
             // state machine retired, as in OpenRaft's detached build task.
-            detached.build_snapshot().await.unwrap()
+            build.await.unwrap()
         });
         started.await.unwrap();
         drop(state);
@@ -549,7 +886,7 @@ mod tests {
             .unwrap();
         read.await
             .expect("the real SQL writer remains live for accepted work");
-        release.send(()).unwrap();
+        drop(publication);
         drop(build.await.unwrap());
         assert!(
             probe.try_lock().is_err(),
@@ -835,6 +1172,54 @@ mod tests {
         );
         // Do not unlink a guarded path: custody intentionally lasts for this
         // isolated test process, whose exit closes the retained descriptor.
+        drop(probe);
+    }
+
+    #[tokio::test]
+    async fn sqlite_close_failure_withholds_ack_and_retains_actual_root_lease() {
+        let root =
+            std::env::temp_dir().join(format!("sqlite-close-failure-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let lock = root.join("root.lock");
+        let lease = std::fs::File::create(&lock).unwrap();
+        lease.lock().unwrap();
+        let probe = std::fs::File::open(&lock).unwrap();
+        let connection = rusqlite::Connection::open(root.join("state.db")).unwrap();
+        // SQLite refuses close with an unfinalized statement. The genuine
+        // SQLITE_BUSY result must not become a positive terminal receipt.
+        std::mem::forget(connection.prepare("SELECT 1").unwrap());
+        let sentinel = root.join("writer.lock");
+        std::fs::write(&sentinel, []).unwrap();
+        let writer = crate::store::state_machine::sqlite::writer::spawn_writer(
+            connection,
+            1,
+            sentinel.to_string_lossy().into_owned(),
+            false,
+            false,
+            #[cfg(feature = "backup")]
+            30,
+            crate::applied_mark::AppliedMark::new::<&str>(&[]),
+        );
+        let mut owner = super::StartupStorageOwner::new(true);
+        owner.retain(Some(std::sync::Arc::new(lease)));
+        owner.protect_writer(writer.clone());
+        let super::StorageCleanup { work, claim } = owner.cleanup.pop().unwrap();
+        drop(owner);
+        assert!(
+            work.await.is_err(),
+            "a real SQLite close failure drops the ACK"
+        );
+        drop(claim);
+        assert!(
+            probe.try_lock().is_err(),
+            "actual directory lease remains held"
+        );
+        assert!(
+            sentinel.exists(),
+            "failed close preserves crash recovery evidence"
+        );
+        // The deliberately leaked statement and root lease live until this
+        // isolated test process exits. Do not unlink their guarded files.
         drop(probe);
     }
 

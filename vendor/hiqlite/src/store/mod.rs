@@ -149,15 +149,29 @@ pub(crate) async fn start_raft_db(
 
     let shutdown_handle = log_store.shutdown_handle();
 
-    let raft = openraft::Raft::new(
-        node_config.node_id,
-        raft_config.clone(),
-        network,
-        log_store,
-        state_machine_store,
+    let node_id = node_config.node_id;
+    let constructor_config = raft_config.clone();
+    // The constructor may build an initial snapshot before its worker/core
+    // exists. Transfer the partial writer/WAL guards into its task owner;
+    // caller cancellation must not close them while inline I/O is live.
+    startup_owner.handoff();
+    let raft = crate::startup_cleanup::construct_db_raft(
+        async move {
+            openraft::Raft::new(
+                node_id,
+                constructor_config,
+                network,
+                log_store,
+                state_machine_store,
+            )
+            .await
+        },
+        storage_drain.clone(),
+        shutdown_handle.clone(),
+        sql_writer.clone(),
+        keepalive,
     )
-    .await
-    .expect("Raft create failed");
+    .await?;
     snapshot_transport.bind_sqlite_membership(raft.metrics());
     let snapshot_executor = crate::network::snapshot_executor::start_snapshot_executor(
         raft.clone(),

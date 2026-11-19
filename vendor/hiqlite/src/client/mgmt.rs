@@ -893,6 +893,7 @@ impl Client {
                 tracing::warn!("retained startup cleanup still owns accepted SQLite snapshot work");
             }
             state.raft_db.raft.shutdown().await?;
+            state.raft_db.storage_drain.request_retirement();
             state.raft_db.storage_drain.wait().await;
             // Plurx patch 34: the SQL writer's shutdown removes the lock file,
             // so it runs whatever the WAL's shutdown returns (a WAL whose
@@ -1176,6 +1177,7 @@ impl Client {
                 ));
             }
             state.raft_db.raft.shutdown().await?;
+            state.raft_db.storage_drain.request_retirement();
             state.raft_db.storage_drain.wait().await;
             info!("Shutting down sqlite logs writer");
             // Plurx patch 34: the SQL writer's shutdown removes the lock file,

@@ -531,8 +531,11 @@ impl StateMachineSqlite {
         }
     }
 
-    pub(crate) fn remove_lock_file(path: &str) {
-        let _ = std::fs::remove_file(path);
+    pub(crate) fn remove_lock_file(path: &str) -> std::io::Result<()> {
+        match std::fs::remove_file(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
     }
 
     pub async fn connect(

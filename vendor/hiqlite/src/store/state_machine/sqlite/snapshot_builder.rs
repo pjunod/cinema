@@ -79,10 +79,20 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
             &self.database_path,
             self.storage_deferral,
             move || write_tx.is_disconnected(),
+            self._storage_owner.retirement_requested(),
         )
         .await;
         if admission == crate::snapshot_admission::Admission::WriterGone {
             return Err(writer_gone());
+        }
+        if admission == crate::snapshot_admission::Admission::Retiring {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "snapshot build retired before storage admission",
+            );
+            return Err(StorageError::IO {
+                source: StorageIOError::write_state_machine(&error),
+            });
         }
         // Snapshot construction and installation both replace the current
         // state-machine image. Serialize their file publication so cleanup
