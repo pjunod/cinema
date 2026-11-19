@@ -504,7 +504,150 @@ function systemLogsCard(){
 function systemLogsToggled(details){
   if(details.open)refreshLogs();
 }
-function systemPanel(sys){
+function systemPanel(sys,httpsCard="",sourceRecoveryHtml=""){
   const platform=sys.platform==="macos"?"macOS":sys.platform==="linux"?"Linux":sys.platform||"";
-  return `<div class="system-settings"><div class="system-title"><h1>System</h1><span class="muted system-small">${esc(platform)}</span></div>${ffmpegSupportWarning(sys)}${systemAttentionHtml(sys)}${systemVersionsCard(sys)}${transcoderCard(sys)}${systemAdditionalSupportCard(sys)}${systemPerformanceCard(sys)}${systemStorageCard(sys)}${systemLogsCard()}</div>`;
+  return `<div class="system-settings"><div class="system-title"><h1>System</h1><span class="muted system-small">${esc(platform)}</span></div>${ffmpegSupportWarning(sys)}${systemAttentionHtml(sys)}${systemVersionsCard(sys)}${transcoderCard(sys)}${systemAdditionalSupportCard(sys)}${systemPerformanceCard(sys)}${systemStorageCard(sys)}${httpsCard}${sourceRecoveryHtml}${systemLogsCard()}</div>`;
+}
+// Node-local HTTPS and playback restart recovery, moved from Developer on 2026-11-18.
+// Addressed-node HTTPS controls are independent of replicated /settings.
+function httpsSettingsMount(value,error){
+  return `<div id="settings-https">${httpsSettingsCard(value,error)}</div>`;
+}
+function httpsConnectionUrl(value,href=location.href){
+  const url=new URL(href);
+  if(!value?.active?.enabled) return null;
+  if(url.protocol!=="https:"){url.protocol="https:";url.port=String(value.active.port);}
+  url.username="";url.password="";url.pathname="/";url.search="";url.hash="";
+  return url.href;
+}
+function httpsSettingsCard(value,error){
+  if(!value) return setCard(`${cardHead("HTTPS","Connections to this node; HTTP app links forward to HTTPS while active.","")}
+    <p>${error?`HTTPS settings are unavailable: ${esc(error)}`:"Loading this node’s HTTPS settings…"}</p>
+    <button class="ghost sm" onclick="reloadHttpsSettings(this)">Reload this node</button>`);
+  const desired=value.desired,active=value.active,cert=value.certificate;
+  const fields=new Set(value.overrides||[]),locked=name=>fields.has(name)?" disabled":"";
+  const link=httpsConnectionUrl(value);
+  return setCard(`${cardHead("HTTPS","Connections to this node; HTTP app links forward to HTTPS while active.",`<span class="pill">${active.enabled?"Active":"Inactive"}</span>`)}
+    <p>Addressed node: <code>${esc(value.node_id)}</code> · revision <code>${esc(value.revision)}</code></p>
+    <p>${value.restart_required?"Saved changes require this node to restart.":"The desired configuration matches this process."} Save never restarts the server. For Docker, apply with <code>make docker-up</code> (source) or <code>make docker-image-up</code> (prebuilt) to update published ports; restarting an existing container cannot change its ports.</p>
+    <details><summary>Saved, desired and active configuration</summary><table><thead><tr><th>State</th><th>Enabled / port</th><th>Identity files or generated names</th></tr></thead><tbody>${[["Saved before environment",value.saved],["Desired next boot",desired],["Active process",active]].map(([label,config])=>`<tr><td>${label}</td><td>${config.enabled?"On":"Off"} / ${esc(config.port)}</td><td>${config.cert_file?`${esc(config.cert_file)}<br>${esc(config.key_file)}`:`Self-signed: ${esc(config.sans.join(", "))}`}</td></tr>`).join("")}</tbody></table></details>
+    <label class="chk"><input id="https-enabled" type="checkbox"${desired.enabled?" checked":""}${locked("enabled")}> Enable HTTPS after restart</label>
+    <div class="setrow"><label for="https-port">HTTPS port</label><input id="https-port" type="number" min="1" max="65535" value="${esc(desired.port)}"${locked("port")}></div>
+    <p>Leave both paths empty for a persistent self-signed identity. Supplied paths refer to files on the server or inside its container, never this browser’s computer.</p>
+    <div class="setrow"><label for="https-cert">Certificate chain PEM path</label><input id="https-cert" value="${esc(desired.cert_file)}"${locked("cert_file")}></div>
+    <div class="setrow"><label for="https-key">Private key PEM path</label><input id="https-key" value="${esc(desired.key_file)}"${locked("key_file")}></div>
+    <div class="setrow"><label for="https-sans">Self-signed DNS names and IP addresses (one per line)</label><textarea id="https-sans" rows="4"${locked("sans")}>${esc(desired.sans.join("\n"))}</textarea></div>
+    <p>Generated identities retain their key and certificate across restarts and disable/enable. Changing their names or replacing an expired identity requires explicit file replacement while stopped. Add every hostname or address clients will use before first enable.</p>
+    ${fields.size?`<p>Environment-controlled fields: ${esc([...fields].join(", "))}. Their saved underlying values are preserved.</p>`:""}
+    ${cert?`<p>Active identity: ${esc(cert.mode)} · expires ${esc(new Date(cert.expires_at_seconds*1000).toISOString())}<br>SHA-256 <code>${esc(cert.sha256)}</code><br>Names: ${esc(cert.sans.join(", "))}</p><button class="ghost sm" onclick="downloadHttpsCertificate(this)">Download active public certificate chain</button>`:"<p>No HTTPS identity is active in this process.</p>"}
+    ${link?`<p><a href="${esc(link)}" target="_blank" rel="noopener noreferrer">Open unverified HTTPS address</a> · This uses the browser’s current hostname and active port. Verify this node’s identity and trust first; the new origin needs its own sign-in.</p>`:""}
+    ${value.durability_confirmed===false?'<p class="err" role="alert">The settings were published, but directory sync could not confirm crash durability. This revision is current; reload before another save and check local storage.</p>':""}
+    
+    <div class="err" id="https-error" role="alert"></div><button onclick="saveHttpsSettings(this)">Save HTTPS settings</button> <button class="ghost" onclick="reloadHttpsSettings(this)">Reload this node</button>`);
+}
+function applyHttpsSettings(value,error){
+  const mount=document.getElementById("settings-https");
+  if(mount) mount.innerHTML=httpsSettingsCard(value,error);
+}
+async function loadHttpsCard(generation){
+  try{
+    const value=await loadSettingsKey("https",generation);
+    if(settingsCurrent(generation,"system")) applyHttpsSettings(value);
+  }catch(error){
+    if(!error?.staleHttps&&settingsCurrent(generation,"system")) applyHttpsSettings(null,error.message||"request failed");
+  }
+}
+async function reloadHttpsSettings(btn){
+  const generation=PAGE_RENDER_GENERATION;
+  if(!settingsCurrent(generation,"system")) return;
+  if(btn)btn.disabled=true;
+  SETTINGS_HTTPS_EPOCH++;SETTINGS_LOADED.delete("https");
+  await loadHttpsCard(generation);
+}
+async function saveHttpsSettings(btn){
+  const generation=PAGE_RENDER_GENERATION,mount=document.getElementById("settings-https"),snapshot=SETTINGS_DATA.https;
+  if(!snapshot||!settingsCurrent(generation,"system")||!mount) return;
+  const err=document.getElementById("https-error"),desired={...snapshot.desired};
+  // Env-owned fields are sent unchanged, preserving their masked saved values.
+  const fields=new Set(snapshot.overrides||[]),read=(name,id,parse)=>{
+    if(!fields.has(name)) desired[name]=parse(document.getElementById(id));
+  };
+  read("enabled","https-enabled",node=>node.checked);
+  read("port","https-port",node=>Number(node.value));
+  read("cert_file","https-cert",node=>node.value.trim());read("key_file","https-key",node=>node.value.trim());
+  read("sans","https-sans",node=>node.value.split(/\r?\n/).map(name=>name.trim()).filter(Boolean));
+  const epoch=++SETTINGS_HTTPS_EPOCH;
+  if(err)err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const value=await api("/system/https",{method:"PUT",body:{node_id:snapshot.node_id,revision:snapshot.revision,desired}});
+    if(epoch!==SETTINGS_HTTPS_EPOCH||!settingsCurrent(generation,"system")||document.getElementById("settings-https")!==mount) return;
+    SETTINGS_HTTPS_EPOCH++;
+    SETTINGS_DATA.https=value;SETTINGS_LOADED.add("https");applyHttpsSettings(value);
+    toast("HTTPS settings saved; restart this node to apply changes");
+  }catch(error){
+    if(epoch!==SETTINGS_HTTPS_EPOCH||!settingsCurrent(generation,"system")||document.getElementById("settings-https")!==mount) return;
+    if(err)err.textContent=(error.message||"Save failed")+(error.status===409?" Reload this node before editing again.":"");
+    if(btn)btn.disabled=false;
+  }
+}
+async function downloadHttpsCertificate(btn){
+  const generation=PAGE_RENDER_GENERATION;
+  if(btn)btn.disabled=true;
+  try{
+    const response=await api("/system/https/certificate",{raw:true}),blob=await response.blob();
+    if(!settingsCurrent(generation,"system")) return;
+    const url=URL.createObjectURL(blob),link=document.createElement("a");
+    link.href=url;link.download="plurx-https-certificate.pem";link.click();URL.revokeObjectURL(url);
+  }catch(error){
+    if(settingsCurrent(generation,"system")){
+      const err=document.getElementById("https-error");if(err)err.textContent=error.message||"Certificate download failed";
+    }
+  }finally{if(btn&&btn.isConnected)btn.disabled=false;}
+}
+
+function sourceRecoveryCard(value,error=""){
+  const node=value&&value.node_name?String(value.node_name):"Node status unavailable";
+  const unavailable=error||(value&&value.error)||(!value?"Waiting for this node's recovery status.":"");
+  const count=(number)=>number!==null&&number!==undefined&&number!==""&&Number.isFinite(Number(number))?String(Number(number)):"Unknown";
+  const yn=(answer)=>answer===true?"Yes":answer===false?"No":"Unknown";
+  const launches=value&&value.launches||{};
+  const latest=launches.latest_unknown;
+  const poisoned=value&&value.poisoned;
+  const poisonCount=poisoned&&poisoned.total;
+  const poisonUnavailable=!value||!!value.error||poisoned===null||poisoned===undefined||poisonCount===null||poisonCount===undefined||!Number.isFinite(Number(poisonCount));
+  const witnesses=poisoned&&Array.isArray(poisoned.witnesses)?poisoned.witnesses:[];
+  const witnessRows=witnesses.slice(0,32).map(row=>`<li>${esc(row.family||"Unknown family")} · ${esc(row.owner_id||"Unknown owner")} · ${esc(row.purpose||"Unknown purpose")} · boot tick ${esc(String(row.boot_tick??"unknown"))}</li>`).join("");
+  return setCard(`${cardHead("Playback restart recovery",`This node: ${esc(node)}`,'<span class="pill">read-only</span>')}
+    <details class="setdetails"><summary>Details</summary><div class="setdetails-body">
+    ${unavailable?`<p class="hint" role="status">${esc(unavailable)}</p>`:""}
+    ${!value?'<p class="hint">Poisoned witness status is unavailable; no zero-count or healthy-state conclusion can be drawn.</p>':""}
+    ${value?`<div class="setfields">
+      <div><b>Reader recovery support</b><br>${value.supported===true?"Supported":"Not supported"} (advisory; never gates playback)</div>
+      <div><b>Authoritative backend</b><br>${yn(value.authoritative_backend)}</div>
+      <div><b>Kernel available</b><br>${yn(value.kernel_available)}</div>
+      <div><b>Local filesystem</b><br>${yn(value.local_filesystem)}</div>
+      <div><b>Daemon is init or subreaper</b><br>${yn(value.daemon_init_or_subreaper)}</div>
+      <div><b>Source-access roots configured</b><br>${yn(value.roots_configured)}${value.roots_configured===false?` · ${esc(value.roots_unconfigured_reason||"reason unavailable")}. Every launch on this node runs unverified until it restarts with its roots; nothing is blocked.`:""} (advisory; never gates playback)</div>
+    </div>
+    <div class="setfields">
+      <div><b>Verified attempts since process start</b><br>${count(launches.verified)}</div>
+      <div><b>Verified no-source attempts</b><br>${count(launches.no_source)}</div>
+      <div><b>Verified metadata-only attempts</b><br>${count(launches.metadata_only)}</div>
+      <div><b>Verified brokered attempts</b><br>${count(launches.brokered)}</div>
+      <div><b>Unknown attempts since process start</b><br>${count(launches.unknown)}</div>
+      <div><b>Explicitly unverified attempts</b><br>${count(launches.unverified)} · subset of unknown.</div>
+    </div>
+    ${latest?`<p>Latest unknown launch: ${esc(latest.purpose)} · ${Number.isFinite(Number(latest.observed_at_ms))?esc(new Date(Number(latest.observed_at_ms)).toLocaleString()):"time unavailable"}</p>`:""}
+    ${poisonUnavailable?'<p class="hint">Poisoned witness status is unavailable; no zero-count or healthy-state conclusion can be drawn.</p>':`<p><b>Poisoned witnesses:</b> ${count(poisonCount)}</p>${Number(poisonCount)>0?`<ul>${witnessRows}</ul>${Number(poisonCount)>32?`<p class="hint">Showing up to the first 32 witnesses.</p>`:""}<p class="hint">Poisoned witnesses await verified owner-stop proof, namespace teardown, or reboot. Confined-reader recovery is future work; this status does not make a playback census safe.</p>`:"<p class=\"hint\">No poisoned witnesses are currently reported.</p>"}`}`:""}
+    <p class="hint">Verified counts mean the final program, arguments, working directory and inherited descriptors passed the launch access check. Unknown includes undeclared and failed declarations; explicitly unverified is a subset of unknown. This read-only status never gates playback.</p>
+    
+    </div></details>
+    <button type="button" class="ghost sm" onclick="reloadSourceRecovery(this)">${unavailable?"Retry":"Refresh this node"}</button>`);
+}
+function sourceRecoveryMount(value,error=""){
+  return `<div id="settings-source-recovery">${sourceRecoveryCard(value,error)}</div>`;
+}
+function applySourceRecovery(value,error=""){
+  const mount=document.getElementById("settings-source-recovery");
+  if(mount)mount.innerHTML=sourceRecoveryCard(value,error);
 }

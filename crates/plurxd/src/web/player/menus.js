@@ -66,7 +66,17 @@ function settingsMenuHtml(){
   return `<div class="amsec">Playback settings</div>
     <button id="pmenu-autoskip" role="menuitemcheckbox" aria-checked="${autoskipOn()}" class="${autoskipOn()?'sel':''}" onclick="togglePlayerAutoskip(); refreshPlayerSettingsMenu('pmenu-autoskip')">Auto-skip intro and credits</button>
     <button id="pmenu-autoplay" role="menuitemcheckbox" aria-checked="${autoNextOn()}" class="${autoNextOn()?'sel':''}" onclick="togglePlayerAutonext(); refreshPlayerSettingsMenu('pmenu-autoplay')">Autoplay next episode</button>
+    <button id="pmenu-retain" role="menuitemcheckbox" aria-checked="${retainOutputOn()}" class="${retainOutputOn()?'sel':''}" onclick="togglePlayerRetainOutput(); refreshPlayerSettingsMenu('pmenu-retain')">Keep a reusable copy of this playback</button>
     ${syncMenuHtml()}`;
+}
+// Per-playback output choice (Paul, 2026-11-18). Off means this playback
+// queues no complete-output preparation and keeps no rolling output; it lasts
+// for this PLAYER only, so the next title follows the server setting again.
+function retainOutputOn(){return !(PLAYER&&PLAYER.retainOutputOff);}
+function togglePlayerRetainOutput(){
+  if(!PLAYER) return;
+  PLAYER.retainOutputOff=!PLAYER.retainOutputOff;
+  if(PLAYER.retainOutputOff&&typeof stopSessionOutputRetention==="function") stopSessionOutputRetention(PLAYER);
 }
 function refreshPlayerSettingsMenu(focusId){
   const m=document.getElementById("pmenu");

@@ -113,11 +113,12 @@ const SETTINGS_MANIFEST={
   analysis:{required:["settings","analysis"],secondary:["developerReadiness"]},
   maintenance:{required:["settings","dvConversions"],secondary:["developerReadiness"]},
   users:{required:["settings","users"],secondary:[]},
-  system:{required:["sys"],secondary:[]},
+  system:{required:["sys"],secondary:["https","sourceRecovery"]},
   cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness","settings"]},
-  sharing:{required:["sharingStatus","sharingImports","sharingExports"],secondary:[]},
-  integrations:{required:["settings","trakt"],secondary:[]},
-  developer:{required:["settings"],secondary:["developerReadiness","https","sourceRecovery"]},
+  sharing:{required:["settings","sharingStatus","sharingImports","sharingExports"],secondary:["developerReadiness"]},
+  integrations:{required:["settings","trakt"],secondary:["developerReadiness"]},
+  remotes:{required:["settings"],secondary:["developerReadiness"]},
+  developer:{required:["settings"],secondary:["developerReadiness"]},
 };
 // The configured mode, not the current peer count or a failed status read,
 // determines whether cluster controls apply. /server is loaded before routing.
@@ -189,15 +190,15 @@ function loadSettingsKey(key,generation,cacheResult=true){
 async function loadSourceRecoveryCard(generation){
   try{
     const value=await loadSettingsKey("sourceRecovery",generation);
-    if(settingsCurrent(generation,"developer"))applySourceRecovery(value);
+    if(settingsCurrent(generation,"system"))applySourceRecovery(value);
   }catch(error){
     if(error?.staleSourceRecovery)return;
-    if(settingsCurrent(generation,"developer"))applySourceRecovery(null,error&&error.message||"request failed");
+    if(settingsCurrent(generation,"system"))applySourceRecovery(null,error&&error.message||"request failed");
   }
 }
 async function reloadSourceRecovery(btn){
   const generation=PAGE_RENDER_GENERATION;
-  if(!settingsCurrent(generation,"developer"))return;
+  if(!settingsCurrent(generation,"system"))return;
   if(btn)btn.disabled=true;
   SETTINGS_SOURCE_RECOVERY_EPOCH++;SETTINGS_LOADED.delete("sourceRecovery");SETTINGS_LOADS.delete("sourceRecovery");
   applySourceRecovery(null,"Loading this node's recovery status…");
@@ -234,7 +235,7 @@ function settingsShell(tab){
   return `<div class="setlayout"><nav class="settabs" aria-label="Settings sections">${settingsTabsHtml(tab)}</nav><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody"><div class="empty">Loading ${esc(SET_TABS.find(row=>row[0]===tab)[1])}…</div></div></div>`;
 }
 function patchSettingsSecondary(tab,key,value){
-  if(tab==="developer"&&key==="https") applyHttpsSettings(value);
+  if(tab==="system"&&key==="https") applyHttpsSettings(value);
   if(tab==="metadata"&&key==="libs"){
     const mount=document.getElementById("metadata-libraries");
     if(mount) mount.innerHTML=keyBackfillHtml(SETTINGS_DATA.libs||[]);
@@ -268,7 +269,7 @@ function patchSettingsSecondary(tab,key,value){
   }
 }
 function patchSettingsSecondaryError(tab,key,error){
-  if(tab==="developer"&&key==="https") applyHttpsSettings(null,error&&error.message||"request failed");
+  if(tab==="system"&&key==="https") applyHttpsSettings(null,error&&error.message||"request failed");
   const message=esc(error&&error.message||"request failed");
   if(tab==="metadata"&&key==="libs"){
     const mount=document.getElementById("metadata-libraries");
@@ -296,7 +297,7 @@ async function loadSettingsTab(generation,tab){
     if(!settingsCurrent(generation,tab)) return;
     const body=document.getElementById("setbody");
     if(body) body.innerHTML=`<div class="empty">${esc(error.message)}<div style="margin-top:12px"><button class="ghost sm" onclick="retrySettingsTab()">Retry</button></div></div>`;
-    if(tab==="developer"&&body){
+    if(tab==="system"&&body){
       body.innerHTML+=httpsSettingsMount(SETTINGS_DATA.https);
       const hasSourceRecovery=manifest.secondary.includes("sourceRecovery");
       if(hasSourceRecovery)body.innerHTML+=sourceRecoveryMount(SETTINGS_DATA.sourceRecovery);
@@ -317,7 +318,7 @@ async function loadSettingsTab(generation,tab){
     // already-rendered roster can open a decision dialog before this secondary
     // response arrives. Other secondary data can keep the ordinary eager cache.
     const staged=tab==="cluster"&&key==="clusterOps";
-    if(tab==="developer"&&key==="sourceRecovery")return loadSourceRecoveryCard(generation);
+    if(tab==="system"&&key==="sourceRecovery")return loadSourceRecoveryCard(generation);
     return loadSettingsKey(key,generation,!staged).then(value=>{
       if(settingsCurrent(generation,tab)) patchSettingsSecondary(tab,key,value);
     }).catch(error=>{
@@ -335,7 +336,7 @@ async function loadSettingsTab(generation,tab){
   return settingsCurrent(generation,tab);
 }
 async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
-  if(!ME.is_admin){ if(settingsRouteTab(location.hash)==="developer")viewLocalRemoteSettings(generation);else location.hash="#/"; return; }
+  if(!ME.is_admin){ if(["remotes","developer"].includes(settingsRouteTab(location.hash)))viewLocalRemoteSettings(generation);else location.hash="#/"; return; }
   const route=location.hash;
   if(reset){
     if(typeof sharingRetire==="function")sharingRetire();

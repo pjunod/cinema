@@ -7,10 +7,17 @@ const SET_GROUPS=[
   ["Content",[["libraries","Libraries"],["metadata","Metadata"],["livetv","Live TV"]]],
   ["Playback",[["playback","Playback"],["analysis","Analysis"]]],
   ["Server",[["maintenance","Maintenance"],["users","Users"],["system","System"],["cluster","Cluster"]]],
-  ["Outside",[["integrations","Integrations"],["sharing","Sharing"]]],
+  ["Outside",[["integrations","Integrations"],["sharing","Sharing"],["remotes","Remotes & devices"]]],
   ["Developer",[["developer","Developer"]]],
 ];
 const SET_TABS=SET_GROUPS.flatMap(([,tabs])=>tabs);
+// Cards that left Developer on 2026-11-18. An old #/settings/developer/<anchor>
+// link lands on the section that now holds the card.
+const DEVELOPER_MOVED={"cinema-sharing-settings":"sharing","jellyfin-compatibility-settings":"integrations",
+  "enable-dolby-vision-processing":"playback","enable-display-target-hdr10":"playback","enable-output-preparation":"playback",
+  "enable-vod-reorder":"playback","enable-auto-quality":"playback","enable-display-auto":"playback","enable-content-encoding":"playback",
+  "enable-sdr-codecs":"playback","enable-indexing-while-serving":"analysis","enable-applied-view":"cluster","create-plan":"playback",
+  "settings-https":"system","settings-source-recovery":"system","cinema-remote":"remotes"};
 // Every section is a route: #/settings/<section>. The bare #/settings (and
 // the older #/admin) land on the last section this browser visited, so the
 // address bar names the section and the back button walks between them.
@@ -18,6 +25,8 @@ function isSettingsRoute(h){ return h==="#/settings"||h==="#/admin"||(typeof h==
 function settingsRouteTab(h){
   if(h==="#/settings/developer/enable-subtitle-transcription") return "maintenance";
   if(h==="#/settings/developer/enable-subtitle-translation") return "playback";
+  const moved=/^#\/settings\/developer\/([a-z0-9-]+)$/.exec(h||"");
+  if(moved&&Object.hasOwn(DEVELOPER_MOVED,moved[1])) return DEVELOPER_MOVED[moved[1]];
   const m=/^#\/settings\/([a-z]+)(?:\/[a-z0-9-]+)?$/.exec(h||"");
   return m&&SET_TABS.some(x=>x[0]===m[1])?m[1]:null;
 }
@@ -98,7 +107,7 @@ function renderSettings(){
   document.getElementById("main").innerHTML=`<div class="setlayout"><nav class="settabs" aria-label="Settings sections">${settingsTabsHtml(tab)}</nav><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody">${settingsPanel(tab,d)}</div></div>`;
   restoreSettingsMounts(keep);
   revealSettingsAnchor(tab);
-  if(tab==="developer")cinemaRemoteLoadManagement();
+  if(tab==="remotes")cinemaRemoteLoadManagement();
   if(tab==="cluster"&&settingsClusterEnabled()){ applyClusterFolds(); return refreshClusterLogs(); }
 }
 function settingsPanel(tab,d){
@@ -108,11 +117,12 @@ function settingsPanel(tab,d){
   if(tab==="analysis")     return analysisSettingsPanel(d.settings,d.analysis,d.developerReadiness);
   if(tab==="maintenance")  return maintenancePanel(d.settings,d.dvConversions,d.developerReadiness);
   if(tab==="users")        return usersPanel(d.users,d.settings);
-  if(tab==="system")       return systemPanel(d.sys);
+  if(tab==="system")       return systemPanel(d.sys,httpsSettingsMount(d.https),sourceRecoveryMount(d.sourceRecovery));
   if(tab==="cluster")      return clusterPanel(d);
-  if(tab==="sharing")      return sharingManagementPanel(d);
+  if(tab==="sharing")      return sharingManagementPanel(d)+cinemaSharingCard(d.settings,d.developerReadiness);
+  if(tab==="remotes")      return remotesPanel(d.settings,d.developerReadiness);
   if(tab==="integrations") return integrationsPanel(d.settings,d.trakt);
-  if(tab==="developer")    return developerPanel(d.settings,d.developerReadiness,httpsSettingsMount(d.https),sourceRecoveryMount(d.sourceRecovery))+cinemaRemoteLocalCards();
+  if(tab==="developer")    return developerPanel(d.settings,d.developerReadiness);
   return librariesPanel(d.libs,d.status,d.settings,d.dvConversions);
 }
 // The section header: name, one line of summary, the section's bulk actions.
@@ -654,7 +664,7 @@ function metadataPanel(settings,readiness){
 // calendar seam; both are the opposite direction of the Metadata providers,
 // which is why they no longer share a page with them.
 function integrationsPanel(settings,trakt){
-  return `${setHead("Integrations","Other services plurx talks to.")}${traktCardHtml(trakt)}${monarrCardHtml()}<div class="card">${cardHead("OpenSubtitles","Find and download missing movie and episode subtitles.")}<div style="padding:16px"><button class="sm" onclick="openSubtitleProvider(this)">Configure OpenSubtitles</button><div id="subtitle-provider-form"></div></div></div>`;
+  return `${setHead("Integrations","Other services plurx talks to.")}${traktCardHtml(trakt)}${monarrCardHtml()}${jellyfinCompatibilityCard(settings,SETTINGS_DATA.developerReadiness)}<div class="card">${cardHead("OpenSubtitles","Find and download missing movie and episode subtitles.")}<div style="padding:16px"><button class="sm" onclick="openSubtitleProvider(this)">Configure OpenSubtitles</button><div id="subtitle-provider-form"></div></div></div>`;
 }
 
 async function openSubtitleProvider(button){
@@ -758,7 +768,7 @@ function playbackPanel(settings,readiness){
   // Chapter thumbnails and both decoder controls graduated from Developer on
   // 2026-09-28; quality switching, this browser's second player and the PGS
   // overlay on 2026-10-10 (Paul's Developer lifecycle). Each keeps its own Save.
-  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${subtitleTranslationCard()}${openInCard()}${hdrDisplayPeakCard()}${local}${chapterThumbnailsCard(settings,readiness)}${preparedQualityCard(settings,readiness)}${preparedHandoffBrowserCard()}${pgsOverlayCard(settings,readiness)}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${rateControlCard(settings)}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}</details>`;
+  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${subtitleTranslationCard()}${openInCard()}${hdrDisplayPeakCard()}${local}${chapterThumbnailsCard(settings,readiness)}${preparedQualityCard(settings,readiness)}${preparedHandoffBrowserCard()}${pgsOverlayCard(settings,readiness)}<div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision and HDR</h2></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${displayTargetHdr10Card(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}${dolbyVisionRefitCard(settings,readiness)}<div class="setsection" id="enable-output-preparation"><h2>Reusable output</h2></div>${outputPreparationCard(settings,readiness)}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${vodReorderCard(settings)}${rateControlCard(settings)}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}</details>`;
 }
 
 function searchSettingsCard(readiness){
