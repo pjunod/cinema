@@ -392,11 +392,11 @@ struct DbRaftCleanup {
 #[cfg(feature = "sqlite")]
 impl DbRaftCleanup {
     async fn drain(mut self, raft: Option<DbRaft>) {
-        if let Some(raft) = raft {
-            if let Err(error) = raft.shutdown().await {
-                tracing::error!(?error, "cancelled Raft constructor core cleanup failed");
-                return;
-            }
+        if let Some(raft) = raft
+            && let Err(error) = raft.shutdown().await
+        {
+            tracing::error!(?error, "cancelled Raft constructor core cleanup failed");
+            return;
         }
         self.producers.request_retirement();
         self.producers.wait().await;
