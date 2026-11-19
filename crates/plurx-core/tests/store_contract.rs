@@ -17709,6 +17709,18 @@ mod managed_bootstrap_regressions {
         assert_eq!(declarations.len(), 2);
         let view = declarations.remove(0).value;
         let trigger = declarations.remove(0).value;
+        let marker: Vec<I64Value> = client
+            .query_consistent_map(
+                "SELECT version AS value FROM subtitle_managed_schema WHERE singleton=1",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("retain the installed managed schema version");
+        assert_eq!(marker.len(), 1);
+        let restore_marker = format!(
+            "INSERT INTO subtitle_managed_schema VALUES(1,{})",
+            marker[0].value
+        );
         for (ordinal, (damage, restore, expected_error)) in [
             (
                 "DROP TRIGGER subtitle_managed_source_changed",
@@ -17722,7 +17734,7 @@ mod managed_bootstrap_regressions {
             ),
             (
                 "DELETE FROM subtitle_managed_schema",
-                "INSERT INTO subtitle_managed_schema VALUES(1,5)".into(),
+                restore_marker,
                 "marker missing",
             ),
         ]
