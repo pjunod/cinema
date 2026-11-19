@@ -1567,6 +1567,12 @@ impl MembershipError {
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
+            Self::PeerAuthenticationAdmission(PeerAuthAdmissionRefusal::RateLimited) => {
+                "cluster_peer_auth_rate_limited"
+            }
+            Self::PeerAuthenticationAdmission(PeerAuthAdmissionRefusal::ReplayCapacity) => {
+                "cluster_peer_auth_replay_capacity"
+            }
             Self::ClockUnbounded(_) => "cluster_clock_unbounded",
             Self::Unavailable => "membership_unavailable",
             Self::InvalidToken => "join_token_invalid",

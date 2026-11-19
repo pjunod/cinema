@@ -446,9 +446,9 @@ pub struct TokenAuthenticationLease {
 #[derive(Clone)]
 pub struct TokenProofSource {
     #[cfg(feature = "hiqlite-store")]
-    watch: std::sync::Arc<hiqlite::AppliedWatch>,
+    watch: std::sync::Arc<::hiqlite::AppliedWatch>,
     #[cfg(feature = "hiqlite-store")]
-    local: hiqlite::LocalDbRaftMetrics,
+    local: ::hiqlite::LocalDbRaftMetrics,
 }
 
 impl std::fmt::Debug for TokenProofSource {
@@ -462,8 +462,8 @@ impl std::fmt::Debug for TokenProofSource {
 impl TokenProofSource {
     #[cfg(feature = "hiqlite-store")]
     pub(crate) fn local(
-        mark: hiqlite::AppliedMarkHandle,
-        local: hiqlite::LocalDbRaftMetrics,
+        mark: ::hiqlite::AppliedMarkHandle,
+        local: ::hiqlite::LocalDbRaftMetrics,
     ) -> Self {
         Self {
             watch: std::sync::Arc::new(mark.watch(&[])),

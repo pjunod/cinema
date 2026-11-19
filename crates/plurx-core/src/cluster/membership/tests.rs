@@ -10966,6 +10966,15 @@ fn peer_proof_leases_expire_on_heartbeat_source_aba_or_image_movement() {
 
 #[test]
 fn peer_replay_capacity_is_distinct_from_an_actual_replay() {
+    assert_eq!(
+        MembershipError::PeerAuthenticationAdmission(PeerAuthAdmissionRefusal::RateLimited).code(),
+        "cluster_peer_auth_rate_limited"
+    );
+    assert_eq!(
+        MembershipError::PeerAuthenticationAdmission(PeerAuthAdmissionRefusal::ReplayCapacity)
+            .code(),
+        "cluster_peer_auth_replay_capacity"
+    );
     let now = Instant::now();
     let mut mutation = InternalAuthReplayWindow::default();
     assert_eq!(mutation.admit_proof("same", now), Ok(true));
