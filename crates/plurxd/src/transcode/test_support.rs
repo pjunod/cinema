@@ -782,6 +782,7 @@ fn test_session_with_optional_child(
         // Historical flow/retention controls explicitly retain the old cushion.
         // Production and new startup regressions bind the short phase below.
         publication: Mutex::new(RollingPublicationClock::historical_control_for_test()),
+        native_split: None,
         publication_worker_started: AtomicBool::new(false),
         flow_worker_started: AtomicBool::new(false),
         file_id: 1,

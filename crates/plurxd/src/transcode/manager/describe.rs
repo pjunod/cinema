@@ -55,7 +55,11 @@ impl TranscodeManager {
                 && segment.start_ms <= position
                 && position < segment.end_ms
         })?;
-        let report = split.fel_at(u64::try_from(segment.index).ok()?, incarnation_id)?;
+        let report = split.fel_at(
+            u64::try_from(segment.index).ok()?,
+            served.producer_attempt,
+            incarnation_id,
+        )?;
         if split.first_fel_presentation() {
             tracing::info!(target: "plurxd::http::hls", session = %session_log_id(session_id),
                 segment = segment.index, phase = "committed", mode = "native_server_splice",

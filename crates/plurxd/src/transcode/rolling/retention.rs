@@ -289,8 +289,11 @@ pub(super) async fn gc_expired_segments(session: &Session) {
                     .zip(segment_index(&name).and_then(|index| u64::try_from(index).ok()))
                 {
                     let mut removed = true;
-                    for role in ["audio", "video", "fel"] {
-                        let child = format!("split-{role}-{name}");
+                    let children = [format!("split-audio-{name}"), format!("split-video-{name}")];
+                    for child in children
+                        .into_iter()
+                        .chain(split.fel_object(index, producer_attempt))
+                    {
                         let retired = session.dir.join(format!(
                             ".plurx-retention-{producer_attempt}-{sweep}-{child}"
                         ));
@@ -307,7 +310,7 @@ pub(super) async fn gc_expired_segments(session: &Session) {
                             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                             Err(error) => {
                                 removed = false;
-                                tracing::warn!(%error, role, index, "split rendition remains in retired scratch");
+                                tracing::warn!(%error, %child, index, "split rendition remains in retired scratch");
                             }
                         }
                     }

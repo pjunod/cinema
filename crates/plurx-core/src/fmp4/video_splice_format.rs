@@ -8,7 +8,7 @@ use super::video_splice::{
 };
 use super::{
     be_u32, classify, copy_box_end, copy_video_sample_entry_facts,
-    declare_hevc_parameter_sets_in_band, dolby_vision_record, find_child,
+    declare_hevc_parameter_sets_in_band, dolby_vision_record, find_child, has_leading_picture,
     hevc_hdr10_sample_entry_facts, hevc_nal_type, hvcc_parameter_set_nals, locate_configuring_hvcc,
     malformed, sei_number, shrink_box, validate_hevc_sample_description_reference,
     visit_length_prefixed_hevc_nals, without_trailing_zero_bytes, Fmp4Error, Fragment,
@@ -94,6 +94,17 @@ impl SpliceVideoFormat {
 
     pub fn init(&self) -> &Init {
         &self.init
+    }
+
+    /// Returning to the ordinary encoder needs an IDR and no leading
+    /// presentation pictures, including the leading pictures IDR_W_RADL allows.
+    pub fn admits_ordinary_return(&self, fragment: &Fragment) -> bool {
+        classify(fragment, &self.init) == super::CutClass::CleanIdr
+            && self
+                .init
+                .video()
+                .and_then(|track| fragment.track(track.id))
+                .is_some_and(|track| !has_leading_picture(track))
     }
 
     /// Establish that both renditions can declare the same sample entry.

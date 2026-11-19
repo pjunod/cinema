@@ -165,10 +165,7 @@ pub(super) async fn child_playlist_local_before(
             state,
             session,
             &owner,
-            crate::transcode::MediaResponsePublication::attempt_media(
-                "continuous-child-playlist",
-                Some(&object),
-            ),
+            crate::transcode::MediaResponsePublication::attempt_media("playlist", Some(&object)),
             true,
             playlist_response(bytes),
             publication_deadline,
@@ -282,8 +279,9 @@ pub(super) async fn child_segment_local_before(
     let name = child.media_name().ok_or(ApiError::NotFound("segment"))?;
     if state
         .transcode
-        .native_split_matches_child(session, child)
+        .native_split_matches_child(session, child, deadline)
         .await
+        .map_err(|_| response_publication_timeout())?
     {
         return Box::pin(segment_local_answer(
             state,
@@ -1201,6 +1199,16 @@ async fn segment_local_answer(
     split_child: Option<&crate::vodserve::ChildMediaRequest>,
 ) -> Result<Response, ApiError> {
     const APPLE_INIT_REWRITE_LIMIT_BYTES: u64 = INIT_INSPECTION_LIMIT_BYTES;
+    let media_kind = |range| match (
+        split_child.map(|child| child.role.as_str()),
+        segment_publication_kind(seg, range),
+    ) {
+        (Some("audio"), "media-segment") => "audio-media-segment",
+        (Some("audio"), "segment-range") => "audio-segment-range",
+        (Some("video"), "media-segment") => "split-video-media-segment",
+        (Some("video"), "segment-range") => "split-video-segment-range",
+        (_, kind) => kind,
+    };
 
     // The VOD presentation's three-outcome contract dispatches first; `None`
     // falls through to the live path untouched. A session neither registry
@@ -1244,7 +1252,7 @@ async fn segment_local_answer(
                     state,
                     session,
                     owner,
-                    segment_publication_kind(seg, None),
+                    media_kind(None),
                     Some(seg),
                     response_publication_deadline_before(request_deadline),
                 )
@@ -1278,7 +1286,7 @@ async fn segment_local_answer(
                 state,
                 session,
                 &owner,
-                segment_publication_kind(seg, None),
+                media_kind(None),
                 Some(seg),
                 response_publication_deadline_before(request_deadline),
             )
@@ -1294,7 +1302,7 @@ async fn segment_local_answer(
                 state,
                 session,
                 &owner,
-                segment_publication_kind(seg, None),
+                media_kind(None),
                 Some(seg),
                 response_publication_deadline_before(request_deadline),
             )
@@ -1337,7 +1345,7 @@ async fn segment_local_answer(
             state,
             session,
             &response_owner,
-            segment_publication_kind(seg, None),
+            media_kind(None),
             Some(seg),
             response_publication_deadline_before(request_deadline),
         )
@@ -1346,8 +1354,10 @@ async fn segment_local_answer(
         return Err(ApiError::NotFound("segment"));
     }
     let content_type = segment_content_type(seg);
+    let typed_object =
+        split_child.map(|child| format!("{}/{}/{}", child.role, child.rendition, seg));
     let etag = response_owner
-        .rolling_etag(session, seg, opened.len)
+        .rolling_etag(session, typed_object.as_deref().unwrap_or(seg), opened.len)
         .expect("a live segment carries a rolling response owner");
     if etag_matches(headers.if_none_match.as_deref(), &etag) {
         let response = (
@@ -1370,7 +1380,10 @@ async fn segment_local_answer(
             session,
             &response_owner,
             crate::transcode::MediaResponsePublication::attempt_media(
-                "segment-not-modified",
+                match split_child {
+                    Some(child) if child.role == "audio" => "audio-segment-not-modified",
+                    _ => "segment-not-modified",
+                },
                 Some(seg),
             ),
             true,
@@ -1438,7 +1451,7 @@ async fn segment_local_answer(
                     state,
                     session,
                     &response_owner,
-                    segment_publication_kind(seg, None),
+                    media_kind(None),
                     Some(seg),
                     publication_deadline,
                 )
@@ -1451,7 +1464,7 @@ async fn segment_local_answer(
                     state,
                     session,
                     &response_owner,
-                    segment_publication_kind(seg, None),
+                    media_kind(None),
                     Some(seg),
                     publication_deadline,
                 )
@@ -1473,7 +1486,7 @@ async fn segment_local_answer(
                 state,
                 session,
                 &response_owner,
-                segment_publication_kind(seg, None),
+                media_kind(None),
                 Some(seg),
                 publication_deadline,
             )
@@ -1529,7 +1542,7 @@ async fn segment_local_answer(
             session,
             &response_owner,
             crate::transcode::MediaResponsePublication::attempt_media(
-                segment_publication_kind(seg, requested_range),
+                media_kind(requested_range),
                 Some(seg),
             ),
             range_covers_object(requested_range, opened.len),
@@ -1575,7 +1588,7 @@ async fn segment_local_answer(
                     state,
                     session,
                     &response_owner,
-                    segment_publication_kind(seg, requested_range),
+                    media_kind(requested_range),
                     Some(seg),
                     publication_deadline,
                 )
@@ -1588,7 +1601,7 @@ async fn segment_local_answer(
                     state,
                     session,
                     &response_owner,
-                    segment_publication_kind(seg, requested_range),
+                    media_kind(requested_range),
                     Some(seg),
                     publication_deadline,
                 )
@@ -1608,7 +1621,7 @@ async fn segment_local_answer(
                 state,
                 session,
                 &response_owner,
-                segment_publication_kind(seg, requested_range),
+                media_kind(requested_range),
                 Some(seg),
                 publication_deadline,
             )
@@ -1621,7 +1634,7 @@ async fn segment_local_answer(
         session,
         &response_owner,
         crate::transcode::MediaResponsePublication::attempt_media(
-            segment_publication_kind(seg, requested_range),
+            media_kind(requested_range),
             Some(seg),
         ),
         publication_deadline,

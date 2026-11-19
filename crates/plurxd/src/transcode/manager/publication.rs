@@ -827,7 +827,7 @@ impl TranscodeManager {
             {
                 return false;
             }
-            let fetched_segment = complete_object
+            let fetched_segment = (complete_object && !kind.starts_with("audio-"))
                 .then(|| object_name.and_then(segment_index))
                 .flatten();
             let fetched_end_ms = if let Some(index) = fetched_segment {
@@ -867,6 +867,18 @@ impl TranscodeManager {
                 .await
             {
                 return false;
+            }
+            if matches!(
+                kind,
+                "split-video-media-segment" | "split-video-segment-range"
+            ) {
+                if let Some((split, index)) = session
+                    .native_split
+                    .as_ref()
+                    .zip(fetched_segment.and_then(|index| u64::try_from(index).ok()))
+                {
+                    split.mark_fel_delivered(index, *producer_attempt);
+                }
             }
             if tokio::time::timeout_at(
                 tokio::time::Instant::from_std(deadline),
@@ -1814,6 +1826,8 @@ impl TranscodeManager {
         let mut last_committed: Option<u64> = None;
         loop {
             let changed = split.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
             if cancellation.is_cancelled()
                 || session.control.is_retired()
                 || session.control.current_producer_attempt() != attempt
@@ -1837,7 +1851,7 @@ impl TranscodeManager {
                     .map_err(|_| "invalid native splice frontier")?
             };
             if last_committed.is_some_and(|index| frontier > index) {
-                return Ok(had_commit);
+                last_committed = None;
             }
             let pending = split.candidates(frontier.max(last_attempted));
             // Keep a proved ordinary successor in hand before changing the
@@ -1891,8 +1905,7 @@ impl TranscodeManager {
                             .ok_or("native splice sequence overflow")?,
                     )
                     .map_err(|err| err.to_string())?;
-                if plurx_core::fmp4::classify(&next.public_video, author.video.init())
-                    != plurx_core::fmp4::CutClass::CleanIdr
+                if !author.video.admits_ordinary_return(&next.public_video)
                     || segment.ordinary.tracks[0].sample_count() as u64 != entry.samples
                 {
                     return Err("native splice has no verified ordinary return boundary".into());
@@ -1949,20 +1962,34 @@ impl TranscodeManager {
                 let DvSelection::Selected(plan) = &encoding.dv_processing else {
                     return Err("native splice has no verified processing plan".into());
                 };
-                let mut receipt = windows
-                    .first()
-                    .and_then(|window| window.receipt.clone())
-                    .ok_or("native splice has no verified processing receipt")?;
                 let shape = DvDigest::new(hex::encode(sha2::Sha256::digest(&bytes)))
                     .map_err(|err| err.to_string())?;
-                receipt
-                    .bind_publication(incarnation_id, shape.clone())
-                    .map_err(|err| err.to_string())?;
-                let report = receipt
-                    .effective_report(&DvProductionRegistry, plan, incarnation_id, &shape)
-                    .map_err(|err| err.to_string())?
-                    .filter(|report| report.profile81_reconstructed() && report.fel_contributed())
-                    .ok_or("native splice did not produce a FEL delivery report")?;
+                let mut reports = windows.iter().map(|window| {
+                    let mut receipt = window
+                        .receipt
+                        .clone()
+                        .ok_or("native splice has no verified processing receipt")?;
+                    receipt
+                        .bind_publication(incarnation_id, shape.clone())
+                        .map_err(|err| err.to_string())?;
+                    receipt
+                        .effective_report(&DvProductionRegistry, plan, incarnation_id, &shape)
+                        .map_err(|err| err.to_string())?
+                        .filter(|report| {
+                            report.profile81_reconstructed() && report.fel_contributed()
+                        })
+                        .ok_or_else(|| {
+                            "native splice did not produce a FEL delivery report".to_owned()
+                        })
+                });
+                let report = reports
+                    .next()
+                    .ok_or("native splice produced no windows")??;
+                for other in reports {
+                    if other? != report {
+                        return Err("native splice windows disagree on effective processing".into());
+                    }
+                }
                 Ok::<_, String>((bytes, report))
             };
             let (bytes, report) = match crate::source_custody::with_request(
@@ -1974,24 +2001,29 @@ impl TranscodeManager {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     tracing::debug!(target: "plurxd::http::hls", index, %error, "native FEL object declined");
-                    if had_commit {
-                        return Ok(true);
-                    }
+                    last_committed = None;
                     continue;
                 }
             };
             let Some(_writer) = permit.ledger().register_writer(permit.key()) else {
                 return Ok(had_commit);
             };
-            crate::copyseg::write_native_split_fel(
+            let object = format!("split-fel-{attempt}-{index}-{}.m4s", uuid::Uuid::new_v4());
+            let write = crate::copyseg::write_native_split_fel(
                 session.dir.clone(),
-                grants.clone(),
-                index,
+                grants(),
+                &object,
                 &bytes,
             )
-            .await?;
+            .await;
+            if let Err(reason) = write {
+                let _ = tokio::fs::remove_file(session.dir.join(format!("{object}.tmp"))).await;
+                return Err(reason);
+            }
+            let transition = session.child_transition.lock().await;
             let clock = session.publication.lock().await;
             let eligible = !cancellation.is_cancelled()
+                && !session.replacing_child.load(Acquire)
                 && session.control.current_producer_attempt() == attempt
                 && !session.control.is_retired()
                 && runtime.source.unchanged()
@@ -1999,13 +2031,22 @@ impl TranscodeManager {
                     snapshot.producer_attempt == attempt
                         && u64::try_from(snapshot.last_segment).is_ok_and(|last| last < index)
                 });
-            if !eligible {
-                if had_commit {
-                    return Ok(true);
-                }
+            let installed = eligible
+                && split.commit_fel(
+                    index,
+                    attempt,
+                    incarnation_id.to_owned(),
+                    &object,
+                    report,
+                    bytes.len() as i64,
+                );
+            drop(clock);
+            drop(transition);
+            if !installed {
+                let _ = tokio::fs::remove_file(session.dir.join(object)).await;
+                last_committed = None;
                 continue;
             }
-            split.commit_fel(index, incarnation_id.to_owned(), report, bytes.len() as i64);
             last_committed = Some(index);
             had_commit = true;
             tracing::info!(target: "plurxd::http::hls", session = %session_log_id(session_id), index,
@@ -2118,27 +2159,26 @@ impl TranscodeManager {
         &self,
         session_id: &str,
         child: &crate::vodserve::ChildMediaRequest,
-    ) -> bool {
-        let session = self.sessions.lock().await.get(session_id).cloned();
-        session
-            .as_ref()
-            .and_then(|session| session.native_split.as_ref())
-            .and_then(|inventory| inventory.active_ids())
-            .and_then(|ids| ids.for_role(&child.role))
-            .is_some_and(|id| id == child.rendition)
+        deadline: Instant,
+    ) -> Result<bool, SegmentOpenError> {
+        Ok(self
+            .resolve_segment_presentation(session_id, deadline)
+            .await?
+            .is_some_and(|(session, _, _)| {
+                session
+                    .native_split
+                    .as_ref()
+                    .and_then(|split| split.active_ids())
+                    .and_then(|ids| ids.for_role(&child.role))
+                    .is_some_and(|id| id == child.rendition)
+            }))
     }
 
-    pub(crate) async fn segment_for_publication_role_before(
-        self: &Arc<Self>,
+    async fn resolve_segment_presentation(
+        &self,
         session_id: &str,
-        name: &str,
-        child: Option<&crate::vodserve::ChildMediaRequest>,
         deadline: Instant,
-    ) -> Result<SegmentPublication, SegmentOpenError> {
-        // Guard against path traversal: segment names are `segNNNNN.ts` only.
-        if !is_safe_segment(name) {
-            return Ok(SegmentPublication::Missing(None));
-        }
+    ) -> Result<Option<(Arc<Session>, bool, u64)>, SegmentOpenError> {
         let live_session = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             self.sessions.lock(),
@@ -2160,13 +2200,33 @@ impl TranscodeManager {
         } else {
             None
         };
-        let (session, retired_owner, resolved_attempt) = match (live_session, retired) {
+        let owner = match (live_session, retired) {
             (Some(session), _) => {
                 let attempt = session.control.current_producer_attempt();
-                (session, false, attempt)
+                Some((session, false, attempt))
             }
-            (None, Some(retired)) => (retired.session, true, retired.producer_attempt),
-            (None, None) => return Ok(SegmentPublication::Missing(None)),
+            (None, Some(retired)) => Some((retired.session, true, retired.producer_attempt)),
+            (None, None) => None,
+        };
+        Ok(owner)
+    }
+
+    pub(crate) async fn segment_for_publication_role_before(
+        self: &Arc<Self>,
+        session_id: &str,
+        name: &str,
+        child: Option<&crate::vodserve::ChildMediaRequest>,
+        deadline: Instant,
+    ) -> Result<SegmentPublication, SegmentOpenError> {
+        // Guard against path traversal: segment names are `segNNNNN.ts` only.
+        if !is_safe_segment(name) {
+            return Ok(SegmentPublication::Missing(None));
+        }
+        let Some((session, retired_owner, resolved_attempt)) = self
+            .resolve_segment_presentation(session_id, deadline)
+            .await?
+        else {
+            return Ok(SegmentPublication::Missing(None));
         };
         // Negative classifications must carry the attempt that was current
         // when this lookup began. If fallback crosses any later await, HTTP's
@@ -2387,6 +2447,20 @@ impl TranscodeManager {
                 {
                     return Ok(SegmentPublication::Missing(Some(current_owner())));
                 }
+                let within_split_frontier = if let (Some(_), Some(index)) = (child, idx) {
+                    session
+                        .publication
+                        .lock()
+                        .await
+                        .served
+                        .as_ref()
+                        .is_some_and(|snapshot| {
+                            snapshot.producer_attempt == producer_attempt
+                                && index <= snapshot.last_segment
+                        })
+                } else {
+                    true
+                };
                 let available = if retired_owner {
                     let owner_current = self
                         .retired_presentations
@@ -2420,7 +2494,7 @@ impl TranscodeManager {
                             })
                         })
                 };
-                if !available {
+                if !available || !within_split_frontier {
                     if retired_owner {
                         return Ok(SegmentPublication::Missing(Some(current_owner())));
                     }
@@ -2441,20 +2515,17 @@ impl TranscodeManager {
                     continue;
                 }
             }
-            let enhanced = child.is_some_and(|child| child.role == "video")
-                && idx
-                    .and_then(|index| u64::try_from(index).ok())
-                    .is_some_and(|index| {
-                        session
-                            .native_split
-                            .as_ref()
-                            .is_some_and(|split| split.has_fel(index))
-                    });
-            let path = if enhanced {
-                session.dir.join(format!("split-fel-{name}"))
-            } else {
-                path.clone()
-            };
+            let enhanced = child
+                .filter(|child| child.role == "video")
+                .and(idx)
+                .and_then(|index| u64::try_from(index).ok())
+                .and_then(|index| {
+                    session
+                        .native_split
+                        .as_ref()?
+                        .fel_object(index, producer_attempt)
+                });
+            let path = enhanced.map_or_else(|| path.clone(), |object| session.dir.join(object));
             let opened = if let Some(opened) = authenticated_cached_file.take() {
                 Some((opened.file, Some(opened.bytes), Some(opened.lease)))
             } else if session.cached {

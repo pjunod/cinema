@@ -515,7 +515,10 @@ impl NativeSplitInitIds {
 
 struct NativeSplitFelReport {
     bytes: i64,
+    attempt: u64,
+    object: String,
     incarnation_id: String,
+    delivered: bool,
     report: plurx_core::transcode::dv_processing::DvEffectiveProcessingReport,
 }
 
@@ -562,28 +565,41 @@ impl NativeSplitInventory {
     pub(crate) fn commit_fel(
         &self,
         index: u64,
+        attempt: u64,
         incarnation_id: String,
+        object: &str,
         report: plurx_core::transcode::dv_processing::DvEffectiveProcessingReport,
         bytes: i64,
-    ) {
-        self.rendered_fel
-            .lock()
-            .expect("split FEL inventory")
-            .insert(
-                index,
-                NativeSplitFelReport {
-                    bytes,
-                    incarnation_id,
-                    report,
-                },
-            );
+    ) -> bool {
+        let mut entries = self.rendered_fel.lock().expect("split FEL inventory");
+        let std::collections::btree_map::Entry::Vacant(entry) = entries.entry(index) else {
+            return false;
+        };
+        entry.insert(NativeSplitFelReport {
+            bytes,
+            attempt,
+            object: object.to_owned(),
+            incarnation_id,
+            delivered: false,
+            report,
+        });
+        true
     }
 
-    pub(crate) fn has_fel(&self, index: u64) -> bool {
-        self.rendered_fel
-            .lock()
-            .expect("split FEL inventory")
-            .contains_key(&index)
+    pub(crate) fn fel_object(&self, index: u64, attempt: u64) -> Option<String> {
+        let entries = self.rendered_fel.lock().expect("split FEL inventory");
+        let entry = entries.get(&index)?;
+        (entry.attempt == attempt).then(|| entry.object.clone())
+    }
+
+    pub(crate) fn mark_fel_delivered(&self, index: u64, attempt: u64) {
+        let mut entries = self.rendered_fel.lock().expect("split FEL inventory");
+        if let Some(entry) = entries
+            .get_mut(&index)
+            .filter(|entry| entry.attempt == attempt)
+        {
+            entry.delivered = true;
+        }
     }
 
     pub(crate) fn first_fel_presentation(&self) -> bool {
@@ -595,11 +611,13 @@ impl NativeSplitInventory {
     pub(crate) fn fel_at(
         &self,
         index: u64,
+        attempt: u64,
         incarnation: &str,
     ) -> Option<plurx_core::transcode::dv_processing::DvEffectiveProcessingReport> {
         let entries = self.rendered_fel.lock().expect("split FEL inventory");
         let entry = entries.get(&index)?;
-        (entry.incarnation_id == incarnation).then(|| entry.report.clone())
+        (entry.delivered && entry.attempt == attempt && entry.incarnation_id == incarnation)
+            .then(|| entry.report.clone())
     }
 
     pub(crate) fn bytes(&self) -> i64 {
@@ -664,7 +682,7 @@ struct SessionDir {
 pub(crate) async fn write_native_split_fel(
     directory: PathBuf,
     grants: WriteGrants,
-    index: u64,
+    object: &str,
     bytes: &[u8],
 ) -> Result<(), String> {
     let mut writer = SessionDir::new(directory, 0, 1, Some(grants));
@@ -672,7 +690,7 @@ pub(crate) async fn write_native_split_fel(
     // holds an unpublished render target. The incumbent keeps its grant.
     writer.optional_write = true;
     writer
-        .publish_file(&format!("split-fel-{}", fmp4::segment_name(index)), bytes)
+        .publish_file(object, bytes)
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())
