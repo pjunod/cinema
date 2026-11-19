@@ -1,6 +1,6 @@
 # Passive voter timing observations
 
-**Status:** ready to build · **Executes:** C4 preparation from the cluster audit · **Written:** 2026-11-19
+**Status:** implemented; qualification pending · **Executes:** C4 preparation from the cluster audit · **Written:** 2026-11-19
 
 ## 1. Objective and boundary
 
@@ -25,3 +25,11 @@ A one-second collector takes explicit discovered endpoint configuration, with at
 ## 5. Validation and remaining acceptance
 
 Run deterministic registry tests for same-term gaps, heartbeat/data inclusion, older-term rejection, endpoint/term reset and capacity eviction. Test existing monitor lateness sampling without changing lease/authority outcomes. Test collector filtering, redirect refusal, identity discontinuity and finite bounds without contacting fleet. Exact committed source compile/tests use the root-owned compiler slot when available. Physical post-deployment observations remain open; prepared instrumentation is not C4 acceptance.
+
+## 6. Prepared collector use
+
+Prepare private configuration from an observed roster, using the shape in `scripts/collect-voter-timing.example.json`. Replace the full expected source and exact published build before collection. Run `python3 scripts/collect-voter-timing.py --config <private-discovered-fleet.json> --output <agent-receipt-directory>/c4.jsonl --duration-seconds 3600`. Exclusive output creation prevents replacing an earlier receipt. The collector does not deploy or enable instrumentation.
+
+The requested scrape cadence is one second; every sample records actual elapsed time, scrape duration and poll lateness. Slow/unavailable nodes may overrun that cadence and must be treated as missing coverage. Duration is at most24hours; output is at most256MiB (64MiB default), with an explicit incomplete end record if capacity ends the window. Only allowlisted timing/build/role/term data is persisted; redirects, embedded credentials and authenticated mutations are refused.
+
+The metrics are bounded summaries (counts, sums, maxima and age), not individual gap histories or quantiles. RPC-attempt gaps precede transport queueing; receive-completion duration includes Raft/store processing. Correlate them with monitor wake lateness and independent pressure observations; none alone attributes CPU starvation or proves physical heartbeat delivery. Fleet measurement acceptance remains open until the qualified source is deployed and representative windows are actually collected.
