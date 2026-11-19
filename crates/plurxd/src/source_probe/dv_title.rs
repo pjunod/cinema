@@ -338,7 +338,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tests {
+mod scanner_launch_tests {
     use super::*;
     use plurx_core::process::source_lifetime as lifetime;
     use std::os::unix::fs::PermissionsExt;
