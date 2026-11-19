@@ -1,0 +1,137 @@
+name: Private replay of PR 1803 AMD64 failures
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+env:
+  CARGO_TERM_COLOR: never
+  PYTHONUNBUFFERED: "1"
+  RUST_MIN_STACK: "8388608"
+  NEXTEST_VERSION: "0.9.151"
+  NEXTEST_SHA256: 1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4
+jobs:
+  replay:
+    name: Replay three tests from the original artifact
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 20
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 09d4d9502291dcca6f55403a6c7d6c33854671b6
+          persist-credentials: false
+      - name: Provision the private D-Bus session runtime for unit tests
+        run: |
+          set -euo pipefail
+          if ! command -v dbus-run-session >/dev/null 2>&1; then
+            apt-get -o Acquire::Retries=3 update
+            DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends dbus-daemon
+          fi
+          command -v dbus-run-session
+      - uses: ./.github/actions/ffmpeg
+        with:
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
+      - name: Install the pinned cargo-nextest
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/nextest-$NEXTEST_VERSION"
+          mkdir -p "$dir"
+          curl -q --fail --location --proto '=https' --proto-redir '=https' --retry 3 \
+            --connect-timeout 20 --max-time 180 --max-filesize 33554432 \
+            --output "$dir/nextest.tar.gz" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          printf '%s  %s\n' "$NEXTEST_SHA256" "$dir/nextest.tar.gz" | sha256sum --check --status
+          tar -xzf "$dir/nextest.tar.gz" -C "$dir"
+          rm -- "$dir/nextest.tar.gz"
+          "$dir/cargo-nextest" nextest --version | grep -F "cargo-nextest $NEXTEST_VERSION"
+          echo "$dir" >> "$GITHUB_PATH"
+      - name: Fetch the exact Forgejo artifact without replacing any receipt
+        env:
+          FORGEJO_ARTIFACT_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 09d4d9502291dcca6f55403a6c7d6c33854671b6
+          mkdir -p target/rust-units
+          python3 - <<'PYTHON'
+          import hashlib
+          import os
+          from pathlib import Path
+          import shutil
+          import urllib.request
+          import zipfile
+
+          output = Path('target/rust-units')
+          bundle = output / 'original.zip'
+          request = urllib.request.Request(
+              os.environ['GITHUB_API_URL'] + '/repos/' + os.environ['GITHUB_REPOSITORY']
+              + '/actions/artifacts/11283/zip')
+          request.add_unredirected_header(
+              'Authorization', 'token ' + os.environ['FORGEJO_ARTIFACT_TOKEN'])
+          with urllib.request.urlopen(request, timeout=120) as response, bundle.open('wb') as f:
+              shutil.copyfileobj(response, f)
+          with bundle.open('rb') as f:
+              digest = hashlib.file_digest(f, 'sha256').hexdigest()
+          assert digest == '19be294f0118b6893af06f06a27e27777978a5d3616a5bd921dd83d0ffce9661', digest
+          with zipfile.ZipFile(bundle) as z:
+              members = [item for item in z.infolist()
+                         if not item.is_dir() and Path(item.filename).name == 'archive.tar.zst']
+              assert len(members) == 1
+              with z.open(members[0]) as contents, (output / 'archive.tar.zst').open('wb') as f:
+                  shutil.copyfileobj(contents, f)
+          print('Authenticated original run 8456 artifact 11283', flush=True)
+          PYTHON
+      - name: Compare five attempts of each exact case under the standard shard limits
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import json
+          from pathlib import Path
+          from validation import rust_units
+
+          cases = (
+              'background_jobs::source::tests::finite_quota_held_scanner_preserves_active_budget_after_verified_stop',
+              'http::shared_source_playback::tests::sharing_source_http_budgeted_start_answers_not_yet_and_rejoins_the_same_entry',
+              'http::shared_source_playback::tests::sharing_source_http_real_h1_h2_playlist_init_and_segment_echo_exact_lineage',
+          )
+          rust_units.require_test_disk()
+          rust_units.bound_cpus()
+          rust_units.EXTRACT.mkdir(parents=True, exist_ok=True)
+          archive = Path('target/rust-units/archive.tar.zst')
+          filters = [' | '.join('test(=' + name + ')' for name in cases)]
+          results = []
+          for attempt in range(1, 6):
+              print(f'Exact sample {attempt} of 5', flush=True)
+              command = rust_units.nextest_command(archive, filters, ['--test-threads', '2', '--retries', '0'])
+              code, outcomes = rust_units.run_nextest(command)
+              observed = {key.split(' ', 1)[1]: value for key, value in outcomes.items()}
+              assert code in (0, 100) and set(observed) == set(cases), (code, observed)
+              results.append({'attempt': attempt, 'statuses': observed})
+          receipt = Path('target/rust-units/queue-1803-diagnostic.json')
+          receipt.write_text(json.dumps({
+              'source': '09d4d9502291dcca6f55403a6c7d6c33854671b6',
+              'original_run': 8456, 'original_artifact': 11283,
+              'diagnostic_only': True, 'results': results,
+          }, indent=2) + '\n')
+          print(receipt.read_text(), flush=True)
+          PYTHON
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
+        with:
+          name: queue-1803-diagnostic
+          path: target/rust-units/queue-1803-diagnostic.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
