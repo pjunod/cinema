@@ -9,6 +9,13 @@ impl Drop for HeavyTurnWait<'_> {
 }
 
 impl TranscodeManager {
+    /// A predecessor's accepted typed control platform. First play has none.
+    pub(crate) async fn refit_platform_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::playback_control::ClientPlatform> {
+        self.vod.client_platform_for_session(session_id).await
+    }
     pub(crate) fn candidate_production_proof(&self, recipe: [u8; 32]) -> Option<u32> {
         self.candidate_production_proofs
             .get(recipe)
@@ -1336,6 +1343,7 @@ impl TranscodeManager {
                         Priority::Live,
                     ) {
                         let admission = FragmentAdmission {
+                            coexist: false,
                             playback_qualification: false,
                             maintenance: false,
                             _heavy: Some(heavy),
@@ -1407,6 +1415,7 @@ impl TranscodeManager {
                 Priority::Speculative,
             )
             .map(|permit| FragmentAdmission {
+                coexist: false,
                 playback_qualification: false,
                 maintenance: false,
                 _heavy: Some(heavy),
@@ -1487,6 +1496,14 @@ impl TranscodeManager {
         }
     }
 
+    /// Observe current pressure as well as future changes, so admission cannot
+    /// lose a registration made before this future receives its first poll.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn playback_qualification_requested(&self) {
+        let mut waiters = self.playback_qualification_waiters.subscribe();
+        let _ = waiters.wait_for(|count| *count > 0).await;
+    }
+
     /// The title scanner has one software decoder thread and never uses a GPU.
     #[cfg(target_os = "linux")]
     pub(crate) async fn admit_dv_title(
@@ -1541,8 +1558,50 @@ impl TranscodeManager {
             .map(|permit| FragmentAdmission {
                 playback_qualification: true,
                 maintenance: false,
+                coexist: false,
                 _heavy: Some(heavy),
                 threads: 1,
+                extension: std::sync::Mutex::new(None),
+                _permit: Some(permit),
+            })
+    }
+
+    /// An F+ curve fit decodes and composes both layers of a whole title on
+    /// the CPU with an explicit thread count, and reserves exactly what it
+    /// measured (`threads`), on the one heavy lane. It coexists with live
+    /// sessions: it is admitted while the reservation fits beside them and
+    /// no viewer waits, and it yields only when a viewer waits for capacity
+    /// or an offline download does (decision F), or exact playback qualification
+    /// needs the lane; an existing playing session alone does not preempt it.
+    pub(crate) async fn admit_dv_refit(&self, threads: usize) -> Option<FragmentAdmission> {
+        if *self.playback_qualification_waiters.borrow() > 0
+            || self.admissions.live_is_waiting()
+            || self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        let heavy = Arc::clone(&self.background_heavy)
+            .try_acquire_owned()
+            .ok()?;
+        self.admissions
+            .try_admit_bundle(
+                self.max_hw_sessions().await,
+                self.software_budget().await,
+                &TranscodeResourceEstimate {
+                    hardware_slot: false,
+                    cpu_threads: threads,
+                    decoder_threads: None,
+                },
+                Priority::Background,
+            )
+            .map(|permit| FragmentAdmission {
+                coexist: true,
+                playback_qualification: false,
+                maintenance: true,
+                _heavy: Some(heavy),
+                threads,
                 extension: std::sync::Mutex::new(None),
                 _permit: Some(permit),
             })
@@ -1596,6 +1655,7 @@ impl TranscodeManager {
                 Priority::Background,
             )
             .map(|permit| FragmentAdmission {
+                coexist: false,
                 playback_qualification: false,
                 maintenance: true,
                 _heavy: Some(heavy),
@@ -1667,7 +1727,7 @@ impl TranscodeManager {
         if admission.maintenance && *self.playback_qualification_waiters.borrow() > 0 {
             return false;
         }
-        if admission.playback_qualification {
+        if admission.playback_qualification || admission.coexists() {
             return !self.admissions.live_is_waiting()
                 && !self
                     .offline_waiting

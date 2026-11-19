@@ -1037,7 +1037,7 @@ impl Encoding {
     }
 
     fn priority(&self) -> Priority {
-        if self.speculative.load(std::sync::atomic::Ordering::Acquire) {
+        if self.is_speculative() {
             Priority::Speculative
         } else {
             Priority::Live

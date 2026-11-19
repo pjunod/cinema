@@ -58,7 +58,8 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // Offload: committed column shape before its additive schema migration.
     // Storage-domain pending apply checks its trigger shape and marker: two more.
     // Scoped application login (delegation) checks its shape and marker: two more.
-    ("hiqlite.rs", 76),
+    // F+ curve fits check their extension shape and marker: two more.
+    ("hiqlite.rs", 78),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.
@@ -558,6 +559,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("custody_migration_settled", STARTUP),
     ("delegation_schema_version", STARTUP),
     ("drain_deadline_column_present", STARTUP),
+    ("dv_refit_schema_version", STARTUP),
     ("dv_title_jobs_schema_version", STARTUP),
     ("invitation_schema_version", STARTUP),
     ("library_annotations_schema_version", STARTUP),

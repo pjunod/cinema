@@ -74,8 +74,23 @@ pub(crate) struct ToolSet {
     /// The scanner executable's own digest. It is statically linked, so this
     /// is everything that decides a complete-title aggregate.
     scanner_sha256: String,
+    /// The libav majors the helper decodes with (`avcodec=…,avformat=…,avutil=…`):
+    /// with [`REFIT_MODE_VERSION`], what an F+ fit's statistics depend on.
+    decoder_abi: String,
     artifacts: Arc<Vec<(PathBuf, String)>>,
 }
+
+/// The refit mode's own version: `segment_decode_render --refit-stats`, its
+/// pooling, statistics and resume rules (`refit_mode.h`) and the composition
+/// it measures (`refit_compose.h`). Bump it whenever either changes what a
+/// run prints; [`REFIT_MODE_SOURCES`] makes a change to them fail a test
+/// until it is bumped and re-pinned.
+pub(crate) const REFIT_MODE_VERSION: &str = "plurx-refit-mode-v2";
+/// sha256 of `refit_mode.h` followed by `refit_compose.h`, as
+/// [`REFIT_MODE_VERSION`] was last reviewed against.
+#[cfg(test)]
+pub(crate) const REFIT_MODE_SOURCES: &str =
+    "37bc7f9cf0f7a2ea9cf660f624875ea42ffe0fc158b3db09461b2f796f0e6f4e";
 
 #[cfg(all(test, target_os = "linux"))]
 impl ToolSet {
@@ -102,8 +117,28 @@ impl ToolSet {
             renderer_env: Vec::new(),
             identity,
             scanner_sha256: hash(b"/bin/false"),
+            decoder_abi: "avcodec=61,avformat=61,avutil=59".into(),
             artifacts: Arc::new(Vec::new()),
         }
+    }
+
+    /// A fixture whose renderer is `renderer` (a script standing in for
+    /// `segment_decode_render --refit-stats`), current while it is unchanged.
+    pub(crate) fn refit_fixture(renderer: PathBuf) -> Result<Self, String> {
+        let identity = DvBackendIdentity::new(
+            digest(b"refit renderer")?,
+            digest(b"libraries")?,
+            digest(b"parser")?,
+            digest(b"sources")?,
+            1,
+            digest(b"manifest")?,
+        )
+        .map_err(|e| e.to_string())?;
+        let digest = hash_file(&renderer)?;
+        let mut tools = Self::lifecycle_fixture(identity);
+        tools.renderer = renderer.clone();
+        tools.artifacts = Arc::new(vec![(renderer, digest)]);
+        Ok(tools)
     }
 }
 fn hash(bytes: &[u8]) -> String {
@@ -346,6 +381,24 @@ impl ToolSet {
     pub(crate) fn title_scanner_digest(&self) -> String {
         hash(format!("plurx-dv-title-scanner-v1\0{}", self.scanner_sha256).as_bytes())
     }
+    /// What an F+ fit's statistics depend on (decision G): the refit mode's
+    /// version and the decoder ABI it runs on, not the whole backend digest,
+    /// so rebuilding the bundle for an unrelated change does not decode every
+    /// FEL title again. The fit method is named separately
+    /// (`dv_refit::FIT_VERSION`).
+    pub(crate) fn refit_helper_identity(&self) -> String {
+        hash(
+            format!(
+                "plurx-dv-refit-identity-v1\0{REFIT_MODE_VERSION}\0{}",
+                self.decoder_abi
+            )
+            .as_bytes(),
+        )
+    }
+    /// The decoder ABI, as the Developer card reports it.
+    pub(crate) fn decoder_abi(&self) -> &str {
+        &self.decoder_abi
+    }
     /// Configuration is captured by the worker, never supplied by a playback
     /// request. Absence preserves ordinary output and the saved preference.
     pub(crate) async fn capture() -> Result<Option<Arc<Self>>, String> {
@@ -464,12 +517,18 @@ impl ToolSet {
                 .ok_or("missing scanner")?
                 .sha256
                 .clone();
+            let decoder_abi = ["avcodec", "avformat", "avutil"]
+                .iter()
+                .map(|key| format!("{key}={}", manifest.abi[*key]))
+                .collect::<Vec<_>>()
+                .join(",");
             Ok(Some(Arc::new(Self {
                 renderer: tools.remove("renderer").ok_or("missing renderer")?,
                 scanner: tools.remove("scanner").ok_or("missing scanner")?,
                 renderer_env: environment,
                 identity,
                 scanner_sha256,
+                decoder_abi,
                 artifacts: Arc::new(artifacts),
             })))
         })
@@ -1676,7 +1735,8 @@ async fn capture_private_output(
             _ = tokio::time::sleep_until(deadline) => Err("DV private window deadline expired".into()),
         }
     };
-    let result = private_window_result(result, cancel, &retirement, observed_helper.outcome());
+    let result =
+        private_window_result_before_cleanup(result, cancel, &retirement, &observed_helper, stages);
     writers.settled();
     let cleanup = slot
         .request_registered_retirement(registration)
@@ -1693,6 +1753,25 @@ async fn capture_private_output(
     registration.wait_confirmed_reap().await;
     let _ = observed_helper.wait().await;
     result
+}
+
+/// Observe supervised completion at the capture boundary, before cleanup can
+/// settle a helper whose supervised outcome was still pending when capture ended.
+fn private_window_result_before_cleanup<T>(
+    result: Result<T, String>,
+    cancel: &tokio_util::sync::CancellationToken,
+    retirement: &tokio_util::sync::CancellationToken,
+    helper: &crate::dv_segment::HelperCompletion,
+    stages: &crate::dv_segment::WindowStageClock,
+) -> Result<WindowOutcome<T>, String> {
+    // The supervisor publishes completion before retiring the encoder. That
+    // retirement can win capture's select before completed_helper is polled.
+    // Mark and classify the same retained snapshot, including cancellation.
+    let helper_outcome = helper.outcome();
+    if helper_outcome.is_some() {
+        stages.mark(crate::dv_segment::WindowStage::HelperExited);
+    }
+    private_window_result(result, cancel, retirement, helper_outcome)
 }
 
 /// Decide a completed private window from its encoder outcome. The helper's
@@ -2453,6 +2532,7 @@ mod helper_decoder_tests {
             max_l1_pq: Some(4095),
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
+            el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
         };
         let DvDisplayTargetChoice::Target(target) =
             DvDisplayTarget::for_title(1000, Some(stats)).expect("title")
@@ -2500,6 +2580,7 @@ mod helper_decoder_tests {
             max_l1_pq: Some(4095),
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
+            el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
         };
         let DvDisplayTargetChoice::Target(target) = DvDisplayTarget::for_title(1600, Some(stats))
             .expect("1600-nit bucket and complete high-peak title")
@@ -2556,6 +2637,7 @@ mod helper_decoder_tests {
             max_l1_pq: Some(4095),
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
+            el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
         };
         let DvDisplayTargetChoice::Target(target) =
             DvDisplayTarget::for_title(1600, Some(stats)).expect("title")
@@ -2775,6 +2857,157 @@ mod private_window_outcome_tests {
         result
     }
 
+    /// An owned encoder blocked on stdin, without using elapsed time to order
+    /// the supervisor and capture boundary. Retirement kills and reaps it.
+    async fn capture_boundary_encoder() -> (
+        std::sync::Arc<crate::prodrun::ProducerSlot>,
+        crate::prodrun::ProducerRegistration,
+        crate::prodrun::ProducerWriters,
+    ) {
+        let slot = std::sync::Arc::new(crate::prodrun::ProducerSlot::new());
+        let child = tokio::process::Command::new("/bin/cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("owned encoder");
+        let job = crate::process_control::ChildJob::attach(&child).expect("encoder job");
+        let (registration, writers) = slot.attach_registered_job_owned(child, job, 0, None).await;
+        (slot, registration, writers)
+    }
+
+    #[tokio::test]
+    async fn capture_boundary_observes_published_failure_after_encoder_retirement() {
+        use crate::dv_segment::{HelperOutcome, WindowStage, WindowStageClock};
+        use tokio_util::sync::CancellationToken;
+        let mut helper_child = tokio::process::Command::new("/bin/false")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("actual failed helper");
+        let (slot, registration, writers) = capture_boundary_encoder().await;
+        let cancel = CancellationToken::new();
+        let retirement = registration.retirement();
+        let completed = crate::dv_segment::supervise_streaming_helper(
+            async move {
+                let status = helper_child
+                    .wait()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("renderer helper failed: {status}"))
+                }
+            },
+            CancellationToken::new(),
+            cancel.clone(),
+            std::sync::Arc::downgrade(&slot),
+            registration.clone(),
+        );
+        let published =
+            tokio::time::timeout(std::time::Duration::from_secs(2), completed.clone().wait()).await;
+        let retired =
+            tokio::time::timeout(std::time::Duration::from_secs(2), retirement.cancelled()).await;
+        let stages = WindowStageClock::start();
+        // Invoke the exact post-select operation directly. No completed_helper
+        // branch has been polled, so only the fallback can record this stage.
+        let result = super::private_window_result_before_cleanup::<Vec<u8>>(
+            Err("DV private window retired".into()),
+            &cancel,
+            &retirement,
+            &completed,
+            &stages,
+        );
+        writers.settled();
+        let cleanup = slot.request_registered_retirement(&registration).await;
+        registration.wait_confirmed_reap().await;
+        let _ = completed.wait().await;
+        cleanup.expect("retire owned encoder");
+        let cause = match published.expect("helper publishes within the fixture bound") {
+            HelperOutcome::Failed(cause) => cause,
+            other => panic!("actual helper must fail: {other:?}"),
+        };
+        retired.expect("supervisor retires encoder after publishing failure");
+        assert_eq!(result.expect_err("causal helper failure"), cause);
+        assert!(stages.at(WindowStage::HelperExited).is_some());
+        assert_eq!(stages.at(WindowStage::EncoderExited), None);
+    }
+
+    #[tokio::test]
+    async fn capture_boundary_marks_cancelled_but_not_cleanup_only_completion() {
+        use crate::dv_segment::{HelperOutcome, WindowStage, WindowStageClock};
+        use tokio_util::sync::CancellationToken;
+        let (slot, registration, writers) = capture_boundary_encoder().await;
+        let cancel = CancellationToken::new();
+        let helper_cancel = CancellationToken::new();
+        let helper_work_cancel = helper_cancel.clone();
+        let retirement = registration.retirement();
+        let completed = crate::dv_segment::supervise_streaming_helper(
+            async move {
+                helper_work_cancel.cancelled().await;
+                Err("fixture helper interrupted".into())
+            },
+            helper_cancel,
+            cancel.clone(),
+            std::sync::Arc::downgrade(&slot),
+            registration.clone(),
+        );
+        // This helper cannot settle before cancellation: None is guaranteed,
+        // independent of whether the supervisor task has been scheduled yet.
+        let pending_stages = WindowStageClock::start();
+        let pending_result = super::private_window_result_before_cleanup::<Vec<u8>>(
+            Err("DV private window deadline expired".into()),
+            &cancel,
+            &retirement,
+            &completed,
+            &pending_stages,
+        );
+        cancel.cancel();
+        let published =
+            tokio::time::timeout(std::time::Duration::from_secs(2), completed.clone().wait()).await;
+        let settled_stages = WindowStageClock::start();
+        let cancelled_result = super::private_window_result_before_cleanup::<Vec<u8>>(
+            Err("DV private window retired".into()),
+            &cancel,
+            &retirement,
+            &completed,
+            &settled_stages,
+        );
+        let first_mark = settled_stages.at(WindowStage::HelperExited);
+        let repeated_result = super::private_window_result_before_cleanup::<Vec<u8>>(
+            Err("DV private window retired".into()),
+            &cancel,
+            &retirement,
+            &completed,
+            &settled_stages,
+        );
+        writers.settled();
+        let cleanup = slot.request_registered_retirement(&registration).await;
+        registration.wait_confirmed_reap().await;
+        let _ = completed.wait().await;
+        cleanup.expect("retire owned encoder");
+        assert!(matches!(
+            published.expect("cancelled supervisor settles within fixture bound"),
+            HelperOutcome::Cancelled
+        ));
+        assert_eq!(
+            pending_result.expect_err("pending capture keeps its failure"),
+            "DV private window deadline expired"
+        );
+        assert_eq!(pending_stages.at(WindowStage::HelperExited), None);
+        assert!(matches!(
+            cancelled_result,
+            Ok(super::WindowOutcome::Cancelled)
+        ));
+        assert!(matches!(
+            repeated_result,
+            Ok(super::WindowOutcome::Cancelled)
+        ));
+        assert!(first_mark.is_some(), "supervised cancellation is settled");
+        assert_eq!(settled_stages.at(WindowStage::HelperExited), first_mark);
+    }
+
     #[tokio::test]
     async fn explicit_close_is_normal_graph_cancellation() {
         assert!(matches!(
@@ -2815,10 +3048,14 @@ mod private_window_outcome_tests {
         assert!(stages.report(None).encoder_tail.is_some());
 
         let stages = WindowStageClock::start();
-        capture_timed_graph(&stages, false, true, false, false, false)
+        let error = capture_timed_graph(&stages, false, true, false, false, false)
             .await
             .expect_err("failed helper graph");
-        assert!(stages.at(WindowStage::HelperExited).is_some());
+        assert!(error.contains("renderer helper failed"), "{error}");
+        assert!(
+            stages.at(WindowStage::HelperExited).is_some(),
+            "published helper completion is observed even when retirement wins capture"
+        );
 
         let stages = WindowStageClock::start();
         let error = capture_timed_graph(&stages, false, false, false, true, false)
@@ -3423,6 +3660,34 @@ mod title_scanner_identity_tests {
         assert_ne!(
             before.title_scanner_digest(),
             new_scanner.title_scanner_digest()
+        );
+    }
+
+    /// Decision G: an F+ fit is keyed by the refit mode and the decoder ABI,
+    /// so a rebuilt bundle (another renderer, shaders, libplacebo) keeps
+    /// every stored fit, and a changed refit mode or decoder ABI does not.
+    #[test]
+    fn refit_identity_is_the_refit_mode_and_the_decoder_abi() {
+        let one = ToolSet::lifecycle_fixture(backend(b"renderer one"));
+        let two = ToolSet::lifecycle_fixture(backend(b"renderer two"));
+        assert_ne!(one.backend_digest(), two.backend_digest());
+        assert_eq!(one.refit_helper_identity(), two.refit_helper_identity());
+        let mut newer_abi = ToolSet::lifecycle_fixture(backend(b"renderer one"));
+        newer_abi.decoder_abi = "avcodec=62,avformat=62,avutil=60".into();
+        assert_ne!(
+            one.refit_helper_identity(),
+            newer_abi.refit_helper_identity()
+        );
+        use sha2::{Digest, Sha256};
+        let mut sources = Sha256::new();
+        sources.update(include_bytes!("../../../tools/dv_processing/refit_mode.h"));
+        sources.update(include_bytes!(
+            "../../../tools/dv_processing/refit_compose.h"
+        ));
+        assert_eq!(
+            hex::encode(sources.finalize()),
+            REFIT_MODE_SOURCES,
+            "the refit mode changed: bump REFIT_MODE_VERSION if what it prints changed, then re-pin"
         );
     }
 

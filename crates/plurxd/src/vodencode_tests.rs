@@ -335,6 +335,221 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
 }
 
 #[tokio::test]
+async fn ordinary_auto_vod_start_registers_live_wait_over_background() {
+    use crate::admission::{Priority, TranscodeResourceEstimate};
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("ordinary Auto admission");
+    let serve = bare_serve(base.path());
+    let (file, mut encoding) = encoded_fixture(base.path()).await;
+    // This is the fresh encoding marker prepare_vod_encoding derives from
+    // automatic + candidate_context. It describes possible Auto trials, not
+    // this already active viewer's attachment purpose.
+    Arc::get_mut(&mut encoding)
+        .expect("unshared recipe")
+        .nonpreemptive_trial = true;
+    let budget = encoding.resources().cpu_threads + 1;
+    encoding
+        .store
+        .put_setting(
+            plurx_core::store::keys::SW_POOL_THREADS,
+            &budget.to_string(),
+        )
+        .await
+        .expect("software budget");
+    let background = encoding
+        .admissions
+        .try_admit_bundle(
+            2,
+            budget,
+            &TranscodeResourceEstimate {
+                hardware_slot: false,
+                cpu_threads: 1,
+                decoder_threads: None,
+            },
+            Priority::Background,
+        )
+        .expect("background owns the settlement barrier");
+    let mut req = request("ordinary-auto", 0.0);
+    req.kind = SessionKind::Transcode { height: 144 };
+    req.automatic = true;
+    serve
+        .try_create(
+            VodRecipeRequest {
+                admission_priority: Priority::Live,
+                encoding: Some(Arc::clone(&encoding)),
+                ..(&req).into()
+            },
+            &file,
+            &settings(),
+            VodAttribution {
+                user_name: "test",
+                item_title: "ordinary Auto",
+                supersession_user: "test",
+            },
+            "ordinary-auto".into(),
+        )
+        .await
+        .expect("ordinary attachment");
+    let rendition = rendition_of(&serve, "ordinary-auto").await;
+    assert_eq!(
+        rendition.readers.lock().await["ordinary-auto"].admission_priority,
+        Priority::Live
+    );
+    let init = tokio::spawn({
+        let serve = Arc::clone(&serve);
+        async move { fetched_bytes(&serve, "ordinary-auto", INIT_NAME).await }
+    });
+    wait_until(
+        "ordinary Auto asks background to yield",
+        Duration::from_secs(5),
+        async || encoding.admissions.live_is_waiting(),
+    )
+    .await;
+    assert!(
+        !init.is_finished(),
+        "the real background permit still blocks admission"
+    );
+    drop(background);
+    assert!(!tokio::time::timeout(Duration::from_secs(20), init)
+        .await
+        .expect("init after background settlement")
+        .expect("init task")
+        .is_empty());
+    assert!(
+        encoding.nonpreemptive_trial,
+        "cached recipe metadata is not mutated"
+    );
+    serve.end("ordinary-auto", Terminal::Deleted).await;
+}
+
+#[tokio::test]
+async fn explicit_vod_attachment_priority_isolated_from_cached_auto_recipe() {
+    use crate::admission::{Priority, TranscodeResourceEstimate};
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("attachment purpose isolation");
+    let (file, source) = encoded_fixture(base.path()).await;
+    for cached_trial in [false, true] {
+        let cache = base.path().join(if cached_trial {
+            "cached-trial"
+        } else {
+            "cached-live"
+        });
+        let serve = bare_serve(&cache);
+        let mut encoding = source
+            .clone_with_admissions_for_test(crate::admission::Admissions::new())
+            .await;
+        Arc::get_mut(&mut encoding)
+            .expect("unshared recipe")
+            .nonpreemptive_trial = cached_trial;
+        if cached_trial {
+            encoding.mark_speculative();
+        }
+        let budget = encoding.resources().cpu_threads + 1;
+        encoding
+            .store
+            .put_setting(
+                plurx_core::store::keys::SW_POOL_THREADS,
+                &budget.to_string(),
+            )
+            .await
+            .expect("software budget");
+        let background = encoding
+            .admissions
+            .try_admit_bundle(
+                2,
+                budget,
+                &TranscodeResourceEstimate {
+                    hardware_slot: false,
+                    cpu_threads: 1,
+                    decoder_threads: None,
+                },
+                Priority::Background,
+            )
+            .expect("background barrier");
+        let mut prepared = request("prepared-purpose", 0.0);
+        prepared.kind = SessionKind::Transcode { height: 144 };
+        prepared.automatic = cached_trial;
+        serve
+            .try_create(
+                VodRecipeRequest {
+                    admission_priority: Priority::Speculative,
+                    encoding: Some(Arc::clone(&encoding)),
+                    ..(&prepared).into()
+                },
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "test",
+                    item_title: "prepared",
+                    supersession_user: "test",
+                },
+                "prepared-purpose".into(),
+            )
+            .await
+            .expect("prepared attachment");
+        let rendition = rendition_of(&serve, "prepared-purpose").await;
+        assert_eq!(rendition.readers.lock().await["prepared-purpose"].admission_priority, Priority::Speculative,
+            "a prepared attachment never inherits foreground admission from an ordinary cached recipe");
+        assert!(
+            !encoding.admissions.live_is_waiting(),
+            "preparation cannot preempt background work"
+        );
+        let mut active = request("active-purpose", 0.0);
+        active.kind = SessionKind::Transcode { height: 144 };
+        active.automatic = true;
+        serve
+            .try_create(
+                VodRecipeRequest {
+                    admission_priority: Priority::Live,
+                    encoding: Some(Arc::clone(&encoding)),
+                    ..(&active).into()
+                },
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "test",
+                    item_title: "active",
+                    supersession_user: "test",
+                },
+                "active-purpose".into(),
+            )
+            .await
+            .expect("active attachment on the same cache");
+        assert!(Arc::ptr_eq(
+            &rendition,
+            &rendition_of(&serve, "active-purpose").await
+        ));
+        {
+            let readers = rendition.readers.lock().await;
+            assert_eq!(
+                readers["prepared-purpose"].admission_priority,
+                Priority::Speculative
+            );
+            assert_eq!(readers["active-purpose"].admission_priority, Priority::Live);
+            assert_eq!(
+                reader_admission_priority(&serve.shared.pool, &rendition, &readers),
+                Some(Priority::Live)
+            );
+        }
+        serve.end("active-purpose", Terminal::Deleted).await;
+        {
+            let readers = rendition.readers.lock().await;
+            assert_eq!(
+                reader_admission_priority(&serve.shared.pool, &rendition, &readers),
+                Some(Priority::Speculative)
+            );
+        }
+        assert_eq!(
+            encoding.is_speculative(),
+            cached_trial,
+            "shared recipe state is unchanged"
+        );
+        serve.end("prepared-purpose", Terminal::Deleted).await;
+        drop(background);
+    }
+}
+
+#[tokio::test]
 async fn playback_info_stream_format_is_the_attached_frozen_recipe() {
     let base = crate::test_tempdir().expect("base");
     let serve = bare_serve(base.path());
@@ -514,6 +729,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         aac: true,
         audio_delivery: None,
         video: CopyVideoOptions::new(false, false),
+        dv_refit_gain: None,
         source_object_version: Some(encoding.source_object_version.clone()),
         cluster_cache_key: None,
         copy_index_init_contract: None,
@@ -626,6 +842,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         role: crate::transcode::ContinuousMediaRole::Video,
     }));
     let attach = || VodRecipeRequest {
+        admission_priority: crate::admission::Priority::Live,
         root_admission: None,
         measured_candidate: None,
         retained_capture: RetainedOutputCapture::New,
@@ -804,6 +1021,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     media.autonomous_companion = Some(companion_id);
     let family_budget = budget + companion.resources().cpu_threads;
     let autonomous = || VodRecipeRequest {
+        admission_priority: crate::admission::Priority::Live,
         root_admission: None,
         measured_candidate: None,
         retained_capture: RetainedOutputCapture::New,
@@ -1515,6 +1733,7 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
                 aac: true,
                 audio_delivery: None,
                 video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
                 copy_index_init_contract: None,
@@ -1645,6 +1864,7 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
                 audio_index: None,
                 aac: true,
                 video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
                 source_object_version: Some(legacy_encoding.source_object_version.clone()),
                 cluster_cache_key: None,
                 copy_index_init_contract: None,
@@ -1847,6 +2067,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     req.kind = SessionKind::Transcode { height: 64 };
     old.try_create(
         VodRecipeRequest {
+            admission_priority: crate::admission::Priority::Live,
             root_admission: None,
             measured_candidate: None,
             retained_capture: RetainedOutputCapture::New,
@@ -1899,6 +2120,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     let refused = new
         .try_create(
             VodRecipeRequest {
+                admission_priority: crate::admission::Priority::Live,
                 root_admission: None,
                 measured_candidate: None,
                 retained_capture: RetainedOutputCapture::New,
@@ -1960,6 +2182,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     });
     new.try_create(
         VodRecipeRequest {
+            admission_priority: crate::admission::Priority::Live,
             root_admission: None,
             measured_candidate: None,
             retained_capture: RetainedOutputCapture::New,
@@ -2115,6 +2338,7 @@ async fn prepared_root_reuses_one_credit_without_private_readers_and_refuses_sub
         supersession_user: "user",
     };
     let attach = |admitted_encoding: Arc<crate::vodencode::Encoding>, permit| VodRecipeRequest {
+        admission_priority: crate::admission::Priority::Live,
         root_admission: Some(PreparedRootAdmission {
             reuse_scope: None,
             reused_parent: None,
@@ -2629,6 +2853,7 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
                 aac: true,
                 audio_delivery: None,
                 video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
                 copy_index_init_contract: None,
@@ -2790,6 +3015,7 @@ async fn an_expired_deadline_without_an_encoder_permit_is_capacity_not_producer_
                 aac: true,
                 audio_delivery: None,
                 video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
                 copy_index_init_contract: None,
@@ -2915,6 +3141,7 @@ async fn an_expired_verdict_waits_for_the_producer_state_instead_of_guessing() {
                 aac: true,
                 audio_delivery: None,
                 video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
                 copy_index_init_contract: None,
@@ -3245,6 +3472,7 @@ async fn encoded_pair(
     serve
         .try_create(
             VodRecipeRequest {
+                admission_priority: crate::admission::Priority::Live,
                 root_admission: None,
                 measured_candidate: None,
                 retained_capture: RetainedOutputCapture::New,
@@ -3678,6 +3906,7 @@ async fn assert_encoded_restarts(
         let started = serve
             .try_create(
                 VodRecipeRequest {
+                    admission_priority: crate::admission::Priority::Live,
                     root_admission: None,
                     measured_candidate: None,
                     retained_capture: RetainedOutputCapture::New,
@@ -4180,6 +4409,7 @@ async fn copy_and_encoded_vod_refuse_missing_or_nonpositive_duration_without_att
             let refusal = serve
                 .try_create(
                     VodRecipeRequest {
+                        admission_priority: crate::admission::Priority::Live,
                         root_admission: None,
                         measured_candidate: None,
                         retained_capture: crate::vodserve::RetainedOutputCapture::New,
@@ -4222,14 +4452,14 @@ async fn continuous_family_start_preempts_background_and_cleans_up_cancelled_wai
         .expect("background index owns capacity");
     // Speculative work must remain an immediate, non-preempting attempt.
     assert!(
-        VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
+        VodServe::reserve_media_group(&media, crate::admission::Priority::Speculative)
             .await
             .is_err()
     );
     assert!(!pool.live_is_waiting());
     let cancelled = tokio::time::timeout(
         Duration::from_millis(50),
-        VodServe::reserve_media_group(&media, None),
+        VodServe::reserve_media_group(&media, crate::admission::Priority::Live),
     )
     .await;
     assert!(
@@ -4263,7 +4493,7 @@ async fn continuous_family_start_preempts_background_and_cleans_up_cancelled_wai
         );
     };
     let (permits, ()) = tokio::join!(
-        VodServe::reserve_media_group(&media, None),
+        VodServe::reserve_media_group(&media, crate::admission::Priority::Live),
         yield_background
     );
     let permits = permits.expect("foreground family starts after background yields");
@@ -4349,6 +4579,7 @@ async fn controlled_continuous_start_defers_companion_until_primary_presentation
     serve
         .try_create(
             VodRecipeRequest {
+                admission_priority: crate::admission::Priority::Live,
                 root_admission: None,
                 measured_candidate: None,
                 retained_capture: RetainedOutputCapture::New,

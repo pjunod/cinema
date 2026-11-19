@@ -13,10 +13,16 @@ final class TVSecondaryNavigationTests: TVNavigationTestCase {
         reachForSetup(movie, in: app, limit: 8)
         assertFocus(movie, in: app, context: "Movie before detail")
         remote.press(.select)
-        let about = app.buttons["detail:about"]
-        XCTAssertTrue(about.waitForExistence(timeout: 10), app.debugDescription)
-        reachForSetup(about, in: app, limit: 8)
-        assertFocus(about, in: app, context: "About opener")
+        // About lives in More: the page row is Play, tracks, Watchlist, More.
+        let more = app.buttons["detail:more"]
+        XCTAssertTrue(more.waitForExistence(timeout: 10), app.debugDescription)
+        reachForSetup(more, in: app, limit: 8)
+        assertFocus(more, in: app, context: "More opener")
+        remote.press(.select)
+        let about = app.buttons["choice:about"]
+        XCTAssertTrue(about.waitForExistence(timeout: 5), app.debugDescription)
+        reachForSetup(about, in: app, limit: 6)
+        assertFocus(about, in: app, context: "About choice in More")
         remote.press(.select)
         let readingViewport = app.scrollViews["info-reading-scroll"]
         XCTAssertTrue(readingViewport.waitForExistence(timeout: 5))
@@ -38,7 +44,7 @@ final class TVSecondaryNavigationTests: TVNavigationTestCase {
             if index == 3 { XCTAssertTrue(paragraph.label.contains("FINAL SYNOPSIS LINE")) }
         }
         remote.press(.menu)
-        assertFocus(about, in: app, context: "About Back restores exact opener")
+        assertFocus(more, in: app, context: "About Back restores More, its opener")
         remote.press(.menu)
         assertFocus(movie, in: app, context: "Detail Back restores original movie")
         XCTAssertEqual(server.requestCount("/api/v1/files/1/decision"), 0,
@@ -59,18 +65,26 @@ final class TVSecondaryNavigationTests: TVNavigationTestCase {
         reachForSetup(season, in: app, limit: 12)
         assertFocus(season, in: app, context: "Season fixture")
         remote.press(.select)
-        let episode = app.buttons["episode-details:10003"]
+        // Select on an episode plays it; a long press opens its menu, and
+        // "Episode details" there navigates without preparing playback.
+        // With a context menu the identified element is the focus target
+        // (an Other wrapping the card's button).
+        let episode = app.descendants(matching: .any).matching(identifier: "episode-card:10003").firstMatch
         XCTAssertTrue(episode.waitForExistence(timeout: 10), app.debugDescription)
         reachForSetup(episode, in: app, limit: 8)
-        assertFocus(episode, in: app, context: "Episode details action")
+        assertFocus(episode, in: app, context: "Episode card")
+        remote.press(.select, forDuration: 1.2)
+        // tvOS hosts each menu action in a focusable cell around the item.
+        let details = app.cells.containing(NSPredicate(format: "identifier == %@", "episode-details:10003")).firstMatch
+        assertFocus(details, in: app, context: "Episode details menu item")
         remote.press(.select)
-        XCTAssertTrue(app.buttons["detail:about"].waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.buttons["detail:more"].waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertGreaterThan(server.requestCount("/api/v1/items/10003"), 0)
         XCTAssertEqual(server.requestCount("/api/v1/files/1/decision"), 0)
         XCTAssertEqual(server.requestCount("/api/v1/library-channels/fixture-channel/sessions"), 0)
         XCTAssertFalse(app.buttons["player-play-pause"].exists)
         remote.press(.menu)
-        assertFocus(episode, in: app, context: "Episode Back restores details action")
+        assertFocus(episode, in: app, context: "Episode Back restores the episode card")
     }
 
     func testSettingsPickerHelpReportAndExactReturn() throws {
@@ -203,7 +217,7 @@ final class TVSecondaryNavigationTests: TVNavigationTestCase {
         remote.press(.down)
         assertFocus(result, in: app, context: "Down reaches first search result")
         remote.press(.select)
-        XCTAssertTrue(app.buttons["detail:about"].waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.buttons["detail:more"].waitForExistence(timeout: 10), app.debugDescription)
         remote.press(.menu)
         assertFocus(result, in: app, context: "Detail Back restores same search result")
     }

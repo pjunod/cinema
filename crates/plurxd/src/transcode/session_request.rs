@@ -1,8 +1,43 @@
 use super::*;
 
+/// Human-facing F+ result for the media this session actually serves.
+/// It is observational metadata, never part of a rendition's byte identity.
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct RefitPlaybackReport {
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gain: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl RefitPlaybackReport {
+    pub fn fitted(gain: Option<f64>) -> Self {
+        Self {
+            state: "fitted",
+            gain,
+            reason: None,
+        }
+    }
+
+    pub fn identity(reason: String) -> Self {
+        Self {
+            state: "identity",
+            gain: None,
+            reason: Some(reason),
+        }
+    }
+}
+
 /// A live session, as the activity page sees it.
 #[derive(Clone, serde::Serialize)]
 pub struct SessionInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dolby_vision_refit: Option<RefitPlaybackReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_refit_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_refit_identity_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vod_observation: Option<crate::vodserve::VodActivityObservation>,
     pub id: String,
@@ -690,6 +725,11 @@ pub struct SessionRequest {
     /// switch's current value instead.
     #[serde(skip)]
     pub(crate) sdr_master_codecs: Option<bool>,
+    /// The fitted copy table selected from a typed session platform at a
+    /// generation boundary. Service-owned; absent preserves v1 semantics and
+    /// old durable recipe bytes. A newer fit does not mutate this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dv_refit_digest: Option<String>,
     /// Trusted service policy, retained by durable and worker envelopes. Native
     /// HTTP create never takes this from the client. A VOD-only request may
     /// not allocate the rolling recovery engine, even when globally enabled.

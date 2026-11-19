@@ -8913,6 +8913,10 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "dolby_vision_hdr_processing",
             "dolby_vision_display_target",
             "dolby_vision_fel_reencode",
+            "dolby_vision_refit_apple",
+            "dolby_vision_refit_web",
+            "dolby_vision_refit_android",
+            "dolby_vision_refit_linux",
             "source_probe_comparison",
             "output_preparation",
             "rolling_retention",
@@ -8946,7 +8950,54 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
         }
     }
 
-    // These three rows describe facts this single-node fixture can prove:
+    // The empty catalogue has no FEL titles awaiting a fit; the isolated
+    // runtime cache has no statistics runs. Neither row claims that a title
+    // was fitted or that this host has a processing helper.
+    let refit_requirements = items
+        .iter()
+        .find(|item| item["id"] == "dolby_vision_refit_apple")
+        .expect("Apple refit card")["requirements"]
+        .as_array()
+        .expect("refit requirements");
+    for (id, evidence) in [
+        (
+            "refit_coverage",
+            "0 of 0 Profile 7 FEL titles fitted for their current source (0 keep identity curves, 0 refused by the helper). Fits run in the background while a switch is on.".to_owned(),
+        ),
+        (
+            "refit_spool",
+            format!("0 complete and 0 partial runs, 0.0 MiB, under the runtime cache's {} directory. Delete it from this card; a later fit decodes its title again.", crate::source_probe::REFIT_SPOOL_DIR),
+        ),
+    ] {
+        let row = refit_requirements
+            .iter()
+            .find(|row| row["id"] == id)
+            .expect("refit inventory requirement");
+        assert_eq!(row["status"], "met", "{id}: {row}");
+        assert_eq!(row["evidence"], evidence, "{id}: {row}");
+    }
+    // The bundle is a host observation, independent of the empty catalogue.
+    // Assert its bounded verdict and evidence outside the exact green set.
+    let helper = refit_requirements
+        .iter()
+        .find(|row| row["id"] == "refit_helper")
+        .expect("refit helper requirement");
+    let helper_evidence = helper["evidence"].as_str().expect("helper evidence");
+    match helper["status"].as_str().expect("helper status") {
+        "met" => assert!(helper_evidence.starts_with(
+            "The DV processing bundle on this node was built from this build's sources (refit mode "
+        )),
+        "unmet" => assert_eq!(
+            helper_evidence,
+            "No DV processing bundle on this node: it fits no titles. Other nodes may."
+        ),
+        "unavailable" => {
+            assert!(helper_evidence.starts_with("The DV processing bundle could not be read: "))
+        }
+        status => panic!("unexpected refit helper status {status}: {helper}"),
+    }
+
+    // These rows describe facts this single-node fixture can prove:
     // the authoritative catalogue responds, server-side handoff exists,
     // and the DVR's tuner arithmetic leaves a recording somewhere to go —
     // that last one is a sum of two configured numbers, so it is knowable
@@ -8989,6 +9040,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
                     | "processed_upgrade_renderer"
                     | "processed_upgrade_slot"
                     | "processed_upgrade_activity"
+                    | "refit_helper"
             )
         })
         .collect::<Vec<_>>();
@@ -9114,6 +9166,9 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             // Network priors' two rows say what the switch does.
             "priors_cold_start",
             "priors_history",
+            // Empty FEL catalogue and statistics spool, asserted above.
+            "refit_coverage",
+            "refit_spool",
             "retention_budget",
             "retention_cleanup_pending",
             "retention_live_bytes",

@@ -367,6 +367,7 @@ impl TranscodeManager {
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             vod_only: false,
             passive_vod: false,
@@ -459,6 +460,7 @@ impl TranscodeManager {
             .vod
             .prepare_encoded_output(
                 crate::vodserve::VodRecipeRequest {
+                    admission_priority: crate::admission::Priority::Background,
                     root_admission: None,
                     soundtrack: None,
                     companion: None,
@@ -831,6 +833,7 @@ impl TranscodeManager {
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             vod_only: false,
             passive_vod: false,
@@ -907,6 +910,7 @@ impl TranscodeManager {
             .await?
             .ok_or(PreparationError::Fail("vod_policy_unavailable"))?;
         let prepared_request = crate::vodserve::VodRecipeRequest {
+            admission_priority: crate::admission::Priority::Background,
             root_admission: None,
             soundtrack: None,
             companion: None,

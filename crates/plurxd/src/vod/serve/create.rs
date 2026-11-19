@@ -682,6 +682,18 @@ impl VodServe {
             preserve_dolby_vision,
             convert_dolby_vision,
         );
+        let (video, dv_refit_gain) = if prepared.encoding.is_none() {
+            crate::dv_refit_serving::rendition_refit(
+                self.shared.store.as_ref(),
+                file,
+                video,
+                req.dv_refit_digest.as_deref(),
+            )
+            .await
+            .map_err(|error| format!("resolving fitted copy rendition: {error}"))?
+        } else {
+            (video, None)
+        };
         let identity = match prepared.encoding.as_ref() {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
             None => crate::fragindex::identity_for(file, video),
@@ -939,6 +951,7 @@ impl VodServe {
                 .and_then(|encoding| encoding.options.audio.clone())
                 .or_else(|| req.audio_delivery.clone()),
             video,
+            dv_refit_gain,
             source_object_version,
             cluster_cache_key,
             copy_index_init_contract,
@@ -955,7 +968,7 @@ impl VodServe {
 
     pub(super) async fn reserve_media_group(
         media: &[Arc<Rendition>],
-        priority: Option<crate::admission::Priority>,
+        priority: crate::admission::Priority,
     ) -> Result<Vec<crate::vodencode::EncodePermit>, String> {
         let refuse = || {
             crate::transcode::vod_refusal_error(
@@ -1004,16 +1017,6 @@ impl VodServe {
             .iter()
             .map(|encoding| encoding.resources())
             .collect::<Vec<_>>();
-        let priority = priority.unwrap_or_else(|| {
-            if encodings
-                .iter()
-                .any(|encoding| encoding.is_speculative() || encoding.nonpreemptive_trial)
-            {
-                crate::admission::Priority::Speculative
-            } else {
-                crate::admission::Priority::Live
-            }
-        });
         // Foreground family starts participate in the same preemption protocol
         // as ordinary encoders. Keep the waiter alive across every attempt so
         // background indexing yields and cannot reclaim its released budget.
@@ -1131,15 +1134,7 @@ impl VodServe {
             .encoding
             .as_ref()
             .is_some_and(|encoding| encoding.nonpreemptive_trial);
-        let admission_priority = if prepared
-            .encoding
-            .as_ref()
-            .is_some_and(|encoding| encoding.is_speculative() || encoding.nonpreemptive_trial)
-        {
-            crate::admission::Priority::Speculative
-        } else {
-            crate::admission::Priority::Live
-        };
+        let admission_priority = prepared.admission_priority;
         let passive_grant = if req.passive_vod {
             if !req.vod_only || req.presentation != crate::transcode::Presentation::Vod {
                 return Err(crate::transcode::vod_refusal_error(
@@ -1267,6 +1262,7 @@ impl VodServe {
                 let attachment = self
                     .resolve_rendition(
                         &mut VodRecipeRequest {
+                            admission_priority,
                             root_admission: None,
                             measured_candidate: None,
                             retained_capture: RetainedOutputCapture::New,
@@ -1304,6 +1300,7 @@ impl VodServe {
                 let attachment = self
                     .resolve_rendition(
                         &mut VodRecipeRequest {
+                            admission_priority,
                             root_admission: None,
                             measured_candidate: None,
                             retained_capture: RetainedOutputCapture::New,
@@ -1385,7 +1382,7 @@ impl VodServe {
                 .filter(|child| !deferred(child))
                 .cloned()
                 .collect::<Vec<_>>();
-            let mut permits = Self::reserve_media_group(&admitted, Some(admission_priority))
+            let mut permits = Self::reserve_media_group(&admitted, admission_priority)
                 .await?
                 .into_iter();
             media
@@ -2681,6 +2678,18 @@ impl VodServe {
             preserve_dolby_vision,
             convert_dolby_vision,
         );
+        let (video, dv_refit_gain) = if prepared.encoding.is_none() {
+            crate::dv_refit_serving::rendition_refit(
+                self.shared.store.as_ref(),
+                file,
+                video,
+                prepared.request.dv_refit_digest.as_deref(),
+            )
+            .await
+            .map_err(|error| format!("resolving fitted source copy rendition: {error}"))?
+        } else {
+            (video, None)
+        };
         let identity = match prepared.encoding.as_ref() {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
             None => crate::fragindex::identity_for(file, video),
@@ -2929,6 +2938,7 @@ impl VodServe {
             audio_index: req.audio_index,
             aac,
             video,
+            dv_refit_gain,
             source_object_version,
             cluster_cache_key,
             copy_index_init_contract,
@@ -3118,6 +3128,7 @@ mod principal_demand_tests {
             audio_delivery: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
         };
         let initial_cap = serve.shared.pool.global_cap();
         let settings = VodSettings {

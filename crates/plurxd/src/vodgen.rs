@@ -51,6 +51,11 @@ use crate::renditiondir::{InitIdentity, InitRefused};
 /// small enough that a SIGSTOPped producer leaves the reader parked in one
 /// `read` rather than holding a large buffer.
 const READ_CHUNK: usize = 256 * 1024;
+// Demuxing after a seek can infer wrong DTS for its initial reordered
+// pictures. Stay within the existing three-fragment landing evidence window
+// and retain at least one fully proven row. This is a supported bound, not
+// a claim that every demuxer recovers within it; longer damage refuses.
+const FITTED_MAX_PREROLL_FRAGMENTS: usize = LANDING_WINDOW - 1;
 
 /// Mirror of [`crate::copyseg::MEMORY_WARN_BYTES`], with the landing buffer
 /// counted in: before the landing resolves nothing can be published, so the
@@ -204,6 +209,9 @@ pub struct Generation {
     /// index built the other way describes media this generation never
     /// produces.
     pub convert_dolby_vision: bool,
+    /// The exact fitted table named by this generation's rendition identity.
+    /// Its source clock is established only after the index landing is known.
+    pub dv_refit: Option<std::sync::Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>>,
     /// Keep the video samples' in-band HEVC parameter sets when merging.
     ///
     /// The recipe's own answer, for the same reason as
@@ -264,6 +272,10 @@ where
     let mut state = GenerationRun {
         generation,
         landing_clock,
+        fitted_landing_time: None,
+        fitted_init: None,
+        fitted_next_row: None,
+        fitted_translation: None,
         time_refusal: None,
         sink,
         session_log,
@@ -356,6 +368,12 @@ struct GenerationRun<'a, S> {
     converter: Option<crate::dvpipe::Converter>,
     /// Taken from the generation; consumed by the first ambiguous landing.
     landing_clock: Option<LandingClock>,
+    /// Saved after the one-shot seek probe, so a short fitted landing can
+    /// collect more fragments without changing the candidate row or clock.
+    fitted_landing_time: Option<LandingTime>,
+    fitted_init: Option<Init>,
+    fitted_next_row: Option<usize>,
+    fitted_translation: Option<i128>,
     /// What the landing time said when it could not place the landing, kept
     /// for the refusal should the bytes not settle it either.
     time_refusal: Option<TimeRefusal>,
@@ -383,6 +401,58 @@ struct GenerationRun<'a, S> {
     audio_segmenter: Option<plurx_core::fmp4::PlannedAudioSegmenter>,
 }
 
+/// Select a fully proven suffix; the only omitted rows are identified preroll
+/// strictly before the requested target. There is no timestamp repair here.
+fn proved_fitted_preroll_start(
+    index: &FragmentIndex,
+    candidate: usize,
+    target: usize,
+    raw: &[(
+        usize,
+        plurx_core::segplan::refit_proof::FittedFragmentProof,
+        u64,
+    )],
+    allow_preroll: bool,
+) -> Option<(usize, usize, u64, i128)> {
+    let proofs = index
+        .dv_refit_proofs
+        .as_ref()
+        .filter(|proofs| proofs.len() == index.rows.len())?;
+    if candidate.checked_add(raw.len())? > index.rows.len()
+        || raw
+            .iter()
+            .enumerate()
+            .any(|(offset, (_, proof, _))| !proofs[candidate + offset].same_pictures(proof))
+    {
+        return None;
+    }
+    for skip in 0..raw.len().min(FITTED_MAX_PREROLL_FRAGMENTS + 1) {
+        let landed = candidate + skip;
+        if landed > target || (skip > 0 && !allow_preroll) {
+            break;
+        }
+        let translation = i128::from(index.rows[landed].dts) - i128::from(raw[skip].2);
+        // These proofs were observed once from the immutable raw fragments.
+        // Equality includes every coded payload, duration, CTO and first CTO.
+        if raw[skip..]
+            .iter()
+            .enumerate()
+            .all(|(offset, (_, proof, dts))| {
+                *proof == proofs[landed + offset]
+                    && i128::from(*dts) + translation == i128::from(index.rows[landed + offset].dts)
+            })
+        {
+            return Some((
+                landed,
+                if skip == 0 { 0 } else { raw[skip].0 },
+                raw[skip].2,
+                translation,
+            ));
+        }
+    }
+    None
+}
+
 impl<S: Sink> GenerationRun<'_, S> {
     /// Prove this generation's pipe still produces the rendition's init, and
     /// keep the *served* form for the segmenter.
@@ -398,6 +468,9 @@ impl<S: Sink> GenerationRun<'_, S> {
         match self.generation.identity.served_init_for(&muxer) {
             Ok(served) => {
                 self.video_id = served.video().map(|video| video.id);
+                if self.generation.dv_refit.is_some() {
+                    self.fitted_init = Some(served.clone());
+                }
                 if self.generation.index.is_none() {
                     self.encoded_init = Some(served.clone());
                 }
@@ -425,7 +498,7 @@ impl<S: Sink> GenerationRun<'_, S> {
                         .map_err(|error| landing_failed(error.to_string()))?,
                     );
                 }
-                if self.generation.convert_dolby_vision {
+                if self.generation.convert_dolby_vision && self.generation.dv_refit.is_none() {
                     match crate::dvpipe::Converter::for_init(&served) {
                         Ok(converter) => self.converter = Some(converter),
                         Err(refused) => {
@@ -493,6 +566,35 @@ impl<S: Sink> GenerationRun<'_, S> {
                 self.deliver(segment).await?;
             }
             return Ok(());
+        }
+        if self.generation.dv_refit.is_some()
+            && self.segmenter.is_some()
+            && self.video_bytes_of(&fragment).is_some()
+        {
+            let row = self
+                .fitted_next_row
+                .ok_or_else(|| landing_failed("fitted producer lost its proof cursor".into()))?;
+            let translation = self
+                .fitted_translation
+                .ok_or_else(|| landing_failed("fitted producer lost its fixed clock".into()))?;
+            let index = self
+                .generation
+                .index
+                .as_ref()
+                .ok_or_else(|| landing_failed("fitted producer lost its index".into()))?;
+            let init = self
+                .fitted_init
+                .as_ref()
+                .ok_or_else(|| landing_failed("fitted producer lost its proof init".into()))?;
+            plurx_core::segplan::refit_proof::verify_fitted_fragment(
+                index,
+                row,
+                &fragment,
+                init,
+                translation,
+            )
+            .map_err(landing_failed)?;
+            self.fitted_next_row = Some(row + 1);
         }
         if let Some(converter) = self.converter.as_mut() {
             let before = converter.report().source_profile;
@@ -696,6 +798,156 @@ impl<S: Sink> GenerationRun<'_, S> {
     /// buffer holds less than one segment's byte ceiling — the memory the
     /// segmenter is entitled to hold pending anyway. Past that, or at the end
     /// of the pipe, it is the typed failure.
+    async fn match_fitted_landing(
+        &mut self,
+        index: &FragmentIndex,
+        target: usize,
+        readable: bool,
+    ) -> Result<Option<usize>, Outcome> {
+        // `match_landing_at` needs the full byte window except at real EOF.
+        // Keep the original fragments until then: each candidate is
+        // converted once, after enough evidence exists to decide it.
+        if readable && self.observed.len() < LANDING_WINDOW {
+            return Ok(None);
+        }
+        let time = match self.fitted_landing_time {
+            Some(time) => Some(time),
+            None => match self.landing_clock.take() {
+                Some(probe) => {
+                    let time = probe().await.map_err(|why| {
+                        landing_failed(format!(
+                            "fitted conversion could not measure its landing: {why}"
+                        ))
+                    })?;
+                    self.fitted_landing_time = Some(time);
+                    Some(time)
+                }
+                None if self.generation.start_entry == 0 => None,
+                None => {
+                    return Err(landing_failed(
+                        "fitted seek conversion needs an index landing clock".into(),
+                    ))
+                }
+            },
+        };
+        let init = self
+            .served
+            .as_ref()
+            .ok_or_else(|| landing_failed("fitted conversion has no served init".into()))?;
+        let video = init
+            .video()
+            .ok_or_else(|| landing_failed("fitted conversion has no video track".into()))?;
+        if video.timescale != index.timescale {
+            return Err(landing_failed(
+                "fitted output changed its video timescale".into(),
+            ));
+        }
+        let proofs = index
+            .dv_refit_proofs
+            .as_ref()
+            .filter(|proofs| proofs.len() == index.rows.len())
+            .ok_or_else(|| {
+                landing_failed("fitted index lacks complete pre-conversion proofs".into())
+            })?;
+        let mut raw = Vec::new();
+        for (slot, fragment) in self.landing.iter().enumerate() {
+            if let Some(track) = fragment.track(video.id) {
+                let proof =
+                    plurx_core::segplan::refit_proof::FittedFragmentProof::observe(fragment, init)
+                        .map_err(landing_failed)?;
+                raw.push((slot, proof, track.base_decode_time));
+            }
+        }
+        let first = raw.first().ok_or_else(|| {
+            landing_failed("fitted conversion has no first video fragment".into())
+        })?;
+        let first_presentation = index
+            .rows
+            .first()
+            .zip(proofs.first())
+            .map(|(row, proof)| i128::from(row.dts) + i128::from(proof.first_cto()))
+            .ok_or_else(|| landing_failed("fitted index has no presentation origin".into()))?;
+        // The probe measures source packet PTS. A seek can temporarily invent
+        // DTS, so compare it with the canonical RAP's PTS, not its DTS.
+        let candidates: Vec<_> = (0..=target.min(index.rows.len().saturating_sub(1)))
+            .filter(|&row| proofs[row].same_pictures(&first.1))
+            .filter(|&row| match time {
+                Some(time) => {
+                    let presentation = i128::from(index.rows[row].dts)
+                        + i128::from(proofs[row].first_cto())
+                        - first_presentation;
+                    let off = presentation.abs_diff(i128::from(time.ticks));
+                    off < u128::from(time.frame_ticks.max(1))
+                        && off * 2 < u128::from(index.rows[row].duration.max(1))
+                }
+                None => row == 0,
+            })
+            .collect();
+        let table = self
+            .generation
+            .dv_refit
+            .as_ref()
+            .ok_or_else(|| landing_failed("fitted conversion lost its pinned table".into()))?;
+        let mut match_found = None;
+        for candidate in candidates {
+            let Some((landed, first_slot, first_dts, translation)) = proved_fitted_preroll_start(
+                index,
+                candidate,
+                target,
+                &raw,
+                self.generation.start_entry > 0,
+            ) else {
+                continue;
+            };
+            let clock = plurx_core::transcode::dv_refit_serve::SourceClock::for_index_landing(
+                index, landed, first_dts,
+            )
+            .map_err(|error| landing_failed(format!("fitted landing clock: {error}")))?;
+            let mut converter = crate::dvpipe::Converter::for_init(init)
+                .and_then(|ready| ready.with_refit(std::sync::Arc::clone(table), clock))
+                .map_err(|error| landing_failed(format!("fitted conversion: {error}")))?;
+            let mut converted = Vec::with_capacity(self.landing.len() - first_slot);
+            let mut observed = Vec::with_capacity(raw.len());
+            for original in &self.landing[first_slot..] {
+                let mut fragment = original.clone();
+                converter
+                    .convert(&mut fragment)
+                    .map_err(|error| landing_failed(format!("fitted conversion: {error}")))?;
+                if let Some(bytes) = self.video_bytes_of(&fragment) {
+                    observed.push(bytes);
+                }
+                converted.push(fragment);
+            }
+            let matches = !observed.is_empty()
+                && landed + observed.len() <= index.rows.len()
+                && observed
+                    .iter()
+                    .enumerate()
+                    .all(|(offset, &bytes)| index.rows[landed + offset].video_bytes == bytes);
+            if matches {
+                if match_found.is_some() {
+                    return Err(landing_failed(
+                        "multiple fitted landing rows agree with the converted bytes".into(),
+                    ));
+                }
+                match_found = Some((landed, converted, observed, converter, translation));
+            }
+        }
+        let Some((landed, converted, observed, converter, translation)) = match_found else {
+            return Err(landing_failed(
+                "no fitted landing row agrees with coded samples, cadence and converted bytes"
+                    .into(),
+            ));
+        };
+        self.fitted_translation = Some(translation);
+        self.fitted_next_row = Some(landed + observed.len());
+        self.landing_bytes = converted.iter().map(|fragment| fragment.bytes.len()).sum();
+        self.landing = converted;
+        self.observed = observed;
+        self.converter = Some(converter);
+        Ok(Some(landed))
+    }
+
     async fn engage(&mut self, at_end: bool) -> Result<(), Outcome> {
         let start_entry = self.generation.start_entry;
         let Some(entry) = self.generation.plan.entry(start_entry) else {
@@ -717,42 +969,52 @@ impl<S: Sink> GenerationRun<'_, S> {
             // Copy's demuxer may land before, but never after, the plan RAP,
             // so the target row bounds every possible landing.
             let readable = !at_end && self.landing_bytes < self.generation.policy.max_bytes;
-            let row = match match_landing(index, &self.observed, target) {
-                Ok(row) => row,
-                Err(ambiguous @ LandingError::Ambiguous { .. }) if self.landing_clock.is_some() => {
-                    let clock = self.landing_clock.take().expect("checked by the guard");
-                    let placed = match clock().await {
-                        Ok(time) => match_landing_at(
-                            index,
-                            &self.observed,
-                            target,
-                            time.ticks,
-                            time.frame_ticks,
-                        )
-                        .map_err(|error| TimeRefusal::Disagrees(error.to_string())),
-                        Err(why) => Err(TimeRefusal::Unmeasured(why)),
-                    };
-                    match placed {
-                        Ok(row) => row,
-                        // The time is one more piece of evidence, not a
-                        // verdict on the rendition: a repeat the next
-                        // fragments settle still lands by its bytes.
-                        Err(refusal) if readable => {
-                            tracing::warn!(
-                                session = %crate::transcode::session_log_id(self.session_log),
-                                "{refusal}; reading further"
-                            );
-                            self.time_refusal = Some(refusal);
-                            return Ok(());
+            let row = if self.generation.dv_refit.is_some() {
+                let index = index.clone();
+                let Some(row) = self.match_fitted_landing(&index, target, readable).await? else {
+                    return Ok(());
+                };
+                row
+            } else {
+                match match_landing(index, &self.observed, target) {
+                    Ok(row) => row,
+                    Err(ambiguous @ LandingError::Ambiguous { .. })
+                        if self.landing_clock.is_some() =>
+                    {
+                        let clock = self.landing_clock.take().expect("checked by the guard");
+                        let placed = match clock().await {
+                            Ok(time) => match_landing_at(
+                                index,
+                                &self.observed,
+                                target,
+                                time.ticks,
+                                time.frame_ticks,
+                            )
+                            .map_err(|error| TimeRefusal::Disagrees(error.to_string())),
+                            Err(why) => Err(TimeRefusal::Unmeasured(why)),
+                        };
+                        match placed {
+                            Ok(row) => row,
+                            // The time is one more piece of evidence, not a
+                            // verdict on the rendition: a repeat the next
+                            // fragments settle still lands by its bytes.
+                            Err(refusal) if readable => {
+                                tracing::warn!(
+                                    session = %crate::transcode::session_log_id(self.session_log),
+                                    "{refusal}; reading further"
+                                );
+                                self.time_refusal = Some(refusal);
+                                return Ok(());
+                            }
+                            Err(refusal) => return Err(unplaced(&ambiguous, Some(&refusal))),
                         }
-                        Err(refusal) => return Err(unplaced(&ambiguous, Some(&refusal))),
                     }
+                    Err(LandingError::Ambiguous { .. }) if readable => return Ok(()),
+                    Err(ambiguous @ LandingError::Ambiguous { .. }) => {
+                        return Err(unplaced(&ambiguous, self.time_refusal.as_ref()))
+                    }
+                    Err(error) => return Err(landing_failed(error.to_string())),
                 }
-                Err(LandingError::Ambiguous { .. }) if readable => return Ok(()),
-                Err(ambiguous @ LandingError::Ambiguous { .. }) => {
-                    return Err(unplaced(&ambiguous, self.time_refusal.as_ref()))
-                }
-                Err(error) => return Err(landing_failed(error.to_string())),
             };
             landed = Some(row);
             target - row
@@ -928,13 +1190,20 @@ impl<S: Sink> GenerationRun<'_, S> {
             ));
         }
         if self.segmenter.is_none() {
-            // Fewer fragments than a full landing window: `match_landing`
-            // accepts a short probe only at the index's own tail, where the
-            // stream genuinely ran out. Anywhere else this is a typed
-            // landing failure, not a guess.
+            // Legacy byte matching accepts a short window only at the index
+            // tail. Fitted coded proofs can settle a unique short window;
+            // their complete EOF coverage check below remains mandatory.
             if let Err(outcome) = self.engage(true).await {
                 return outcome;
             }
+        }
+        if complete
+            && self.generation.dv_refit.is_some()
+            && self.fitted_next_row != self.generation.index.as_ref().map(|index| index.rows.len())
+        {
+            return landing_failed(
+                "fitted producer ended before every indexed row was verified".into(),
+            );
         }
         let Some(mut segmenter) = self.segmenter.take() else {
             unreachable!("engage constructs the segmenter or fails typed");
@@ -1122,6 +1391,7 @@ mod tests {
             start_entry: 1,
             policy: CutPolicy::new(2, 2, 48_000_000, 15, 24),
             convert_dolby_vision: false,
+            dv_refit: None,
             retain_hevc_parameter_sets: true,
         };
         let sink = MemSink::default();
@@ -1262,6 +1532,7 @@ mod tests {
             start_entry: 0,
             policy: CutPolicy::new(2, 2, 48_000_000, 15, 24000),
             convert_dolby_vision: false,
+            dv_refit: None,
             retain_hevc_parameter_sets: false,
         };
         let sink = MemSink::default();
@@ -1451,6 +1722,350 @@ mod tests {
         }
     }
 
+    /// Build a fitted index from the same RPU-bearing video-only pipe that
+    /// `converting_film` used. An identity scene and a fitted scene straddle
+    /// row one, so the two candidate clocks rewrite the first RPU with
+    /// different lengths.
+    async fn fitted_film() -> (
+        Film,
+        std::sync::Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>,
+    ) {
+        use plurx_core::transcode::dv_refit::{servable, RefitCurves};
+        use plurx_core::transcode::dv_refit_serve::{ServedCurveTable, SourceClock};
+        let mut film = converting_film().await;
+        let mut right = RefitCurves::identity();
+        for piece in &mut right.luma {
+            piece[0] += 90.0 / 4095.0;
+        }
+        let right = servable(&right).expect("second fitted scene");
+        let split =
+            i64::try_from(film.index.rows[1].dts - film.index.rows[0].dts).expect("scene boundary");
+        let last = film.index.rows.last().expect("index rows");
+        let end =
+            i64::try_from(last.dts + last.duration - film.index.rows[0].dts).expect("scene end");
+        let base = format!("1/{}", film.index.timescale);
+        let table = std::sync::Arc::new(
+            ServedCurveTable::from_servable(
+                "d".repeat(64),
+                [
+                    (0, split, base.as_str(), None),
+                    (split, end, base.as_str(), Some(&right)),
+                ],
+            )
+            .expect("servable fitted table"),
+        );
+
+        let indexed = testfixtures::with_dolby_vision_rpus(&index_pipe_bytes("clean-cra"));
+        // This regression isolates candidate-specific RPU byte matching. The
+        // cached A/V fixture's AAC muxer repairs its first video duration,
+        // so that fixture is not the exact source clock indexed above. Use
+        // the actual video-only indexed pipe for both sides of this proof.
+        film.feed = indexed.clone();
+        let mut reader = FragmentReader::new();
+        reader.push(&indexed);
+        let Some(Unit::Init(init)) = reader.next_unit().expect("index init") else {
+            panic!("index init missing");
+        };
+        let video = init.video().expect("index video");
+        film.video_id = video.id;
+        let mut muxer = init.clone();
+        sanitize_stale_dolby_brand(&mut muxer);
+        film.identity = InitIdentity::establish(&muxer, film.index.promotion.clone())
+            .expect("video-only fitted identity");
+        film.plan = plurx_core::segplan::plan_copy(
+            &film.index,
+            &film.policy,
+            &TrackDurations {
+                video_ms: 12_000,
+                audio_ms: 0,
+                audio_bits_per_second: 0,
+            },
+        );
+        let mut converter = None;
+        let mut row = 0;
+        let mut first_cto = None;
+        let mut proofs = Vec::new();
+        while let Some(unit) = reader.next_unit().expect("index fragment") {
+            if let Unit::Fragment(mut fragment) = unit {
+                proofs.push(
+                    plurx_core::segplan::refit_proof::FittedFragmentProof::observe(
+                        &fragment, &init,
+                    )
+                    .expect("raw fitted fixture proof"),
+                );
+                if converter.is_none() {
+                    let track = fragment.track(video.id).expect("video track");
+                    first_cto = track.samples().next().map(|sample| sample.cto);
+                    let clock = SourceClock {
+                        track_timescale: video.timescale,
+                        track_ticks: i128::from(track.base_decode_time),
+                        source_pts: 0,
+                        source_time_base: (1, video.timescale),
+                    };
+                    converter = Some(
+                        crate::dvpipe::Converter::for_init(&init)
+                            .and_then(|ready| {
+                                ready.with_refit(std::sync::Arc::clone(&table), clock)
+                            })
+                            .expect("fitted index converter"),
+                    );
+                }
+                converter
+                    .as_mut()
+                    .expect("converter")
+                    .convert(&mut fragment)
+                    .expect("fitted index fragment");
+                let measured = plurx_core::segplan::IndexRow::from_fragment(&fragment, &init)
+                    .expect("fitted row");
+                film.index.rows[row].video_bytes = measured.video_bytes;
+                row += 1;
+            }
+        }
+        assert_eq!(row, film.index.rows.len());
+        film.index.dv_refit_proofs = Some(proofs);
+        film.index.dv_refit_origin = Some(plurx_core::segplan::DvRefitOrigin {
+            first_dts: 0,
+            first_pts: first_cto.expect("first composition offset"),
+            time_base_num: 1,
+            time_base_den: video.timescale,
+        });
+        (film, table)
+    }
+
+    /// The nearest measured row may use a different scene and therefore a
+    /// different RPU length. Matching raw bytes (or converting only that
+    /// nearest row) refuses the valid landing; every clock-permitted row must
+    /// be converted against its own scene before the byte comparison.
+    #[tokio::test]
+    async fn fitted_landing_checks_converted_bytes_for_each_clock_candidate() {
+        use plurx_core::transcode::dv_refit_serve::SourceClock;
+        let (mut film, table) = fitted_film().await;
+        assert!(film.index.rows.len() > LANDING_WINDOW);
+        let step = film.index.rows[1].dts - film.index.rows[0].dts;
+        assert!(step > 3);
+        let near_second = film.index.rows[1].dts - step / 3;
+        // A long first row makes both starts plausible under the clock's
+        // half-duration rule. Its real fitted bytes still identify row zero.
+        film.index.rows[0].duration = step * 4;
+        let start_entry = film
+            .plan
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == PlanEntryKind::Video)
+            .find(|entry| entry_row(&film.index, entry).is_some_and(|row| row > 1))
+            .map(|entry| entry.index)
+            .expect("later video entry");
+        let mut reader = FragmentReader::new();
+        reader.push(&film.feed);
+        let Some(Unit::Init(init)) = reader.next_unit().expect("production init") else {
+            panic!("production init missing");
+        };
+        let first = loop {
+            match reader.next_unit().expect("production fragment") {
+                Some(Unit::Fragment(fragment)) if fragment.track(film.video_id).is_some() => {
+                    break fragment
+                }
+                Some(_) => continue,
+                None => panic!("first video fragment missing"),
+            }
+        };
+        let first_dts = first.track(film.video_id).expect("video").base_decode_time;
+        let converted_size = |row| {
+            let clock = SourceClock::for_index_landing(&film.index, row, first_dts)
+                .expect("candidate clock");
+            let mut converter = crate::dvpipe::Converter::for_init(&init)
+                .and_then(|ready| ready.with_refit(std::sync::Arc::clone(&table), clock))
+                .expect("candidate converter");
+            let mut fragment = first.clone();
+            converter
+                .convert(&mut fragment)
+                .expect("candidate conversion");
+            fragment
+                .track(film.video_id)
+                .expect("video")
+                .samples()
+                .map(|sample| sample.size)
+                .sum::<u32>()
+        };
+        assert_eq!(converted_size(0), film.index.rows[0].video_bytes);
+        assert_ne!(
+            converted_size(0),
+            converted_size(1),
+            "the wrong scene must change the RPU size in this regression"
+        );
+        let mut generation = generation(&film, start_entry);
+        generation.convert_dolby_vision = true;
+        generation.dv_refit = Some(table);
+        generation.landing_clock = clock(Ok(LandingTime {
+            ticks: near_second,
+            frame_ticks: step * 2,
+        }));
+        let sink = MemSink::default();
+        let outcome = run(&film.feed[..], generation, &sink, "fitted-candidates").await;
+        assert!(matches!(outcome, Outcome::Ran { .. }), "{outcome:?}");
+        assert_eq!(
+            sink.taken().first().map(|(entry, _)| *entry),
+            Some(start_entry)
+        );
+    }
+
+    fn preroll_proof(
+        coded: u8,
+        cadence: u8,
+    ) -> plurx_core::segplan::refit_proof::FittedFragmentProof {
+        let mut bytes = [0u8; 72];
+        bytes[..32].fill(coded);
+        bytes[32..64].fill(cadence);
+        serde_json::from_value(serde_json::json!(hex::encode(bytes))).expect("v4 proof")
+    }
+    fn preroll_index() -> FragmentIndex {
+        let mut index = FragmentIndex::new(
+            1000,
+            (0..4)
+                .map(|at| plurx_core::segplan::IndexRow {
+                    dts: at * 100,
+                    duration: 100,
+                    bytes: 1,
+                    video_bytes: 1,
+                    class: plurx_core::fmp4::CutClass::CleanIdr,
+                })
+                .collect(),
+            "a".repeat(64),
+            plurx_core::segplan::SourceIdentity::new(1, 1, "fitted-v4"),
+        );
+        index.dv_refit_proofs = Some((1..=4).map(|code| preroll_proof(code, 7)).collect());
+        index
+    }
+    #[test]
+    fn fitted_preroll_discards_only_identified_pre_target_clock_damage() {
+        let index = preroll_index();
+        let full = [(2, preroll_proof(1, 7), 10_000)];
+        assert_eq!(
+            proved_fitted_preroll_start(&index, 0, 0, &full, false),
+            Some((0, 0, 10_000, -10_000)),
+            "without a preroll discard, retain leading audio-only fragments"
+        );
+        let raw = [
+            (0, preroll_proof(1, 9), 10_000),
+            (1, preroll_proof(2, 7), 10_083),
+            (2, preroll_proof(3, 7), 10_183),
+        ];
+        assert_eq!(
+            proved_fitted_preroll_start(&index, 0, 1, &raw, true),
+            Some((1, 1, 10_083, -9_983))
+        );
+        assert!(
+            proved_fitted_preroll_start(&index, 0, 0, &raw, true).is_none(),
+            "cannot discard target row"
+        );
+        assert!(
+            proved_fitted_preroll_start(&index, 0, 1, &raw, false).is_none(),
+            "whole playback cannot discard"
+        );
+        let mut wrong_picture = raw;
+        wrong_picture[0].1 = preroll_proof(9, 9);
+        assert!(
+            proved_fitted_preroll_start(&index, 0, 1, &wrong_picture, true).is_none(),
+            "skipped pictures also require identity"
+        );
+    }
+    #[test]
+    fn fitted_preroll_keeps_every_served_row_clock_and_prefix_bound() {
+        let index = preroll_index();
+        let raw = [
+            (0, preroll_proof(1, 9), 10_000),
+            (1, preroll_proof(2, 7), 10_083),
+            (2, preroll_proof(3, 9), 10_183),
+        ];
+        assert!(
+            proved_fitted_preroll_start(&index, 0, 1, &raw, true).is_none(),
+            "later served cadence cannot differ"
+        );
+        let target_damage = [
+            (0, preroll_proof(1, 9), 10_000),
+            (1, preroll_proof(2, 9), 10_083),
+            (2, preroll_proof(3, 7), 10_183),
+        ];
+        assert!(
+            proved_fitted_preroll_start(&index, 0, 1, &target_damage, true).is_none(),
+            "damage intersecting target cannot be discarded"
+        );
+        let drift = [
+            (0, preroll_proof(1, 9), 10_000),
+            (1, preroll_proof(2, 7), 10_083),
+            (2, preroll_proof(3, 7), 10_184),
+        ];
+        assert!(
+            proved_fitted_preroll_start(&index, 0, 1, &drift, true).is_none(),
+            "fixed translation includes every served row"
+        );
+        let over_bound = [
+            (0, preroll_proof(1, 9), 10_000),
+            (1, preroll_proof(2, 9), 10_100),
+            (2, preroll_proof(3, 9), 10_200),
+            (3, preroll_proof(4, 7), 10_300),
+        ];
+        assert!(
+            proved_fitted_preroll_start(&index, 0, 3, &over_bound, true).is_none(),
+            "at most two preroll fragments"
+        );
+    }
+
+    /// The A/V fixture really has the AAC-induced initial video clock repair
+    /// that exposed this defect. Its coded pictures still weigh the same,
+    /// but a fitted generation must refuse before rewriting/publishing them.
+    #[tokio::test]
+    async fn fitted_copy_refuses_the_aac_muxer_clock_repair_before_publication() {
+        let (film, table) = fitted_film().await;
+        let warped = testfixtures::with_dolby_vision_rpus(&pipe("clean-cra"));
+        let mut muxer = muxer_init(&warped);
+        sanitize_stale_dolby_brand(&mut muxer);
+        let identity =
+            InitIdentity::establish(&muxer, film.index.promotion.clone()).expect("actual A/V init");
+        let mut request = generation(&film, 0);
+        request.identity = identity;
+        request.convert_dolby_vision = true;
+        request.dv_refit = Some(table);
+        let sink = MemSink::default();
+        let outcome = run(&warped[..], request, &sink, "aac-clock-repair").await;
+        assert!(
+            matches!(outcome, Outcome::Failed(Failure::Landing(_))),
+            "{outcome:?}"
+        );
+        assert!(
+            sink.taken().is_empty(),
+            "warped cadence cannot publish even its first fitted segment"
+        );
+    }
+
+    #[tokio::test]
+    async fn fitted_copy_rejects_a_complete_trailer_that_omits_a_later_indexed_row() {
+        let (film, table) = fitted_film().await;
+        assert!(film.index.rows.len() > LANDING_WINDOW);
+        let cutoff = fragment_boundary_cut(&film.feed, film.index.rows.len() - 1);
+        let mut omitted = film.feed[..cutoff].to_vec();
+        box_walk(&film.feed, |name, body| {
+            if name == b"mfra" {
+                omitted.extend_from_slice(
+                    &u32::try_from(body.len() + 8)
+                        .expect("small trailer")
+                        .to_be_bytes(),
+                );
+                omitted.extend_from_slice(name);
+                omitted.extend_from_slice(body);
+            }
+        });
+        let mut request = generation(&film, 0);
+        request.convert_dolby_vision = true;
+        request.dv_refit = Some(table);
+        let sink = MemSink::default();
+        let outcome = run(&omitted[..], request, &sink, "missing-fitted-row").await;
+        assert!(
+            matches!(outcome, Outcome::Failed(Failure::Landing(ref reason)) if reason.contains("every indexed row")),
+            "{outcome:?}"
+        );
+    }
+
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|at| at == needle)
     }
@@ -1619,6 +2234,7 @@ mod tests {
     fn generation(film: &Film, start_entry: u32) -> Generation {
         Generation {
             convert_dolby_vision: false,
+            dv_refit: None,
             retain_hevc_parameter_sets: false,
             plan: film.plan.clone(),
             index: Some(film.index.clone()),
@@ -2107,6 +2723,7 @@ mod tests {
             .expect("establishing identity");
         let generation = Generation {
             convert_dolby_vision: false,
+            dv_refit: None,
             retain_hevc_parameter_sets: false,
             plan: film.plan.clone(),
             index: Some(film.index.clone()),

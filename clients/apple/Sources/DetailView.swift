@@ -368,21 +368,16 @@ private struct DetailBreadcrumbLinkStyle: ButtonStyle {
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         var body: some View {
+            // White means focus: quiet text at rest, a solid white pill
+            // with dark ink when focused, never an accent stroke.
             configuration.label
-                .foregroundStyle(isFocused ? Palette.onBg : Palette.accent)
+                .foregroundStyle(isFocused ? Palette.bg : Palette.muted)
                 .padding(.horizontal, DetailBreadcrumbMetrics.horizontalPadding)
                 .padding(.vertical, DetailBreadcrumbMetrics.verticalPadding)
                 .background(
-                    Palette.surfaceHi.opacity(isFocused ? 0.9 : 0),
+                    Palette.onBg.opacity(isFocused ? 1 : 0),
                     in: Capsule()
                 )
-                .overlay {
-                    Capsule()
-                        .stroke(
-                            Palette.accent.opacity(isFocused ? 0.9 : 0),
-                            lineWidth: DetailBreadcrumbMetrics.focusStrokeWidth
-                        )
-                }
                 .contentShape(Capsule())
                 .scaleEffect(reduceMotion ? 1 : (configuration.isPressed ? 0.98 : 1))
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isFocused)
@@ -407,7 +402,7 @@ private extension View {
     @ViewBuilder
     func breadcrumbFont() -> some View {
         #if os(tvOS)
-        self.font(.system(size: 20, weight: .semibold, design: .rounded))
+        self.font(.system(size: 22, weight: .medium))
         #else
         self.font(.system(.caption, design: .rounded).weight(.semibold))
         #endif
@@ -701,6 +696,9 @@ struct DetailView: View {
     @State private var remoteChoices: [RemoteChoice] = []
     @State private var remoteChoiceSource: RemoteOwnedChoiceSource?
     @State private var aboutPresented = false
+    /// A panel the More panel asked for, opened once More has gone.
+    @State private var pendingDetailPanel: PendingDetailPanel?
+    private enum PendingDetailPanel { case about, version }
     #if os(iOS)
     @State private var downloadBusy = false
     @State private var reader: ReaderContext?
@@ -765,7 +763,7 @@ struct DetailView: View {
         }
         .onChange(of: selectedMediaFileID) { _, _ in remoteNavigation.contextChanged() }
         .onChange(of: pendingTrackSelection) { _, _ in remoteNavigation.contextChanged() }
-        .remoteChoicePresentation(isPresented: Binding(get: { remoteChoiceTitle != nil }, set: { if !$0 { remoteChoiceTitle = nil } }), scope: "item:\(itemId):preplay") {
+        .remoteChoicePresentation(isPresented: Binding(get: { remoteChoiceTitle != nil }, set: { if !$0 { remoteChoiceTitle = nil } }), scope: "item:\(itemId):preplay", onDismiss: openPendingDetailPanel) {
             if let remoteChoiceTitle {
                 RemoteChoicePanel(scope: "item:\(itemId):preplay", title: remoteChoiceTitle, choices: remoteChoices, admission: { [source = remoteChoiceSource] in
                     guard let source, remoteNavigation.activeScope == "item:\(itemId):preplay",
@@ -966,14 +964,20 @@ struct DetailView: View {
             #if os(tvOS)
             if TrackFacts.audioRows(file).count > 1 { keys.append("detail:audio") }
             if !TrackFacts.subtitleRows(file).isEmpty { keys.append("detail:subtitles") }
-            if (detail.files ?? []).count > 1 { keys.append("detail:version") }
             #endif
         }
+        #if os(tvOS)
+        // Favorite, About and Version live in More on television.
+        if annotations != nil, detail.item.kind == "movie" || detail.item.kind == "show" {
+            keys.append("detail:watchlist")
+        }
+        keys.append("detail:more")
+        #else
         if annotations != nil, detail.item.kind == "movie" || detail.item.kind == "show" {
             keys += ["detail:watchlist", "detail:favorite"]
         }
+        #endif
         #if os(tvOS)
-        if let overview = detail.item.overview, !overview.isEmpty { keys.append("detail:about") }
         keys += (detail.children ?? []).flatMap { item in
             item.kind == "episode" ? ["detail:children:item:\(item.id)", "detail:children:details:\(item.id)"] : ["detail:children:item:\(item.id)"]
         }
@@ -1001,6 +1005,19 @@ struct DetailView: View {
             remoteChoiceTitle = nil; remoteChoices = []; remoteChoiceSource = nil
         }
     }
+    /// Runs from the preplay cover's onDismiss: by then the coordinator has
+    /// closed the More modal and the native cover is gone, so the next panel
+    /// can present and its Back returns to More.
+    private func openPendingDetailPanel() {
+        guard let pending = pendingDetailPanel else { return }
+        pendingDetailPanel = nil
+        #if os(tvOS)
+        switch pending {
+        case .about: openAbout(opener: "detail:more")
+        case .version: if let detail { openPreplayVersions(detail, opener: "detail:more") }
+        }
+        #endif
+    }
     private func openPreplayTracks(_ file: MediaFile, subtitles: Bool) {
         let binding = trackSelectionBinding(for: file)
         let selected = subtitles ? trackSelection(for: file).subtitleIndex : trackSelection(for: file).audioIndex
@@ -1016,8 +1033,8 @@ struct DetailView: View {
         } }
         showPreplayChoices(title: subtitles ? "Subtitles" : "Audio", opener: subtitles ? "detail:subtitles" : "detail:audio", choices: choices)
     }
-    private func openPreplayVersions(_ detail: ItemDetail) {
-        showPreplayChoices(title: "Version", opener: "detail:version", choices: (detail.files ?? []).map { file in
+    private func openPreplayVersions(_ detail: ItemDetail, opener: String = "detail:version") {
+        showPreplayChoices(title: "Version", opener: opener, choices: (detail.files ?? []).map { file in
             RemoteChoice(id: String(file.id), label: file.filename ?? "Version \(file.id)", selected: selectedMediaFileID == file.id) { selectedMediaFileID = file.id }
         })
     }
@@ -1027,15 +1044,44 @@ struct DetailView: View {
     @ViewBuilder
     private func trackChoiceControls(_ file: MediaFile) -> some View {
         #if os(tvOS)
+        // The current choice is on the button, not hidden in VoiceOver.
         if TrackFacts.audioRows(file).count > 1 {
-            Button("Audio") { openPreplayTracks(file, subtitles: false) }
+            Button { openPreplayTracks(file, subtitles: false) } label: {
+                HStack(spacing: 12) {
+                    Text("Audio").fixedSize()
+                    Text(TrackFacts.audioButtonValue(file, chosen: trackSelection(for: file).audioIndex))
+                        .opacity(0.62)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .font(.system(size: 26, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            }
                 .buttonStyle(TVReadableButtonStyle(prominent: false))
+                // Not fixed-size: on a crowded row this value truncates
+                // before More or Play are pushed off the screen.
+                .layoutPriority(0)
                 .accessibilityValue(TrackFacts.audioSummary(file, chosen: trackSelection(for: file).audioIndex))
                 .remoteControl("detail:audio", label: "Choose audio") { openPreplayTracks(file, subtitles: false) }
         }
         if !TrackFacts.subtitleRows(file).isEmpty {
-            Button("Subtitles") { openPreplayTracks(file, subtitles: true) }
+            Button { openPreplayTracks(file, subtitles: true) } label: {
+                HStack(spacing: 12) {
+                    Text("Subtitles").fixedSize()
+                    Text(TrackFacts.subtitleButtonValue(file, chosen: trackSelection(for: file).subtitleIndex))
+                        .opacity(0.62)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .font(.system(size: 26, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            }
                 .buttonStyle(TVReadableButtonStyle(prominent: false))
+                // Not fixed-size: on a crowded row this value truncates
+                // before More or Play are pushed off the screen.
+                .layoutPriority(0)
                 .accessibilityValue(TrackFacts.subtitleSummary(file, chosen: trackSelection(for: file).subtitleIndex))
                 .remoteControl("detail:subtitles", label: "Choose subtitles") { openPreplayTracks(file, subtitles: true) }
         }
@@ -1517,19 +1563,6 @@ struct DetailView: View {
     }
 
     #if os(tvOS)
-    private var aboutButton: some View {
-        Button("About") {
-            remoteNavigation.openModal(scope: "item:\(itemId):about", opener: "detail:about") { aboutPresented = false }
-            aboutPresented = true
-        }
-        .buttonStyle(TVReadableButtonStyle(prominent: false))
-        .accessibilityIdentifier("detail:about")
-        .remoteControl("detail:about", label: "About this title") {
-            remoteNavigation.openModal(scope: "item:\(itemId):about", opener: "detail:about") { aboutPresented = false }
-            aboutPresented = true
-        }
-    }
-
     private func tvPlayableContent(_ detail: ItemDetail) -> some View {
         let item = detail.item
         let ancestors = detail.ancestors ?? []
@@ -1544,94 +1577,72 @@ struct DetailView: View {
             ZStack(alignment: .bottomLeading) {
                 tvPlayableBackground(item)
 
-                VStack(alignment: .leading, spacing: 12) {
-                    if !ancestors.isEmpty {
-                        DetailBreadcrumb(ancestors: ancestors)
-                    }
+                // Everything a viewer must read or choose before pressing
+                // play sits in this one viewport: a tvOS scroll view only
+                // moves with focus, so nothing below the fold may be needed.
+                VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if !ancestors.isEmpty {
+                            DetailBreadcrumb(ancestors: ancestors)
+                        }
 
-                    if item.kind != "episode" || ancestors.isEmpty {
-                        Text(tvPlayableEyebrow(detail).uppercased())
-                            .font(.system(size: 20, weight: .bold, design: .rounded))
-                            .tracking(2.6)
-                            .foregroundColor(Palette.accent)
-                    }
+                        if item.kind != "episode" || ancestors.isEmpty {
+                            Text(tvPlayableEyebrow(detail).uppercased())
+                                .font(.system(size: 22, weight: .semibold))
+                                .tracking(2)
+                                .foregroundColor(Palette.muted)
+                        }
 
-                    Text(item.title)
-                        .font(.system(size: 60, weight: .heavy, design: .rounded))
-                        .foregroundColor(Palette.onBg)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .shadow(color: .black.opacity(0.72), radius: 14, y: 5)
-
-                    tvMetadataLine(item, file: file, durationMs: durationMs)
-                    ratingsRow
-
-                    if let overview = item.overview, !overview.isEmpty {
-                        Text(overview)
-                            .font(.system(size: 24, weight: .regular, design: .rounded))
-                            .foregroundColor(Palette.onBg.opacity(0.88))
-                            .lineSpacing(3)
+                        Text(item.title)
+                            .font(.system(size: 78, weight: .bold))
+                            .foregroundColor(Palette.onBg)
                             .lineLimit(2)
+                            .minimumScaleFactor(0.8)
                             .fixedSize(horizontal: false, vertical: true)
-                    }
+                            .shadow(color: .black.opacity(0.72), radius: 14, y: 5)
 
-                    HStack(spacing: 16) {
-                        if let file, item.isPlayable {
-                            resumeButton(
-                                item: item,
-                                file: file,
-                                durationMs: durationMs ?? 0,
-                                resumeMs: resumeMs,
-                                canResume: canResume
-                            )
-                            .fixedSize()
+                        tvMetadataLine(item, file: file, durationMs: durationMs)
+                        ratingsRow
 
-                            if canResume {
-                                startOverButton(item: item, file: file, durationMs: durationMs ?? 0)
-                                    .fixedSize()
-                            }
+                        if let overview = item.overview, !overview.isEmpty {
+                            Text(overview)
+                                .font(.system(size: 27, weight: .regular))
+                                .foregroundColor(Palette.onBg.opacity(0.88))
+                                .lineSpacing(4)
+                                .lineLimit(3)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.top, 4)
                         }
 
-                        if !item.isBook {
-                            watchButton(detail)
-                            listButtons(detail.item)
+                        if canResume, let durationMs, durationMs > 0 {
+                            tvResumeProgress(positionMs: resumeMs, durationMs: durationMs)
+                                .padding(.top, 8)
                         }
-                        if let overview = item.overview, !overview.isEmpty { aboutButton }
                     }
-                    .padding(.top, 3)
+                    .frame(maxWidth: TVPlayableDetailMetrics.copyWidth, alignment: .leading)
 
-                    // Beside Play, not only in the list below: the choice has
-                    // to be reachable before the viewer presses the button.
+                    tvPlayableActionRow(detail, file: file, durationMs: durationMs ?? 0, resumeMs: resumeMs, canResume: canResume)
+                        .padding(.top, 36)
+
                     if let file, item.isPlayable, !item.isBook {
-                        HStack(spacing: 16) {
-                            trackChoiceControls(file)
-                            if (detail.files ?? []).count > 1 {
-                                Button("Version") { openPreplayVersions(detail) }
-                                    .buttonStyle(TVReadableButtonStyle(prominent: false))
-                                    .remoteControl("detail:version", label: "Choose version") { openPreplayVersions(detail) }
-                            }
-                        }
+                        tvCostNotice(file)
+                            .padding(.top, 14)
                     }
 
                     if let actionError {
                         Text(actionError)
-                            .font(.caption)
-                            .foregroundColor(Palette.accent)
+                            .font(.system(size: 22, weight: .medium))
+                            .foregroundColor(Palette.muted)
+                            .padding(.top, 10)
                     }
                 }
-                .frame(maxWidth: TVPlayableDetailMetrics.copyWidth, alignment: .leading)
-                .padding(.leading, 88)
-                .padding(.trailing, 70)
+                .padding(.leading, 80)
+                .padding(.trailing, 80)
                 .padding(.bottom, TVPlayableDetailMetrics.bottomInset)
             }
             .frame(minHeight: TVPlayableDetailMetrics.heroHeight)
             .containerRelativeFrame(.vertical, alignment: .center)
             .tvNavigationFocusSection()
-
-            DetailBodyFrame {
-                trackFacts(item: item, file: file)
-            }
-            .padding(.top, 24)
 
             audiobookContents(detail)
 
@@ -1656,10 +1667,137 @@ struct DetailView: View {
         .padding(.bottom, 30)
     }
 
+    /// A thin accent bar and the time still to watch, quiet beneath the copy.
+    private func tvResumeProgress(positionMs: Int, durationMs: Int) -> some View {
+        let fraction = min(1, max(0, Double(positionMs) / Double(durationMs)))
+        return VStack(alignment: .leading, spacing: 10) {
+            ZStack(alignment: .leading) {
+                Capsule().fill(Palette.onBg.opacity(0.22))
+                Capsule().fill(Palette.accent)
+                    .frame(width: 460 * fraction)
+            }
+            .frame(width: 460, height: 6)
+            Text(Self.tvTimeLeftLabel(positionMs: positionMs, durationMs: durationMs))
+                .font(.system(size: 22, weight: .medium))
+                .foregroundColor(Palette.muted)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Self.tvTimeLeftLabel(positionMs: positionMs, durationMs: durationMs))
+    }
+
+    static func tvTimeLeftLabel(positionMs: Int, durationMs: Int) -> String {
+        tvRuntimeLabel(max(0, durationMs - positionMs)) + " left"
+    }
+
+    /// The one action row: play first, then the choices that change what
+    /// plays, then the list toggle, then More for everything else.
+    @ViewBuilder
+    private func tvPlayableActionRow(_ detail: ItemDetail, file: MediaFile?, durationMs: Int, resumeMs: Int, canResume: Bool) -> some View {
+        let item = detail.item
+        HStack(spacing: 18) {
+            if let file, item.isPlayable {
+                resumeButton(
+                    item: item,
+                    file: file,
+                    durationMs: durationMs,
+                    resumeMs: resumeMs,
+                    canResume: canResume
+                )
+                .fixedSize()
+                .layoutPriority(3)
+
+                if canResume {
+                    startOverButton(item: item, file: file, durationMs: durationMs)
+                        .fixedSize()
+                        .layoutPriority(2)
+                }
+            }
+            if let file, item.isPlayable, !item.isBook {
+                trackChoiceControls(file)
+            }
+            watchlistButton(item)
+                .layoutPriority(2)
+            moreButton(detail)
+                .layoutPriority(3)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func tvCostNotice(_ file: MediaFile) -> some View {
+        TrackChoiceCostNotice(file: file, selection: trackSelection(for: file))
+    }
+
+    /// Watchlist alone on the page row; Favorite lives in More.
+    @ViewBuilder
+    private func watchlistButton(_ item: Item) -> some View {
+        if let current = annotations, item.kind == "movie" || item.kind == "show" {
+            listButton(item, list: "watchlist", on: current.watchlist == true,
+                       label: current.watchlist == true ? "On watchlist" : "Watchlist",
+                       symbol: current.watchlist == true ? "checkmark" : "plus")
+        }
+    }
+
+    private func moreButton(_ detail: ItemDetail) -> some View {
+        Button("More") { openMore(detail) }
+            .font(.system(size: 26, weight: .medium))
+            .buttonStyle(TVReadableButtonStyle(prominent: false))
+            .fixedSize()
+            .accessibilityIdentifier("detail:more")
+            .remoteControl("detail:more", label: "More") { openMore(detail) }
+    }
+
+    /// Opens a second panel only once the More panel has fully gone: the
+    /// coordinator refuses a modal while one is open, and a native cover
+    /// cannot present until the first one's dismissal completes.
+    private func openMore(_ detail: ItemDetail) {
+        let item = detail.item
+        var choices: [RemoteChoice] = []
+        if !item.isBook {
+            let watched = isWatched(item)
+            choices.append(RemoteChoice(id: "watched", label: watched ? "Mark as unwatched" : "Mark as watched", selected: false) {
+                guard !watchBusy else { return }
+                Task { await toggleWatched(item, watched: watched) }
+            })
+        }
+        if let current = annotations, item.kind == "movie" || item.kind == "show" {
+            let on = current.favorite == true
+            choices.append(RemoteChoice(id: "favorite", label: on ? "Remove favorite" : "Favorite", selected: false) {
+                toggleList(item, list: "favorite", on: on)
+            })
+        }
+        if let overview = item.overview, !overview.isEmpty {
+            choices.append(RemoteChoice(id: "about", label: "About", selected: false) {
+                pendingDetailPanel = .about
+            })
+        }
+        if item.isPlayable, !item.isBook, (detail.files ?? []).count > 1 {
+            choices.append(RemoteChoice(id: "version", label: "Version…", selected: false) {
+                pendingDetailPanel = .version
+            })
+        }
+        showPreplayChoices(title: "More", opener: "detail:more", choices: choices)
+    }
+
+    private func openAbout(opener: String) {
+        guard remoteNavigation.activeScope == "item:\(itemId)", !remoteNavigation.hasOwnedModal else { return }
+        remoteNavigation.openModal(scope: "item:\(itemId):about", opener: opener) { aboutPresented = false }
+        aboutPresented = true
+    }
+
+    /// One quiet line of the same facts the badge row carried.
     private func tvMetadataLine(_ item: Item, file: MediaFile?, durationMs: Int?) -> some View {
-        ItemMetadataBadgeRow(
-            badges: Self.tvPlayableBadges(item, file: file, durationMs: durationMs)
-        )
+        Text(Self.tvPlayableFactLine(item, file: file, durationMs: durationMs))
+            .font(.system(size: 26, weight: .medium))
+            .foregroundColor(Palette.muted)
+            .lineLimit(1)
+            .truncationMode(.tail)
+    }
+
+    static func tvPlayableFactLine(_ item: Item, file: MediaFile?, durationMs: Int?) -> String {
+        tvPlayableBadges(item, file: file, durationMs: durationMs)
+            .map(\.accessibilityLabel)
+            .joined(separator: " · ")
     }
 
     static func tvPlayableBadges(
@@ -1795,44 +1933,46 @@ struct DetailView: View {
                             DetailBreadcrumb(ancestors: ancestors)
                         } else if let eyebrow = tvSeriesEyebrow(detail) {
                             Text(eyebrow.uppercased())
-                                .font(.system(.caption, design: .monospaced).weight(.semibold))
-                                .foregroundColor(Palette.accent)
+                                .font(.system(size: 22, weight: .semibold))
+                                .tracking(2)
+                                .foregroundColor(Palette.muted)
                         }
 
                         Text(item.title)
-                            .font(.system(size: 52, weight: .bold))
+                            .font(.system(size: 72, weight: .bold))
                             .foregroundColor(Palette.onBg)
                             .lineLimit(2)
+                            .minimumScaleFactor(0.8)
                             .fixedSize(horizontal: false, vertical: true)
 
                         Text(tvSeriesMeta(item, childCount: children.count))
-                            .font(.system(.callout, design: .monospaced))
+                            .font(.system(size: 26, weight: .medium))
                             .foregroundColor(Palette.muted)
-                            .lineLimit(2)
+                            .lineLimit(1)
 
                         if let overview = item.overview, !overview.isEmpty {
                             Text(overview)
-                                .font(.body)
-                                .foregroundColor(Palette.onBg.opacity(0.82))
-                                .lineSpacing(5)
-                                .lineLimit(5)
+                                .font(.system(size: 27, weight: .regular))
+                                .foregroundColor(Palette.onBg.opacity(0.88))
+                                .lineSpacing(4)
+                                .lineLimit(3)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
 
-                        HStack(spacing: 16) {
+                        HStack(alignment: .top, spacing: 18) {
                             if let seriesPlayback {
                                 seriesPlaybackButton(seriesPlayback)
                                     .fixedSize()
                             }
-                            watchButton(detail)
-                            listButtons(detail.item)
-                            if let overview = item.overview, !overview.isEmpty { aboutButton }
+                            watchlistButton(detail.item)
+                            moreButton(detail)
                         }
+                        .padding(.top, 8)
 
                         if let actionError {
                             Text(actionError)
-                                .font(.caption)
-                                .foregroundColor(Palette.accent)
+                                .font(.system(size: 22, weight: .medium))
+                                .foregroundColor(Palette.muted)
                         }
                     }
                     .frame(maxWidth: 980, alignment: .leading)
@@ -1908,7 +2048,7 @@ struct DetailView: View {
                 parts.append("\(rollup.watched) of \(rollup.leaves) watched")
             }
         }
-        return parts.joined(separator: "   ·   ")
+        return parts.joined(separator: " · ")
     }
 
     static func hasTVPrimaryAction(
@@ -1935,7 +2075,12 @@ struct DetailView: View {
             .focused($tvFocusedAction, equals: .primaryAction)
             #endif
             Text([target.subtitle, target.title].compactMap { $0 }.joined(separator: " · "))
+                #if os(tvOS)
+                .font(.system(size: 22, weight: .medium))
+                .lineLimit(1)
+                #else
                 .font(.subheadline)
+                #endif
                 .foregroundStyle(Palette.muted)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -2329,6 +2474,15 @@ struct DetailView: View {
     /// The item's review-site scores, when it has any.
     @ViewBuilder
     private var ratingsRow: some View {
+        #if os(tvOS)
+        if let ratings = annotations?.ratings, !ratings.isEmpty {
+            Text(ratings.map { "\(RatingFormat.name($0.source, short: true)) \(RatingFormat.text($0))" }.joined(separator: " · "))
+                .font(.system(size: 22, weight: .medium))
+                .foregroundColor(Palette.muted)
+                .lineLimit(1)
+                .accessibilityLabel(ratings.map { RatingFormat.accessibility($0) }.joined(separator: ", "))
+        }
+        #else
         if let ratings = annotations?.ratings, !ratings.isEmpty {
             HStack(spacing: 14) {
                 ForEach(ratings, id: \.source) { rating in
@@ -2340,6 +2494,7 @@ struct DetailView: View {
                 }
             }
         }
+        #endif
     }
 
     /// Watchlist and favorite toggles for a movie or show, once its flags are in.
@@ -2357,51 +2512,44 @@ struct DetailView: View {
 
     private func listButton(_ item: Item, list: String, on: Bool, label: String, symbol: String) -> some View {
         Button {
-            // One write per list at a time; a failure undoes only its own
-            // field, and only while that field still shows its change.
-            guard !listBusy.contains(list) else { return }
-            listBusy.insert(list)
-            if list == "watchlist" { annotations?.watchlist = !on } else { annotations?.favorite = !on }
-            Task {
-                do {
-                    try await model.requireAPI().setListed(itemId: item.id, list: list, listed: !on)
-                    await model.refreshLists()
-                } catch {
-                    if list == "watchlist", annotations?.watchlist == !on { annotations?.watchlist = on }
-                    if list == "favorite", annotations?.favorite == !on { annotations?.favorite = on }
-                }
-                listBusy.remove(list)
-            }
+            toggleList(item, list: list, on: on)
         } label: {
             Label(label, systemImage: symbol)
             #if os(tvOS)
-            .font(.system(.body, design: .monospaced))
+            .font(.system(size: 26, weight: .medium))
             #else
             .font(.subheadline.weight(.semibold))
             .lineLimit(1)
             #endif
         }
         .remoteControl("detail:\(list)", label: label) {
-            guard !listBusy.contains(list) else { return }
-            listBusy.insert(list)
-            if list == "watchlist" { annotations?.watchlist = !on } else { annotations?.favorite = !on }
-            Task {
-                do {
-                    try await model.requireAPI().setListed(itemId: item.id, list: list, listed: !on)
-                    await model.refreshLists()
-                } catch {
-                    if list == "watchlist", annotations?.watchlist == !on { annotations?.watchlist = on }
-                    if list == "favorite", annotations?.favorite == !on { annotations?.favorite = on }
-                }
-                listBusy.remove(list)
-            }
+            toggleList(item, list: list, on: on)
         }
         #if os(tvOS)
-        .buttonStyle(TVReadableButtonStyle(prominent: on))
+        // White means focus: the label and symbol carry the state.
+        .buttonStyle(TVReadableButtonStyle(prominent: false))
         .fixedSize()
         #else
         .buttonStyle(IOSDetailSecondaryActionButtonStyle(selected: on))
         #endif
+    }
+
+    private func toggleList(_ item: Item, list: String, on: Bool) {
+        // One write per list at a time; a failure undoes only its own
+        // field, and only while that field still shows its change.
+        guard !listBusy.contains(list) else { return }
+        listBusy.insert(list)
+        if list == "watchlist" { annotations?.watchlist = !on } else { annotations?.favorite = !on }
+        Task {
+            do {
+                try await model.requireAPI().setListed(itemId: item.id, list: list, listed: !on)
+                await model.refreshLists()
+            } catch {
+                if list == "watchlist", annotations?.watchlist == !on { annotations?.watchlist = on }
+                if list == "favorite", annotations?.favorite == !on { annotations?.favorite = on }
+            }
+            listBusy.remove(list)
+        }
     }
 
     private func watchButton(_ detail: ItemDetail) -> some View {
@@ -2414,14 +2562,14 @@ struct DetailView: View {
                 systemImage: watched ? "checkmark.circle.fill" : "checkmark.circle"
             )
             #if os(tvOS)
-            .font(.system(.body, design: .monospaced))
+            .font(.system(size: 26, weight: .medium))
             #else
             .font(.subheadline.weight(.semibold))
             .lineLimit(1)
             #endif
         }
         #if os(tvOS)
-        .buttonStyle(TVReadableButtonStyle(prominent: watched))
+        .buttonStyle(TVReadableButtonStyle(prominent: false))
         .fixedSize()
         #else
         .buttonStyle(IOSDetailSecondaryActionButtonStyle(selected: watched))
@@ -2959,7 +3107,7 @@ struct DetailView: View {
         return Button(action: action) {
             #if os(tvOS)
             Text("Start over")
-                .font(.system(.body, design: .monospaced))
+                .font(.system(size: 26, weight: .medium))
             #else
             Label("Start over", systemImage: "arrow.counterclockwise")
                 .font(.subheadline.weight(.semibold))

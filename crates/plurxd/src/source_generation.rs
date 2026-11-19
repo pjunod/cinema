@@ -15,7 +15,7 @@ pub(crate) struct SourceRenditionOwners {
 #[derive(Default)]
 struct SourceOwnersState {
     telemetry_capable: bool,
-    source_observer: Option<(u64, crate::source_custody::SourceObserver)>,
+    source_observer: Option<PublishedSourceObserver>,
     owners: Vec<Arc<SourceRenditionOwner>>,
     current: Option<ProducerRegistration>,
     pending_dispatches: usize,
@@ -25,6 +25,35 @@ struct SourceOwnersState {
     producer_gate: Option<Arc<crate::transcode::source_actor::SourceProducerAuthority>>,
     retiring_current: bool,
 }
+struct PublishedSourceObserver {
+    epoch: u64,
+    observer: crate::source_custody::SourceObserver,
+    identity: Arc<()>,
+}
+
+/// Owned by the actual SourceInput, never by the cached rendition. Revocation
+/// and policy enqueue share the ledger lock, so an accepted policy command is
+/// queued before that input can settle its custody.
+pub(crate) struct SourceObserverPublication {
+    ledger: Weak<StdMutex<SourceOwnersState>>,
+    identity: Arc<()>,
+}
+impl Drop for SourceObserverPublication {
+    fn drop(&mut self) {
+        let Some(ledger) = self.ledger.upgrade() else {
+            return;
+        };
+        let mut state = ledger.lock().expect("Source rendition owners");
+        if state
+            .source_observer
+            .as_ref()
+            .is_some_and(|published| Arc::ptr_eq(&published.identity, &self.identity))
+        {
+            state.source_observer = None;
+        }
+    }
+}
+
 /// No wire constructor. The private deferred-create path associates a closed
 /// full assignment with this exact rendition before committing viewer demand.
 pub(crate) struct SourceRenditionOwner {
@@ -59,29 +88,61 @@ impl SourceRenditionOwners {
             .telemetry_capable
     }
     pub(crate) async fn declare_source_telemetry(&self) -> Result<(), String> {
-        let observer = {
+        let update = {
             let mut state = self.state.lock().expect("Source rendition owners");
             state.telemetry_capable = true;
             state
                 .source_observer
                 .as_ref()
-                .map(|(_, observer)| observer.clone())
+                .map(|published| published.observer.begin_rolling_policy())
         };
-        if let Some(observer) = observer {
-            observer.declare_rolling_policy().await?;
+        if let Some(update) = update {
+            update.await?;
         }
         Ok(())
     }
 
-    pub(crate) fn set_source_observer(
+    pub(crate) fn publish_source_observer(
         &self,
         epoch: u64,
         observer: crate::source_custody::SourceObserver,
+    ) -> (
+        SourceObserverPublication,
+        impl std::future::Future<Output = Result<(), String>> + Send + 'static,
     ) {
-        self.state
-            .lock()
-            .expect("Source rendition owners")
-            .source_observer = Some((epoch, observer));
+        let identity = Arc::new(());
+        let update = {
+            let mut state = self.state.lock().expect("Source rendition owners");
+            let update = state
+                .telemetry_capable
+                .then(|| observer.begin_rolling_policy());
+            // An older input finishing its open cannot replace a newer live
+            // generation. Identity also fences replacement within one epoch.
+            if state
+                .source_observer
+                .as_ref()
+                .is_none_or(|published| published.epoch <= epoch)
+            {
+                state.source_observer = Some(PublishedSourceObserver {
+                    epoch,
+                    observer,
+                    identity: Arc::clone(&identity),
+                });
+            }
+            update
+        };
+        (
+            SourceObserverPublication {
+                ledger: Arc::downgrade(&self.state),
+                identity,
+            },
+            async move {
+                if let Some(update) = update {
+                    update.await?;
+                }
+                Ok(())
+            },
+        )
     }
     pub(crate) fn source_observer(
         &self,
@@ -92,8 +153,8 @@ impl SourceRenditionOwners {
             .expect("Source rendition owners")
             .source_observer
             .as_ref()
-            .filter(|(current, _)| *current == epoch)
-            .map(|(_, observer)| observer.clone())
+            .filter(|published| published.epoch == epoch)
+            .map(|published| published.observer.clone())
     }
 
     pub(crate) fn contains_live_assignment(&self, assignment: &SourceDispatchAssignment) -> bool {
@@ -509,5 +570,138 @@ impl Drop for SourceGenerationDispatch {
                 .in_flight -= 1;
             owner.changed.notify_waiters();
         }
+    }
+}
+
+#[cfg(test)]
+mod observer_publication_tests {
+    use super::*;
+    use crate::source_custody::SourceObserver;
+
+    #[tokio::test]
+    async fn retired_observer_reuse_defers_telemetry_to_next_live_input() {
+        let owners = SourceRenditionOwners::default();
+        let (old, old_owner) = SourceObserver::policy_fixture();
+        let (publication, update) = owners.publish_source_observer(7, old);
+        update.await.expect("no telemetry yet");
+        drop(publication);
+        drop(old_owner); // The original source owner has actually ended.
+        assert!(owners.source_observer(7).is_none());
+        owners
+            .declare_source_telemetry()
+            .await
+            .expect("cached rendition remains reusable");
+        assert!(owners.has_source_telemetry());
+
+        let (next, mut next_owner) = SourceObserver::policy_fixture();
+        let (publication, update) = owners.publish_source_observer(8, next.clone());
+        // Publication enqueues pending policy even though its request was
+        // prepared before telemetry arrived; no projection future is polled.
+        let reply = next_owner.projection().await;
+        assert!(!next.rolling_policy());
+        reply.send(Ok(())).expect("policy waiter");
+        update
+            .await
+            .expect("next live owner accepts rolling policy");
+        assert!(next.rolling_policy());
+        drop(publication);
+        assert!(owners.source_observer(8).is_none());
+    }
+
+    #[tokio::test]
+    async fn retiring_old_input_cannot_unpublish_replacement_or_newer_epoch() {
+        let owners = SourceRenditionOwners::default();
+        let (old, _old_owner) = SourceObserver::policy_fixture();
+        let (old_publication, update) = owners.publish_source_observer(10, old);
+        update.await.expect("old publication");
+        let (replacement, _replacement_owner) = SourceObserver::policy_fixture();
+        let (replacement_publication, update) = owners.publish_source_observer(10, replacement);
+        update.await.expect("same-epoch replacement");
+        drop(old_publication);
+        assert!(owners.source_observer(10).is_some());
+
+        let (next, _next_owner) = SourceObserver::policy_fixture();
+        let (next_publication, update) = owners.publish_source_observer(11, next);
+        update.await.expect("next epoch");
+        let (late, _late_owner) = SourceObserver::policy_fixture();
+        let (late_publication, update) = owners.publish_source_observer(10, late);
+        update
+            .await
+            .expect("late old input cannot replace current publication");
+        assert!(owners.source_observer(10).is_none());
+        drop(replacement_publication);
+        drop(late_publication);
+        assert!(owners.source_observer(11).is_some());
+        drop(next_publication);
+        assert!(owners.source_observer(11).is_none());
+    }
+
+    #[tokio::test]
+    async fn telemetry_accepted_before_retirement_keeps_its_authority_reply() {
+        let owners = Arc::new(SourceRenditionOwners::default());
+        let (observer, mut owner) = SourceObserver::policy_fixture();
+        let (publication, update) = owners.publish_source_observer(3, observer.clone());
+        update.await.expect("publication");
+        let declaration = tokio::spawn({
+            let owners = Arc::clone(&owners);
+            async move { owners.declare_source_telemetry().await }
+        });
+        // Reaching the real command receiver proves the declaration has
+        // passed the fence. Retirement must not discard its authority result.
+        let reply = owner.projection().await;
+        drop(publication);
+        assert!(owners.source_observer(3).is_none());
+        owners
+            .declare_source_telemetry()
+            .await
+            .expect("later attach stays pending");
+        reply.send(Ok(())).expect("accepted declaration");
+        declaration
+            .await
+            .expect("declaration task")
+            .expect("authority accepted");
+        assert!(observer.rolling_policy());
+    }
+
+    #[tokio::test]
+    async fn live_owner_authority_failure_is_preserved() {
+        let owners = Arc::new(SourceRenditionOwners::default());
+        let (observer, mut owner) = SourceObserver::policy_fixture();
+        let (_publication, update) = owners.publish_source_observer(5, observer.clone());
+        update.await.expect("publication");
+        let declaration = tokio::spawn({
+            let owners = Arc::clone(&owners);
+            async move { owners.declare_source_telemetry().await }
+        });
+        owner
+            .projection()
+            .await
+            .send(Err("source authority refused policy".into()))
+            .expect("live waiter");
+        assert_eq!(
+            declaration.await.expect("task"),
+            Err("source authority refused policy".into())
+        );
+        assert!(!observer.has_authority());
+        assert!(!observer.rolling_policy());
+        assert!(owners.source_observer(5).is_some());
+    }
+
+    #[tokio::test]
+    async fn closed_live_owner_is_an_error_until_publication_retires() {
+        let owners = SourceRenditionOwners::default();
+        let (observer, owner) = SourceObserver::policy_fixture();
+        let (publication, update) = owners.publish_source_observer(6, observer);
+        update.await.expect("publication");
+        drop(owner);
+        assert_eq!(
+            owners.declare_source_telemetry().await,
+            Err("original-source owner ended".into())
+        );
+        drop(publication);
+        owners
+            .declare_source_telemetry()
+            .await
+            .expect("retired input has no live projection");
     }
 }

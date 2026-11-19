@@ -1409,7 +1409,10 @@ async fn client_event_joins_and_persists_every_live_session_measurement() {
     beacon.session_id = Some("session-a".into());
     let event = client_playback_event(&beacon, 7);
     let info = crate::transcode::SessionInfo {
+        dolby_vision_refit: None,
         vod_observation: None,
+        dv_refit_digest: None,
+        dv_refit_identity_reason: None,
         id: "session-a".into(),
         presentation: "live-recovery",
         file_id: 42,
@@ -1913,7 +1916,7 @@ fn writer_abandoned_replies_render_by_request_and_outcome() {
     ] {
         assert!(rendered.contains(line), "missing {line:?} in\n{rendered}");
     }
-    assert_eq!(hiqlite::db_writer_abandoned_replies().len(), 11);
+    assert_eq!(crate::cluster::writer_abandoned_replies().len(), 11);
 }
 
 /// E1a: the applied view's families render from one observation, the mark's
