@@ -4101,7 +4101,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # shared_source_playback/tests.rs. The Direct fixture awaits its Start before
 # checking the response. The cold-index fixture awaits its admission repost
 # after End retires the Start waiter.
-expected_occurrences = 1183
+# The changed-source offline fixture awaits one queue pass in place of the
+# spawned worker loop, removing one test task.
+expected_occurrences = 1182
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes

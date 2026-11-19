@@ -1674,18 +1674,23 @@ mod tests {
             .await
             .expect("replace package");
 
-        let task = tokio::spawn(Arc::clone(&fixture.manager).run(voter_authority()));
-        for _ in 0..40 {
-            tokio::task::yield_now().await;
-            if stored_package(&fixture, "changed-source").await.state == "failed" {
-                break;
-            }
-        }
+        assert_eq!(
+            stored_package(&fixture, "changed-source").await.state,
+            "queued"
+        );
+        // One queue pass awaits both the claim and the durable failure write.
+        fixture
+            .manager
+            .claim_pass(
+                &mut OfflineClaimPolicy::new(),
+                voter_authority().as_ref(),
+                fixture.store.as_ref(),
+            )
+            .await;
         let failed = stored_package(&fixture, "changed-source").await;
         assert_eq!(failed.state, "failed");
         assert_eq!(failed.phase, "waiting_for_source");
         assert_eq!(failed.error_code.as_deref(), Some("source_unavailable"));
-        task.abort();
     }
 
     #[tokio::test(start_paused = true)]
