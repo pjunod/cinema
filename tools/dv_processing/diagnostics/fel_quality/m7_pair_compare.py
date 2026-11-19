@@ -229,6 +229,20 @@ def validate_encoder(paths, refs, folder, chosen, recipe):
             "scope": "Map construction and encoder admission do not prove each coded block used its requested offset."}
 
 
+def validate_rate_proposal(proposal, runtime, encode_recipe, *, chosen, target,
+                           request_sha, proposal_sha):
+    """Bind the author to the pre-encode proposal and check the output recipe separately."""
+    baseline.require_fields(proposal, {"target_kbps": target, "request_sha256": request_sha},
+                            "selected rate proposal")
+    require(proposal["driver_argv"][-4:] == ["--prefix", chosen, "--override", f"b={target}k"],
+            "rate proposal argv differs from the selected attempt")
+    require(runtime["recipe_sha256"] == proposal_sha,
+            "author runtime recipe must identify the guarded rate proposal")
+    require(83334 <= target <= 125000
+            and encode_recipe["overrides"] == ["x265-params+=cbqpoffs=-9:crqpoffs=-12:aq-strength=0", f"b={target}k"],
+            "candidate differs from sealed NP1 override policy")
+
+
 def validate_candidate(paths, refs, protocol, result, metadata):
     """Decode receipt schema 1 owns software decoding, trace parsing and AU audit.
 
@@ -261,15 +275,6 @@ def validate_candidate(paths, refs, protocol, result, metadata):
     attempt = int(chosen[-1])
     require(paths["rate_proposal"] == folder.parent / f"proposal-{attempt}.json",
             "rate proposal is not the selected attempt")
-    proposal = read(paths["rate_proposal"])
-    baseline.require_fields(proposal, {"target_kbps": target,
-                                        "request_sha256": refs["run_request"]["sha256"]},
-                            "selected rate proposal")
-    require(proposal["driver_argv"][-4:] == ["--prefix", chosen, "--override", f"b={target}k"],
-            "rate proposal argv differs from the selected attempt")
-    require(83334 <= target <= 125000
-            and recipe["overrides"] == ["x265-params+=cbqpoffs=-9:crqpoffs=-12:aq-strength=0", f"b={target}k"],
-            "candidate differs from sealed NP1 override policy")
     for run_name, ref_name in (("protocol", "protocol"), ("served_baseline", "baseline_result")):
         require(run["artifacts"][run_name]["sha256"] == refs[ref_name]["sha256"],
                 f"run binding differs: {run_name}")
@@ -279,11 +284,12 @@ def validate_candidate(paths, refs, protocol, result, metadata):
     baseline.require_fields(author, {"schema_version": 1, "status": "validated_profile81_window",
                                        "protocol_sha256": refs["author_protocol"]["sha256"]}, "author receipt")
     runtime = read(paths["author_protocol"])
+    validate_rate_proposal(read(paths["rate_proposal"]), runtime, recipe, chosen=chosen, target=target,
+                           request_sha=refs["run_request"]["sha256"], proposal_sha=refs["rate_proposal"]["sha256"])
     require(runtime["comparison_protocol_sha256"] == PROTOCOL_SHA
-            and runtime["recipe_sha256"] == refs["rate_proposal"]["sha256"]
             and runtime["input_representation_sha256"] == run["artifacts"]["input"]["sha256"]
             and runtime["author_plan_sha256"] == terminal["author_plan_sha256"],
-            "author runtime protocol differs from the frozen comparison or guarded rate proposal")
+            "author runtime protocol differs from the frozen comparison, plan or input")
     author_request = read(paths["author_request"])
     require(author_request["protocol"]["sha256"] == refs["author_protocol"]["sha256"]
             and author_request["encoded_mp4"]["sha256"] == refs["encoded"]["sha256"]
