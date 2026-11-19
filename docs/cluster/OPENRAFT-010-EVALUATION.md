@@ -72,6 +72,13 @@ condition adds another 8 s. These state-dependent rules are also documented
 in upstream 0.9.25's `src/docs/protocol/leader_lease.md`; the configured floor
 alone is not the complete elapsed outage bound.
 
+The pinned 0.10.0 [pre-vote configuration](https://github.com/databendlabs/openraft/blob/6a6c8e71e4d086090e863594564108099a71c983/openraft/src/config/config.rs)
+is opt-in in that release: `enable_pre_vote: None` currently evaluates to
+false. A peer without the separate network RPC is treated as granting the
+pre-vote to preserve mixed-version liveness. The port must explicitly enable
+and implement/authenticate that RPC, then test the mixed-version case; a
+version bump alone does not establish the intended C4 protection.
+
 ## 4. Qualification — preserve failures and measure before tuning
 
 The isolated port must exercise all of these cases before retiring code:
