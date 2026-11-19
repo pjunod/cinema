@@ -380,8 +380,9 @@ struct LibraryView: View {
                             }
                             #if os(tvOS)
                             // Keep the lifted first/last card and its ring inside
-                            // the horizontal viewport, including large posters.
-                            .padding(.horizontal, 24)
+                            // the horizontal viewport when focus restores to the last tile.
+                            .padding(.leading, 24)
+                            .padding(.trailing, 36)
                             .padding(.vertical, 16)
                             #else
                             .padding(.vertical, 12)
