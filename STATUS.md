@@ -1,13 +1,13 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-11-16 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-11-19 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
+- **2026-11-19 · Dolby Vision F+ curve fit (FEL RPU re-fit):** Owner Claude (claude-opus-5-5, from Codex 2026-11-18). Milestones 1–6 landed as #1565 (`8630ee431`) through `scripts/land` with the train off; all 50 Regression-Test lines carried. The nearest-Q12 production RPU passes all 48 native points and controls, and the full lane passed on `f8a7f5ab3`. The landed main merge ran preflight only (`Landed-Untested`, by Paul's order), so the combined tree has no lane run. Not deployed; physical playback and milestone 7 re-encode trials remain. [Ledger](docs/streaming/FEL-RPU-REFIT-BUILD.md).
 - **2026-11-16 · Native prepared forward rendezvous:** owner GPT. New Moon's
   native seeks trailed 90–97 ms; buffered forward aim+existing hold preserves the guard.
   Astra review and 103 focused tests pass; Safari acceptance, seam and deadline
   follow-up remain open ([build plan](docs/streaming/PLAYBACK-START-BUILD.md)).
-
 - **2026-11-17 · Web prepared-switch ownership:** owner GPT. New Moon's exposed
   successor could report Waiting under its predecessor's control generation,
   causing the server to cancel the prepared stream. Actual-source reproduction
@@ -18,7 +18,7 @@
   open. Twilight's earlier Profile 8.1 FEL metadata upgrade was accepted.
 
 - **2026-11-16 · CM29 target-black gamut reuse:** Owner Codex. State: implemented and numerically qualified on isolated Intel/AMD GPUs; served acceptance remains open. Next: verify the integrated application after operator deployment. Review and CI state are recorded in PR #1727. The [gamut ledger](docs/streaming/CM29-MEASURED-GAMUT.md) records paired black anchors, the complete Dumb Money frame and all stress-grid limitations; no CSV vertices changed.
-
+- **2026-11-19 · Guarded runner owner admission:** Codex implements UUID/generation-pinned starts and shared target-host exclusion. Astra accepted the isolated manual owner start, advancing service and product-verified pickup. Automatic qualification remains in the ci-fleet ledger; this native companion uses its independent current-head promotion gate. [Contract and evidence](docs/ci/GUARDED-RUNNER-ADMISSION.md).
 - **2026-11-13 · Optional Curator household login:** Owner Claude (claude-opus-5-5, taken over from Codex 2026-11-15). Independent account linking and household-only delegation; Astra production review cleared, local qualification passed; PR #1586 updated onto main and landing through the merge train. [Ledger](docs/features/CURATOR-LOGIN-STATUS.md). No deployment.
 - **2026-11-13 · CM4 trim fidelity:** Owner Codex. Implementation and bounded reference qualification complete; delivery PR #1591. Six-vector knots used a fixed BT.2020 palette and L8 MS was ignored. Real-frame and independent synthetic CPU comparisons remove all observed pixels above0.05dE; every worsening coordinate is retained. [Root cause, evidence and remaining work](docs/streaming/CM4-TRIM-FIDELITY.md).
 - **2026-11-13 · Linux replicated custody startup identity:** The lab4 exact-custody owner was released through merged PR #1567's normal census recovery at 19:01:59 UTC; read-only checks found the exact row absent and `plurx_background_source_recovery_pending=0` on lab3, lab4, lab6 and media1 at 19:06 UTC (revision `882d4b691e04`). All four had valid, host-matching read-only identity mounts at 19:03 UTC. PR #1570's reviewed guard is incorporated into the playback scheduling batch; combined qualification and fleet rollout remain pending. Broader playback acceptance also remains open. [Canonical ledger §1.5](docs/server/SOURCE-CUSTODY-RECOVERY.md#15-linux-replicated-startup-requires-actual-host-identity).

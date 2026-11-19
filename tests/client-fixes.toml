@@ -8170,6 +8170,14 @@ source_anchor = "Keep the preamble in the results scroll."
 test = "clients/apple/UITests/TVNavigationTests.swift"
 test_anchor = "testShowRowsKeepWholeCardsVisibleAtExtraLargeSize"
 
+[[fixes]]
+id = "apple.tvos-library-view-all-focus-clearance"
+commits = ["509a4ae3399f5a60577739e4338953dee3c2aade"]
+source = "clients/apple/Sources/LibraryView.swift"
+source_anchor = ".padding(.trailing, 36)"
+test = "clients/apple/UITests/TVNavigationTests.swift"
+test_anchor = "func testRowsViewAllOpensGroupAndBackRestoresHeader() throws"
+
 
 # Direct-GPT DV client corrective commits: source/test anchors only.
 # Execution evidence remains bound to its recorded source.
