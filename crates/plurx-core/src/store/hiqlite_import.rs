@@ -2460,12 +2460,12 @@ const TABLES: &[TablePlan] = &[
     }, // A person's watchlist and favorites, and the provider scores cached per
     // item, follow the catalogue they reference.
     // Person-curated tags, rows, Home layouts and grants follow the users
-    // and items they reference (v134).
+    // and items they reference (v135).
     TablePlan {
         name: "library_curation_grants",
         columns: &["user_id", "grant_name", "granted_by", "granted_at_ms"],
         order_by: "user_id, grant_name",
-        minimum_schema: 134,
+        minimum_schema: 135,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -2484,7 +2484,7 @@ const TABLES: &[TablePlan] = &[
             "created_at_ms",
         ],
         order_by: "id",
-        minimum_schema: 134,
+        minimum_schema: 135,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -2493,7 +2493,7 @@ const TABLES: &[TablePlan] = &[
         name: "library_curation_item_tags",
         columns: &["tag_id", "item_id", "added_by", "added_at_ms", "source"],
         order_by: "tag_id, item_id",
-        minimum_schema: 134,
+        minimum_schema: 135,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -2502,7 +2502,7 @@ const TABLES: &[TablePlan] = &[
         name: "library_curation_rejections",
         columns: &["tag_id", "item_id", "rejected_by", "rejected_at_ms"],
         order_by: "tag_id, item_id",
-        minimum_schema: 134,
+        minimum_schema: 135,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -2519,7 +2519,7 @@ const TABLES: &[TablePlan] = &[
             "updated_at_ms",
         ],
         order_by: "id",
-        minimum_schema: 134,
+        minimum_schema: 135,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -2528,7 +2528,7 @@ const TABLES: &[TablePlan] = &[
         name: "library_curation_home",
         columns: &["user_id", "layout", "updated_at_ms"],
         order_by: "user_id",
-        minimum_schema: 134,
+        minimum_schema: 135,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
