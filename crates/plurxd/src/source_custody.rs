@@ -983,6 +983,52 @@ pub(crate) struct SourceObserver {
     reads: Arc<ReadActivity>,
     foreground_bytes: u64,
 }
+/// A controlled command owner for deterministic lifecycle regressions. It
+/// never opens a source, grants capacity, or substitutes for store qualification.
+#[cfg(test)]
+pub(crate) struct SourceObserverPolicyTestOwner(mpsc::UnboundedReceiver<Command>);
+#[cfg(test)]
+impl SourceObserverPolicyTestOwner {
+    async fn next_command(&mut self) -> Option<Command> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.0.recv())
+            .await
+            .expect("policy lifecycle command must arrive")
+    }
+    pub(crate) async fn projection(&mut self) -> oneshot::Sender<Result<(), String>> {
+        match self
+            .next_command()
+            .await
+            .expect("live policy command owner")
+        {
+            Command::Project(projection, reply) => {
+                assert_eq!(projection.phase, ForegroundSourcePhase::Refill);
+                reply
+            }
+            _ => panic!("expected rolling-policy projection"),
+        }
+    }
+    pub(crate) async fn cleanup_pending(&mut self) {
+        assert!(matches!(
+            self.next_command().await,
+            Some(Command::CleanupPending)
+        ));
+    }
+}
+#[cfg(test)]
+impl SourceObserver {
+    pub(crate) fn policy_fixture() -> (Self, SourceObserverPolicyTestOwner) {
+        let (commands, receiver) = mpsc::unbounded_channel();
+        (
+            Self {
+                commands,
+                reads: Arc::new(ReadActivity::default()),
+                foreground_bytes: 1024,
+            },
+            SourceObserverPolicyTestOwner(receiver),
+        )
+    }
+}
+
 #[derive(Default)]
 struct ReadActivity {
     known: std::sync::atomic::AtomicBool,
@@ -1103,7 +1149,7 @@ impl SourceRequest {
                     return Err(match outcome {
                         Err(error) => error.to_string(),
                         _ => "original-source registration lost authority".into(),
-                    })
+                    });
                 }
                 Err(error) => {
                     // No input was opened. A lost registration acknowledgement
@@ -1202,11 +1248,20 @@ impl SourceObserver {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Some(SourceReadActivity(Arc::clone(&self.reads)))
     }
-    async fn project(&self, projection: ForegroundSourceProjection) -> Result<(), String> {
+    fn begin_projection(
+        &self,
+        projection: ForegroundSourceProjection,
+    ) -> Result<oneshot::Receiver<Result<(), String>>, String> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(Command::Project(projection, reply))
             .map_err(|_| "original-source owner ended".to_owned())?;
+        Ok(response)
+    }
+    async fn finish_projection(
+        &self,
+        response: oneshot::Receiver<Result<(), String>>,
+    ) -> Result<(), String> {
         let result = response
             .await
             .map_err(|_| "original-source projection owner ended".to_owned())?;
@@ -1214,6 +1269,10 @@ impl SourceObserver {
             self.reads.authority_lost.cancel();
         }
         result
+    }
+    async fn project(&self, projection: ForegroundSourceProjection) -> Result<(), String> {
+        self.finish_projection(self.begin_projection(projection)?)
+            .await
     }
     pub(crate) async fn refill(&self) -> Result<(), String> {
         let mut projection =
@@ -1318,18 +1377,40 @@ impl SourceObserver {
     pub(crate) async fn policy_changed(&self) {
         self.reads.policy_changed.notified().await;
     }
-    pub(crate) async fn declare_rolling_policy(&self) -> Result<(), String> {
-        if self.rolling_policy() {
-            return Ok(());
+    /// Enqueue while the publication owner still holds its retirement fence;
+    /// callers await durable authority outside that fence. This never infers
+    /// retirement from a closed channel: active-owner errors remain errors.
+    pub(crate) fn begin_rolling_policy(
+        &self,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send + 'static {
+        let response = (!self.rolling_policy()).then(|| {
+            let mut projection =
+                ForegroundSourceProjection::startup(crate::fragment_index_cluster::unix_ms());
+            projection.phase = ForegroundSourcePhase::Refill;
+            self.begin_projection(projection)
+        });
+        let observer = self.clone();
+        async move {
+            if let Some(response) = response {
+                // Close the old transfer opportunity before making reads
+                // unconstrained by that class's finite grant.
+                observer.finish_projection(response?).await?;
+                observer
+                    .reads
+                    .reads_held
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                observer.reads.reads_resumed.notify_waiters();
+                observer
+                    .reads
+                    .rolling
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                observer.reads.policy_changed.notify_one();
+            }
+            Ok(())
         }
-        // Close the old transfer opportunity before making source reads
-        // unconstrained by that class's finite grant.
-        self.refill().await?;
-        self.reads
-            .rolling
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.reads.policy_changed.notify_one();
-        Ok(())
+    }
+    pub(crate) async fn declare_rolling_policy(&self) -> Result<(), String> {
+        self.begin_rolling_policy().await
     }
     pub(crate) fn rolling_policy(&self) -> bool {
         self.reads.rolling.load(std::sync::atomic::Ordering::SeqCst)

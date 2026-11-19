@@ -1,3 +1,50 @@
+# Subtitle identity fixture: +1 time shape is the one-millisecond sleep while
+# waiting for an observable ctime mutation, bounded by a two-second assertion.
+# It runs on the existing test thread; no production work or settlement owner.
+# PR1727/main8630 structural union (2026-11-18): preserve both reviewed
+# ownership audits below. Compared with actual main, five task shapes are
+# joined test workers/controllers in decode_facts, source_generation,
+# source_input and vodencode_tests. Five observation deadlines are the three
+# DV supervisor bounds, source custody receive and admission init fetch.
+# Four Command constructors are two fixture policy-command builders in
+# copy_analysis/gap_fill_tests (neither launched there), plus the two owned DV
+# children described below. Three process-capable matches are the controlled
+# decode-facts fixture spawn and the two DV children. The two added kill-on-drop
+# guards remain fallback only; existing owners wait/reap before assertions.
+# No production task/timer/process shape, pattern, root or exclusion changed.
+# Static counts are not runtime/physical-settlement evidence.
+
+# Static raw-retirement fixture follow-up (2026-11-17): one controlled worker
+# thread and one scoped controller thread are both joined. The controller's
+# five-second acknowledgement bound fails observation only; raw custody remains
+# held until actual worker join. Production accounting adds no task, process or timer.
+
+# HDR source-lifetime/admission and capture-boundary fixture audit (2026-11-16).
+# Authored static comparison of f83484653 with fbe197ed9, using the unchanged
+# rust_structural_source extractor and module_roots; not runtime qualification.
+# Exact source deltas: namespaced tasks 1166->1170 (+4), method spawns
+# 99->101 (+2), time constructors 2251->2256 (+5), Commands 352->354 (+2),
+# process-capable methods 937->939 (+2), lifecycle methods 395->400 (+5),
+# and kill-on-drop constructors 127->129 (+2). The independent prepared-status
+# baseline correction 936->937 from #1752 is preserved below; it is not part
+# of this change's +2 process-capable delta.
+# All added matches are test-only. Four fixture tasks are joined on their
+# normal paths: two controlled telemetry declarations in source_generation.rs,
+# SourceInput close_and_wait behind a held reader slot in source_input/tests.rs,
+# and the admission-purpose init fetch in vodencode_tests.rs. Source custody
+# stays with the physical close/join; observer publication revokes separately.
+# Five deadline constructors are failing observation bounds: one controlled
+# policy-command receive, one admission init fetch, and three DV supervisor
+# observations. A timeout fails the fixture, never proves task/child settlement.
+# Two actual child-launch sites in dv_runtime.rs create the stdin-held encoder
+# and failing helper. Both have kill-on-drop fallbacks; the encoder is attached
+# to ChildJob and registered with ProducerSlot. The registered owner retains
+# writer/reap responsibility. Both DV boundary fixtures settle writers, request
+# exact retirement, confirm reap and join the helper before assertions. Five
+# lifecycle matches are one actual child.wait plus four retained supervised
+# HelperCompletion.wait observations, not five new process waits.
+# No production task, timer or process-launch shape is added. Roots, patterns,
+# extractor, aliases, forbidden-zeroes and unrelated expected rows are unchanged.
 # F+ PR1565 ownership review (2026-11-13), independently reviewed against
 # main e503f8bf3 with the unchanged rust_structural_source extractor and the
 # declared module_roots. Static source ownership evidence only; no runtime or
@@ -4053,7 +4100,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Shared: both sides carried the Twilight/reader source (title-lane scheduling and reader
 # reclamation), so main's figure already counts admission.rs +1 and source_probe/title_work_tests.rs +4.
 # Union 1153 + 15 (F+) + 13 (main) = 1181, less those 5 counted twice = 1176.
-expected_occurrences = 1176
+expected_occurrences = 1181
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4308,7 +4355,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
-expected_occurrences = 99
+expected_occurrences = 102
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6016,7 +6063,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # source_probe/title_work_tests.rs +8 and transcode/manager/construct.rs +1 (the bounded
 # production qualification-admission timeout, QUEUE_WAIT in admit_dv_title).
 # Union 2212 + 20 + 39 = 2271, less those 11 counted twice = 2260.
-expected_occurrences = 2260
+expected_occurrences = 2266
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6065,6 +6112,11 @@ pattern = "use\\s+tokio::time"
 # +1 #1609 (da8f9357d, processed-window stage timings): dv_segment's stage
 # clock and its handoff tests, each on its owning task (reviewed in #1645).
 expected_occurrences = 8
+
+# Static fixture lifecycle follow-up (2026-11-17): gap-fill adds two real
+# children (FFmpeg builder and FFprobe) joined by testfixtures::run; TempDir
+# remains live through both settlements. The decode-facts change is a final
+# failure snapshot only. These are test fixtures; production gates are unchanged.
 
 [[module_structures]]
 id = "process-command-construction"
@@ -6549,7 +6601,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # source_probe/title_work_tests.rs +1.
 # Union at 0d501cae6: 349 + 13 + 3 = 365, less those 3 counted twice = 362; the spool
 # registration test adds one isolated test image: 363.
-expected_occurrences = 363
+expected_occurrences = 367
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7279,13 +7331,17 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # it reads listener state and launches nothing.
 # +1 with #1629: the sharing idle-loop test reads SharingManager::status()
 # to observe the listener state; it launches nothing.
+# Prepared delivery (#1736): +1 test-only `.vod.status()` observation in
+# processed_stream_format_reports_the_attached_carrier_not_its_pq_base.
+# It reads the existing VOD owner's status_publication snapshot: no child
+# launch, lease renewal, or ownership transfer. The broad matcher is unchanged.
 # F+ (#1565) contributes five awaited test-only launches beyond current main:
 # dv_disk/tests.rs +1, fragindex/refit_acceptance_tests.rs +1,
 # fragindex/tests.rs +1, and source_probe/dv_refit.rs +2.
 # Prepared delivery (#1736/#1752) contributes main's additional test-only
 # `.vod.status()` snapshot observation. It launches no child and transfers no
 # ownership. Preserve both reviewed contributions: main 937 + F+ 5 = 942.
-expected_occurrences = 942
+expected_occurrences = 945
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7606,7 +7662,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Change-driven sharing monitors (A6 M3): +1 closed.wait() in the receiver
 # connection monitor's one-second floor wait, beside its change wait. No
 # process is involved.
-expected_occurrences = 395
+expected_occurrences = 400
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -7855,7 +7911,7 @@ pattern = "kill_on_drop\\s*\\("
 # sleep child, killed and waited before the successor takes the lane).
 # Union at 0d501cae6: 126 + 2 + 1 = 129, less 1 counted twice = 128; the spool
 # registration test adds one: 129.
-expected_occurrences = 129
+expected_occurrences = 131
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

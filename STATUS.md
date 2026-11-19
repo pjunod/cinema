@@ -1,6 +1,6 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-11-13 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-11-16 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
 - **2026-11-18 · Settings → Cluster rebuilt:** owner Claude, branch `claude/cluster-settings-layout`. Status strip, alert slot, nodes table with per-node drawers, one settings list with advisory readiness chips, ledger, Maintenance, Backup, log; no folds or tabs. Web tests pass; Chromium baseline and PR still to come ([operator docs](docs/OPERATIONS.md)).
@@ -18,6 +18,8 @@
   33 focused regressions and independent Astra review pass. Runtime Safari
   continuity after deployment and the preparation-deadline follow-up remain
   open. Twilight's earlier Profile 8.1 FEL metadata upgrade was accepted.
+
+- **2026-11-16 · CM29 target-black gamut reuse:** Owner Codex. State: implemented and numerically qualified on isolated Intel/AMD GPUs; served acceptance remains open. Next: verify the integrated application after operator deployment. Review and CI state are recorded in PR #1727. The [gamut ledger](docs/streaming/CM29-MEASURED-GAMUT.md) records paired black anchors, the complete Dumb Money frame and all stress-grid limitations; no CSV vertices changed.
 
 - **2026-11-13 · Optional Curator household login:** Owner Claude (claude-opus-5-5, taken over from Codex 2026-11-15). Independent account linking and household-only delegation; Astra production review cleared, local qualification passed; PR #1586 updated onto main and landing through the merge train. [Ledger](docs/features/CURATOR-LOGIN-STATUS.md). No deployment.
 - **2026-11-13 · CM4 trim fidelity:** Owner Codex. Implementation and bounded reference qualification complete; delivery PR #1591. Six-vector knots used a fixed BT.2020 palette and L8 MS was ignored. Real-frame and independent synthetic CPU comparisons remove all observed pixels above0.05dE; every worsening coordinate is retained. [Root cause, evidence and remaining work](docs/streaming/CM4-TRIM-FIDELITY.md).
@@ -103,7 +105,7 @@ Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-0
 
 | First recorded | Effort | Now in |
 |---|---|---|
-| 2026-10-11 | Playback startup path: the per-read stall and the web scrim | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
+| Undated | Playback startup path: the per-read stall and the web scrim | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-11 | Startup and tone-map: fewer create-path reads, a tone-map census, lab arms | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-10 | HDR tone-map on Apple Silicon runs on the GPU, held to CPU parity | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-04 | Live TV station logos on Apple TV, iOS and Android | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
