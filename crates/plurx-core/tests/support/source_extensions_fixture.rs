@@ -769,24 +769,38 @@ fn rewind_offload_to_v129(connection: &rusqlite::Connection) {
         .expect("published offload rewind");
 }
 
-/// Rewind v129 (retention keeps a charged custody's owner job) to v128: the
-/// exact marker is required; the v85 enqueue and v86 upkeep triggers return.
-fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("fixture custody retention ordinal");
-    if version != 129 {
-        return;
-    }
-    let marker: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM background_custody_retention_schema WHERE singleton=1 AND version=1",
-            [],
-            |row| row.get(0),
+pub(crate) const CUSTODY_RETENTION_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('background_custody_retention_schema','background_job_enqueue_command','background_job_maintenance_command','background_source_custody_owner_work') AND sql IS NOT NULL ORDER BY name";
+
+fn custody_retention_shape(connection: &rusqlite::Connection) -> Vec<(String, String)> {
+    connection
+        .prepare(CUSTODY_RETENTION_FIXTURE_SHAPE_SQL)
+        .expect("custody retention fixture inventory")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("custody retention fixture objects")
+        .collect::<Result<_, _>>()
+        .expect("complete custody retention fixture objects")
+}
+
+pub(crate) fn validated_custody_retention_rewind(shape: &[(String, String)]) -> [String; 6] {
+    let expected =
+        rusqlite::Connection::open_in_memory().expect("published custody retention witness");
+    expected
+        .execute_batch(
+            "CREATE TABLE background_job_commands(id TEXT);
+         CREATE TABLE background_source_custody(owner_kind TEXT,work_id TEXT);",
         )
-        .expect("custody retention marker");
-    assert_eq!(marker, 1, "custody retention requires its exact marker");
-    let plan = [
+        .expect("published custody retention dependencies");
+    expected
+        .execute_batch(include_str!(
+            "../../src/store/background_jobs_custody_retention.sql"
+        ))
+        .expect("published v129 custody retention");
+    assert_eq!(
+        shape,
+        custody_retention_shape(&expected),
+        "exact published custody retention required"
+    );
+    [
         "DROP TABLE background_custody_retention_schema;".to_owned(),
         "DROP INDEX background_source_custody_owner_work;".to_owned(),
         "DROP TRIGGER background_job_enqueue_command;".to_owned(),
@@ -807,10 +821,29 @@ fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
             )
             .trim_end_matches(';')
         ),
-        "PRAGMA user_version=128;".to_owned(),
-    ];
+    ]
+}
+
+/// Rewind v129 (retention keeps a charged custody's owner job) to v128: the
+/// exact marker is required; the v85 enqueue and v86 upkeep triggers return.
+fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture custody retention ordinal");
+    if version != 129 {
+        return;
+    }
+    let marker: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM background_custody_retention_schema WHERE singleton=1 AND version=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("custody retention marker");
+    assert_eq!(marker, 1, "custody retention requires its exact marker");
+    let plan = validated_custody_retention_rewind(&custody_retention_shape(connection));
     connection
-        .execute_batch(&plan.join("\n"))
+        .execute_batch(&format!("{}\nPRAGMA user_version=128;", plan.join("\n")))
         .expect("published custody retention rewind");
 }
 
