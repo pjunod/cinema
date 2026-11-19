@@ -5359,9 +5359,79 @@ struct InternalReadAdmission {
     checks: u16,
 }
 
-struct InternalReadAuthority {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PeerAuthorityStamp {
+    membership: hiqlite::LocalDbMembershipSnapshot,
+    image_generation: u64,
+    revisions: [u64; 3],
+}
+
+struct PeerAuthorityLease {
+    stamp: PeerAuthorityStamp,
     expires_at: Instant,
+    reachable_through_ms: i64,
+}
+
+impl PeerAuthorityLease {
+    fn admits(&self, stamp: &PeerAuthorityStamp, now: Instant, wall_ms: i64) -> bool {
+        stamp.membership.running
+            && stamp.membership.committed
+            && stamp.image_generation.is_multiple_of(2)
+            && self.stamp == *stamp
+            && self.expires_at > now
+            && wall_ms <= self.reachable_through_ms
+    }
+}
+
+struct InternalReadAuthority {
+    member: Option<PeerAuthorityLease>,
+    voter: Option<PeerAuthorityLease>,
     refresh: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl InternalReadAuthority {
+    fn lease(&self, role: PeerAuthorityRole) -> Option<&PeerAuthorityLease> {
+        match role {
+            PeerAuthorityRole::CommittedMember => self.member.as_ref(),
+            PeerAuthorityRole::CommittedVoter => self.voter.as_ref(),
+        }
+    }
+    fn publish(&mut self, role: PeerAuthorityRole, lease: PeerAuthorityLease) {
+        match role {
+            PeerAuthorityRole::CommittedMember => self.member = Some(lease),
+            PeerAuthorityRole::CommittedVoter => self.voter = Some(lease),
+        }
+    }
+}
+
+fn peer_authority_stamp(inner: &ReplicatedMembership) -> Option<PeerAuthorityStamp> {
+    let membership = inner.local_metrics.membership_snapshot();
+    if !membership.running
+        || !membership.committed
+        || !membership.members.contains(&membership.node_id)
+    {
+        return None;
+    }
+    let mark = inner.client.local_db_applied_mark().ok()?;
+    let image_generation = mark.generation();
+    if !image_generation.is_multiple_of(2) {
+        return None;
+    }
+    let applied_index = mark.applied_index();
+    let revisions = [
+        "cluster_nodes",
+        "cluster_node_removals",
+        "cluster_node_activity_keys",
+    ]
+    .map(|table| {
+        mark.slot(table)
+            .map_or(applied_index, |slot| mark.revision(slot))
+    });
+    (mark.generation() == image_generation).then_some(PeerAuthorityStamp {
+        membership,
+        image_generation,
+        revisions,
+    })
 }
 
 #[derive(Default)]
@@ -9757,8 +9827,14 @@ impl MembershipManager {
         {
             return Ok(false);
         }
-        self.verify_live_peer_authority(&auth.node_id, now, PeerAuthorityRole::CommittedVoter)
-            .await
+        let authorized = self
+            .cached_live_peer_authority(
+                &auth.node_id,
+                PeerAuthorityRole::CommittedVoter,
+                Some((auth.timestamp_ms, ACTIVITY_AUTH_WINDOW_MS as u64)),
+            )
+            .await?;
+        Ok(authorized && unix_ms()?.abs_diff(auth.timestamp_ms) <= ACTIVITY_AUTH_WINDOW_MS as u64)
     }
 
     /// Sign an exact internal peer HTTP request with this node's durable key.
@@ -9855,17 +9931,23 @@ impl MembershipManager {
             return Ok(false);
         }
         let clock_request = path == "/_internal/v1/clock";
-        let authorized = self
-            .verify_live_peer_authority_counted(
+        let authorized = if clock_request {
+            self.verify_live_peer_authority_counted(
                 &auth.node_id,
                 now,
                 PeerAuthorityRole::CommittedMember,
-                clock_request,
+                true,
             )
-            .await?;
-        Ok(authorized
-            && (!clock_request
-                || unix_ms()?.abs_diff(auth.timestamp_ms) <= ACTIVITY_AUTH_WINDOW_MS as u64))
+            .await?
+        } else {
+            self.cached_live_peer_authority(
+                &auth.node_id,
+                PeerAuthorityRole::CommittedMember,
+                Some((auth.timestamp_ms, ACTIVITY_AUTH_WINDOW_MS as u64)),
+            )
+            .await?
+        };
+        Ok(authorized && unix_ms()?.abs_diff(auth.timestamp_ms) <= ACTIVITY_AUTH_WINDOW_MS as u64)
     }
 
     /// Authenticate an exact internal mutation whose caller and receiver must
@@ -9885,12 +9967,14 @@ impl MembershipManager {
         {
             return Ok(false);
         }
-        self.verify_live_peer_authority(
-            &auth.node_id,
-            unix_ms()?,
-            PeerAuthorityRole::CommittedVoter,
-        )
-        .await
+        let authorized = self
+            .cached_live_peer_authority(
+                &auth.node_id,
+                PeerAuthorityRole::CommittedVoter,
+                Some((auth.timestamp_ms, ACTIVITY_AUTH_WINDOW_MS as u64)),
+            )
+            .await?;
+        Ok(authorized && unix_ms()?.abs_diff(auth.timestamp_ms) <= ACTIVITY_AUTH_WINDOW_MS as u64)
     }
 
     /// Sign a response to one exact internal request with this node's durable
@@ -10011,7 +10095,7 @@ impl MembershipManager {
             self.verify_committed_clock_peer_authority(source_node_id, false)
                 .await
         } else {
-            self.verify_live_peer_authority(source_node_id, unix_ms()?, role)
+            self.cached_live_peer_authority(source_node_id, role, None)
                 .await
         }
     }
@@ -10084,28 +10168,55 @@ impl MembershipManager {
         if unix_ms()?.abs_diff(auth.timestamp_ms) > INTERNAL_READ_AUTH_WINDOW_MS as u64 {
             return Ok(false);
         }
-        let observed = Instant::now();
+        let authorized = self
+            .cached_live_peer_authority(
+                &auth.node_id,
+                PeerAuthorityRole::CommittedMember,
+                Some((auth.timestamp_ms, INTERNAL_READ_AUTH_WINDOW_MS as u64)),
+            )
+            .await?;
+        Ok(authorized
+            && unix_ms()?.abs_diff(auth.timestamp_ms) <= INTERNAL_READ_AUTH_WINDOW_MS as u64)
+    }
+
+    async fn cached_live_peer_authority(
+        &self,
+        node_id: &str,
+        role: PeerAuthorityRole,
+        request_freshness: Option<(i64, u64)>,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = unix_ms()?;
+        if request_freshness.is_some_and(|(timestamp, window)| now.abs_diff(timestamp) > window) {
+            return Ok(false);
+        }
+        let Some(stamp) = peer_authority_stamp(inner) else {
+            return self
+                .verify_live_peer_authority(node_id, unix_ms()?, role)
+                .await;
+        };
         let refresh = {
             let mut authority = inner.internal_read_authority.lock().await;
-            if let Some(entry) = authority.get(&auth.node_id) {
-                if entry.expires_at > observed {
-                    return Ok(unix_ms()?.abs_diff(auth.timestamp_ms)
-                        <= INTERNAL_READ_AUTH_WINDOW_MS as u64);
+            if let Some(entry) = authority.get(node_id) {
+                let wall_now = unix_ms()?;
+                if entry
+                    .lease(role)
+                    .is_some_and(|lease| lease.admits(&stamp, Instant::now(), wall_now))
+                    && peer_authority_stamp(inner).as_ref() == Some(&stamp)
+                {
+                    return Ok(true);
                 }
                 Arc::clone(&entry.refresh)
             } else {
-                // Only senders with a verified cached signing key reach this
-                // map. Keep expired entries as their per-sender single-flight
-                // gates; membership/key eviction removes them, so the map has
-                // the same hard peer bound without a global slow-query lock.
                 if authority.len() >= MAX_ACTIVITY_PEERS {
                     return Ok(false);
                 }
                 let refresh = Arc::new(tokio::sync::Mutex::new(()));
                 authority.insert(
-                    auth.node_id.clone(),
+                    node_id.to_owned(),
                     InternalReadAuthority {
-                        expires_at: observed,
+                        member: None,
+                        voter: None,
                         refresh: Arc::clone(&refresh),
                     },
                 );
@@ -10113,44 +10224,50 @@ impl MembershipManager {
             }
         };
         let _refresh = refresh.lock().await;
-        // Queueing behind this sender's single-flight consumes both the proof
-        // window and heartbeat freshness. Re-sample wall time after the wait;
-        // never let the timestamp captured before signature verification
-        // authorize a later consensus read or cached-authority hit.
+        // This sender alone waits for its read. Re-observe both clocks and
+        // source after queueing; another sender never shares this mutex.
         let authority_now = unix_ms()?;
-        if authority_now.abs_diff(auth.timestamp_ms) > INTERNAL_READ_AUTH_WINDOW_MS as u64 {
+        if request_freshness
+            .is_some_and(|(timestamp, window)| authority_now.abs_diff(timestamp) > window)
+        {
             return Ok(false);
         }
+        let Some(stamp) = peer_authority_stamp(inner) else {
+            return self
+                .verify_live_peer_authority(node_id, authority_now, role)
+                .await;
+        };
         {
-            // A waiter for this sender may find that the task ahead of it
-            // already refreshed authority. Re-check without coupling any
-            // other sender to the consistent read below.
             let authority = inner.internal_read_authority.lock().await;
             if authority
-                .get(&auth.node_id)
-                .is_some_and(|entry| entry.expires_at > Instant::now())
+                .get(node_id)
+                .and_then(|entry| entry.lease(role))
+                .is_some_and(|lease| lease.admits(&stamp, Instant::now(), authority_now))
+                && peer_authority_stamp(inner).as_ref() == Some(&stamp)
             {
-                return Ok(
-                    unix_ms()?.abs_diff(auth.timestamp_ms) <= INTERNAL_READ_AUTH_WINDOW_MS as u64
-                );
+                return Ok(true);
             }
         }
-        let live = self
-            .verify_live_peer_authority(
-                &auth.node_id,
-                authority_now,
-                PeerAuthorityRole::CommittedMember,
-            )
+        let observed = Instant::now();
+        let proof = self
+            .read_live_peer_authority(node_id, authority_now, role)
             .await?;
-        let proof_still_fresh =
-            unix_ms()?.abs_diff(auth.timestamp_ms) <= INTERNAL_READ_AUTH_WINDOW_MS as u64;
-        if live && proof_still_fresh {
-            let mut authority = inner.internal_read_authority.lock().await;
-            if let Some(entry) = authority.get_mut(&auth.node_id) {
-                entry.expires_at = Instant::now() + INTERNAL_READ_AUTHORITY_TTL;
+        if let Some(reachable_through_ms) = proof {
+            if peer_authority_stamp(inner).as_ref() == Some(&stamp) {
+                let mut authority = inner.internal_read_authority.lock().await;
+                if let Some(entry) = authority.get_mut(node_id) {
+                    entry.publish(
+                        role,
+                        PeerAuthorityLease {
+                            stamp,
+                            expires_at: observed + INTERNAL_READ_AUTHORITY_TTL,
+                            reachable_through_ms,
+                        },
+                    );
+                }
             }
         }
-        Ok(live && proof_still_fresh)
+        Ok(proof.is_some())
     }
 
     async fn activity_signature_is_valid(
@@ -10359,6 +10476,18 @@ impl MembershipManager {
                 .verify_committed_clock_peer_authority(node_id, true)
                 .await;
         }
+        Ok(self
+            .read_live_peer_authority(node_id, now, role)
+            .await?
+            .is_some())
+    }
+
+    async fn read_live_peer_authority(
+        &self,
+        node_id: &str,
+        now: i64,
+        role: PeerAuthorityRole,
+    ) -> Result<Option<i64>, MembershipError> {
         let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
         let admits = |raft_id| {
@@ -10370,7 +10499,7 @@ impl MembershipManager {
             )
         };
         if !admits(inner.identity.raft_id) {
-            return Ok(false);
+            return Ok(None);
         }
         let reachable_after = reachable_after(now);
         let rows = inner
@@ -10387,9 +10516,14 @@ impl MembershipManager {
             )
             .await?;
         let verified_reachable_after = unix_ms()?.saturating_sub(NODE_REACHABLE_WINDOW_MS);
-        Ok(rows.len() == 1
+        Ok((rows.len() == 1
             && rows[0].last_seen_at >= verified_reachable_after
             && admits(rows[0].raft_id))
+        .then(|| {
+            rows[0]
+                .last_seen_at
+                .saturating_add(NODE_REACHABLE_WINDOW_MS)
+        }))
     }
 
     /// Clock exchanges prove applied membership, not normal serving liveness.

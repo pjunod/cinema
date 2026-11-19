@@ -10871,3 +10871,95 @@ fn general_token_cache_protocol_refuses_a_fresh_v4_member_among_v5_members() {
         "a rollback without a matching v5 heartbeat closes the cache"
     );
 }
+
+fn peer_auth_stamp_fixture() -> PeerAuthorityStamp {
+    PeerAuthorityStamp {
+        membership: hiqlite::LocalDbMembershipSnapshot {
+            running: true,
+            node_id: 1,
+            membership_log: Some((1, 1, 10)),
+            members: BTreeSet::from([1, 2]),
+            voters: BTreeSet::from([1]),
+            committed: true,
+        },
+        image_generation: 2,
+        revisions: [3, 4, 5],
+    }
+}
+
+#[test]
+fn peer_proof_leases_never_cross_member_and_voter_roles() {
+    let stamp = peer_auth_stamp_fixture();
+    let now = Instant::now();
+    let mut authority = InternalReadAuthority {
+        member: None,
+        voter: None,
+        refresh: Arc::new(tokio::sync::Mutex::new(())),
+    };
+    authority.publish(
+        PeerAuthorityRole::CommittedMember,
+        PeerAuthorityLease {
+            stamp: stamp.clone(),
+            expires_at: now + Duration::from_secs(1),
+            reachable_through_ms: 10_000,
+        },
+    );
+    assert!(authority
+        .lease(PeerAuthorityRole::CommittedMember)
+        .unwrap()
+        .admits(&stamp, now, 10_000));
+    assert!(authority.lease(PeerAuthorityRole::CommittedVoter).is_none());
+    authority.publish(
+        PeerAuthorityRole::CommittedVoter,
+        PeerAuthorityLease {
+            stamp: stamp.clone(),
+            expires_at: now,
+            reachable_through_ms: 10_000,
+        },
+    );
+    assert!(!authority
+        .lease(PeerAuthorityRole::CommittedVoter)
+        .unwrap()
+        .admits(&stamp, now, 10_000));
+    assert!(authority
+        .lease(PeerAuthorityRole::CommittedMember)
+        .unwrap()
+        .admits(&stamp, now, 10_000));
+}
+
+#[test]
+fn peer_proof_leases_expire_on_heartbeat_source_aba_or_image_movement() {
+    let stamp = peer_auth_stamp_fixture();
+    let now = Instant::now();
+    let lease = PeerAuthorityLease {
+        stamp: stamp.clone(),
+        expires_at: now + Duration::from_secs(1),
+        reachable_through_ms: 10_000,
+    };
+    assert!(lease.admits(&stamp, now, 10_000));
+    assert!(
+        !lease.admits(&stamp, now, 10_001),
+        "heartbeat freshness cannot be extended by a cache lease"
+    );
+    assert!(!lease.admits(&stamp, now + Duration::from_secs(1), 10_000));
+    let mut changed = stamp.clone();
+    changed.membership.membership_log = Some((2, 2, 11));
+    assert!(
+        !lease.admits(&changed, now, 10_000),
+        "the same member set in a later log is a different source"
+    );
+    for slot in 0..3 {
+        let mut changed = stamp.clone();
+        changed.revisions[slot] += 1;
+        assert!(!lease.admits(&changed, now, 10_000));
+    }
+    let mut changed = stamp.clone();
+    changed.image_generation += 2;
+    assert!(!lease.admits(&changed, now, 10_000));
+    let mut changed = stamp.clone();
+    changed.membership.running = false;
+    assert!(!lease.admits(&changed, now, 10_000));
+    let mut changed = stamp;
+    changed.membership.committed = false;
+    assert!(!lease.admits(&changed, now, 10_000));
+}
