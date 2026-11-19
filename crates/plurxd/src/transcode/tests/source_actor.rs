@@ -4383,6 +4383,7 @@ fn delivery_policy_request(kind: SessionKind, subtitle_burn: Option<i64>) -> Ses
         source_telemetry: None,
         continuous_media: None,
         dv_processing_destination: None,
+        dv_refit_digest: None,
         sdr_master_codecs: None,
         vod_only: false,
         passive_vod: false,

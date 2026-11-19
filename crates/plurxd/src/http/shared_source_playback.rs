@@ -2675,6 +2675,7 @@ fn dolby_vision_fixture_source(
                     plurx_core::transcode::dvconvert::convert_length_prefixed(
                         sample,
                         nal_length_size,
+                        None,
                         &mut converted,
                     )
                     .expect("Profile 8.1 fixture RPUs");
