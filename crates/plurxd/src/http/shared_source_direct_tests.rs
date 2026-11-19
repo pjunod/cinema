@@ -478,7 +478,8 @@ async fn sharing_source_direct_read_join_before_end_receipt() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_direct_symlink_or_resized_file_refuses() {
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    fixture.keep_fixture_membership_stable().await;
     let session = started(&fixture).await;
     let peer = peer(&fixture, None).await;
     let url = direct_url(peer.address, &fixture, &session, "direct");
