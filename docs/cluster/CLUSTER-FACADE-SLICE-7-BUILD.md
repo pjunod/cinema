@@ -483,31 +483,60 @@ from a name:
 
    They must also pass for a proven-local DTO field named `membership`.
 
-### Runtime ownership
+### Runtime ownership (as built)
 
-- **One `Cluster` through startup.** `Boot`, `AppConfig`, `build_state` and
-  `new_configured` carry one `Cluster` (`Cluster::new` at the existing
-  composition point, after store selection) instead of the raw
-  `ReplicationMonitor` and `MembershipManager`. The fence is still built from
-  the replication metrics handle inside that composition. There is no
-  raw-parts getter, `Deref` or callback.
-- **Remove the three raw fields.** `AppState.replication`, `.serving` and
-  `.membership` are deleted, not made private copies.
-- **New narrow capabilities.** Each one delegates the original call:
-  - `Cluster::spawn_owned_loops(shutdown)` starts passive metrics, the fence
-    monitor, heartbeat, the offline-source probe and relay registration,
-    with the same tasks and the same order as `spawn_background_loops`;
-  - a sharing boot capability for ingress-custody publication and
-    purpose-key coordination;
-  - relay acquisition support;
-  - Live TV protocol pending nodes;
-  - the node hostname.
-- **Clock observer.** `ClockObserver` and `StartupClockObserver` take the
-  facade's existing clock source (`ClockOperations`), not the manager.
-- **Test hooks.** Test-only hooks live on the facade under `#[cfg(test)]`:
-  readiness set, planned-outage hold, fence subscribe, membership replacement
-  and replication replacement. Tests that string-assert "no
-  `state.membership`" keep asserting it.
+- **Parts through startup.** `Boot`, `build_state` and `AppConfig` carry one
+  opaque `ClusterParts`. It is built by `ClusterParts::of(&SelectedStore)` in
+  the facade module, and its fields are private.
+  `Cluster::compose(parts, applied_mark)` builds the fence from the
+  replication metrics handle, as `new_configured` did, then the facade. There
+  is no raw-parts getter, `Deref` or callback.
+- **Raw fields removed.** `AppState.replication`, `.serving` and
+  `.membership` are deleted.
+- **Narrow capabilities.** Each delegates the original call, in the original
+  order:
+  - `spawn_fence_and_metrics`: the passive sampler, then the fence monitor;
+  - `start_heartbeat_with_relay`: relay registration, then the heartbeat;
+  - `spawn_source_probe_answers`;
+  - `sharing_boot()`, with `record_custody_boot`, `announce_custody_boot`,
+    `qualify_purpose_master` and `coordinate_purposes`;
+  - `relay_supported_by`, `live_tv_pending_nodes` and `own_hostname`.
+
+  Their names are not manager method names. `Operations::handoff_for_shutdown`
+  became `hand_off_leadership_for_stop`. `StoreAccess::cluster_enabled` (the
+  subtitle cluster-sources switch) became `cluster_sources_enabled`.
+- **Startup clock.** plurx-core's `StartupClockObserver` still hands its
+  observer the manager. `StartupClockAdapter` in the facade turns it into
+  `ClockOperations` at once. The daemon's observer implements the facade's
+  `StartupClock`, and `ClockObserver::new` takes `ClockOperations`. plurx-core
+  is unchanged.
+- **Test hooks.** `#[cfg(test)]` only, never compiled into production: the
+  compiler probe shows E0599. They are:
+  - `test_fence`, `test_membership` and `test_replication`, which return the
+    facade's own parts;
+  - `with_membership`, which rebuilds the facade as `replace_membership`
+    always did;
+  - `with_replication`, which swaps only the monitor;
+  - `ClusterParts::from_handles` and `ClusterParts::standalone`;
+  - `AppState::replace_replication`.
+
+  Fixtures reach the same objects as before, and no assertion changed.
+
+### Census rules added by the 7d review
+
+- **Accessor class.** A call to a function that a read source declares
+  returning a raw type counts. This covers a `pub` dependency function, a
+  trait method, a visible facade function, or any function of this crate.
+  `selected.membership_manager()` is counted however its result is bound. A
+  raw type's own methods are not accessors: they need a raw receiver, which
+  is counted where it is obtained.
+- **Generic projections are unknown.** A field typed `P::Fence` counts.
+- **The facade's own tree.** Private fields declared in an exempt facade file
+  are ignored only outside that file's module tree. A counted `cluster/…`
+  file can name them, so they count there.
+- **`Self::`.** `Self::Variant` is a variant only inside an `impl` of the enum
+  that declares it.
+- **Every dependency source must parse.** A test requires it.
 
 ### Done when
 
@@ -521,3 +550,36 @@ from a name:
   reviewed.
 
 No fleet claim is made here. Deploying stays with Paul.
+
+## 7d delivery ledger
+
+- **Branch.** `claude/cluster-facade-7d`, on #1795's head `c85c80a`.
+- **Census.**
+  - The census moved from spellings to declarations: 199 → 190 for the nine
+    enum variants, → 183 for seven covered facade calls, → 158 for the 25
+    `ClusterJobAuthority` job-gate calls (role and roster now count by
+    visibility).
+  - It reached 0 once the raw fields were gone and `cluster_sources_enabled`
+    was renamed. `REACH_AROUNDS` is empty and `CEILING` is 0.
+  - After the review it is still 0 with the accessor class and the stricter
+    rules. All 15 census tests and the 7 ratchet tests pass.
+- **Focused regressions.** 234 tests passed at `64a8373`. They are the
+  integrated 4–7c set, every `startup_tests` case, `clock_offset`, the
+  internal-clock causal test and the census. Effort evidence `EV-5e2b97a254`.
+- **Compiler probe.** It is valid at `64a8373`, effort evidence for operation
+  `check-7d-probe-64a8373-c`. It ran on an archive of the exact commit with
+  one probe module (script
+  `/Volumes/Untitled/agent/claude/cluster-layer-20261118/probe-7d.py`). The
+  scratch copy is deleted after each run.
+  - Raw `AppState` fields give E0609 (three times).
+  - Private `Cluster` and `ClusterParts` fields give E0616 (four times).
+  - A test-only hook gives E0599.
+  - The facade route compiles, with no other error.
+- **Review.** One whole-diff adversarial review asked for changes: two
+  majors (the inferred-binding bypass and two stale item pins) and five
+  minors. All are fixed in the review-fix commit.
+  - The `fn run` and `fn spawn_background_loops` item pins were re-recorded
+    after review: the modeled facts are unchanged.
+  - Three desktop protected-filesystem cases still need a protected host.
+- **Not yet claimed.** Effort gate, landing, main promotion and deployment.
+

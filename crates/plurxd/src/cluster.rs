@@ -690,20 +690,18 @@ impl Cluster {
         &self.replication
     }
 
-    /// The same fence and membership manager over another replication
-    /// monitor, for fixtures that replace it.
+    /// This facade with only its replication monitor replaced, for fixtures
+    /// that replace it: the fence, manager, directory, jobs and access stay
+    /// the ones every subsystem was built with.
     #[cfg(test)]
     pub(crate) fn with_replication(
         &self,
         replication: plurx_core::cluster::migration::status::ReplicationMonitor,
-        mark: Option<hiqlite::AppliedMarkHandle>,
     ) -> Self {
-        Self::new(
-            self.fence.clone(),
-            self.membership.clone(),
+        Self {
             replication,
-            mark,
-        )
+            ..self.clone()
+        }
     }
 
     /// The same fence and replication monitor over another membership

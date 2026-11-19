@@ -1481,10 +1481,7 @@ impl AppState {
         &mut self,
         replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     ) {
-        self.cluster = self
-            .cluster
-            .with_replication(replication, self.applied.applied_mark());
-        self.live_tv_peers = self.cluster.calls();
+        self.cluster = self.cluster.with_replication(replication);
     }
 
     /// Point this state at another membership manager, and the cluster

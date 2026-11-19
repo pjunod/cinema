@@ -5,31 +5,31 @@
 //! `tests/support/rust_source_inventory.rs`, so a new file cannot hide), skips
 //! `#[cfg(test)]` items, and counts per file and per [`Class`]:
 //!
-//! - a field access named `membership`, `replication` or `serving`, on any
-//!   receiver — `state.membership` and a subsystem's cloned `self.membership`
-//!   alike;
-//! - a path naming one of [`TYPES`], or any other path starting `hiqlite::`;
-//! - a call to `PeerTransport::new`;
-//! - the same three names taken out by a pattern
-//!   (`let AppState { membership, .. } = state;`) or moved by a shorthand
-//!   field (`Foo { serving }`);
-//! - a path naming one of [`TYPES`], or any other path starting `hiqlite::`;
+//! - a field access named `membership`, `replication` or `serving`, or the
+//!   same names taken out by a pattern (`let AppState { membership, .. } =
+//!   state;`) or moved by a shorthand field (`Foo { serving }`);
+//! - a path naming one of [`TYPES`] or an alias of one, or any other path
+//!   starting `hiqlite::`;
 //! - a call to `PeerTransport::new`;
 //! - a call, by name, to a membership manager method: its role ([`ROLE`]) and
 //!   roster ([`ROSTER`]) answers, and every other public method of
 //!   `MembershipManager` (`manager`), read from plurx-core's source less the
-//!   names other types share ([`NOT_CLUSTER`]). A handle under another field
-//!   name is still counted by what is called on it.
+//!   names other types share ([`NOT_CLUSTER`]);
+//! - a call to a function a read source declares returning a raw type
+//!   (`accessor`), so a handle bound with an inferred type is counted where it
+//!   is obtained. A raw type's own methods are not accessors: they need a raw
+//!   receiver, which is counted where it is obtained.
 //!
 //! Macro bodies are not Rust syntax to `syn`, so their tokens are scanned for
-//! the same spellings (`tokio::join!(self.membership.activity_peers(), ..)`
+//! the same spellings (`tokio::join!(self.membership.promote_learner(id), ..)`
 //! counts). An item, statement or block under `#[cfg(test)]` or
 //! `#[cfg(all(test, ..))]` is skipped; `any(test, ..)` is counted.
 //!
-//! What it cannot see: a type renamed on import (`use … as`), a call through
-//! a generic or trait-object receiver whose method name is not the
-//! manager's, and code outside this crate's `src/` — plurx-core,
-//! plurx-cluster-check, `tests/` and `benches/` are not read.
+//! What it reads: this crate's production `src/`, and the `pub` fields,
+//! aliases and functions of every other workspace and vendored crate's
+//! `src/` (each must parse). What it cannot see: a raw handle reached only
+//! through a generic or trait-object receiver whose method names are not
+//! the manager's, where nothing names, declares or returns the raw type.
 //!
 //! Spellings are classified by what the sources declare ([`Declarations`]): a
 //! field spelling counts unless every declaration of that name has a proven
@@ -80,10 +80,13 @@ enum Class {
     /// Any other public `MembershipManager` method, by name (derived from
     /// plurx-core's source, less [`NOT_CLUSTER`]).
     Manager,
+    /// A call to a function a read source declares returning a raw type, so
+    /// a raw handle bound with an inferred type is still counted.
+    Accessor,
 }
 
 impl Class {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Membership,
         Self::Replication,
         Self::Serving,
@@ -93,6 +96,7 @@ impl Class {
         Self::Role,
         Self::Roster,
         Self::Manager,
+        Self::Accessor,
     ];
 
     const fn label(self) -> &'static str {
@@ -106,6 +110,7 @@ impl Class {
             Self::Role => "role",
             Self::Roster => "roster",
             Self::Manager => "manager",
+            Self::Accessor => "accessor",
         }
     }
 
@@ -404,6 +409,16 @@ struct Declarations {
     raw_fields: BTreeSet<String>,
     /// Local names that stand for a raw type: `use … as`, `type X = …`.
     raw_aliases: BTreeSet<String>,
+    /// Names of functions a read source declares returning a raw type.
+    raw_returning: BTreeSet<String>,
+    /// Raw private fields of the exempt facade: only its own child modules
+    /// can name them.
+    facade_private_raw_fields: BTreeSet<String>,
+    facade_private_declared: BTreeSet<String>,
+    pending_facade_private: Vec<(String, syn::Type, BTreeSet<String>)>,
+    pending_returns: Vec<(String, syn::Type, BTreeSet<String>)>,
+    /// Dependency sources `syn` could not parse; a test requires none.
+    unparsed: usize,
     /// `(enum, variant)` of every enum the counted crate declares, so
     /// `Rejection::ServingFence` is not the fence.
     variants: BTreeSet<(String, String)>,
@@ -422,12 +437,15 @@ impl Declarations {
     fn read(&mut self, source: &str, scope: Scope) {
         let Ok(file) = syn::parse_file(source) else {
             assert!(scope == Scope::Dependency, "a production file parses");
+            self.unparsed += 1;
             return;
         };
         let mut reader = DeclarationReader {
             declarations: self,
             scope,
             generics: Vec::new(),
+            trait_impl: false,
+            raw_impl: false,
         };
         reader.visit_file(&file);
     }
@@ -450,10 +468,26 @@ impl Declarations {
                 self.raw_fields.insert(name);
             }
         }
+        for (name, ty, generics) in std::mem::take(&mut self.pending_facade_private) {
+            if type_names_raw(&ty, &generics, &self.raw_aliases, true) {
+                self.facade_private_raw_fields.insert(name);
+            }
+        }
+        for (name, ty, generics) in std::mem::take(&mut self.pending_returns) {
+            if type_names_raw(&ty, &generics, &self.raw_aliases, false) {
+                self.raw_returning.insert(name);
+            }
+        }
     }
 
-    fn counts_field(&self, name: &str) -> bool {
-        !self.declared_fields.contains(name) || self.raw_fields.contains(name)
+    /// Whether a field spelling counts in a file; `inside_facade` is a file
+    /// of the facade's own module tree, which can name its private fields.
+    fn counts_field(&self, name: &str, inside_facade: bool) -> bool {
+        let declared = self.declared_fields.contains(name)
+            || (inside_facade && self.facade_private_declared.contains(name));
+        !declared
+            || self.raw_fields.contains(name)
+            || (inside_facade && self.facade_private_raw_fields.contains(name))
     }
 }
 
@@ -491,10 +525,7 @@ fn type_names_raw(
                     self.hit = true;
                 }
             }
-            if self.unresolved
-                && path.segments.len() == 1
-                && self.generics.contains(&path.segments[0].ident.to_string())
-            {
+            if self.unresolved && self.generics.contains(&path.segments[0].ident.to_string()) {
                 self.hit = true;
             }
             syn::visit::visit_path(self, path);
@@ -514,6 +545,11 @@ struct DeclarationReader<'d> {
     declarations: &'d mut Declarations,
     scope: Scope,
     generics: Vec<BTreeSet<String>>,
+    /// Inside `impl Trait for X`, whose functions are as visible as the trait.
+    trait_impl: bool,
+    /// Inside an `impl` of a raw type: its methods need a raw receiver, which
+    /// a counted file can only get through a site the census already counts.
+    raw_impl: bool,
 }
 
 impl DeclarationReader<'_> {
@@ -529,6 +565,30 @@ impl DeclarationReader<'_> {
 
     fn public(vis: &syn::Visibility) -> bool {
         matches!(vis, syn::Visibility::Public(_))
+    }
+
+    /// Record a function whose return type may name a raw type, if a
+    /// counted file can call it.
+    fn returns(&mut self, vis: &syn::Visibility, attrs: &[syn::Attribute], sig: &syn::Signature) {
+        if is_cfg_test(attrs) || self.raw_impl {
+            return;
+        }
+        let visible = match self.scope {
+            Scope::Daemon => true,
+            Scope::Facade => !matches!(vis, syn::Visibility::Inherited),
+            Scope::Dependency => Self::public(vis),
+        };
+        if let (true, syn::ReturnType::Type(_, ty)) = (visible, &sig.output) {
+            let mut generics = self.generics.last().cloned().unwrap_or_default();
+            for param in sig.generics.type_params() {
+                generics.insert(param.ident.to_string());
+            }
+            self.declarations.pending_returns.push((
+                sig.ident.to_string(),
+                (**ty).clone(),
+                generics,
+            ));
+        }
     }
 }
 
@@ -587,6 +647,16 @@ impl<'ast> Visit<'ast> for DeclarationReader<'_> {
             Scope::Facade => !matches!(field.vis, syn::Visibility::Inherited),
             Scope::Dependency => Self::public(&field.vis),
         };
+        if !visible && self.scope == Scope::Facade && Class::field(&name).is_some() {
+            self.declarations
+                .facade_private_declared
+                .insert(name.clone());
+            let generics = self.generics.last().cloned().unwrap_or_default();
+            self.declarations
+                .pending_facade_private
+                .push((name, field.ty.clone(), generics));
+            return;
+        }
         if visible && Class::field(&name).is_some() {
             self.declarations.declared_fields.insert(name.clone());
             let generics = self.generics.last().cloned().unwrap_or_default();
@@ -604,6 +674,50 @@ impl<'ast> Visit<'ast> for DeclarationReader<'_> {
         }
     }
 
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        let (outer_trait, outer_raw) = (self.trait_impl, self.raw_impl);
+        self.trait_impl = item.trait_.is_some();
+        self.raw_impl = matches!(item.self_ty.as_ref(), syn::Type::Path(path)
+            if path.path.segments.last().is_some_and(|segment|
+                TYPES.contains(&segment.ident.to_string().as_str())));
+        self.with_generics(&item.generics, |reader| {
+            syn::visit::visit_item_impl(reader, item);
+        });
+        self.trait_impl = outer_trait;
+        self.raw_impl = outer_raw;
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        self.returns(&item.vis, &item.attrs, &item.sig);
+        syn::visit::visit_item_fn(self, item);
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        let vis = if self.trait_impl {
+            syn::Visibility::Public(Default::default())
+        } else {
+            item.vis.clone()
+        };
+        self.returns(&vis, &item.attrs, &item.sig);
+        syn::visit::visit_impl_item_fn(self, item);
+    }
+
+    fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
+        let public = self.scope != Scope::Dependency || Self::public(&item.vis);
+        if public {
+            for entry in &item.items {
+                if let syn::TraitItem::Fn(function) = entry {
+                    self.returns(
+                        &syn::Visibility::Public(Default::default()),
+                        &function.attrs,
+                        &function.sig,
+                    );
+                }
+            }
+        }
+        syn::visit::visit_item_trait(self, item);
+    }
+
     fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
         if TYPES.contains(&rename.ident.to_string().as_str()) {
             self.declarations
@@ -616,12 +730,16 @@ impl<'ast> Visit<'ast> for DeclarationReader<'_> {
 struct Counter<'d> {
     counts: BTreeMap<Class, usize>,
     declarations: &'d Declarations,
+    /// A file of the facade's own module tree (`cluster/…`).
+    inside_facade: bool,
+    /// The self type of each enclosing `impl`, innermost last.
+    impls: Vec<String>,
 }
 
 impl Counter<'_> {
     /// A field spelling counts only where a raw handle can sit behind it.
     fn field(&self, name: &str) -> Option<Class> {
-        Class::field(name).filter(|_| self.declarations.counts_field(name))
+        Class::field(name).filter(|_| self.declarations.counts_field(name, self.inside_facade))
     }
 
     fn add(&mut self, class: Class) {
@@ -637,12 +755,16 @@ impl Counter<'_> {
         let mut class = (first == "hiqlite").then_some(Class::Hiqlite);
         for (at, segment) in segments.iter().enumerate() {
             let raw = TYPES.contains(segment) || self.declarations.raw_aliases.contains(*segment);
-            let variant = at > 0
-                && (segments[at - 1] == "Self"
-                    || self
-                        .declarations
-                        .variants
-                        .contains(&(segments[at - 1].to_owned(), (*segment).to_owned())));
+            let owner = match segments.get(at.wrapping_sub(1)) {
+                Some(&"Self") => self.impls.last().map(String::as_str),
+                Some(owner) if at > 0 => Some(*owner),
+                _ => None,
+            };
+            let variant = owner.is_some_and(|owner| {
+                self.declarations
+                    .variants
+                    .contains(&(owner.to_owned(), (*segment).to_owned()))
+            });
             if raw && !variant {
                 class = Some(Class::Type);
             }
@@ -701,6 +823,9 @@ impl Counter<'_> {
                         if called {
                             if let Some(class) = Class::method(&name) {
                                 self.add(class);
+                            }
+                            if self.declarations.raw_returning.contains(&name) {
+                                self.add(Class::Accessor);
                             }
                         } else if let Some(class) = self.field(&name) {
                             self.add(class);
@@ -867,9 +992,28 @@ impl<'ast> Visit<'ast> for Counter<'_> {
         syn::visit::visit_expr_field(self, field);
     }
 
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        let name = match item.self_ty.as_ref() {
+            syn::Type::Path(path) => path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string())
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        self.impls.push(name);
+        syn::visit::visit_item_impl(self, item);
+        self.impls.pop();
+    }
+
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        if let Some(class) = Class::method(&call.method.to_string()) {
+        let name = call.method.to_string();
+        if let Some(class) = Class::method(&name) {
             self.add(class);
+        }
+        if self.declarations.raw_returning.contains(&name) {
+            self.add(Class::Accessor);
         }
         syn::visit::visit_expr_method_call(self, call);
     }
@@ -877,6 +1021,13 @@ impl<'ast> Visit<'ast> for Counter<'_> {
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         if let syn::Expr::Path(path) = call.func.as_ref() {
             let segments = &path.path.segments;
+            if segments.last().is_some_and(|last| {
+                self.declarations
+                    .raw_returning
+                    .contains(&last.ident.to_string())
+            }) {
+                self.add(Class::Accessor);
+            }
             if segments.len() >= 2
                 && segments[segments.len() - 2].ident == "PeerTransport"
                 && segments[segments.len() - 1].ident == "new"
@@ -912,14 +1063,20 @@ impl<'ast> Visit<'ast> for Counter<'_> {
 /// Count one self-contained source: its own declarations decide its
 /// field spellings.
 fn census_of(source: &str) -> BTreeMap<Class, usize> {
-    census_with(source, &Declarations::of(source))
+    census_with(source, &Declarations::of(source), false)
 }
 
-fn census_with(source: &str, declarations: &Declarations) -> BTreeMap<Class, usize> {
+fn census_with(
+    source: &str,
+    declarations: &Declarations,
+    inside_facade: bool,
+) -> BTreeMap<Class, usize> {
     let file = syn::parse_file(source).expect("a production file parses");
     let mut counter = Counter {
         counts: BTreeMap::new(),
         declarations,
+        inside_facade,
+        impls: Vec::new(),
     };
     counter.visit_file(&file);
     counter.counts
@@ -1005,7 +1162,8 @@ fn census() -> Census {
         if exempt(rel) {
             continue;
         }
-        for (class, count) in census_with(source, &declarations) {
+        let inside_facade = rel.starts_with("cluster/");
+        for (class, count) in census_with(source, &declarations, inside_facade) {
             census.insert((rel.clone(), class), count);
         }
     }
@@ -1354,6 +1512,84 @@ fn role_and_roster_names_count_while_the_manager_exposes_them() {
             "{name}: a module-private raw method is not counted by name"
         );
     }
+}
+
+/// The review's bypass shapes: each must be counted.
+#[test]
+fn inferred_bindings_projections_and_facade_children_are_counted() {
+    let accessor = census_of(
+        "pub struct Selected;\n\
+         impl Selected { pub fn membership_manager(&self) -> MembershipManager { todo!() } }\n\
+         async fn f(s: &Selected) { let m = s.membership_manager(); let _ = m; }",
+    );
+    assert_eq!(
+        accessor.get(&Class::Accessor),
+        Some(&1),
+        "a raw handle bound with an inferred type is counted at the call"
+    );
+    let raw_method = census_of(
+        "impl ReplicationMonitor { pub fn metrics_handle(&self) -> PassiveRaftMetrics { todo!() } }\n\
+         struct Pool;\n\
+         impl Pool { fn metrics_handle(&self) -> Counters { todo!() } }\n\
+         fn f(p: &Pool) { let _ = p.metrics_handle(); }",
+    );
+    assert_eq!(
+        raw_method.get(&Class::Accessor),
+        None,
+        "a raw type's own method needs a raw receiver, which is counted where it is obtained"
+    );
+    let projection = census_of(
+        "struct S<P: Parts> { serving: P::Fence }\n\
+         fn f<P: Parts>(s: &S<P>) { let _ = &s.serving; }",
+    );
+    assert_eq!(
+        projection.get(&Class::Serving),
+        Some(&1),
+        "a generic projection is unknown"
+    );
+
+    let facade = "pub(crate) struct Cluster { membership: MembershipManager }";
+    let child = "fn f(c: &super::Cluster) { let _ = &c.membership; }";
+    let dto = "pub(crate) struct Row { pub membership: Status }";
+    let mut declarations = Declarations::default();
+    declarations.read(facade, Scope::Facade);
+    declarations.read(dto, Scope::Daemon);
+    declarations.finish();
+    assert_eq!(
+        census_with(child, &declarations, true).get(&Class::Membership),
+        Some(&1),
+        "a child of the facade can name its private raw field, so it counts there"
+    );
+    assert_eq!(
+        census_with(child, &declarations, false).get(&Class::Membership),
+        None,
+        "outside the facade tree the private field cannot be named"
+    );
+
+    let other_self = census_of(
+        "enum E { ServingFence }\n\
+         struct S;\n\
+         impl S { fn f() -> Self::ServingFence { todo!() } }",
+    );
+    assert_eq!(
+        other_self.get(&Class::Type),
+        Some(&1),
+        "Self:: is a variant only inside the impl of the enum that declares it"
+    );
+}
+
+/// Every other workspace and vendored crate's source is read, so no `pub`
+/// raw field or accessor hides in a file the census skipped.
+#[test]
+fn every_dependency_source_parses() {
+    let mut declarations = Declarations::default();
+    for source in dependency_sources() {
+        declarations.read(&source, Scope::Dependency);
+    }
+    assert_eq!(
+        declarations.unparsed, 0,
+        "a dependency source did not parse"
+    );
 }
 
 /// The manager's public surface is read from plurx-core, so a new method is
