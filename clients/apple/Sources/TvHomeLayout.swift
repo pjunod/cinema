@@ -84,28 +84,50 @@ struct TvTheaterHero: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(feature.eyebrow.uppercased())
+                #if os(tvOS)
+                .font(.system(size: 22, weight: .semibold))
+                .tracking(3)
+                .foregroundStyle(Palette.muted)
+                #else
                 .font(.system(size: 18, weight: .bold, design: .monospaced))
                 .tracking(3)
                 .foregroundStyle(Palette.accent)
+                #endif
             Text(item.showTitle ?? item.title)
+                #if os(tvOS)
+                .font(.system(size: 78, weight: .bold))
+                #else
                 .font(standardTheater ? .system(size: 52, weight: .bold) : .largeTitle.bold())
+                #endif
                 .foregroundStyle(standardTheater ? .white : Palette.heroInk)
                 .lineLimit(2)
             if item.showTitle != nil {
                 Text(item.title)
+                    #if os(tvOS)
+                    .font(.system(size: 26, weight: .medium))
+                    #else
                     .font(.title3)
+                    #endif
                     .foregroundStyle(standardTheater ? .white.opacity(0.85) : Palette.heroInk)
                     .lineLimit(1)
             }
             if !metadata.isEmpty {
                 Text(metadata)
+                    #if os(tvOS)
+                    .font(.system(size: 22, weight: .medium))
+                    #else
                     .font(.system(.callout, design: .monospaced))
+                    #endif
                     .foregroundStyle(standardTheater ? .white.opacity(0.8) : Palette.heroInk)
                     .lineLimit(1)
             }
             if let overview = item.overview, !overview.isEmpty {
                 Text(overview)
+                    #if os(tvOS)
+                    .font(.system(size: 26, weight: .medium))
+                    #else
                     .font(.callout)
+                    #endif
                     .foregroundStyle(standardTheater ? .white.opacity(0.9) : Palette.heroInk)
                     .lineLimit(3)
             }

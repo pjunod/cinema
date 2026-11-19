@@ -125,24 +125,24 @@ enum Palette {
 }
 
 #if os(tvOS)
-/// tvOS 26 can apply a button's tint to both its glass and its label, making a
-/// muted bordered action look blank. This style owns both sides of the
-/// contrast pair. Focus is expressed with the plurx red signal, lift, and glow
-/// instead of turning the entire control into a bright white plate.
+/// The house tvOS button: a quiet capsule at rest that turns solid
+/// `Palette.onBg` with `Palette.bg` ink when focused. White means focus; the
+/// accent colour is kept for progress and live marks, so no red here.
+/// `prominent` survives for call-site compatibility and only strengthens the
+/// resting fill a little.
 struct TVReadableButtonStyle: ButtonStyle {
     let prominent: Bool
-    /// A ten-foot page can afford one row of chrome, not three. The compact
-    /// pair is the toolbar size (48 pt) — the default 66 pt pair stays the
-    /// sheet size, where a button is the only thing on the line.
+    /// Compact is the toolbar / list-row size (56 pt, 24 pt semibold text);
+    /// the default 66 pt size is for a button that is the only thing on its line.
     var compact: Bool = false
-    var focusScale: CGFloat = 1.045
+    var focusScale: CGFloat = 1.05
 
     static func foregroundColor(prominent: Bool, focused: Bool) -> Color {
-        prominent ? Palette.buttonInk : Palette.onBg
+        focused ? Palette.bg : Palette.onBg
     }
 
     static func backgroundColor(prominent: Bool, focused: Bool) -> Color {
-        return prominent ? Palette.accent : Palette.surfaceHi
+        focused ? Palette.onBg : Palette.onBg.opacity(prominent ? 0.2 : 0.12)
     }
 
     func makeBody(configuration: Configuration) -> Body {
@@ -153,41 +153,33 @@ struct TVReadableButtonStyle: ButtonStyle {
         let configuration: ButtonStyle.Configuration
         let prominent: Bool
         var compact: Bool = false
-        var focusScale: CGFloat = 1.045
+        var focusScale: CGFloat = 1.05
         @Environment(\.isFocused) private var isFocused
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
         @Environment(\.isEnabled) private var isEnabled
 
-        private var radius: CGFloat { compact ? 10 : 14 }
-
         var body: some View {
             configuration.label
-                .font(compact ? Font.system(size: 22, weight: .semibold) : nil)
+                .font(compact ? Font.system(size: 24, weight: .semibold) : nil)
                 .foregroundStyle(
                     TVReadableButtonStyle.foregroundColor(
                         prominent: prominent,
                         focused: isFocused
                     )
                 )
-                .padding(.horizontal, compact ? 20 : 28)
-                .padding(.vertical, compact ? 10 : 16)
-                .frame(minHeight: compact ? 48 : 66)
+                .padding(.horizontal, compact ? 24 : 32)
+                .padding(.vertical, compact ? 10 : 14)
+                .frame(minHeight: compact ? 56 : 66)
                 .background(
                     TVReadableButtonStyle.backgroundColor(
                         prominent: prominent,
                         focused: isFocused
                     ),
-                    in: RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    in: Capsule()
                 )
-                .overlay {
-                    RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .stroke(
-                            isFocused ? Palette.accent : Palette.outline,
-                            lineWidth: isFocused ? 4 : 1
-                        )
-                }
+                .contentShape(Capsule())
                 .scaleEffect(reduceMotion ? 1 : (isFocused ? focusScale : (configuration.isPressed ? 0.98 : 1)))
-                .shadow(color: Palette.accent.opacity(isFocused ? 0.3 : 0), radius: 16, y: 7)
+                .shadow(color: .black.opacity(isFocused ? 0.4 : 0), radius: 16, y: 8)
                 .opacity(isEnabled ? 1 : 0.45)
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: isFocused)
                 .remoteNativeFocus(isFocused)
@@ -196,8 +188,9 @@ struct TVReadableButtonStyle: ButtonStyle {
     }
 }
 
-/// Fullscreen Live TV chrome keeps the house focus ring, lift and glow while
-/// staying on player black in every app theme.
+/// Fullscreen Live TV chrome sits over video, so it uses fixed colours rather
+/// than the app palette: a translucent white pill that turns solid white with
+/// black ink on focus.
 struct LiveSurfacePillStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         Renderer(configuration: configuration)
@@ -212,39 +205,29 @@ struct LiveSurfacePillStyle: ButtonStyle {
             configuration.label
                 .labelStyle(.titleAndIcon)
                 .font(LiveTvType.surfaceButton)
-                .foregroundStyle(.white)
+                .foregroundStyle(isFocused ? Color.black : Color.white)
                 .padding(.leading, 22)
                 .padding(.trailing, 26)
                 .frame(height: 56)
-                .background(
-                    Palette.playerChrome.opacity(isFocused ? 0.92 : 0.72),
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(
-                            isFocused ? Palette.accent : .white.opacity(0.10),
-                            lineWidth: isFocused ? 4 : 1
-                        )
-                }
-                .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.045 : (configuration.isPressed ? 0.98 : 1)))
-                .shadow(
-                    color: Palette.accent.opacity(isFocused ? 0.35 : 0),
-                    radius: 14,
-                    y: 10
-                )
+                .background(isFocused ? Color.white : Color.white.opacity(0.14), in: Capsule())
+                .contentShape(Capsule())
+                .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.05 : (configuration.isPressed ? 0.98 : 1)))
+                .shadow(color: .black.opacity(isFocused ? 0.45 : 0), radius: 14, y: 8)
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: isFocused)
                 .remoteNativeFocus(isFocused)
         }
     }
 }
 
-/// Compact trailing action for shelf headers. tvOS 26 can tint a default
-/// NavigationLink's label and background identically, leaving only an empty
-/// accent-colored capsule. This style owns that contrast pair explicitly.
+/// Compact trailing action for shelf headers: the same quiet pill as the
+/// compact `TVReadableButtonStyle`, solid `Palette.onBg` only when focused.
 struct TVShelfActionButtonStyle: ButtonStyle {
-    static func foregroundColor(focused: Bool) -> Color { Palette.buttonInk }
-    static func backgroundColor(focused: Bool) -> Color { Palette.accent }
+    static func foregroundColor(focused: Bool) -> Color {
+        TVReadableButtonStyle.foregroundColor(prominent: false, focused: focused)
+    }
+    static func backgroundColor(focused: Bool) -> Color {
+        TVReadableButtonStyle.backgroundColor(prominent: false, focused: focused)
+    }
 
     func makeBody(configuration: Configuration) -> Body {
         Body(configuration: configuration)
@@ -257,21 +240,18 @@ struct TVShelfActionButtonStyle: ButtonStyle {
 
         var body: some View {
             configuration.label
+                .font(.system(size: 24, weight: .semibold))
                 .foregroundStyle(TVShelfActionButtonStyle.foregroundColor(focused: isFocused))
-                .padding(.horizontal, 22)
+                .padding(.horizontal, 24)
                 .padding(.vertical, 10)
-                .frame(minWidth: 126, minHeight: 48)
+                .frame(minWidth: 56, minHeight: 56)
                 .background(
                     TVShelfActionButtonStyle.backgroundColor(focused: isFocused),
                     in: Capsule()
                 )
-                .brightness(isFocused ? 0.08 : 0)
-                .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.07 : (configuration.isPressed ? 0.97 : 1)))
-                .shadow(
-                    color: Palette.accent.opacity(isFocused ? 0.42 : 0),
-                    radius: 14,
-                    y: 6
-                )
+                .contentShape(Capsule())
+                .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.05 : (configuration.isPressed ? 0.97 : 1)))
+                .shadow(color: .black.opacity(isFocused ? 0.4 : 0), radius: 14, y: 6)
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: isFocused)
                 .remoteNativeFocus(isFocused)
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: configuration.isPressed)
@@ -279,14 +259,15 @@ struct TVShelfActionButtonStyle: ButtonStyle {
     }
 }
 
-/// The player chrome should stay subordinate to the picture. These controls
-/// keep a compact, dark footprint and use only a hairline accent when focused
-/// instead of tvOS's large white focus plate.
+/// Player controls sit over the picture, so they use fixed colours: a
+/// translucent white labelled pill that turns solid white with black ink when
+/// focused. Icon-only buttons keep a 64 pt minimum width.
 struct TVPlayerControlButtonStyle: ButtonStyle {
-    static let width: CGFloat = 54
-    static let height: CGFloat = 46
-    static let iconSize: CGFloat = 23
-    static let cornerRadius: CGFloat = 11
+    static let height: CGFloat = 64
+    static let minWidth: CGFloat = 64
+    static let iconSize: CGFloat = 26
+    static let fontSize: CGFloat = 24
+    static let horizontalPadding: CGFloat = 22
 
     func makeBody(configuration: Configuration) -> Body {
         Body(configuration: configuration)
@@ -300,31 +281,19 @@ struct TVPlayerControlButtonStyle: ButtonStyle {
 
         var body: some View {
             configuration.label
-                .font(.system(size: TVPlayerControlButtonStyle.iconSize, weight: .semibold))
-                .foregroundStyle(.white)
+                .font(.system(size: TVPlayerControlButtonStyle.fontSize, weight: .semibold))
+                .lineLimit(1)
+                .foregroundStyle(isFocused ? Color.black : Color.white)
+                .padding(.horizontal, TVPlayerControlButtonStyle.horizontalPadding)
                 .frame(
-                    width: TVPlayerControlButtonStyle.width,
-                    height: TVPlayerControlButtonStyle.height
+                    minWidth: TVPlayerControlButtonStyle.minWidth,
+                    minHeight: TVPlayerControlButtonStyle.height,
+                    maxHeight: TVPlayerControlButtonStyle.height
                 )
-                .background(
-                    Palette.playerChrome.opacity(isFocused ? 0.9 : 0.68),
-                    in: RoundedRectangle(
-                        cornerRadius: TVPlayerControlButtonStyle.cornerRadius,
-                        style: .continuous
-                    )
-                )
-                .overlay {
-                    RoundedRectangle(
-                        cornerRadius: TVPlayerControlButtonStyle.cornerRadius,
-                        style: .continuous
-                    )
-                        .stroke(
-                            isFocused ? Palette.accent.opacity(0.95) : Palette.outline.opacity(0.7),
-                            lineWidth: isFocused ? 1 : 0.5
-                        )
-                }
-                .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.035 : (configuration.isPressed ? 0.97 : 1)))
-                .shadow(color: .black.opacity(isFocused ? 0.55 : 0), radius: 8, y: 4)
+                .background(isFocused ? Color.white : Color.white.opacity(0.14), in: Capsule())
+                .contentShape(Capsule())
+                .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.05 : (configuration.isPressed ? 0.97 : 1)))
+                .shadow(color: .black.opacity(isFocused ? 0.45 : 0), radius: 12, y: 6)
                 .opacity(isEnabled ? 1 : 0.42)
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isFocused)
                 .remoteNativeFocus(isFocused)
@@ -333,30 +302,21 @@ struct TVPlayerControlButtonStyle: ButtonStyle {
     }
 }
 
-/// Three concentric sub-two-point strokes make the progress focus indicator a
-/// red hairline whose two edges fall back into black.
-enum TVPlayerProgressFocusRing {
-    static let outerStrokeWidth: CGFloat = 1.5
-    static let fadeStrokeWidth: CGFloat = 0.9
-    static let accentStrokeWidth: CGFloat = 0.3
-}
-
-/// Opaque player chrome is limited to the pixels immediately surrounding copy.
-/// The timeline and controls already carry their own contrast and need no
-/// full-width material panel behind them.
+/// Ten-foot player chrome metrics: a large title, the quality pills, a
+/// timeline whose focus is obvious (taller bar, white knob and halo) and
+/// labelled control pills.
 enum TVPlayerChromeMetrics {
-    static let headerHorizontalInset: CGFloat = 8
-    static let headerVerticalInset: CGFloat = 5
-    static let timeHorizontalInset: CGFloat = 6
-    static let timeVerticalInset: CGFloat = 3
-    static let infoHeadingFontSize: CGFloat = 13
-    static let infoBodyFontSize: CGFloat = 19
-    static let infoLineLimit = 8
+    static let titleFontSize: CGFloat = 48
+    static let subtitleFontSize: CGFloat = 27
+    static let subtitleOpacity: Double = 0.82
+    static let timeFontSize: CGFloat = 27
+    static let timelineHeight: CGFloat = 8
+    static let focusedTimelineHeight: CGFloat = 14
+    static let knobSize: CGFloat = 30
+    static let knobHaloSize: CGFloat = 48
 }
 
-/// Replaces tvOS's thick white focus plate with the same restrained red
-/// signal used throughout plurx. The hero still lifts enough to read from the
-/// couch without turning the artwork into a glowing white rectangle.
+/// The featured hero lifts and gains a `Palette.onBg` ring when focused.
 struct TVHeroButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> Body {
         Body(configuration: configuration)
@@ -371,12 +331,12 @@ struct TVHeroButtonStyle: ButtonStyle {
             configuration.label
                 .overlay {
                     RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .stroke(Palette.accent.opacity(isFocused ? 0.95 : 0.18),
-                                lineWidth: isFocused ? 4 : 1)
+                        .stroke(Palette.onBg.opacity(isFocused ? 1 : 0),
+                                lineWidth: 4)
                 }
                 .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.012 : (configuration.isPressed ? 0.994 : 1)))
                 .shadow(
-                    color: Palette.accent.opacity(isFocused ? 0.22 : 0),
+                    color: .black.opacity(isFocused ? 0.5 : 0),
                     radius: 20,
                     y: 8
                 )
@@ -387,17 +347,13 @@ struct TVHeroButtonStyle: ButtonStyle {
     }
 }
 
-/// Shelf cards get a subtle lift and shadow, not the default opaque tvOS
-/// surround that hides the edges of posters and backdrops.
+/// Shelf cards: on focus a 4 pt `Palette.onBg` ring about 6 pt outside the
+/// card, a 6% lift and a black shadow. No accent strokes.
 struct TVMediaCardButtonStyle: ButtonStyle {
-    // Strokes share one center line, so progressively narrower layers produce
-    // a symmetric black → muted red → signal red → muted red → black
-    // cross-section. Keep the complete surround narrow enough to read as a
-    // selection ring rather than a frame around the card.
-    static let outerStrokeWidth: CGFloat = 6
-    static let fadeStrokeWidth: CGFloat = 4
-    static let accentStrokeWidth: CGFloat = 2
-    static let contentClearance: CGFloat = 7
+    static let ringWidth: CGFloat = 4
+    /// Gap between the card edge and the inner edge of the ring.
+    static let contentClearance: CGFloat = 6
+    static let focusScale: CGFloat = 1.06
 
     func makeBody(configuration: Configuration) -> Body {
         Body(configuration: configuration)
@@ -410,27 +366,19 @@ struct TVMediaCardButtonStyle: ButtonStyle {
 
         var body: some View {
             let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
-            let ringShape = shape.inset(by: -TVMediaCardButtonStyle.contentClearance)
+            // A stroke is centred on its path, so the path sits half a ring
+            // width further out than the clearance.
+            let ringShape = shape.inset(
+                by: -(TVMediaCardButtonStyle.contentClearance + TVMediaCardButtonStyle.ringWidth / 2)
+            )
             configuration.label
                 .background(Palette.bg.opacity(isFocused ? 0.96 : 0), in: shape)
                 .overlay {
-                    ZStack {
-                        ringShape.stroke(
-                            .black.opacity(0.96),
-                            lineWidth: TVMediaCardButtonStyle.outerStrokeWidth
-                        )
-                        ringShape.stroke(
-                            Palette.accent.opacity(0.32),
-                            lineWidth: TVMediaCardButtonStyle.fadeStrokeWidth
-                        )
-                        ringShape.stroke(
-                            Palette.accent.opacity(0.95),
-                            lineWidth: TVMediaCardButtonStyle.accentStrokeWidth
-                        )
-                    }
-                    .opacity(isFocused ? 1 : 0)
+                    ringShape
+                        .stroke(Palette.onBg, lineWidth: TVMediaCardButtonStyle.ringWidth)
+                        .opacity(isFocused ? 1 : 0)
                 }
-                .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.035 : (configuration.isPressed ? 0.985 : 1)))
+                .scaleEffect(reduceMotion ? 1 : (isFocused ? TVMediaCardButtonStyle.focusScale : (configuration.isPressed ? 0.985 : 1)))
                 .shadow(color: .black.opacity(isFocused ? 0.72 : 0), radius: 19, y: 10)
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: isFocused)
                 .remoteNativeFocus(isFocused)
