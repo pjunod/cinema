@@ -1915,6 +1915,9 @@ impl RemoteStartRequest {
                     .map_or(0, String::capacity),
             )?;
             bytes = bytes.checked_add(catalog.binding.source_digest.capacity())?;
+            if let Some(query) = catalog.catalog_query.as_ref() {
+                bytes = bytes.checked_add(query.requested_heap_bytes()?)?;
+            }
             if let Some(query) = &catalog.catalog_query {
                 bytes = bytes.checked_add(query.requested_heap_bytes()?)?;
             }
@@ -2147,7 +2150,30 @@ fn selected_finite_candidate_context_heap_bytes(
 
 #[cfg(target_os = "linux")]
 impl SessionRequest {
+    pub(crate) fn is_exact_adaptive_fel(&self) -> bool {
+        self.is_adaptive_fel() && self.start_seconds == 0.0
+    }
+
+    pub(crate) fn is_adaptive_fel(&self) -> bool {
+        self.dv_processing_destination
+            == Some(plurx_core::transcode::dv_processing::DvDestination::Profile81)
+            && self.presentation == crate::transcode::Presentation::Vod
+            && matches!(self.kind, crate::transcode::SessionKind::Transcode { .. })
+            && self.subtitle_burn.is_none()
+            && self.continuous_media.is_none()
+            && !self.passive_vod
+    }
+
     pub(crate) fn selected_finite_requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self.adaptive_request_base_heap_bytes()?;
+        if let Some(context) = &self.candidate_context {
+            bytes = bytes.checked_add(selected_finite_candidate_context_heap_bytes(context)?)?;
+        }
+        Some(bytes)
+    }
+
+    /// Actual inline request fields, excluding independently retained planning.
+    pub(crate) fn adaptive_request_base_heap_bytes(&self) -> Option<usize> {
         if self.continuous_media.is_some() || self.quality_catalog.is_some() {
             return None;
         }
@@ -2167,9 +2193,6 @@ impl SessionRequest {
         }
         if let Some(claim) = &self.audio_claim {
             bytes = bytes.checked_add(claim.requested_heap_bytes()?)?;
-        }
-        if let Some(context) = &self.candidate_context {
-            bytes = bytes.checked_add(selected_finite_candidate_context_heap_bytes(context)?)?;
         }
         Some(bytes)
     }
@@ -2358,7 +2381,34 @@ pub(crate) use adaptive_intent::bounded_digest_bytes as bounded_adaptive_digest_
 pub(crate) struct AdaptiveAttemptPrepareV1 {
     pub version: u16,
     pub claim: plurx_core::store::adaptive_resource_attempts::AttemptClaim,
+    #[serde(default, skip_serializing_if = "AdaptivePreparePurpose::is_create")]
+    pub purpose: AdaptivePreparePurpose,
     pub recipe: RemoteStartRequest,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AdaptivePreparePurpose {
+    #[default]
+    Create,
+    DeferredFel,
+}
+
+#[cfg(target_os = "linux")]
+impl AdaptivePreparePurpose {
+    fn is_create(&self) -> bool {
+        *self == Self::Create
+    }
+
+    pub(crate) fn bind_intent(self, recipe_digest: String) -> Result<String, String> {
+        match self {
+            Self::Create => Ok(recipe_digest),
+            Self::DeferredFel => {
+                bounded_adaptive_digest(&("plurx:deferred-fel-intent:v1", recipe_digest))
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2366,6 +2416,20 @@ impl AdaptiveAttemptPrepareV1 {
     pub(crate) fn is_valid(&self) -> bool {
         self.version == ADAPTIVE_ATTEMPT_VERSION
             && self.recipe.is_valid()
+            && (self.purpose.is_create()
+                || (self.recipe.request.is_adaptive_fel()
+                    && self.claim.key.ordinal == 1
+                    && self.claim.key.owner_epoch == 1
+                    && self
+                        .claim
+                        .binding
+                        .expected_predecessor_incarnation_id
+                        .is_some()
+                    && self
+                        .claim
+                        .binding
+                        .expected_predecessor_owner_epoch
+                        .is_some()))
             && self.claim.binding.key == self.claim.key.request
             && self.recipe.incarnation_id == self.claim.key.route_incarnation_id.to_string()
             && self.recipe.principal == self.claim.binding.principal
@@ -2508,6 +2572,174 @@ pub(crate) struct AdaptiveAttemptRegisteredV2 {
     pub serving_generation: u64,
 }
 
+/// Processed candidate IDs bind local source-object and executable identity.
+/// The exact FEL request fixes output semantics and rate independently; each
+/// worker must prove its own local recipe before reporting this contract.
+#[cfg(target_os = "linux")]
+pub(crate) fn same_fel_output_contract(
+    requested: &plurx_core::playback::candidate::QualityCandidate,
+    actual: &plurx_core::playback::candidate::QualityCandidate,
+) -> bool {
+    use plurx_core::playback::candidate::CandidateRoute;
+
+    requested.identity_matches()
+        && actual.identity_matches()
+        && requested.route == CandidateRoute::Encode
+        && actual.route == requested.route
+        && requested.processed_dv
+        && actual.processed_dv
+        && requested.decoder_compatible
+        && actual.decoder_compatible
+        && requested.planned_codec.as_deref() == Some("hevc")
+        && actual.planned_codec == requested.planned_codec
+        && actual.grade == OutputGrade::Hdr10
+        && actual.grade == requested.grade
+        && actual.normalized_geometry == requested.normalized_geometry
+        && actual.target_height == requested.target_height
+        && actual.width == requested.width
+        && actual.height == requested.height
+        && requested.average_bps.is_some_and(|rate| rate > 0)
+        && actual.average_bps == requested.average_bps
+        && requested.peak_bps.is_some_and(|rate| rate > 0)
+        && actual.peak_bps == requested.peak_bps
+        // Previous production/cache observations do not travel with the
+        // request. This response describes a fresh verified window only.
+        && !actual.complete_cache
+        && actual.sustainable
+}
+
+/// A cold Auto request binds the incumbent description and requested
+/// processing, not a hypothetical processed candidate. The ordinary recipe
+/// supplies the raster ceiling; the independently verified worker returns its
+/// actual bounded HEVC rate for normal post-preparation link admission.
+#[cfg(target_os = "linux")]
+pub(crate) fn deferred_fel_output_matches(
+    request: &SessionRequest,
+    incumbent: &plurx_core::playback::candidate::QualityCandidate,
+    actual: &plurx_core::playback::candidate::QualityCandidate,
+) -> bool {
+    use crate::transcode::SessionKind;
+    use plurx_core::playback::candidate::CandidateRoute;
+
+    if incumbent.processed_dv {
+        return same_fel_output_contract(incumbent, actual);
+    }
+    let SessionKind::Transcode { height } = request.kind else {
+        return false;
+    };
+    request.is_adaptive_fel()
+        && request.automatic
+        && incumbent.identity_matches()
+        && incumbent.decoder_compatible
+        && incumbent.width > 0
+        && incumbent.height > 0
+        && incumbent.route == CandidateRoute::Remux
+        && i64::from(incumbent.target_height) >= height
+        && actual.playable()
+        && actual.route == CandidateRoute::Encode
+        && actual.processed_dv
+        && actual.grade == OutputGrade::Hdr10
+        && i64::from(actual.target_height) == height
+        && actual.height <= actual.target_height
+        && actual.width <= incumbent.width
+        && actual
+            .average_bps
+            .zip(actual.peak_bps)
+            .is_some_and(|(average, peak)| {
+                average > 0
+                    && average <= peak
+                    && request
+                        .finite_bitrate_limit_bps
+                        .is_none_or(|limit| peak <= u64::from(limit))
+            })
+        && !actual.complete_cache
+        && actual.sustainable
+}
+
+#[cfg(all(target_os = "linux", test))]
+#[test]
+fn equivalent_fel_candidates_can_have_distinct_worker_identities() {
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+
+    let requested = QualityCandidate {
+        id: CandidateId::for_recipe_digest([1; 32]),
+        recipe_digest: [1; 32],
+        route: CandidateRoute::Encode,
+        processed_dv: true,
+        planned_codec: Some("hevc".into()),
+        normalized_geometry: false,
+        width: 3840,
+        height: 2160,
+        target_height: 2160,
+        average_bps: Some(20_000_000),
+        peak_bps: Some(24_000_000),
+        grade: OutputGrade::Hdr10,
+        decoder_compatible: true,
+        complete_cache: false,
+        sustainable: false,
+    };
+    let mut actual = QualityCandidate {
+        id: CandidateId::for_recipe_digest([2; 32]),
+        recipe_digest: [2; 32],
+        sustainable: true,
+        ..requested.clone()
+    };
+    assert!(same_fel_output_contract(&requested, &actual));
+    actual.peak_bps = Some(24_000_001);
+    assert!(!same_fel_output_contract(&requested, &actual));
+    actual.peak_bps = requested.peak_bps;
+    actual.height -= 2;
+    assert!(!same_fel_output_contract(&requested, &actual));
+    actual.height = requested.height;
+    actual.complete_cache = true;
+    assert!(!same_fel_output_contract(&requested, &actual));
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) const ADAPTIVE_PROCESSED_CAPACITY_REFUSED: &str = "processed_worker_capacity";
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum AdaptiveProcessedRefusal {
+    AdmissionLimit,
+    RecipeUnverified,
+    CleanupPending,
+}
+
+#[cfg(target_os = "linux")]
+impl AdaptiveProcessedRefusal {
+    pub(crate) fn into_api_error(self) -> crate::http::error::ApiError {
+        let (code, message) = match self {
+            Self::AdmissionLimit => (
+                ADAPTIVE_PROCESSED_CAPACITY_REFUSED,
+                "the worker's configured processed FEL admission limit is occupied or too small",
+            ),
+            Self::RecipeUnverified => (
+                "processed_recipe_unverified",
+                "the worker could not verify the exact FEL recipe within the original preparation",
+            ),
+            Self::CleanupPending => (
+                "processed_cleanup_pending",
+                "the worker could not confirm closure of the original FEL preparation",
+            ),
+        };
+        crate::http::error::ApiError::typed(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            code,
+            message,
+        )
+    }
+
+    pub(crate) fn from_code(code: &str) -> Option<Self> {
+        match code {
+            ADAPTIVE_PROCESSED_CAPACITY_REFUSED => Some(Self::AdmissionLimit),
+            "processed_recipe_unverified" => Some(Self::RecipeUnverified),
+            "processed_cleanup_pending" => Some(Self::CleanupPending),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2519,6 +2751,13 @@ pub(crate) struct AdaptiveAttemptPreparedV1 {
     /// Constructed from the same dormant Rendition plan before Store Winner.
     /// Adopt compares these exact bytes, then checks the attached plan again.
     pub preview_json: String,
+    /// Only sent for a negotiated exact FEL attempt. Old ordinary peers
+    /// retain the strict original response shape.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub processed_fel: bool,
+    /// The exact verified film interval for deferred preparation only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_window_ms: Option<(i64, i64)>,
 }
 
 #[cfg(target_os = "linux")]
@@ -2529,6 +2768,15 @@ pub(crate) struct AdaptiveAttemptAdoptV1 {
     pub adoption: plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption,
     /// Exact Prepared preview bytes, separate from the canonical public
     /// StartResponse persisted by Store for ordinary resolved replay.
+    pub preview_json: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdaptiveAttemptStagedAdoptV1 {
+    pub version: u16,
+    pub adoption: plurx_core::store::adaptive_resource_attempts::AdaptiveStagedAdoption,
     pub preview_json: String,
 }
 

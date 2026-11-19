@@ -395,7 +395,7 @@ impl TranscodeManager {
     }
 
     #[cfg(any(target_os = "linux", test))]
-    pub(super) fn processed_catalog_destination(
+    pub(crate) fn processed_catalog_destination(
         snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
         query: &crate::media_pool::QualityCatalogRequest,
     ) -> Option<plurx_core::transcode::dv_processing::DvDestination> {
@@ -459,7 +459,7 @@ impl TranscodeManager {
     /// One encoded audio projection for qualification and every hint consumer.
     /// Preserve the original copy provenance while replacing its audio route.
     #[cfg(any(target_os = "linux", test))]
-    pub(super) fn processed_catalog_query(
+    pub(crate) fn processed_catalog_query(
         snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
         query: &crate::media_pool::QualityCatalogRequest,
     ) -> Option<crate::media_pool::QualityCatalogRequest> {

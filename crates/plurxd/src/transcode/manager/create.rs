@@ -1,5 +1,16 @@
 use crate::vodserve::StagedProcessedPredecessor;
 
+struct PreparedEncodingAdmission<'a> {
+    permit: &'a mut Option<crate::vodencode::EncodePermit>,
+    #[cfg(target_os = "linux")]
+    deadline: tokio::time::Instant,
+    #[cfg(target_os = "linux")]
+    original_cutoff: Option<(
+        &'a plurx_core::cluster::clock::ContinuousDeadline,
+        &'a std::sync::atomic::AtomicBool,
+    )>,
+}
+
 enum VodRecipeAttachment {
     Recovery {
         speculative: bool,
@@ -2323,16 +2334,40 @@ impl TranscodeManager {
         recovery: &SessionRecoveryIdentity,
         hdr10_intent: bool,
     ) -> Result<Option<ProcessedUpgradeTrial>, String> {
+        self.prepare_processed_upgrade_before(session_id, request, recovery, hdr10_intent, None)
+            .await
+    }
+
+    pub(crate) async fn prepare_processed_upgrade_before(
+        &self,
+        session_id: &str,
+        request: &SessionRequest,
+        recovery: &SessionRecoveryIdentity,
+        hdr10_intent: bool,
+        original: Option<(
+            &plurx_core::cluster::clock::ContinuousDeadline,
+            &std::sync::atomic::AtomicBool,
+        )>,
+    ) -> Result<Option<ProcessedUpgradeTrial>, String> {
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (session_id, request, recovery, hdr10_intent);
+            let _ = (session_id, request, recovery, hdr10_intent, original);
             Ok(None)
         }
         #[cfg(target_os = "linux")]
         {
             use plurx_core::transcode::dv_processing::DvDestination;
+            let cutoff = original
+                .map(|(original, _)| {
+                    original.entry_remaining()?;
+                    original
+                        .monotonic_cutoff()
+                        .map(tokio::time::Instant::from_std)
+                })
+                .transpose()
+                .map_err(|error| error.to_string())?;
             let Some(planning) = self
-                .validate_candidate_planning_binding(request, None, None)
+                .validate_candidate_planning_binding(request, cutoff, None)
                 .await?
             else {
                 return Ok(None);
@@ -2347,6 +2382,8 @@ impl TranscodeManager {
                     true,
                 ),
             );
+            let peer_preparation = original.is_some();
+            let continuous = original;
             let Some(destination) =
                 Self::processed_upgrade_gates(request, &planning, hdr10_intent)?
             else {
@@ -2367,12 +2404,11 @@ impl TranscodeManager {
             let Ok(_preparation_slot) =
                 Arc::clone(&self.processed_preparation_slot).try_acquire_owned()
             else {
-                return Err("another processed preparation already holds this node's slot".into());
+                let message = "another processed preparation already holds this node's slot";
+                return Err(vod_refusal_error("processed_worker_capacity", message));
             };
-            // The upgrade runs after the viewer's first frame, outside any
-            // create budget: one bounded trial, the same 8 s the in-create
-            // qualification was allowed at most.
             let deadline = tokio::time::Instant::now() + PROCESSED_UPGRADE_TRIAL_BUDGET;
+            let deadline = cutoff.map_or(deadline, |cutoff| deadline.min(cutoff));
             let mut file = planning.file.clone();
             file.audio_offset_ms = if file.audio_streams.is_empty() {
                 0
@@ -2435,7 +2471,7 @@ impl TranscodeManager {
                 .catalog_query
                 .as_ref()
                 .and_then(|query| self.processed_hint_key(&planning, query));
-            let reused = if let Some(scope) = reuse_scope {
+            let reused = if let Some(scope) = reuse_scope.filter(|_| !peer_preparation) {
                 self.vod
                     .capture_processed_root(
                         request,
@@ -2497,7 +2533,8 @@ impl TranscodeManager {
                     let Ok(instance_allowance) =
                         Arc::clone(&self.processed_instance_slots).try_acquire_owned()
                     else {
-                        return Err("this node's processed graph instances are all in use".into());
+                        let message = "this node's processed graph instances are all in use";
+                        return Err(vod_refusal_error("processed_worker_capacity", message));
                     };
                     let mut credit = None;
                     let Some(encoding) = self
@@ -2506,7 +2543,11 @@ impl TranscodeManager {
                             &file,
                             None,
                             Some(super::planning_hwaccel_preference(&planning)),
-                            Some((&mut credit, deadline)),
+                            Some(PreparedEncodingAdmission {
+                                permit: &mut credit,
+                                deadline,
+                                original_cutoff: continuous,
+                            }),
                             None,
                             None,
                         )
@@ -2547,7 +2588,10 @@ impl TranscodeManager {
                 );
             }
             let digest = encoding.processed_candidate_digest(&file, &binding)?;
-            if original.selected_candidate.processed_dv && digest != original.recipe_digest {
+            if !peer_preparation
+                && original.selected_candidate.processed_dv
+                && digest != original.recipe_digest
+            {
                 return Err(vod_refusal_error(
                     "candidate_recipe_changed",
                     "processed candidate inputs changed during qualification",
@@ -2845,10 +2889,7 @@ impl TranscodeManager {
             &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
         )>,
         hwaccel: Option<&str>,
-        prepared_admission: Option<(
-            &mut Option<crate::vodencode::EncodePermit>,
-            tokio::time::Instant,
-        )>,
+        prepared_admission: Option<PreparedEncodingAdmission<'_>>,
         _decline: Option<&mut Option<String>>,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
@@ -2889,10 +2930,7 @@ impl TranscodeManager {
             &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
         )>,
         hwaccel: Option<&str>,
-        mut prepared_admission: Option<(
-            &mut Option<crate::vodencode::EncodePermit>,
-            tokio::time::Instant,
-        )>,
+        mut prepared_admission: Option<PreparedEncodingAdmission<'_>>,
         decline: Option<&mut Option<String>>,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
@@ -2913,7 +2951,13 @@ impl TranscodeManager {
             ));
         }
         #[cfg(target_os = "linux")]
-        let processing_deadline = prepared_admission.as_ref().map(|(_, deadline)| *deadline);
+        let processing_deadline = prepared_admission
+            .as_ref()
+            .map(|admission| admission.deadline);
+        #[cfg(target_os = "linux")]
+        let processed_cutoff = prepared_admission
+            .as_ref()
+            .and_then(|admission| admission.original_cutoff);
         if req
             .continuous_media
             .as_ref()
@@ -3687,7 +3731,16 @@ impl TranscodeManager {
                     } else { plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu };
                     // One live FEL reconstruction per worker. A second play falls
                     // back to its ordinary route with this reason.
-                    let reconstruction_slot = self.acquire_reconstruction_slot(destination).await?;
+                    let reconstruction_slot = if let Some(deadline) = processing_deadline.filter(|_| processed_cutoff.is_some()) {
+                        tokio::time::timeout_at(deadline, self.acquire_reconstruction_slot(destination))
+                            .await
+                            .map_err(|_| "the original FEL preparation deadline expired")?
+                            .map_err(|reason| vod_refusal_error("processed_worker_capacity", reason))?
+                    } else {
+                        self.acquire_reconstruction_slot(destination).await.map_err(|reason| {
+                            if processed_trial { vod_refusal_error("processed_worker_capacity", reason) } else { reason }
+                        })?
+                    };
                     let preparation_budget = self.vod_settings(req).await?
                         .ok_or("DV processing requires the VOD preparation budget")?.block_budget;
                     let mut processed_options = retained.1.clone();
@@ -3785,13 +3838,20 @@ impl TranscodeManager {
                     let bundle = crate::vodencode::admit_processed_trial(&self.admissions,
                         self.max_hw_sessions().await, software_budget, &processed_resources,
                         admission_deadline.into_std()).await
-                        .map_err(|unadmittable| if unadmittable {
-                            format!("DV processing needs {} CPU threads ({helper_threads} renderer, {} encoder) \
-                                 and this server's software encoder budget is {software_budget}",
-                                processed_resources.cpu_threads, processed_resources.cpu_threads - helper_threads)
-                        } else {
-                            format!("DV processing needs a GPU slot and {} CPU threads that other work holds",
-                                processed_resources.cpu_threads)
+                        .map_err(|unadmittable| {
+                            let message = if unadmittable {
+                                format!("DV processing needs {} CPU threads ({helper_threads} renderer, {} encoder) \
+                                     and this server's software encoder budget is {software_budget}",
+                                    processed_resources.cpu_threads, processed_resources.cpu_threads - helper_threads)
+                            } else {
+                                format!("DV processing needs a GPU slot and {} CPU threads that other work holds",
+                                    processed_resources.cpu_threads)
+                            };
+                            if processed_trial {
+                                vod_refusal_error("processed_worker_capacity", message)
+                            } else {
+                                message
+                            }
                         })?;
                     let segment_plan = grid.plan(file.duration_ms.ok_or("held source duration unavailable")?, 0);
                     let at = ((req.start_seconds.max(0.0) * f64::from(grid.numerator)) as u64
@@ -3805,6 +3865,9 @@ impl TranscodeManager {
                     // The same explicitly scoped FG/BG owner that prepared
                     // this recipe must own its first actual original reads.
                     // Clone the held descriptor; never reacquire path authority.
+                    if let Some((original, _)) = processed_cutoff {
+                        original.entry_remaining().map_err(|error| error.to_string())?;
+                    }
                     let source_open_started = tokio::time::Instant::now();
                     let input=crate::source_input::SourceInput::open_current_held(
                         &runtime.source.handle,"processed-first-window").await?
@@ -3812,7 +3875,8 @@ impl TranscodeManager {
                     let (verified, selected) = match runtime.execute_with_source_input(file, &processed_plan, &processed_options, grid,
                         entry, &executable.path, admission,
                         Arc::new(crate::prodrun::ProducerSlot::new()), tokio_util::sync::CancellationToken::new(), None,
-                        input, processing_deadline, Some(source_open_started.elapsed())).await {
+                        input, processing_deadline, Some(source_open_started.elapsed()),
+                        processed_cutoff.map(|(_, pending)| pending)).await {
                             // This awaited owner still holds the frozen graph's
                             // admission. Dropping it never reaches this branch;
                             // normal cancellation makes no backend claim.
@@ -3834,7 +3898,9 @@ impl TranscodeManager {
                     // is the qualification's answer, reported with the
                     // ordinary start, not an ordinary recipe nobody asked for.
                     Err(reason) if processed_trial => {
-                        if pending_fel_qualification(&reason).is_some() { return Err(reason); }
+                        if pending_fel_qualification(&reason).is_some() || super::vod_refusal(&reason).is_some_and(|(code, _)| code == "processed_worker_capacity") {
+                            return Err(reason);
+                        }
                         return Err(format!("processed window refused: {reason}"));
                     }
                     Err(reason) => {
@@ -3905,7 +3971,7 @@ impl TranscodeManager {
             handoff_claim: std::sync::Mutex::new(None),
             hooks: Box::new(crate::vodencode::NoopEncodingHooks),
         });
-        if let Some((sink, _)) = prepared_admission.as_mut() { **sink = prepared_credit; }
+        if let Some(admission) = prepared_admission.as_mut() { *admission.permit = prepared_credit; }
         Ok(Some(encoding))
         }.await;
         if copy_attempt && !processed_trial {
@@ -4320,7 +4386,7 @@ impl TranscodeManager {
     /// Shared correctness validation for fresh one-shot qualification and an
     /// exact staged predecessor. Catalog speed/ranking observations do not
     /// decide whether already admitted physical capacity can be retained.
-    async fn validate_processed_root(
+    pub(crate) async fn validate_processed_root(
         &self,
         req: &SessionRequest,
         context: &CandidateExecutionContext,

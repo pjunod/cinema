@@ -1374,6 +1374,9 @@ async fn settle_preparation_control(
     // can do so. From here this detached settlement task owns the exact row,
     // actor slot, and worker until it commits or explicitly aborts them.
     let active_preparation = take_active_preparation(staged_incarnation_id);
+    let deferred_fel = active_preparation
+        .as_ref()
+        .is_some_and(|stage| stage.deferred_fel);
     let acknowledgement_rejected = matches!(
         &outcome.preparation_directive,
         crate::playback_control::PreparationDirective::Abort {
@@ -1453,6 +1456,7 @@ async fn settle_preparation_control(
                     state,
                     staged_incarnation_id,
                     outcome.selection.capabilities.as_ref(),
+                    active_preparation.as_ref(),
                 )
                 .await
                 {
@@ -1466,6 +1470,7 @@ async fn settle_preparation_control(
                             state,
                             staged_incarnation_id,
                             "candidate target or decoder snapshot changed before commit",
+                            deferred_fel,
                         )
                         .await;
                     }
@@ -1506,6 +1511,7 @@ async fn settle_preparation_control(
                                         state,
                                         staged_incarnation_id,
                                         "planned relocation expired before commit",
+                                        deferred_fel,
                                     )
                                     .await;
                                 }
@@ -1529,6 +1535,7 @@ async fn settle_preparation_control(
                                     state,
                                     staged_incarnation_id,
                                     "planned relocation expired before commit",
+                                    deferred_fel,
                                 )
                                 .await;
                             }
@@ -1610,6 +1617,7 @@ async fn settle_preparation_control(
                                     staged_incarnation_id,
                                     &active.preparation.session_id,
                                     "prepared successor commit refused",
+                                    active.deferred_fel,
                                 )
                                 .await;
                             } else {
@@ -1617,6 +1625,7 @@ async fn settle_preparation_control(
                                     state,
                                     staged_incarnation_id,
                                     "prepared successor commit refused",
+                                    deferred_fel,
                                 )
                                 .await;
                             }
@@ -1640,6 +1649,7 @@ async fn settle_preparation_control(
                                     state,
                                     staged_incarnation_id,
                                     "prepared successor commit response unavailable",
+                                    deferred_fel,
                                 )
                                 .await;
                             }
@@ -1664,6 +1674,7 @@ async fn settle_preparation_control(
                                     staged_incarnation_id,
                                     &active.preparation.session_id,
                                     "prepared successor aborted",
+                                    active.deferred_fel,
                                 )
                                 .await;
                             } else {
@@ -1671,6 +1682,7 @@ async fn settle_preparation_control(
                                     state,
                                     staged_incarnation_id,
                                     "prepared successor aborted",
+                                    deferred_fel,
                                 )
                                 .await;
                             }
@@ -1711,6 +1723,7 @@ async fn settle_preparation_control(
             state,
             staged_incarnation_id,
             "prepared successor commit settlement expired",
+            deferred_fel,
         )
         .await;
     }
@@ -1751,6 +1764,7 @@ async fn retire_prepared_incarnation(
     state: &Arc<PreparationSettlementServices>,
     staged_incarnation_id: &str,
     reason: &'static str,
+    deferred_fel: bool,
 ) {
     let route = tokio::time::timeout(
         PREPARATION_STORE_BUDGET,
@@ -1764,12 +1778,15 @@ async fn retire_prepared_incarnation(
     .flatten()
     .filter(|route| route.state == "ended" && route.terminal_reason.as_deref() == Some("replaced"));
     if let Some(route) = route {
+        let deferred_fel = deferred_fel
+            || super::create::deferred_fel_stage_enhancement(&route.response_json).is_some();
         retire_prepared_worker(
             state,
             &route.owner_node_id,
             &route.incarnation_id,
             &route.session_id,
             reason,
+            deferred_fel,
         )
         .await;
     }
@@ -2841,6 +2858,7 @@ async fn candidate_snapshot_current(
     state: &Arc<PreparationSettlementServices>,
     staged_incarnation: &str,
     latest: Option<&crate::playback_control::DynamicCapabilities>,
+    active: Option<&super::preparation::ActivePreparedSuccessor>,
 ) -> bool {
     let Ok(Some(route)) = state
         .store
@@ -2880,6 +2898,31 @@ async fn candidate_snapshot_current(
     else {
         return false;
     };
+    if super::create::deferred_fel_stage_enhancement(&route.response_json).is_some()
+        || active.is_some_and(|stage| stage.deferred_fel)
+    {
+        if !active.is_some_and(|stage| stage.matches_deferred_fel_stage(&route)) {
+            return false;
+        }
+        // This peer was selected by its private FEL preparation proof. Its
+        // exact prepared recipe need not be present in the ordinary offer
+        // catalog. Recheck the source, settings, and live worker capability.
+        let Ok(Some(planning)) = state
+            .store
+            .playback_planning_snapshot(
+                recipe.request.file_id,
+                &crate::transcode::QUALITY_PLANNING_KEYS,
+            )
+            .await
+        else {
+            return false;
+        };
+        return crate::media_pool::PlanningBinding::from_snapshot(&planning) == catalog.binding
+            && state
+                .media_pool
+                .adaptive_fel_stage_worker_current(&route.owner_node_id)
+                .await;
+    }
     let candidates = state.media_pool.quality_candidates(state, query).await;
     candidates.iter().any(|entry| {
         entry.node_id == route.owner_node_id
@@ -2924,10 +2967,13 @@ async fn staged_successor_action(
                 "staged playback generation has no media-session route"
             );
         })?;
+    let remote_fel = successor.owner_node_id != state.node_id
+        && super::preparation::active_preparation(&successor.incarnation_id)
+            .is_some_and(|stage| stage.matches_deferred_fel_stage(&successor));
     if successor.incarnation_id != staged.staged_incarnation_id
         || successor.principal != predecessor.principal
         || successor.playback_id != predecessor.playback_id
-        || successor.owner_node_id != state.node_id
+        || (successor.owner_node_id != state.node_id && !remote_fel)
         || successor.owner_epoch != 1
         || successor.state != "active"
         || successor.publication_ready_at_ms
@@ -2966,15 +3012,21 @@ async fn staged_successor_action(
         );
         return Err(());
     }
-    let enhancement = prepared_successor_enhancement(
-        &state.transcode,
-        &successor.session_id,
-        &successor.incarnation_id,
-        recipe.request.file_id,
-        start.delivered_dynamic_range.as_deref(),
-        start.delivered_dolby_vision_profile,
-    )
-    .await;
+    let enhancement = if remote_fel {
+        // The authenticated staged Adopt verified the response against its
+        // original processed root before the incumbent could offer this slot.
+        super::create::deferred_fel_stage_enhancement(&successor.response_json)
+    } else {
+        prepared_successor_enhancement(
+            &state.transcode,
+            &successor.session_id,
+            &successor.incarnation_id,
+            recipe.request.file_id,
+            start.delivered_dynamic_range.as_deref(),
+            start.delivered_dolby_vision_profile,
+        )
+        .await
+    };
     let prepared = crate::playback_control::PreparedSuccessorAction {
         staged_incarnation_id: staged.staged_incarnation_id,
         deadline_ms: staged.deadline_ms,

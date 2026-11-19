@@ -1079,6 +1079,9 @@ impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) use vod_serve_create::bounded_adaptive_selected_recipe;
+
 pub(crate) struct PreparedRootAdmission {
     pub(crate) reuse_scope: Option<[u8; 32]>,
     pub(crate) reused_parent: Option<ProcessedRootReuse>,

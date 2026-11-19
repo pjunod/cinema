@@ -1041,6 +1041,7 @@ async fn staged_processing_delivery_round_trip(profile81: bool, verified: bool) 
             dolby_vision_profile: profile81.then_some(8),
             fel: Some(true),
         }),
+        None,
     )
     .await;
     assert_eq!(outcome, PreparationStageOutcome::Staged);

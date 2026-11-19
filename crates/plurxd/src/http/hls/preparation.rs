@@ -44,6 +44,7 @@ pub(super) struct ActivePreparedSuccessor {
     executor: crate::playback_control::PreparationExecutor,
     pub(super) preparation: plurx_core::domain::MediaSessionPreparation,
     pub(super) purpose: PreparationPurpose,
+    pub(super) deferred_fel: bool,
     // Issued only after local retained-output seal and successful prime.
     cached_recovery_owner: Option<CachedRecoveryOwner>,
     cached_accepted_wait: Option<CachedAcceptedWait>,
@@ -452,6 +453,7 @@ pub(super) fn register_test_preparation(
         executor,
         preparation,
         purpose,
+        deferred_fel: false,
         cached_recovery_owner: None,
         cached_accepted_wait: None,
         planning_registration: None,
@@ -557,6 +559,23 @@ pub(super) fn active_preparation(staged_incarnation_id: &str) -> Option<ActivePr
         .cloned()
 }
 
+impl ActivePreparedSuccessor {
+    /// The actor must independently complete Prime and activate this slot
+    /// before it can announce the peer or accept a viewer commit.
+    pub(super) fn matches_deferred_fel_stage(&self, route: &MediaSessionRoute) -> bool {
+        let preparation = &self.preparation;
+        self.deferred_fel
+            && !self.cancelled.is_cancelled()
+            && preparation.deadline_ms > unix_ms()
+            && preparation.incarnation_id == route.incarnation_id
+            && preparation.session_id == route.session_id
+            && preparation.owner_node_id == route.owner_node_id
+            && preparation.playback_id == route.playback_id
+            && preparation.recipe_json == route.recipe_json
+            && preparation.response_json == route.response_json
+    }
+}
+
 pub(super) fn take_active_preparation(
     staged_incarnation_id: &str,
 ) -> Option<ActivePreparedSuccessor> {
@@ -623,6 +642,7 @@ pub(super) async fn settle_cancelled_preparation(
         &active.preparation.incarnation_id,
         &active.preparation.session_id,
         reason,
+        active.deferred_fel,
     )
     .await;
     if durable_settled && retired {
@@ -2673,12 +2693,48 @@ pub(super) async fn stage_prepared_successor_as(
         prime_worker,
         ids,
         None,
+        None,
     )
     .await
 }
 
-/// The verified processed-upgrade root supplies delivery metadata for these
-/// same minted identities; ordinary staging passes no processing authority.
+/// The remote verified upgrade is tied to its original charged attempt.
+pub(super) struct DeferredFelStage {
+    pub(super) recipe_json: String,
+    pub(super) request_fingerprint: String,
+    pub(super) cancellation_key: String,
+    pub(super) desired_revision: Option<i64>,
+    pub(super) duration_ms: i64,
+    #[cfg(target_os = "linux")]
+    pub(super) prepared: super::create::AdaptiveOriginPrepared,
+    #[cfg(target_os = "linux")]
+    pub(super) deadline: tokio::time::Instant,
+}
+
+impl DeferredFelStage {
+    async fn adopt(
+        &self,
+        state: &AppState,
+        preparation: &plurx_core::domain::MediaSessionPreparation,
+    ) -> bool {
+        #[cfg(target_os = "linux")]
+        return super::create::adopt_deferred_fel_origin(
+            state,
+            &self.prepared,
+            preparation,
+            self.deadline,
+        )
+        .await
+        .is_ok();
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (state, preparation);
+            false
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn stage_prepared_successor_with_delivery_as(
     state: &AppState,
@@ -2693,6 +2749,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
     prime_worker: bool,
     ids: StagedSuccessorIds,
     processing: Option<StagedProcessingDelivery>,
+    deferred_fel: Option<&DeferredFelStage>,
 ) -> PreparationStageOutcome {
     // Saving the switch off takes the write side, persists the choice, and
     // settles every registered successor before releasing it. Holding this
@@ -2867,7 +2924,11 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
         library_channel: predecessor.library_channel.clone(),
         request: staged_request.clone(),
     };
-    let Ok(recipe_json) = serde_json::to_string(&staged_recipe) else {
+    let recipe_json = deferred_fel.map_or_else(
+        || serde_json::to_string(&staged_recipe),
+        |deferred| Ok(deferred.recipe_json.clone()),
+    );
+    let Ok(recipe_json) = recipe_json else {
         return PreparationStageOutcome::refused(
             session_id,
             PreparationStageRefusal::RecipeSerialization,
@@ -2955,7 +3016,9 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
         }),
         session_id: staged_session_id.clone(),
         playlist_url: format!("/api/v1/hls/{staged_session_id}/index.m3u8"),
-        duration_ms: source.duration_ms,
+        duration_ms: deferred_fel
+            .map(|deferred| deferred.duration_ms)
+            .or(source.duration_ms),
         start_seconds: resume_ms as f64 / 1_000.0,
         // VOD playlists retain the film's absolute zero origin. A rolling
         // successor instead begins its local timeline at this film boundary.
@@ -3010,13 +3073,20 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             )
         }
     };
-    let captures_output = successor_owner_captures_output(
-        state,
-        successor_owner,
-        staged_request.presentation,
-        prime_worker,
-    )
-    .await;
+    if deferred_fel.is_some() {
+        response_value
+            .as_object_mut()
+            .expect("StartResponse serializes as an object")
+            .insert("deferred_fel_stage".to_owned(), true.into());
+    }
+    let captures_output = deferred_fel.is_none()
+        && successor_owner_captures_output(
+            state,
+            successor_owner,
+            staged_request.presentation,
+            prime_worker,
+        )
+        .await;
     if captures_output {
         response_value
             .as_object_mut()
@@ -3088,9 +3158,13 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
     // then rather than against the one that started the work.
     .asking(desired_digest.clone());
     let preparation = plurx_core::domain::MediaSessionPreparation {
-        quality_cancellation_key: quality_intent
-            .as_ref()
-            .map(quality_cancellation_receipt_key),
+        quality_cancellation_key: deferred_fel
+            .map(|deferred| deferred.cancellation_key.clone())
+            .or_else(|| {
+                quality_intent
+                    .as_ref()
+                    .map(quality_cancellation_receipt_key)
+            }),
         incarnation_id: staged_incarnation_id,
         session_id: staged_session_id,
         principal: route.principal.clone(),
@@ -3103,10 +3177,15 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
         // The successor's own intent, not the predecessor's: the
         // fingerprint encodes `kind` and `start_seconds`, both of which this
         // row deliberately changes.
-        request_fingerprint: staged_request.durable_intent_fingerprint(
-            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
-                user_id: local_user_id,
+        request_fingerprint: deferred_fel.map_or_else(
+            || {
+                staged_request.durable_intent_fingerprint(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: local_user_id,
+                    },
+                )
             },
+            |deferred| deferred.request_fingerprint.clone(),
         ),
         owner_node_id: successor_owner.to_owned(),
         recipe_json,
@@ -3123,13 +3202,17 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
         // resolution — are exactly where a newer ask lands, and a value
         // captured before them would prove only that the ask had not changed
         // before the work started.
-        expected_desired_revision: state
-            .store
-            .desired_selection(&route.principal, &route.playback_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|desired| desired.revision),
+        expected_desired_revision: if let Some(deferred) = deferred_fel {
+            deferred.desired_revision
+        } else {
+            state
+                .store
+                .desired_selection(&route.principal, &route.playback_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|desired| desired.revision)
+        },
         deadline_ms: now_ms.saturating_add(PREPARATION_DEADLINE_MS),
     };
     if prime_worker {
@@ -3146,6 +3229,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             executor: executor.clone(),
             preparation: preparation.clone(),
             purpose,
+            deferred_fel: deferred_fel.is_some(),
             cached_recovery_owner: None,
             cached_accepted_wait: None,
             planning_registration: planning_registration.clone(),
@@ -3186,7 +3270,19 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             );
         }
         arm_preparation_foreground_watch(active.clone());
-        let reservation = match reserve_preparation_before(active.clone()).await {
+        let reserved = if let Some(deferred) = deferred_fel {
+            let guard = ReservedPreparationGuard::new(active.clone());
+            if deferred.adopt(state, &preparation).await {
+                Ok(guard)
+            } else {
+                Err(ReservationEnd::Refused(
+                    PreparationStageRefusal::ReservationRefused,
+                ))
+            }
+        } else {
+            reserve_preparation_before(active.clone()).await
+        };
+        let reservation = match reserved {
             Ok(reservation) => reservation,
             Err(ReservationEnd::Refused(reason)) => {
                 return PreparationStageOutcome::refused(session_id, reason)
@@ -3208,7 +3304,11 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
         }
         let prime_deadline = Instant::now() + PREPARATION_PRIME_BUDGET;
         let prime = async {
-            if successor_owner == state.node_id {
+            if deferred_fel.is_some() {
+                // The original authenticated staged Adopt already attached
+                // the verified private window under this exact reservation.
+                true
+            } else if successor_owner == state.node_id {
                 if staged_request.presentation == crate::transcode::Presentation::Live {
                     prime_live_prepared_session(
                         state,
@@ -3450,6 +3550,7 @@ pub(super) async fn retire_prepared_worker(
     incarnation_id: &str,
     session_id: &str,
     reason: &'static str,
+    deferred_fel: bool,
 ) -> bool {
     if owner_node_id == state.node_id() {
         state
@@ -3467,7 +3568,8 @@ pub(super) async fn retire_prepared_worker(
                     incarnation_id: incarnation_id.to_owned(),
                     session_id: session_id.to_owned(),
                     expected_owner_epoch: 1,
-                    reason: None,
+                    reason: deferred_fel
+                        .then(|| crate::vodserve::Terminal::Replaced.control_reason().into()),
                 },
             )
             .await

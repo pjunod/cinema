@@ -848,6 +848,11 @@ where
             .saturating_add(trial_budget_ms),
         source.duration_ms,
     );
+    #[cfg(target_os = "linux")]
+    let peer_budget = crate::media_pool::CreateStartupBudget::new_with_clock(
+        trial_budget_ms as u64,
+        &state.membership.clock_guard(),
+    );
     let mut trial_request = intent.request.clone();
     trial_request.start_seconds = verified_ms as f64 / 1_000.0;
     let superseded = pending.cancellation_token();
@@ -928,6 +933,35 @@ where
                 }
                 run.skipped("the current reconstruction recipe no longer matches its completed qualification");
                 return "declined";
+            }
+            #[cfg(target_os = "linux")]
+            if intent.auto_policy
+                && crate::transcode::vod_refusal(&reason).is_some_and(|(code, _)| {
+                    code == crate::media_sessions::ADAPTIVE_PROCESSED_CAPACITY_REFUSED
+                })
+            {
+                // The remote successor owns no local yield. Return any
+                // parked producer to the incumbent before considering a peer.
+                drop(incumbent_claim.take());
+                let remote = peer_budget
+                    .scope(stage_remote_fel_after_capacity_refusal(
+                        state,
+                        intent,
+                        run,
+                        &pending,
+                        &route,
+                        &predecessor,
+                        &source,
+                        projected.as_ref(),
+                    ))
+                    .await;
+                match remote {
+                    Ok(outcome) => return outcome,
+                    Err(error) => {
+                        tracing::info!(target: "plurxd::http::hls", error = %error,
+                            "same-quality FEL peer did not stage a successor");
+                    }
+                }
             }
             tracing::warn!(target: "plurxd::http::hls", session = %session, %reason,
                 "processed upgrade declined; the ordinary session keeps playing");
@@ -1089,6 +1123,7 @@ where
         primes,
         ids,
         Some(delivery),
+        None,
     )
     .await;
     if staged == super::preparation::PreparationStageOutcome::Staged {
@@ -1103,6 +1138,342 @@ where
         }
     }
     run.finish_staging(staged)
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+async fn stage_remote_fel_after_capacity_refusal(
+    state: &AppState,
+    intent: &UpgradeIntent,
+    run: &UpgradeRun,
+    pending: &super::preparation::PendingCandidateGuard,
+    route: &MediaSessionRoute,
+    predecessor: &RemoteStartRequest,
+    source: &MediaFile,
+    projected: Option<&plurx_core::playback::candidate::QualityCandidate>,
+) -> Result<&'static str, String> {
+    use crate::media_sessions::AdaptivePreparePurpose;
+    use plurx_core::transcode::dv_processing::DvDestination;
+
+    let deadline = crate::media_pool::create_preparation_deadline()
+        .ok_or("the original deferred FEL preparation cutoff is absent")?;
+    crate::media_pool::create_remote_grant(deadline).map_err(|error| error.to_string())?;
+    let owner = state
+        .media_pool
+        .adaptive_fel_workers(state, true)
+        .await
+        .into_iter()
+        .next()
+        .ok_or("no eligible worker advertises deferred FEL preparation")?;
+    let quote = state
+        .media_pool
+        .adaptive_worker_quote(state, &owner)
+        .await
+        .ok_or("deferred FEL worker quote is no longer current")?;
+    let planning = state
+        .store
+        .playback_planning_snapshot(source.id, &crate::transcode::QUALITY_PLANNING_KEYS)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or("deferred FEL source planning is unavailable")?;
+    let original = intent
+        .request
+        .candidate_context
+        .as_deref()
+        .ok_or("the deferred FEL request has no selection context")?;
+    let incumbent = predecessor
+        .candidate_catalog
+        .as_ref()
+        .filter(|catalog| {
+            !catalog.candidate.processed_dv
+                && predecessor.candidate_id == Some(catalog.candidate.id)
+                && catalog.candidate.id == original.candidate_id
+                && catalog.candidate.recipe_digest == original.recipe_digest
+        })
+        .ok_or("the current incumbent has no matching ordinary candidate")?;
+    let requested = projected.unwrap_or(&incumbent.candidate);
+    let source_height = source
+        .height
+        .filter(|height| *height > 0)
+        .ok_or("the Profile 7 source has no known picture height")?;
+    let height = source_height.min(i64::from(incumbent.candidate.target_height)) & !1;
+    if height < 32 || (requested.processed_dv && i64::from(requested.target_height) != height) {
+        return Err("the original deferred FEL raster is no longer current".into());
+    }
+    let query = original
+        .catalog_query
+        .as_ref()
+        .and_then(|query| {
+            crate::transcode::TranscodeManager::processed_catalog_query(&planning, query)
+        })
+        .ok_or("the deferred FEL audio or source contract changed")?;
+    if crate::transcode::TranscodeManager::processed_catalog_destination(&planning, &query)
+        != Some(DvDestination::Profile81)
+        || pending.cancelled()
+        || tokio::time::Instant::now() >= deadline
+    {
+        return Err("the deferred FEL source, settings or original cutoff changed".into());
+    }
+    let viewer_ms = viewer_film_time_ms(state, intent, run).await;
+    let remaining_ms = i64::try_from(
+        deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX);
+    let requested_ms = bounded_film_ms(viewer_ms.saturating_add(remaining_ms), source.duration_ms);
+    let root_id = uuid::Uuid::new_v4().to_string();
+    let claim_id = format!("deferred-fel:{root_id}");
+    let mut request = intent.request.clone();
+    request.start_seconds = requested_ms as f64 / 1000.0;
+    request.kind = crate::transcode::SessionKind::Transcode { height };
+    request.hdr10 = true;
+    request.dv_processing_destination = Some(DvDestination::Profile81);
+    request.dv_refit_digest = None;
+    request.audio_index = query.audio_index;
+    request.audio_offset_ms = query.audio_offset_ms;
+    request.audio_claim = query.audio_claim.clone();
+    request.audio_delivery = query.audio_delivery.clone();
+    request.request_id = Some(root_id.clone());
+    request.previous_session_id = None;
+    request.reopen_reason = None;
+    request.control_sequence = None;
+    request.quality_catalog = None;
+    request.candidate_context = None;
+    let catalog = crate::media_sessions::CandidateCatalogContext {
+        caps: query.caps.clone(),
+        candidate: requested.clone(),
+        binding: crate::media_pool::PlanningBinding::from_snapshot(&planning),
+        catalog_query: Some(query),
+    };
+    let pristine = RemoteStartRequest {
+        retained_output_receiver: Some(1),
+        retained_output: None,
+        candidate_id: Some(requested.id),
+        candidate_catalog: Some(catalog),
+        decoder_caps: predecessor.decoder_caps.clone(),
+        presentation_target: predecessor.presentation_target,
+        protocol_version: crate::media_pool::PROTOCOL_VERSION,
+        incarnation_id: root_id.clone(),
+        principal: route.principal.clone(),
+        source_size: source.size,
+        source_mtime: source.mtime,
+        typeless_playlist: predecessor.typeless_playlist,
+        library_channel: None,
+        request,
+    };
+    let fingerprint = pristine
+        .request
+        .durable_intent_fingerprint(&pristine.principal);
+    let desired_revision = state
+        .store
+        .desired_selection(&route.principal, &route.playback_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .map(|desired| desired.revision);
+    let now_ms = crate::media_sessions::unix_ms();
+    let claim_expiry = now_ms.saturating_add(60_000);
+    let (mut guard, acquired) = super::session_guard::MediaSessionRequestGuard::claim(
+        state.clone(),
+        route.principal.clone(),
+        claim_id.clone(),
+        root_id.clone(),
+        async {
+            let (outcome, _) = state
+                .store
+                .claim_media_session_request_recording(
+                    &route.principal,
+                    &claim_id,
+                    &fingerprint,
+                    &route.playback_id,
+                    &root_id,
+                    now_ms,
+                    claim_expiry,
+                    None,
+                )
+                .await?;
+            Ok(outcome)
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|_| "deferred FEL root claim is unavailable")?;
+    if acquired != root_id {
+        return Err("the deferred FEL root claim selected another incarnation".into());
+    }
+    let mut context = None;
+    let selected = super::create::prepare_adaptive_origin(
+        state,
+        &mut context,
+        &owner,
+        quote,
+        source,
+        &planning,
+        &pristine,
+        &claim_id,
+        &root_id,
+        &fingerprint,
+        &route.recovery_epoch,
+        Some(route),
+        Some(&route.incarnation_id),
+        desired_revision,
+        claim_expiry,
+        deadline,
+        AdaptivePreparePurpose::DeferredFel,
+    )
+    .await;
+    if context.is_some() {
+        guard.disarm();
+    }
+    let prepared = selected.map_err(|failure| match failure {
+        super::create::adaptive_retry::AdaptiveOriginFailure::NextWorker(error)
+        | super::create::adaptive_retry::AdaptiveOriginFailure::Hold(error) => format!("{error:?}"),
+    })?;
+    stage_verified_remote_fel(
+        state,
+        intent,
+        run,
+        pending,
+        route,
+        predecessor,
+        source,
+        &owner,
+        prepared,
+        requested_ms,
+        deadline,
+    )
+    .await
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+async fn stage_verified_remote_fel(
+    state: &AppState,
+    intent: &UpgradeIntent,
+    run: &UpgradeRun,
+    pending: &super::preparation::PendingCandidateGuard,
+    route: &MediaSessionRoute,
+    predecessor: &RemoteStartRequest,
+    source: &MediaFile,
+    owner: &str,
+    prepared: super::create::AdaptiveOriginPrepared,
+    requested_ms: i64,
+    deadline: tokio::time::Instant,
+) -> Result<&'static str, String> {
+    let ready = async {
+        let (start, end) = prepared
+            .prepared_window_ms
+            .ok_or("the worker has no verified FEL window")?;
+        if requested_ms < start
+            || requested_ms >= end
+            || (prepared.preview.start_seconds * 1000.0).round() as i64 != requested_ms
+        {
+            return Err(
+                "the original verified worker window does not cover the deferred playhead".into(),
+            );
+        }
+        let route_recipe: RemoteStartRequest = serde_json::from_str(&prepared.selected_recipe_json)
+            .map_err(|error| error.to_string())?;
+        let catalog = route_recipe
+            .candidate_catalog
+            .as_ref()
+            .ok_or("the worker has no selected FEL candidate")?;
+        let mut request = route_recipe.request.clone();
+        let mut selected =
+            crate::transcode::TranscodeManager::candidate_context(&catalog.candidate);
+        selected.canonical_caps = Some(catalog.caps.clone());
+        selected.catalog_query = catalog.catalog_query.clone();
+        selected.planning_binding = Some(catalog.binding.clone());
+        selected.owner_node_id = Some(owner.to_owned());
+        request.candidate_context = Some(Box::new(selected));
+        request.audio_delivery = prepared.preview.audio_delivery.clone();
+        admit_processed_candidate(
+            state,
+            intent,
+            source,
+            route,
+            &catalog.candidate,
+            AdmissionStage::AfterTrial,
+        )
+        .await?;
+        let verified_entry = requested_ms..end;
+        let (rendezvous_ms, _) = tokio::time::timeout_at(
+            deadline,
+            await_successor_start(
+                state,
+                intent,
+                run,
+                pending,
+                Some(&verified_entry),
+                source.duration_ms,
+            ),
+        )
+        .await
+        .map_err(|_| "the original deferred FEL rendezvous cutoff expired")??;
+        if pending.cancelled()
+            || tokio::time::Instant::now() >= deadline
+            || rendezvous_ms != requested_ms
+        {
+            return Err("the viewer moved past the original deferred FEL opportunity".into());
+        }
+        let cancellation_key = crate::media_sessions::bounded_adaptive_digest(&prepared.claim.key)?;
+        let duration_ms = prepared
+            .preview
+            .duration_ms
+            .ok_or("the worker has no bound VOD duration")?;
+        Ok((request, cancellation_key, duration_ms))
+    }
+    .await;
+    let (request, cancellation_key, duration_ms) = match ready {
+        Ok(ready) => ready,
+        Err(error) => {
+            super::create::cancel_deferred_fel_origin(state, &prepared).await;
+            return Err(error);
+        }
+    };
+    let ids = super::preparation::StagedSuccessorIds {
+        incarnation_id: prepared.claim.key.route_incarnation_id.to_string(),
+        session_id: prepared.claim.key.session_id.to_string(),
+    };
+    let deferred = super::preparation::DeferredFelStage {
+        recipe_json: prepared.selected_recipe_json.clone(),
+        request_fingerprint: prepared.claim.binding.request_fingerprint.clone(),
+        desired_revision: prepared.claim.binding.expected_desired_revision,
+        cancellation_key,
+        duration_ms,
+        prepared,
+        deadline,
+    };
+    let outcome = super::preparation::stage_prepared_successor_with_delivery_as(
+        state,
+        &intent.session_id,
+        route,
+        predecessor,
+        &request,
+        Some(source),
+        owner,
+        super::preparation::PreparationPurpose::SelectionChange,
+        super::preparation::AcceptedAsk {
+            prepared_proof: None,
+            film_time_ms: requested_ms,
+            desired_digest: None,
+            planning_cancellation: Some(pending.cancellation_token()),
+            planning_registration: Some(pending.registration()),
+            quality_intent: None,
+        },
+        true,
+        ids,
+        Some(super::preparation::StagedProcessingDelivery {
+            dolby_vision_profile: Some(8),
+            fel: Some(true),
+        }),
+        Some(&deferred),
+    )
+    .await;
+    if outcome != super::preparation::PreparationStageOutcome::Staged {
+        super::create::cancel_deferred_fel_origin(state, &deferred.prepared).await;
+    }
+    Ok(run.finish_staging(outcome))
 }
 
 /// Skip reason when a parked incumbent's published runway (or a seek past it)

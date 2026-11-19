@@ -3102,6 +3102,8 @@ fn placement_test_snapshot(node_id: &str) -> crate::media_pool::MediaNodeSnapsho
         live_tv_processing: false,
         live_tv_resource_processing: false,
         adaptive_worker_quote: None,
+        adaptive_fel_prepare: false,
+        adaptive_fel_stage: false,
     }
 }
 

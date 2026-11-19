@@ -95,41 +95,47 @@ impl PreparedAdaptiveRecipe {
         {
             return Err("adaptive selected route differs from its local finite recipe".into());
         }
-        // The Store's selected-route limit is 32 KiB. Reserve and verify
-        // that one actual backing allocation before serialization; a writer
-        // error refuses an overlong route before Vec can grow past it.
-        struct BoundedRoute(Vec<u8>);
-        impl std::io::Write for BoundedRoute {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                if bytes.len() > 32 * 1024 - self.0.len() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "adaptive selected route exceeds Store limit",
-                    ));
-                }
-                self.0.extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(32 * 1024)
-            .map_err(|_| "reserving adaptive selected route capacity")?;
-        if bytes.capacity() > 32 * 1024 {
-            return Err("adaptive selected route allocation exceeds its charged limit".into());
-        }
-        let mut writer = BoundedRoute(bytes);
-        serde_json::to_writer(&mut writer, envelope)
-            .map_err(|error| format!("serializing adaptive selected route: {error}"))?;
-        let json =
-            String::from_utf8(writer.0).map_err(|_| "adaptive selected route is not UTF-8")?;
-        plurx_core::store::adaptive_resource_attempts::selected_recipe_digest(&json)
-            .map_err(|error| format!("adaptive selected route exceeds Store bounds: {error}"))?;
-        Ok(json)
+        bounded_adaptive_selected_recipe(envelope)
     }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn bounded_adaptive_selected_recipe(
+    envelope: &crate::media_sessions::RemoteStartRequest,
+) -> Result<String, String> {
+    // The Store's selected-route limit is 32 KiB. Reserve and verify
+    // that one actual backing allocation before serialization; a writer
+    // error refuses an overlong route before Vec can grow past it.
+    struct BoundedRoute(Vec<u8>);
+    impl std::io::Write for BoundedRoute {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > 32 * 1024 - self.0.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "adaptive selected route exceeds Store limit",
+                ));
+            }
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(32 * 1024)
+        .map_err(|_| "reserving adaptive selected route capacity")?;
+    if bytes.capacity() > 32 * 1024 {
+        return Err("adaptive selected route allocation exceeds its charged limit".into());
+    }
+    let mut writer = BoundedRoute(bytes);
+    serde_json::to_writer(&mut writer, envelope)
+        .map_err(|error| format!("serializing adaptive selected route: {error}"))?;
+    let json = String::from_utf8(writer.0).map_err(|_| "adaptive selected route is not UTF-8")?;
+    plurx_core::store::adaptive_resource_attempts::selected_recipe_digest(&json)
+        .map_err(|error| format!("adaptive selected route exceeds Store bounds: {error}"))?;
+    Ok(json)
 }
 
 /// Private publication/storage identity; the canonical recipe remains the

@@ -396,6 +396,7 @@ pub(super) async fn spawn_generation(
                     source_custody,
                     None,
                     source_open,
+                    None,
                 )
                 .await
                 .and_then(|outcome| match outcome {

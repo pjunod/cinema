@@ -6,7 +6,7 @@ use plurx_core::store::adaptive_resource_attempts::{
     RequestBinding, RequestDisposition, RequestStatus,
 };
 
-pub(super) enum AdaptiveOriginFailure {
+pub(in crate::http::hls) enum AdaptiveOriginFailure {
     NextWorker(ApiError),
     Hold(ApiError),
 }
@@ -30,6 +30,14 @@ impl From<ApiError> for AdaptivePrepareFailure {
 pub(super) fn local_prepare_refusal(
     error: crate::transcode::adaptive_attempts::AdaptivePrepareError,
 ) -> AdaptivePrepareFailure {
+    if let Some(reason) = error.processed_refusal {
+        return match reason {
+            crate::media_sessions::AdaptiveProcessedRefusal::AdmissionLimit => {
+                AdaptivePrepareFailure::Retry(reason.into_api_error())
+            }
+            _ => AdaptivePrepareFailure::Hold(reason.into_api_error()),
+        };
+    }
     AdaptivePrepareFailure::Retry(match error.trial_refusal {
         Some(reason) => crate::media_sessions::AdaptiveTrialRefusalV1::new(reason).into_api_error(),
         None => ApiError::ServiceUnavailable(error.message.into_string()),
@@ -73,6 +81,19 @@ pub(super) fn grant_http_refusal(
     body: &[u8],
 ) -> AdaptivePrepareFailure {
     if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        let processed = serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| {
+                crate::media_sessions::AdaptiveProcessedRefusal::from_code(value["code"].as_str()?)
+            });
+        if let Some(reason) = processed {
+            return match reason {
+                crate::media_sessions::AdaptiveProcessedRefusal::AdmissionLimit => {
+                    AdaptivePrepareFailure::Retry(reason.into_api_error())
+                }
+                _ => AdaptivePrepareFailure::Hold(reason.into_api_error()),
+            };
+        }
         if let Some(refusal) = crate::media_sessions::AdaptiveTrialRefusalV1::decode(body) {
             return AdaptivePrepareFailure::Retry(refusal.into_api_error());
         }
@@ -123,7 +144,7 @@ pub(super) fn remote_candidate_refusal(
     )))
 }
 
-pub(super) struct AdaptiveOriginContext {
+pub(in crate::http::hls) struct AdaptiveOriginContext {
     pub binding: RequestBinding,
     // Cardinality is bounded by the durable three-attempt contract. This is
     // original control payload, not an assertion about Tokio/native peak size.

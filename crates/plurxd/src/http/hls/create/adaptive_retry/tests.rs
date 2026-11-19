@@ -451,12 +451,45 @@ async fn grant_time_clock_refusal_retries_the_next_candidate_and_other_refusals_
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+async fn processed_capacity_refusal_keeps_a_distinct_retry_reason() {
+    use axum::response::IntoResponse;
+
+    let refusal = crate::transcode::adaptive_attempts::AdaptivePrepareError {
+        message: "the processed FEL reconstruction slot is occupied".into(),
+        trial_refusal: None,
+        processed_refusal: Some(crate::media_sessions::AdaptiveProcessedRefusal::AdmissionLimit),
+    };
+    let AdaptivePrepareFailure::Retry(local) = local_prepare_refusal(refusal) else {
+        panic!("a processed admission refusal should reach the retry path");
+    };
+    let code = crate::media_sessions::ADAPTIVE_PROCESSED_CAPACITY_REFUSED;
+    assert_eq!(local.code(), Some(code));
+    let body = axum::body::to_bytes(local.into_response().into_body(), 1024)
+        .await
+        .expect("bounded processed refusal");
+    assert!(crate::media_sessions::AdaptiveTrialRefusalV1::decode(&body).is_none());
+
+    let AdaptivePrepareFailure::Retry(remote) =
+        grant_http_refusal("node-b", reqwest::StatusCode::SERVICE_UNAVAILABLE, &body)
+    else {
+        panic!("the authenticated worker's processed refusal should be retryable");
+    };
+    assert_eq!(remote.code(), Some(code));
+    assert!(matches!(
+        grant_http_refusal("node-b", reqwest::StatusCode::UNAUTHORIZED, &body),
+        AdaptivePrepareFailure::Hold(_)
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
 async fn trial_policy_refusal_keeps_local_and_remote_reason_without_inventing_evidence() {
     use axum::response::IntoResponse;
     use plurx_core::resource_policy::TrialRefusal;
     let refusal = crate::transcode::adaptive_attempts::AdaptivePrepareError {
         message: "actual finite capacity refused".into(),
         trial_refusal: Some(TrialRefusal::UnknownMemory),
+        processed_refusal: None,
     };
     let AdaptivePrepareFailure::Retry(local) = local_prepare_refusal(refusal) else {
         panic!("known local policy refusal is a retry candidate, pending cleanup");

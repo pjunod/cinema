@@ -193,6 +193,7 @@ async fn cached_wait_watcher_fixture(watcher_revocation: Option<&str>) {
         ),
         preparation,
         purpose: PreparationPurpose::SelectionChange,
+        deferred_fel: false,
         cached_recovery_owner: None,
         cached_accepted_wait: None,
         planning_registration: Some(Arc::clone(&pending.registered)),

@@ -162,17 +162,18 @@ fn origin_activation_frame_bytes() -> Option<usize> {
 
 #[cfg(target_os = "linux")]
 #[path = "create/adaptive_retry.rs"]
-mod adaptive_retry;
+pub(super) mod adaptive_retry;
 #[cfg(target_os = "linux")]
 use adaptive_retry::{AdaptiveOriginContext, AdaptiveOriginFailure, AdaptivePrepareFailure};
 
 #[cfg(target_os = "linux")]
-struct AdaptiveOriginPrepared {
-    claim: plurx_core::store::adaptive_resource_attempts::AttemptClaim,
-    worker: plurx_core::store::adaptive_resource_attempts::WorkerBinding,
-    selected_recipe_json: String,
-    preview_json: String,
-    preview: RemoteStartResponse,
+pub(super) struct AdaptiveOriginPrepared {
+    pub(super) prepared_window_ms: Option<(i64, i64)>,
+    pub(super) claim: plurx_core::store::adaptive_resource_attempts::AttemptClaim,
+    pub(super) worker: plurx_core::store::adaptive_resource_attempts::WorkerBinding,
+    pub(super) selected_recipe_json: String,
+    pub(super) preview_json: String,
+    pub(super) preview: RemoteStartResponse,
     // Last: local response fields transfer to charged control DTOs or die first.
     _reply_permit: Option<plurx_core::adaptive_resources::runtime::attempt_root::ReplyPermit>,
 }
@@ -472,7 +473,7 @@ fn clone_adaptive_origin_recipe(
 /// exclusively with the original worker's native/application owners.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
-async fn prepare_adaptive_origin(
+pub(super) async fn prepare_adaptive_origin(
     state: &AppState,
     context: &mut Option<AdaptiveOriginContext>,
     owner_node_id: &str,
@@ -489,6 +490,7 @@ async fn prepare_adaptive_origin(
     desired_revision: Option<i64>,
     original_claim_deadline_ms: i64,
     deadline: tokio::time::Instant,
+    purpose: crate::media_sessions::AdaptivePreparePurpose,
 ) -> Result<AdaptiveOriginPrepared, AdaptiveOriginFailure> {
     use plurx_core::store::adaptive_resource_attempts::{
         AttemptClaim, AttemptKey, MutationContext, RequestBinding, RequestKey,
@@ -509,6 +511,7 @@ async fn prepare_adaptive_origin(
     let intent_digest = funded
         .recipe
         .adaptive_intent_digest()
+        .and_then(|digest| purpose.bind_intent(digest))
         .map_err(ApiError::ServiceUnavailable)?;
     let route_id = uuid::Uuid::new_v4();
     let session_id = uuid::Uuid::new_v4();
@@ -591,6 +594,7 @@ async fn prepare_adaptive_origin(
             funded,
             quote.serving_generation,
             deadline,
+            purpose,
         ),
     )
     .await;
@@ -613,8 +617,12 @@ async fn prepare_adaptive_origin(
             adaptive_retry::fence_original(state, context, &claim, deadline).await?;
             // A typed growth refusal is not a cleanup receipt. Its fixed P/M
             // may still be retained even though no new R was admitted.
+            let processed_capacity =
+                error.code() == Some(crate::media_sessions::ADAPTIVE_PROCESSED_CAPACITY_REFUSED);
             let may_retry = may_retry
-                && (error.code() != Some(crate::media_sessions::ADAPTIVE_TRIAL_REFUSED)
+                && (!recipe.request.is_exact_adaptive_fel() || processed_capacity)
+                && (!(processed_capacity
+                    || error.code() == Some(crate::media_sessions::ADAPTIVE_TRIAL_REFUSED))
                     || adaptive_retry::policy_refusal_retry_ready(state, &claim, deadline).await);
             Err(if may_retry {
                 AdaptiveOriginFailure::NextWorker(error)
@@ -632,6 +640,7 @@ async fn prepare_claimed_adaptive_origin(
     funded: FundedOriginRecipe,
     serving_generation: u64,
     deadline: tokio::time::Instant,
+    purpose: crate::media_sessions::AdaptivePreparePurpose,
 ) -> Result<AdaptiveOriginPrepared, AdaptivePrepareFailure> {
     use plurx_core::store::adaptive_resource_attempts::{
         AttemptMutation, AttemptPhase, MutationContext, WinnerSelection,
@@ -640,6 +649,7 @@ async fn prepare_claimed_adaptive_origin(
     let prepare = crate::media_sessions::AdaptiveAttemptPrepareV1 {
         version: crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
         claim: claim.clone(),
+        purpose,
         recipe: funded.recipe,
     };
     let mut prepared = None;
@@ -687,8 +697,16 @@ async fn prepare_claimed_adaptive_origin(
                         // gave is the only record of why this node's own
                         // preparation did not finish.
                         Ok(Ok(Err(error))) => {
-                            if error.trial_refusal.is_some() {
+                            if error.trial_refusal.is_some() || error.processed_refusal.is_some() {
                                 return Err(adaptive_retry::local_prepare_refusal(error));
+                            }
+                            if prepare.recipe.request.is_exact_adaptive_fel() {
+                                return Err(AdaptivePrepareFailure::Hold(
+                                    ApiError::ServiceUnavailable(
+                                        "the local worker could not verify the exact FEL recipe"
+                                            .into(),
+                                    ),
+                                ));
                             }
                             tracing::warn!(
                                 target: "plurxd::http::hls",
@@ -824,8 +842,78 @@ async fn prepare_claimed_adaptive_origin(
     }
     crate::transcode::adaptive_attempts::preflight_origin_reply(&claim, &prepared)
         .map_err(ApiError::ServiceUnavailable)?;
-    let preview: RemoteStartResponse =
+    let mut preview: RemoteStartResponse =
         serde_json::from_str(&prepared.preview_json).map_err(ApiError::from)?;
+    let deferred = purpose == crate::media_sessions::AdaptivePreparePurpose::DeferredFel;
+    if prepared.processed_fel != (deferred || prepare.recipe.request.is_exact_adaptive_fel())
+        || prepared.prepared_window_ms.is_some() != deferred
+        || (prepared.processed_fel && preview.grade != plurx_core::transcode::OutputGrade::Hdr10)
+    {
+        return Err(AdaptivePrepareFailure::Hold(ApiError::ServiceUnavailable(
+            "adaptive worker returned a different processing contract".into(),
+        )));
+    }
+    if prepared.processed_fel {
+        let mut selected: RemoteStartRequest =
+            serde_json::from_str(&prepared.selected_recipe_json).map_err(ApiError::from)?;
+        let requested = prepare
+            .recipe
+            .candidate_catalog
+            .as_ref()
+            .ok_or_else(|| ApiError::Conflict("missing original FEL output contract".into()))?;
+        let equivalent = selected.is_valid()
+            && (selected.request.is_exact_adaptive_fel()
+                || (deferred && selected.request.is_adaptive_fel()))
+            && prepare
+                .recipe
+                .request
+                .audio_delivery
+                .as_ref()
+                .is_none_or(|expected| {
+                    preview
+                        .audio_delivery
+                        .as_ref()
+                        .is_some_and(|actual| expected.byte_identity() == actual.byte_identity())
+                })
+            && selected.candidate_catalog.as_ref().is_some_and(|actual| {
+                if deferred {
+                    crate::media_sessions::deferred_fel_output_matches(
+                        &prepare.recipe.request,
+                        &requested.candidate,
+                        &actual.candidate,
+                    )
+                } else {
+                    crate::media_sessions::same_fel_output_contract(
+                        &requested.candidate,
+                        &actual.candidate,
+                    )
+                }
+            });
+        if !equivalent {
+            return Err(AdaptivePrepareFailure::Hold(ApiError::Conflict(
+                "the worker changed the requested FEL output contract".into(),
+            )));
+        }
+        selected.candidate_id = prepare.recipe.candidate_id;
+        selected
+            .candidate_catalog
+            .as_mut()
+            .expect("checked processed candidate")
+            .candidate = requested.candidate.clone();
+        if selected
+            .adaptive_root_intent_digest(claim.binding.key.request_incarnation_id)
+            .and_then(|digest| purpose.bind_intent(digest))
+            .ok()
+            .as_deref()
+            != Some(claim.binding.intent_digest.as_str())
+        {
+            return Err(AdaptivePrepareFailure::Hold(ApiError::Conflict(
+                "the worker changed the original FEL source, settings or client intent".into(),
+            )));
+        }
+        preview.processed_dv_profile = Some(8);
+        preview.processed_fel = Some(true);
+    }
     if preview
         .adaptive_preview_requested_heap_bytes()
         .and_then(|n| n.checked_add(std::mem::size_of::<RemoteStartResponse>()))
@@ -857,34 +945,37 @@ async fn prepare_claimed_adaptive_origin(
     {
         return Err(ApiError::ServiceUnavailable("adaptive Prepared row changed".into()).into());
     }
-    let selection = WinnerSelection {
-        context: MutationContext {
-            operation_id: uuid::Uuid::new_v4(),
-            expected_request_sequence: status.sequence,
-            expected_attempt_sequence: attempt.sequence,
-            now_ms: unix_ms(),
-        },
-        binding: claim.binding.clone(),
-        key: claim.key.clone(),
-        worker: prepared.worker.clone(),
-    };
-    match state
-        .store
-        .select_adaptive_winner(&selection)
-        .await
-        .map_err(|error| session_store_error("selecting adaptive worker", error))?
-    {
-        AttemptMutation::Applied(known) | AttemptMutation::Replay(known)
-            if known.binding == claim.binding
-                && known.winner_attempt_id == Some(claim.key.attempt_id) => {}
-        _ => {
-            return Err(ApiError::ServiceUnavailable(
-                "adaptive Winner selection is uncertain".into(),
-            )
-            .into())
+    if !deferred {
+        let selection = WinnerSelection {
+            context: MutationContext {
+                operation_id: uuid::Uuid::new_v4(),
+                expected_request_sequence: status.sequence,
+                expected_attempt_sequence: attempt.sequence,
+                now_ms: unix_ms(),
+            },
+            binding: claim.binding.clone(),
+            key: claim.key.clone(),
+            worker: prepared.worker.clone(),
+        };
+        match state
+            .store
+            .select_adaptive_winner(&selection)
+            .await
+            .map_err(|error| session_store_error("selecting adaptive worker", error))?
+        {
+            AttemptMutation::Applied(known) | AttemptMutation::Replay(known)
+                if known.binding == claim.binding
+                    && known.winner_attempt_id == Some(claim.key.attempt_id) => {}
+            _ => {
+                return Err(ApiError::ServiceUnavailable(
+                    "adaptive Winner selection is uncertain".into(),
+                )
+                .into())
+            }
         }
     }
     Ok(AdaptiveOriginPrepared {
+        prepared_window_ms: prepared.prepared_window_ms,
         claim,
         worker: prepared.worker,
         selected_recipe_json: prepared.selected_recipe_json,
@@ -894,7 +985,180 @@ async fn prepare_claimed_adaptive_origin(
     })
 }
 
-/// Classify a refused catalogue without changing candidate selection.
+/// Select and attach only the original prepared peer to the incumbent stage.
+#[cfg(target_os = "linux")]
+pub(super) async fn adopt_deferred_fel_origin(
+    state: &AppState,
+    prepared: &AdaptiveOriginPrepared,
+    preparation: &plurx_core::domain::MediaSessionPreparation,
+    deadline: tokio::time::Instant,
+) -> Result<(), ApiError> {
+    use plurx_core::store::adaptive_resource_attempts::{
+        AdaptiveStagedAdoption, AttemptMutation, AttemptPhase, MutationContext, WinnerSelection,
+    };
+    if prepared.prepared_window_ms.is_none() || tokio::time::Instant::now() >= deadline {
+        return Err(ApiError::ServiceUnavailable(
+            "the original staged FEL allowance has expired".into(),
+        ));
+    }
+    let status = state
+        .store
+        .adaptive_request_status(
+            &prepared.claim.binding.key,
+            &prepared.claim.binding.principal,
+        )
+        .await
+        .map_err(|error| session_store_error("reading staged FEL Prepared", error))?
+        .ok_or_else(|| ApiError::Conflict("the staged FEL request disappeared".into()))?;
+    let attempt = status
+        .attempts
+        .iter()
+        .find(|row| row.key == prepared.claim.key)
+        .filter(|row| {
+            row.phase == AttemptPhase::Prepared && row.worker.as_ref() == Some(&prepared.worker)
+        })
+        .ok_or_else(|| {
+            ApiError::Conflict("the original staged worker is no longer Prepared".into())
+        })?;
+    if status.binding != prepared.claim.binding || status.winner_attempt_id.is_some() {
+        return Err(ApiError::Conflict(
+            "the original staged request changed".into(),
+        ));
+    }
+    let selection = WinnerSelection {
+        context: MutationContext {
+            operation_id: uuid::Uuid::new_v4(),
+            expected_request_sequence: status.sequence,
+            expected_attempt_sequence: attempt.sequence,
+            now_ms: unix_ms(),
+        },
+        binding: prepared.claim.binding.clone(),
+        key: prepared.claim.key.clone(),
+        worker: prepared.worker.clone(),
+    };
+    let status = match state
+        .store
+        .select_adaptive_winner(&selection)
+        .await
+        .map_err(|error| session_store_error("selecting staged FEL worker", error))?
+    {
+        AttemptMutation::Applied(status) | AttemptMutation::Replay(status)
+            if status.binding == selection.binding
+                && status.winner_attempt_id == Some(selection.key.attempt_id) =>
+        {
+            status
+        }
+        _ => return Err(ApiError::Conflict("the staged FEL winner changed".into())),
+    };
+    let winner = status
+        .attempts
+        .iter()
+        .find(|row| row.key == selection.key)
+        .ok_or_else(|| ApiError::Conflict("the staged FEL winner disappeared".into()))?;
+    let wire = crate::media_sessions::AdaptiveAttemptStagedAdoptV1 {
+        version: crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
+        adoption: AdaptiveStagedAdoption {
+            context: MutationContext {
+                operation_id: uuid::Uuid::new_v4(),
+                expected_request_sequence: status.sequence,
+                expected_attempt_sequence: winner.sequence,
+                now_ms: preparation.now_ms,
+            },
+            binding: selection.binding,
+            key: selection.key,
+            worker: selection.worker,
+            preparation: preparation.clone(),
+        },
+        preview_json: prepared.preview_json.clone(),
+    };
+    let answer = state
+        .media_sessions
+        .adaptive_attempt_peer_request(
+            &preparation.owner_node_id,
+            crate::media_sessions::ADAPTIVE_ATTEMPT_ADOPT_PATH,
+            &wire,
+            deadline,
+        )
+        .await
+        .map_err(|_| {
+            ApiError::ServiceUnavailable("the staged FEL worker's attachment is unknown".into())
+        })?;
+    let known = answer.status == reqwest::StatusCode::OK
+        && serde_json::from_slice::<serde_json::Value>(&answer.body).is_ok_and(|value| {
+            value["session_id"].as_str() == Some(preparation.session_id.as_str())
+                && value["duration_ms"].as_i64() == prepared.preview.duration_ms
+        });
+    if !known {
+        return Err(ApiError::ServiceUnavailable(
+            "the staged FEL worker did not confirm attachment".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(super) async fn cancel_deferred_fel_origin(
+    state: &AppState,
+    prepared: &AdaptiveOriginPrepared,
+) {
+    use plurx_core::store::adaptive_resource_attempts::{
+        AttemptFence, AttemptPhase, MutationContext, RequestDisposition,
+    };
+    let Ok(Some(status)) = state
+        .store
+        .adaptive_request_status(
+            &prepared.claim.binding.key,
+            &prepared.claim.binding.principal,
+        )
+        .await
+    else {
+        return;
+    };
+    let Some(row) = status
+        .attempts
+        .iter()
+        .find(|row| row.key == prepared.claim.key)
+    else {
+        return;
+    };
+    if status.binding != prepared.claim.binding
+        || status.disposition != RequestDisposition::Open
+        || matches!(
+            row.phase,
+            AttemptPhase::Losing | AttemptPhase::Cleanup | AttemptPhase::Closed
+        )
+    {
+        // Adopted custody belongs to the existing staged successor guard.
+        return;
+    }
+    let fence = AttemptFence {
+        context: MutationContext {
+            operation_id: uuid::Uuid::new_v4(),
+            expected_request_sequence: status.sequence,
+            expected_attempt_sequence: row.sequence,
+            now_ms: unix_ms(),
+        },
+        binding: prepared.claim.binding.clone(),
+        key: prepared.claim.key.clone(),
+        cancel_request: true,
+    };
+    let control = crate::media_sessions::AdaptiveAttemptCancelV1 {
+        version: crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
+        fence,
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let _ = state
+        .media_sessions
+        .adaptive_attempt_peer_request(
+            &prepared.worker.node_id,
+            crate::media_sessions::ADAPTIVE_ATTEMPT_CANCEL_PATH,
+            &control,
+            deadline,
+        )
+        .await;
+}
+
+/// Classify a refused catalog without changing candidate selection.
 fn candidate_refusal_reason(
     catalog: &[plurx_core::playback::candidate::QualityCandidate],
     requested: Option<plurx_core::playback::candidate::CandidateId>,
@@ -2420,6 +2684,22 @@ pub(super) fn session_delivered_processing_shape(
     )
 }
 
+/// Read the enhancement sidecar only for the exact authenticated staged
+/// response. Ordinary StartResponse replay deliberately discards it.
+pub(crate) fn deferred_fel_stage_enhancement(
+    response_json: &str,
+) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
+    #[derive(Deserialize)]
+    struct Enhancement {
+        deferred_fel_stage: bool,
+        enhancement: plurx_core::playback::enhancement::PlaybackEnhancement,
+    }
+    serde_json::from_str::<Enhancement>(response_json)
+        .ok()
+        .filter(|response| response.deferred_fel_stage)
+        .map(|response| response.enhancement)
+}
+
 /// The FEL / RPU / DYN indicator for what this session actually delivers.
 ///
 /// The route comes from the selected processing plan (`processed_fel`), not
@@ -2431,7 +2711,7 @@ pub(super) fn session_delivered_processing_shape(
     clippy::too_many_arguments,
     reason = "each is an independent fact of the session being described"
 )]
-pub(super) fn session_enhancement(
+pub(crate) fn session_enhancement(
     source: Option<&MediaFile>,
     kind: &crate::transcode::SessionKind,
     grade: plurx_core::transcode::OutputGrade,
@@ -2777,6 +3057,7 @@ struct PlanScope<'a> {
     /// predecessor's own. A create resolves the ordinary plan and leaves
     /// processing to the upgrade after its first frame (plan ruling 3).
     processed_selectable: bool,
+    exact_fel_create: bool,
 }
 
 /// Internal preparation policy, never a create-body override. Ordinary creates
@@ -2806,6 +3087,7 @@ pub(super) async fn resolve_plan_for_preparation(
             continuous: None,
             auto_bootstrap_ceiling,
             processed_selectable: processed_predecessor,
+            exact_fel_create: false,
         },
     )
     .await
@@ -2825,6 +3107,7 @@ async fn resolve_plan_with_continuous(
             continuous,
             auto_bootstrap_ceiling: None,
             processed_selectable: false,
+            exact_fel_create: cfg!(target_os = "linux") && continuous.is_none(),
         },
     )
     .await
@@ -2905,6 +3188,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
         continuous,
         auto_bootstrap_ceiling,
         processed_selectable,
+        exact_fel_create,
     } = scope;
     if auto_bootstrap_ceiling.is_some_and(|ceiling| ceiling <= 0)
         || (auto_bootstrap_ceiling.is_some()
@@ -2947,6 +3231,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
         hwaccel,
     )
     .await;
+    let mut selected_exact_fel = false;
     let mut candidate_context = None;
     let mut continuous_media = None;
     let mut candidate_route = None;
@@ -3096,27 +3381,58 @@ async fn resolve_plan_for_principal_with_local_evidence(
                 ));
             }
             let authority_refused = catalogue_result.authority_refused;
-            // A create never dispatches a processed candidate: it has no
-            // qualified graph before the first frame. Nor does a prepared
-            // successor of an ordinary session, which has no processed root
-            // to prime from. One the viewer named (a reopen of a processed
-            // session, or the processed rung picked on an ordinary one) starts
-            // as the ordinary rung it enhances, and the upgrade runs after
-            // that session's first presented frame.
-            let unprocessed;
-            let worker_catalog = if processed_selectable {
+            // Only an exact FEL create can cold-prepare a processed graph.
+            // Other requests retain their deferred upgrade or predecessor root.
+            #[cfg(target_os = "linux")]
+            let exact_fel = exact_fel_create
+                && state.resource_runtime.is_some()
+                && body.start.unwrap_or(0.0) == 0.0
+                && snapshot.is_some_and(|snapshot| {
+                    crate::transcode::TranscodeManager::processed_catalog_destination(
+                        snapshot,
+                        &catalog_request,
+                    ) == Some(plurx_core::transcode::dv_processing::DvDestination::Profile81)
+                })
+                && requested.is_some_and(|id| {
+                    catalogue_result.candidates.iter().any(|entry| {
+                        entry.candidate.id == id
+                            && entry.candidate.identity_matches()
+                            && entry.candidate.processed_dv
+                            && entry.candidate.decoder_compatible
+                            && !entry.partial
+                            && entry.binding.is_some()
+                    })
+                });
+            #[cfg(not(target_os = "linux"))]
+            let exact_fel = exact_fel_create;
+            let filtered;
+            let worker_catalog = if exact_fel {
+                filtered = catalogue_result
+                    .candidates
+                    .iter()
+                    .filter(|entry| Some(entry.candidate.id) == requested && !entry.partial)
+                    .cloned()
+                    .map(|mut entry| {
+                        // This exact request uses the prepared-capability path.
+                        // The original reusable row and its evidence are unchanged.
+                        entry.dispatch_supported = true;
+                        entry
+                    })
+                    .collect::<Vec<_>>();
+                &filtered
+            } else if processed_selectable {
                 &catalogue_result.candidates
             } else {
-                unprocessed = catalogue_result
+                filtered = catalogue_result
                     .candidates
                     .iter()
                     .filter(|entry| !entry.candidate.processed_dv)
                     .cloned()
                     .collect::<Vec<_>>();
-                &unprocessed
+                &filtered
             };
             let requested = match requested {
-                Some(id) if !processed_selectable => catalogue_result
+                Some(id) if !processed_selectable && !exact_fel => catalogue_result
                     .candidates
                     .iter()
                     .find(|entry| entry.candidate.id == id && entry.candidate.processed_dv)
@@ -3301,6 +3617,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
             })?;
             candidate_route = Some(candidate.route);
             selected_candidate = Some(candidate.clone());
+            selected_exact_fel = exact_fel && candidate.processed_dv;
             candidate_copy =
                 candidate.route != plurx_core::playback::candidate::CandidateRoute::Encode;
             height = i64::from(candidate.target_height);
@@ -3481,6 +3798,11 @@ async fn resolve_plan_for_principal_with_local_evidence(
     };
     normalize_catalog_selection(&mut request, height, candidate_copy)?;
     reconcile_request_audio(source, &mut request);
+    if selected_exact_fel {
+        request.dv_processing_destination =
+            Some(plurx_core::transcode::dv_processing::DvDestination::Profile81);
+        request.hdr10 = true;
+    }
     if let Some(file) = source {
         let platform = match request.previous_session_id.as_deref() {
             Some(previous) => state.transcode.refit_platform_for_session(previous).await,
@@ -5015,9 +5337,10 @@ async fn create_with_purpose_attempt(
     // first frame on the node that owns the session (registered after
     // activation, below). Only a reopen pinned to another node's session is
     // left to that node.
-    let processed_upgrade_applies = if pinned_owner
-        .as_ref()
-        .is_none_or(|owner| owner == &state.node_id)
+    let processed_upgrade_applies = if request.dv_processing_destination.is_none()
+        && pinned_owner
+            .as_ref()
+            .is_none_or(|owner| owner == &state.node_id)
     {
         match planning_snapshot.map(|snapshot| {
             crate::transcode::TranscodeManager::processed_upgrade_gates(
@@ -5133,14 +5456,30 @@ async fn create_with_purpose_attempt(
             || predecessor_owner
                 .as_ref()
                 .is_none_or(|owner| quality_owners.contains(owner)));
+    #[cfg(target_os = "linux")]
+    let exact_fel = request.is_exact_adaptive_fel();
+    #[cfg(not(target_os = "linux"))]
+    let exact_fel = false;
     let mut worker_request = request.clone();
     worker_request.request_id = Some(incarnation_id.clone());
+    if exact_fel {
+        worker_request.candidate_context = None;
+        worker_request.quality_catalog = None;
+    }
     let mut remote_request = RemoteStartRequest {
         retained_output: None,
         retained_output_receiver: Some(1),
         candidate_catalog: request.candidate_context.as_ref().and_then(|context| {
             Some(crate::media_sessions::CandidateCatalogContext {
-                catalog_query: context.catalog_query.clone(),
+                catalog_query: context.catalog_query.clone().map(|mut query| {
+                    if exact_fel {
+                        query.audio_index = request.audio_index;
+                        query.audio_offset_ms = request.audio_offset_ms;
+                        query.audio_claim = request.audio_claim.clone();
+                        query.audio_delivery = request.audio_delivery.clone();
+                    }
+                    query
+                }),
                 caps: context.canonical_caps.clone()?,
                 candidate: context.selected_candidate.clone(),
                 binding: context.planning_binding.clone()?,
@@ -5151,7 +5490,7 @@ async fn create_with_purpose_attempt(
             .as_ref()
             .map(|context| context.candidate_id),
         presentation_target: quality_negotiated.then_some(candidate_target).flatten(),
-        decoder_caps: quality_negotiated
+        decoder_caps: (quality_negotiated || exact_fel)
             .then_some(candidate_decoder_caps.clone())
             .flatten(),
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
@@ -5280,6 +5619,20 @@ async fn create_with_purpose_attempt(
         owner_candidates.push(state.node_id.clone());
     }
     #[cfg(target_os = "linux")]
+    if exact_fel {
+        if planning_snapshot.is_none() || native_subtitles || library_channel.is_some() {
+            return Err(ApiError::Conflict(
+                "exact FEL preparation has no supported source plan".into(),
+            ));
+        }
+        owner_candidates = state.media_pool.adaptive_fel_workers(&state, false).await;
+        if owner_candidates.is_empty() {
+            return Err(ApiError::ServiceUnavailable(
+                "no eligible worker advertises exact FEL preparation".into(),
+            ));
+        }
+    }
+    #[cfg(target_os = "linux")]
     let adaptive_software_offers: std::collections::HashSet<String> =
         if let Some(offers) = ranked_software_offers {
             offers
@@ -5327,7 +5680,7 @@ async fn create_with_purpose_attempt(
             break;
         }
         #[cfg(target_os = "linux")]
-        let adaptive_quote = if adaptive_software_offers.contains(&candidate) {
+        let adaptive_quote = if exact_fel || adaptive_software_offers.contains(&candidate) {
             tokio::time::timeout_at(
                 placement_deadline,
                 state.media_pool.adaptive_worker_quote(&state, &candidate),
@@ -5342,7 +5695,8 @@ async fn create_with_purpose_attempt(
             None
         };
         #[cfg(target_os = "linux")]
-        if adaptive_software_offers.contains(&candidate) && adaptive_quote.is_none() {
+        if (exact_fel || adaptive_software_offers.contains(&candidate)) && adaptive_quote.is_none()
+        {
             last_error = Some(ApiError::ServiceUnavailable(format!(
                 "media worker {candidate} has no current adaptive admission quote"
             )));
@@ -5384,6 +5738,7 @@ async fn create_with_purpose_attempt(
                 recorded_ask_revision,
                 original_claim_deadline_ms,
                 placement_deadline,
+                crate::media_sessions::AdaptivePreparePurpose::Create,
             )
             .await;
             let mut selection = match selection {
@@ -5698,6 +6053,22 @@ async fn create_with_purpose_attempt(
             return Err(ApiError::ServiceUnavailable(
                 "adaptive origin decoded recipe exceeds its actual capacity partition".into(),
             ));
+        }
+        if parsed.request.is_exact_adaptive_fel() {
+            let actual = parsed.candidate_catalog.as_ref().ok_or_else(|| {
+                ApiError::Conflict("the selected FEL worker has no actual candidate".into())
+            })?;
+            let context = request
+                .candidate_context
+                .as_mut()
+                .ok_or_else(|| ApiError::Conflict("the selected FEL intent disappeared".into()))?;
+            context.candidate_id = actual.candidate.id;
+            context.recipe_digest = actual.candidate.recipe_digest;
+            context.selected_candidate = actual.candidate.clone();
+            context.owner_node_id = Some(selected.worker.node_id.clone());
+            // Any origin link receipt is tied to the old worker's exact
+            // identity and cannot be transferred to this output.
+            link_source_binding = None;
         }
         remote_request = parsed;
     }

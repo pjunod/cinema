@@ -1,4 +1,4 @@
-//! Original local owners of Store-coordinated finite software attempts.
+//! Original local owners of Store-coordinated adaptive playback attempts.
 //!
 //! Store rows coordinate a winner, but cannot close a native owner. This
 //! bounded controller registers the original attempt before its coordinator
@@ -16,13 +16,15 @@ use plurx_core::adaptive_resources::runtime::planning_probe::{
     FixedPlanningProbeCleanup, FixedPlanningProbeOwner,
 };
 use plurx_core::store::adaptive_resource_attempts::{
-    selected_recipe_digest, AttemptAdoption, AttemptClaim, AttemptClose, AttemptMutation,
-    AttemptPhase, MutationContext, PreparedAttempt, RequestDisposition, WorkerBinding,
+    selected_recipe_digest, AdaptiveStagedAdoption, AttemptAdoption, AttemptClaim, AttemptClose,
+    AttemptMutation, AttemptPhase, MutationContext, PreparedAttempt, RequestDisposition,
+    WorkerBinding,
 };
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 type AttemptRef = attempt_root::AttemptRef<AttemptEntry>;
 
+use crate::media_sessions::{AdaptivePreparePurpose, AdaptiveProcessedRefusal};
 use crate::vodserve::{
     PreparedAttemptCleanup, PreparedAttemptCleanupTask, PreparedAttemptRendition,
 };
@@ -36,6 +38,14 @@ pub(crate) const MAX_LOCAL_ATTEMPTS: usize = 64;
 /// pays for a measured prepared recipe before R admission; it is not an RSS
 /// or allocator upper bound.
 pub(super) const PLANNING_TO_R_HANDOFF_BYTES: usize = 16 * 1024 * 1024;
+
+#[path = "adaptive_attempts/processed.rs"]
+mod processed;
+
+enum PreparedWorkerProduct {
+    Finite(PreparedAttemptRendition),
+    ProcessedFel(Box<processed::PreparedProcessedFel>),
+}
 
 /// One independently admitted original/replay response. DTO destruction
 /// precedes its copy permit, including HTTP serialization.
@@ -180,12 +190,14 @@ impl AdaptiveAdopted {
 pub(crate) struct AdaptivePrepareError {
     pub(crate) message: ScalarAdaptiveDiagnostic,
     pub(crate) trial_refusal: Option<plurx_core::resource_policy::TrialRefusal>,
+    pub(crate) processed_refusal: Option<AdaptiveProcessedRefusal>,
 }
 impl From<String> for AdaptivePrepareError {
     fn from(message: String) -> Self {
         Self {
             message: message.into(),
             trial_refusal: None,
+            processed_refusal: None,
         }
     }
 }
@@ -234,6 +246,7 @@ pub(crate) enum AdaptiveRemoteRegistrationStart {
 pub(crate) enum RemoteGrantError {
     ClusterClock(plurx_core::cluster::clock::ClockRefusal),
     TrialRefused(plurx_core::resource_policy::TrialRefusal),
+    Processed(AdaptiveProcessedRefusal),
     Refused(String),
 }
 impl From<String> for RemoteGrantError {
@@ -254,6 +267,7 @@ impl std::fmt::Display for RemoteGrantError {
                 "cluster_clock: the cluster clock cannot prove the original grant ({reason})"
             ),
             Self::TrialRefused(reason) => write!(f, "adaptive trial refused: {reason:?}"),
+            Self::Processed(_) => f.write_str("processed FEL worker preparation refused"),
             Self::Refused(reason) => f.write_str(reason),
         }
     }
@@ -655,6 +669,7 @@ pub(super) struct AttemptEntry {
     remote_registration: Mutex<Option<RemoteRegistration>>,
     // Inline reason belongs to this original owner, including failed replay.
     trial_refusal: Mutex<Option<plurx_core::resource_policy::TrialRefusal>>,
+    processed_refusal: Mutex<Option<AdaptiveProcessedRefusal>>,
     coordinator_frame_bytes: std::sync::atomic::AtomicUsize,
     task_join_failed: std::sync::atomic::AtomicBool,
     coordinator_started: std::sync::atomic::AtomicBool,
@@ -748,7 +763,7 @@ pub(super) struct PlanningFailedAttempt {
 /// Allocated only after the original core role has charged this requested
 /// capacity. The compact pre-admission entry never allocates this payload.
 pub(super) struct RichAttempt {
-    pub(super) pending: PreparedAttemptRendition,
+    pending: PreparedWorkerProduct,
     pub(super) settings: crate::vodserve::VodSettings,
     pub(super) selected_recipe_json: String,
     pub(super) preview_json: Option<String>,
@@ -761,13 +776,15 @@ pub(super) struct RichAttempt {
     pub(super) prepared: Option<PreparedAttempt>,
     pub(super) fence: Option<plurx_core::store::adaptive_resource_attempts::AttemptFence>,
     pub(super) adoption: Option<plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption>,
+    staged_adoption: Option<AdaptiveStagedAdoption>,
+    staged_attachment_started: bool,
     /// Protect the exact durable route across commit-unknown Adopt and the
     /// commit-to-attach gap. This guard owns no heap; its inline size is part
     /// of the existing RichAttempt application projection.
     pub(super) settlement: Option<crate::media_sessions::AdaptiveSessionSettlementGuard>,
     // Last: destroy the pending owner and strings before releasing the
     // registered application fence.
-    pub(super) application_lease: FiniteApplicationLease,
+    application_lease: Option<FiniteApplicationLease>,
 }
 
 pub(super) struct ClosingAttempt {
@@ -852,6 +869,7 @@ impl AdaptiveAttemptRegistry {
                 remote_changed: tokio::sync::Notify::new(),
                 remote_registration: Mutex::new(None),
                 trial_refusal: Mutex::new(None),
+                processed_refusal: Mutex::new(None),
                 coordinator_frame_bytes: std::sync::atomic::AtomicUsize::new(0),
                 attempt_id,
                 request_incarnation_id,
@@ -1019,13 +1037,29 @@ impl AttemptEntry {
     fn prepare_error(&self, message: String) -> AdaptivePrepareError {
         AdaptivePrepareError {
             message: message.into(),
+            processed_refusal: *self
+                .processed_refusal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             trial_refusal: *self
                 .trial_refusal
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         }
     }
-    fn retained_trial_refusal(&self) -> Option<AdaptivePrepareError> {
+
+    fn retained_prepare_refusal(&self) -> Option<AdaptivePrepareError> {
+        let processed = *self
+            .processed_refusal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(reason) = processed {
+            return Some(AdaptivePrepareError {
+                message: "processed FEL worker preparation refused".into(),
+                trial_refusal: None,
+                processed_refusal: Some(reason),
+            });
+        }
         let reason = *self
             .trial_refusal
             .lock()
@@ -1033,6 +1067,7 @@ impl AttemptEntry {
         reason.map(|reason| AdaptivePrepareError {
             message: format!("adaptive trial refused: {reason:?}").into(),
             trial_refusal: Some(reason),
+            processed_refusal: None,
         })
     }
 
@@ -1578,24 +1613,25 @@ impl super::TranscodeManager {
         Ok((report, application_metadata_bytes))
     }
 
-    /// The Store's scanner row and authenticated peer intent are both
-    /// negative checks. The admitted P collector supplies the sole fresh
-    /// source/probe observation; no daemon pathname open or legacy FFprobe
-    /// may precede it on this selected path.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "The original worker recipe factory keeps envelope, claim, entry, frame, deadline and the original remote grant in one admitted frame."
-    )]
-    pub(super) async fn prepare_adaptive_worker_recipe(
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_adaptive_worker_inputs(
         &self,
-        _state: &crate::state::AppState,
         envelope: &mut crate::media_sessions::RemoteStartRequest,
         claim: &AttemptClaim,
+        purpose: AdaptivePreparePurpose,
         entry: &AttemptRef,
         coordinator_frame_bytes: usize,
         deadline: std::time::Instant,
         remote_grant: Option<RemoteGrantWait>,
-    ) -> Result<PreparedAdaptiveWorkerRecipe, String> {
+    ) -> Result<
+        (
+            plurx_core::store::PlaybackPlanningSnapshot,
+            crate::vodserve::VodSettings,
+            plurx_core::adaptive_resources::runtime::planning_probe::FixedProbeMetadataLease,
+            usize,
+        ),
+        String,
+    > {
         if !envelope.is_valid()
             || envelope.principal != claim.binding.principal
             || envelope.request.file_id <= 0
@@ -1605,8 +1641,9 @@ impl super::TranscodeManager {
         {
             return Err("adaptive worker intent or original deadline is invalid".into());
         }
-        if envelope.adaptive_root_intent_digest(claim.binding.key.request_incarnation_id)?
-            != claim.binding.intent_digest
+        if purpose.bind_intent(
+            envelope.adaptive_root_intent_digest(claim.binding.key.request_incarnation_id)?,
+        )? != claim.binding.intent_digest
         {
             return Err("adaptive worker intent digest differs from the original request".into());
         }
@@ -1643,6 +1680,15 @@ impl super::TranscodeManager {
             claim,
             coordinator_frame_bytes,
         )
+        .and_then(|bytes| {
+            if purpose == AdaptivePreparePurpose::DeferredFel {
+                // An authenticated retry can coexist with the one original
+                // staged Adopt payload retained for outcome reconciliation.
+                bytes.checked_add(2 * crate::media_sessions::MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES)
+            } else {
+                Some(bytes)
+            }
+        })
         .ok_or("adaptive planning application capacity is unsupported or overflowed")?;
         let settings = self
             .vod_settings(&envelope.request)
@@ -1657,6 +1703,38 @@ impl super::TranscodeManager {
                 claim,
                 &snapshot,
                 application_metadata_bytes,
+                deadline,
+                remote_grant,
+            )
+            .await?;
+        Ok((snapshot, settings, report, requested_bytes))
+    }
+
+    /// The Store's scanner row and authenticated peer intent are both
+    /// negative checks. The admitted P collector supplies the sole fresh
+    /// source/probe observation; no daemon pathname open or legacy FFprobe
+    /// may precede it on this selected path.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The original worker recipe factory keeps envelope, claim, entry, frame, deadline and the original remote grant in one admitted frame."
+    )]
+    pub(super) async fn prepare_adaptive_worker_recipe(
+        &self,
+        _state: &crate::state::AppState,
+        envelope: &mut crate::media_sessions::RemoteStartRequest,
+        claim: &AttemptClaim,
+        entry: &AttemptRef,
+        coordinator_frame_bytes: usize,
+        deadline: std::time::Instant,
+        remote_grant: Option<RemoteGrantWait>,
+    ) -> Result<PreparedAdaptiveWorkerRecipe, String> {
+        let (snapshot, settings, report, requested_bytes) = self
+            .prepare_adaptive_worker_inputs(
+                envelope,
+                claim,
+                AdaptivePreparePurpose::Create,
+                entry,
+                coordinator_frame_bytes,
                 deadline,
                 remote_grant,
             )
@@ -1731,7 +1809,7 @@ impl super::TranscodeManager {
                 .map(Some)
                 .map_err(|error| existing.prepare_error(error));
         }
-        if let Some(error) = existing.retained_trial_refusal() {
+        if let Some(error) = existing.retained_prepare_refusal() {
             return Err(error);
         }
         Ok(Some(AdaptivePrepareReplay::Pending))
@@ -1773,7 +1851,7 @@ impl super::TranscodeManager {
             if let Some(reply) = self.replay_adaptive_prepared(attempt_id).await {
                 return reply.map_err(|error| entry.prepare_error(error));
             }
-            if let Some(error) = entry.retained_trial_refusal() {
+            if let Some(error) = entry.retained_prepare_refusal() {
                 return Err(error);
             }
             if !matches!(*entry.state().await, AttemptState::Reserved) {
@@ -1945,7 +2023,10 @@ impl super::TranscodeManager {
                 .map(AdaptivePrepareReplay::Prepared)
                 .map_err(RemoteGrantError::Refused);
         }
-        if let Some(error) = entry.retained_trial_refusal() {
+        if let Some(error) = entry.retained_prepare_refusal() {
+            if let Some(reason) = error.processed_refusal {
+                return Err(RemoteGrantError::Processed(reason));
+            }
             if let Some(reason) = error.trial_refusal {
                 return Err(RemoteGrantError::TrialRefused(reason));
             }
@@ -1976,7 +2057,7 @@ impl super::TranscodeManager {
                     .map(AdaptivePrepareStart::Prepared)
                     .map_err(|error| existing.prepare_error(error));
             }
-            if let Some(error) = existing.retained_trial_refusal() {
+            if let Some(error) = existing.retained_prepare_refusal() {
                 return Err(error);
             }
             return Ok(AdaptivePrepareStart::Pending);
@@ -2063,6 +2144,46 @@ impl super::TranscodeManager {
                 close: None,
             }));
             return Err("adaptive planning lost its original deadline or serving authority".into());
+        }
+        if request.recipe.request.is_exact_adaptive_fel()
+            || request.purpose == AdaptivePreparePurpose::DeferredFel
+        {
+            // Keep this future in the original coordinator so its actual
+            // frame is included in the pre-P requested bytes.
+            let result = self
+                .run_adaptive_processed_prepare(
+                    &mut request,
+                    &entry,
+                    coordinator_frame_bytes,
+                    deadline,
+                    remote_grant,
+                )
+                .await;
+            if let Err(message) = &result {
+                let mut held = entry.state().await;
+                let refusal = if matches!(*held, AttemptState::Unknown) {
+                    AdaptiveProcessedRefusal::CleanupPending
+                } else if super::vod_refusal(message).is_some_and(|(code, _)| {
+                    code == crate::media_sessions::ADAPTIVE_PROCESSED_CAPACITY_REFUSED
+                }) {
+                    AdaptiveProcessedRefusal::AdmissionLimit
+                } else {
+                    AdaptiveProcessedRefusal::RecipeUnverified
+                };
+                *entry
+                    .processed_refusal
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(refusal);
+                if matches!(*held, AttemptState::Reserved) {
+                    *held = AttemptState::PlanningFailed(Box::new(PlanningFailedAttempt {
+                        claim: request.claim,
+                        cleanup: None,
+                        fence: entry.remote_failure_fence(),
+                        close: None,
+                    }));
+                }
+            }
+            return result;
         }
         // The factory admits the original fixed P collector before source or
         // executable open and retains P through pure recipe construction.
@@ -2215,6 +2336,90 @@ impl super::TranscodeManager {
             settings,
             deadline,
             requested_application_bytes,
+        )
+        .await
+    }
+
+    async fn run_adaptive_processed_prepare(
+        &self,
+        request: &mut crate::media_sessions::AdaptiveAttemptPrepareV1,
+        entry: &AttemptRef,
+        coordinator_frame_bytes: usize,
+        deadline: std::time::Instant,
+        remote_grant: Option<RemoteGrantWait>,
+    ) -> Result<FundedPreparedReply, String> {
+        let (snapshot, settings, report, requested_bytes) = self
+            .prepare_adaptive_worker_inputs(
+                &mut request.recipe,
+                &request.claim,
+                request.purpose,
+                entry,
+                coordinator_frame_bytes,
+                deadline,
+                remote_grant,
+            )
+            .await?;
+        let source_object = report.source_object_version().to_owned();
+        drop(report);
+        let cutoff = entry
+            .continuous_entry_deadline()?
+            .ok_or("processed preparation has no original cutoff")?;
+        cutoff
+            .entry_remaining()
+            .map_err(|error| error.to_string())?;
+        let deadline = deadline.min(
+            cutoff
+                .monotonic_cutoff()
+                .map_err(|error| error.to_string())?,
+        );
+        entry.finish_adaptive_fixed_planning(deadline).await?;
+        let unsettled_window = std::sync::atomic::AtomicBool::new(false);
+        let prepared = self
+            .prepare_adaptive_fel(
+                &request.recipe,
+                &request.claim,
+                snapshot,
+                request.purpose,
+                &cutoff,
+                &source_object,
+                &unsettled_window,
+            )
+            .await;
+        if prepared.is_err() && unsettled_window.load(std::sync::atomic::Ordering::Acquire) {
+            // A failed first window may still have physical custody in its
+            // original processed owners. The provisional Store row remains a
+            // drain blocker because the registry has no positive close proof.
+            let mut held = entry.state().await;
+            if matches!(*held, AttemptState::Reserved) {
+                *held = AttemptState::Unknown;
+            }
+        }
+        let pending = prepared?;
+        // The original claim remains immutable. The selected route can now
+        // name the verified worker-local candidate and executable instead.
+        let catalog = request
+            .recipe
+            .candidate_catalog
+            .as_mut()
+            .ok_or("processed worker lost its original catalog")?;
+        catalog.candidate = pending.candidate().clone();
+        request.recipe.candidate_id = Some(catalog.candidate.id);
+        let selected_recipe_json =
+            crate::vodserve::bounded_adaptive_selected_recipe(&request.recipe)?;
+        if !self
+            .serving_authority
+            .is_current(entry.serving_generation())
+        {
+            return Err("processed preparation lost its serving generation".into());
+        }
+        self.record_adaptive_product(
+            entry,
+            request.claim.clone(),
+            selected_recipe_json,
+            PreparedWorkerProduct::ProcessedFel(Box::new(pending)),
+            settings,
+            deadline,
+            requested_bytes,
         )
         .await
     }
@@ -2466,7 +2671,27 @@ impl super::TranscodeManager {
         {
             return Err("adaptive activation response differs from the prepared preview".into());
         }
-        if preview.duration_ms != Some(rich.pending.planned_duration_ms()) {
+        if matches!(&rich.pending, PreparedWorkerProduct::ProcessedFel(pending) if pending.deferred_window().is_some())
+        {
+            return Err("a deferred FEL product requires its original staged adoption".into());
+        }
+        let planned_duration_ms = match &rich.pending {
+            PreparedWorkerProduct::Finite(pending) => pending.planned_duration_ms(),
+            PreparedWorkerProduct::ProcessedFel(pending) => pending.duration_ms(),
+        };
+        if let PreparedWorkerProduct::ProcessedFel(pending) = &rich.pending {
+            if public.delivered_dolby_vision_profile != Some(8)
+                || public.delivered_dynamic_range.as_deref() != Some("dolby_vision")
+                || public.quality_candidate_id != route.candidate_id
+            {
+                return Err("processed Adopt changed the original FEL delivery".into());
+            }
+            pending.validate_adopt(self, deadline).await?;
+            if std::time::Instant::now() >= deadline {
+                return Err("processed Adopt exceeded its original cutoff".into());
+            }
+        }
+        if preview.duration_ms != Some(planned_duration_ms) {
             return Err(
                 "adaptive activation preview duration differs from the original plan".into(),
             );
@@ -2535,19 +2760,36 @@ impl super::TranscodeManager {
             }
         }
         let publication_authority = authority.clone();
-        let start = rich
-            .pending
-            .attach_after_store_adopt(
-                &self.vod,
-                &route,
-                &rich.settings,
-                &user.username,
-                original.key.session_id.to_string(),
-                authority,
-                entry.serving_generation(),
-                deadline,
-            )
-            .await?;
+        let start = match &mut rich.pending {
+            PreparedWorkerProduct::Finite(pending) => {
+                pending
+                    .attach_after_store_adopt(
+                        &self.vod,
+                        &route,
+                        &rich.settings,
+                        &user.username,
+                        original.key.session_id.to_string(),
+                        authority,
+                        entry.serving_generation(),
+                        deadline,
+                    )
+                    .await?
+            }
+            PreparedWorkerProduct::ProcessedFel(pending) => {
+                pending
+                    .attach(
+                        self,
+                        &route,
+                        &rich.settings,
+                        &user.username,
+                        original.key.session_id.to_string(),
+                        authority,
+                        entry.serving_generation(),
+                        deadline,
+                    )
+                    .await?
+            }
+        };
         if start.session_id != original.key.session_id.to_string() {
             return Err("adaptive attachment returned a different session".into());
         }
@@ -2578,7 +2820,7 @@ impl super::TranscodeManager {
             std::mem::forget(application_lease);
             return Err("adaptive Adopt application fence was already retained".into());
         }
-        *held = Some(application_lease);
+        *held = application_lease;
         // The published local worker is now visible to ordinary liveness.
         drop(settlement);
         Ok(start)
@@ -2884,6 +3126,8 @@ impl super::TranscodeManager {
             prepared: _,
             fence,
             adoption: _,
+            staged_adoption: _,
+            staged_attachment_started: _,
             settlement,
             application_lease,
         } = *rich;
@@ -2891,13 +3135,30 @@ impl super::TranscodeManager {
         // Fence. There is no adopted live route to keep out of settlement.
         drop(settlement);
         drop(selected_recipe_json);
-        let task = pending.begin_abandon()?;
-        *state = AttemptState::Handoff(Box::new(HandoffAttempt {
-            task,
-            claim,
-            fence,
-            application_lease,
-        }));
+        match pending {
+            PreparedWorkerProduct::Finite(pending) => {
+                let task = pending.begin_abandon()?;
+                *state = AttemptState::Handoff(Box::new(HandoffAttempt {
+                    task,
+                    claim,
+                    fence,
+                    application_lease: application_lease
+                        .ok_or("finite loser lost its original application lease")?,
+                }));
+            }
+            PreparedWorkerProduct::ProcessedFel(pending) => {
+                // A successful first window has already joined and settled its
+                // helper, encoder and source. Its dormant credit and bytes end
+                // here; Store Close still waits for the original tasks and P/M.
+                drop(pending);
+                *state = AttemptState::PlanningFailed(Box::new(PlanningFailedAttempt {
+                    claim,
+                    cleanup: None,
+                    fence,
+                    close: None,
+                }));
+            }
+        }
         Ok(())
     }
 
@@ -2978,6 +3239,51 @@ impl super::TranscodeManager {
         {
             return Err("adaptive adopted winner cannot become a native loser".into());
         }
+        if let Some(staged) = rich.staged_adoption.as_ref() {
+            if staged.binding != status.binding
+                || staged.key != attempt.key
+                || attempt.worker.as_ref() != Some(&staged.worker)
+            {
+                return Err("staged cancellation differs from the retained original Adopt".into());
+            }
+            if status.disposition == RequestDisposition::Adopted
+                && status.winner_attempt_id == Some(staged.key.attempt_id)
+            {
+                let Some(route) = self
+                    .store
+                    .media_session_route_by_incarnation(&staged.preparation.incarnation_id)
+                    .await
+                    .map_err(|error| format!("reading staged cancellation: {error}"))?
+                else {
+                    return Err("staged cancellation lost its exact owner route".into());
+                };
+                if route.session_id != staged.preparation.session_id
+                    || route.owner_epoch != staged.key.owner_epoch
+                    || route.owner_node_id != staged.preparation.owner_node_id
+                    || route.principal != staged.binding.principal
+                    || route.recipe_json != staged.preparation.recipe_json
+                {
+                    return Err("staged cancellation found a different owner route".into());
+                }
+                if route.state != "ended" {
+                    return Ok(());
+                }
+                // A durable abort fences further attachment. If it raced
+                // the registered attach, wait for exact VOD terminal cleanup.
+                // No owner or cleanup result is still uncertainty.
+                if rich.staged_attachment_started
+                    && !self
+                        .vod
+                        .end(&route.session_id, crate::vodserve::Terminal::Replaced)
+                        .await
+                {
+                    return Err("staged attachment cleanup remains uncertain".into());
+                }
+                *state = AttemptState::Adopted;
+                return Ok(());
+            }
+        }
+
         // An attempted Adopt remains uncertain until this SAME durable row
         // positively enters Losing/Cleanup. Store Adopt requires Winner and
         // Store Fence cannot move an adopted request into Cleanup. Its exact
@@ -3198,6 +3504,16 @@ impl super::TranscodeManager {
                         worker: prepared.worker.clone(),
                         selected_recipe_json: rich.selected_recipe_json.clone(),
                         preview_json,
+                        processed_fel: matches!(
+                            rich.pending,
+                            PreparedWorkerProduct::ProcessedFel(_)
+                        ),
+                        prepared_window_ms: match &rich.pending {
+                            PreparedWorkerProduct::ProcessedFel(pending) => {
+                                pending.deferred_window()
+                            }
+                            PreparedWorkerProduct::Finite(_) => None,
+                        },
                     },
                     permit,
                 })
@@ -3219,20 +3535,51 @@ impl super::TranscodeManager {
         entry: &AttemptRef,
         claim: AttemptClaim,
         selected_recipe_json: String,
-        mut pending: PreparedAttemptRendition,
+        pending: PreparedAttemptRendition,
         settings: crate::vodserve::VodSettings,
         deadline: std::time::Instant,
         projected_application_bytes: usize,
     ) -> Result<FundedPreparedReply, String> {
-        let actual = pending
-            .requested_heap_bytes()
+        self.record_adaptive_product(
+            entry,
+            claim,
+            selected_recipe_json,
+            PreparedWorkerProduct::Finite(pending),
+            settings,
+            deadline,
+            projected_application_bytes,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn record_adaptive_product(
+        &self,
+        entry: &AttemptRef,
+        claim: AttemptClaim,
+        selected_recipe_json: String,
+        mut pending: PreparedWorkerProduct,
+        settings: crate::vodserve::VodSettings,
+        deadline: std::time::Instant,
+        projected_application_bytes: usize,
+    ) -> Result<FundedPreparedReply, String> {
+        let finite_bytes = match &pending {
+            PreparedWorkerProduct::Finite(pending) => pending.requested_heap_bytes(),
+            // This root retains its legacy bounded instance and EncodePermit;
+            // it does not assert a measured native or heap peak.
+            PreparedWorkerProduct::ProcessedFel(pending) => pending.requested_metadata_bytes(),
+        };
+        let actual = finite_bytes
             .and_then(|bytes| bytes.checked_add(selected_recipe_json.capacity()))
             .and_then(|bytes| bytes.checked_add(std::mem::size_of::<RichAttempt>()))
             .ok_or("adaptive owner capacity overflow")?;
         if actual > projected_application_bytes {
             return Err("adaptive owner exceeds its charged application partition".into());
         }
-        let application_lease = pending.take_application_lease()?;
+        let application_lease = match &mut pending {
+            PreparedWorkerProduct::Finite(pending) => Some(pending.take_application_lease()?),
+            PreparedWorkerProduct::ProcessedFel(_) => None,
+        };
         entry.charged_control_frame_bytes.store(
             crate::media_sessions::MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES,
             std::sync::atomic::Ordering::Release,
@@ -3250,16 +3597,23 @@ impl super::TranscodeManager {
             prepared: None,
             fence: None,
             adoption: None,
+            staged_adoption: None,
+            staged_attachment_started: false,
             settlement: None,
             application_lease,
         }));
         let AttemptState::Rich(rich) = &mut *state else {
             unreachable!()
         };
-        let preview = rich.pending.planned_preview(
-            &rich.claim.key.session_id.to_string(),
-            entry.serving_generation(),
-        )?;
+        let session_id = rich.claim.key.session_id.to_string();
+        let preview = match &rich.pending {
+            PreparedWorkerProduct::Finite(pending) => {
+                pending.planned_preview(&session_id, entry.serving_generation())?
+            }
+            PreparedWorkerProduct::ProcessedFel(pending) => {
+                pending.preview(&session_id, entry.serving_generation())
+            }
+        };
         rich.preview_json = Some(preview.bounded_adaptive_preview_json()?);
         if std::time::Instant::now() >= deadline
             || crate::media_sessions::unix_ms() >= rich.claim.binding.original_deadline_ms
@@ -3290,8 +3644,12 @@ impl super::TranscodeManager {
         {
             return Err("adaptive attempt changed before Prepared".into());
         }
-        let (prepared_handle_digest, output_digest) =
-            rich.pending.prepare_worker_binding(deadline).await?;
+        let (prepared_handle_digest, output_digest) = match &mut rich.pending {
+            PreparedWorkerProduct::Finite(pending) => {
+                pending.prepare_worker_binding(deadline).await?
+            }
+            PreparedWorkerProduct::ProcessedFel(pending) => pending.binding()?,
+        };
         let recipe_digest = selected_recipe_digest(&rich.selected_recipe_json)
             .map_err(|error| format!("adaptive route digest: {error}"))?;
         let worker = WorkerBinding {
@@ -3370,6 +3728,16 @@ impl super::TranscodeManager {
                             .preview_json
                             .clone()
                             .ok_or("adaptive original preview is absent")?,
+                        processed_fel: matches!(
+                            rich.pending,
+                            PreparedWorkerProduct::ProcessedFel(_)
+                        ),
+                        prepared_window_ms: match &rich.pending {
+                            PreparedWorkerProduct::ProcessedFel(pending) => {
+                                pending.deferred_window()
+                            }
+                            PreparedWorkerProduct::Finite(_) => None,
+                        },
                     },
                     permit,
                 })
@@ -4619,7 +4987,7 @@ mod tests {
                 None,
             )
             .expect("original entry");
-        assert!(entry.retained_trial_refusal().is_none());
+        assert!(entry.retained_prepare_refusal().is_none());
         *entry.trial_refusal.lock().expect("inline reason") = Some(TrialRefusal::UnknownBounds);
         let message = String::from("actual admission failure");
         let error = entry.prepare_error(message);
@@ -4634,7 +5002,7 @@ mod tests {
         assert_eq!(error.trial_refusal, Some(TrialRefusal::UnknownBounds));
         assert_eq!(
             entry
-                .retained_trial_refusal()
+                .retained_prepare_refusal()
                 .expect("same reason")
                 .trial_refusal,
             error.trial_refusal

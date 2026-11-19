@@ -188,6 +188,12 @@ pub(crate) struct MediaNodeSnapshot {
     /// the authenticated internal-peer request check in `internal_media`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adaptive_worker_quote: Option<AdaptiveWorkerQuote>,
+    /// The negotiated worker can prepare an exact Profile 7 FEL request.
+    /// This is capability discovery, independent of cached candidate results.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adaptive_fel_prepare: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adaptive_fel_stage: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1478,6 +1484,56 @@ impl MediaPool {
             .filter(AdaptiveWorkerQuote::valid)
     }
 
+    pub(crate) async fn adaptive_fel_stage_worker_current(&self, node_id: &str) -> bool {
+        let now = tokio::time::Instant::now();
+        self.snapshots.read().await.get(node_id).is_some_and(|row| {
+            now <= row.expires_at
+                && row.snapshot.protocol_version == PROTOCOL_VERSION
+                && row.snapshot.adaptive_fel_stage
+                && row
+                    .snapshot
+                    .adaptive_worker_quote
+                    .as_ref()
+                    .is_some_and(AdaptiveWorkerQuote::valid)
+                && placement_refusal(&row.snapshot).is_none()
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn adaptive_fel_workers(&self, state: &AppState, staged: bool) -> Vec<String> {
+        let now = tokio::time::Instant::now();
+        let mut peers = self
+            .snapshots
+            .read()
+            .await
+            .iter()
+            .filter(|(node, row)| {
+                node.as_str() != state.node_id
+                    && now <= row.expires_at
+                    && row.snapshot.protocol_version == PROTOCOL_VERSION
+                    && (if staged {
+                        row.snapshot.adaptive_fel_stage
+                    } else {
+                        row.snapshot.adaptive_fel_prepare
+                    })
+                    && row
+                        .snapshot
+                        .adaptive_worker_quote
+                        .as_ref()
+                        .is_some_and(AdaptiveWorkerQuote::valid)
+                    && placement_refusal(&row.snapshot).is_none()
+            })
+            .map(|(node, _)| node.clone())
+            .collect::<Vec<_>>();
+        peers.sort_unstable();
+        let mut ordered = Vec::new();
+        if !staged && local_snapshot(state).await.adaptive_fel_prepare {
+            ordered.push(state.node_id.clone());
+        }
+        ordered.extend(peers.into_iter().take(3 - ordered.len()));
+        ordered
+    }
+
     #[cfg(test)]
     pub(crate) fn inject_peer_answers_for_test(&self, answers: Vec<QualityCatalogResult>) {
         self.injected_peer_answers
@@ -2629,6 +2685,11 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
     };
     #[cfg(not(target_os = "linux"))]
     let adaptive_worker_quote = None;
+    #[cfg(target_os = "linux")]
+    let adaptive_fel_prepare =
+        adaptive_worker_quote.is_some() && state.transcode.fel_qualification_capable();
+    #[cfg(not(target_os = "linux"))]
+    let adaptive_fel_prepare = false;
     let scratch_pressure =
         capacity_pressure(runtime.scratch_bytes_free, runtime.scratch_target_bytes);
     let workload_pressure = count_pressure(runtime.active_sessions, runtime.session_pressure_limit);
@@ -2669,6 +2730,8 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         live_tv_resource_processing: state.serving.is_ready()
             && state.cluster.role().admission != Admission::Maintenance,
         adaptive_worker_quote,
+        adaptive_fel_prepare,
+        adaptive_fel_stage: adaptive_fel_prepare,
     }
 }
 
@@ -3555,6 +3618,8 @@ mod tests {
             live_tv_processing: false,
             live_tv_resource_processing: true,
             adaptive_worker_quote: None,
+            adaptive_fel_prepare: false,
+            adaptive_fel_stage: false,
         }
     }
 
@@ -4657,6 +4722,8 @@ mod tests {
                     live_tv_processing: false,
                     live_tv_resource_processing: true,
                     adaptive_worker_quote: None,
+                    adaptive_fel_prepare: false,
+                    adaptive_fel_stage: false,
                 },
                 expires_at: tokio::time::Instant::now() + SNAPSHOT_EXPIRY,
             },

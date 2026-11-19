@@ -470,6 +470,12 @@ async fn adaptive_attempt_causal_prepare(
                         .await
                     {
                         Ok(reply) => reply.into_http_response(),
+                        Err(error) if error.processed_refusal.is_some() => funding.error(
+                            error
+                                .processed_refusal
+                                .expect("processed refusal checked")
+                                .into_api_error(),
+                        ),
                         Err(error) => match error.trial_refusal {
                             Some(reason) => funding.error(
                                 crate::media_sessions::AdaptiveTrialRefusalV1::new(reason)
@@ -478,6 +484,9 @@ async fn adaptive_attempt_causal_prepare(
                             None => StatusCode::ACCEPTED.into_response(),
                         },
                     }
+                }
+                Err(crate::transcode::adaptive_attempts::RemoteGrantError::Processed(reason)) => {
+                    funding.error(reason.into_api_error())
                 }
                 Err(crate::transcode::adaptive_attempts::RemoteGrantError::TrialRefused(
                     reason,
@@ -517,6 +526,11 @@ pub(crate) async fn adaptive_attempt_adopt(
     use crate::media_sessions::{AdaptiveAttemptAdoptV1, ADAPTIVE_ATTEMPT_ADOPT_PATH};
     if let Err(status) = authorize(&state, &headers, ADAPTIVE_ATTEMPT_ADOPT_PATH, &body).await {
         return status.into_response();
+    }
+    if let Ok(request) =
+        serde_json::from_slice::<crate::media_sessions::AdaptiveAttemptStagedAdoptV1>(&body)
+    {
+        return adaptive_attempt_staged_adopt(&state, request).await;
     }
     let Ok(request) = serde_json::from_slice::<AdaptiveAttemptAdoptV1>(&body) else {
         return StatusCode::BAD_REQUEST.into_response();
@@ -576,6 +590,59 @@ pub(crate) async fn adaptive_attempt_adopt(
         ),
         Ok(Ok(Err(_))) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
         Ok(Err(_)) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Err(_) => StatusCode::ACCEPTED.into_response(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn adaptive_attempt_staged_adopt(
+    state: &AppState,
+    request: crate::media_sessions::AdaptiveAttemptStagedAdoptV1,
+) -> Response {
+    let adoption = request.adoption;
+    if request.version != crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION
+        || adoption.key.validate(&adoption.binding).is_err()
+        || adoption
+            .worker
+            .validate(&adoption.binding, &adoption.key)
+            .is_err()
+        || adoption.binding.principal.local_user_id().is_none()
+        || adoption.key.worker_node_id != state.node_id
+        || state
+            .resource_runtime
+            .as_ref()
+            .is_none_or(|runtime| runtime.owner().owner_id != adoption.worker.worker_instance_id)
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let authority = state.serving.authority();
+    if authority.admit() != Some(adoption.worker.serving_generation) {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    let remaining = adoption
+        .binding
+        .original_deadline_ms
+        .saturating_sub(unix_ms());
+    if remaining <= 0 {
+        return StatusCode::CONFLICT.into_response();
+    }
+    // The original worker checks its retained continuous cutoff too.
+    let deadline = Instant::now() + Duration::from_millis(remaining as u64);
+    let Ok(funding) = AdaptiveRpcReply::reserve(state) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let receiver = match state.transcode.begin_adaptive_staged_adopt(
+        adoption,
+        request.preview_json,
+        authority,
+        deadline,
+    ) {
+        Ok(receiver) => receiver,
+        Err(_) => return StatusCode::CONFLICT.into_response(),
+    };
+    match tokio::time::timeout_at(deadline.into(), receiver).await {
+        Ok(Ok(Ok(start))) => funding.json(StatusCode::OK, start),
+        Ok(Ok(Err(_)) | Err(_)) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
         Err(_) => StatusCode::ACCEPTED.into_response(),
     }
 }

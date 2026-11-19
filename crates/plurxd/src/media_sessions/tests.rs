@@ -400,6 +400,7 @@ async fn remote_adaptive_replay_cannot_register_missing_original_or_mint_a_windo
         .validate()
         .expect("well-formed control claim; not a native permit");
     let request = AdaptiveAttemptPrepareV1 {
+        purpose: AdaptivePreparePurpose::Create,
         version: ADAPTIVE_ATTEMPT_VERSION,
         claim,
         recipe,
@@ -2009,6 +2010,58 @@ fn only_durable_prepared_authority_bypasses_the_control_publication_fence() {
 
 fn eligible_recipe(route: &MediaSessionRoute) -> RemoteStartRequest {
     serde_json::from_str(&route.recipe_json).expect("the eligible fixture parses")
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cold_deferred_fel_preserves_incumbent_raster_and_requires_a_new_processed_candidate() {
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    use plurx_core::transcode::dv_processing::DvDestination;
+
+    let mut request = valid_start_request().request;
+    request.dv_processing_destination = Some(DvDestination::Profile81);
+    request.hdr10 = true;
+    request.kind = SessionKind::Transcode { height: 2160 };
+    let incumbent = QualityCandidate {
+        id: CandidateId::for_recipe_digest([1; 32]),
+        recipe_digest: [1; 32],
+        route: CandidateRoute::Remux,
+        planned_codec: Some("hevc".into()),
+        processed_dv: false,
+        normalized_geometry: false,
+        width: 3840,
+        height: 2160,
+        target_height: 2160,
+        average_bps: None,
+        peak_bps: None,
+        grade: OutputGrade::Hdr10,
+        decoder_compatible: true,
+        complete_cache: false,
+        sustainable: false,
+    };
+    let mut actual = QualityCandidate {
+        id: CandidateId::for_recipe_digest([2; 32]),
+        recipe_digest: [2; 32],
+        route: CandidateRoute::Encode,
+        processed_dv: true,
+        average_bps: Some(24_000_000),
+        peak_bps: Some(30_000_000),
+        sustainable: true,
+        ..incumbent.clone()
+    };
+    assert!(deferred_fel_output_matches(&request, &incumbent, &actual));
+    assert!(!deferred_fel_output_matches(
+        &request, &incumbent, &incumbent
+    ));
+
+    actual.target_height = 1080;
+    assert!(!deferred_fel_output_matches(&request, &incumbent, &actual));
+    actual.target_height = 2160;
+    actual.width = 4000;
+    assert!(!deferred_fel_output_matches(&request, &incumbent, &actual));
+    actual.width = 3840;
+    actual.peak_bps = None;
+    assert!(!deferred_fel_output_matches(&request, &incumbent, &actual));
 }
 
 /// §7.3 requires a candidate to prove the source snapshot rather than

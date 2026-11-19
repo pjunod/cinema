@@ -1069,6 +1069,7 @@ impl RuntimeRecipe {
         source_input: crate::source_input::SourceInput,
         absolute_deadline: Option<tokio::time::Instant>,
         source_open: Option<std::time::Duration>,
+        original_pending: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<
         WindowOutcome<(
             VerifiedWindow,
@@ -1078,6 +1079,7 @@ impl RuntimeRecipe {
     > {
         let source_input =
             crate::dv_segment::SourceInputLease::new(source_input.without_prefetch());
+        let mut graph_closed = false;
         let result = self
             .execute_policy_until_with_source(
                 file,
@@ -1094,15 +1096,23 @@ impl RuntimeRecipe {
                 self.display_target,
                 Arc::clone(&source_input),
                 source_open,
+                original_pending.map(|pending| (pending, &mut graph_closed)),
             )
             .await;
         // Early validation/spawn failures and every terminal graph result use
         // this same join. Physical Resources retain their input use through
         // helper and encoder reap; no caller can release it by returning early.
-        source_input
-            .close_and_wait()
-            .await
-            .map_err(|error| format!("DV original source cleanup: {error}"))?;
+        if let Err(error) = source_input.close_and_wait().await {
+            if let Some(pending) = original_pending {
+                pending.store(true, std::sync::atomic::Ordering::Release);
+            }
+            return Err(format!("DV original source cleanup: {error}"));
+        }
+        if graph_closed {
+            if let Some(pending) = original_pending {
+                pending.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
         result
     }
 
@@ -1153,6 +1163,7 @@ impl RuntimeRecipe {
                 display_target,
                 Arc::clone(&source_input),
                 None,
+                None,
             )
             .await;
         source_input
@@ -1179,6 +1190,7 @@ impl RuntimeRecipe {
         display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
         source_input: Arc<crate::dv_segment::SourceInputLease>,
         source_open: Option<std::time::Duration>,
+        original_settlement: Option<(&std::sync::atomic::AtomicBool, &mut bool)>,
     ) -> Result<
         WindowOutcome<(
             VerifiedWindow,
@@ -1320,10 +1332,11 @@ impl RuntimeRecipe {
                 window: Some(window),
                 stages: Arc::clone(&stages),
             };
-            let private = match run_private_window(request, registration_hook).await? {
-                WindowOutcome::Completed(private) => private,
-                WindowOutcome::Cancelled => return Ok(WindowOutcome::Cancelled),
-            };
+            let private =
+                match run_private_window(request, registration_hook, original_settlement).await? {
+                    WindowOutcome::Completed(private) => private,
+                    WindowOutcome::Cancelled => return Ok(WindowOutcome::Cancelled),
+                };
             stages.mark(crate::dv_segment::WindowStage::Captured);
             trace_window_stage(entry.index, "render_and_encode", &mut stage_started);
             // Both children are reaped. Start an optional inventory while all
@@ -1556,6 +1569,7 @@ impl RuntimeRecipe {
 async fn run_private_window(
     mut request: crate::dv_segment::StreamingSegmentRequest,
     registration_hook: Option<RegistrationHook>,
+    original_settlement: Option<(&std::sync::atomic::AtomicBool, &mut bool)>,
 ) -> Result<WindowOutcome<PrivateWindow>, String> {
     let slot = request.request.producer.clone();
     let cancel = request.request.cancel.child_token();
@@ -1565,8 +1579,12 @@ async fn run_private_window(
     let stages = Arc::clone(&request.stages);
     let display_target = request.display_target;
     let master_metadata = request.master_metadata;
+    if let Some((pending, _)) = original_settlement.as_ref() {
+        pending.store(true, std::sync::atomic::Ordering::Release);
+    }
     let mut producer = crate::dv_segment::spawn_streaming(request).await?;
     let source_settlement = producer.take_source_settlement();
+    let mut reaped = false;
     let result = async {
         let evidence = producer
             .take_evidence()
@@ -1588,9 +1606,10 @@ async fn run_private_window(
             &cancel,
             deadline,
             &stages,
+            &mut reaped,
         )
         .await;
-        // Both children are reaped here, so the helper's rows are final.
+        // Both children are reaped after a successful capture.
         stages.helper_reported(evidence.helper_stages());
         match captured? {
             WindowOutcome::Completed(encoded) => Ok(WindowOutcome::Completed(PrivateWindow {
@@ -1607,6 +1626,9 @@ async fn run_private_window(
     if let Some(source) = source_settlement {
         source.settle().await?;
     }
+    if let Some((_, closed)) = original_settlement {
+        *closed = reaped;
+    }
     result
 }
 
@@ -1621,6 +1643,7 @@ async fn capture_private_output(
     cancel: &tokio_util::sync::CancellationToken,
     deadline: tokio::time::Instant,
     stages: &crate::dv_segment::WindowStageClock,
+    reaped: &mut bool,
 ) -> Result<WindowOutcome<Vec<u8>>, String> {
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
@@ -1709,6 +1732,7 @@ async fn capture_private_output(
     }
     registration.wait_confirmed_reap().await;
     let _ = observed_helper.wait().await;
+    *reaped = true;
     result
 }
 
@@ -2788,6 +2812,7 @@ mod private_window_outcome_tests {
         });
         let deadline = tokio::time::Instant::now()
             + std::time::Duration::from_millis(if timeout { 30 } else { 2000 });
+        let mut reaped = false;
         let result = super::capture_private_output(
             &slot,
             &registration,
@@ -2798,8 +2823,10 @@ mod private_window_outcome_tests {
             &cancel,
             deadline,
             stages,
+            &mut reaped,
         )
         .await;
+        assert!(reaped, "capture reports both original native joins");
         if let Some(close) = close {
             close.await.expect("Close owner completes");
         }
