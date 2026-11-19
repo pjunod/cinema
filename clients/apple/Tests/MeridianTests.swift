@@ -73,14 +73,12 @@ final class MeridianTests: XCTestCase {
         XCTAssertEqual(navigation.viewControllers.count, 2, "Fixture must create an actual implicit native push")
         XCTAssertTrue(state.detailHasAppeared, "The destination must appear before measuring its lifecycle")
         XCTAssertNil(navigation.transitionCoordinator, "The initial native push must finish before resizing")
-        #if os(iOS)
-        if #available(iOS 18.0, *) {
+        if #available(iOS 18.0, tvOS 18.0, *) {
             // The native SwiftUI stack can deliver this callback after UIKit
             // clears its transition coordinator. Measure from the callback.
             settle(until: { state.rootDisappearances > 0 })
-            XCTAssertEqual(state.rootDisappearances, 1, "The push must retire the Settings root before resizing")
+            XCTAssertEqual(state.rootDisappearances, 1, "The Settings root must disappear after the push and before resizing")
         }
-        #endif
         let detail = try XCTUnwrap(navigation.topViewController)
         let disappearances = state.disappearances
         for width in [390, 1200, 700, 390] {
