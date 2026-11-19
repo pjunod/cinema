@@ -2460,6 +2460,28 @@ class Controller internal constructor(
         return false
     }
 
+    val retainOutput: Boolean get() = playbackIntent.retainOutput
+
+    /**
+     * The viewer's "Keep a reusable copy" switch. Later creates of this
+     * playback follow it; turning it off also tells a running session. The
+     * call is off-only and a failure never touches playback.
+     */
+    fun setRetainOutput(retain: Boolean, onFailure: () -> Unit) {
+        playbackIntent.setRetainOutput(retain)
+        if (retain) return
+        val running = sessionId ?: return
+        scope.launch {
+            try {
+                vm.retainHlsOutputOff(running)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                onFailure()
+            }
+        }
+    }
+
     /** Apply an A/V correction to this controller only and reopen in place. */
     fun setAudioOffset(offsetMs: Long) {
         if (!playbackControlBootstrapFence.isActive()) return
@@ -3036,7 +3058,10 @@ class Controller internal constructor(
         ),
     ).let(::applyQualityIntent)
 
-    private fun applyQualityIntent(body: CreateSessionReq): CreateSessionReq {
+    private fun applyQualityIntent(body: CreateSessionReq): CreateSessionReq =
+        playbackIntent.applyRetention(bindQualityIntent(body))
+
+    private fun bindQualityIntent(body: CreateSessionReq): CreateSessionReq {
         val bound = playbackIntent.bindSessionIntent(
             body = body,
             caps = decisionCaps,

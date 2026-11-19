@@ -2108,7 +2108,7 @@ fn audio_intent_fingerprint_keys_the_claim_not_a_refreshed_server_answer() {
     let mut request = SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         vod_only: false,
@@ -2250,7 +2250,7 @@ async fn candidate_catalog_and_execution_share_typed_audio_recipe_identity() {
     let mut request = SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         vod_only: false,
@@ -2471,7 +2471,7 @@ async fn retained_audio_consumer_case(encoded: bool) {
     let mut request = SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         vod_only: false,

@@ -7,7 +7,7 @@ function cinemaRemoteLocalCards(){
     ${togRow("dev-cinema-cec","Enable local CEC","Saved on this device and independent of the server remote-control setting.",prefs.cec)}
     <p class="hint">Install the source-reviewed Chromium extension and native host, then use its Bind this Cinema tab button. Local pause and Stop keep using this browser's existing player even when the server is unavailable.</p>
     ${devStaticReq("Physical acceptance","pending","Linux/Pi and Mac adapters, native browser registration, permission prompts and Windows launcher qualification remain open.","")}
-    ${devGraduation("the desktop CEC hardware and installation acceptance is recorded.","this device-local switch moves to the normal playback preferences.")}${setCardFoot("saveCinemaCec")}`)+
+    ${setCardFoot("saveCinemaCec")}`)+
     setCard(`${cardHead("Receive phone controls","Let this foreground Cinema screen receive approved same-account commands.")}
     ${togRow("dev-cinema-receiver","Enable this screen as a receiver","Saved choice stays authoritative; availability is advisory.",prefs.receiver)}
     <label class="setfield"><span>Screen name</span><input id="cinema-screen-name" maxlength="80" value="${esc(cinemaRemoteLoad(cinemaRemoteIdentity()).receiver?.name||"Cinema browser")}"></label>
@@ -15,13 +15,13 @@ function cinemaRemoteLocalCards(){
     <div id="cinema-receiver-status" class="hint" role="status">${esc(status)}</div>
     <button class="ghost" onclick="cinemaRemoteRegisterScreen(event)">Register this screen</button>
     <button class="ghost" onclick="cinemaRemoteShowPairing(event)">Show pairing code</button>
-    ${devGraduation("the two-device receiver, owner-loss and platform acceptance is recorded.","this device-local switch moves to the normal device preferences.")}${setCardFoot("saveCinemaReceiver")}`)+
+    ${setCardFoot("saveCinemaReceiver")}`)+
     setCard(`${cardHead("Phone remote","Use approved grants to control another foreground Cinema screen.")}
     ${togRow("dev-cinema-companion","Enable the phone remote","Pairing still requires the TV's visible local approval.",prefs.companion)}
     ${togRow("dev-cinema-suggestions","Suggest paired screens","Only screens with a grant saved on this device can be suggested.",prefs.suggestions)}
     <p class="hint">No background or operating-system wake is promised. Dismissed cards stay dismissed until this app session ends.</p>
     <a class="ghost" href="#/remote">Open phone remote</a>
-    ${devGraduation("foreground browser pairing, control and revocation acceptance is recorded.","these choices move to the normal device preferences.")}${setCardFoot("saveCinemaCompanion")}`)+
+    ${setCardFoot("saveCinemaCompanion")}`)+
     setCard(`${cardHead("Screens and grants","Manage this signed-in account's registered screens and approved phones.")}
     <div id="cinema-remote-management" role="status">Loading this account's screens…</div><button class="ghost" onclick="cinemaRemoteLoadManagement()">Refresh</button>`);
 }
@@ -42,7 +42,7 @@ function saveCinemaCec(button){saveCinemaRemotePreference(button,"cec");}
 function saveCinemaReceiver(button){saveCinemaRemotePreference(button,"receiver");}
 function saveCinemaCompanion(button){saveCinemaRemotePreference(button,"companion");}
 function viewLocalRemoteSettings(generation){
-  layoutChrome("settings",setHead("Developer","Preferences for this device only.")+cinemaRemoteLocalCards());
+  layoutChrome("settings",setHead("Remotes & devices","Preferences for this device only.")+cinemaRemoteLocalCards());
   setPagePhase(location.hash,generation,"shell");setPagePhase(location.hash,generation,"content");setPagePhase(location.hash,generation,"settled");cinemaRemoteLoadManagement();
 }
 async function cinemaRemoteRegisterScreen(event){
@@ -93,4 +93,41 @@ async function cinemaRemoteRevokeGrant(id,event){
   if(!event?.isTrusted||!CinemaRemoteWire.id(id))return;const identity=cinemaRemoteIdentity();if(!identity)return;
   const stored=cinemaRemoteLoad(identity);stored.grants=stored.grants.filter(value=>value.grant_id!==id);cinemaRemoteSave(identity,stored);if(CINEMA_WEB_CONTROLLER?.grant?.grant_id===id)cinemaRemoteControllerRetire();
   const client=new CinemaRemoteClient(identity);try{await client.request("grants/"+id,{method:"DELETE"});toast("Grant revoked");cinemaRemoteLoadManagement();}catch(error){toast(error.message);}finally{client.retire();}
+}
+// Companion remote server switches, graduated from Developer on 2026-11-18.
+function cinemaRemoteCard(settings,readiness){
+  return setCard(`${cardHead("Cinema remote control","Pair a phone or tablet with one active Cinema screen.")}
+    ${togRow("cinema-remote-control","Enable companion remotes","Only explicitly approved same-account devices can control a screen. Turning this off ends network remote sessions.",!!settings.cinema_remote_control)}
+    <div class="err" id="cinema-remote-error" role="alert"></div>${setCardFoot("saveCinemaRemote")}`);
+}
+async function saveCinemaRemote(button){
+  const err=document.getElementById("cinema-remote-error");if(err)err.textContent="";
+  if(button)button.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{cinema_remote_control:/** @type {HTMLInputElement} */(document.getElementById("cinema-remote-control")).checked}}));
+    toast("Companion remote preference saved");if(button)setCardSaved(button);
+  }catch(error){if(err)err.textContent=error.message;if(button)button.disabled=false;}
+}
+
+function cinemaRemoteInvitationsCard(settings,readiness){
+  return setCard(`${cardHead("Cinema background invitations","Let opted-in phones receive an invitation when their Cinema screen becomes available.")}
+    ${togRow("cinema-remote-invitations","Enable background invitations","Requires companion remotes and explicit consent on each paired phone. This choice does not change either preference.",!!settings.cinema_remote_invitations)}
+    <details class="setdetails"><summary>Details</summary><div class="setdetails-body">
+    ${devReq(readiness,"cinema_remote_invitations","broker","Notification delivery provider","Configure the broker and provider separately. Missing configuration never prevents saving this choice.")}
+    ${devReq(readiness,"cinema_remote_invitations","consent","Paired phone consent","Each same-account phone must explicitly opt in to invitations for its approved screen.")}
+    </div></details>
+    <div class="err" id="cinema-invitations-error" role="alert"></div>${setCardFoot("saveCinemaRemoteInvitations")}`);
+}
+async function saveCinemaRemoteInvitations(button){
+  const err=document.getElementById("cinema-invitations-error");if(err)err.textContent="";
+  if(button)button.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{cinema_remote_invitations:/** @type {HTMLInputElement} */(document.getElementById("cinema-remote-invitations")).checked}}));
+    toast("Background invitation preference saved");if(button)setCardSaved(button);
+  }catch(error){if(err)err.textContent=error.message;if(button)button.disabled=false;}
+}
+// Settings → Remotes & devices (2026-11-18): the server's companion-remote
+// switches for an admin, then this device's own preferences.
+function remotesPanel(settings,readiness){
+  return `${setHead("Remotes & devices","Companion remotes for this server, and preferences for this device.")}${cinemaRemoteCard(settings,readiness)}${cinemaRemoteInvitationsCard(settings,readiness)}${cinemaRemoteLocalCards()}`;
 }

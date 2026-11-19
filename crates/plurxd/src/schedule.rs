@@ -51,8 +51,6 @@ pub struct GlobalSchedule {
     pub last_artwork_retry: Option<i64>,
     pub transcode_cleanup_mins: i64,
     pub last_transcode_cleanup: Option<i64>,
-    pub telemetry_retain_days: i64,
-    pub network_priors: bool,
     pub last_telemetry_prune: Option<i64>,
     pub cache_produce_mins: i64,
     pub last_cache_produce: Option<i64>,
@@ -105,9 +103,10 @@ pub fn due_jobs(now: i64, libraries: &[Library], global: GlobalSchedule) -> Vec<
     ) {
         jobs.push(DueJob::CleanupTranscode);
     }
-    if (global.telemetry_retain_days > 0 || global.network_priors)
-        && due(now, global.last_telemetry_prune, 24 * 60)
-    {
+    // Daily whatever `telemetry.retain_days` says: network priors are always
+    // kept, and their rows age out through this same job (which reads the
+    // retention itself and skips event pruning when it is 0).
+    if due(now, global.last_telemetry_prune, 24 * 60) {
         jobs.push(DueJob::PruneTelemetry);
     }
     // Last, and that is deliberate rather than incidental. This is the only
@@ -167,33 +166,36 @@ mod tests {
     const HOUR: i64 = 3600;
     const NOW: i64 = 1_700_000_000;
 
+    /// Defaults with the daily telemetry prune just run, so a test sees only
+    /// the jobs it configures.
+    fn quiet(now: i64) -> GlobalSchedule {
+        GlobalSchedule {
+            last_telemetry_prune: Some(now),
+            ..GlobalSchedule::default()
+        }
+    }
+
     #[test]
     fn zero_means_off_and_off_is_the_default() {
         let libs = [lib(1, 0, None, 0, None)];
-        assert!(due_jobs(NOW, &libs, GlobalSchedule::default()).is_empty());
+        assert!(due_jobs(NOW, &libs, quiet(NOW)).is_empty());
         // Even a library that has never been scanned stays alone when its
         // interval is off — "never scanned" is not by itself a reason to scan.
-        assert!(due_jobs(NOW, &[lib(1, 0, None, 0, None)], GlobalSchedule::default()).is_empty());
+        assert!(due_jobs(NOW, &[lib(1, 0, None, 0, None)], quiet(NOW)).is_empty());
     }
 
     #[test]
     fn a_scheduled_library_runs_when_the_interval_has_elapsed() {
         // 60-minute interval, scanned 59 minutes ago → not yet.
         let libs = [lib(1, 60, Some(NOW - 59 * 60), 0, None)];
-        assert!(due_jobs(NOW, &libs, GlobalSchedule::default()).is_empty());
+        assert!(due_jobs(NOW, &libs, quiet(NOW)).is_empty());
         // Exactly on the hour → due. (`>=`, so a tick landing precisely on the
         // boundary doesn't wait another whole cycle.)
         let libs = [lib(1, 60, Some(NOW - HOUR), 0, None)];
-        assert_eq!(
-            due_jobs(NOW, &libs, GlobalSchedule::default()),
-            [DueJob::Scan(1)]
-        );
+        assert_eq!(due_jobs(NOW, &libs, quiet(NOW)), [DueJob::Scan(1)]);
         // Never scanned, interval set → run now.
         let libs = [lib(1, 60, None, 0, None)];
-        assert_eq!(
-            due_jobs(NOW, &libs, GlobalSchedule::default()),
-            [DueJob::Scan(1)]
-        );
+        assert_eq!(due_jobs(NOW, &libs, quiet(NOW)), [DueJob::Scan(1)]);
     }
 
     #[test]
@@ -206,7 +208,7 @@ mod tests {
             Some(NOW - 48 * HOUR),
         )];
         assert_eq!(
-            due_jobs(NOW, &libs, GlobalSchedule::default()),
+            due_jobs(NOW, &libs, quiet(NOW)),
             [DueJob::Refresh(1)],
             "a refresh already walks the library; queuing the scan too walks it twice"
         );
@@ -216,10 +218,7 @@ mod tests {
     fn a_clock_that_jumped_backwards_does_not_park_the_schedule() {
         // Stamped an hour into the future (clock corrected, or a restored DB).
         let libs = [lib(1, 60, Some(NOW + HOUR), 0, None)];
-        assert_eq!(
-            due_jobs(NOW, &libs, GlobalSchedule::default()),
-            [DueJob::Scan(1)]
-        );
+        assert_eq!(due_jobs(NOW, &libs, quiet(NOW)), [DueJob::Scan(1)]);
     }
 
     #[test]
@@ -229,7 +228,7 @@ mod tests {
             last_probe_retry: Some(NOW - 23 * HOUR),
             transcode_cleanup_mins: 360,
             last_transcode_cleanup: Some(NOW - 7 * HOUR),
-            ..Default::default()
+            ..quiet(NOW)
         };
         assert_eq!(due_jobs(NOW, &[], global), [DueJob::CleanupTranscode]);
 
@@ -238,7 +237,7 @@ mod tests {
             last_probe_retry: None,
             transcode_cleanup_mins: 0,
             last_transcode_cleanup: None,
-            ..Default::default()
+            ..quiet(NOW)
         };
         assert_eq!(due_jobs(NOW, &[], global), [DueJob::RetryProbes]);
     }
@@ -250,14 +249,12 @@ mod tests {
     #[test]
     fn indexing_is_off_by_default_and_goes_behind_even_the_producer() {
         // Off by default until M0-P1 prices a full read of a library over NFS.
-        assert!(
-            !due_jobs(HOUR, &[], GlobalSchedule::default()).contains(&DueJob::BuildFragmentIndexes)
-        );
+        assert!(!due_jobs(HOUR, &[], quiet(HOUR)).contains(&DueJob::BuildFragmentIndexes));
 
         let both = GlobalSchedule {
             cache_produce_mins: 30,
             vod_index_mins: 30,
-            ..GlobalSchedule::default()
+            ..quiet(HOUR)
         };
         let jobs = due_jobs(HOUR, &[], both);
         let producer = jobs
@@ -278,7 +275,7 @@ mod tests {
     #[test]
     fn the_producer_is_off_by_default_and_goes_last_when_it_is_not() {
         assert!(
-            !due_jobs(NOW, &[], GlobalSchedule::default()).contains(&DueJob::ProduceCache),
+            !due_jobs(NOW, &[], quiet(NOW)).contains(&DueJob::ProduceCache),
             "an unconfigured server does not pre-transcode"
         );
         let global = GlobalSchedule {
@@ -286,7 +283,7 @@ mod tests {
             last_probe_retry: None,
             cache_produce_mins: 360,
             last_cache_produce: None,
-            ..Default::default()
+            ..quiet(NOW)
         };
         assert_eq!(
             due_jobs(NOW, &[lib(1, 60, None, 0, None)], global),
@@ -295,30 +292,24 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_retention_arms_a_daily_trailing_prune() {
+    fn telemetry_prune_runs_daily_and_trails_the_other_jobs() {
         let global = GlobalSchedule {
-            telemetry_retain_days: 30,
             last_telemetry_prune: None,
             cache_produce_mins: 360,
             last_cache_produce: None,
-            ..GlobalSchedule::default()
+            ..quiet(NOW)
         };
         assert_eq!(
             due_jobs(NOW, &[], global),
             [DueJob::PruneTelemetry, DueJob::ProduceCache]
         );
-        let disabled = GlobalSchedule {
-            telemetry_retain_days: 0,
-            last_telemetry_prune: None,
-            ..GlobalSchedule::default()
+        // Even with event retention off it is due: network priors are always
+        // kept and age out through the same job.
+        let pruned_today = GlobalSchedule {
+            last_telemetry_prune: Some(NOW - HOUR),
+            ..quiet(NOW)
         };
-        assert!(due_jobs(NOW, &[], disabled).is_empty());
-
-        let priors_only = GlobalSchedule {
-            network_priors: true,
-            ..disabled
-        };
-        assert_eq!(due_jobs(NOW, &[], priors_only), [DueJob::PruneTelemetry]);
+        assert!(due_jobs(NOW, &[], pruned_today).is_empty());
     }
 
     #[test]
@@ -328,10 +319,7 @@ mod tests {
             lib(2, 60, Some(NOW - 5 * 60), 0, None),
             lib(3, 0, None, 0, None),
         ];
-        assert_eq!(
-            due_jobs(NOW, &libs, GlobalSchedule::default()),
-            [DueJob::Scan(1)]
-        );
+        assert_eq!(due_jobs(NOW, &libs, quiet(NOW)), [DueJob::Scan(1)]);
     }
 
     /// The artwork retry runs on the default interval — the point of it being
@@ -342,7 +330,7 @@ mod tests {
         let global = GlobalSchedule {
             artwork_retry_mins: plurx_core::store::keys::ARTWORK_RETRY_DEFAULT_MINS,
             last_artwork_retry: None,
-            ..GlobalSchedule::default()
+            ..quiet(NOW)
         };
         assert_eq!(due_jobs(NOW, &[], global), [DueJob::RetryArtwork]);
 
@@ -350,7 +338,7 @@ mod tests {
         let global = GlobalSchedule {
             artwork_retry_mins: 30,
             last_artwork_retry: Some(NOW - 29 * 60),
-            ..GlobalSchedule::default()
+            ..quiet(NOW)
         };
         assert!(due_jobs(NOW, &[], global).is_empty());
 
@@ -358,7 +346,7 @@ mod tests {
         let global = GlobalSchedule {
             artwork_retry_mins: 0,
             last_artwork_retry: None,
-            ..GlobalSchedule::default()
+            ..quiet(NOW)
         };
         assert!(due_jobs(NOW, &[], global).is_empty());
     }

@@ -43,14 +43,12 @@ enum TVSettingsCategory: String, CaseIterable, Identifiable {
     case remotes = "Remotes & devices"
     case account = "Account"
     case help = "Help"
-    case developer = "Developer"
     case about = "About"
     var id: String { rawValue }
     var title: String {
         switch self {
         case .liveTv: return "Live TV & recordings"
         case .sharing: return "Shared libraries"
-        case .developer: return "Advanced"
         default: return rawValue
         }
     }
@@ -100,6 +98,38 @@ struct SettingsPicker<Selection: Hashable, Content: View>: View {
     }
 }
 
+/// Collapsed details use a focusable button on Apple TV and a native
+/// disclosure row on iPhone and iPad.
+struct SettingsDisclosure<Content: View>: View {
+    private let title: String
+    private let content: Content
+    @State private var isExpanded = false
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    @ViewBuilder var body: some View {
+        #if os(tvOS)
+        Button {
+            isExpanded.toggle()
+        } label: {
+            HStack {
+                Text(title)
+                Spacer()
+                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                    .accessibilityHidden(true)
+            }
+        }
+        .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+        if isExpanded { content }
+        #else
+        DisclosureGroup(title, isExpanded: $isExpanded) { content }
+        #endif
+    }
+}
+
 struct SettingsView: View {
     var category: TVSettingsCategory? = nil
     var entryRequest = 0
@@ -112,8 +142,9 @@ struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject private var remoteClient: RemoteClientModel
     @State private var diagnosticSignOutConfirmation = false
-    // Graduated from Developer with the same keys and defaults, so a choice a
-    // viewer already made there carries over unchanged.
+    // Same keys and defaults as before they left Developer, so a saved choice
+    // carries over unchanged.
+    @AppStorage("plurx.cinemaRemote") private var cinemaRemoteEnabled = false
     @AppStorage("plurx.boundedResume") private var boundedResumeEnabled = true
     @AppStorage("plurx.preparedHandoff") private var preparedHandoffEnabled = true
     #if os(tvOS)
@@ -159,14 +190,6 @@ struct SettingsView: View {
         #endif
     }
 
-    private var testedFeaturesLabel: String {
-        #if os(tvOS)
-        return "Features still being tested"
-        #else
-        return "Shared libraries, Cinema remotes and other features awaiting evidence"
-        #endif
-    }
-
     private var sharedLibrariesLabel: String {
         #if os(tvOS)
         return "Shared libraries and sources"
@@ -192,7 +215,7 @@ struct SettingsView: View {
     }
 
     /// Pause/resume and quality handoff switches with their readiness page.
-    /// iPhone and iPad keep them under Playback; Apple TV moves them to Advanced.
+    /// Every platform keeps them under Playback (Developer retired 2026-11-18).
     @ViewBuilder private var playbackEngineeringRows: some View {
         Toggle("Bounded pause/resume", isOn: $boundedResumeEnabled)
         Toggle("Prepared quality handoff", isOn: $preparedHandoffEnabled)
@@ -288,9 +311,7 @@ struct SettingsView: View {
                     get: { model.autoSkip },
                     set: { model.setAutoSkip($0) }
                 ))
-                #if !os(tvOS)
                 playbackEngineeringRows
-                #endif
                 NavigationLink(captionsLabel) { ProgressiveCaptionSetupView() }
             } header: {
                 Text("Playback")
@@ -298,6 +319,9 @@ struct SettingsView: View {
                 Text(playbackFooter)
             }
             .settingsCategory(.playback, selection: category)
+
+            DolbyVisionRefitSettingsSection()
+                .settingsCategory(.playback, selection: category)
 
             #if os(iOS)
             Section {
@@ -455,29 +479,19 @@ struct SettingsView: View {
             Section("Remotes & devices") {
                 NavigationLink("Manage remote pairings") { RemoteDeviceSettingsView() }
                     .focused($focusedEntry, equals: .remotes)
+                Toggle("Enable Cinema remotes on this installation", isOn: $cinemaRemoteEnabled)
                 Text(remoteClient.status).font(.caption)
+                #if os(iOS)
+                NavigationLink("Screen invitations") { RemoteDeviceSettingsView() }
+                #endif
+                SettingsDisclosure("Details") {
+                    Text("The server must also enable Cinema remote control. Missing server support or network access does not prevent saving this choice.").font(.caption)
+                    #if os(iOS)
+                    Text("Each paired screen has its own saved invitation choice, independent of this switch.").font(.caption)
+                    #endif
+                }
             }
             .settingsCategory(.remotes, selection: category)
-            #if os(tvOS)
-            Section {
-                NavigationLink(testedFeaturesLabel) { LiveTvDeveloperView() }
-                    .focused($focusedEntry, equals: .developer)
-                    .accessibilityIdentifier("settings-developer-features")
-                playbackEngineeringRows
-            } header: {
-                Text(TVSettingsCategory.developer.title)
-            } footer: {
-                Text("Pause/resume and quality handoff are on by default; their readiness rows are advisory and never change either switch.")
-            }
-            .settingsCategory(.developer, selection: category)
-            #else
-            Section("Developer") {
-                NavigationLink(testedFeaturesLabel) { LiveTvDeveloperView() }
-                    .focused($focusedEntry, equals: .developer)
-                    .accessibilityIdentifier("settings-developer-features")
-            }
-            .settingsCategory(.developer, selection: category)
-            #endif
 
             Section("Help") {
                 DiagnosticReportButton()

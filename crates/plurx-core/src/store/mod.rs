@@ -2064,7 +2064,6 @@ pub mod keys {
     /// VBR path exactly; `quality` is validated against every usable encoder
     /// before an effective snapshot is published.
     pub const VOD_REORDER_FRAMES: &str = "playback.vod_reorder_frames";
-    pub const CONTENT_AWARE_ENCODING: &str = "transcode.content_aware_encoding";
     pub const TRANSCODE_RATE_MODE: &str = "transcode.rate_mode";
     /// Optional integer quality override. Empty/absent means the calibrated
     /// per-family default; the value matters only when rate mode is quality.
@@ -2117,13 +2116,6 @@ pub mod keys {
     /// This is deliberately on by default: it is bounded local bookkeeping and
     /// the measurement referee for every Performance II milestone.
     pub const TELEMETRY_RETAIN_DAYS: &str = "telemetry.retain_days";
-    /// Opt-in node-local network history used to seed Auto quality. Missing
-    /// and every value other than `"1"` are off.
-    pub const PLAYBACK_NETWORK_PRIORS: &str = "playback.network_priors";
-    /// Opt-in web Auto controller. Missing and every value other than `"1"`
-    /// are off, leaving the server's initial Auto choice in place.
-    pub const PLAYBACK_AUTO_ABR: &str = "playback.auto_abr";
-    pub const PLAYBACK_DISPLAY_AWARE_AUTO: &str = "playback.display_aware_auto";
     /// Opt-in Android TV refresh-rate matching. Missing and every value other
     /// than `"1"` are off; readiness observations are advisory only.
     pub const PLAYBACK_DISPLAY_MODE_MATCH: &str = "playback.display_mode_match";
@@ -2272,14 +2264,6 @@ pub mod keys {
     /// Operator override for HEVC copy without configuration/source proof.
     /// Off by default. Readiness is advisory and never prevents saving it.
     pub const HEVC_UNVERIFIED_COPY: &str = "playback.hevc_unverified_copy";
-    /// Print `CODECS` on SDR (`avc1`) HLS master variants when the session's
-    /// frozen component facts are complete (S-10, HONEST-MASTER-PLAYLIST).
-    /// Missing and every off spelling are off, which is the pre-S-10 master:
-    /// AVPlayer filters variants on `CODECS` before it fetches a byte, and no
-    /// device has re-qualified the SDR string yet. HDR/Dolby Vision variants
-    /// are unaffected either way. Read once per session at create, so one
-    /// session's master never changes shape.
-    pub const PLAYBACK_SDR_MASTER_CODECS: &str = "playback.sdr_master_codecs";
     /// Ask this node to plan into the health-qualified artifact identity, so a
     /// transcode may only be reused when its producer's own receipt says the
     /// decode was clean.
@@ -2400,8 +2384,9 @@ pub mod keys {
     /// single play must not start a whole-title background encode unasked —
     /// and turning it off cancels rows already queued.
     pub const VOD_OUTPUT_PREPARATION: &str = "vod.output_preparation";
-    /// Developer switch for retaining a rolling session's complete output as a
-    /// reusable artifact. Absent means off.
+    /// Retired switch: rolling retention is always on and nothing reads this
+    /// key. Kept only because the revision-1 playback-input triggers
+    /// (`playback_input_keys`) name it and are never edited.
     pub const VOD_ROLLING_RETENTION: &str = "vod.rolling_retention";
     /// Last user id inspected by the bounded speculative-candidate fan-out.
     /// The singleton lease makes advancing this replicated cursor race-free.
