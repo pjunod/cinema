@@ -4388,6 +4388,7 @@ expected_occurrences = 26
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# The offline fixture uses one timeout and one poll to await the owned worker.
 # Source-budget audit (8ab61a779 -> bbc5c1664): +11 timer shapes. Group's
 # 100 ms failed-wait retry and 25 ms quiescence poll retain the owned children,
 # registrations and pause guard until positive reap; neither is settlement.
@@ -6063,7 +6064,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # source_probe/title_work_tests.rs +8 and transcode/manager/construct.rs +1 (the bounded
 # production qualification-admission timeout, QUEUE_WAIT in admit_dv_title).
 # Union 2212 + 20 + 39 = 2271, less those 11 counted twice = 2260.
-expected_occurrences = 2266
+expected_occurrences = 2268
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
