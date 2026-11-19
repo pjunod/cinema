@@ -204,6 +204,41 @@ enum TrackFacts {
         return row.summary
     }
 
+    /// The short value an Audio button carries on one line: language and
+    /// channel layout ("Japanese 5.1"), or language and codec when the layout
+    /// is unknown. Falls back to the full summary's own answers otherwise.
+    static func audioButtonValue(_ file: MediaFile, chosen: Int?) -> String {
+        let index = chosen ?? file.playbackDefaults?.audio?.selectedIndex
+        guard let track = (file.audioStreams ?? []).first(where: { $0.index == index }) else {
+            return audioSummary(file, chosen: chosen)
+        }
+        var parts = [languageName(track.language)]
+        if let channels = track.channels, let layout = channelLayout(channels) {
+            parts.append(layout)
+        } else {
+            parts.append(codecName(track.codec))
+        }
+        return buttonValue(parts.joined(separator: " "))
+    }
+
+    /// The short value a Subtitles button carries: language plus Forced/SDH,
+    /// or Off.
+    static func subtitleButtonValue(_ file: MediaFile, chosen: Int?) -> String {
+        if chosen == PrePlaySelection.subtitleOff { return "Off" }
+        let index = chosen ?? file.playbackDefaults?.subtitle?.selectedIndex
+        guard let track = (file.subtitleStreams ?? []).first(where: { $0.index == index }) else {
+            return subtitleSummary(file, chosen: chosen)
+        }
+        return buttonValue(([languageName(track.language)] + subtitleMarkers(track)).joined(separator: " "))
+    }
+
+    /// One line on a button: long values end in an ellipsis rather than
+    /// pushing the rest of the action row off the screen.
+    static func buttonValue(_ value: String, limit: Int = 16) -> String {
+        guard value.count > limit else { return value }
+        return String(value.prefix(limit - 1)).trimmingCharacters(in: .whitespaces) + "…"
+    }
+
     /// The burn-in cost of a pre-play subtitle choice, disclosed before
     /// playback starts.
     ///
@@ -519,11 +554,20 @@ struct TrackChoiceCostNotice: View {
 
     var body: some View {
         if let warning = TrackFacts.burnInWarning(file, chosen: selection.subtitleIndex) {
+            #if os(tvOS)
+            // One quiet line under the action row, owed before playback.
+            Text(warning)
+                .font(.system(size: 22, weight: .medium))
+                .foregroundStyle(Palette.muted)
+                .lineLimit(2)
+                .frame(maxWidth: 1500, alignment: .leading)
+            #else
             Label(warning, systemImage: "exclamationmark.triangle.fill")
                 .font(.system(.caption, design: .rounded))
                 .foregroundStyle(Palette.muted)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: EpisodeMediaInfoMetrics.maximumWidth, alignment: .leading)
+            #endif
         }
     }
 }
