@@ -1662,15 +1662,43 @@ mod tests {
             .split_once("impl FromRequestParts<AppState> for RawToken")
             .expect("AuthUser extractor end")
             .0;
-        assert!(
-            extractor
-                .find("authentication_ticket()")
-                .expect("auth ticket")
-                < extractor
-                    .find("authenticate_token(&hash)")
-                    .expect("Store auth")
-        );
-        assert!(extractor.contains("record_authenticated(ticket, hash, &user)"));
+        let authentication = extractor
+            .split_once("pub(crate) async fn authenticate_token_digest(")
+            .expect("shared audience-bound authentication")
+            .1
+            .split_once("/// Stable code every client")
+            .expect("shared authentication end")
+            .0;
+        let cache_hit = authentication
+            .find(".authenticated_token(")
+            .expect("bounded proof read");
+        let cache_return = authentication
+            .find("return Ok(user);")
+            .expect("cache hit returns without renewal");
+        let ticket = authentication
+            .find("authentication_ticket()")
+            .expect("auth ticket");
+        let store = authentication
+            .find(".authenticate_token_proof_for(&hash, audience)")
+            .expect("authoritative Store proof read");
+        let admin_publish = authentication
+            .find("record_authenticated(ticket, hash.clone(), &user)")
+            .expect("fresh Store result recovery publication");
+        let token_publish = authentication
+            .find("record_token_authenticated(")
+            .expect("fresh Store result token publication");
+        assert!(cache_hit < cache_return && cache_return < ticket && ticket < store);
+        assert!(store < admin_publish && admin_publish < token_publish);
+        let store_trait = include_str!("../../../plurx-core/src/store/mod.rs");
+        let default_proof = store_trait
+            .split_once("async fn authenticate_token_proof_for(")
+            .expect("default Store proof delegation")
+            .1
+            .split_once("/// Resolve a token hash to its user")
+            .expect("default Store proof delegation end")
+            .0;
+        assert!(default_proof.contains("TokenAuthenticationProof::uncached("));
+        assert!(default_proof.contains("self.authenticate_token_for(token_hash, audience).await?"));
 
         let auth = include_str!("auth.rs");
         let login = auth
@@ -1724,6 +1752,27 @@ mod tests {
                 < setup.find("count_users()").expect("setup Store read")
         );
         assert!(setup.contains("record_authenticated(proof_ticket, token_hash, &user)"));
+
+        let policy = include_str!("system.rs")
+            .split_once(
+                "if req.auth_token_expiry.is_some() || req.auth_token_idle_days.is_some() {",
+            )
+            .expect("token policy writer")
+            .1
+            .split_once("if let Some(on) = req.cinema_remote_invitations {")
+            .expect("token policy writer end")
+            .0;
+        let begin = policy
+            .find("ClusterCacheRevocation::begin_token_policy")
+            .expect("global policy revocation");
+        let write = policy
+            .find(".put_auth_token_policy(")
+            .expect("claim-bound policy writer");
+        let finish = policy
+            .find("proof_revocation.finish")
+            .expect("policy peer bracket end");
+        assert!(begin < write && write < finish);
+        assert!(policy.contains("proof_revocation.mutation_claim()"));
 
         let users = include_str!("users.rs");
         let update = users
