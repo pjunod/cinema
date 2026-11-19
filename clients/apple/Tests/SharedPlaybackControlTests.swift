@@ -456,6 +456,14 @@ final class SharedBoundedRangeTimelineTests: XCTestCase {
         XCTAssertEqual(initial.filmPositionMs(itemPositionMs: 0), 0)
         XCTAssertTrue(PreparedSeekPolicy.originalTargetHasRunway(filmPositionMs: 0,
             mediaOriginMs: -83, ranges: [0...5]))
+        XCTAssertNil(PreparedCommitRendezvous.planLoaded(stagedFilmPositionMs: 0,
+            incumbentFilmPositionMs: 0, mediaOriginMs: -83, playbackRate: 1,
+            overlapRemainingMs: 5_000, loadedItemRanges: [0...10]))
+        let loaded = PreparedCommitRendezvous.planLoaded(stagedFilmPositionMs: 0,
+            incumbentFilmPositionMs: 0, mediaOriginMs: -83, playbackRate: 1,
+            overlapRemainingMs: 6_000, loadedItemRanges: [0...10])
+        XCTAssertEqual(loaded?.filmPositionMs, 1_900)
+        XCTAssertEqual(loaded?.itemPositionMs, 1_983)
         let loadedRendezvous = try XCTUnwrap(PreparedCommitRendezvous.planLoaded(stagedFilmPositionMs: 0,
             incumbentFilmPositionMs: 0, mediaOriginMs: -83, playbackRate: 1,
             overlapRemainingMs: 12_000, loadedItemRanges: [0...10]))
