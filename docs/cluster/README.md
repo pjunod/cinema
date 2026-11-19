@@ -14,6 +14,7 @@ failures.
 
 | File | Answers | |
 |---|---|---|
+| [CLUSTER-TIMING-BOUNDED-FIXES.md](CLUSTER-TIMING-BOUNDED-FIXES.md) | How delayed activation consumes one lease and optional reconciliation cannot starve renewal. | open |
 | [CLUSTER-CATALOGUE-SNAPSHOT-BUILD.md](CLUSTER-CATALOGUE-SNAPSHOT-BUILD.md) | How complete source-bound peer catalogue descriptions are reused without caching execution authority. | open |
 | [CLUSTER-WATCH-BUILD.md](CLUSTER-WATCH-BUILD.md) | General table-change watch contract and consumer migration. | open |
 | [OPENRAFT-010-EVALUATION.md](OPENRAFT-010-EVALUATION.md) | Which native 0.10 mechanisms can replace fork patches 4, 6 and 28, and what exact 0.9.25 source proves about starved voters. | open |

@@ -1,8 +1,9 @@
 //! Shared cluster timing policy. Consumer aliases retain their existing APIs.
 //!
-//! Durations are the deployed values, not a new failover promise. In particular,
-//! the 16 s leader-recovery budget exceeds the normal 12 s media lease; the
-//! measured C4 decision must resolve that mismatch before either is tuned.
+//! Durations are deployed policy, not a new failover promise. The generic
+//! exact-state retry envelope does not renew media leases: confirmation keeps
+//! the original expiry, while renewal uses its bounded attempt and cycle.
+//! C4 still owns the measured availability/grace decision before floor tuning.
 //! See `docs/cluster/CLUSTER-TIMING-BUILD.md` for ownership and qualification.
 
 /// Raft sender and election configuration; rolling-update floors are measured policy.

@@ -4953,6 +4953,7 @@ async fn create_with_purpose_attempt(
     // read-budget line) even though the task is detached so it can outlive a
     // cancelled caller.
     let activation_counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
+    let activation_deadline = activation_lease_deadline(&publication_activation);
     let mut activation_task = if owner_node_id == state.node_id {
         let activation_state = state.clone();
         let activation_authority = ingress_serving_authority.clone();
@@ -4967,6 +4968,7 @@ async fn create_with_purpose_attempt(
                     activation_authority,
                     owner_activation_generation,
                     guard,
+                    activation_deadline,
                 )
                 .await
                 .map(|_| ())
@@ -4982,8 +4984,6 @@ async fn create_with_purpose_attempt(
                     target_generation: owner_activation_generation,
                     activation,
                 };
-                let activation_deadline = tokio::time::Instant::now()
-                    + Duration::from_millis(u64::try_from(LEASE_TTL_MS).unwrap_or_default());
                 activation_state
                     .media_sessions
                     .activate_remote(&activation_owner, &request, activation_deadline)
@@ -5024,7 +5024,6 @@ async fn create_with_purpose_attempt(
             },
         ))
     };
-    let activation_deadline = activation_lease_deadline(&publication_activation);
     match tokio::time::timeout_at(activation_deadline, &mut activation_task).await {
         Ok(Ok(Ok(_))) => crate::media_pool::mark_create_phase("activation"),
         Ok(Ok(Err(error))) => {
@@ -5301,13 +5300,26 @@ fn activation_confirmation_deadline(lease_deadline: tokio::time::Instant) -> tok
     lease_deadline - ACTIVATION_CONFIRMATION_RECOVERY_MARGIN.min(remaining / 2)
 }
 
-fn activation_lease_deadline(activation: &MediaSessionActivation) -> tokio::time::Instant {
-    let remaining_ms = activation
-        .lease_expires_at_ms
-        .saturating_sub(activation.now_ms)
+/// Translate the validated absolute route expiry on the same local clock
+/// basis as `route_matches_activation`, once per owner. Pass the resulting
+/// monotonic deadline through every await; the foreign request timestamp is
+/// not the current time and must not mint another full lease on late entry.
+pub(in crate::http) fn activation_lease_deadline(
+    activation: &MediaSessionActivation,
+) -> tokio::time::Instant {
+    let monotonic_sample = tokio::time::Instant::now();
+    activation_lease_deadline_at(activation.lease_expires_at_ms, unix_ms(), monotonic_sample)
+}
+
+pub(super) fn activation_lease_deadline_at(
+    lease_expires_at_ms: i64,
+    now_ms: i64,
+    monotonic_sample: tokio::time::Instant,
+) -> tokio::time::Instant {
+    let remaining_ms = lease_expires_at_ms
+        .saturating_sub(now_ms)
         .clamp(0, LEASE_TTL_MS);
-    tokio::time::Instant::now()
-        + Duration::from_millis(u64::try_from(remaining_ms).unwrap_or_default())
+    monotonic_sample + Duration::from_millis(u64::try_from(remaining_ms).unwrap_or_default())
 }
 
 fn spawn_activation_abandonment(state: AppState, activation: MediaSessionActivation) {
@@ -5412,8 +5424,8 @@ pub(in crate::http) async fn activate_session_under_authority(
     authority: crate::serving_fence::ServingAuthority,
     admitted_generation: u64,
     guard: Option<StartedSessionGuard>,
+    lease_deadline: tokio::time::Instant,
 ) -> Result<MediaSessionActivationOutcome, ApiError> {
-    let lease_deadline = activation_lease_deadline(&activation);
     let serving_transition = authority
         .commit_guard_before(admitted_generation, lease_deadline.into_std())
         .await
