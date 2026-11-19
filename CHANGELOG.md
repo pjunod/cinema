@@ -45,6 +45,17 @@ bump may break compatibility and a **patch** bump never does.
   mapping and held-out gain, or its identity reason. This metadata comes from
   the pinned rendition and adds no curve-store read to status polls.
 
+### Changed
+
+- Settings → Cluster is one page without folds or tabs: a six-cell status strip
+  (state, leader, nodes reachable, replication, build, rolling restart), alerts
+  only when something needs action, a nodes table whose rows open a drawer with
+  that node's detail and actions, one Cluster settings list with a single Save
+  and advisory readiness chips, the replicated database ledger, Maintenance,
+  Backup and the log. Blocked actions keep their server-supplied reason beside
+  the button, refused operations stay until dismissed, and nothing is remembered
+  in the browser any more. Settings, endpoints and permissions are unchanged.
+
 ### Removed
 
 - The engineering knowledge pilot (`scripts/knowledge`, `validation/knowledge/`,

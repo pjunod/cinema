@@ -932,146 +932,166 @@ easier path when you have a browser open. It is admin-only, matching the
 endpoints' own gating; a non-admin never sees the tab or its data. The roster is
 read when you open the tab, not on every Settings visit.
 
-| What you see | What it means |
+The page runs top to bottom: header, **status strip**, an **alert slot** (empty
+when nothing needs action), **Nodes**, **Cluster settings** beside **Replicated
+database**, **Maintenance** beside **Backup**, and the **Cluster log**. Nothing on it is folded, tabbed or remembered in the
+browser, and it grows with the roster rather than scrolling inside a box.
+
+The header reads `<n> nodes · sampled <age>`; the age is the oldest direct
+sample and moves in place without a fetch. **Refresh** reloads the roster and
+the direct status together and keeps unsaved settings.
+
+#### The status strip
+
+| Cell | What it says |
 |---|---|
-| `Not clustered` | This server is on unreplicated SQLite and has no membership. Normal and complete for a single machine; there is nothing to fix and no join control to press. |
+| Cluster | The state, with `V voters · quorum Q · tolerates T failures` beneath. See the states below. |
+| Leader | The leader's hostname and Raft term (`term disagreement` when voters differ); `—` with no leader. |
+| Nodes reachable | `reachable / members`, with voter and learner counts or the unreachable host. |
+| Replication | The replicated database's health and the largest apply lag. |
+| Build | The one build every answering node runs, or `N builds` (warning); protocol skew is named here. |
+| Rolling restart | **Safe**, **Blocked**, **Collecting…** or **Unavailable**, with the next candidate's hostname or the first blocker beneath. |
+
+| Cluster cell | What it means |
+|---|---|
+| `Not clustered` (header; no strip) | This server is on unreplicated SQLite and has no membership. Normal and complete for one machine; there is nothing to fix. |
 | `One node` | Replicated, one voter. A supported configuration, not a half-built cluster. |
-| `Reconfiguration in progress — not redundant` | Two voters. Both machines are required for every write and every membership change, so this survives no failure — read the same warning in the table above. Add a third node. |
-| `Redundant — N voters` | Three or more voters. The panel names the majority required and how many nodes may be down. |
-| `… is a learner` appended to any of the above | One or more admitted non-voting members. The sentence is appended, never substituted: a learner changes none of the quorum arithmetic in front of it. |
-| `Leader election required` | A voter majority is reachable, but no leader is elected. Normal mutations stay locked; a bounded force-election request is available when a caught-up voter can campaign. |
-| `Recovery required` | The latest committed heartbeats do not prove a reachable voter majority. Force election and membership changes are unavailable because neither can bypass quorum. |
+| `Reconfiguring` | Two voters. Both are required for every write and membership change, so this survives no failure and is never redundancy. Add a third node. |
+| `Healthy` | Three or more voters, every heartbeat fresh. The sub-line names the majority and how many voters may be down. |
+| `Degraded` | A voter's heartbeat is stale; the alert names the host and what that now blocks. |
+| `Maintenance` | A node is fenced for planned maintenance. |
+| `Recovery required` | The committed heartbeats do not prove a reachable voter majority. Force election and membership changes are unavailable because neither can bypass quorum. |
+| `Status unavailable` | The roster could not be read. |
 
-The node cards lead with each machine's short OS hostname, label the current
-leader beside it, then show the advertised host and stable node id underneath.
-The advertised host may be a DNS name or IP; loopback is written `localhost`
-instead of `127.0.0.1`, and listener ports stay private. A native daemon reads
-the hostname from the OS. A container should set `PLURX_NODE_HOSTNAME` to the
-Docker host's `hostname -s`, because its own OS hostname is normally a generated
-container id. `GET /api/v1/cluster/nodes` also exposes the Raft id,
-voter/learner role, heartbeat freshness, and last-seen. A fresh heartbeat is a
-recent committed application heartbeat, not a direct socket probe. The role is
-the durable one the node was admitted under, not a phase of joining; a learner
-keeps it for as long as it is a member. Read the nested replication status for
-leader and apply-lag health. Media paths and token material are not in that
-payload and are not shown.
+Precedence when several apply: recovery, maintenance, reconfiguring, degraded,
+healthy, one node. A heartbeat is a recent committed application heartbeat, not a direct socket
+probe; only the direct status can say a node is observed.
 
-Every node card starts expanded and combines two sources without pretending
-they are the same: **Membership** is committed roster state, while
-**Operations** is the bounded direct observation from that process. Collapse a
-card when you only need its hostname, role, leadership, and direct-readiness
-badge; **Collapse all** and **Expand all** change every card together.
+#### Alerts
 
-#### How the tab is laid out
+An alert appears only when something needs action, most severe first. Each is
+one sentence and its controls.
 
-The tab describes two things, and they never share a card. **Replicated
-database** is the store: the health verdict, the elected leader and term, the
-quorum-confirmed commit watermark against this node's applied index, apply lag,
-how far behind the projection says this node is, when convergence was last
-positively observed, snapshot and WAL health, the active protocol range, and
-how old the readings themselves are. **Cluster nodes** is the machines carrying
-it, with the restart-readiness verdict beneath them because it names one of
-them. **Maintenance** is the operations rail. **Troubleshooting** holds the
-cluster log, the quorum and sample readings, and the last refusal, one tab at
-a time.
+- **Recovery required** (bad): reachable against required voters, Force
+  election or the preservation actions, and the checklist.
+- **Maintenance active** (warn): the four steps and **Resume service**. The
+  fence survives a restart; resume only from the target node.
+- **Restart preparation active** (warn; good once drained): commands, expiry, **Cancel**.
+- **Voter unreachable** (warn): which host, since when, how many more failures
+  are tolerated, and what rolling restart is now blocked by.
+- **Status unavailable** (warn): the direct status failed; **Retry status**.
+- **Two-voter reconfiguration** (warn): two voters are not redundancy; add a
+  third node.
+- **Refused operation** (bad): the server's refusal, kept until **Dismiss**.
+- **Roster read failed** (warn): the strip shows **Status unavailable**;
+  **Retry roster**.
 
-#### The operations rail
+#### Nodes
 
-**Maintenance** lists every action this screen can take with its precondition
-already evaluated, so a refusal is something you read while deciding rather
-than a paragraph that arrives after the click. Each row is marked **Ready**,
-**Blocked** or **Permanent**, and a blocked row says which preflight failed:
-a learner that is caught up but whose data root has not proved the voter
-reserve, an election with no caught-up follower to campaign, a voter removal
-below the three voters the server requires, a lifecycle change already in
-flight on a named node, or a recovery that has locked membership entirely. A
-blocked maintenance row names the blocker the preflight actually returned
-rather than a plausible one — that verdict fails for a dozen different reasons
-and only two of them are about quorum.
+One row per member, reflowing into labelled cards at phone width. **Node** is
+the short OS hostname with Leader, This node, Removal pending and read-worker
+pills and the advertised host beneath; then **Role** (`voter`, `joining voter`,
+`learner`), **Status**, **Heartbeat**, **Raft**, **WAL**, **Database**,
+**Streams** and **Build**.
 
-The rail never widens what the server allows — it reports the same conditions
-the endpoints enforce, from the roster and the direct status. Two of them it
-cannot see: whether a node still owns unresolved offline work, and whether
-every binary understands the current membership fences. Those are still
-answered by the server when you act, and the answer lands in
-**Troubleshooting → Refusals**.
+A cell with no direct sample shows `—`, never a heartbeat-derived value; a
+heartbeat is not a substitute for a direct peer observation. Status is **Ready**, **Needs attention**, **Maintenance**,
+**Catching up**, **Unreachable** or **Not observed** (which names why the probe
+failed).
 
-**Add a node** and **Leave this cluster** carry their own controls, as an
-expansion of the row that states the precondition. Opening Add reveals the
-token lifetime, the role, and the mint button; the credential then appears in
-that same place and nowhere else, because a join token is shown exactly once
-and two surfaces that mint one are two surfaces to leak it from. Whether a row
-is expanded is held for as long as the panel is on screen and is never written
-to browser storage, so a fresh page always starts collapsed and a status
-refresh cannot pull the panel shut while you are reading a token. Both rows
-carry a precondition. Adding is blocked by a recovery that has locked
-membership or a lifecycle change already in flight; leaving is blocked by that
-same recovery, by an active maintenance fence anywhere in the cluster, and — for
-a voter — by the three-voter bar the server holds a self-leave to, which is the
-same arithmetic the Remove row reports. A blocked row has no expansion at all,
-so the blocked reason is the whole row rather than a disabled control you have
-to open to discover.
+The advertised host may be a DNS name or IP; loopback is written `localhost`,
+and listener ports stay private. A native daemon reads the hostname from the OS;
+a container should set `PLURX_NODE_HOSTNAME` to the Docker host's `hostname -s`,
+because its own OS hostname is normally a generated container id.
+`GET /api/v1/cluster/nodes` also exposes the Raft id, role, heartbeat freshness
+and last-seen. The role is the durable one the node was admitted under. Media paths and token material are never in that payload.
 
-A machine that is not in a cluster gets a shorter version of the same tab:
-the banner, a **Replicated database** section that names the backend and says
-there are no peers, and **Troubleshooting**. There is no roster, no
-restart-readiness verdict and no maintenance section, because none of them
-describe a single machine — and eleven `unknown` rows would read as a failed
-read rather than as an install with no Raft in it.
+**+ Add node** opens the join form above the table: token lifetime, role and
+the mint button. The credential then appears in that same place and nowhere
+else, because a join token is shown exactly once and two surfaces that mint one
+are two surfaces to leak it from; it lives in page memory only. A recovery that
+has locked membership, or a lifecycle change in flight, blocks Add with the
+reason beside the button.
 
-The node list is a fixed-height scroller on a window with room for one, so
-opening and closing cards changes what is in the list and nothing else on the
-page. Before that it moved every section below it by as much as 1259px on a
-four-node cluster, and left the store's column that much shorter than the
-machines'. Its height is the height of the list with every card closed, capped
-by the window, so a collapsed roster does not sit above a box of nothing.
-Below three nodes it keeps its natural height instead.
+Click a row to open its drawer (several may be open). It holds **Membership**
+(committed roster state), **Raft & WAL** and **Snapshot & media** (the bounded
+direct observation from that process), then that node's actions. The two
+sources are never presented as the same thing.
 
-Both **Replicated database** and the node cards fold. The database section
-keeps its health pill and a one-line summary — leader, term, commit, applied,
-lag, last converged — when it is collapsed, so folding hides the detail and
-never the verdict. What is folded is remembered in this browser and nowhere
-else, keyed by node id rather than by row, so a node leaving the cluster does
-not collapse whichever card takes its place. A browser with site data blocked
-simply gets the defaults: everything expanded. The selected Troubleshooting tab
-is remembered the same way, because an operational change repaints this panel
-and would otherwise snap you back to the log every few seconds while you watch
-a node drain.
+| Row | Actions |
+|---|---|
+| This node | **Enter maintenance** or **Resume service**, **Prepare for restart**, **Leave cluster…** |
+| Another voter | **Remove permanently…**; maintenance and restart run from that node itself |
+| A learner | **Promote to voter**, **Remove permanently…** |
 
-The cluster-wide operational verdict and its quorum/build/sample facts sit in
-**Maintenance** rather than beside the roster, because they authorize one
-cluster action, not one machine in isolation.
+A blocked action stays visible with the server's blocker beside it, so a
+refusal is something you read while deciding: a learner whose data root has not
+proved the voter reserve, a voter removal or leave below the three voters the
+server requires, a lifecycle change already in flight on a named node,
+maintenance already active elsewhere, a leader (which can only leave from its
+own screen), or a recovery that has locked membership. A blocked maintenance action names the blocker the
+preflight actually returned rather than a plausible one; that verdict fails for
+a dozen different reasons and only two of them are about quorum. The page never
+widens what the server allows. Two conditions it cannot see, unresolved offline
+work on a node and whether every binary understands the current membership
+fences, are answered by the server when you act, as a refused-operation alert.
+
+#### Cluster settings
+
+One list, one **Save**, one request carrying all five switches: Remote media
+placement, Session takeover (under it), Local catalogue reads, Enforce clock
+guard and Shared subtitle tracks. **Transport recovery** is listed as `always
+on`. Each row's chip, such as `3 of 4 checks`, expands to the full description
+and each requirement's status and evidence exactly as the server reported it. It
+counts only requirements the server reports a status for, and reads `checking…`
+or `checks unavailable` otherwise.
+
+Readiness is advisory: a chip never disables a switch or Save, and a Save is
+never refused for runtime state. Unsaved changes survive repaints and **Refresh**.
+
+#### Replicated database
+
+The store, kept apart from the machines carrying it: a health pill and a ledger of backend, leader and term, quorum commit against this node's applied
+index, behind-by, last converged, WAL, snapshots, database size, read capacity,
+protocol range and reading age (updated in place).
+
+#### Maintenance, Backup and the log
+
+**Maintenance** holds the cluster-wide actions. **Rolling restart** states the
+verdict (one step, not a health badge) and, when blocked,
+every blocker and warning the server returned; **Prepare** appears only on the
+candidate node, otherwise the row names the host to open. **Leader election** (more than one voter) opens the
+force-election dialog: a bounded campaign request, never a quorum override. **Diagnostics** downloads a support bundle or roster snapshot.
+
+**Backup** holds the destination, daily time (UTC) and retention, with its own
+**Save**, a status pill and a readiness chip. The full-width **Cluster log**
+below has a level filter, auto-refresh and Refresh.
+
+#### Not clustered and disabled
+
+A machine that is not in a cluster gets a shorter page: a calm sentence, the
+settings, a **Replicated database** ledger that names the backend and says there
+are no peers, Backup and the log. There is no roster, restart verdict or
+maintenance, because eleven `unknown` rows would read as a failed read rather
+than as an install with no Raft in it. With clustering disabled the page says so
+and nothing more.
 
 #### What the tab refreshes, and when
 
 The committed roster and the direct all-voter status are two different reads
-with two different costs, and the tab treats them that way. The roster is
-refetched every two seconds only while something is in flight — a node in
-maintenance, or a recovery in progress. The direct status behind every rail
-verdict, every node card's Operations group, and the ledger's Raft, WAL,
-snapshot and protocol readings is collected at most every fifteen seconds for
-as long as the tab is visible: it probes every voter, so it is not a
-two-second reading, and the restart-preparation flow that does need one keeps
-its own poll. Nothing is collected while the tab is hidden, nothing is
-collected at all on a machine that is not in a cluster, and a probe slower than
-the interval is never overlapped. A refused collection retries at the next
-interval rather than the next tick.
+with two different costs. The roster is refetched every two seconds only while
+something is in flight: a node in maintenance, or a recovery in progress. The
+direct status behind the strip, the drawers and the ledger is collected at most
+every fifteen seconds while the tab is visible. It probes every voter, so it is
+not a two-second reading, and the restart-preparation flow that does need one
+keeps its own poll. Nothing is collected while the tab is hidden or on an unclustered machine, and
+a probe slower than the interval never overlaps.
 
-A collection is not a redraw. The panel repaints only when something it
-actually shows has changed. The comparison excludes the ages in the payload, so
-time passing on its own never rewrites the screen — but a cluster that is
-committing writes is genuinely changing what the ledger reports, and there the
-tab will repaint about as often as it collects. That is intended, so a repaint
-has to be survivable: the roster's scroll position, any open **WAL, snapshot,
-and protocol details**, and every control you have touched — the token's
-lifetime and role, the log level, the auto-refresh box — are all put back
-afterwards, and a repaint is deferred entirely while a dialog is open — the
-sample is held rather than stored, so what the panel holds is always what it
-painted, and the repaint is paid on the next collection after you close it. Between repaints the **Reading
-age** row is updated in place, because the one row whose job is freshness must
-not be the row that goes stale. Text selection is the one thing that cannot
-survive the rewrite, which is why repaints are driven by change and not by the
-clock.
+A collection is not a redraw. The page repaints only when something it shows has
+changed; ages are excluded from that comparison. A repaint keeps open drawers,
+every control you have touched, the minted token and focus. It is deferred
+entirely while a dialog is open; the sample is held rather than stored, so what
+the page holds is always what it painted.
 
 The restart-preparation poll is the exception: while a preparation is active it
 repaints every two seconds regardless, because the drain countdown is the whole
@@ -1117,8 +1137,8 @@ exists, so the exclusion remains effective throughout a rolling upgrade or
 rollback without permanently blocking later recovery.
 
 The workflow in **Maintenance & leadership** is the authoritative checklist.
-The **Operational readiness** summary above the node cards remains the stricter
-direct-peer restart verdict; each expanded node card holds that machine's WAL,
+The **Rolling restart** cell of the status strip remains the stricter
+direct-peer restart verdict; each node's drawer holds that machine's WAL,
 snapshot, protocol, media, and build evidence:
 
 1. The target blocks new local admissions and waits for any admission already
@@ -2932,16 +2952,16 @@ plan or turn one surviving voter into a new cluster.
 
 ### Cluster node status and guarded voter restarts
 
-Open **Settings → Cluster** for the cluster-wide view. Each node card keeps the
+Open **Settings → Cluster** for the cluster-wide view. Each node keeps the
 authoritative committed membership beside a direct, authenticated process
-observation, while the summary above the cards gives one conservative restart
+observation, while the status strip gives one conservative restart
 verdict. An ordinary SQLite server continues to show **Not clustered** and has
 no direct operations evidence.
 
-The verdict is phrased as **Ready to restart one voter** or **Do not restart
-another voter**. It is an authorization for one rolling-restart step, not a
+The verdict reads **Safe** or **Blocked**, with the next candidate or the first
+blocker beneath. It is an authorization for one rolling-restart step, not a
 general health badge. An unreachable voter stays visible as unreachable and
-never becomes healthy by omission. Expand a node card to see the IDs and
+never becomes healthy by omission. Open a node's drawer to see the IDs and
 protocol range that were checked, Raft term and indices, WAL durability and
 recovery observations, recent snapshot outcomes, and media-drain details.
 
@@ -3100,7 +3120,7 @@ escalation; this build has no force-reconfigure path.
 
 #### Stalled or failing WAL and snapshots
 
-Start with the online evidence. Expand the affected node card and preserve a
+Start with the online evidence. Open the affected node's drawer and preserve a
 support bundle. `wal_not_healthy` means the live WAL snapshot is absent, not
 open, does not own the real lock, has a current error, or has not made its last
 log index durable. A recent failed snapshot outcome is evidence to retain; it

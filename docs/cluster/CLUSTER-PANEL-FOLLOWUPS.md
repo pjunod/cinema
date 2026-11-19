@@ -1,5 +1,13 @@
 # Cluster panel follow-ups — live status, a real module seam, one credential surface
 
+> **Note, 2026-11-18:** the panel layout this plan describes (operations rail,
+> folds, Troubleshooting tabs, `#cluster-node-list`, `plurx.cluster.fold`) was
+> replaced by the status strip, alert slot, nodes table with drawers, and
+> two-up cards. The functions and storage key named below are history; see
+> [OPERATIONS.md](../OPERATIONS.md) §"The Cluster tab" for the current page.
+> The invariants in §4 (credential surface, repaint survival, server-owned
+> preconditions) still hold.
+
 **Status:** ready to build · **Depends on:** PR #651 (`agent/cluster-operations-rail`,
 code head `7e417145`) — if it is not merged when you start, branch from its head ·
 **Written:** 2026-08-30 by the session that built PRs #647 and #651 · **Ratified:**
