@@ -642,10 +642,15 @@ final class ProgressiveCaptionTests: XCTestCase {
             await fulfillment(of:[held],timeout:2);XCTAssertTrue(owner.busy)
             owner.read(publishedAsset)
             XCTAssertFalse(owner.busy,"the read owns presentation, not the cancelled mutation's busy flag")
-            // A periodic sample can publish an empty window while the read
-            // still reports startup. The cue proves the replacement read settled.
-            try await eventually { self.owner.window?.cues.first?.cueId == self.fixture.cueID }
-            let replacementStatus = owner.status
+            // The held server mutation changes the fixture before its reply
+            // is released. The replacement may legitimately read that state.
+            let replacementStatus = mutation == "stop"
+                ? "Caption work stopped. Published captions remain available."
+                : "Partial captions available. Playback continues."
+            try await eventually {
+                self.owner.window?.cues.first?.cueId == self.fixture.cueID
+                    && self.owner.status == replacementStatus
+            }
             var observedStatuses: [String] = []
             let statusObservation = owner.$status.sink { observedStatuses.append($0) }
             CaptionFixtureProtocol.holdRequest=nil;CaptionFixtureProtocol.releaseHeld?()
