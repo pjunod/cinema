@@ -1888,6 +1888,12 @@ pub(crate) mod calls {
         futures_util::stream::iter(requests)
             .buffer_unordered(4)
             .take_until(tokio::time::sleep_until(deadline))
+            // A candidate can cross the deadline during a synchronous poll
+            // (for example digest validation). The timer was checked before
+            // that poll; refuse a late Ready item at the yield boundary too.
+            .take_while(move |_| {
+                futures_util::future::ready(tokio::time::Instant::now() < deadline)
+            })
     }
 
     #[derive(Clone, Copy)]
@@ -3254,6 +3260,28 @@ pub(crate) mod calls {
                 cleaning.load(Ordering::SeqCst),
                 0,
                 "all blocked cleanup was canceled with the lookup"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn holder_completed_after_deadline_in_one_poll_cannot_win() {
+            let started = tokio::time::Instant::now();
+            let budget = Duration::from_secs(8);
+            let deadline = started + budget;
+            let candidate = std::future::poll_fn(move |context| {
+                // Advance the paused clock inside the candidate's one poll,
+                // after the outer timer has already returned Pending. Poll
+                // advance without awaiting its trailing yield so this models
+                // synchronous validation crossing the deadline before Ready.
+                let mut advancing = Box::pin(tokio::time::advance(budget));
+                let _ = advancing.as_mut().poll(context);
+                std::task::Poll::Ready("verified too late")
+            });
+            let winners: Vec<_> = race_holders([candidate], deadline).collect().await;
+            assert_eq!(tokio::time::Instant::now(), deadline);
+            assert!(
+                winners.is_empty(),
+                "a late Ready candidate must never reach installation"
             );
         }
 
