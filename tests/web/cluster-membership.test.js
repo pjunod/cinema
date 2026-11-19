@@ -57,56 +57,51 @@ const BORROWED = [
   "fmtAgo",
   "fmtBytes",
   "clusterOpsElapsed",
-  "replicationText",
-  "clusterNodeOperationsBadge",
-  "clusterNodeOperationsHtml",
-  "clusterNodeRow",
+  "clusterTone",
+  "clusterNodeLedger",
+  "clusterNodeDrawer",
+  "clusterNodeActionsHtml",
+  "clusterNodeTableRow",
+  "clusterNodesCard",
   "clusterOperationsUnavailable",
   "clusterRestartPreparationHtml",
-  "clusterOperationsCard",
-  "clusterRecoveryPanel",
+  "clusterRecoveryAlert",
   "clusterMaintenanceProgress",
-  "clusterOperationsPanel",
+  "clusterMaintenanceAlert",
+  "clusterMaintenanceCard",
   "forceElectionDialog",
   "clusterRefusalHtml",
-  "clusterOperationsRail",
   "clusterDatabasePanel",
-  "clusterTabButton",
-  "clusterDiagnosticsFacts",
-  "clusterTroubleshootingPanel",
-  "showClusterTab",
-  "selectClusterTab",
-  "clusterNodeFoldId",
-  "clusterNodeFoldLater",
-  "clusterNodeFoldSave",
-  "clusterStorage",
-  "clusterFoldState",
-  "clusterFoldSave",
-  "applyClusterFolds",
-  "setClusterDatabaseFold",
-  "toggleClusterDatabase",
+  "clusterStrip",
+  "clusterAlerts",
+  "clusterLogCard",
   "joinPanel",
   "leavePanel",
   "joinTokenHtml",
   "clusterPanel",
   "settingsClusterEnabled",
   "setHead",
-  "clusterTransportRecoveryCard",
+  "clusterBackupCard",
+  "clusterSettingRows",
+  "clusterBackupChecks",
+  "clusterSettingChecks",
+  "clusterChecksChip",
+  "clusterChecksMore",
+  "clusterChecksHtml",
+  "clusterSettingRow",
   "setCard",
   "cardHead",
   "devReq",
   "devReadinessRow",
   "devReadinessPill",
   "devReadinessEvidence",
-  "toggleClusterNodes",
-  "syncClusterNodeToggle",
   "promoteNode",
   "clusterSettingsSection",
 ];
 
 // One sandbox per test so a mutation of ME or CLUSTER_REFUSAL cannot leak into
 // the next assertion.
-function sandbox({ isAdmin = true, refusal = null, token = null, expanded = [], clustered } = {}) {
+function sandbox({ isAdmin = true, refusal = null, token = null, expanded = [], open = [], clustered } = {}) {
   const source = `
     const CLUSTER_OPS_RECEIVED_AT = new WeakMap();
     const SERVER={cluster_enabled:${JSON.stringify(clustered)}},SETTINGS_DATA={};
@@ -115,6 +110,7 @@ function sandbox({ isAdmin = true, refusal = null, token = null, expanded = [], 
     let CLUSTER_TOKEN = ${JSON.stringify(token)};
     let CLUSTER_RAIL_EXPANDED = ${JSON.stringify(expanded)};
     let CLUSTER_LEAVING = false;
+    let CLUSTER_OPEN_NODES = ${JSON.stringify(open)};
     ${BORROWED.map(shippedSource).join("\n")}
     // The shell's own esc/fmtAgo/fmtBytes, handed to the model exactly the way
     // the browser hands them over. Borrowing the real ones rather than stubbing
@@ -122,6 +118,18 @@ function sandbox({ isAdmin = true, refusal = null, token = null, expanded = [], 
     return Object.assign({}, PlurxClusterPanel, { ${BORROWED.join(", ")} }, { env: clenv() });
   `;
   return new Function("PlurxClusterPanel", source)(PANEL);
+}
+
+// The cluster-wide readings an operator acts on: the strip, the alerts and the
+// Maintenance card, as the page paints them.
+function opsPage(ui, cluster, ops) {
+  return ui.clusterStrip(cluster, ops) + ui.clusterAlerts(cluster, ops) + ui.clusterMaintenanceCard(cluster, ops);
+}
+
+// One node's table row and its drawer, in a roster of just that node unless a
+// cluster is given.
+function nodeRow(ui, n, localNodeId = "node-a", ops = null, cluster = null) {
+  return ui.clusterNodeTableRow(n, cluster || { local_node_id: localNodeId, nodes: [n] }, ops);
 }
 
 let failures = 0;
@@ -338,16 +346,28 @@ function operationStatus(membership, { safe = true, unreachable = false } = {}) 
         : [],
       warnings: [],
     },
-    maintenance: membership.nodes.map((entry) => ({
-      node_id: entry.node_id,
-      safe_to_enter:
-        !unreachable &&
-        (entry.is_voter
-          ? membership.capacity.voting_nodes === 1 ||
-            membership.capacity.voting_nodes >= 3
-          : entry.role === "learner"),
-      blockers: [],
-    })),
+    // As the server does (http/cluster_operations.rs): a fence already
+    // active anywhere is a blocker on every other node's entry verdict.
+    maintenance: membership.nodes.map((entry) => {
+      const fences = membership.nodes
+        .filter((other) => other.maintenance)
+        .map((other) => ({
+          code: "maintenance_already_active",
+          node_id: other.node_id,
+          message: "another durable maintenance fence is already active",
+        }));
+      return {
+        node_id: entry.node_id,
+        safe_to_enter:
+          !unreachable &&
+          !fences.length &&
+          (entry.is_voter
+            ? membership.capacity.voting_nodes === 1 ||
+              membership.capacity.voting_nodes >= 3
+            : entry.role === "learner"),
+        blockers: fences,
+      };
+    }),
   };
 }
 
@@ -526,19 +546,16 @@ test("private transport renders while public status is closed for learners and v
       ],
     };
 
-    const operationsHtml = ui.clusterNodeOperationsHtml(target, operations);
+    const operationsHtml = ui.clusterNodeDrawer(target, membership, operations);
     assert.match(operationsHtml, /Not observed/);
     assert.match(
       operationsHtml,
-      /Transport<\/span>snapshot stalled · observer 2 · 35s ago/,
+      /<dt>Transport<\/dt><dd>snapshot stalled · observer 2 · 35s ago/,
     );
-    const nodeHtml = ui.clusterNodeRow(target, "node-a", true, {
-      operations,
-      lifecycleLocked: false,
-    });
+    const nodeHtml = ui.clusterNodeTableRow(target, membership, operations);
     assert.match(
       nodeHtml,
-      /Transport<\/span>snapshot stalled · observer 2 · 35s ago/,
+      /<dt>Transport<\/dt><dd>snapshot stalled · observer 2 · 35s ago/,
       `${role} node card hides private transport evidence`,
     );
   }
@@ -1643,12 +1660,8 @@ test("stalled transport renders its observer and sample age", () => {
     ],
   };
 
-  const html = ui.clusterNodeOperationsHtml(membership.nodes[1], operations);
-  assert.match(html, /Transport<\/span>snapshot stalled · observer 1 · 1m ago/);
-  assert.match(
-    html,
-    /Bounded-read recovery evidence<\/dt><dd>snapshot stalled · observer 1 · 1m ago/,
-  );
+  const html = ui.clusterNodeDrawer(membership.nodes[1], membership, operations);
+  assert.match(html, /<dt>Transport<\/dt><dd>snapshot stalled · observer 1 · 1m ago/);
 });
 
 test("active transport stays visible through its server-projected deadline", () => {
@@ -1701,11 +1714,11 @@ test("the two-voter state reaches the rendered panel as those words", () => {
   // the template would pass a view-only assertion.
   assert.match(html, /Reconfiguration in progress/);
   assert.match(html, /survives no failure/);
-  assert.equal(html.includes("clstate warn"), true);
+  assert.match(html, /<div class="clalert" role="status"><div><b>Reconfiguration in progress — not redundant\.<\/b>/);
   assertNoRedundancyClaim(html.replace(/<[^>]*>/g, " "), "the two-voter panel");
   assert.match(
     html,
-    /disabled title="Direct maintenance preflight has not approved this node/,
+    /disabled >Enter maintenance<\/button><span class="clwhy">The direct maintenance preflight has not answered yet\./,
   );
 });
 
@@ -1740,14 +1753,14 @@ test("operations card renders the server rollout verdict and direct evidence", (
     node("node-c", 3, "voter"),
   ]);
   const operations = operationStatus(membership);
-  const summary = ui.clusterOperationsCard(operations);
-  const nodeHtml = ui.clusterNodeOperationsHtml(membership.nodes[1], operations);
-  assert.match(summary, /Ready to restart one voter/);
-  assert.match(summary, /3 voters · majority 2 · 3 ready/);
+  const summary = opsPage(ui, membership, operations);
+  const nodeHtml = ui.clusterNodeDrawer(membership.nodes[1], membership, operations);
+  assert.match(summary, /The observed voters preserve majority after one restart/);
+  assert.match(summary, /3 voters · quorum 2 · tolerates 1 failure/);
   assert.match(nodeHtml, /Follower · term 81 · lag 0/);
   assert.match(nodeHtml, /open.*3 segments.*6\.3 MB/s);
-  assert.match(nodeHtml, /WAL durable index[\s\S]*482191/);
-  assert.match(nodeHtml, /Unknown here — drain proxy connections separately/);
+  assert.match(nodeHtml, /<dt>Durable index<\/dt><dd>482191<\/dd>/);
+  assert.match(nodeHtml, /unknown here — drain proxy connections separately/);
   assert.match(nodeHtml, /v0\.2\.7-operations/);
 });
 
@@ -1759,9 +1772,9 @@ test("an unreachable voter is written as a blocker, never a healthy row", () => 
     node("node-c", 3, "voter"),
   ]);
   const operations = operationStatus(membership, { safe: false, unreachable: true });
-  const html = ui.clusterOperationsCard(operations);
-  const nodeHtml = ui.clusterNodeOperationsHtml(membership.nodes[1], operations);
-  assert.match(html, /Do not restart another voter/);
+  const html = opsPage(ui, membership, operations);
+  const nodeHtml = ui.clusterNodeDrawer(membership.nodes[1], membership, operations);
+  assert.match(html, /<div class="clv clwarn">Blocked<\/div>/);
   assert.match(html, /voter not observed/);
   assert.match(nodeHtml, /Not observed · no route to it from this node/);
   assert.doesNotMatch(nodeHtml, />Ready</);
@@ -1781,8 +1794,8 @@ test("election and fenced fixtures state why rollout is blocked", () => {
     code: "leader_term_disagreement",
     message: "voters do not agree on one current term and known leader",
   }];
-  const electionHtml = ui.clusterOperationsCard(election);
-  const electionNode = ui.clusterNodeOperationsHtml(membership.nodes[2], election);
+  const electionHtml = opsPage(ui, membership, election);
+  const electionNode = ui.clusterNodeDrawer(membership.nodes[2], membership, election);
   assert.match(electionHtml, /term disagreement/);
   assert.match(electionNode, /stale or incomplete proof/);
   assert.match(electionHtml, /leader term disagreement/);
@@ -1794,9 +1807,9 @@ test("election and fenced fixtures state why rollout is blocked", () => {
     node_id: "node-b",
     message: "a voter is fenced from serving new work",
   }];
-  const fencedHtml = ui.clusterOperationsCard(fenced);
-  const fencedNode = ui.clusterNodeOperationsHtml(membership.nodes[1], fenced);
-  assert.match(fencedNode, /Fenced: quorum stale/);
+  const fencedHtml = opsPage(ui, membership, fenced);
+  const fencedNode = ui.clusterNodeDrawer(membership.nodes[1], membership, fenced);
+  assert.match(fencedNode, /fenced: quorum stale/);
   assert.match(fencedHtml, /voter not ready.*node-b/s);
 });
 
@@ -1813,9 +1826,9 @@ test("build skew and WAL errors remain visible in summary and node evidence", ()
     code: "mixed_builds",
     message: "voters are directly observed on mixed builds",
   }];
-  const skewHtml = ui.clusterOperationsCard(skew);
-  const skewNode = ui.clusterNodeOperationsHtml(membership.nodes[2], skew);
-  assert.match(skewHtml, /2 observed builds/);
+  const skewHtml = opsPage(ui, membership, skew);
+  const skewNode = ui.clusterNodeDrawer(membership.nodes[2], membership, skew);
+  assert.match(skewHtml, />2 builds</);
   assert.match(skewHtml, /mixed builds/);
   assert.match(skewNode, /v0\.2\.8-next/);
 
@@ -1828,9 +1841,9 @@ test("build skew and WAL errors remain visible in summary and node evidence", ()
   wire.nodes[2].placement = { eligible_owner: false, reason: "protocol_mismatch:10" };
   delete wire.nodes[1].status.media_protocol;
   wire.nodes[1].placement = { eligible_owner: false, reason: "protocol_unreported" };
-  const ownerNode = ui.clusterNodeOperationsHtml(membership.nodes[0], wire);
-  const skewedNode = ui.clusterNodeOperationsHtml(membership.nodes[2], wire);
-  const oldNode = ui.clusterNodeOperationsHtml(membership.nodes[1], wire);
+  const ownerNode = ui.clusterNodeDrawer(membership.nodes[0], membership, wire);
+  const skewedNode = ui.clusterNodeDrawer(membership.nodes[2], membership, wire);
+  const oldNode = ui.clusterNodeDrawer(membership.nodes[1], membership, wire);
   assert.match(ownerNode, /media protocol 9/);
   assert.match(ownerNode, /eligible owner/);
   assert.match(skewedNode, /media protocol 10/);
@@ -1840,7 +1853,7 @@ test("build skew and WAL errors remain visible in summary and node evidence", ()
   assert.match(oldNode, /not an owner: its build predates media-protocol reporting/);
   const uniform = operationStatus(membership);
   uniform.nodes.forEach((row) => { row.status.media_protocol = 9; });
-  assert.doesNotMatch(ui.clusterNodeOperationsHtml(membership.nodes[0], uniform), /Protocol skew/);
+  assert.doesNotMatch(ui.clusterNodeDrawer(membership.nodes[0], membership, uniform), /Protocol skew/);
 
   const walError = operationStatus(membership, { safe: false });
   walError.nodes[1].status.wal.snapshot.state = "error";
@@ -1853,8 +1866,8 @@ test("build skew and WAL errors remain visible in summary and node evidence", ()
     node_id: "node-b",
     message: "a voter's live WAL reports an error",
   }];
-  const walHtml = ui.clusterOperationsCard(walError);
-  const walNode = ui.clusterNodeOperationsHtml(membership.nodes[1], walError);
+  const walHtml = opsPage(ui, membership, walError);
+  const walNode = ui.clusterNodeDrawer(membership.nodes[1], membership, walError);
   assert.match(walHtml, /wal not healthy.*node-b/s);
   assert.match(walNode, /durability proof failed/);
 });
@@ -1875,15 +1888,15 @@ test("stale samples and four-voter-one-down fixtures never imply safety", () => 
     node_id: "node-b",
     message: "a voter did not answer with a fresh sample",
   }];
-  const staleHtml = ui.clusterOperationsCard(stale);
-  const staleNode = ui.clusterNodeOperationsHtml(membership.nodes[1], stale);
+  const staleHtml = opsPage(ui, membership, stale);
+  const staleNode = ui.clusterNodeDrawer(membership.nodes[1], membership, stale);
   assert.match(staleNode, /Not observed · its answer was older than one refresh window/);
-  assert.match(staleHtml, /Do not restart another voter/);
+  assert.match(staleHtml, /<div class="clv clwarn">Blocked<\/div>/);
 
   const oneDown = operationStatus(membership, { safe: false, unreachable: true });
-  const oneDownHtml = ui.clusterOperationsCard(oneDown);
-  assert.match(oneDownHtml, /4 voters · majority 3 · 3 ready/);
-  assert.match(oneDownHtml, /Do not restart another voter/);
+  const oneDownHtml = opsPage(ui, membership, oneDown);
+  assert.match(oneDownHtml, /4 of 4 answered|3 of 4 answered/);
+  assert.match(oneDownHtml, /<div class="clv clwarn">Blocked<\/div>/);
 });
 
 // ---- the never-joined install is the common one ---------------------------
@@ -2020,7 +2033,7 @@ test("a refusal says the node answered; only silence says unreachable", () => {
   refused.nodes[3].error_class = "refused";
   refused.nodes[3].status = null;
 
-  const html = ui.clusterNodeOperationsHtml(membership.nodes[3], refused);
+  const html = ui.clusterNodeDrawer(membership.nodes[3], membership, refused);
   assert.match(html, /Not observed · it answered and refused the signed request from this node/);
   // The specific regression: a node that replied must never be described as
   // one that could not be reached.
@@ -2033,7 +2046,7 @@ test("a refusal says the node answered; only silence says unreachable", () => {
   silent.nodes[3].error_class = "unreachable";
   silent.nodes[3].status = null;
   assert.match(
-    ui.clusterNodeOperationsHtml(membership.nodes[3], silent),
+    ui.clusterNodeDrawer(membership.nodes[3], membership, silent),
     /Not observed · no route to it from this node/,
   );
 });
@@ -2079,7 +2092,7 @@ test("every observation code the aggregator can emit has a sentence", () => {
 // so it could be reverted to "Admitted and catching up" by itself.
 test("the learner role pill says what the banner says", () => {
   const ui = sandbox();
-  const row = ui.clusterNodeRow(
+  const row = nodeRow(ui,
     node("node-b", 2, "learner", {
       bounded_read_ready: true,
       voter_storage_ready: true,
@@ -2088,12 +2101,12 @@ test("the learner role pill says what the banner says", () => {
   );
   assert.match(row, /non-voting capacity role/i);
   assert.match(row, /explicit promotion adds its vote/i);
-  assert.match(row, /Read worker ready/i);
+  assert.match(row, /read worker/i);
   assert.match(row, /Promote to voter/i);
   assert.doesNotMatch(row, /Promote to voter" disabled/);
 
   // And none of that leaks onto a voter's pill.
-  const voter = ui.clusterNodeRow(node("node-a", 1, "voter"), "node-a");
+  const voter = nodeRow(ui, node("node-a", 1, "voter"), "node-a");
   assert.match(voter, />voter</);
   assert.doesNotMatch(voter, /non-voting/i);
 });
@@ -2104,7 +2117,7 @@ test("promotion stays disabled until both learner proofs are ready", () => {
     { bounded_read_ready: false, voter_storage_ready: true },
     { bounded_read_ready: true, voter_storage_ready: false },
   ]) {
-    const row = ui.clusterNodeRow(node("node-b", 2, "learner", extra), "node-a");
+    const row = nodeRow(ui, node("node-b", 2, "learner", extra), "node-a");
     assert.match(row, /Promote to voter/);
     assert.match(row, /<button class="ghost sm" disabled/);
   }
@@ -2142,7 +2155,7 @@ test("a voter catching up is not rendered as a learner capacity role", () => {
   assert.match(view.body, /no committed vote yet/i);
   assert.doesNotMatch(view.body, /node is a learner/i);
 
-  const row = ui.clusterNodeRow(joining, "node-a");
+  const row = nodeRow(ui, joining, "node-a");
   assert.match(row, /joining voter/i);
   assert.doesNotMatch(row, /non-voting capacity role/i);
 });
@@ -2240,7 +2253,7 @@ test("last_seen_at is read as milliseconds, not seconds", () => {
   const ui = sandbox();
   // The API documents Unix milliseconds. Feeding fmtAgo() — which takes seconds
   // — the raw field prints a node seen a minute ago as decades stale.
-  const html = ui.clusterNodeRow(
+  const html = nodeRow(ui,
     node("node-a", 1, "voter", { last_seen_at: Date.now() - 120_000 }),
   );
   assert.match(html, /2m ago/);
@@ -2249,9 +2262,9 @@ test("last_seen_at is read as milliseconds, not seconds", () => {
 
 test("a roster row shows hostname and advertised host without listener ports", () => {
   const ui = sandbox();
-  const row = ui.clusterNodeRow(node("node-a", 7, "voter"));
+  const row = nodeRow(ui, node("node-a", 7, "voter"));
   assert.match(row, /class="clhost">node-a/);
-  assert.match(row, /Advertised host node-a\.lan/);
+  assert.match(row, /class="clsub">node-a\.lan<\/div>/);
   assert.match(row, /node-a/);
   assert.match(row, />7</);
   assert.match(row, /voter/);
@@ -2264,7 +2277,7 @@ test("a roster row shows hostname and advertised host without listener ports", (
 
 test("a pending removal is visible and offers an idempotent retry", () => {
   const ui = sandbox();
-  const row = ui.clusterNodeRow(
+  const row = nodeRow(ui,
     node("node-b", 2, "voter", { removal_pending: true }),
     "node-a",
   );
@@ -2278,59 +2291,63 @@ test("a pending removal is visible and offers an idempotent retry", () => {
 
 test("hostname leads the identity while node id stays secondary", () => {
   const ui = sandbox();
-  const row = ui.clusterNodeRow(
+  const row = nodeRow(ui,
     node("550e8400-e29b-41d4-a716-446655440000", 7, "voter", {
       hostname: "living-room-plurx",
       advertised_host: "10.42.1.20",
     }),
   );
   assert.match(row, /class="clhost">living-room-plurx/);
-  assert.match(row, /Advertised host 10\.42\.1\.20/);
+  assert.match(row, /class="clsub">10\.42\.1\.20<\/div>/);
   assert.match(
     row,
-    /class="clid">Node ID 550e8400-e29b-41d4-a716-446655440000/,
+    /<dt>Node ID<\/dt><dd><span class="clmono">550e8400-e29b-41d4-a716-446655440000/,
   );
   assert.ok(
-    row.indexOf("living-room-plurx") < row.indexOf("550e8400-e29b"),
+    row.replace(/<[^>]*>/g, " ").indexOf("living-room-plurx") < row.replace(/<[^>]*>/g, " ").indexOf("550e8400-e29b"),
     `node id appeared before hostname: ${row}`,
   );
 });
 
 test("the current leader is labeled beside its hostname", () => {
   const ui = sandbox();
-  const leader = ui.clusterNodeRow(
+  const leader = nodeRow(ui,
     node("node-b", 2, "voter", { is_leader: true }),
   );
-  const follower = ui.clusterNodeRow(node("node-a", 1, "voter"));
+  const follower = nodeRow(ui, node("node-a", 1, "voter"));
   assert.match(leader, /class="clhost">node-b[\s\S]*>Leader</);
   assert.equal(follower.includes(">Leader<"), false);
 });
 
 test("node actions stay inside the node card footer", () => {
   const ui = sandbox();
-  const row = ui.clusterNodeRow(node("node-a", 1, "voter"));
-  assert.match(row, /<details class="clnode[^>]* open/);
-  assert.match(row, /<summary>[\s\S]*class="clnodesummary"/);
-  assert.match(row, /<div class="clnodefoot">[\s\S]*<div class="row">/);
-  assert.equal(row.includes("<td"), false);
+  const row = nodeRow(ui, node("node-a", 1, "voter"));
+  // The row itself is a summary to click; its one control is the drawer
+  // toggle, and every action is in the drawer's action row, under the
+  // readings it acts on.
+  const [summary, drawer] = row.split('<tr class="setdrawer"');
+  assert.deepEqual(summary.match(/<button[^>]*>/g),
+    ['<button type="button" class="clnodebtn" data-node="node-a" aria-expanded="false" aria-controls="cldrawer-node-a" onclick="toggleClusterNode(this)">']);
+  assert.match(drawer, /<div class="cldraweract">[\s\S]*>Enter maintenance</);
+  assert.ok(drawer.indexOf("<h4>Membership</h4>") < drawer.indexOf('class="cldraweract"'));
 });
 
 test("a stale node heartbeat says so rather than claiming a network probe", () => {
   const ui = sandbox();
-  const row = ui.clusterNodeRow(node("node-c", 3, "voter", { reachable: false }));
+  const row = nodeRow(ui, node("node-c", 3, "voter", { reachable: false }));
   assert.match(row, /stale/);
 });
 
 test("loopback is shown as localhost beside the short hostname", () => {
   const ui = sandbox();
-  const row = ui.clusterNodeRow(
+  const row = nodeRow(ui,
     node("node-local", 1, "voter", {
       hostname: "media-1",
       advertised_host: "localhost",
     }),
   );
   assert.match(row, /class="clhost">media-1/);
-  assert.match(row, /Advertised host localhost/);
+  assert.match(row, /class="clsub">localhost<\/div>/);
   assert.equal(row.includes("127.0.0.1"), false);
 });
 
@@ -2357,64 +2374,65 @@ test("the healthy cluster layout combines node membership and operations evidenc
     clusterOps: operationStatus(cluster),
     sys: { replication: REPLICATION },
   });
-  assert.match(html, /class="cluster-health"/);
-  assert.match(html, /id="cluster-operations"/);
-  assert.match(html, /<h3>Cluster nodes<\/h3>/);
-  assert.match(html, /id="cluster-node-list"/);
-  assert.match(html, /Membership/);
-  assert.match(html, /Operations/);
-  assert.match(html, /WAL, snapshot, and protocol details/);
-  assert.match(html, /class="clcontextfact">[\s\S]*Watch state/);
-  assert.match(html, /class="clcontextfact">[\s\S]*Capacity/);
-  assert.match(html, /<h3>Maintenance<\/h3>/);
-  // Planned work is now the rail, which states the same two actions with
-  // their preconditions filled in rather than as prose.
-  assert.match(html, /class="clrail"/);
-  assert.match(html, /Enter maintenance on node-a/);
-  assert.match(html, /Force a leader election/);
-  // The membership controls are the rail's own rows now, not a second card.
-  assert.equal(html.includes("cldanger"), false);
-  assert.match(html, /id="clrail-add"/);
-  assert.match(html, /id="clrail-leave"/);
-  assert.equal(html.includes("<table"), false);
+  // Top to bottom: header, strip, the (empty) alert mount, the nodes table
+  // with a drawer per node, settings beside the store, maintenance, the log.
+  const order = ['class="sethead"', 'class="clcard clstrip"', 'id="cluster-operations"', 'id="cluster-nodes"',
+    'id="cluster-settings"', 'id="cluster-database"', 'id="cluster-maintenance"', 'id="cluster-log"'];
+  const at = order.map((marker) => html.indexOf(marker));
+  assert.ok(at.every((index) => index !== -1), `missing a region: ${order.filter((_, i) => at[i] === -1)}`);
+  assert.deepEqual([...at].sort((x, y) => x - y), at, "regions are out of order");
+  assert.match(html, /<table class="clnodetable">[\s\S]*<tbody id="cluster-node-list">/);
+  assert.equal((html.match(/<tr class="clrow/g) || []).length, 3);
+  assert.equal((html.match(/<tr class="setdrawer" id="cldrawer-[^"]*" data-node="[^"]*" hidden>/g) || []).length, 3,
+    "every drawer ships closed");
+  assert.match(html, /<h4>Membership<\/h4>[\s\S]*<h4>Raft &amp; WAL<\/h4>[\s\S]*<h4>Snapshot &amp; media<\/h4>/);
+  // Healthy means no alert at all.
+  assert.equal(html.includes('class="clalert'), false);
+  // Cluster-wide actions are the Maintenance card's rows; the membership
+  // controls are the nodes card's and the local drawer's own expansions.
+  assert.match(html, /data-row="restart"[\s\S]*data-row="election"[\s\S]*data-row="diagnostics"/);
+  assert.match(html, /id="clexp-add" hidden/);
+  assert.match(html, /id="clexp-leave" hidden/);
+  // Nothing on this page scrolls inside itself any more.
+  for (const gone of ["clnodes-capped", "--clnodes-h", "cluster-health", "clrail", "cltab", "cldb-toggle"])
+    assert.equal(html.includes(gone), false, `${gone} is still rendered`);
 });
 
-test("node cards start expanded and the all-nodes control toggles both ways", () => {
+test("a row click opens its drawer in place and records it as module state", () => {
   const ui = sandbox();
-  const cluster = status("high_availability", [
-    node("node-a", 1, "voter", { is_leader: true }),
-    node("node-b", 2, "voter"),
-    node("node-c", 3, "voter"),
-  ]);
-  const html = ui.clusterPanel({ cluster, sys: { replication: REPLICATION } });
-  assert.equal((html.match(/<details class="clnode[^>]*" open/g) || []).length, 3);
-  assert.match(html, /id="clnodes-toggle"[^>]*aria-expanded="true"[^>]*>Collapse all</);
-
-  const cards = [{ open: true }, { open: false }, { open: true }];
+  const cluster = status("high_availability", [node("node-a", 1, "voter"), node("node-b", 2, "voter")]);
+  const drawer = { hidden: true };
+  const chev = { textContent: "▸" };
   const attributes = {};
+  const classes = new Set(["clrow"]);
+  const row = { classList: { toggle: (name, on) => (on ? classes.add(name) : classes.delete(name)) } };
   const button = {
-    textContent: "Collapse all",
-    setAttribute(name, value) { attributes[name] = value; },
-    focus() {},
+    getAttribute: (name) => (name === "data-node" ? "node-b" : null),
+    setAttribute: (name, value) => { attributes[name] = value; },
+    querySelector: () => chev,
   };
-  const previousDocument = global.document;
-  global.document = {
-    querySelectorAll() { return cards; },
-    getElementById() { return button; },
-  };
-  try {
-    ui.toggleClusterNodes(button);
-    assert.deepEqual(cards.map((card) => card.open), [true, true, true]);
-    assert.equal(button.textContent, "Collapse all");
-    assert.equal(attributes["aria-expanded"], "true");
-    ui.toggleClusterNodes(button);
-    assert.deepEqual(cards.map((card) => card.open), [false, false, false]);
-    assert.equal(button.textContent, "Expand all");
-    assert.equal(attributes["aria-expanded"], "false");
-  } finally {
-    if (previousDocument === undefined) delete global.document;
-    else global.document = previousDocument;
-  }
+  const toggle = new Function(
+    "document",
+    `let CLUSTER_OPEN_NODES=[];
+     ${shippedSource("toggleClusterNode")}
+     return {toggle:toggleClusterNode,open:()=>CLUSTER_OPEN_NODES};`,
+  )({ getElementById: (id) => (id === "cldrawer-node-b" ? drawer : id === "clrow-node-b" ? row : null) });
+  toggle.toggle(button);
+  assert.deepEqual(toggle.open(), ["node-b"]);
+  assert.equal(drawer.hidden, false);
+  assert.equal(attributes["aria-expanded"], "true");
+  assert.ok(classes.has("setopen"));
+  assert.equal(chev.textContent, "▾");
+  toggle.toggle(button);
+  assert.deepEqual(toggle.open(), []);
+  assert.equal(drawer.hidden, true);
+  assert.equal(attributes["aria-expanded"], "false");
+  // A drawer is not a credential surface and not layout: nothing is stored.
+  for (const sink of ["localStorage", "sessionStorage", "renderSettings"])
+    assert.equal(shippedSource("toggleClusterNode").includes(sink), false, sink);
+  // And the module state is what the painter reads.
+  assert.match(sandbox({ open: ["node-b"] }).clusterNodesCard(cluster, null), /id="cldrawer-node-b" data-node="node-b">/);
+  assert.match(ui.clusterNodesCard(cluster, null), /id="cldrawer-node-b" data-node="node-b" hidden>/);
 });
 
 test("maintenance entry is available directly on a leader, busy follower, and learner", () => {
@@ -2431,10 +2449,7 @@ test("maintenance entry is available directly on a leader, busy follower, and le
   for (const nodeId of ["node-a", "node-b", "node-d"]) {
     cluster.local_node_id = nodeId;
     const target = cluster.nodes.find((entry) => entry.node_id === nodeId);
-    const card = ui.clusterNodeRow(target, nodeId, true, {
-      operations: ops,
-      lifecycleLocked: false,
-    });
+    const card = nodeRow(ui, target, nodeId, ops, cluster);
     assert.match(card, /Enter maintenance/);
     assert.doesNotMatch(card, /disabled[^>]*>Enter maintenance/);
   }
@@ -2452,17 +2467,17 @@ test("maintenance renders the acknowledged handoff, catch-up, and drain workflow
     }),
     node("node-c", 3, "voter"),
   ]);
-  const html = ui.clusterOperationsPanel(cluster, maintenanceOps("node-b", { drained: false }));
-  assert.match(html, /Maintenance in progress/);
+  const html = ui.clusterAlerts(cluster, maintenanceOps("node-b", { drained: false }));
+  assert.match(html, /Maintenance in progress on node-b\./);
   assert.match(html, /Target acknowledged the replicated work fence/);
   assert.match(html, /Direct process work drained \(1 local operation\)/);
-  assert.match(html, /maintenance fence survives a process restart/i);
+  assert.match(html, /fence survives a process restart/i);
   assert.match(html, /<button class="sm" disabled[^>]*>Resume service/);
 
   cluster.nodes[1].active_media_sessions = 0;
   cluster.nodes[1].maintenance_ready = true;
   cluster.local_node_id = "node-b";
-  const ready = ui.clusterOperationsPanel(cluster, maintenanceOps("node-b"));
+  const ready = ui.clusterAlerts(cluster, maintenanceOps("node-b"));
   assert.match(ready, /Ready to update, reboot, or resume/);
   assert.doesNotMatch(ready, /<button class="sm" disabled[^>]*>Resume service/);
 });
@@ -2474,27 +2489,25 @@ test("maintenance resume requires direct local process evidence", () => {
     maintenance_acknowledged: true,
     maintenance_ready: true,
   });
-  const remote = ui.clusterNodeRow(maintained, "node-a", false, {
-    operations: maintenanceOps("node-b"),
-    lifecycleLocked: true,
+  const clusterOf = (local) => ({
+    ...status("high_availability", [node("node-a", 1, "voter", { is_leader: true }), maintained, node("node-c", 3, "voter")]),
+    local_node_id: local,
   });
-  assert.match(remote, /Open this node directly to resume it/);
+  // Seen from another node: the alert names the target and its Resume is
+  // disabled; that node's drawer offers no maintenance control at all.
+  const remote = ui.clusterAlerts(clusterOf("node-a"), maintenanceOps("node-b"));
+  assert.match(remote, /Open the maintenance target directly to resume it/);
   assert.match(remote, /<button class="sm" disabled[^>]*>Resume service/);
+  assert.doesNotMatch(nodeRow(ui, maintained, "node-a", maintenanceOps("node-b"), clusterOf("node-a")), /Resume service/);
 
-  const local = ui.clusterNodeRow(maintained, "node-b", false, {
-    operations: maintenanceOps("node-b"),
-    lifecycleLocked: true,
-  });
-  assert.doesNotMatch(local, /<button class="sm" disabled[^>]*>Resume service/);
+  const local = nodeRow(ui, maintained, "node-b", maintenanceOps("node-b"), clusterOf("node-b"));
+  assert.match(local, /<button class="sm"  onclick='setNodeMaintenance\(&quot;node-b&quot;,false\)'>Resume service/);
 
-  const admission = ui.clusterNodeRow(maintained, "node-b", false, {
-    operations: maintenanceOps("node-b", { admissions: 1 }),
-    lifecycleLocked: true,
-  });
-  assert.match(admission, /<button class="sm" disabled[^>]*>Resume service/);
+  const admission = nodeRow(ui, maintained, "node-b", maintenanceOps("node-b", { admissions: 1 }), clusterOf("node-b"));
+  assert.match(admission, /<button class="sm" disabled >Resume service/);
 
   const recoveredLeader = { ...maintained, is_leader: true, maintenance_ready: false };
-  const handoff = ui.clusterOperationsPanel(
+  const handoff = ui.clusterAlerts(
     status("high_availability", [
       recoveredLeader,
       node("node-a", 1, "voter"),
@@ -2514,11 +2527,9 @@ test("maintenance resume requires direct local process evidence", () => {
   // A membership change is in flight, so the rows that would start another one
   // are blocked — and a blocked row carries no expansion at all. An unreachable
   // control is better than a disabled control the operator has to open to find.
-  assert.equal(panel.includes('id="clrail-add"'), false);
+  assert.equal(panel.includes('id="clexp-add"'), false);
   assert.equal(panel.includes("Create a join token"), false);
   assert.match(panel, /A membership change is already in flight on node-b/);
-  const leaving = ui.leavePanel("node-a", true);
-  assert.match(leaving, /disabled title="Finish maintenance before changing membership[^>]*>Leave this cluster/);
   assert.match(panel, /disabled[^>]*>Remove permanently/);
 });
 
@@ -2541,7 +2552,7 @@ test("recovery keeps an active maintenance target visible and blocks elections",
     leader_elected: false,
     permanent_majority_loss_supported: false,
   };
-  const html = ui.clusterOperationsPanel(cluster, null);
+  const html = ui.clusterAlerts(cluster, null);
   assert.match(html, /Restore the maintenance target first: node-b/);
   assert.match(html, /durable work fence is still active/i);
   assert.match(html, /Force election unavailable without quorum/);
@@ -2552,7 +2563,7 @@ test("recovery keeps an active maintenance target visible and blocks elections",
     quorum_available: true,
     reachable_voters: 2,
   };
-  const leaderless = ui.clusterOperationsPanel(cluster, null);
+  const leaderless = ui.clusterAlerts(cluster, null);
   assert.match(leaderless, /<button class="ghost sm" disabled[^>]*>Force election/);
 });
 
@@ -2605,12 +2616,12 @@ test("a leaderless cluster with quorum may request a bounded election", () => {
 
 test("the local row cannot use generic removal", () => {
   const ui = sandbox();
-  const local = ui.clusterNodeRow(node("node-a", 1, "voter"), "node-a");
-  const peer = ui.clusterNodeRow(node("node-b", 2, "voter"), "node-a");
+  const local = nodeRow(ui, node("node-a", 1, "voter"), "node-a");
+  const peer = nodeRow(ui, node("node-b", 2, "voter"), "node-a");
   assert.match(local, /This node/);
-  assert.match(local, /Use Leave this cluster on the Maintenance card/);
-  assert.equal(local.includes(">Remove<"), false);
-  assert.match(peer, />Remove permanently</);
+  assert.match(local, />Leave cluster…</);
+  assert.equal(local.includes("removeNode"), false);
+  assert.match(peer, />Remove permanently…</);
 });
 
 test("graceful leave binds the POST to the roster's local node", () => {
@@ -2667,7 +2678,8 @@ test("the join token is never written to browser storage or a URL", () => {
     "copyJoinToken",
     "forgetJoinToken",
     "clusterPanel",
-    "clusterTransportRecoveryCard",
+    "clusterNodesCard",
+    "toggleClusterExpansion",
     "setCard",
     "cardHead",
     "devReq",
@@ -2879,46 +2891,23 @@ test("the replicated database is its own section with the store's own readings",
     row.status.snapshot.build_ok_count = 999;
   });
   const html = ui.clusterPanel({ cluster, clusterOps: ops, sys: { replication: REPLICATION } });
-  assert.match(html, /<h3>Replicated database<\/h3>/);
+  assert.match(html, /<h2>Replicated database<\/h2>/);
   assert.match(html, /id="cluster-database"/);
   assert.match(html, /<dt>Quorum commit<\/dt><dd class="num">482191<\/dd>/);
-  assert.match(html, /<dt>Term<\/dt><dd class="num">81<\/dd>/);
-  assert.match(html, /<dt>Apply lag<\/dt><dd class="num">0 entries<\/dd>/);
+  assert.match(html, /<dt>Leader · term<\/dt><dd class="num">node-a <span class="muted">this node<\/span> · 81<\/dd>/);
   assert.match(html, /<dt>Protocol<\/dt><dd class="num">5–6<\/dd>/);
-  assert.match(html, /<dt>Snapshots<\/dt><dd class="num">build 9 ok \/ 0 error · install 2 ok \/ 0 error · DB 2\.1 MB<\/dd>/);
+  assert.match(html, /<dt>Snapshots<\/dt><dd class="num">build 9 ok \/ 0 error · install 2 ok \/ 0 error<\/dd>/);
+  assert.match(html, /<dt>Database size<\/dt><dd class="num">2\.1 MB<\/dd>/);
   // The watermark and the applied index have to come from one sample or their
   // difference is not a lag, so both are the direct status's, not the
   // membership projection's separately-fetched index.
-  assert.match(html, /<dt>Applied here<\/dt><dd class="num">482191<\/dd>/);
-  // The store's facts sit in the store's column: watch state must reach the
-  // page before the node roster, not inside it.
+  assert.match(html, /<dt>Applied on this node<\/dt><dd class="num">482191 · lag 0<\/dd>/);
+  // The store's facts sit in the store's own card, never inside the nodes
+  // table: the ledger's first reading comes after the card opens.
   assert.ok(
-    html.indexOf("Watch state") < html.indexOf("<h3>Cluster nodes</h3>"),
-    "watch state is still rendered inside the node card",
+    html.indexOf("<dt>Quorum commit</dt>") > html.indexOf('id="cluster-database"'),
+    "the quorum watermark is rendered outside the database card",
   );
-});
-
-test("the database section is foldable and keeps its verdict folded", () => {
-  const ui = sandbox();
-  const cluster = status("high_availability", [
-    node("node-a", 1, "voter", { is_leader: true }),
-    node("node-b", 2, "voter"),
-    node("node-c", 3, "voter"),
-  ]);
-  const ops = operationStatus(cluster);
-  const html = ui.clusterPanel({ cluster, clusterOps: ops, sys: { replication: REPLICATION } });
-  // Ships open; the summary is the folded state and is hidden until then.
-  assert.match(html, /id="cldb-toggle"[^>]*aria-expanded="true"[^>]*>Hide</);
-  assert.match(html, /id="cluster-database-summary" hidden/);
-  // Folding hides the detail, never the verdict: the pill stays in the header
-  // and the summary keeps the readings somebody checks before expanding again.
-  const summary = ui.clusterDatabaseSummary(ui.env, cluster, REPLICATION, ops);
-  assert.match(summary, /leader <b>node-a<\/b>/);
-  assert.match(summary, /term <b>81<\/b>/);
-  assert.match(summary, /commit <b>482191<\/b>/);
-  assert.match(summary, /applied <b>912<\/b>/);
-  assert.match(summary, /lag <b>0<\/b>/);
-  assert.match(html, /class="pill"[^>]*>In sync</);
 });
 
 test("the quorum watermark is the quorum's, not this node's applied index", () => {
@@ -2942,8 +2931,7 @@ test("the quorum watermark is the quorum's, not this node's applied index", () =
       .map((row) => [row[0], row[1]]),
   );
   assert.equal(rows.get("Quorum commit"), "482195");
-  assert.match(rows.get("Applied here"), /^482191/);
-  assert.equal(rows.get("Apply lag"), "4 entries");
+  assert.equal(rows.get("Applied on this node"), "482191 · lag 4");
   assert.equal(rows.get("Behind by"), "4 changes");
 });
 
@@ -2969,25 +2957,25 @@ test("the database reports this machine's store, not the leader's", () => {
     row.status.protocol_max = local ? 6 : 9;
   });
   const rows = new Map(ui.clusterDatabaseRows(ui.env, cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
-  assert.equal(rows.get("Applied here"), "482100");
-  assert.equal(rows.get("Apply lag"), "91 entries");
+  assert.equal(rows.get("Applied on this node"), "482100 · lag 91");
   assert.equal(rows.get("Protocol"), "5–6");
   // The leader row is still the leader's: naming the elected leader is a
   // membership fact, and it must not drag its readings along with it.
-  assert.match(rows.get("Leader"), /node-b/);
+  assert.match(rows.get("Leader · term"), /^node-b · 81$/);
 });
 
 test("database readings say unknown instead of inventing a number", () => {
   const ui = sandbox();
   const cluster = status("high_availability", [node("node-a", 1, "voter", { is_leader: true })]);
   const rows = new Map(ui.clusterDatabaseRows(ui.env, cluster, REPLICATION, null).map((row) => [row[0], row[1]]));
-  assert.equal(rows.get("Term"), "unknown");
+  assert.match(rows.get("Leader · term"), / · unknown$/);
   assert.equal(rows.get("Quorum commit"), "unknown");
-  assert.equal(rows.get("Apply lag"), "unknown");
+  assert.match(rows.get("Applied on this node"), / · lag unknown$/);
   assert.equal(rows.get("Protocol"), "unknown");
+  assert.equal(rows.get("Database size"), "unknown");
   // The membership projection is a different source and is still present, so
   // the applied index must not be blanked along with the direct sample.
-  assert.match(rows.get("Applied here"), /^912/);
+  assert.match(rows.get("Applied on this node"), /^912/);
   assert.equal(rows.get("Reading age"), "unknown");
   // The counting rows are the tempting ones: `build 0 ok / 0 error` reads as a
   // measurement, and "0 changes behind" beside a degraded pill is a claim.
@@ -3055,7 +3043,7 @@ test("standalone Cluster settings contain only the disabled message", () => {
 test("configured cluster settings remain visible during membership recovery", () => {
   const html=sandbox({clustered:true}).clusterPanel({cluster:{unavailable:true,code:"membership_unavailable"}});
   assert.doesNotMatch(html,/Clustering is not enabled/);
-  assert.match(html,/cluster-dashboard/);
+  assert.match(html,/class="clpage"/);
 });
 
 test("a SQLite membership refusal shows only that clustering is not enabled", () => {
@@ -3065,54 +3053,6 @@ test("a SQLite membership refusal shows only that clustering is not enabled", ()
 });
 
 // ---- folding, and remembering it ------------------------------------------
-// The fold is a per-browser convenience. These pin the two properties that
-// matter: it is keyed by node id rather than by row, and a browser that refuses
-// storage still gets a working panel.
-
-function foldDom({ cards = [], toggle = null, database = null } = {}) {
-  const byId = {};
-  if (toggle) byId["clnodes-toggle"] = toggle;
-  if (database) Object.assign(byId, database);
-  return {
-    querySelectorAll: () => cards,
-    getElementById: (id) => byId[id] || null,
-  };
-}
-
-function foldCard(nodeId, open) {
-  // Reads like the browser does: the id lives on the card body, under the
-  // attribute the markup writes. A stub that answers any selector with any
-  // attribute would let both of those be renamed without a failure.
-  const body = { getAttribute: (name) => (name === "data-node" ? nodeId : null) };
-  return {
-    open,
-    querySelector: (selector) => (selector === ".clnodebody" ? body : null),
-  };
-}
-
-function withDom(document, localStorage, run) {
-  const priorDocument = global.document;
-  const priorStorage = Object.getOwnPropertyDescriptor(global, "localStorage");
-  global.document = document;
-  if (localStorage === "blocked") {
-    Object.defineProperty(global, "localStorage", {
-      configurable: true,
-      get() {
-        throw new Error("site data is blocked in this browser");
-      },
-    });
-  } else {
-    Object.defineProperty(global, "localStorage", { configurable: true, value: localStorage });
-  }
-  try {
-    return run();
-  } finally {
-    global.document = priorDocument;
-    delete global.localStorage;
-    if (priorStorage) Object.defineProperty(global, "localStorage", priorStorage);
-  }
-}
-
 function fakeStorage(seed = {}) {
   const map = new Map(Object.entries(seed));
   return {
@@ -3122,202 +3062,7 @@ function fakeStorage(seed = {}) {
   };
 }
 
-test("a collapsed node is remembered by node id, not by its row", () => {
-  const ui = sandbox();
-  const storage = fakeStorage();
-  const toggle = { textContent: "Collapse all", setAttribute() {}, focus() {} };
-  const cards = [foldCard("node-a", true), foldCard("node-b", false), foldCard("node-c", true)];
-  withDom(foldDom({ cards, toggle }), storage, () => ui.clusterNodeFoldSave());
-  assert.deepEqual(JSON.parse(storage.read("plurx.cluster.fold")), { nodes_closed: ["node-b"] });
-
-  // node-b has since left the cluster and node-d has joined. The stored set is
-  // keyed by id, so node-d does not inherit node-b's collapsed row.
-  const next = [foldCard("node-a", true), foldCard("node-d", true), foldCard("node-c", true)];
-  withDom(foldDom({ cards: next, toggle }), storage, () => ui.applyClusterFolds());
-  assert.deepEqual(
-    next.map((card) => card.open),
-    [true, true, true],
-  );
-
-  const again = [foldCard("node-a", true), foldCard("node-b", true)];
-  withDom(foldDom({ cards: again, toggle }), storage, () => ui.applyClusterFolds());
-  assert.deepEqual(
-    again.map((card) => card.open),
-    [true, false],
-  );
-});
-
-test("a browser that refuses storage still gets the shipped defaults", () => {
-  const ui = sandbox();
-  const toggle = { textContent: "Collapse all", setAttribute() {}, focus() {} };
-  const cards = [foldCard("node-a", true), foldCard("node-b", false)];
-  withDom(foldDom({ cards, toggle }), "blocked", () => {
-    // Neither the restore nor the save may throw, and neither may rewrite the
-    // markup's own defaults on the way past.
-    ui.applyClusterFolds();
-    ui.clusterNodeFoldSave();
-    assert.equal(ui.clusterFoldState(), null);
-  });
-  assert.deepEqual(
-    cards.map((card) => card.open),
-    [true, false],
-  );
-});
-
-test("folding the database flips its control and is remembered", () => {
-  const ui = sandbox();
-  const storage = fakeStorage();
-  const body = { hidden: false };
-  const summary = { hidden: true };
-  const button = {
-    textContent: "Hide",
-    attrs: {},
-    setAttribute(name, value) {
-      this.attrs[name] = value;
-    },
-    focus() {},
-  };
-  const dom = foldDom({
-    database: {
-      "cluster-database": body,
-      "cluster-database-summary": summary,
-      "cldb-toggle": button,
-    },
-  });
-  withDom(dom, storage, () => ui.toggleClusterDatabase(button));
-  assert.equal(body.hidden, true);
-  assert.equal(summary.hidden, false);
-  assert.equal(button.textContent, "Show");
-  assert.equal(button.attrs["aria-expanded"], "false");
-  assert.deepEqual(JSON.parse(storage.read("plurx.cluster.fold")), { database: false });
-
-  withDom(dom, storage, () => ui.toggleClusterDatabase(button));
-  assert.equal(body.hidden, false);
-  assert.equal(summary.hidden, true);
-  assert.equal(button.textContent, "Hide");
-  assert.equal(button.attrs["aria-expanded"], "true");
-  assert.deepEqual(JSON.parse(storage.read("plurx.cluster.fold")), { database: true });
-});
-
-test("a page load cannot overwrite the remembered folds", () => {
-  // Chrome fires one `toggle` per <details open> while the panel is parsed, so
-  // persisting from `ontoggle` overwrites the stored set with "everything open"
-  // on every visit. Measured in a real browser, not assumed. The card persists
-  // from a click — a real gesture — and `ontoggle` stays presentational.
-  const row = shippedSource("clusterNodeRow");
-  assert.match(row, /ontoggle="syncClusterNodeToggle\(\)"/);
-  assert.doesNotMatch(row, /ontoggle="[^"]*clusterNodeFoldSave/);
-  assert.match(row, /onclick="clusterNodeFoldLater\(this\)"/);
-  // And the card carries the id the fold is keyed by, where the reader looks.
-  assert.match(row, /<div class="clnodebody" data-node="\$\{esc\(n\.node_id\)\}">/);
-  // And the click saves after the card's open state has actually flipped.
-  assert.match(shippedSource("clusterNodeFoldLater"), /setTimeout\(\(\)=>\{\s*clusterNodeFoldSave\(\);/);
-});
-
-test("the fold is restored where the panel is written, and saved by every control", () => {
-  // Both are call sites: the helpers can be perfect while the panel never
-  // calls them. Deleting either line leaves the feature dead with the rest of
-  // these tests green.
-  assert.match(shippedSource("renderSettings"), /if\(tab==="cluster"&&settingsClusterEnabled\(\)\)\{ applyClusterFolds\(\); return refreshClusterLogs\(\); \}/);
-  assert.match(shippedSource("toggleClusterNodes"), /clusterNodeFoldSave\(\);/);
-  assert.match(shippedSource("selectClusterTab"), /clusterFoldSave\(\{tab:id\}\)/);
-});
-
-test("the troubleshooting tab is a fold like any other", () => {
-  const ui = sandbox();
-  const storage = fakeStorage();
-  const panes = {
-    "clpane-log": { hidden: false },
-    "clpane-readings": { hidden: true },
-    "clpane-refusals": { hidden: true },
-  };
-  const tabs = [
-    { id: "cltab-log", attrs: {}, controls: "clpane-log" },
-    { id: "cltab-readings", attrs: {}, controls: "clpane-readings" },
-    { id: "cltab-refusals", attrs: {}, controls: "clpane-refusals" },
-  ].map((tab) => ({
-    ...tab,
-    setAttribute(name, value) { this.attrs[name] = value; },
-    getAttribute: () => tab.controls,
-  }));
-  const document = {
-    querySelectorAll: () => tabs,
-    getElementById: (id) => panes[id] || tabs.find((tab) => tab.id === id) || null,
-  };
-  withDom(document, storage, () => ui.selectClusterTab("readings"));
-  assert.deepEqual(
-    Object.entries(panes).map(([id, pane]) => [id, pane.hidden]),
-    [["clpane-log", true], ["clpane-readings", false], ["clpane-refusals", true]],
-  );
-  assert.deepEqual(tabs.map((tab) => tab.attrs["aria-selected"]), ["false", "true", "false"]);
-  // Every operational change repaints this panel from scratch, so a chosen tab
-  // that is not remembered snaps back to the log every few seconds while you
-  // watch a node drain.
-  assert.equal(JSON.parse(storage.read("plurx.cluster.fold")).tab, "readings");
-  panes["clpane-readings"].hidden = true;
-  panes["clpane-log"].hidden = false;
-  withDom(document, storage, () => ui.applyClusterFolds());
-  assert.equal(panes["clpane-readings"].hidden, false);
-  assert.equal(panes["clpane-log"].hidden, true);
-});
-
-test("the fold never carries anything but the fold", () => {
-  // The panel holds a live join credential in memory. The fold is the one thing
-  // on this screen that is allowed to reach browser storage, so pin its shape.
-  const write = PANEL.clusterFoldWrite.toString();
-  assert.match(write, /storage\.setItem\(clusterFoldKey\(\),JSON\.stringify\(/);
-  assert.match(shippedSource("clusterNodeFoldSave"), /nodes_closed/);
-  assert.match(shippedSource("toggleClusterDatabase"), /clusterFoldSave\(\{database:open\}\)/);
-  assert.doesNotMatch(shippedSource("clusterDatabasePanel"), /localStorage/);
-  // Only the shell may hold the storage handle: the model takes it as an
-  // argument, so a test never stubs a global to exercise it.
-  assert.doesNotMatch(PANEL.clusterFoldRead.toString(), /localStorage/);
-});
-
-test("a stored fold that is not a fold is ignored, not carried forward", () => {
-  const ui = sandbox();
-  const junk = fakeStorage({ "plurx.cluster.fold": JSON.stringify([1, 2, 3]) });
-  withDom(foldDom(), junk, () => assert.equal(ui.clusterFoldState(), null));
-  const stray = fakeStorage({
-    "plurx.cluster.fold": JSON.stringify({ database: false, nodes_closed: ["a", 7], tab: "log", stowaway: "x" }),
-  });
-  withDom(foldDom(), stray, () => {
-    assert.deepEqual(ui.clusterFoldState(), { database: false, nodes_closed: ["a"], tab: "log" });
-    ui.clusterFoldSave({ database: true });
-  });
-  assert.deepEqual(JSON.parse(stray.read("plurx.cluster.fold")), {
-    database: true, nodes_closed: ["a"], tab: "log",
-  });
-});
-
-// ---- troubleshooting -------------------------------------------------------
-
-test("troubleshooting is one section with exactly one visible pane", () => {
-  const ui = sandbox();
-  const cluster = status("high_availability", [
-    node("node-a", 1, "voter", { is_leader: true }),
-    node("node-b", 2, "voter"),
-    node("node-c", 3, "voter"),
-  ]);
-  const html = ui.clusterPanel({
-    cluster,
-    clusterOps: operationStatus(cluster),
-    sys: { replication: REPLICATION },
-  });
-  assert.match(html, /<h3>Troubleshooting<\/h3>/);
-  assert.equal((html.match(/role="tab"/g) || []).length, 3);
-  // The log pane is the open one; the other two ship hidden so exactly one
-  // answer is on screen at a time.
-  assert.match(html, /id="cltab-log" aria-selected="true"/);
-  assert.match(html, /id="clpane-log" role="tabpanel"[^>]*>/);
-  assert.match(html, /id="clpane-readings"[^>]*hidden/);
-  assert.match(html, /id="clpane-refusals"[^>]*hidden/);
-  assert.match(html, /id="cllogbox"/);
-  assert.match(html, /Heartbeat quorum/);
-  assert.match(html, /2 of 3 voters must agree on every write/);
-});
-
-test("a refusal is kept in troubleshooting, not spent on a toast", () => {
+test("a refusal is kept in the alert slot, not spent on a toast", () => {
   const ui = sandbox({
     refusal: { node_id: "node-b", code: "node_owns_offline_work", message: "" },
   });
@@ -3327,24 +3072,43 @@ test("a refusal is kept in troubleshooting, not spent on a toast", () => {
     node("node-c", 3, "voter"),
   ]);
   const html = ui.clusterPanel({ cluster, sys: { replication: REPLICATION } });
-  const pane = html.slice(html.indexOf('id="clpane-refusals"'));
-  assert.match(pane, /Cluster operation for node-b was refused/);
-  assert.match(pane, /offline download/i);
+  // In the alert slot, above the table, with its sentence and a way to clear
+  // it — not a toast, and not a tab nobody opens.
+  const alert = /<div class="clalert bad" role="alert">[\s\S]*?<\/div><\/div>/.exec(html);
+  assert.ok(alert, "the refusal is an alert");
+  assert.match(alert[0], /Cluster operation for node-b was refused/);
+  assert.match(alert[0], /offline download/i);
+  assert.match(alert[0], /onclick="dismissClusterRefusal\(\)">Dismiss</);
+  assert.ok(html.indexOf("was refused") < html.indexOf('id="cluster-nodes"'));
+  assert.match(shippedSource("dismissClusterRefusal"), /CLUSTER_REFUSAL=null; repaintClusterPreserving\(renderSettings\)/);
 });
 
-// ---- the operations rail ---------------------------------------------------
-// The rail's whole claim is that a refusal is readable before the click. These
-// pin two halves of that: the precondition is stated, and the control is
-// actually disabled when it does not hold — a row that says "Blocked" beside a
-// live button is worse than no row at all.
+// ---- actions carry their preconditions ---------------------------------------
+// A refusal is readable before the click. These pin both halves of that: the
+// precondition is stated, and the control is actually disabled when it does
+// not hold — a reason beside a live button is worse than no reason at all.
+// Every action is keyed by what it does, wherever the page draws it: the nodes
+// card (add), a node's drawer (promote, remove, maintenance, restart, leave)
+// or the Maintenance card (rolling restart, election).
 
 function railRows(ui, cluster, ops) {
-  return new Map(
-    ui.clusterOperationRows(ui.env, cluster, ops).map((row) => [row.title.replace(/<[^>]*>/g, ""), row]),
-  );
+  const rows = new Map([["Add a node", ui.clusterAddNodeAction(ui.env, cluster)]]);
+  const names = { promote: "Promote", remove: "Remove", maintenance: "Enter maintenance", resume: "Resume service",
+    restart: "Prepare for restart", leave: "Leave this cluster" };
+  for (const n of cluster.nodes) {
+    for (const action of ui.clusterNodeActions(ui.env, cluster, ops, n)) {
+      const key = action.id === "promote" || action.id === "remove" ? `${names[action.id]} ${n.hostname}` : names[action.id];
+      rows.set(key, { ...action, action: action.html });
+    }
+  }
+  for (const row of ui.clusterMaintenanceRows(ui.env, cluster, ops)) {
+    const key = { restart: "Rolling restart", election: "Force a leader election", diagnostics: "Diagnostics" }[row.id];
+    rows.set(key, { ...row, blocked: /disabled/.test(row.action), reason: row.text });
+  }
+  return rows;
 }
 
-test("every action on the rail carries its precondition", () => {
+test("every action carries its precondition", () => {
   const ui = sandbox();
   const cluster = status("high_availability", [
     node("node-a", 1, "voter", { is_leader: true }),
@@ -3354,22 +3118,22 @@ test("every action on the rail carries its precondition", () => {
       storage_headroom_bytes: 22 * 1000 * 1000 * 1000 }),
   ]);
   const rows = railRows(ui, cluster, operationStatus(cluster));
-  assert.ok(rows.has("Add a node"));
-  assert.equal(rows.get("Add a node").blocked, undefined);
+  assert.equal(rows.get("Add a node").blocked, false);
 
   // The learner is caught up but its filesystem has not proved the reserve, so
-  // the row says which of the two preflights failed and what to do about it —
-  // before the promotion is attempted and refused.
-  const promote = rows.get("Promote node-d to voter");
+  // the action says which of the two preflights failed and what to do about
+  // it — before the promotion is attempted and refused.
+  const promote = rows.get("Promote node-d");
   assert.equal(promote.blocked, true);
   assert.match(promote.reason, /durable free-space reserve/);
   assert.match(promote.reason, /22 GB free/);
   assert.match(promote.action, /disabled/);
 
-  // Leaving is always available and always permanent; it is never "ready".
+  // Leaving is permanent and is an expansion of its own action.
   const leave = rows.get("Leave this cluster");
   assert.equal(leave.destructive, true);
-  assert.match(leave.reason, /fresh data directory/);
+  assert.equal(leave.expand, "leave");
+  assert.match(ui.leavePanel("node-a"), /fresh data directory/);
 });
 
 test("a learner that has proved both preflights is offered promotion", () => {
@@ -3380,7 +3144,7 @@ test("a learner that has proved both preflights is offered promotion", () => {
     node("node-c", 3, "voter"),
     node("node-d", 4, "learner", { bounded_read_ready: true, voter_storage_ready: true }),
   ]);
-  const promote = railRows(ui, cluster, operationStatus(cluster)).get("Promote node-d to voter");
+  const promote = railRows(ui, cluster, operationStatus(cluster)).get("Promote node-d");
   assert.equal(promote.blocked, false);
   assert.doesNotMatch(promote.action, /disabled/);
   assert.match(promote.action, /promoteNode\(&quot;node-d&quot;\)/);
@@ -3392,24 +3156,23 @@ test("a learner that has proved both preflights is offered promotion", () => {
     node("node-c", 3, "voter"),
     node("node-d", 4, "learner", { bounded_read_ready: false, voter_storage_ready: true }),
   ]);
-  const waiting = railRows(ui, catching, operationStatus(catching)).get("Promote node-d to voter");
+  const waiting = railRows(ui, catching, operationStatus(catching)).get("Promote node-d");
   assert.equal(waiting.blocked, true);
   assert.match(waiting.reason, /zero-lag apply proof/);
   assert.match(waiting.action, /disabled/);
 });
 
-test("the rail never offers what the server would refuse", () => {
+test("no action offers what the server would refuse", () => {
   const ui = sandbox();
-  // Two voters: removal drops to one and is refused, and the rail says so
+  // Two voters: removal drops to one and is refused, and the action says so
   // instead of leaving it to the failed attempt.
   const pair = status("degraded_reconfiguration", [
     node("node-a", 1, "voter", { is_leader: true }),
     node("node-b", 2, "voter"),
   ]);
-  const two = railRows(ui, pair, operationStatus(pair)).get("Remove a node permanently");
+  const two = railRows(ui, pair, operationStatus(pair)).get("Remove node-b");
   assert.equal(two.blocked, true);
-  // The server's bar is three voters, not "not two": one voter is refused as
-  // well, and so is a roster whose other members are still joining.
+  // The server's bar is three voters, not "not two".
   assert.match(two.reason, /at least three voters and this cluster has 2/);
 
   // A membership change in flight locks the rest of the lifecycle.
@@ -3422,44 +3185,51 @@ test("the rail never offers what the server would refuse", () => {
   const locked = railRows(ui, fenced, operationStatus(fenced));
   assert.equal(locked.get("Add a node").blocked, true);
   assert.match(locked.get("Add a node").reason, /already in flight on node-b/);
-  assert.equal(locked.get("Promote node-d to voter").blocked, true);
+  assert.equal(locked.get("Promote node-d").blocked, true);
   assert.equal(locked.get("Force a leader election").blocked, true);
-  // The fenced node's own resume replaces the maintenance row, and it is only
-  // offered from the node that owns the fence.
-  assert.ok(!locked.has("Enter maintenance on node-a"));
-  const resume = locked.get("Resume service on node-b");
-  assert.equal(resume.blocked, true);
-  assert.match(resume.reason, /Open node-b directly/);
+  // One planned outage at a time: this node may not fence itself while
+  // another is fenced, and only the fenced node can lift its own fence.
+  assert.equal(locked.get("Enter maintenance").blocked, true);
+  // The reason is the server's own blocker, named by hostname.
+  assert.equal(locked.get("Enter maintenance").reason, "maintenance already active on node-b.");
+  assert.ok(!locked.has("Resume service"));
+  assert.match(ui.clusterAlerts(fenced, operationStatus(fenced)),
+    /title="Open the maintenance target directly to resume it\." [^>]*>Resume service/);
+  // And the leader cannot be removed from anywhere but its own screen.
+  const remote = status("high_availability", [
+    node("node-a", 1, "voter"),
+    node("node-b", 2, "voter", { is_leader: true }),
+    node("node-c", 3, "voter"),
+  ]);
+  const leader = railRows(ui, remote, operationStatus(remote)).get("Remove node-b");
+  assert.equal(leader.blocked, true);
+  assert.match(leader.reason, /node-b is the current leader and can only leave from its own screen/);
 });
 
-test("the rail routes to the credential rather than minting a second one", () => {
+test("the credential and the leave each have exactly one control", () => {
   // A join token is shown exactly once. Two places that mint one is two places
-  // to leak it, so these rows open the panel that owns it.
-  const ui = sandbox();
+  // to leak it, so the add action opens the panel that owns it, and so does
+  // the leave.
+  const ui = sandbox({ expanded: ["add", "leave"] });
   const cluster = status("high_availability", [
     node("node-a", 1, "voter", { is_leader: true }),
     node("node-b", 2, "voter"),
     node("node-c", 3, "voter"),
   ]);
-  const rows = railRows(ui, cluster, operationStatus(cluster));
-  assert.match(rows.get("Add a node").action, /toggleClusterRailPanel\('add'\)/);
-  assert.match(rows.get("Leave this cluster").action, /toggleClusterRailPanel\('leave'\)/);
-
-  // The row that decides the change carries the control for it, and it is the
-  // only place either one exists. Two surfaces that mint one credential is the
-  // failure this panel must never ship.
   const html = ui.clusterPanel({ cluster, clusterOps: operationStatus(cluster), sys: { replication: REPLICATION } });
   assert.equal((html.match(/mintJoinToken\(this\)/g) || []).length, 1);
   assert.equal((html.match(/leaveCluster\(this,/g) || []).length, 1);
-  const rail = html.slice(html.indexOf('<div class="clrail">'));
-  assert.match(rail, /mintJoinToken\(this\)/);
-  assert.match(rail, /leaveCluster\(this,/);
-  assert.doesNotMatch(PANEL.clusterOperationRows.toString(), /localStorage/);
+  const add = html.slice(html.indexOf('id="clexp-add"'));
+  assert.ok(add.indexOf("mintJoinToken(this)") < add.indexOf("</div></div>") + 400, "the mint lives in the add expansion");
+  assert.match(html, /onclick="toggleClusterExpansion\('add'\)"/);
+  assert.match(html, /onclick="toggleClusterExpansion\('leave'\)"/);
+  assert.match(html.slice(html.indexOf('id="clexp-leave"')), /^id="clexp-leave">[\s\S]*?leaveCluster\(this,/);
+  assert.doesNotMatch(PANEL.clusterNodeActions.toString(), /localStorage/);
 });
 
-test("a stale roster cannot make the rail claim a verdict", () => {
-  // With no direct status there is no restart verdict to report, so the row is
-  // absent rather than guessing at safety.
+test("a stale roster cannot make an action claim a verdict", () => {
+  // With no direct status there is no restart verdict to report, so nothing
+  // guesses at safety.
   const ui = sandbox();
   const cluster = status("high_availability", [
     node("node-a", 1, "voter", { is_leader: true }),
@@ -3467,62 +3237,38 @@ test("a stale roster cannot make the rail claim a verdict", () => {
     node("node-c", 3, "voter"),
   ]);
   const rows = railRows(ui, cluster, null);
-  assert.ok(!rows.has("Prepare this voter for restart"));
+  assert.equal(rows.get("Rolling restart").blocked, true);
+  assert.match(rows.get("Rolling restart").reason, /Collecting the direct rollout verdict/);
+  assert.equal(rows.get("Prepare for restart").blocked, true);
   // And maintenance is refused while the preflight has not answered.
-  const maintain = rows.get("Enter maintenance on node-a");
+  const maintain = rows.get("Enter maintenance");
   assert.equal(maintain.blocked, true);
   assert.match(maintain.reason, /preflight has not answered/);
 });
 
 // ---- the layout holding still ----------------------------------------------
 
-test("the roster is a fixed-height scroller once there are nodes to fill it", () => {
-  // Opening a node card used to move every section below it — measured at
-  // 1259px on a four-node cluster. The list gets a fixed height so its own
-  // size no longer depends on what is expanded; a maximum would still shrink
-  // when everything is collapsed and move the page the other way.
+test("the roster grows with its table and nothing scrolls inside the page", () => {
+  // The fixed-height node scroller is gone: the table is a table, and an open
+  // drawer pushes the page down rather than a keyhole scrolling. A hidden
+  // drawer stays hidden even where the phone rules make rows blocks.
   const ui = sandbox();
   const three = status("high_availability", [
     node("node-a", 1, "voter", { is_leader: true }),
     node("node-b", 2, "voter"),
     node("node-c", 3, "voter"),
   ]);
-  assert.match(ui.clusterPanel({ cluster: three, sys: { replication: REPLICATION } }),
-    /class="clnodes clnodes-capped" id="cluster-node-list"/);
-
-  // Two nodes cannot fill it, and an empty box below the last card is worse
-  // than a list that grows a little.
-  const pair = status("degraded_reconfiguration", [
-    node("node-a", 1, "voter", { is_leader: true }),
-    node("node-b", 2, "voter"),
-  ]);
-  assert.match(ui.clusterPanel({ cluster: pair, sys: { replication: REPLICATION } }),
-    /class="clnodes" id="cluster-node-list"/);
-
-  // The height and the scroller belong to the same rule, and it is scoped to
-  // windows with room for it.
-  assert.match(SHIPPED_UI, /@media\(min-width:1100px\) and \(min-height:720px\)\{[\s\S]*?\.clnodes\.clnodes-capped\{display:flex/);
-  // `height`, not `max-height`: the substring would match either, and a
-  // maximum is exactly the bug this rule replaced.
-  // The box is the size of the list when every card is closed, capped by the
-  // viewport — a fixed fraction of the window left a three-node roster with
-  // 394px of nothing under the last card, which is the void this rule exists
-  // to avoid. `height`, not `max-height`: a maximum shrinks when everything is
-  // collapsed and moves the page the other way.
-  assert.match(SHIPPED_UI, /\.clnodes\.clnodes-capped\{[^}]*[;\s]height:min\(var\(--clnodes-h[^}]*overflow-y:auto/);
-  assert.doesNotMatch(SHIPPED_UI, /\.clnodes\.clnodes-capped\{[^}]*max-height:/);
-  // And the viewport cap keeps a floor: a scroller shorter than a card is not
-  // a list, it is a keyhole.
-  assert.match(SHIPPED_UI, /\.clnodes\.clnodes-capped\{[^}]*max\(360px,calc\(100vh - 330px\)\)/);
-  assert.match(SHIPPED_UI, /\.clnodes\.clnodes-capped>\.clnode\{[^}]*flex:0 0 auto/);
-  const sized = ui.clusterPanel({ cluster: three, sys: { replication: REPLICATION } });
-  assert.match(sized, /id="cluster-node-list" style="--clnodes-h:312px"/);
+  const html = ui.clusterPanel({ cluster: three, sys: { replication: REPLICATION } });
+  assert.match(html, /<tbody id="cluster-node-list">/);
+  assert.doesNotMatch(html, /--clnodes-h|clnodes-capped/);
+  assert.doesNotMatch(SHIPPED_UI, /clnodes-capped|--clnodes-h/);
+  assert.doesNotMatch(SHIPPED_UI, /\.clnodetable[^{]*\{[^}]*(max-height|overflow-y)/);
+  assert.match(SHIPPED_UI, /\.clnodetable tr\[hidden\]\{display:none\}/);
 });
 
-test("the rail's verdict reaches the markup, not just the model", () => {
-  // The chips are the feature. Every precondition in clusterOperationRows can
-  // be correct while clusterRailRow paints them all green, so pin the rendered
-  // row rather than only the object behind it.
+test("an action's verdict reaches the markup, not just the model", () => {
+  // Every precondition can be right in the model while the painter draws a
+  // live button, so pin the rendered drawer.
   const ui = sandbox();
   const cluster = status("high_availability", [
     node("node-a", 1, "voter", { is_leader: true }),
@@ -3530,23 +3276,12 @@ test("the rail's verdict reaches the markup, not just the model", () => {
     node("node-c", 3, "voter"),
     node("node-d", 4, "learner", { bounded_read_ready: false, voter_storage_ready: false }),
   ]);
-  const html = ui.clusterOperationsRail(cluster, operationStatus(cluster));
-  const rowOf = (title) => {
-    const at = html.indexOf(title);
-    assert.notEqual(at, -1, `no row titled ${title}`);
-    const start = html.lastIndexOf('<div class="clrailrow', at);
-    return html.slice(start, html.indexOf('<div class="clrailrow', at + 1) === -1 ? undefined : html.indexOf('<div class="clrailrow', at + 1));
-  };
-  const promote = rowOf("Promote node-d to voter");
-  assert.match(promote, /class="clrailrow blocked"/);
-  assert.match(promote, />Blocked</);
-  assert.doesNotMatch(promote, />Ready</);
-  const add = rowOf("Add a node");
-  assert.match(add, /class="clrailrow ready"/);
-  assert.match(add, />Ready</);
-  const leave = html.slice(html.indexOf("Leave this cluster"));
-  assert.match(leave, />Permanent</);
-  assert.match(html, /class="clrailrow destructive"/);
+  const learner = ui.clusterNodeDrawer(cluster.nodes[3], cluster, operationStatus(cluster));
+  assert.match(learner, /<button class="ghost sm" disabled >Promote to voter<\/button><span class="clwhy">It has not published a fresh zero-lag apply proof yet/);
+  const local = ui.clusterNodeDrawer(cluster.nodes[0], cluster, operationStatus(cluster));
+  assert.match(local, /<button class="ghost sm"  onclick='setNodeMaintenance\(&quot;node-a&quot;,true\)'>Enter maintenance<\/button>(?!<span class="clwhy">)/);
+  assert.match(local, /<button class="ghost sm" disabled >Prepare for restart<\/button><span class="clwhy">The safe candidate is node-b/);
+  assert.match(local, /<span class="clactitem clpush"><button class="danger sm" aria-controls="clexp-leave" aria-expanded="false"/);
 });
 
 test("entering maintenance is offered only when the preflight approved it", () => {
@@ -3557,7 +3292,7 @@ test("entering maintenance is offered only when the preflight approved it", () =
     node("node-c", 3, "voter"),
   ]);
   const approved = operationStatus(cluster);
-  const ok = railRows(ui, cluster, approved).get("Enter maintenance on node-a");
+  const ok = railRows(ui, cluster, approved).get("Enter maintenance");
   assert.equal(ok.blocked, false);
   assert.doesNotMatch(ok.action, /disabled/);
 
@@ -3570,7 +3305,7 @@ test("entering maintenance is offered only when the preflight approved it", () =
     safe_to_enter: false,
     blockers: [{ code: "restart_preparation_active", node_id: "node-b", message: "" }],
   }));
-  const no = railRows(ui, cluster, refused).get("Enter maintenance on node-a");
+  const no = railRows(ui, cluster, refused).get("Enter maintenance");
   assert.equal(no.blocked, true);
   assert.match(no.reason, /restart preparation active on node-b/);
   assert.doesNotMatch(no.reason, /quorum/);
@@ -3586,17 +3321,20 @@ test("restart preparation is offered only on the node the server named", () => {
   ]);
   // operationStatus names nodes[1] as the candidate, and the local node is
   // nodes[0]: preparing here is refused as a candidate mismatch.
-  const elsewhere = railRows(ui, cluster, operationStatus(cluster)).get("Prepare this voter for restart");
+  const rows = railRows(ui, cluster, operationStatus(cluster));
+  const elsewhere = rows.get("Prepare for restart");
   assert.equal(elsewhere.blocked, true);
   assert.match(elsewhere.reason, /candidate is node-b/);
   assert.match(elsewhere.action, /disabled/);
+  assert.doesNotMatch(rows.get("Rolling restart").action, /prepareLocalRestart/);
 
   const here = operationStatus(cluster);
   here.verdict.candidate_node_id = cluster.local_node_id;
-  const mine = railRows(ui, cluster, here).get("Prepare this voter for restart");
-  assert.equal(mine.blocked, false);
-  assert.match(mine.action, /prepareLocalRestart/);
-  assert.doesNotMatch(mine.action, /disabled/);
+  const mine = railRows(ui, cluster, here);
+  assert.equal(mine.get("Prepare for restart").blocked, false);
+  assert.match(mine.get("Prepare for restart").action, /prepareLocalRestart/);
+  assert.match(mine.get("Rolling restart").action, /prepareLocalRestart/);
+  assert.doesNotMatch(mine.get("Rolling restart").action, /disabled/);
 });
 
 test("an election is offered only with a quorum and a caught-up follower", () => {
@@ -3628,8 +3366,8 @@ test("an election is offered only with a quorum and a caught-up follower", () =>
 });
 
 test("recovery locks the membership changes it cannot commit", () => {
-  // The banner above the rail says membership changes are locked; the rows
-  // underneath it must not read Ready.
+  // The alert says membership changes are locked; the actions underneath it
+  // must not be live.
   const ui = sandbox();
   const cluster = status("high_availability", [
     node("node-a", 1, "voter", { is_leader: true }),
@@ -3638,8 +3376,8 @@ test("recovery locks the membership changes it cannot commit", () => {
   ]);
   cluster.recovery = { required: true, quorum_available: false, reachable_voters: 1, required_voters: 2, leader_elected: false };
   const rows = railRows(ui, cluster, operationStatus(cluster));
-  for (const title of ["Add a node", "Remove a node permanently"]) {
-    assert.equal(rows.get(title).blocked, true, `${title} still reads ready under recovery`);
+  for (const title of ["Add a node", "Remove node-b", "Leave this cluster"]) {
+    assert.equal(rows.get(title).blocked, true, `${title} is still live under recovery`);
     assert.match(rows.get(title).reason, /elected leader and a reachable voter majority/);
   }
 });
@@ -3654,60 +3392,34 @@ test("a learner can be removed from a cluster too small to lose a voter", () => 
     node("node-c", 3, "learner", { bounded_read_ready: true }),
   ]);
   const rows = railRows(ui, small, operationStatus(small));
-  assert.equal(rows.get("Remove a node permanently").blocked, true);
-  const learnerOnly = status("degraded_reconfiguration", [
-    node("node-a", 1, "voter", { is_leader: true }),
-    node("node-c", 3, "learner", { bounded_read_ready: true }),
-  ]);
-  const only = railRows(ui, learnerOnly, operationStatus(learnerOnly)).get("Remove a node permanently");
-  assert.equal(only.blocked, false);
+  assert.equal(rows.get("Remove node-b").blocked, true);
+  assert.equal(rows.get("Remove node-c").blocked, false);
   // The same roster read from the learner: now a voter is the removable one,
   // and one voter is below the server's bar just as two is.
   const fromLearner = status("degraded_reconfiguration", [
     node("node-c", 3, "learner", { bounded_read_ready: true }),
-    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-a", 1, "voter"),
   ]);
-  const single = railRows(ui, fromLearner, operationStatus(fromLearner)).get("Remove a node permanently");
+  const single = railRows(ui, fromLearner, operationStatus(fromLearner)).get("Remove node-a");
   assert.equal(single.blocked, true);
   assert.match(single.reason, /at least three voters and this cluster has 1/);
-  // And the leader's own removal is refused from anywhere but its own screen.
-  const remote = status("high_availability", [
-    node("node-a", 1, "voter"),
-    node("node-b", 2, "voter", { is_leader: true }),
-    node("node-c", 3, "voter"),
-  ]);
-  assert.match(railRows(ui, remote, operationStatus(remote)).get("Remove a node permanently").reason,
-    /node-b is the current leader and can only leave from its own screen/);
 });
 
-test("the two components stay in their own columns, with operations above the board", () => {
-  // The layout is the deliverable here: asserting the headings exist would
-  // pass with every card back in one flow, which is what this replaced.
+test("the page is one column of regions, with the alerts above the table", () => {
   const ui = sandbox();
   const cluster = status("high_availability", [
     node("node-a", 1, "voter", { is_leader: true }),
     node("node-b", 2, "voter"),
     node("node-c", 3, "voter"),
   ]);
-  const html = ui.clusterPanel({ cluster, clusterOps: operationStatus(cluster), sys: { replication: REPLICATION } });
-  const columns = html.split('<div class="clcolumn">');
-  assert.equal(columns.length, 3, "expected exactly two columns in the board");
-  const [, left, right] = columns;
-  assert.match(left, /<h3>Replicated database<\/h3>/);
-  assert.match(left, /<h3>Maintenance<\/h3>/);
-  assert.match(left, /class="clrail"/);
-  assert.match(left, /id="clrail-add"/);
-  assert.doesNotMatch(left, /id="cluster-node-list"/);
-  assert.match(right, /<h3>Cluster nodes<\/h3>/);
-  assert.match(right, /id="cluster-node-list"/);
-  // The fleet-wide operations verdict spans both components above the board;
-  // it does not get buried in either component column.
-  assert.match(html, /id="cluster-operations"/);
-  assert.ok(html.indexOf('id="cluster-operations"') < html.indexOf('class="cluster-board'),
-    "cluster operations precede the two-column component board");
-  assert.doesNotMatch(left, /id="cluster-operations"/);
-  assert.doesNotMatch(right, /id="cluster-operations"/);
-  // One election dialog, once: the recovery panel ships its own.
+  const html = ui.clusterPanel({ cluster, clusterOps: { unavailable: true, message: "timeout" }, sys: { replication: REPLICATION } });
+  // The status failure is an alert above the table, carrying its own retry.
+  assert.ok(html.indexOf('id="cluster-operations"') < html.indexOf('id="cluster-nodes"'));
+  assert.match(html, /<div id="cluster-operations"><div class="clalert" role="status"><div><b>Do not restart another voter\.<\/b>[\s\S]*timeout/);
+  assert.equal((html.match(/id="cluster-operations"/g) || []).length, 1);
+  // Two two-up rows: settings beside the store, maintenance beside backup.
+  assert.equal((html.match(/<div class="cltwo">/g) || []).length, 2);
+  // One election dialog, once — inside the Maintenance card — whatever opens it.
   assert.equal((html.match(/id="clelection"/g) || []).length, 1);
   const recovering = status("high_availability", [
     node("node-a", 1, "voter", { is_leader: true }),
@@ -3717,38 +3429,36 @@ test("the two components stay in their own columns, with operations above the bo
   recovering.recovery = { required: true, quorum_available: true, reachable_voters: 2, required_voters: 2, leader_elected: false };
   const lost = ui.clusterPanel({ cluster: recovering, sys: { replication: REPLICATION } });
   assert.equal((lost.match(/id="clelection"/g) || []).length, 1);
+  assert.ok(lost.indexOf("Leader election required") < lost.indexOf('id="cluster-nodes"'));
 });
 
-test("the controls the rail routes to actually do something", () => {
-  // Both of these are one line each and both were deletable with the suite
-  // green: the credential panel would never open, and a card opened near the
-  // bottom of the scroller would open below the fold.
-  assert.match(shippedSource("toggleClusterRailPanel"), /scrollIntoView\(\{block:"nearest"\}\)/);
-  assert.match(shippedSource("clusterNodeFoldLater"), /scrollIntoView\(\{block:"nearest"\}\)/);
+test("the controls the page routes to actually do something", () => {
+  // One line each, and deletable with the suite green: the credential panel
+  // would open below the fold.
+  assert.match(shippedSource("toggleClusterExpansion"), /scrollIntoView\(\{block:"nearest"\}\)/);
 });
 
 // ---- one credential surface ------------------------------------------------
 
-test("the credential is an expansion of the row that decides it", () => {
+test("the credential is an expansion of the action that decides it", () => {
   const cluster = status("high_availability", [
     node("node-a", 1, "voter", { is_leader: true }),
     node("node-b", 2, "voter"),
     node("node-c", 3, "voter"),
   ]);
   const ops = operationStatus(cluster);
-  const collapsed = sandbox().clusterOperationsRail(cluster, ops);
+  const collapsed = sandbox().clusterNodesCard(cluster, ops);
   // Shipped state: the panel exists in the markup and is not showing. A fresh
   // page must never open a credential surface by itself.
-  assert.match(collapsed, /<div class="clrailpanel" id="clrail-add" hidden>/);
-  assert.match(collapsed, /aria-controls="clrail-add" aria-expanded="false"/);
-  assert.match(collapsed, /<div class="clrailpanel" id="clrail-leave" hidden>/);
+  assert.match(collapsed, /<div class="clexpansion" id="clexp-add" hidden>/);
+  assert.match(collapsed, /aria-controls="clexp-add" aria-expanded="false"[^>]*>\+ Add node</);
+  assert.match(collapsed, /<div class="clexpansion" id="clexp-leave" hidden>/);
 
-  const open = sandbox({ expanded: ["add"] }).clusterOperationsRail(cluster, ops);
-  assert.match(open, /<div class="clrailpanel" id="clrail-add">/);
-  assert.match(open, /aria-controls="clrail-add" aria-expanded="true"/);
-  assert.match(open, />Hide</);
+  const open = sandbox({ expanded: ["add"] }).clusterNodesCard(cluster, ops);
+  assert.match(open, /<div class="clexpansion" id="clexp-add">/);
+  assert.match(open, /aria-controls="clexp-add" aria-expanded="true"[^>]*>Hide</);
   // Opening one does not open the other.
-  assert.match(open, /<div class="clrailpanel" id="clrail-leave" hidden>/);
+  assert.match(open, /<div class="clexpansion" id="clexp-leave" hidden>/);
 });
 
 test("the token survives a repaint and never reaches storage", () => {
@@ -3761,12 +3471,12 @@ test("the token survives a repaint and never reaches storage", () => {
     expanded: ["add"],
     token: { token: "plxjoin:v1:aaaa:bbbb", expires_at: Date.now() + 600_000, raft_id: 4, role: "voter" },
   });
-  const rail = ui.clusterOperationsRail(cluster, operationStatus(cluster));
+  const card = ui.clusterNodesCard(cluster, operationStatus(cluster));
   // Rendered from state rather than captured from the DOM, so the 15s status
   // repaint cannot pull a half-read credential shut underneath someone.
-  assert.match(rail, /plxjoin:v1:aaaa:bbbb/);
-  assert.equal((rail.match(/plxjoin:v1:aaaa:bbbb/g) || []).length, 1, "shown once means once");
-  assert.match(rail, /Shown once/);
+  assert.match(card, /plxjoin:v1:aaaa:bbbb/);
+  assert.equal((card.match(/plxjoin:v1:aaaa:bbbb/g) || []).length, 1, "shown once means once");
+  assert.match(card, /Shown once/);
 
   // The expansion is module state, and the same three exits that drop the token
   // drop it too — so returning to this tab starts collapsed, with nothing to
@@ -3774,41 +3484,34 @@ test("the token survives a repaint and never reaches storage", () => {
   const forget = shippedSource("forgetJoinToken");
   assert.match(forget, /CLUSTER_TOKEN=null/);
   assert.match(forget, /CLUSTER_RAIL_EXPANDED=\[\]/);
-  const toggle = shippedSource("toggleClusterRailPanel");
+  const toggle = shippedSource("toggleClusterExpansion");
   assert.doesNotMatch(toggle, /forgetJoinToken|CLUSTER_TOKEN/);
-  for (const sink of ["localStorage", "sessionStorage", "clusterFoldSave"]) {
-    assert.equal(toggle.includes(sink), false, `the rail expansion reaches ${sink}`);
+  for (const sink of ["localStorage", "sessionStorage"]) {
+    assert.equal(toggle.includes(sink), false, `the expansion reaches ${sink}`);
   }
-  // The fold's whitelist is still exactly the fold: nothing credential-adjacent
-  // can ride into storage on it.
-  const read = PANEL.clusterFoldRead.toString();
-  for (const key of ["database", "nodes_closed", "tab"]) assert.ok(read.includes(key));
-  assert.doesNotMatch(read, /rail|expand|token/i);
+  // The page keeps nothing in browser storage at all any more: no fold for
+  // anything credential-adjacent to ride into.
+  for (const name of ["clusterFoldRead", "clusterFoldWrite", "clusterFoldKey"]) assert.equal(PANEL[name], undefined, name);
+  assert.equal(SHIPPED_UI.includes("plurx.cluster.fold"), false);
 });
 
 test("the expansion is a toggle over module state, and writes nothing down", () => {
-  // The fold's read side is a whitelist, but its write side Object.assigns any
-  // key it is handed — so the guarantee that a credential surface never reaches
-  // storage has to be asserted against the storage, not against a grep.
-  const storage = fakeStorage({ "plurx.cluster.fold": JSON.stringify({ database: true }) });
+  const storage = fakeStorage({ unrelated: "kept" });
   const panel = { hidden: true, scrollIntoView() {} };
-  const document = { getElementById: (id) => (id === "clrail-add" ? panel : null) };
+  const document = { getElementById: (id) => (id === "clexp-add" ? panel : null) };
   const harness = new Function(
     "document", "renderSettings", "repaintClusterPreserving", "localStorage",
     `let CLUSTER_RAIL_EXPANDED=[];
-     ${shippedSource("toggleClusterRailPanel")}
-     return {toggle:toggleClusterRailPanel,state:()=>CLUSTER_RAIL_EXPANDED};`,
+     ${shippedSource("toggleClusterExpansion")}
+     return {toggle:toggleClusterExpansion,state:()=>CLUSTER_RAIL_EXPANDED};`,
   )(document, () => {}, (paint) => paint(), storage);
 
   harness.toggle("add");
   assert.deepEqual(harness.state(), ["add"]);
   harness.toggle("add");
   assert.deepEqual(harness.state(), [], "toggling twice closes it again");
-  assert.deepEqual(
-    JSON.parse(storage.read("plurx.cluster.fold")),
-    { database: true },
-    "the rail expansion left nothing behind in browser storage",
-  );
+  assert.equal(storage.read("unrelated"), "kept");
+  assert.equal(storage.read("plurx.cluster.fold"), undefined, "the expansion left nothing behind in browser storage");
 });
 
 test("both membership rows carry an evaluated precondition", () => {
@@ -3822,8 +3525,8 @@ test("both membership rows carry an evaluated precondition", () => {
     node("node-c", 3, "voter"),
   ]);
   const ui = sandbox({ expanded: ["leave"] });
-  const open = ui.clusterOperationsRail(cluster, operationStatus(cluster));
-  assert.match(open, /<div class="clrailpanel" id="clrail-leave">/, "leave expands too, not just add");
+  const open = ui.clusterNodeDrawer(cluster.nodes[0], cluster, operationStatus(cluster));
+  assert.match(open, /<div class="clexpansion" id="clexp-leave">/, "leave expands too, not just add");
   assert.match(open, /leaveCluster\(this,/);
 
   const recovering = status("high_availability", [
@@ -3835,15 +3538,13 @@ test("both membership rows carry an evaluated precondition", () => {
   const locked = railRows(ui, recovering, operationStatus(recovering)).get("Leave this cluster");
   assert.equal(locked.blocked, true);
   assert.match(locked.reason, /elected leader and a reachable voter majority/);
-  const lockedHtml = sandbox({ expanded: ["leave"] }).clusterOperationsRail(recovering, operationStatus(recovering));
-  assert.equal(lockedHtml.includes('id="clrail-leave"'), false, "a blocked row has no reachable control");
+  const lockedHtml = sandbox({ expanded: ["leave"] }).clusterNodeDrawer(recovering.nodes[0], recovering, operationStatus(recovering));
+  assert.equal(lockedHtml.includes('id="clexp-leave"'), false, "a blocked action has no reachable control");
+  // …and no aria-controls naming a panel that is not there.
+  assert.match(lockedHtml, /<button class="danger sm" disabled onclick="toggleClusterExpansion\('leave'\)">/);
+  assert.equal(lockedHtml.includes('aria-controls="clexp-leave"'), false);
   assert.equal(lockedHtml.includes("leaveCluster(this,"), false);
 
-  // A blocked row's own control is disabled in the model too, not only absent
-  // from the shell's mount — otherwise a live Leave button ships on a row the
-  // rail has already refused.
-  assert.match(locked.action, /disabled/);
-  assert.doesNotMatch(locked.action, /toggleClusterRailPanel/);
 
   // Maintenance is a cluster-wide conflict for membership changes, so a fenced
   // node blocks a leave and the row says which node to resume.
@@ -3886,10 +3587,10 @@ test("both membership rows carry an evaluated precondition", () => {
   const learnerRow = railRows(ui, learnerLocal, operationStatus(learnerLocal)).get("Leave this cluster");
   assert.equal(learnerRow.blocked, false);
 
-  // And the leave control the rail mounts still receives the lifecycle state, so
-  // its own button stays disabled wherever the row is reachable.
-  assert.match(shippedSource("clusterOperationsRail"), /leavePanel\(cluster\.local_node_id,maintenanceActive\)/);
-  assert.match(shippedSource("clusterOperationsRail"), /joinPanel\(maintenanceActive\)/);
+  // The join control is only ever rendered when Add is not blocked, so it
+  // carries no disabled branch of its own to drift from the action's reason.
+  assert.match(shippedSource("clusterNodesCard"), /add\.blocked\?"":`<div class="clexpansion" id="clexp-add"[^`]*\$\{joinPanel\(\)\}/);
+  assert.equal(shippedSource("joinPanel").includes("disabled"), false);
 });
 
 test("the danger zone is gone, not renamed", () => {
@@ -3996,7 +3697,12 @@ test("transport observer age advances the repaint projection", () => {
 
 // A settingsTick harness that can actually run the cluster branch: the tick
 // itself is shipped source, everything it reaches for is supplied here.
-function tickHarness({ cluster, ops, now, clustered=true }) {
+// The tick reads the roster on the status gate too. Unless a test asks to
+// answer it by hand (`manualRoster`), the roster read is answered at once with
+// the roster the panel already holds, and only the status reads are queued.
+// The roster read answers on a microtask; let the status request follow it.
+const tickSettle = () => new Promise((resolve) => setImmediate(resolve));
+function tickHarness({ cluster, ops, now, clustered=true, manualRoster=false }) {
   const requests = [];
   const painted = [];
   const paintedTransport = [];
@@ -4034,7 +3740,6 @@ function tickHarness({ cluster, ops, now, clustered=true }) {
      ${shippedSource("repaintClusterPreserving")}
      ${shippedSource("clusterControlValues")}
      ${shippedSource("clusterRestoreControlValues")}
-     ${shippedSource("clusterOpenDetailNodes")}
      ${shippedSource("patchClusterReadingAge")}
      ${shippedSource("clenv")}
      ${shippedSource("esc")}
@@ -4047,7 +3752,9 @@ function tickHarness({ cluster, ops, now, clustered=true }) {
   )(
     document,
     { hash: "#/settings" },
-    (url) => new Promise((resolve, reject) => requests.push({ url, resolve, reject })),
+    (url) => (url === "/cluster/nodes" && !manualRoster
+      ? Promise.resolve(JSON.parse(JSON.stringify(cluster)))
+      : new Promise((resolve, reject) => requests.push({ url, resolve, reject }))),
     () => "cluster",
     () => true,
     async () => {},
@@ -4075,37 +3782,49 @@ test("the direct status collects on its own gate, and never overlaps", async () 
   ]);
   const ops = operationStatus(cluster);
   const now = { value: 1_000_000 };
-  const { harness, requests } = tickHarness({ cluster, ops, now });
+  const { harness, requests } = tickHarness({ cluster, ops, now, manualRoster: true });
 
-  // Fifteen seconds since the tab painted, so this tick collects — and stamps
-  // the clock BEFORE the await, at request time rather than at completion.
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  // Fifteen seconds since the tab painted, so this tick collects: the roster,
+  // then the direct status — and it stamps the clock BEFORE the first await,
+  // at request time rather than at completion.
   now.value += 15_000;
   const first = harness.settingsTick(1, "cluster");
-  assert.deepEqual(requests.map((r) => r.url), ["/cluster/status"]);
+  assert.deepEqual(requests.map((r) => r.url), ["/cluster/nodes"]);
   assert.equal(harness.stamped(), now.value, "the clock is stamped before the await");
 
   // A probe slower than the gate must not put a second fan-out behind itself.
   now.value += 20_000;
   await harness.settingsTick(1, "cluster");
   assert.equal(requests.length, 1, "a slow probe is never overlapped");
-  requests[0].resolve(ops);
+  requests[0].resolve(cluster);
+  await settle();
+  assert.deepEqual(requests.map((r) => r.url), ["/cluster/nodes", "/cluster/status"],
+    "one roster read and one fan-out per gate");
+  requests[1].resolve(ops);
   await first;
 
   // …and because the clock was stamped at request time, a probe that took
   // twenty seconds does not also push the next collection twenty seconds out.
   const prompt = harness.settingsTick(1, "cluster");
-  assert.equal(requests.length, 2, "a slow probe does not delay the next one by its own duration");
-  requests[1].resolve(ops);
+  assert.equal(requests.length, 3, "a slow probe does not delay the next one by its own duration");
+  requests[2].resolve(cluster);
+  await settle();
+  requests[3].resolve(ops);
   await prompt;
 
   now.value += 9_000;
   await harness.settingsTick(1, "cluster");
-  assert.equal(requests.length, 2, "the 2s tick does not become a 2s fan-out");
+  assert.equal(requests.length, 4, "the 2s tick does not become a 2s fan-out, nor a 2s roster read");
   now.value += 7_000;
   const dueAgain = harness.settingsTick(1, "cluster");
-  assert.equal(requests.length, 3, "fifteen seconds later it collects again");
-  requests[2].resolve(ops);
+  assert.equal(requests.length, 5, "fifteen seconds later it collects again");
+  requests[4].resolve(cluster);
+  await settle();
+  requests[5].resolve(ops);
   await dueAgain;
+  assert.deepEqual(requests.map((r) => r.url),
+    ["/cluster/nodes", "/cluster/status", "/cluster/nodes", "/cluster/status", "/cluster/nodes", "/cluster/status"]);
 });
 
 test("the gate is fifteen seconds, and a single machine is never polled", async () => {
@@ -4146,12 +3865,16 @@ test("a refused collection repaints retained transport unless a dialog owns the 
   };
   const now = { value: 1_000_000 };
   const { harness, requests, painted, paintedTransport, readingAge } = tickHarness({
-    cluster, ops, now,
+    cluster, ops, now, manualRoster: true,
   });
   readingAge.innerHTML = "frozen";
+  // Each gate reads the roster first; answer it unchanged, then the status.
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const rosterThen = async () => { requests.at(-1).resolve(cluster); await settle(); };
   now.value += 15_000;
   const refused = harness.settingsTick(1, "cluster");
-  requests[0].reject(Object.assign(new Error("gateway"), { status: 502 }));
+  await rosterThen();
+  requests.at(-1).reject(Object.assign(new Error("gateway"), { status: 502 }));
   await refused;
   assert.notEqual(readingAge.innerHTML, "frozen");
   assert.deepEqual(painted, ["render"], "the locally projected stall is repainted");
@@ -4164,7 +3887,8 @@ test("a refused collection repaints retained transport unless a dialog owns the 
   readingAge.innerHTML = "frozen under modal";
   now.value += 286_001;
   const held = harness.settingsTick(1, "cluster");
-  requests[1].reject(Object.assign(new Error("gateway"), { status: 502 }));
+  await rosterThen();
+  requests.at(-1).reject(Object.assign(new Error("gateway"), { status: 502 }));
   await held;
   assert.deepEqual(painted, ["render"], "the open modal prevented a repaint");
   assert.notEqual(readingAge.innerHTML, "frozen under modal");
@@ -4174,7 +3898,8 @@ test("a refused collection repaints retained transport unless a dialog owns the 
   harness.openDialog(false);
   now.value += 15_000;
   const expired = harness.settingsTick(1, "cluster");
-  requests[2].reject(Object.assign(new Error("gateway"), { status: 502 }));
+  await rosterThen();
+  requests.at(-1).reject(Object.assign(new Error("gateway"), { status: 502 }));
   await expired;
   assert.deepEqual(painted, ["render", "render"]);
   assert.deepEqual(paintedTransport, ["stalled", "unavailable"]);
@@ -4188,8 +3913,9 @@ test("a refused collection repaints retained transport unless a dialog owns the 
   // try again on the next gate.
   now.value += 15_000;
   const unauthorized = harness.settingsTick(1, "cluster");
+  await rosterThen();
   readingAge.innerHTML = "frozen after a refusal";
-  requests[3].reject(Object.assign(new Error("unauthorized"), { status: 401 }));
+  requests.at(-1).reject(Object.assign(new Error("unauthorized"), { status: 401 }));
   await unauthorized;
   assert.deepEqual(
     painted,
@@ -4221,7 +3947,7 @@ test("the two-second roster poll holds its sample under a dialog too", async () 
   ]);
   const ops = operationStatus(fenced);
   const now = { value: 1_000_000 };
-  const { harness, requests, painted } = tickHarness({ cluster: fenced, ops, now });
+  const { harness, requests, painted } = tickHarness({ cluster: fenced, ops, now, manualRoster: true });
   const moved = JSON.parse(JSON.stringify(fenced));
   moved.nodes[2].reachable = false;
 
@@ -4347,7 +4073,7 @@ test("a manual refresh holds a success if force election opens after the request
   });
   const harness = new Function(
     "document", "loadSettingsKey", "settingsCurrent", "repaintClusterPreserving",
-    "clusterOperationsCard", "clusterOperationsUnavailable", "esc",
+    "clusterOperationsUnavailable", "esc",
     "clusterRepaintDeferred", "patchClusterReadingAge", "initialOps", "loaded", "record",
     `let PAGE_RENDER_GENERATION=1;
      let SETTINGS_DATA={clusterOps:initialOps};
@@ -4364,7 +4090,6 @@ test("a manual refresh holds a success if force election opens after the request
     },
     () => true,
     (paint) => paint(),
-    () => "collecting",
     (message) => `UNAVAILABLE:${message}`,
     (value) => value,
     () => dialogOpen,
@@ -4410,7 +4135,7 @@ test("a failed manual refresh ages transport unless force election opens after r
     });
     const refresh = new Function(
       "document", "loadSettingsKey", "settingsCurrent", "repaintClusterPreserving",
-      "clusterOperationsCard", "clusterOperationsUnavailable", "esc", "record",
+      "clusterOperationsUnavailable", "esc", "record",
       "PlurxClusterPanel", "performance", "initialOps", "clusterRepaintDeferred",
       "patchClusterReadingAge",
       `let PAGE_RENDER_GENERATION=1;
@@ -4432,7 +4157,6 @@ test("a failed manual refresh ages transport unless force election opens after r
       },
       () => true,
       (paint) => paint(),
-      () => "collecting",
       (message) => `UNAVAILABLE:${message}`,
       (value) => value,
       (code) => painted.push(code),
@@ -4503,6 +4227,7 @@ test("a decision in progress is never repainted out from under the operator", as
   harness.openDialog(true);
   now.value += 15_000;
   const held = harness.settingsTick(1, "cluster");
+  await tickSettle();
   requests[0].resolve(changed);
   await held;
   assert.deepEqual(painted, [], "the dialog was still open");
@@ -4516,6 +4241,7 @@ test("a decision in progress is never repainted out from under the operator", as
   harness.openDialog(false);
   now.value += 15_000;
   const paid = harness.settingsTick(1, "cluster");
+  await tickSettle();
   requests[1].resolve(changed);
   await paid;
   assert.deepEqual(painted, ["render"], "the owed repaint landed once the modal closed");
@@ -4527,6 +4253,7 @@ test("a decision in progress is never repainted out from under the operator", as
   harness.openDialog(true);
   now.value += 15_000;
   const quiet = harness.settingsTick(1, "cluster");
+  await tickSettle();
   requests[2].resolve(changed);
   await quiet;
   assert.deepEqual(painted, ["render"], "nothing changed, so nothing repainted");
@@ -4550,6 +4277,7 @@ test("a fetch is not a repaint, and the freshness row still ages", async () => {
   });
   readingAge.innerHTML = "stale text";
   const quiet = harness.settingsTick(1, "cluster");
+  await tickSettle();
   requests[0].resolve(older);
   await quiet;
   assert.deepEqual(painted, [], "nothing changed, so nothing was rewritten");
@@ -4560,6 +4288,7 @@ test("a fetch is not a repaint, and the freshness row still ages", async () => {
   const changed = JSON.parse(JSON.stringify(older));
   changed.verdict.safe_to_restart_one = !changed.verdict.safe_to_restart_one;
   const loud = harness.settingsTick(1, "cluster");
+  await tickSettle();
   requests[1].resolve(changed);
   await loud;
   assert.deepEqual(painted, ["render"], "a changed verdict repaints exactly once");
@@ -4577,57 +4306,56 @@ test("every repaint on this tab preserves what the operator was looking at", () 
   // …and the restart poll stamps the same clock, so the two never probe at once.
   assert.match(shippedSource("pollLocalRestart"), /clusterOpsStamp\(\)/);
 
-  const detail = (open) => ({ open });
-  const bodies = [
-    { node: "node-a", detail: detail(true) },
-    { node: "node-b", detail: detail(false) },
-  ].map((entry) => ({
-    getAttribute: () => entry.node,
-    querySelector: () => entry.detail,
-    detail: entry.detail,
-  }));
-  const list = { scrollTop: 420 };
   const ttl = { id: "clttl", value: "3600" };
   const role = { id: "clrole", value: "learner" };
   const auto = { id: "cllogauto", type: "checkbox", checked: false, value: "on" };
+  let focused = null;
+  const focusable = (id) => ({ id, focus() { focused = this; }, closest: () => ({}) });
+  const before = focusable("clfocus");
+  const after = focusable("clfocus");
   const controls = { clttl: ttl, clrole: role, cllogauto: auto };
   const document = {
-    getElementById: (id) => (id === "cluster-node-list" ? list : controls[id] || null),
-    querySelectorAll: (selector) => (selector.includes("clnodebody") ? bodies : [ttl, role, auto]),
+    activeElement: before,
+    getElementById: (id) => (id === "clfocus" ? (document.painted ? after : before) : controls[id] || null),
+    querySelectorAll: () => [ttl, role, auto],
   };
   const repaint = new Function(
     "document",
-    `${shippedSource("clusterOpenDetailNodes")}
-     ${shippedSource("clusterControlValues")}
+    `${shippedSource("clusterControlValues")}
      ${shippedSource("clusterRestoreControlValues")}
      ${shippedSource("repaintClusterPreserving")}
      return repaintClusterPreserving;`,
   )(document);
 
   repaint(() => {
-    // renderSettings() rewrites the markup: a fresh list at the top, every
-    // drill-down back to its shipped default, and every control back to the
-    // value in the template.
-    list.scrollTop = 0;
-    bodies.forEach((body) => {
-      body.detail.open = false;
-    });
+    // renderSettings() rewrites the markup: every control back to the value
+    // in the template, and the focused element replaced by a fresh one.
     ttl.value = "600";
     role.value = "voter";
     auto.checked = true;
+    document.painted = true;
+    document.activeElement = null;
   });
-  assert.equal(list.scrollTop, 420, "the roster scroller kept its place");
   // A repaint between choosing a token's lifetime and clicking Create must not
   // silently mint a ten-minute voter token instead of the hour-long read worker
   // that was selected.
   assert.equal(ttl.value, "3600");
   assert.equal(role.value, "learner");
   assert.equal(auto.checked, false);
-  assert.deepEqual(
-    bodies.map((body) => body.detail.open),
-    [true, false],
-    "the open drill-down came back and the closed one stayed closed",
-  );
+  assert.equal(focused, after, "focus returns to the repainted control with the same id");
+
+  // Open drawers are module state, so the repaint draws them open again
+  // without anything to restore: the open one comes back, the closed one
+  // stays closed.
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const html = sandbox({ open: ["node-b"] }).clusterNodesCard(cluster, operationStatus(cluster));
+  assert.match(html, /<tr class="setdrawer" id="cldrawer-node-b" data-node="node-b">/);
+  assert.match(html, /<tr class="setdrawer" id="cldrawer-node-a" data-node="node-a" hidden>/);
+  assert.match(html, /<tr class="clrow setopen" id="clrow-node-b"[\s\S]*?<button type="button" class="clnodebtn" data-node="node-b" aria-expanded="true" aria-controls="cldrawer-node-b"/);
 });
 
 // ---- the module boundary ---------------------------------------------------
@@ -4669,19 +4397,26 @@ test("the ledger's freshness cell is addressable, and the clock is stamped where
 test("every path that rewrites this tab goes through the preserving repaint", () => {
   // A bare renderSettings() on the Cluster tab throws away the roster scroll,
   // the open drill-downs, and the half-filled token form. Both branches of the
-  // tick, initial secondary hydration, the manual refresh, the restart poll,
-  // and the three controls that repaint from inside the rail all use the helper.
+  // tick, initial secondary hydration, the manual refresh, the header Refresh,
+  // the restart poll, and the controls that repaint from inside the page all
+  // use the helper. The tick paints once for the roster and the status
+  // together, whichever of them changed or failed.
   const tick = shippedSource("settingsTick");
   assert.equal(
     (tick.match(/repaintClusterPreserving\(renderSettings\)/g) || []).length,
-    3,
-    "the roster and both successful and failed direct-status branches preserve",
+    1,
+    "the tick's one paint preserves",
   );
+  assert.match(tick, /if\(repaint&&!clusterRepaintDeferred\(\)\) repaintClusterPreserving\(renderSettings\);/);
+  assert.equal(/\brenderSettings\(\)/.test(shippedSource("refreshClusterPage")), false,
+    "the header Refresh never repaints bare");
   for (const handler of [
+    "refreshClusterPage",
     "patchSettingsSecondary",
     "refreshClusterOperations",
     "pollLocalRestart",
-    "toggleClusterRailPanel",
+    "toggleClusterExpansion",
+    "dismissClusterRefusal",
     "mintJoinToken",
     "clearJoinToken",
   ]) {
@@ -4711,7 +4446,20 @@ test("the model is a file, and the shell actually mounts it", () => {
     model < caller,
     `cluster-panel.js is served at ${model} but its caller at ${caller}`,
   );
-  assert.match(shippedSource("clusterOperationsRail"), /PlurxClusterPanel\.clusterOperationRows\(clenv\(\),/);
+  // Every derivation the page paints from is called by the painter that
+  // draws it — a model function the page never reads would pass every model
+  // test while the screen showed something else.
+  for (const [painter, call] of [
+    ["clusterStrip", "clusterStripCells(clenv(),"],
+    ["clusterAlerts", "clusterAlertKinds(cluster,ops,"],
+    ["clusterAlerts", "clusterVoterDownText(clenv(),"],
+    ["clusterNodeTableRow", "clusterNodeCells(clenv(),"],
+    ["clusterNodeActionsHtml", "clusterNodeActions(clenv(),"],
+    ["clusterNodesCard", "clusterAddNodeAction(clenv(),"],
+    ["clusterMaintenanceCard", "clusterMaintenanceRows(clenv(),"],
+    ["clusterPanel", "clusterSampledText(ops)"],
+    ["patchClusterReadingAge", "clusterSampledText(data.clusterOps)"],
+  ]) assert.ok(shippedSource(painter).includes(call), `${painter} does not call ${call}`);
   assert.match(shippedSource("clusterDatabasePanel"), /PlurxClusterPanel\.clusterDatabaseRows\(clenv\(\),/);
   assert.match(shippedSource("clusterPanel"), /PlurxClusterPanel\.clusterStateView\(/);
   assert.match(shippedSource("clusterRefusalHtml"), /PlurxClusterPanel\.membershipRefusalText\(/);
@@ -4740,6 +4488,741 @@ test("standalone Settings never polls cluster status even with a cached roster",
   const h=tickHarness({clustered:false,cluster:{nodes:[{node_id:"local",maintenance:true}]},ops:{},now:{value:100000}});
   await h.harness.settingsTick(1,"cluster");
   assert.deepEqual(h.requests,[]);
+});
+
+// ---- the page's summary readings (status strip, node table, chips) ----------
+// These pin the derivations the new layout paints from. Each fixture is built
+// so the wrong source gives a visibly different answer: hostnames differ from
+// node ids, the roster and the direct status disagree where it matters.
+
+function labCluster(extra = {}) {
+  const nodes = [
+    node("node-1", 1, "voter", { hostname: "lab1", is_leader: true, active_media_sessions: 2 }),
+    node("node-2", 2, "voter", { hostname: "lab2" }),
+    node("node-3", 3, "voter", { hostname: "lab3" }),
+    node("node-4", 4, "voter", { hostname: "lab4" }),
+    node("node-5", 5, "learner", { hostname: "lab5", bounded_read_ready: true }),
+  ];
+  return Object.assign(status("high_availability", nodes), extra);
+}
+function stripMap(cells) {
+  return new Map(cells.map((cell) => [cell.key, cell]));
+}
+
+test("the status strip states the healthy cluster from roster and direct status", () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const cells = PANEL.clusterStripCells(sandbox().env, cluster, ops);
+  assert.deepEqual(cells.map((cell) => cell.label),
+    ["Cluster", "Leader", "Nodes reachable", "Replication", "Build", "Rolling restart"]);
+  const s = stripMap(cells);
+  assert.equal(s.get("cluster").value, "Healthy");
+  assert.equal(s.get("cluster").tone, "good");
+  assert.equal(s.get("cluster").sub, "4 voters · quorum 3 · tolerates 1 failure");
+  assert.equal(s.get("leader").value, "lab1");
+  assert.equal(s.get("leader").sub, "term 81");
+  assert.equal(s.get("reachable").value, "5 / 5");
+  assert.equal(s.get("reachable").sub, "4 voters · 1 learner");
+  assert.equal(s.get("replication").value, "In sync");
+  assert.equal(s.get("replication").sub, "max apply lag 0");
+  assert.equal(s.get("build").value, "v0.2.7-operations");
+  assert.equal(s.get("build").sub, "all 5 nodes match");
+  // The candidate is named by hostname: the old card printed the node id.
+  assert.equal(s.get("restart").value, "Safe");
+  assert.equal(s.get("restart").sub, "next: lab2");
+});
+
+test("the strip's leader and lag cells read the direct status, not the roster", () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  ops.nodes[2].status.raft.current_term = 82;
+  ops.nodes[3].status.raft.apply_lag_entries = 17;
+  const s = stripMap(PANEL.clusterStripCells(sandbox().env, cluster, ops));
+  assert.equal(s.get("leader").sub, "term disagreement");
+  assert.equal(s.get("leader").tone, "warn");
+  assert.equal(s.get("replication").sub, "max apply lag 17");
+});
+
+test("a down voter degrades the strip, names the host, and the server's blocker", () => {
+  const cluster = labCluster();
+  cluster.nodes[3].reachable = false;
+  const ops = operationStatus(cluster);
+  ops.nodes[3] = { membership: cluster.nodes[3], observation: "timeout", error_class: "timeout", sample_age_ms: 900, status: null };
+  ops.verdict = { safe_to_restart_one: false, candidate_node_id: null, warnings: [],
+    blockers: [{ code: "voter_unreachable", node_id: "node-4", message: "no answer" }] };
+  const s = stripMap(PANEL.clusterStripCells(sandbox().env, cluster, ops));
+  assert.equal(s.get("cluster").value, "Degraded");
+  assert.equal(s.get("cluster").tone, "warn");
+  assert.equal(s.get("cluster").sub, "3 of 4 voters reachable · tolerates 0 more");
+  assert.equal(s.get("reachable").value, "4 / 5");
+  assert.equal(s.get("reachable").sub, "lab4 unreachable");
+  assert.equal(s.get("build").sub, "4 of 5 answered");
+  assert.equal(s.get("restart").value, "Blocked");
+  assert.equal(s.get("restart").sub, "voter unreachable on lab4");
+});
+
+test("two voters are reconfiguring in the strip, never healthy", () => {
+  const cluster = status("degraded_reconfiguration", [
+    node("node-1", 1, "voter", { is_leader: true }),
+    node("node-2", 2, "voter"),
+  ]);
+  const cell = PANEL.clusterStripCells(sandbox().env, cluster, null)[0];
+  assert.equal(cell.value, "Reconfiguring");
+  assert.equal(cell.tone, "warn");
+  assertNoRedundancyClaim(`${cell.value} ${cell.sub}`, "two-voter strip cell");
+  assert.match(cell.sub, /survives no failure/);
+});
+
+test("maintenance and recovery outrank a healthy availability in the strip", () => {
+  const fenced = labCluster();
+  fenced.nodes[0].maintenance = true;
+  const ops = maintenanceOps("node-1", { drained: false });
+  const m = PANEL.clusterStripCells(sandbox().env, fenced, ops)[0];
+  assert.equal(m.value, "Maintenance");
+  assert.equal(m.sub, "lab1 fenced · draining 1 stream");
+  const lost = labCluster();
+  lost.recovery = { required: true, quorum_available: false, reachable_voters: 2, required_voters: 3, leader_elected: false };
+  const r = PANEL.clusterStripCells(sandbox().env, lost, null)[0];
+  assert.equal(r.value, "Recovery required");
+  assert.equal(r.tone, "bad");
+  assert.equal(r.sub, "2 reachable · 3 needed for quorum");
+});
+
+test("build skew and protocol skew are visible in the strip", () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  ops.nodes[1].status.build = "v0.2.8";
+  const s = stripMap(PANEL.clusterStripCells(sandbox().env, cluster, ops));
+  assert.equal(s.get("build").value, "2 builds");
+  assert.equal(s.get("build").tone, "warn");
+  ops.nodes[1].status.media_protocol = 10;
+  ops.nodes[2].status.media_protocol = 11;
+  const skewed = stripMap(PANEL.clusterStripCells(sandbox().env, cluster, ops));
+  assert.equal(skewed.get("build").tone, "bad");
+  assert.match(skewed.get("build").sub, /^protocol skew 10 \/ 11/);
+});
+
+test("the strip says collecting and unavailable rather than guessing a verdict", () => {
+  const cluster = labCluster();
+  const collecting = stripMap(PANEL.clusterStripCells(sandbox().env, cluster, null));
+  assert.equal(collecting.get("restart").value, "Collecting…");
+  assert.equal(collecting.get("build").value, "—");
+  assert.equal(collecting.get("leader").sub, "term unknown");
+  const failed = stripMap(PANEL.clusterStripCells(sandbox().env, cluster, { unavailable: true, message: "x" }));
+  assert.equal(failed.get("restart").value, "Unavailable");
+  const roster = PANEL.clusterStripCells(sandbox().env, { unavailable: true, code: "cluster_unavailable" }, null);
+  assert.equal(roster[0].value, "Status unavailable");
+  assert.ok(roster.slice(1).every((cell) => cell.value === "—"));
+});
+
+test("a node row reads the direct status, and a dash where there is none", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const ready = PANEL.clusterNodeCells(env, cluster.nodes[0], ops);
+  assert.deepEqual(ready.status, { label: "Ready", tone: "good" });
+  assert.equal(ready.role, "voter");
+  assert.equal(ready.raft.text, "leader · lag 0");
+  assert.equal(ready.wal.text, "open · 6.3 MB");
+  assert.equal(ready.database.text, "2.1 MB");
+  assert.equal(ready.build.text, "v0.2.7-operations");
+  // The direct status is the source for streams, not the roster's count.
+  assert.equal(ready.streams.text, "0");
+  const follower = PANEL.clusterNodeCells(env, cluster.nodes[1], ops);
+  assert.equal(follower.raft.text, "follower · lag 0");
+  // Unreachable: stale heartbeat in bad tone, and every sampled cell a dash —
+  // never filled in from the roster's heartbeat.
+  cluster.nodes[3].reachable = false;
+  cluster.nodes[3].last_seen_at = Date.now() - 14 * 60 * 1000;
+  ops.nodes[3] = { membership: cluster.nodes[3], observation: "timeout", status: null };
+  const down = PANEL.clusterNodeCells(env, cluster.nodes[3], ops);
+  assert.deepEqual(down.status, { label: "Unreachable", tone: "bad" });
+  assert.equal(down.heartbeat.text, "14m ago");
+  assert.equal(down.heartbeat.tone, "bad");
+  for (const cell of ["raft", "wal", "database", "streams", "build"]) assert.equal(down[cell].text, "—", cell);
+});
+
+test("a node row's status follows the badge logic", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  ops.nodes[1] = { membership: cluster.nodes[1], observation: "refused", error_class: "refused", status: null };
+  const refused = PANEL.clusterNodeCells(env, cluster.nodes[1], ops);
+  assert.equal(refused.status.label, "Not observed");
+  assert.match(refused.status.why, /answered and refused/);
+  ops.nodes[2].status.wal.snapshot.last_error = { message: "fsync failed" };
+  const wal = PANEL.clusterNodeCells(env, cluster.nodes[2], ops);
+  assert.deepEqual(wal.status, { label: "Needs attention", tone: "warn" });
+  assert.equal(wal.wal.tone, "bad");
+  ops.nodes[3].status.raft.watermark_valid = false;
+  const stale = PANEL.clusterNodeCells(env, cluster.nodes[3], ops);
+  assert.equal(stale.status.label, "Needs attention");
+  assert.equal(stale.raft.text, "follower · stale proof");
+  cluster.nodes[4].bounded_read_ready = false;
+  assert.equal(PANEL.clusterNodeCells(env, cluster.nodes[4], ops).status.label, "Catching up");
+  cluster.nodes[0].maintenance = true;
+  assert.equal(PANEL.clusterNodeCells(env, cluster.nodes[0], ops).status.label, "Maintenance");
+  assert.equal(PANEL.clusterNodeCells(env, cluster.nodes[1], null).status.label, "Collecting…");
+  const joining = node("node-6", 6, "voter", { is_voter: false });
+  assert.equal(PANEL.clusterNodeCells(env, joining, ops).role, "joining voter");
+});
+
+test("a readiness chip counts only what the server reported", () => {
+  assert.deepEqual(PANEL.clusterReadinessChip(null, [null]), { tone: "", label: "checking…" });
+  assert.deepEqual(PANEL.clusterReadinessChip({ unavailable: "boom" }, [{ status: "met" }]),
+    { tone: "warn", label: "checks unavailable" });
+  assert.deepEqual(PANEL.clusterReadinessChip({}, [{ status: "met" }, null, { status: "met" }]),
+    { tone: "ok", label: "2 of 2 checks" });
+  assert.deepEqual(PANEL.clusterReadinessChip({}, [{ status: "met" }, { status: "unobservable" }, { status: "unmet" }]),
+    { tone: "warn", label: "1 of 3 checks" });
+  assert.deepEqual(PANEL.clusterReadinessChip({}, [null, null]), { tone: "", label: "not reported" });
+});
+
+test("alerts are empty when healthy and most severe first otherwise", () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  assert.deepEqual(PANEL.clusterAlertKinds(cluster, ops, {}), []);
+  cluster.nodes[3].reachable = false;
+  cluster.availability = "degraded_reconfiguration";
+  const kinds = PANEL.clusterAlertKinds(cluster, { unavailable: true }, { refusal: true }).map((k) => k.kind);
+  assert.deepEqual(kinds, ["refusal", "voter_down", "ops_unavailable", "reconfiguration"]);
+  // Recovery carries the maintenance target and the down voters inside it.
+  cluster.nodes[0].maintenance = true;
+  cluster.recovery = { required: true, quorum_available: false, reachable_voters: 2, required_voters: 3 };
+  assert.deepEqual(PANEL.clusterAlertKinds(cluster, null, { refusal: true }).map((k) => k.kind), ["recovery", "refusal", "reconfiguration"]);
+  cluster.recovery.required = false;
+  assert.deepEqual(PANEL.clusterAlertKinds(cluster, null, {}).map((k) => k.kind),
+    ["maintenance", "voter_down", "reconfiguration"]);
+  assert.deepEqual(PANEL.clusterAlertKinds({ unavailable: true, code: "cluster_unavailable" }, null, {}).map((k) => k.kind),
+    ["roster_failed"]);
+  assert.deepEqual(PANEL.clusterAlertKinds({ unavailable: true, code: "membership_unavailable" }, null, {}), []);
+});
+
+test("restart preparation on this node raises an alert with the drain tone", () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  ops.nodes[0].status.media = { local_active_sessions: 1, drained: false, new_admissions_blocked: true };
+  assert.deepEqual(PANEL.clusterAlertKinds(cluster, ops, {}), [{ kind: "restart", tone: "warn" }]);
+  ops.nodes[0].status.media = { local_active_sessions: 0, drained: true, new_admissions_blocked: true };
+  assert.deepEqual(PANEL.clusterAlertKinds(cluster, ops, {}), [{ kind: "restart", tone: "good" }]);
+});
+
+test("the voter-down sentence names the host, the quorum left, and only the server's blocker", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  cluster.nodes[3].reachable = false;
+  cluster.nodes[3].last_seen_at = Date.now() - 14 * 60 * 1000;
+  const safe = PANEL.clusterVoterDownText(env, cluster, operationStatus(cluster));
+  assert.match(safe, /lab4 \(last heartbeat 14m ago\)/);
+  assert.match(safe, /Quorum holds at 3 of 4; one more voter failure stops writes\./);
+  assert.doesNotMatch(safe, /blocked/, "no blocked claim without the server's verdict");
+  const ops = operationStatus(cluster);
+  ops.verdict = { safe_to_restart_one: false, blockers: [{ code: "voter_unreachable", node_id: "node-4" }] };
+  assert.match(PANEL.clusterVoterDownText(env, cluster, ops), /Rolling restart is blocked: voter unreachable on lab4\./);
+  cluster.nodes[3].reachable = true;
+  assert.equal(PANEL.clusterVoterDownText(env, cluster, ops), "");
+});
+
+test("the header's sample age is the oldest sample, aged since the aggregate", () => {
+  const ops = { observed_at_unix_ms: Date.now() - 5000, nodes: [{ sample_age_ms: 1000 }, { sample_age_ms: 3000 }, { sample_age_ms: null }] };
+  assert.equal(PANEL.clusterSampledText(ops), "sampled 8s ago");
+  assert.equal(PANEL.clusterSampledText(null), "collecting status");
+  assert.equal(PANEL.clusterSampledText({ unavailable: true }), "status unavailable");
+});
+
+test("this node's drawer carries maintenance, restart preparation and leave", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const actions = new Map(PANEL.clusterNodeActions(env, cluster, ops, cluster.nodes[0]).map((a) => [a.id, a]));
+  assert.deepEqual([...actions.keys()], ["maintenance", "restart", "leave"]);
+  assert.equal(actions.get("maintenance").blocked, false);
+  assert.match(actions.get("maintenance").html, /onclick='setNodeMaintenance\(&quot;node-1&quot;,true\)'/);
+  // The verdict names lab2 as the candidate, so this node may not prepare.
+  assert.equal(actions.get("restart").blocked, true);
+  assert.match(actions.get("restart").reason, /The safe candidate is lab2/);
+  assert.match(actions.get("restart").html, /disabled/);
+  assert.equal(actions.get("leave").blocked, false);
+  assert.equal(actions.get("leave").expand, "leave");
+  ops.verdict.candidate_node_id = "node-1";
+  const prepare = PANEL.clusterNodeActions(env, cluster, ops, cluster.nodes[0]).find((a) => a.id === "restart");
+  assert.equal(prepare.blocked, false);
+  assert.match(prepare.html, /prepareLocalRestart\(this,&quot;node-1&quot;\)/);
+  ops.maintenance[0] = { node_id: "node-1", safe_to_enter: false, blockers: [{ code: "leader_transfer_pending", node_id: "node-2" }] };
+  const fence = PANEL.clusterNodeActions(env, cluster, ops, cluster.nodes[0])[0];
+  assert.equal(fence.blocked, true);
+  assert.equal(fence.reason, "leader transfer pending on lab2.");
+});
+
+test("another member's drawer offers removal, and promotion only to a learner", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const voter = PANEL.clusterNodeActions(env, cluster, ops, cluster.nodes[1]);
+  assert.deepEqual(voter.map((a) => a.id), ["remove"]);
+  assert.match(voter[0].html, /onclick='removeNode\(&quot;node-2&quot;\)'/);
+  cluster.nodes[4].voter_storage_ready = false;
+  cluster.nodes[4].storage_headroom_bytes = 21e9;
+  const learner = PANEL.clusterNodeActions(env, cluster, ops, cluster.nodes[4]);
+  assert.deepEqual(learner.map((a) => a.id), ["promote", "remove"]);
+  assert.equal(learner[0].blocked, true);
+  assert.match(learner[0].reason, /durable free-space reserve a voter must hold \(21 GB free\)/);
+  cluster.nodes[4].voter_storage_ready = true;
+  assert.equal(PANEL.clusterNodeActions(env, cluster, ops, cluster.nodes[4])[0].blocked, false);
+});
+
+test("removal keeps the voter arithmetic per node and allows retrying its own pending removal", () => {
+  const env = sandbox().env;
+  const two = status("degraded_reconfiguration", [
+    node("node-1", 1, "voter", { is_leader: true }),
+    node("node-2", 2, "voter"),
+    node("node-3", 3, "learner"),
+  ]);
+  const remove = (cluster, n) => PANEL.clusterNodeActions(env, cluster, null, n).find((a) => a.id === "remove");
+  assert.equal(remove(two, two.nodes[1]).blocked, true);
+  assert.match(remove(two, two.nodes[1]).reason, /needs at least three voters and this cluster has 2/);
+  assert.equal(remove(two, two.nodes[2]).blocked, false, "a learner is not held to the voter arithmetic");
+  const pending = labCluster();
+  pending.nodes[1].removal_pending = true;
+  assert.equal(remove(pending, pending.nodes[1]).blocked, false);
+  assert.match(remove(pending, pending.nodes[1]).html, />Retry removal</);
+  // A removal pending on another node does not block this one: the server's
+  // removal fence is per node, and the server refuses what it refuses.
+  assert.equal(remove(pending, pending.nodes[2]).blocked, false);
+  assert.equal(remove(pending, pending.nodes[2]).reason, "");
+  pending.nodes[1].removal_pending = false;
+  pending.nodes[0].maintenance = true;
+  assert.equal(remove(pending, pending.nodes[2]).reason, "Finish maintenance before changing membership.");
+});
+
+test("adding a node is blocked by recovery and by an in-flight membership change", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  assert.equal(PANEL.clusterAddNodeAction(env, cluster).blocked, false);
+  cluster.nodes[2].removal_pending = true;
+  assert.match(PANEL.clusterAddNodeAction(env, cluster).reason, /in flight on lab3/);
+  cluster.recovery = { required: true, quorum_available: false, reachable_voters: 1, required_voters: 3 };
+  assert.match(PANEL.clusterAddNodeAction(env, cluster).reason, /membership change cannot commit/);
+});
+
+test("the maintenance card's rows are cluster-wide and carry the server's verdict", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const rows = new Map(PANEL.clusterMaintenanceRows(env, cluster, ops).map((row) => [row.id, row]));
+  assert.deepEqual([...rows.keys()], ["restart", "election", "diagnostics"]);
+  assert.match(rows.get("restart").text, /Prepare only <b>lab2<\/b>/);
+  assert.match(rows.get("restart").action, /Open lab2 to prepare it/);
+  assert.doesNotMatch(rows.get("restart").action, /<button/);
+  assert.match(rows.get("election").action, /onclick="openElectionDialog\(\)"/);
+  assert.doesNotMatch(rows.get("election").action, /disabled/);
+  ops.verdict = { safe_to_restart_one: false, blockers: [{ code: "voter_unreachable", node_id: "node-4", message: "no answer" }],
+    warnings: [{ code: "build_skew", node_id: null, message: "two builds" }] };
+  const blocked = PANEL.clusterMaintenanceRows(env, cluster, ops)[0];
+  // The verdict's own sentences, as the operations card said them.
+  assert.match(blocked.text, /Blocked<\/span> — Do not restart another voter\. At least one direct safety condition is missing or unhealthy\. Keep the available voters running until every blocker below clears\./);
+  assert.match(blocked.text, /<li><b>voter unreachable<\/b> on lab4: no answer<\/li><li><b>build skew<\/b>: two builds<\/li>/);
+  assert.match(blocked.action, /disabled/);
+  cluster.nodes[2].removal_pending = true;
+  const election = PANEL.clusterMaintenanceRows(env, cluster, ops).find((row) => row.id === "election");
+  assert.match(election.text, /in flight on lab3/);
+  assert.match(election.action, /disabled/);
+  const single = status("single_node", [node("node-1", 1, "voter", { is_leader: true })]);
+  assert.deepEqual(PANEL.clusterMaintenanceRows(env, single, null).map((row) => row.id), ["restart", "diagnostics"]);
+});
+
+test("late readiness redraws only the chips and their text, never a switch", () => {
+  const chips = new Map(), mores = new Map();
+  const document = {
+    querySelector: (selector) => {
+      const chip = /data-clchip="([^"]+)"/.exec(selector), more = /data-clmore="([^"]+)"/.exec(selector);
+      if (chip) { if (!chips.has(chip[1])) chips.set(chip[1], { innerHTML: "" }); return chips.get(chip[1]); }
+      if (more) { if (!mores.has(more[1])) mores.set(more[1], { innerHTML: "" }); return mores.get(more[1]); }
+      return null;
+    },
+    getElementById: () => { throw new Error("a switch was reached for"); },
+  };
+  const patch = new Function("document", "PlurxClusterPanel",
+    `const SETTINGS_DATA={settings:{cluster_media_pool_ready:true}};
+     ${["esc", "devReadinessRow", "devReadinessEvidence", "clusterSettingRows", "clusterBackupChecks", "clusterSettingChecks",
+        "clusterChecksChip", "clusterChecksMore", "patchClusterReadiness"].map(shippedSource).join("\n")}
+     return patchClusterReadiness;`)(document, PANEL);
+  patch({ items: [{ id: "cluster_clock", requirements: [
+    { id: "coverage", status: "met", evidence: "4 of 4 answered." }, { id: "ntp", status: "unobservable", evidence: "Not visible." }] }] });
+  assert.equal(chips.get("cluster-clock-enforced").innerHTML, '<span class="clchip warn">1 of 2 checks</span>');
+  assert.match(mores.get("cluster-clock-enforced").innerHTML, /<b>Every voter reachable and observed<\/b> <span>— 4 of 4 answered\./);
+  assert.equal(chips.get("cluster-placement-enabled").innerHTML, '<span class="clchip ok">1 of 1 checks</span>');
+  assert.equal(chips.get("cluster-backup").innerHTML, '<span class="clchip">not reported</span>');
+  assert.equal(chips.has("cluster-takeover-enabled"), false, "a row without checks has no chip");
+  patch({ unavailable: "offline" });
+  assert.equal(chips.get("subcluster").innerHTML, '<span class="clchip warn">checks unavailable</span>');
+  assert.match(mores.get("subcluster").innerHTML, /The prerequisite reading failed: offline/);
+});
+
+// ---- review fixes: what the page does, pinned where it is painted ----------
+
+// The header's Refresh, run against a page whose controls are rebuilt from
+// their defaults on every paint — exactly what renderSettings() does to them.
+function refreshHarness({ cluster, ops, fresh, freshOps, dialog = false }) {
+  const calls = [];
+  let active = null;
+  const control = (props) => Object.assign({
+    closest: () => ({}),
+    focus() { active = this; },
+  }, props);
+  const defaults = () => ({
+    clttl: control({ id: "clttl", value: "600" }),
+    clrole: control({ id: "clrole", value: "voter" }),
+    clloglvl: control({ id: "clloglvl", value: "info" }),
+    cllogauto: control({ id: "cllogauto", type: "checkbox", checked: true, value: "on" }),
+    "cluster-clock-enforced": control({ id: "cluster-clock-enforced", type: "checkbox", checked: false, value: "on" }),
+  });
+  let dom = defaults();
+  const document = {
+    querySelectorAll: () => Object.values(dom),
+    getElementById: (id) => dom[id] || null,
+    querySelector: (selector) => (selector.includes("dialog[open]") && dialog ? {} : null),
+    get activeElement() { return active; },
+  };
+  const page = new Function(
+    "document", "calls", "rebuild", "fresh", "freshOps", "initial",
+    `let PAGE_RENDER_GENERATION=7,CLUSTER_LOADED=true;
+     const SETTINGS_DATA={cluster:initial.cluster,clusterOps:initial.ops};
+     const SETTINGS_LOADED=new Set(["cluster","clusterOps"]);
+     const SETTINGS_ENDPOINTS={
+       cluster:()=>{calls.push("/cluster/nodes");return Promise.resolve(fresh);},
+       clusterOps:()=>{calls.push("/cluster/status");return Promise.resolve(freshOps);},
+     };
+     const settingsCurrent=(generation,tab)=>generation===PAGE_RENDER_GENERATION&&tab==="cluster";
+     const renderSettings=()=>{calls.push("paint");rebuild();};
+     const viewSettings=()=>calls.push("viewSettings");
+     const layoutChrome=()=>calls.push("layoutChrome");
+     const patchClusterReadingAge=()=>calls.push("age");
+     ${shippedSource("clusterRepaintDeferred")}
+     ${shippedSource("repaintClusterPreserving")}
+     ${shippedSource("clusterControlValues")}
+     ${shippedSource("clusterRestoreControlValues")}
+     ${shippedSource("refreshClusterPage")}
+     return {refresh:refreshClusterPage,data:()=>SETTINGS_DATA,generation:()=>PAGE_RENDER_GENERATION};`,
+  )(document, calls, () => { dom = defaults(); }, fresh, freshOps, { cluster, ops });
+  return { page, calls, dom: () => dom, active: () => active };
+}
+
+test("Refresh re-reads roster and status and keeps every choice on the page", async () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const fresh = labCluster();
+  fresh.nodes[3].reachable = false;
+  const freshOps = operationStatus(fresh);
+  const { page, calls, dom, active } = refreshHarness({ cluster, ops, fresh, freshOps });
+  // The operator chose a one-hour read-worker token, a log level, turned off
+  // auto-refresh, flipped a setting without saving, and is on the role select.
+  dom().clttl.value = "3600";
+  dom().clrole.value = "learner";
+  dom().clloglvl.value = "warn";
+  dom().cllogauto.checked = false;
+  dom()["cluster-clock-enforced"].checked = true;
+  dom().clrole.focus();
+  const button = { disabled: false };
+  const done = page.refresh(button);
+  assert.equal(button.disabled, true, "the button says it is working");
+  await done;
+  assert.deepEqual(calls, ["/cluster/nodes", "/cluster/status", "paint"],
+    "both reads, then one preserving paint — never the loading shell");
+  assert.equal(page.generation(), 7, "no generation bump: an operation in flight keeps its answer");
+  assert.equal(page.data().cluster, fresh);
+  assert.equal(page.data().clusterOps, freshOps);
+  assert.equal(dom().clttl.value, "3600");
+  assert.equal(dom().clrole.value, "learner", "a repaint must never turn this into a voter token");
+  assert.equal(dom().clloglvl.value, "warn");
+  assert.equal(dom().cllogauto.checked, false);
+  assert.equal(dom()["cluster-clock-enforced"].checked, true, "the unsaved toggle survives");
+  assert.equal(active(), dom().clrole, "focus is put back on the rebuilt control");
+  assert.equal(button.disabled, false);
+});
+
+test("Refresh holds both samples under an open dialog, and polls nothing on one machine", async () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const fresh = labCluster();
+  fresh.nodes[3].reachable = false;
+  const held = refreshHarness({ cluster, ops, fresh, freshOps: operationStatus(fresh), dialog: true });
+  await held.page.refresh(null);
+  assert.deepEqual(held.calls, ["/cluster/nodes", "/cluster/status", "age"]);
+  assert.equal(held.page.data().cluster, cluster, "a roster the page did not paint is not stored");
+  assert.equal(held.page.data().clusterOps, ops);
+
+  const solo = { unavailable: true, code: "membership_unavailable" };
+  const single = refreshHarness({ cluster: solo, ops: null, fresh: solo, freshOps: null });
+  await single.page.refresh(null);
+  assert.deepEqual(single.calls, ["/cluster/nodes", "paint"], "no fan-out for a machine that is not clustered");
+});
+
+test("recovery outranks maintenance in the strip and the alert slot", () => {
+  const cluster = labCluster();
+  cluster.nodes[2].maintenance = true;
+  cluster.recovery = { required: true, quorum_available: false, reachable_voters: 1, required_voters: 3, leader_elected: false };
+  const ops = operationStatus(cluster);
+  const health = stripMap(PANEL.clusterStripCells(sandbox().env, cluster, ops)).get("cluster");
+  assert.equal(health.value, "Recovery required");
+  assert.equal(health.tone, "bad");
+  const kinds = PANEL.clusterAlertKinds(cluster, ops).map((k) => k.kind);
+  assert.equal(kinds[0], "recovery");
+  assert.equal(kinds.includes("maintenance"), false, "recovery carries the fenced target inside it");
+});
+
+test("the two-voter sentence reaches the alert slot whole", () => {
+  const ui = sandbox();
+  const two = status("degraded_reconfiguration", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+  ]);
+  const state = PANEL.clusterStateView(two);
+  assert.ok(state.body.length > 80, "the state carries its full sentence");
+  const html = ui.clusterAlerts(two, operationStatus(two));
+  assert.ok(html.includes(`<b>${ui.esc(state.title)}.</b> ${ui.esc(state.body)}`),
+    "the painted alert carries the unshortened two-voter body");
+});
+
+test("a drawer is opened by a real button, and the row only delegates to it", () => {
+  const ui = sandbox();
+  const cluster = labCluster();
+  const row = ui.clusterNodeTableRow(cluster.nodes[1], cluster, null);
+  const [summary] = row.split('<tr class="setdrawer"');
+  assert.doesNotMatch(summary, /<tr[^>]*(tabindex|onkeydown|aria-expanded|aria-controls)/,
+    "the row is not a control; the button is");
+  assert.match(summary, /<button type="button" class="clnodebtn" data-node="node-2" aria-expanded="false" aria-controls="cldrawer-node-2" onclick="toggleClusterNode\(this\)">[\s\S]*lab2<\/span><\/button>/);
+  assert.match(row, /<tr class="setdrawer" id="cldrawer-node-2"/, "aria-controls names a panel that exists");
+
+  const toggled = [];
+  const click = (selection) => new Function(
+    "getSelection", "toggleClusterNode",
+    `${shippedSource("clusterRowClick")}
+     return clusterRowClick;`,
+  )(() => selection, (button) => toggled.push(button));
+  const button = { id: "toggle" };
+  const rowEl = { querySelector: (selector) => (selector === ".clnodebtn" ? button : null) };
+  const plain = { target: { closest: () => null } };
+  click({ isCollapsed: true, toString: () => "" })(plain, rowEl);
+  assert.deepEqual(toggled, [button], "a click on the row is the button's toggle");
+  click({ isCollapsed: false, toString: () => "lab2" })(plain, rowEl);
+  assert.equal(toggled.length, 1, "finishing a text selection does not toggle the drawer");
+  click({ isCollapsed: true, toString: () => "" })({ target: { closest: () => ({}) } }, rowEl);
+  assert.equal(toggled.length, 1, "a control inside the row handles its own click");
+});
+
+test("open drawers are dropped when the operator leaves the section", async () => {
+  const run = async ({ shown, tab, reset }) => {
+    const view = new Function(
+      "shown", "tab",
+      `let SETTINGS=null,TRAKT=null,TRAKT_EDIT=false,SETTINGS_DATA={},DV_SETTINGS_POLL_AT=0,CLUSTER_LOADED=true;
+       let SETTINGS_PENDING_KEEP=null,SETTINGS_SHOWN_TAB=shown,LIB_DRAWER=null,USER_DRAWER=null,DEVICE_DRAWER=null;
+       let CLUSTER_OPEN_NODES=["node-2"],PAGE_RENDER_GENERATION=1;
+       const SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
+       const ME={is_admin:true},location={hash:"#/settings/"+tab},localStorage={setItem(){}};
+       const settingsTab=()=>tab,captureSettingsMounts=()=>null,forgetJoinToken=()=>{};
+       const layoutChrome=()=>{},settingsShell=()=>"",setPagePhase=()=>{},setPageTimer=()=>{};
+       const loadSettingsTab=async()=>false,settingsClusterEnabled=()=>true;
+       ${shippedSource("viewSettings")}
+       return async(reset)=>{await viewSettings(1,reset);return CLUSTER_OPEN_NODES;};`,
+    )(shown, tab);
+    return view(reset);
+  };
+  assert.deepEqual(await run({ shown: "cluster", tab: "cluster", reset: false }), ["node-2"],
+    "a same-section reload keeps them");
+  assert.deepEqual(await run({ shown: "cluster", tab: "system", reset: false }), [],
+    "another section drops them");
+  assert.deepEqual(await run({ shown: "cluster", tab: "cluster", reset: true }), [],
+    "a fresh visit starts closed");
+});
+
+test("the strip is not Healthy over a status that says otherwise", () => {
+  const env = sandbox().env;
+  const health = (cluster, ops) => stripMap(PANEL.clusterStripCells(env, cluster, ops)).get("cluster");
+  const cluster = labCluster();
+  // Still collecting degrades nothing.
+  assert.equal(health(cluster, null).value, "Healthy");
+  // A failed collection.
+  const failed = health(cluster, { unavailable: true, message: "gateway" });
+  assert.deepEqual([failed.value, failed.tone, failed.sub],
+    ["Status unavailable", "warn", "direct status could not be collected"]);
+  // A voter the status did not observe, with the server's blocker as the reason.
+  const unobserved = operationStatus(cluster, { unreachable: true });
+  const down = health(cluster, unobserved);
+  assert.deepEqual([down.value, down.tone], ["Degraded", "warn"]);
+  assert.equal(down.sub, "voter not observed on lab2");
+  // …and with no blocker to name, the count.
+  unobserved.verdict = { safe_to_restart_one: true, candidate_node_id: "node-3", blockers: [], warnings: [] };
+  assert.equal(health(cluster, unobserved).sub, "3 of 4 voters answered");
+  assert.equal(PANEL.clusterUnobservedVoters(cluster, null).length, 0);
+  // Degraded replication.
+  const behind = labCluster({ replication: { ...REPLICATION, health: "degraded", explanation: "This node is behind." } });
+  assert.deepEqual([health(behind, operationStatus(behind)).value, health(behind, operationStatus(behind)).sub],
+    ["Degraded", "replication degraded"]);
+});
+
+test("a blocked verdict alone puts the base warning in the alert slot", () => {
+  const ui = sandbox();
+  const cluster = labCluster();
+  const ops = operationStatus(cluster, { unreachable: true });
+  assert.ok(PANEL.clusterAlertKinds(cluster, ops).some((k) => k.kind === "restart_blocked"));
+  const html = ui.clusterAlerts(cluster, ops);
+  assert.match(html, /<b>Do not restart another voter\.<\/b> Rolling restart is blocked: voter not observed on lab2\./);
+  // Not repeated where another block already says it, and not on a safe verdict.
+  assert.equal(PANEL.clusterAlertKinds(cluster, operationStatus(cluster)).length, 0);
+  const downCluster = labCluster();
+  downCluster.nodes[1].reachable = false;
+  const kinds = PANEL.clusterAlertKinds(downCluster, operationStatus(downCluster, { unreachable: true })).map((k) => k.kind);
+  assert.deepEqual(kinds, ["voter_down"]);
+});
+
+test("degraded replication shows the server's explanation in the ledger", () => {
+  const env = sandbox().env;
+  const behind = { ...REPLICATION, health: "degraded", explanation: "This node is behind. Keep it running while it catches up." };
+  const cluster = labCluster({ replication: behind });
+  const rows = PANEL.clusterDatabaseRows(env, cluster, behind, operationStatus(cluster));
+  const watch = rows.find((row) => row[0] === "Watch state");
+  assert.ok(watch, "a degraded store says why");
+  assert.equal(watch[1], "This node is behind. Keep it running while it catches up.");
+  const healthy = PANEL.clusterDatabaseRows(env, labCluster(), REPLICATION, null);
+  assert.equal(healthy.some((row) => row[0] === "Watch state"), false, "in sync needs no sentence");
+});
+
+test("a learner can be promoted from its own screen", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  cluster.local_node_id = "node-5";
+  cluster.nodes[4].voter_storage_ready = true;
+  const actions = PANEL.clusterNodeActions(env, cluster, operationStatus(cluster), cluster.nodes[4]);
+  assert.deepEqual(actions.map((a) => a.id), ["maintenance", "restart", "leave", "promote"]);
+  assert.equal(actions.find((a) => a.id === "promote").blocked, false);
+});
+
+test("requirement details are printed, not hidden in a tooltip", () => {
+  const ui = sandbox();
+  const row = ui.clusterSettingRows().find((r) => r.reqs && r.reqs.length);
+  const checks = row.reqs.map(([, title, detail]) => ({ title, detail, status: "met", evidence: "observed" }));
+  const html = ui.clusterChecksMore(row, checks);
+  assert.equal(/title="/.test(html), false);
+  for (const [, , detail] of row.reqs) assert.ok(html.includes(`<small>${ui.esc(detail)}</small>`), detail);
+});
+
+test("the ages move on every tick, fetch or no fetch", async () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const now = { value: 1_000_000 };
+  const { harness, requests, readingAge } = tickHarness({ cluster, ops, now });
+  const first = harness.settingsTick(1, "cluster");
+  await tickSettle();
+  requests[0].resolve(ops);
+  await first;
+  readingAge.innerHTML = "stale";
+  now.value += 2_000;
+  await harness.settingsTick(1, "cluster");
+  assert.equal(requests.length, 1, "nothing was due");
+  assert.notEqual(readingAge.innerHTML, "stale", "the age was patched without a fetch");
+});
+
+test("the roster on the status gate repaints for news, not for a heartbeat", async () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const now = { value: 1_000_000 };
+  const { harness, requests, painted } = tickHarness({ cluster, ops, now, manualRoster: true });
+  const gate = async (roster) => {
+    now.value += 15_000;
+    const tick = harness.settingsTick(1, "cluster");
+    requests.at(-1).resolve(roster);
+    await tickSettle();
+    requests.at(-1).resolve(ops);
+    await tick;
+  };
+  const beat = JSON.parse(JSON.stringify(cluster));
+  beat.nodes.forEach((n) => { n.last_seen_at += 15_000; });
+  beat.replication.last_converged_at = 1_760_000_100;
+  await gate(beat);
+  assert.deepEqual(painted, [], "a heartbeat is not a reason to rewrite the page");
+  assert.deepEqual(harness.cluster(), beat, "it is stored, and its ages are patched in place");
+
+  const lost = JSON.parse(JSON.stringify(beat));
+  lost.nodes[3].reachable = false;
+  harness.openDialog(true);
+  await gate(lost);
+  assert.deepEqual(painted, [], "never under a dialog");
+  assert.deepEqual(harness.cluster(), beat, "a roster that arrives under a dialog is dropped");
+  harness.openDialog(false);
+  await gate(lost);
+  assert.deepEqual(painted, ["render"], "a voter that stopped heartbeating repaints the page once");
+  assert.deepEqual(harness.cluster(), lost);
+  assert.deepEqual(requests.map((r) => r.url).filter((u) => u === "/cluster/nodes").length, 3);
+});
+
+test("heartbeat cells and the last-converged age are patched in place", () => {
+  const cluster = labCluster();
+  cluster.nodes[1].last_seen_at = Date.now() - 125_000;
+  cluster.replication = { ...REPLICATION, last_converged_at: Math.floor(Date.now() / 1000) - 600 };
+  const td = { tagName: "TD", innerHTML: "4s ago", getAttribute: () => "node-2" };
+  const span = { tagName: "SPAN", textContent: "4s ago", getAttribute: () => "node-2" };
+  const converged = { textContent: "3s ago" };
+  const patch = new Function(
+    "document", "SETTINGS_DATA", "PlurxClusterPanel",
+    `${shippedSource("esc")}
+     ${shippedSource("fmtAgo")}
+     ${shippedSource("fmtBytes")}
+     ${shippedSource("clenv")}
+     ${shippedSource("patchClusterReadingAge")}
+     return patchClusterReadingAge;`,
+  )({
+    getElementById: (id) => (id === "cldb-converged" ? converged : null),
+    querySelectorAll: (selector) => (selector === "[data-clhb]" ? [td, span] : []),
+  }, { cluster, clusterOps: null }, PANEL);
+  patch();
+  assert.match(td.innerHTML, /^2m/);
+  assert.match(span.textContent, /^2m/);
+  assert.match(converged.textContent, /^10m/);
+});
+
+test("aria-controls names only panels that exist, and a refusal is announced once", () => {
+  const recovering = labCluster();
+  recovering.recovery = { required: true, quorum_available: false, reachable_voters: 1, required_voters: 3, leader_elected: false };
+  const blocked = sandbox({ expanded: ["add"] }).clusterNodesCard(recovering, null);
+  assert.equal(blocked.includes('aria-controls="clexp-add"'), false);
+  assert.equal(blocked.includes('id="clexp-add"'), false);
+  const open = sandbox().clusterNodesCard(labCluster(), null);
+  assert.match(open, /aria-controls="clexp-add" aria-expanded="false"/);
+
+  const ui = sandbox({ refusal: { node_id: "node-2", code: "cluster_leader_removal_refused", message: "no" } });
+  assert.match(ui.clusterRefusalHtml(), /^<div class="clalert bad" role="alert">/);
+  assert.match(ui.clusterRefusalHtml(), /^<div class="clalert bad"><div>/, "a repaint does not re-announce it");
+});
+
+test("a safe verdict that names no candidate prints no empty name", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  ops.verdict = { safe_to_restart_one: true, candidate_node_id: null, blockers: [], warnings: [] };
+  const row = PANEL.clusterMaintenanceRows(env, cluster, ops)[0];
+  assert.equal(row.text, "The observed voters preserve majority after one restart.");
+  assert.doesNotMatch(row.action, /Open/);
+  const restart = PANEL.clusterNodeActions(env, cluster, ops, cluster.nodes[0]).find((a) => a.id === "restart");
+  assert.equal(restart.reason, "The direct rollout verdict names no candidate.");
+});
+
+test("the strip's build breaks after its plus sign, not inside the hash", () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  ops.nodes.forEach((row) => { row.status.build = "0.71.2+8630ee43"; });
+  assert.equal(stripMap(PANEL.clusterStripCells(sandbox().env, cluster, ops)).get("build").value, "0.71.2+<wbr>8630ee43");
+  assert.equal(PANEL.clusterNodeCells(sandbox().env, cluster.nodes[0], ops).build.text, "0.71.2+<wbr>8630ee43");
+});
+
+test("a learner with a fault reads Needs attention, not Catching up", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  cluster.nodes[4].bounded_read_ready = false;
+  const ops = operationStatus(cluster);
+  assert.equal(PANEL.clusterNodeCells(env, cluster.nodes[4], ops).status.label, "Catching up");
+  ops.nodes[4].status.process.live = false;
+  assert.equal(PANEL.clusterNodeCells(env, cluster.nodes[4], ops).status.label, "Needs attention");
 });
 
 main().catch((error) => {

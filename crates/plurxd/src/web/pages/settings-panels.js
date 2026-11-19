@@ -50,12 +50,12 @@ function settingsTab(){
 // keep the cached aggregate across one (a tab switch is not a page load).
 let SETTINGS_SHOWN_TAB=null;
 // Settings cards that share a section with something that repaints the whole
-// section: the cluster board on every status change and roster refresh, the
+// section: the Cluster page on every status change and roster refresh, the
 // analysis summary after its Save. Each mount is carried across the repaint as
 // the live DOM node, so an unsaved edit, the Save it enabled, an open readiness
 // disclosure and focus all survive; the card's own Save replaces it from the
 // server's answer, and a fresh visit to the section draws it anew.
-const SETTINGS_KEPT_MOUNTS={playback:["enable-subtitle-translation"],cluster:["cluster-settings"],analysis:["subbackfillcard"],maintenance:["enable-subtitle-transcription"]};
+const SETTINGS_KEPT_MOUNTS={playback:["enable-subtitle-translation"],cluster:["cluster-settings","cluster-backup"],analysis:["subbackfillcard"],maintenance:["enable-subtitle-transcription"]};
 let SETTINGS_PENDING_KEEP=null;
 function captureSettingsMounts(tab){
   const nodes=(SETTINGS_KEPT_MOUNTS[tab]||[]).map(id=>document.getElementById(id))
@@ -99,7 +99,7 @@ function renderSettings(){
   restoreSettingsMounts(keep);
   revealSettingsAnchor(tab);
   if(tab==="developer")cinemaRemoteLoadManagement();
-  if(tab==="cluster"&&settingsClusterEnabled()){ applyClusterFolds(); return refreshClusterLogs(); }
+  if(tab==="cluster"&&settingsClusterEnabled()) return refreshClusterLogs();
 }
 function settingsPanel(tab,d){
   if(tab==="metadata")     return metadataPanel(d.settings,d.developerReadiness);

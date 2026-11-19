@@ -307,7 +307,7 @@ test("names never survive into a snapshot that did not carry them", () => {
 });
 
 test("the node label wears a class nothing else in the sheet styles", () => {
-  // The first draft called it `.clnode`, which is also the cluster page's node
+  // The first draft called it `.clnode`, which was then also the cluster page's node
   // *card* — border, radius, panel background — defined later in the same
   // stylesheet at equal specificity. The later rule wins, so the label
   // rendered as a bordered box inside a table cell, on two pages.

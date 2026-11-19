@@ -33,9 +33,8 @@ crates/plurxd/src/web/layouts/theater.js	TS2769	1
 crates/plurxd/src/web/pages/activity-stream.js	TS2339	8
 crates/plurxd/src/web/pages/analysis.js	TS2339	10
 crates/plurxd/src/web/pages/analysis.js	TS2367	1
-crates/plurxd/src/web/pages/cluster-database.js	TS2339	2
-crates/plurxd/src/web/pages/cluster-troubleshooting.js	TS2339	22
-crates/plurxd/src/web/pages/cluster.js	TS2339	8
+crates/plurxd/src/web/pages/cluster-troubleshooting.js	TS2339	19
+crates/plurxd/src/web/pages/cluster.js	TS2339	6
 crates/plurxd/src/web/pages/home-helpers.js	TS2339	1
 crates/plurxd/src/web/pages/home-helpers.js	TS2345	1
 crates/plurxd/src/web/pages/home-helpers.js	TS2362	1

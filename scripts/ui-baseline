@@ -1480,25 +1480,50 @@ def stress_long_track_containment(page, name, layout_id):
         raise Fail(f"{name}/{layout_id}: unbroken fallback audio text did not wrap at the narrow viewport")
 
 
-def stress_cluster_metric_containment(page, name, layout_id):
-    """Exercise a dynamic hostname in the zero-floored cluster health grid."""
+def stress_cluster_strip_containment(page, name, layout_id):
+    """Exercise long hostnames in the Cluster status strip and nodes table.
+
+    Both fixtures use the page's real classes. A value in the strip wraps
+    inside its own cell; the nodes table is sized by its card (the card
+    clips, so a column pushed past it would be unreachable) and its Node cell
+    wraps a long hostname instead of widening the table.
+    """
     if name != "item":
         return
     metrics = page.evaluate("""() => {
+      const host = "ClusterLeaderHostnameWithoutAnyNaturalBreakOpportunity0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
       const fixture = document.createElement("div");
-      fixture.className = "cluster-health";
+      fixture.className = "clcard clstrip";
       fixture.style.cssText = "grid-template-columns:repeat(3,minmax(0,1fr));max-width:700px";
-      fixture.innerHTML = `<div class="clmetric"><strong>ClusterLeaderHostnameWithoutAnyNaturalBreakOpportunity0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ</strong><span>Current leader</span></div>
-        <div class="clmetric"><strong>3 / 3</strong><span>Fresh heartbeats</span></div>
-        <div class="clmetric"><strong>3 · q2</strong><span>Voters · quorum</span></div>`;
-      document.querySelector("main").append(fixture);
-      const metric = fixture.querySelector(".clmetric");
-      const value = metric.querySelector("strong");
+      fixture.innerHTML = `<div><div class="clk">Leader</div><div class="clv">${host}</div><div class="cls">${host} unreachable</div></div>
+        <div><div class="clk">Nodes reachable</div><div class="clv">3 / 3</div><div class="cls">3 voters</div></div>
+        <div><div class="clk">Build</div><div class="clv">0.71.2</div><div class="cls">all 3 nodes match</div></div>`;
+      const card = document.createElement("section");
+      card.className = "clcard";
+      card.id = "cluster-nodes";
+      card.style.maxWidth = "1100px";
+      const cells = ["Role", "Status", "Heartbeat", "Raft", "WAL", "Database", "Streams"]
+        .map((label) => `<td data-label="${label}" class="num">follower · lag 0</td>`).join("");
+      card.innerHTML = `<table class="clnodetable"><thead><tr><th>Node</th><th>Role</th><th>Status</th><th>Heartbeat</th>
+        <th>Raft</th><th>WAL</th><th>Database</th><th>Streams</th><th>Build</th></tr></thead><tbody>
+        <tr class="clrow"><td class="clname"><button type="button" class="clnodebtn"><span class="clhost">${host}</span></button>
+        <span class="pill acc">Leader</span><span class="pill">This node</span><div class="clsub">${host}.lan</div></td>${cells}
+        <td data-label="Build" class="num">0.71.2-rc.3+8630ee43a1b2c3d4.dirty.20261118T2031Z</td></tr></tbody></table>`;
+      document.querySelector("main").append(fixture, card);
+      const metric = fixture.firstElementChild;
+      const value = metric.querySelector(".clv");
       const fixtureBox = fixture.getBoundingClientRect();
       const metricBox = metric.getBoundingClientRect();
       const valueBox = value.getBoundingClientRect();
       const range = document.createRange();
       range.selectNodeContents(value);
+      const cardBox = card.getBoundingClientRect();
+      const table = card.querySelector("table");
+      const name = card.querySelector(".clhost");
+      const nameRange = document.createRange();
+      nameRange.selectNodeContents(name);
+      const cellPastCard = Math.max(...[...card.querySelectorAll("td")]
+        .map((cell) => cell.getBoundingClientRect().right - cardBox.right));
       return {
         documentOverflow: document.documentElement.scrollWidth
           - document.documentElement.clientWidth,
@@ -1507,22 +1532,27 @@ def stress_cluster_metric_containment(page, name, layout_id):
         valuePastMetric: valueBox.right - metricBox.right,
         valueBeforeMetric: metricBox.left - valueBox.left,
         valueInternalOverflow: value.scrollWidth - value.clientWidth,
+        tablePastCard: table.scrollWidth - card.clientWidth,
+        cellPastCard,
         valueHeight: valueBox.height,
         valueLines: range.getClientRects().length,
+        hostLines: nameRange.getClientRects().length,
         viewportWidth: document.documentElement.clientWidth,
       };
     }""")
     leaks = {
         key: value for key, value in metrics.items()
-        if key not in {"valueHeight", "valueLines", "viewportWidth"} and value > 1
+        if key not in {"valueHeight", "valueLines", "hostLines", "viewportWidth"} and value > 1
     }
     if leaks:
         rendered = ", ".join(f"{key}={value:.1f}px" for key, value in leaks.items())
-        raise Fail(f"{name}/{layout_id}: cluster metric escaped its owner ({rendered})")
+        raise Fail(f"{name}/{layout_id}: cluster strip or nodes table escaped its owner ({rendered})")
     if metrics["valueHeight"] <= 0:
-        raise Fail(f"{name}/{layout_id}: cluster metric stress fixture did not render")
+        raise Fail(f"{name}/{layout_id}: cluster strip stress fixture did not render")
     if metrics["viewportWidth"] <= 720 and metrics["valueLines"] < 2:
         raise Fail(f"{name}/{layout_id}: cluster hostname did not wrap at the narrow viewport")
+    if metrics["hostLines"] < 2:
+        raise Fail(f"{name}/{layout_id}: nodes-table hostname did not wrap inside its cell")
 
 
 def counted_api_calls(name, route, api_calls):
@@ -2013,7 +2043,7 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         page.screenshot(path=str(shot), full_page=not args.viewport_only)
         stress_classic_header(page, name, layout_id)
         stress_long_track_containment(page, name, layout_id)
-        stress_cluster_metric_containment(page, name, layout_id)
+        stress_cluster_strip_containment(page, name, layout_id)
         # Refusals annotate a capture that is already failing; they never
         # fail one on their own. Some fetches are non-ok by design — the
         # segment-playlist probe, the subtitle sidecar, the reader search —
