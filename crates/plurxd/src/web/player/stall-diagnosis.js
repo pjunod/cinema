@@ -90,11 +90,12 @@ async function startTranscodeFallback(reason, note){
      &&hasPendingPlaybackOpen(PLAYER)) return false;
   if(hasPendingPlaybackOpen(PLAYER)
      &&reason!=="stall-manual"&&reason!=="stall-terminal") return false;
-  const startSec=positionForPlaybackIntent(v,PLAYER);
+  const me=PLAYER, startSec=positionForPlaybackIntent(v,me);
+  const viewerInitiated=reason==="stall-manual"||reason==="stall-terminal";
+  const originStart=me.hlsStartup?.transport==="native"&&!me.controlSeek&&Math.round(startSec*1000)===0;
   endWait(false);
-  beginPlaybackControlSeek(PLAYER,startSec,
-    reason==="stall-manual"||reason==="stall-terminal");
-  const me=PLAYER;
+  if(!originStart) beginPlaybackControlSeek(me,startSec,viewerInitiated);
+  else if(viewerInitiated) supersedePlaybackControlIntent(me);
   // Before the session is opened, because `transcodeOpts` reads it: a stream
   // the browser refused is not a stream it lacked the pixels for, so the
   // replacement keeps the source's resolution (see sessionHeight). Set only
@@ -111,6 +112,7 @@ async function startTranscodeFallback(reason, note){
   // in when this caller brought one.
   return requestPlaybackMediaChange(me,{method:'transcode',copyHls:false,
     reason:reason||"fallback",note:note||me.rescuedNote,
+    ...(originStart?{reopenPositionSec:0}:{}),
     automatic:reason==='decode-rescue'||reason==='auto-supply',
     from:reason==='auto-supply'?me.method:null,switchReason:"supply stalls"});
 }
@@ -901,12 +903,14 @@ function retryPlayback(){
     PENDING_ATTEMPT_REASON="retry";
     if(PLAYER?.fileId===retry.fileId){
       retry.wantsPlayback=PLAYER.wantsPlayback;
-      beginPlaybackControlSeek(PLAYER,retry.resumeMs/1000);
+      if(retry.resumeMs>0||PLAYER.controlSeek) beginPlaybackControlSeek(PLAYER,retry.resumeMs/1000);
     }
     return play(retry.fileId,retry.title,retry.resumeMs,retry.knownDurMs,retry.meta,null,retry);
   }
   if(!PLAYER) return;
-  const t=(PLAYER.stallFrom!=null)?PLAYER.stallFrom:pbPosSec();
+  const t=PLAYER.controlSeek?.targetMs!=null
+    ? (PLAYER.controlSeek.targetMs+(PLAYER.bookOffset||0))/1000
+    : PLAYER.stallFrom??pbPosSec();
   if(PLAYER.playPermissionDenied){
     // The stopped owner is already retired. Reset the SAME element within the
     // retry gesture, before play can await a replacement session. WebKit's
@@ -925,7 +929,7 @@ function retryPlayback(){
     return play(p.fileId,p.title||"",targetMs,p.knownDur||0,p.meta,null,retry);
   }
   raisePlaybackSurface("owner_recovery_step",{title:"Retrying…",detail:null});
-  seekTo(t,true);
+  return seekTo(t,true,null,true,null,{stallRetry:true});
 }
 async function stallDiagnose(){
   const v=document.getElementById("video");

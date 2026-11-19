@@ -22,6 +22,8 @@ function pbPosSec(){ const v=document.getElementById("video"); if(PLAYER?.mediaA
 function positionForPlaybackIntent(v,p){
   const target=p&&p.controlSeek&&Number(p.controlSeek.targetMs);
   if(Number.isFinite(target)) return Math.max(0,target/1000);
+  const reopen=p?.pendingMediaChange?.reopenPositionSec;
+  if(Number.isFinite(reopen)) return reopen;
   if(p?.mediaAttachment?.nativePositionPending){
     const hint=p.controlPositionHintSec;
     if(hint!=null&&Number.isFinite(Number(hint))) return Math.max(0,Number(hint));
@@ -36,7 +38,7 @@ function positionForPlaybackIntent(v,p){
 // and the picture on screen is still the predecessor's.
 function unexecutedPlaybackDestinationSec(p){
   const pending=p&&p.controlSeek;
-  if(!pending||pending.executed) return null;
+  if(pending?.executed) return null;
   // ONLY while a replacement is actually pending or retained after a refusal.
   // `controlSeek` outlives the element by design and `play()` carries it into
   // the successor with `executed:false`, so a destination can survive into a
@@ -52,8 +54,8 @@ function unexecutedPlaybackDestinationSec(p){
   // needed a replacement would need it applied in three places; the honest
   // answer for now is to leave their arithmetic exactly as it was.
   if(p.bookParts&&p.bookParts.length) return null;
-  const target=Number(pending.targetMs);
-  return Number.isFinite(target)?Math.max(0,target/1000):null;
+  const target=pending?.targetMs;
+  return Number.isFinite(target)?Math.max(0,target/1000):(p.pendingMediaChange.reopenPositionSec??null);
 }
 // Where a relative seek counts from. Not the attached element's clock: while
 // a replacement is pending the incumbent is still showing 100 seconds, so
@@ -676,7 +678,7 @@ function togglePlay(origin="viewer_control"){
         ? (PLAYER.controlSeek.targetMs+(PLAYER.bookOffset||0))/1000 : pbPosSec();
       clientLog(Object.assign({level:"info",event:"paused_retirement",detail:"reopen",
         message:`reopening the retired paused session at ${at.toFixed(1)}s`},playbackContext()));
-      seekTo(at,true,null,false,null,qualityBoundary);
+      seekTo(at,true,null,false,null,{qualityBoundary});
     }else{
       if(PLAYER.wantsPlayback) resumeHlsStartup(v,PLAYER);
       else pauseHlsStartup(PLAYER);
@@ -1192,7 +1194,7 @@ function playbackSeekBufferCovers(v,p,targetMs){
 // Seek that works for every method: direct/VOD and safe rolling/progressive
 // destinations seek the attached element; everything else reopens at film time.
 async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, viewerInitiated=true,
-  recoveryEpisode=null,qualityBoundary=false,boundaryCandidate=null){
+  recoveryEpisode=null,{qualityBoundary=false,boundaryCandidate=null,stallRetry=false}={}){
   // The element at the press. Only the synchronous routes below use it; the
   // media route re-reads #video once the awaits are behind it.
   const pressed=document.getElementById("video"); if(!pressed||!PLAYER) return;
@@ -1258,6 +1260,24 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   // A same-target recovery continues the viewer's seek measurement. It is
   // another attachment attempt, not another seek command in the denominator.
   const prior=PLAYER.controlSeek;
+  const reason=forceReopen?"stall-restart":"seek";
+  const mediaChange=p=>({method:p.method,copyHls:!!p.copyHls,reason,height:autoHeightOverride,
+    forceReopen,previousSessionId:p.sessionId,
+    // Only an independently selected lower rung turns supply pressure into a
+    // capacity verdict. MEDIA_ERR_NETWORK alone keeps the same recipe.
+    recoveryCause:recoveryEpisode&&recoveryEpisode.kind==="supply"&&autoHeightOverride>0
+      ?"network":"unknown"});
+  if(forceReopen&&(stallRetry||recoveryEpisode)&&!prior&&Math.round(targetSec*1000)===0
+    &&PLAYER.hlsStartup?.transport==="native"){
+    // Starting at the file origin has no viewer seek to land. Keep zero on
+    // the create even if the retired element has a nonzero clock. The
+    // successor uses its own startup presentation and freeze detection.
+    const p=PLAYER;
+    if(viewerInitiated) supersedePlaybackControlIntent(p);
+    endWait(false);
+    if(restartPendingPlaybackOpen(p,reason,0)) return;
+    return requestPlaybackMediaChange(p,{...mediaChange(p),reopenPositionSec:0});
+  }
   const seekTelemetry=forceReopen&&prior?.targetMs===Math.round(targetSec*1000)
     &&!prior.seekTelemetry?.outcome ? prior.seekTelemetry
     : viewerInitiated&&!forceReopen ? {startedAt:null,outcome:null,context:null,cleanup:null} : null;
@@ -1265,7 +1285,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
     {preserveContinuousManualQuality:!forceReopen&&!!PLAYER.vod
       &&!!PLAYER.continuousQuality&&!PLAYER.pendingMediaChange});
   endWait(false);
-  if(restartPendingPlaybackOpen(PLAYER,forceReopen?"stall-restart":"seek")){
+  if(restartPendingPlaybackOpen(PLAYER,reason)){
     recordPlaybackSeekRoute(PLAYER,seekIntent,pressed,{route:"reopen"},null,null,null,"pending_open");
     dispatchPlaybackSeekTelemetry(PLAYER,seekIntent);
     return;
@@ -1427,14 +1447,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   // and re-attach hls.js twice. Token the call and bail any superseded one after
   // its await, so only the last seek attaches.
   dispatchPlaybackSeekTelemetry(PLAYER,seekIntent);
-  return requestPlaybackMediaChange(PLAYER,{method:PLAYER.method,copyHls:!!PLAYER.copyHls,
-    reason:forceReopen?"stall-restart":"seek",height:autoHeightOverride,
-    forceReopen,previousSessionId:PLAYER.sessionId,
-    // Only an independently selected lower rung turns supply pressure into a
-    // capacity verdict. MEDIA_ERR_NETWORK alone is a failed transfer and keeps
-    // this create on the same recipe without the legacy rung-lowering ticket.
-    recoveryCause:recoveryEpisode&&recoveryEpisode.kind==="supply"&&autoHeightOverride>0
-      ?"network":"unknown"});
+  return requestPlaybackMediaChange(PLAYER,mediaChange(PLAYER));
 }
 function autoskipOn(){ try{ return localStorage.getItem("plurx_autoskip")==="1"; }catch(e){ return false; } }
 function setAutoskip(on){ try{ localStorage.setItem("plurx_autoskip", on?"1":"0"); }catch(e){}
