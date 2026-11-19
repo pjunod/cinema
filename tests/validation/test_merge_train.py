@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -64,14 +65,14 @@ class SelectionCase(unittest.TestCase):
     def test_worker_proof_uses_exact_checkout_and_all_ends_of_the_diff(self):
         base, head = "a" * 40, "b" * 40
         source = {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}
+        governed = runpy.run_path(str(ROOT / "scripts/check-worker-control"))["GOVERNED"]
         for path, required in (
+            *((path, True) for path in governed),
             ("docs/ci/MERGE-TRAIN.md", False),
             ("crates/plurxd/src/http/browse.rs", False),
-            ("crates/plurxd/src/library_work.rs", True),
             ("crates/plurx-worker-control/src/nested/driver.rs", True),
             ("verification/worker-control/cases.json", True),
             ("validation/merge_train.py", True),
-            ("Cargo.lock", True),
         ):
             with self.subTest(path=path), patch(
                 "validation.merge_train.subprocess.check_output",

@@ -47,6 +47,7 @@ WORKER_PROOF_FILES = frozenset({
     "crates/plurxd/src/library_work.rs",
     "crates/plurxd/src/library_work/env.rs",
     "scripts/check-worker-control",
+    "tests/operations/test_worker_control_runner.py",
     "validation/merge_train.py",
     "validation/worker_control_resume.py",
 })
