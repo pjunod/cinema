@@ -898,8 +898,35 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn owned_group_pause_preserves_active_budget_and_cancel_reaps_the_stopped_group() {
+        async fn wait_for_fixture(
+            label: &str,
+            bound: Duration,
+            mut observed: impl AsyncFnMut() -> bool,
+        ) {
+            let began = std::time::Instant::now();
+            loop {
+                if observed().await {
+                    return;
+                }
+                assert!(
+                    began.elapsed() < bound,
+                    "{label} was not observed within {bound:?}"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+
+        const ACTIVE_BUDGET: Duration = Duration::from_secs(2);
+        const HOLD: Duration = Duration::from_millis(2200);
+        // Real filesystem and process observations run with the budget clock
+        // stationary. A blocking task inhibits Tokio's idle auto-advance.
+        // Dropping its sender releases it even if this test unwinds.
+        let (release_clock, hold_clock) = tokio::sync::oneshot::channel::<()>();
+        let clock_guard = tokio::task::spawn_blocking(move || {
+            let _ = hold_clock.blocking_recv();
+        });
         let directory = tempfile::tempdir().expect("source pause fixture");
         let leader = directory.path().join("leader.pid");
         let helper = directory.path().join("helper.pid");
@@ -911,45 +938,63 @@ mod tests {
         let args=vec!["-c".to_owned(),
             "echo $$ > \"$1\"; (while :; do printf x >> \"$2\"; sleep 0.02; done) & echo $! > \"$3\"; wait".to_owned(),
             "pause-fixture".to_owned(),leader.to_string_lossy().into_owned(),progress.to_string_lossy().into_owned(),helper.to_string_lossy().into_owned()];
+        let started = tokio::time::Instant::now();
         let child = tokio::spawn(async move {
             pausable(
                 worker_control,
                 cancellable(
                     worker_cancel,
-                    output("/bin/sh", &args, Duration::from_secs(2), 1024, TEST_WORK),
+                    output("/bin/sh", &args, ACTIVE_BUDGET, 1024, TEST_WORK),
                 ),
             )
             .await
         });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !leader.exists() || !helper.exists() || !progress.exists() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+        wait_for_fixture("owned group progress", Duration::from_secs(5), async || {
+            leader.exists() && helper.exists() && progress.exists()
         })
-        .await
-        .expect("the owned group is reading");
+        .await;
         let pid: i32 = tokio::fs::read_to_string(&leader)
             .await
             .expect("leader")
             .trim()
             .parse()
             .expect("pid");
+        let verified_pause = async |revision| {
+            wait_for_fixture("physical group stop", Duration::from_secs(5), async || {
+                source_group_quiescent(pid, true)
+                    .await
+                    .expect("whole group observation")
+            })
+            .await;
+            // Once the real group has stopped, give the owner three of its
+            // 100 ms poll ticks. A scan already in flight may have seen the
+            // stop in progress. The owner still needs two stopped observations.
+            tokio::time::advance(Duration::from_millis(300)).await;
+            wait_for_fixture(
+                "owned pause acknowledgement",
+                Duration::from_secs(5),
+                async || {
+                    let observation = control.observation();
+                    observation.phase == SourcePausePhase::Paused
+                        && observation.revision == revision
+                },
+            )
+            .await;
+        };
         let first = control.request_pause();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while control.observation().phase != SourcePausePhase::Paused {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("every group thread stopped");
-        assert!(source_group_quiescent(pid, true)
-            .await
-            .expect("whole group observation"));
+        verified_pause(first).await;
+        let elapsed_before_hold = started.elapsed();
+        assert!(
+            elapsed_before_hold < ACTIVE_BUDGET,
+            "the first verified stop must precede the active deadline: {elapsed_before_hold:?}"
+        );
         let before = tokio::fs::metadata(&progress)
             .await
             .expect("progress")
             .len();
-        tokio::time::sleep(Duration::from_millis(2200)).await;
+        let prior_credit = control.paused_duration();
+        tokio::time::advance(HOLD).await;
+        assert_eq!(control.paused_duration() - prior_credit, HOLD);
         assert_eq!(
             before,
             tokio::fs::metadata(&progress)
@@ -957,35 +1002,35 @@ mod tests {
                 .expect("held progress")
                 .len()
         );
-        assert!(
-            !child.is_finished(),
-            "verified holds do not consume the two-second active budget"
-        );
+        if child.is_finished() {
+            panic!(
+                "child finished through a verified hold: result={:?}; timeout evidence={:?}",
+                child.await,
+                control.test_child_active_timeouts(),
+            );
+        }
         assert!(!control.resume(first + 1));
         assert!(control.resume(first));
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while tokio::fs::metadata(&progress)
-                .await
-                .expect("resumed progress")
-                .len()
-                == before
-            {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the same helper resumes progress");
+        wait_for_fixture(
+            "same helper resumes progress",
+            Duration::from_secs(2),
+            async || {
+                tokio::fs::metadata(&progress)
+                    .await
+                    .expect("resumed progress")
+                    .len()
+                    > before
+            },
+        )
+        .await;
         let second = control.request_pause();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while control.observation().phase != SourcePausePhase::Paused {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("second owned pause");
+        verified_pause(second).await;
         assert!(!control.resume(first));
         assert!(second > first);
         cancellation.cancel();
+        tokio::time::resume();
+        drop(release_clock);
+        clock_guard.await.expect("join fixture clock guard");
         let failure = tokio::time::timeout(Duration::from_secs(5), child)
             .await
             .expect("stopped group cleanup")

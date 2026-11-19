@@ -4103,7 +4103,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # after End retires the Start waiter.
 # The changed-source offline fixture awaits one queue pass in place of the
 # spawned worker loop, removing one test task.
-expected_occurrences = 1182
+# The owned-process pause fixture joins one blocking task that prevents
+# Tokio's test clock from auto-advancing during physical observations.
+expected_occurrences = 1183
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -6065,7 +6067,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Recovery adds six test-only matches in shared_source_playback/tests.rs.
 # One waits for Store-wall lease expiry, one bounds Source-factory retirement,
 # three bound native failure diagnostics, and one bounds the VTT failure body.
-expected_occurrences = 2272
+# The owned-process pause fixture replaces four observation timeouts and five
+# sleeps with host-clock observation bounds and an explicit budget clock.
+expected_occurrences = 2263
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
