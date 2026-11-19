@@ -35,7 +35,9 @@ jobs:
           swap=$(cat "$root/memory.swap.max")
           printf 'Effective diagnostic container memory=%s swap=%s\n' "$memory" "$swap"
           [[ "$memory" =~ ^[0-9]+$ && "$swap" =~ ^[0-9]+$ ]]
-          (( memory >= 10737418240 && memory <= 17179869184 && swap <= 1073741824 ))
+          # This registration's standard inherited swap cap is 4 GiB.
+          # Keep the requested resident-memory limit at 14 GiB.
+          (( memory == 15032385536 && swap <= 4294967296 ))
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: a1d8301985cc97287d6395c57c532ab2a9eb5c45
