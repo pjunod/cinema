@@ -190,6 +190,11 @@ pub(crate) fn writer_abandoned_replies() -> Vec<WriterAbandonedReply> {
         .collect()
 }
 
+/// Process-local read-pool counters; sampling performs no store read.
+pub(crate) fn read_pool_wait() -> hiqlite::DbReadPoolWait {
+    hiqlite::db_read_pool_wait()
+}
+
 /// This node's place in the cluster.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LocalRole {

@@ -7,6 +7,16 @@ and [WAIT-MAP.md](WAIT-MAP.md) (source waits and external boundaries).
 This contract defines the meaning of `OperationProgress.tla`; it does not
 extend the original [safety contract](../durable-jobs/CONTRACT.md).
 
+## HDR integration with item pins — 2026-11-18
+
+Main `1d350d82` introduces item pins and the reviewed claim/predicate
+closure. Every incoming item pin and dependency is retained. The mapped
+custody activation and TranscodeManager producer items remain byte-identical;
+the HDR changes in those files lie outside those pinned items. No item hash
+is refreshed. The dated whole-file review below remains historical context.
+Models, configurations and prior qualification identities are unchanged;
+this source review does not claim new TLC or runtime execution.
+
 ## HDR playback ownership — scoped source review on 2026-11-17
 
 Codex compared PR #1727 at `19266fde08e2` with main `e59cd50c69b1`.

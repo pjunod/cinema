@@ -1846,10 +1846,24 @@ mod tests {
             hash.step(&cancel).is_err(),
             "a paused cancelled read must not publish"
         );
-        source.seek(SeekFrom::Start(0)).expect("rewind");
-        source
-            .write_all(&[2])
-            .expect("replace byte without changing length");
+        // Some filesystems give consecutive writes the same ctime. Advance
+        // the fixture to an observably different identity before asserting
+        // that the previously captured identity is rejected.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            source.seek(SeekFrom::Start(0)).expect("rewind");
+            source
+                .write_all(&[2])
+                .expect("replace byte without changing length");
+            if std_file_identity(&source).expect("changed identity") != identity {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture ctime did not advance"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         assert!(
             SourceHash::new(source, identity).is_err(),
             "same-sized mutation changes held identity"

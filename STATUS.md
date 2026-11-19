@@ -101,7 +101,7 @@ Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-0
 
 | First recorded | Effort | Now in |
 |---|---|---|
-| 2026-10-11 | Playback startup path: the per-read stall and the web scrim | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
+| Undated | Playback startup path: the per-read stall and the web scrim | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-11 | Startup and tone-map: fewer create-path reads, a tone-map census, lab arms | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-10 | HDR tone-map on Apple Silicon runs on the GPU, held to CPU parity | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-04 | Live TV station logos on Apple TV, iOS and Android | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |

@@ -1,8 +1,26 @@
+# After merging #1727, the inventory contains 1188 namespaced task spawns,
+# 2283 namespaced time constructors and 958 process-capable methods.
 # Q3 integration source union: pure unchanged structural scan measures 1178
 # namespaced task spawns, 2273 timers, 953 broad launch-shaped methods and 401
 # lifecycle shapes. Q3 adds one joined request task, two fixture bounds, one
 # HTTP status read and one Source-factory wait; no matcher/scope/zero change.
 # Static inventory only; no runtime/acceptance claim.
+# Subtitle identity fixture: +1 time shape is the one-millisecond sleep while
+# waiting for an observable ctime mutation, bounded by a two-second assertion.
+# It runs on the existing test thread; no production work or settlement owner.
+# PR1727/main8630 structural union (2026-11-18): preserve both reviewed
+# ownership audits below. Compared with actual main, five task shapes are
+# joined test workers/controllers in decode_facts, source_generation,
+# source_input and vodencode_tests. Five observation deadlines are the three
+# DV supervisor bounds, source custody receive and admission init fetch.
+# Four Command constructors are two fixture policy-command builders in
+# copy_analysis/gap_fill_tests (neither launched there), plus the two owned DV
+# children described below. Three process-capable matches are the controlled
+# decode-facts fixture spawn and the two DV children. The two added kill-on-drop
+# guards remain fallback only; existing owners wait/reap before assertions.
+# No production task/timer/process shape, pattern, root or exclusion changed.
+# Static counts are not runtime/physical-settlement evidence.
+
 # Static raw-retirement fixture follow-up (2026-11-17): one controlled worker
 # thread and one scoped controller thread are both joined. The controller's
 # five-second acknowledgement bound fails observation only; raw custody remains
@@ -6093,7 +6111,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Source-factory retirement observation. These matches are test-only; the
 # actual Instant::now credit samples do not match this constructor pattern.
 # Shared-DV + main8630 source union; existing reviewed sites/pattern unchanged.
-expected_occurrences = 2282
+expected_occurrences = 2283
 # F+ (#1565) on main 59022fd2a: main's 2251 plus 9 F+-only timer shapes, none a new owner:
 #  +1 background_jobs.rs: publish_dv_refit's bounded backoff sleep between store retries,
 #     on the job's own task while its lease holds.
