@@ -3970,12 +3970,6 @@ async fn sharing_source_http_budgeted_start_answers_not_yet_and_rejoins_the_same
 }
 async fn actual_source_budgeted_start() {
     use std::time::{Duration, Instant};
-    // Preserve the actual asynchronous owner's refusal stage if it cannot
-    // reach the existing index-child seam; the viewer already got its answer.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("plurx::sharing=warn,plurxd::transcode=warn")
-        .with_test_writer()
-        .try_init();
     let fixture = real_source_start_fixture_with(SourceFixtureMode::ColdCopy, None).await;
     // Occupied software capacity: the Source cannot publish until released.
     let hold = fixture
