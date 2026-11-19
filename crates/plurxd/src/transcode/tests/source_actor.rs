@@ -140,6 +140,36 @@ fn source_fixture_store(
     ))
 }
 
+fn source_fixture_voter_port_collision(
+    error: &plurx_core::error::StoreError,
+    config: &plurx_core::config::Config,
+) -> bool {
+    let plurx_core::error::StoreError::Migration(message) = error else {
+        return false;
+    };
+    let source = config
+        .storage
+        .data_dir
+        .join(plurx_core::cluster::migration::SQLITE_FILENAME);
+    let suffix = format!(
+        "; SQLite source {} remains available; rollback command: plurxd run",
+        source.display()
+    );
+    let Some(message) = message.strip_suffix(&suffix) else {
+        return false;
+    };
+    let occupied = std::io::Error::from_raw_os_error(libc::EADDRINUSE);
+    [
+        ("raft", "Raft", config.cluster.raft_bind),
+        ("cluster API", "API", config.cluster.api_bind),
+    ]
+    .into_iter()
+    .any(|(preflight, vendor, address)| {
+        message == format!("database error: starting Hiqlite voter: Connect: bind {vendor} listener {address}: {occupied}")
+            || message == format!("schema migration failed: the {preflight} port {address} is not available: {occupied}. Another plurxd on this host is using it — cluster ports are host-wide, so a second data directory needs its own raft_bind and api_bind")
+    })
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn source_unknown_local_register_actual_closure_and_exact_ack_clear_pending_before_new_driver(
 ) {
@@ -233,9 +263,21 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     config.storage.data_dir = directory.path().join("database");
     (config.cluster.raft_bind, config.cluster.api_bind) = source_fixture_addresses();
     config.cluster.advertise_host = "localhost".into();
-    let mut selected = source_fixture_store(&config)
-        .await
-        .expect("actual standalone voter");
+    // Nextest processes share the host network even though each address
+    // registry is local to its process. Retry only an owned voter bind race.
+    let mut attempt = 1;
+    let mut selected = loop {
+        match source_fixture_store(&config).await {
+            Ok(selected) => break selected,
+            Err(error) if attempt < 3 && source_fixture_voter_port_collision(&error, &config) => {
+                eprintln!("Source fixture: voter bind collision on attempt {attempt}: {error}");
+                attempt += 1;
+                config.storage.data_dir = directory.path().join(format!("database-{attempt}"));
+                (config.cluster.raft_bind, config.cluster.api_bind) = source_fixture_addresses();
+            }
+            Err(error) => panic!("actual standalone voter: {error:?}"),
+        }
+    };
     selected
         .store
         .put_setting(keys::SHARING_ENABLED, "true")
