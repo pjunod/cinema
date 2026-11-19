@@ -829,6 +829,10 @@ where
             }
         }
     }
+    let native_split = state
+        .transcode
+        .native_split_active(&intent.session_id)
+        .await;
     let ids = super::preparation::StagedSuccessorIds::mint();
     let recovery = crate::transcode::SessionRecoveryIdentity {
         principal: route.principal.clone(),
@@ -865,7 +869,7 @@ where
     // today's decline.
     let mut incumbent_claim = None;
     let trial = match (trial, admission.needed()) {
-        (Err(reason), Some(needed)) => {
+        (Err(reason), Some(needed)) if !native_split => {
             match claim_incumbent(ids.incarnation_id.clone(), needed).await {
                 None => Err(reason),
                 Some(claim) => {
@@ -954,6 +958,42 @@ where
         root,
         prepared_window,
     } = trial;
+    #[cfg(target_os = "linux")]
+    if native_split {
+        if post_trial_admission_needed(proven_before, projected.as_ref(), &candidate) {
+            if let Err(reason) = admit_processed_candidate(
+                state,
+                intent,
+                &source,
+                &route,
+                &candidate,
+                AdmissionStage::AfterTrial,
+            )
+            .await
+            {
+                run.skipped(&reason);
+                return "admission_refused";
+            }
+        }
+        return match state
+            .transcode
+            .run_native_fel_splice(
+                &intent.session_id,
+                &intent.incarnation_id,
+                &source,
+                &root,
+                pending.cancellation_token(),
+            )
+            .await
+        {
+            Ok(true) => "native_splice_staged",
+            Ok(false) => "declined",
+            Err(reason) => {
+                run.skipped(&reason);
+                "declined"
+            }
+        };
+    }
     // A parked incumbent keeps only its published runway. When that no
     // longer covers a failed hand-back (or the viewer seeks past it), the
     // claim closes and this upgrade gives back what it took, now.

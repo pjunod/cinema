@@ -103,8 +103,11 @@ function dynamicRangeBadge(f, delivered, displayHdr, deliveredDvProfile){
 // which is a correct-looking badge for the wrong delivery.
 function effectiveHdrProcessing(report,generation,delivered){
   const sdr=delivered==='sdr'&&report?.sdr_processed===true&&report?.hdr10_enhanced===false;
-  if(!report||(!sdr&&(report.hdr10_enhanced!==true||report.sdr_processed===true||delivered!=='hdr10'))||typeof report.fel_contributed!=='boolean'
-    ||!['hdr10','sdr'].includes(delivered)||typeof generation!=='string'||report.generation!==generation
+  const p81=delivered==='dolby_vision'&&report?.profile81_reconstructed===true
+    &&report.hdr10_enhanced===false&&report.sdr_processed!==true&&report.fel_contributed===true;
+  const hdr10=delivered==='hdr10'&&report?.hdr10_enhanced===true&&report.sdr_processed!==true;
+  if(!report||(!sdr&&!p81&&!hdr10)||typeof report.fel_contributed!=='boolean'
+    ||typeof generation!=='string'||report.generation!==generation
     ||!/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(generation)
     ||!Array.isArray(report.applied_operations)||!report.applied_operations.length
     ||report.applied_operations.length>16
@@ -112,7 +115,8 @@ function effectiveHdrProcessing(report,generation,delivered){
       :op&&typeof op==='object'&&Object.keys(op).length===1
         &&op.DisplayTargetMapping&&Object.keys(op.DisplayTargetMapping).length===1
         &&(sdr?[100]:[400,600,1000,1600,2000,4000]).includes(op.DisplayTargetMapping.nits))
-    ||sdr&&(!report.applied_operations.includes('Bt709Gamma24Conversion')||!report.applied_operations.some(op=>op?.DisplayTargetMapping?.nits===100))) return null;
+    ||sdr&&(!report.applied_operations.includes('Bt709Gamma24Conversion')||!report.applied_operations.some(op=>op?.DisplayTargetMapping?.nits===100))
+    ||p81&&(!report.applied_operations.includes('LinearNlqResidual')||report.applied_operations.some(op=>op?.DisplayTargetMapping))) return null;
   return report;
 }
 function effectiveProcessingDetail(report){
@@ -173,8 +177,14 @@ function playerEffectiveProcessing(p){
 function playerEnhancement(p){
   const enhancement=p&&enhancementWithProcessingSkip(p.enhancement,p.processingSkip,p.controlReporter?.bootstrap?.generation);
   if(!enhancement) return null;
-  if(!enhancement.requires_effective_processing) return enhancement;
   const report=playerEffectiveProcessing(p);
+  if(report?.profile81_reconstructed===true){
+    return {...enhancement,active:['FEL'],details:[
+      {badge:'FEL',active:true,text:'FEL: full enhancement layer reconstructed into the Dolby Vision Profile 8.1 picture'},
+      ...enhancement.details.filter(d=>!['FEL','RPU','DYN'].includes(d.badge))
+    ]};
+  }
+  if(!enhancement.requires_effective_processing) return enhancement;
   if(!report) return null;
   // Session creation can precede the first processed window. For these
   // routes the current execution report supersedes that provisional snapshot;
@@ -202,7 +212,8 @@ function playerEnhancement(p){
 function playerEnhancementRow(p){
   const enhancement=playerEnhancement(p);
   if(!enhancement) return null;
-  return {value:enhancement.active.length?enhancement.active.join(' · '):'None active',
+  const p81=playerEffectiveProcessing(p)?.profile81_reconstructed===true;
+  return {value:p81?'Profile 8.1 FEL':enhancement.active.length?enhancement.active.join(' · '):'None active',
     note:enhancement.details.length?enhancement.details.map(d=>d.text).join('\n'):null};
 }
 function enhancementPills(enhancement){
@@ -219,7 +230,7 @@ function playerRangeBadge(f){
   const badge=dynamicRangeBadge(f, delivered, displayIsHdr(), PLAYER.deliveredDvProfile);
   const generation=PLAYER.controlReporter?.bootstrap?.generation;
   const report=effectiveHdrProcessing(PLAYER.effectiveProcessing,generation,delivered);
-  if(!report) return badge;
+  if(!report||report.profile81_reconstructed===true) return badge;
   const mark=report.sdr_processed?'SDR-E':'HDR10-E';
   const source=sourceDynamicRange(f),same=source===(report.sdr_processed?'sdr':'hdr10');
   const detail=effectiveProcessingDetail(report);

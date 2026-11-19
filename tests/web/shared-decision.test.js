@@ -286,6 +286,9 @@ test("HLS HEVC requires selected MSE transport and every claimed profile",async(
  assert.ok(queries.some(c=>c.video.transferFunction==="pq"));
  for(const override of [{nativeHls:true},{hlsJsSupported:false},{mediaSource:{isTypeSupported:()=>false}},{mediaCapabilities:{decodingInfo:async()=>({supported:false})}}])
   assert.deepEqual(Array.from(await probe([true,true,false,true,false],null,{...injected,...override})),[]);
+ const native={nativeHls:true,userAgent:"Mozilla/5.0 (Macintosh) Version/27.2 Safari/605.1.15",videoElement:{canPlayType:type=>type.includes("hev1")?"probably":""}};
+ assert.deepEqual(Array.from(await probe([true,true,false,true,false],[false,false,false,true,false],native)),["hvc1","hev1"]);
+ assert.deepEqual(Array.from(await probe([true,true,false,true,false],[false,false,false,true,false],{...native,userAgent:"Mozilla/5.0 (Macintosh) Version/26.4 Safari/605.1.15"})),[]);
 });
 
 

@@ -372,6 +372,36 @@ fn length_prefixed_hevc_nals(nals: &[&[u8]]) -> Vec<u8> {
     sample
 }
 
+#[test]
+fn base_layer_witness_matches_across_el_and_rpu_transformation() {
+    let picture = [38, 1, 0x80, 0x27];
+    let next_slice = [38, 1, 0, 0x15];
+    let changed_picture = [38, 1, 0x80, 0x2a];
+    let source = length_prefixed_hevc_nals(&[
+        &[70, 1, 0x50],
+        &picture,
+        &next_slice,
+        &[124, 1, 1, 2],
+        &[126, 1, 38, 1, 0x80],
+    ]);
+    let copy = length_prefixed_hevc_nals(&[&picture, &[124, 1, 3, 4], &next_slice]);
+    let changed = length_prefixed_hevc_nals(&[&changed_picture, &next_slice]);
+    let observed = hevc_base_layer_vcl_sha256(&source).expect("source picture witness");
+    assert_eq!(
+        observed,
+        hevc_base_layer_vcl_sha256(&copy).expect("copy picture witness")
+    );
+    assert_ne!(
+        observed,
+        hevc_base_layer_vcl_sha256(&changed).expect("different picture witness")
+    );
+    assert!(hevc_base_layer_vcl_sha256(&length_prefixed_hevc_nals(&[&next_slice])).is_err());
+    assert!(
+        hevc_base_layer_vcl_sha256(&length_prefixed_hevc_nals(&[&picture, &changed_picture]))
+            .is_err()
+    );
+}
+
 fn fragment_with_first_video_sample(track_id: u32, sample: Vec<u8>) -> Fragment {
     let size = sample.len() as u32;
     Fragment {
