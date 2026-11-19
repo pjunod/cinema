@@ -1819,6 +1819,29 @@ test("build skew and WAL errors remain visible in summary and node evidence", ()
   assert.match(skewHtml, /mixed builds/);
   assert.match(skewNode, /v0\.2\.8-next/);
 
+  // A two-build fleet mid-upgrade: build, media protocol and eligibility are
+  // shown side by side, and a protocol skew names the cohort split.
+  const wire = operationStatus(membership);
+  wire.nodes.forEach((row) => { row.status.media_protocol = 9; row.placement = { eligible_owner: true }; });
+  wire.nodes[2].status.build = "v0.2.8-next";
+  wire.nodes[2].status.media_protocol = 10;
+  wire.nodes[2].placement = { eligible_owner: false, reason: "protocol_mismatch:10" };
+  delete wire.nodes[1].status.media_protocol;
+  wire.nodes[1].placement = { eligible_owner: false, reason: "protocol_unreported" };
+  const ownerNode = ui.clusterNodeOperationsHtml(membership.nodes[0], wire);
+  const skewedNode = ui.clusterNodeOperationsHtml(membership.nodes[2], wire);
+  const oldNode = ui.clusterNodeOperationsHtml(membership.nodes[1], wire);
+  assert.match(ownerNode, /media protocol 9/);
+  assert.match(ownerNode, /eligible owner/);
+  assert.match(skewedNode, /media protocol 10/);
+  assert.match(skewedNode, /not an owner: it speaks media protocol 10/);
+  assert.match(skewedNode, /Protocol skew: 10 \/ 9 \/ unreported/);
+  assert.match(oldNode, /media protocol unreported/);
+  assert.match(oldNode, /not an owner: its build predates media-protocol reporting/);
+  const uniform = operationStatus(membership);
+  uniform.nodes.forEach((row) => { row.status.media_protocol = 9; });
+  assert.doesNotMatch(ui.clusterNodeOperationsHtml(membership.nodes[0], uniform), /Protocol skew/);
+
   const walError = operationStatus(membership, { safe: false });
   walError.nodes[1].status.wal.snapshot.state = "error";
   walError.nodes[1].status.wal.snapshot.last_error = {

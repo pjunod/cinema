@@ -2,9 +2,8 @@
 #
 # This roster mirrors `pjunod/ansible`'s `github-runners/inventory/` —
 # `group_vars/all.yml` for the Incus guests and the macOS runner, and
-# `host_vars/<host>.yml` for the standalone Linux hosts — plus the two
-# hand-registered ARM64 laptop VMs (`gha-maca-linux-arm-01`,
-# `gha-macb-linux-arm-01`) that were provisioned outside that inventory. Only
+# `host_vars/<host>.yml` for the standalone Linux hosts — plus the
+# hand-registered ARM64 laptop VMs provisioned outside that inventory. Only
 # the runners registered to `pjunod/plurx` are listed; the same hosts also run
 # runner services scoped to other repositories, and those can never answer a
 # job in this one.
@@ -66,11 +65,12 @@ voter_hosts = ["lab6", "lab3", "lab4", "media1"]
 # `ci-store` slots rather than chosen freely: a surplus shard cannot be given a
 # second runner on a host that already holds one, so it serialises behind a
 # busy runner and buys a more complicated failure instead of wall time. The
-# fleet carries three slots today, on `lab1`, `lab5` and `lab2` — one per
-# physical non-voter host. That number is an eligibility fact rather than a
-# capacity decision: a runner counts as a slot only once the Store lane has
-# passed on it. See `gha-lab2-android-01` below for what that cost to learn.
-host_exclusive_labels = ["ci-store", "ci-topology"]
+# legacy `ci-store` rows below record the previously advertised labels on
+# `lab1`, `lab5` and `lab2`. Store workflows now request `ci-nonvoter-store`;
+# legacy labels grant no eligibility for that alias. Record its two physical
+# nonvoter carriers only after actual registration and Store qualification.
+# See `gha-lab2-android-01` below for what a false eligibility claim cost.
+host_exclusive_labels = ["ci-nonvoter-store", "ci-topology"]
 
 # --- lab1: Incus guest host, non-voter -------------------------------------
 [[runners]]
@@ -78,7 +78,20 @@ name = "gha-lab1-general-01"
 host = "lab1"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "ci-store"]
+implicit_labels = false
+labels = ["maintenance-lab1-exclusive"]
+
+[[runners]]
+name = "gha-lab1-plurx-heavy-01"
+host = "lab1"
+os = "Linux"
+arch = "X64"
+implicit_labels = false
+labels = ["ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-store", "incus"]
+
+# Retired from CI eligibility 2026-11-13: Forgejo registration 62 shared
+# `lab1`'s same 20 GiB `plurx-heavy.slice` with -01, so it added no independent
+# host capacity. The stopped registration and its cache are retained.
 
 # --- lab2: Incus guest host, non-voter --------------------------------------
 # A `ci-store` slot, and the entry to read before adding or removing one.
@@ -115,7 +128,7 @@ name = "gha-lab2-android-01"
 host = "lab2"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "android-kvm", "ci-store"]
+labels = ["lab", "incus", "ubuntu-24.04", "android-kvm", "ci-store", "ci-nonvoter-store"]
 
 [[runners]]
 name = "gha-lab2-android-02"
@@ -124,8 +137,33 @@ os = "Linux"
 arch = "X64"
 labels = ["lab", "incus", "ubuntu-24.04", "android-kvm"]
 
-# --- lab5 (`asus` in the ansible inventory): baremetal, active voter -------
-# Do not place uncapped SDK builds here; nightly media jobs use lab1/lab2 VMs.
+# Retired from CI eligibility 2026-11-13: Forgejo registration 63's service
+# advertised 20 GiB inside the Android guest, whose actual memory is about
+# 10 GiB. The stopped registration, cache, and Android runner remain intact.
+
+# --- lab5 (`asus` in the ansible inventory): baremetal, non-voter ---------
+# lab5 is not a plurx voter (it is absent from `voter_hosts`; this header
+# called it "active voter" until 2026-11-11, which was wrong). Do not place
+# uncapped SDK builds here; nightly media jobs use lab1/lab2 VMs.
+#
+# `gha-lab5-plurx-compile-01` is the second carrier of the nonvoter compile
+# pool (`ci-nonvoter-compile-amd64`). That pool runs only the jobs whose
+# container the workflow itself bounds (`--memory 20g --cpus 4
+# --cpuset-cpus 0-3 --pids-limit 4096`, re-checked by each job's first
+# step), so a job gets the same box on lab1 or here. Host-mode jobs, every
+# publishing job and the disk-gated `web_layout`/`vod_web` pair stay on
+# `ci-nonvoter-heavy-amd64`, which only lab1 carries: a release image must not
+# change build host with queue order. Registered 2026-11-11 (Forgejo runner
+# id 61); its worker adds `--oom-score-adj=500` so lab5's `plurxd` outlives a
+# CI container under memory pressure.
+[[runners]]
+name = "gha-lab5-plurx-compile-01"
+host = "lab5"
+os = "Linux"
+arch = "X64"
+implicit_labels = false
+labels = ["ci-nonvoter-compile-amd64"]
+
 [[runners]]
 name = "gha-lab5-general-01"
 host = "lab5"
@@ -145,7 +183,9 @@ name = "gha-lab5-general-03"
 host = "lab5"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
+# Provisioned proof owner from codex/async-store-refinement (f14b400bc).
+# Keep its reserved label; the branch owns proof admission and qualification.
+labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04", "async-proof-owned"]
 
 [[runners]]
 name = "gha-lab5-general-04"
@@ -235,9 +275,9 @@ labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
 # --- maca / macb: laptops, non-voters -----------------------------------------
 # Apple CI uses the M4 Air (`maca`) as primary and the M3 Max Pro (`macb`)
 # as standby; deploy/apple-runner controls eligibility during outages. The two
-# Linux ARM64 guests are Lima VMs registered by hand rather than by ansible, and
-# they are
-# the required `ci-arm64` packaging pool: `macb` is primary, `maca` is backup.
+# ARM package registrations use Lima guests registered by hand.
+# Their Forgejo roles are separate: `maca` serves release-arm64 only; `macb`
+# supplies ci-arm64. The release guest has no qualified CI fallback role.
 [[runners]]
 name = "gha-maca-apple-01"
 host = "maca"
@@ -252,18 +292,40 @@ os = "macOS"
 arch = "ARM64"
 labels = ["lab", "apple", "xcode-27", "backup", "xcode-27.2"]
 
-# This VM also runs a Forgejo runner carrying `release-arm64`: the release
-# image's arm64 leg builds there natively instead of under QEMU on X64.
+# Repository-scoped Forgejo signing registration, provisioned 2026-11-03.
+# The signing user's separate LaunchAgent and private config are documented
+# in docs/PUBLISHING.md. Capacity one; no general Apple CI eligibility.
+[[runners]]
+name = "gha-macb-mobile-signing-01"
+host = "macb"
+os = "macOS"
+arch = "ARM64"
+labels = ["mobile-release"]
+
+# The existing Forgejo registration is release-only: the release image's
+# arm64 leg builds natively instead of under QEMU on X64. Do not add ci-arm64
+# or backup eligibility without separately qualifying that workload here.
 [[runners]]
 name = "gha-maca-linux-arm-01"
 host = "maca"
 os = "Linux"
 arch = "ARM64"
-labels = ["lab", "ubuntu-26.04", "ci-arm64", "laptop-vm", "backup", "release-arm64"]
+labels = ["lab", "ubuntu-26.04", "release-arm64"]
 
+# Capacity-one native CI guest on the release runner's physical host.
 [[runners]]
-name = "gha-macb-linux-arm-01"
+name = "gha-maca-linux-arm-02"
+host = "maca"
+os = "Linux"
+arch = "ARM64"
+labels = ["lab", "ubuntu-26.04", "ci-arm64"]
+
+# Native Linux Rust compiler on the M3 Max. Forgejo run #6624 passed the
+# all-target check and vendored Hiqlite Clippy in the Ubuntu 24.04 job image.
+# Capacity one, with an eight-CPU and 16 GiB job limit.
+[[runners]]
+name = "gha-macb-linux-rust-01"
 host = "macb"
 os = "Linux"
 arch = "ARM64"
-labels = ["lab", "ubuntu-26.04", "ci-arm64", "laptop-vm", "primary"]
+labels = ["lab", "ubuntu-26.04", "high-cpu"]

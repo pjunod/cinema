@@ -31,7 +31,6 @@ checked-out head, and it says so.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from pathlib import Path
 import re
@@ -50,6 +49,7 @@ from validation.history import (
     resolve_regression_test,
     worktree_reader,
 )
+from validation import pr_event
 from validation.runner import REPO_ROOT
 
 
@@ -190,6 +190,16 @@ def merge_candidate_tree(root: Path, base: str, head: str) -> str | None:
     return tree if re.fullmatch(r"[0-9a-f]{40,64}", tree) else None
 
 
+def landing_lines(fields: tuple[str, ...]) -> tuple[str, ...]:
+    """The field values as the lines a landing commit's message carries.
+
+    One spelling for `--landing-lines` and for `scripts/land`
+    (`validation/landing.py`), which merges with exactly these lines.
+    """
+
+    return tuple(f"{REGRESSION_TRAILER}: {value}" for value in fields)
+
+
 def corrective_subjects(root: Path, base: str, head: str) -> tuple[str, ...]:
     log = _git(root, "log", "--no-merges", "--format=%s", f"{base}..{head}", "--")
     return tuple(
@@ -199,25 +209,13 @@ def corrective_subjects(root: Path, base: str, head: str) -> tuple[str, ...]:
     )
 
 
-def description_from_environment() -> str:
+def description_from_environment(*, event_fallback: bool = False) -> str:
     """Read full PR data without putting a large description in execve's env."""
-    if "PR_BODY" in os.environ:
-        return os.environ["PR_BODY"]
-    if os.environ.get("PR_BODY_FROM_EVENT") != "1":
-        return ""
-    event_path = os.environ.get("GITHUB_EVENT_PATH")
-    if not event_path:
-        raise ValueError("PR_BODY_FROM_EVENT requires GITHUB_EVENT_PATH")
-    event = json.loads(Path(event_path).read_text(encoding="utf-8"))
-    request = event.get("pull_request") if isinstance(event, dict) else None
-    if not isinstance(request, dict) or "body" not in request:
-        raise ValueError("PR event must contain pull_request.body")
-    body = request["body"]
-    if body is None:
-        return ""
-    if not isinstance(body, str):
-        raise ValueError("pull_request.body must be a string or null")
-    return body
+    if os.environ.get("PR_BODY_FROM_EVENT") == "1":
+        return pr_event.body(require_event=True) or ""
+    if event_fallback:
+        return pr_event.body() or ""
+    return os.environ.get("PR_BODY", "")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -244,16 +242,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = args.root
-    if args.body_file:
-        body = args.body_file.read_text(encoding="utf-8")
-    elif args.body is not None:
-        body = args.body
-    else:
-        try:
-            body = description_from_environment()
-        except (OSError, ValueError) as error:
-            parser.error(f"cannot read PR description: {error}")
-    title = args.title if args.title is not None else os.environ.get("PR_TITLE", "")
+    try:
+        if args.body_file:
+            body = args.body_file.read_text(encoding="utf-8")
+        elif args.body is not None:
+            body = args.body
+        else:
+            body = description_from_environment(event_fallback=True)
+        title = args.title if args.title is not None else (pr_event.title() or "")
+    except (OSError, ValueError) as error:
+        parser.error(f"cannot read PR description or title: {error}")
     base = args.base or os.environ.get("PR_BASE_SHA", "")
     head = args.head or os.environ.get("PR_HEAD_SHA", "")
     say = (lambda *_args, **_kwargs: None) if args.landing_lines else print
@@ -336,8 +334,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         return 1
     if args.landing_lines:
-        for value in fields:
-            print(f"{REGRESSION_TRAILER}: {value}")
+        for line in landing_lines(fields):
+            print(line)
         return 0
     if not fields:
         print(f"no {REGRESSION_TRAILER}: field, and nothing corrective that needs one")

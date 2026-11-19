@@ -158,6 +158,22 @@ impl VodServe {
                     };
                     Some((
                         VodDeliveryInfo {
+                            dolby_vision_refit: session
+                                .rendition
+                                .as_ref()
+                                .and_then(|rendition| rendition.recipe.refit_report()),
+                            dv_refit_digest: session.rendition.as_ref().and_then(|rendition| {
+                                rendition.recipe.video.dolby_vision_refit().map(hex::encode)
+                            }),
+                            dv_refit_identity_reason: session.rendition.as_ref().and_then(
+                                |rendition| {
+                                    (rendition.recipe.video.converts_dolby_vision()
+                                        && rendition.recipe.video.dolby_vision_refit().is_none())
+                                    .then(|| {
+                                        "No F+ curve table is pinned to this rendition".to_owned()
+                                    })
+                                },
+                            ),
                             observation: Some(observation),
                             id: id.clone(),
                             method: match session.kind {
@@ -936,7 +952,13 @@ impl VodServe {
             if !self.response_owner_is_live(session_id, owner).await {
                 return Ok(false);
             }
-            let Some(route) = self.shared.store.media_session_route(session_id).await? else {
+            let Some(route) = crate::media_sessions::read_media_session_route(
+                &*self.shared.store,
+                crate::media_sessions::RouteReadSite::Verdict,
+                session_id,
+            )
+            .await?
+            else {
                 return Ok(false);
             };
             let now_ms = now_ms();
@@ -971,20 +993,24 @@ impl VodServe {
         session_id: &str,
         deadline: Instant,
     ) -> Option<VodPublication<Option<VerifiedContinuousFamily>>> {
-        let is_continuous = {
+        let (is_continuous, versioned, primary_key) = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(session_id)?;
-            session
-                .live_rendition()?
-                .recipe
-                .encoding
-                .as_ref()
-                .is_some_and(|encoding| {
-                    encoding.shared_audio.is_none()
-                        && !encoding.plan.options().input_has_audio
-                        && encoding.options.video_sample_envelope
-                            == plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50
-                })
+            (
+                session
+                    .live_rendition()?
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .is_some_and(|encoding| {
+                        encoding.shared_audio.is_none()
+                            && !encoding.plan.options().input_has_audio
+                            && encoding.options.video_sample_envelope
+                                == plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50
+                    }),
+                session.children.iter().any(|child| child.versioned_family),
+                session.rendition_key.clone(),
+            )
         };
         if !is_continuous {
             return None;
@@ -1014,7 +1040,29 @@ impl VodServe {
                     .collect::<Vec<_>>()
             };
             let mut verified = Vec::new();
-            for rendition in &children {
+            // Verify foreground dependencies first; a speculative companion
+            // never consumes the foreground request's blocking budget.
+            let mut ordered = children.iter().collect::<Vec<_>>();
+            ordered.sort_by_key(|rendition| {
+                versioned
+                    && rendition.key != primary_key
+                    && rendition
+                        .recipe
+                        .encoding
+                        .as_ref()
+                        .is_some_and(|encoding| encoding.shared_audio.is_none())
+            });
+            for rendition in ordered {
+                let optional = versioned
+                    && rendition.key != primary_key
+                    && rendition
+                        .recipe
+                        .encoding
+                        .as_ref()
+                        .is_some_and(|encoding| encoding.shared_audio.is_none());
+                if optional && !rendition.dir.has_init().await {
+                    continue;
+                }
                 let Some(lookup) = self
                     .session_media_rendition(session_id, Some(&rendition.key))
                     .await
@@ -1032,7 +1080,18 @@ impl VodServe {
                 let budget = found
                     .block_budget
                     .min(deadline.saturating_duration_since(Instant::now()));
-                let mut ready = self.serve_init(rendition, budget, found.delivery).await?;
+                let mut ready = match self
+                    .serve_init(
+                        rendition,
+                        if optional { Duration::ZERO } else { budget },
+                        found.delivery,
+                    )
+                    .await
+                {
+                    Ok(ready) => ready,
+                    Err(_) if optional => continue,
+                    Err(error) => return Err(error),
+                };
                 let expected = rendition
                     .identity
                     .lock()
@@ -1044,6 +1103,9 @@ impl VodServe {
                     return Ok(None);
                 };
                 let Some(bytes) = read_child_init(&mut ready, &expected, deadline).await? else {
+                    if optional {
+                        continue;
+                    }
                     return Ok(None);
                 };
                 let mut reader = FragmentReader::new();
@@ -1160,14 +1222,21 @@ impl VodServe {
                     sustained_bps: encoding.continuous_sustained_bps(),
                 });
             }
-            let family = plurx_core::transcode::VodPresentationFamily::new(
-                plurx_core::transcode::VodVideoFamily::new(rungs).map_err(fail)?,
-                audio,
-            )
+            let video = if versioned {
+                plurx_core::transcode::VodVideoFamily::continuous(rungs)
+            } else {
+                plurx_core::transcode::VodVideoFamily::new(rungs)
+            }
+            .map_err(fail)?;
+            let family = if versioned {
+                plurx_core::transcode::VodPresentationFamily::continuous(video, audio, &primary_key)
+            } else {
+                plurx_core::transcode::VodPresentationFamily::new(video, audio)
+            }
             .map_err(fail)?;
 
-            let sessions = self.shared.sessions.lock().await;
-            let Some(session) = sessions.get(session_id) else {
+            let mut sessions = self.shared.sessions.lock().await;
+            let Some(session) = sessions.get_mut(session_id) else {
                 return Ok(None);
             };
             if !Arc::ptr_eq(&session.incarnation, &owner.incarnation)
@@ -1182,6 +1251,14 @@ impl VodServe {
             {
                 return Ok(None);
             }
+            for child in &mut session.children {
+                if verified
+                    .iter()
+                    .any(|(rendition, _, _)| Arc::ptr_eq(rendition, &child.rendition))
+                {
+                    child.companion_bootstrap = false;
+                }
+            }
             let candidates = session
                 .children
                 .iter()
@@ -1192,6 +1269,7 @@ impl VodServe {
                 })
                 .collect();
             Ok(Some(VerifiedContinuousFamily {
+                versioned,
                 controlled: session.children.iter().any(|child| child.controlled),
                 family,
                 video_budgets,

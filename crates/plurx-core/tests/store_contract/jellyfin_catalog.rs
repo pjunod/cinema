@@ -709,3 +709,111 @@ async fn jellyfin_catalog_upcoming_and_similar_use_real_dates_genres_and_live_so
     })
     .await;
 }
+
+/// Offloaded titles are not in Jellyfin's catalogue: an offloaded episode
+/// drops out and out of its parents' counts, and a show or season whose
+/// episodes are all offloaded is hidden with them (nothing under it plays).
+#[tokio::test]
+async fn jellyfin_catalog_hides_offloaded_titles_and_does_not_count_them() {
+    for_each_backend(|store, backend| async move {
+        use plurx_core::domain::ProbeResult;
+        let (uid, _) = seed_file(&store, "catalog-offload").await;
+        let shows = store
+            .create_library(&NewLibrary {
+                name: "Offloaded series".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![PathBuf::from(format!("/offloaded-series-{backend}"))],
+                anime: false,
+            })
+            .await
+            .expect("shows");
+        let show = store
+            .insert_item(&item(shows.id, ItemKind::Show, None, "Series", None))
+            .await
+            .expect("show");
+        let season = store
+            .insert_item(&item(
+                shows.id,
+                ItemKind::Season,
+                Some(show),
+                "Season",
+                Some(1),
+            ))
+            .await
+            .expect("season");
+        let mut episodes = Vec::new();
+        for number in [1, 2] {
+            episodes.push(
+                store
+                    .insert_item(&item(
+                        shows.id,
+                        ItemKind::Episode,
+                        Some(season),
+                        &format!("Episode {number}"),
+                        Some(number),
+                    ))
+                    .await
+                    .expect("episode"),
+            );
+        }
+        let mut file_ids = Vec::new();
+        for (index, episode) in episodes.iter().enumerate() {
+            file_ids.push(
+                store
+                    .upsert_file(
+                        *episode,
+                        &format!("/offloaded-series-{backend}/S01E0{}.mkv", index + 1),
+                        10,
+                        10,
+                        &ProbeResult::default(),
+                    )
+                    .await
+                    .expect("file"),
+            );
+        }
+        store
+            .ensure_library_root_fingerprint(shows.id, &shows.paths, "fp", true)
+            .await
+            .expect("root");
+        let q = query_for(&store, uid).await;
+        let natives = |page: &JellyfinCatalogPage| -> Vec<i64> {
+            page.items
+                .iter()
+                .filter_map(|i| i["native_id"].as_i64())
+                .collect()
+        };
+
+        // One episode offloaded: it is gone, the rest still counts.
+        store
+            .reconcile_library(shows.id, "fp", &[file_ids[1]], 1, &[episodes[1]], 100)
+            .await
+            .expect("offload the second episode");
+        let page = primed(&store, &q).await;
+        let listed = natives(&page);
+        assert!(
+            !listed.contains(&episodes[1]),
+            "{backend}: offloaded episode listed"
+        );
+        for id in [show, season, episodes[0]] {
+            assert!(listed.contains(&id), "{backend}: {id} still plays");
+        }
+        let season_row = page
+            .items
+            .iter()
+            .find(|i| i["native_id"] == season)
+            .expect("season");
+        assert_eq!(season_row["child_count"], 1, "{backend}: {season_row}");
+        assert_eq!(season_row["playable_count"], 1, "{backend}: {season_row}");
+
+        // Every episode offloaded: the containers go too.
+        store
+            .reconcile_library(shows.id, "fp", &[file_ids[0]], 1, &[episodes[0]], 101)
+            .await
+            .expect("offload the first episode");
+        let listed = natives(&primed(&store, &q).await);
+        for id in [show, season, episodes[0], episodes[1]] {
+            assert!(!listed.contains(&id), "{backend}: {id} has nothing to play");
+        }
+    })
+    .await;
+}

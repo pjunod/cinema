@@ -79,7 +79,7 @@ async fn encoded_preparation_consumer(with_live_pressure: bool) {
     };
     let active = crate::background_jobs::ActiveBackgroundJob::start(Arc::clone(&store), Arc::new(CopyPreparationAuthority),
         claimed.token.clone().expect("token"), tokio::time::Instant::now() + Duration::from_secs(45),
-        JobKind::EncodedOutputPrepare).expect("owner");
+        JobKind::EncodedOutputPrepare).await.expect("owner");
     let heavy = manager.admit_encoded_preparation().expect("existing heavy lane");
     let observation = manager.copy_preparation_attachment_observation();
     assert!(manager.produce_encoded_output_job(&file, &claimed, active.fence(),
@@ -87,7 +87,7 @@ async fn encoded_preparation_consumer(with_live_pressure: bool) {
     drop(heavy); active.finish().await;
     assert_eq!(store.background_job(&job.id).await.expect("job").expect("row").state, JobState::Succeeded);
     let encoding = manager.resolve_encoded_output_test(&selected, &resolved_file).await.expect("fresh resolver");
-    serve.try_create(VodRecipeRequest { root_admission: None, soundtrack: None, companion: None, request: &selected, encoding: Some(encoding),
+    serve.try_create(VodRecipeRequest { admission_priority: crate::admission::Priority::Live, root_admission: None, soundtrack: None, companion: None, request: &selected, encoding: Some(encoding),
         retained_capture: RetainedOutputCapture::New, measured_candidate: None }, &resolved_file, &settings(),
         VodAttribution { user_name: "user", item_title: "encoded", supersession_user: "user" }, "later-encoded".into())
         .await.expect("compatible new attachment");
@@ -329,7 +329,7 @@ async fn automatic_encoded_canonical_carrier_survives_claim_completion_and_new_a
         claimed.token.clone().expect("token"),
         tokio::time::Instant::now() + Duration::from_secs(45),
         JobKind::EncodedOutputPrepare,
-    )
+    ).await
     .expect("owner");
     let heavy = manager
         .admit_encoded_preparation()
@@ -379,7 +379,7 @@ async fn automatic_encoded_canonical_carrier_survives_claim_completion_and_new_a
     };
     serve
         .try_create(
-            VodRecipeRequest { root_admission: None, soundtrack: None, companion: None,
+            VodRecipeRequest { admission_priority: crate::admission::Priority::Live, root_admission: None, soundtrack: None, companion: None,
                 request: &selected,
                 encoding: Some(encoding),
                 retained_capture: RetainedOutputCapture::New,

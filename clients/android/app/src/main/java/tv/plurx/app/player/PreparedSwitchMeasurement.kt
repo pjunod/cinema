@@ -197,6 +197,7 @@ internal class PreparedSwitchRecorder {
      */
     private class Series {
         val frames = ArrayDeque<PreparedSwitchSample>()
+        val decoder = ArrayDeque<PreparedSwitchSample>()
         val underruns = ArrayDeque<Long>()
         var droppedTotal = 0L
     }
@@ -260,6 +261,56 @@ internal class PreparedSwitchRecorder {
         if (commitAtMs != null && firstFrameAtMs == null) firstFrameAtMs = atMs
     }
 
+    /**
+     * Media3 `DecoderCounters.droppedBufferCount`, an absolute total per
+     * renderer, read synchronously by the controller at the points it already
+     * runs (the rendezvous poll, the commit, the report). Kept apart from the
+     * analytics increments: one is a total and the other a running sum.
+     * Throttled to one reading per [DECODER_SAMPLE_SPACING_MS] unless [force]d,
+     * so the bounded list still spans the window.
+     */
+    fun noteDecoderDropped(atMs: Long, droppedTotal: Long, pipeline: Int, force: Boolean = false) {
+        val entry = seriesFor(pipeline)
+        val last = entry.decoder.lastOrNull()
+        if (!force && last != null && atMs - last.atMs < DECODER_SAMPLE_SPACING_MS) return
+        push(entry.decoder, atMs, droppedTotal)
+    }
+
+    /**
+     * The seam evidence a `prepared_seam` report carries, read at [nowMs].
+     * Frames are complete only when both pipelines were sampled across their
+     * whole side of the ±2 s window; audio continuity is observed only once
+     * the window has fully elapsed with both pipelines measured and no audio
+     * underrun inside it.
+     */
+    fun seamEvidence(nowMs: Long): PreparedSeamEvidence {
+        val commit = commitAtMs ?: return PreparedSeamEvidence(false, null, false)
+        val before = predecessor?.let { series[it] }
+        val after = successor?.let { series[it] }
+        val decoder = preparedSwitchCounterDelta(
+            before?.decoder?.toList() ?: emptyList(),
+            after?.decoder?.toList() ?: emptyList(),
+            commit,
+        )
+        val frames = if (decoder.count != null && decoder.coveredMs >= decoder.spanMs) decoder
+        else preparedSwitchCounterDelta(
+            before?.frames?.toList() ?: emptyList(),
+            after?.frames?.toList() ?: emptyList(),
+            commit,
+        )
+        val complete = frames.count != null && frames.coveredMs >= frames.spanMs
+        val underruns = preparedSwitchEventCount(
+            (before?.underruns?.toList() ?: emptyList()).filter { it <= commit } +
+                (after?.underruns?.toList() ?: emptyList()).filter { it >= commit },
+            commit,
+        )
+        return PreparedSeamEvidence(
+            framesComplete = complete,
+            droppedFrames = frames.count,
+            audioObserved = complete && nowMs >= commit + PREPARED_SWITCH_WINDOW_MS && underruns == 0L,
+        )
+    }
+
     /** The three rows, computed on demand. */
     fun reading(): PreparedSwitchReading {
         val commit = commitAtMs ?: return PreparedSwitchReading.unmeasured
@@ -314,3 +365,38 @@ internal fun preparedSwitchAudioRequirements(
         false,
     ),
 )
+
+/** How far apart unforced decoder-counter readings are kept. */
+internal const val DECODER_SAMPLE_SPACING_MS = 250L
+
+/** What one prepared switch measured at its seam. */
+internal data class PreparedSeamEvidence(
+    val framesComplete: Boolean,
+    val droppedFrames: Long?,
+    val audioObserved: Boolean,
+)
+
+/**
+ * The `prepared_seam` beacon body, the same shape on every client. The server
+ * counts it per platform; the processed Dolby Vision upgrade leaves the
+ * Developer tab only after twenty committed switches with complete frames,
+ * zero dropped, observed audio continuity and no reopen. [reopened] is what
+ * happened, not what the outcome implies: whether an ordinary reopen actually
+ * ran inside the report's window. Null for an outcome outside the vocabulary.
+ */
+internal fun preparedSeamReport(
+    outcome: String,
+    evidence: PreparedSeamEvidence?,
+    reopened: Boolean,
+): PreparedSeam? {
+    if (outcome !in listOf("committed", "refused", "switched_without_a_frame")) return null
+    val committed = outcome == "committed"
+    return PreparedSeam(
+        platform = "android",
+        outcome = outcome,
+        framesComplete = committed && evidence?.framesComplete == true,
+        droppedFrames = if (committed) evidence?.droppedFrames else null,
+        audioObserved = committed && evidence?.audioObserved == true,
+        reopened = reopened,
+    )
+}

@@ -303,8 +303,9 @@ async function sharedCatalogueLaunch(reference,fileId,stillCurrent){
   const selected=id===null?fresh.files[0]:fresh.files.find(entry=>entry.context.source_file_id===id);
   if(!selected)throw new Error("Shared file changed.");
   const watch=fresh.detail.watch;
-  const resume=watch&&!watch.watched?watch.position_ms:0,duration=selected.file.duration_ms??0;
-  if(!Number.isSafeInteger(resume)||resume<0||!Number.isSafeInteger(duration)||duration<0)throw new Error("Shared timeline unavailable.");
+  const position=watch?.position_ms??0,duration=selected.file.duration_ms??0;
+  if(!Number.isSafeInteger(position)||position<0||!Number.isSafeInteger(duration)||duration<0)throw new Error("Shared timeline unavailable.");
+  const resume=playbackResumeMs(watch,duration);
   return play(selected.context.source_file_id,fresh.detail.item.title||"Shared item",resume,duration,
     {...fresh.detail.item,fileContext:selected.context,sharedReference:ref});
 }

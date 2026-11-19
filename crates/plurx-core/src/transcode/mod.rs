@@ -18,8 +18,12 @@ pub mod decoder_inventory;
 mod dolby;
 pub mod dv_fel_qualification;
 pub mod dv_processing;
+pub mod dv_refit;
+pub mod dv_refit_serve;
+pub mod dv_refit_title;
 pub mod dvconvert;
 mod encoder;
+mod enhancement_rate;
 pub mod health;
 pub mod hevc_census;
 mod hevc_scan;
@@ -52,12 +56,17 @@ pub use dolby::{
 };
 pub use encoder::{
     benchmark_encoder, detect_encoders, detect_video_decoders, hevc_level_for,
-    reconstructed_p81_video_kbps, reconstructed_p81_window_encode_args, vaapi_device,
-    validate_quality_rate_control, validate_quality_rate_control_yielding, vbv_maxrate_bps,
-    vbv_maxrate_kbps, CompletedReconstructedOutputContract, EffectiveRateControl, Encoder,
-    EncoderCaps, EncoderDeviceBinding, GraphicsDevice, OutputCodecContract, OutputGrade,
+    reconstructed_p81_video_kbps, reconstructed_p81_window_encode_args,
+    source_copy_hdr10_video_kbps, vaapi_device, validate_quality_rate_control,
+    validate_quality_rate_control_yielding, vbv_maxrate_bps, vbv_maxrate_kbps,
+    CompletedReconstructedOutputContract, EffectiveRateControl, Encoder, EncoderCaps,
+    EncoderDeviceBinding, GraphicsDevice, OutputCodecContract, OutputGrade,
     QualityRateControlValidation, QualityRc, RateMode, VaapiHdrPolicy, VideoCodec,
-    RECONSTRUCTED_P81_MAX_VIDEO_KBPS, RECONSTRUCTED_P81_RECIPE,
+    RECONSTRUCTED_P81_RECIPE,
+};
+pub use enhancement_rate::{
+    enhancement_source_budget, enhancement_stream_rate, validate_encoded_enhancement_envelope,
+    EnhancementRateEnvelope, EnhancementRateLimits, EnhancementRateProvenance,
 };
 pub use macos::{
     MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,
@@ -215,73 +224,11 @@ pub const COPY_SEGMENT_MAX_SECS: u32 = 15;
 /// unknown GOP from being treated as if it were the one-second difference.
 pub const ROLLING_PRESENTATION_TARGET_SECS: u32 = 16;
 
-/// Seconds of media that must exist before the first `index.m3u8` is
-/// published.
-///
-/// **A playlist that starts at the live edge starts one publication gap from
-/// a freeze.** Delivery to the browser runs at hundreds of Mb/s against a
-/// producer that reads a 4K remux off the NAS at not much over 1×, so a
-/// client that starts on segment zero drains everything published within
-/// seconds and is then advancing at exactly the producer's publication rate.
-/// The first time it has to wait a whole publication out, the picture stops
-/// for one segment's worth of *production* time — once per film, always at
-/// the same second, because where the buffer first runs dry is a property of
-/// the film's early bitrate, not of timing. Measured on *reference film G* in Chrome:
-/// an 8.8 s freeze at 9.2 s in under a 15 s ceiling, a 5.5 s freeze at 6.0 s
-/// under a 6 s one — the freeze moved with the ceiling and scaled with it,
-/// which is the experiment that showed shrinking segments approaches this
-/// asymptotically and can never remove it. After that first stall the
-/// producer's accumulated lead covers every later gap, which is why it
-/// happens exactly once.
-///
-/// So the fix is a head start rather than a segment size: hold the playlist
-/// until this many seconds of media exist, and the client begins that far
-/// behind the edge. The cushion lives on the server — the client's
-/// quota-bounded buffer stays as small as `bufferTargets` says, it just
-/// always has published-but-unfetched segments in front of it, and every
-/// segment after the gate only adds lead.
-///
-/// **The unit is seconds, not segments, and it was segments for a day.** A
-/// count gate multiplies by whatever the opening happens to cut, and the cut
-/// is a property of the title: a stretch quiet enough for the 15 s duration
-/// ceiling to bind turns "three segments" into 2 + 15 + 15 = 32 s of
-/// cushion, 2.4× what the freeze needs, every extra second of it produced at
-/// the paced rate before a viewer sees frame one. A duration gate promises
-/// the cushion in the unit the freeze is measured in; its realized size is
-/// this value up to this value plus one segment, whatever the title cuts.
-/// (*reference film F*, the file that exposed the slow start at 21.0 s to first frame,
-/// turned out to cut clean 7.5–8.5 s segments — the overlay's own
-/// largest-appended figure said so — so its cushion was ~17 s under either
-/// unit, and its 21 s decomposes as ~8 s of cushion at the flat 2× pacing
-/// below plus a cold NFS open and probe of a Dolby Vision MKV plus fetch
-/// and decode; a warm second play started visibly faster with nothing
-/// changed. The count was still the wrong unit — it just wasn't *reference film F's*
-/// biggest cost.)
-///
-/// Why 12 s clears the worst gap: the gap is one segment's production time,
-/// and duration and production speed are inversely coupled through bitrate.
-/// A quiet stretch cuts long segments (up to 15 s) but reads cheap —
-/// `HLS_READRATE` holds production at 2×, so the gap is ≤ 7.5 s. A heavy
-/// stretch can be NAS-bound near 1×, but its segments are byte-capped: at
-/// any bitrate the NAS can sustain playback of at all, a 64 MB segment
-/// produces in ≤ ~8.5 s (8.8 s is the worst ever measured, on a 15 s
-/// segment under the old regime). 12 covers both shapes; raising it buys
-/// margin at one-for-one cost in time-to-first-frame on every paced open.
-///
-/// The remaining startup cost is honest and has one more owner: an ffmpeg
-/// without `-readrate_initial_burst` (pre-6.1 — jellyfin-ffmpeg7 has it)
-/// fills the gate at the flat paced rate instead of at I/O speed, which
-/// `pacing_caps` now warns about at startup. With the burst working, the
-/// cushion is produced as fast as the NAS will go and the gate costs a few
-/// seconds; without it, the gate costs cushion ÷ readrate. `Manager::playlist`
-/// holds the HTTP response while the gate fills rather than 404ing (verified
-/// against the vendored hls.js: the manifest loader waits indefinitely for
-/// the first byte — `maxTimeToFirstByteMs` is `Infinity` — inside a 20 s
-/// per-attempt window with two retries).
-///
-/// At end of stream the gate yields: a film shorter than the cushion
-/// publishes whole, `ENDLIST` and all, the moment it finishes.
-pub const COPY_PUBLISH_GATE_SECS: u32 = 12;
+/// The copy writer exposes its first complete segment and verified init.
+/// Rolling publication owns the bootstrap and replenishment phase; collecting
+/// a second duration cushion here would charge startup twice. Zero removes
+/// only the duration gate: no partial fragment or unvalidated init is served.
+pub const COPY_PUBLISH_GATE_SECS: u32 = 0;
 
 /// The bitstream filter every copied HEVC stream gets before a client sees it.
 ///
@@ -518,6 +465,7 @@ pub struct CopyVideoOptions {
     preserve_dolby_vision: bool,
     promote_hevc_parameter_sets: bool,
     dv_convert: bool,
+    dv_refit_digest: Option<[u8; 32]>,
     retain_hevc_parameter_sets: bool,
 }
 
@@ -528,6 +476,7 @@ impl CopyVideoOptions {
             preserve_dolby_vision,
             promote_hevc_parameter_sets: false,
             dv_convert: false,
+            dv_refit_digest: None,
             retain_hevc_parameter_sets: false,
         }
     }
@@ -582,6 +531,9 @@ impl CopyVideoOptions {
     /// filter, so the invariant lives here and not in each caller (plan §4.8).
     pub const fn with_dolby_vision_conversion(mut self, convert: bool) -> Self {
         self.dv_convert = convert;
+        if !convert {
+            self.dv_refit_digest = None;
+        }
         if convert {
             self.preserve_dolby_vision = true;
         }
@@ -591,6 +543,16 @@ impl CopyVideoOptions {
     /// Whether this copy converts Profile 7 to Profile 8.1.
     pub const fn converts_dolby_vision(self) -> bool {
         self.dv_convert
+    }
+
+    /// A fitted table is an output-affecting part of a converting copy.
+    pub const fn with_dolby_vision_refit(mut self, digest: Option<[u8; 32]>) -> Self {
+        self.dv_refit_digest = if self.dv_convert { digest } else { None };
+        self
+    }
+
+    pub const fn dolby_vision_refit(self) -> Option<[u8; 32]> {
+        self.dv_refit_digest
     }
 
     pub fn from_probe(
@@ -1542,6 +1504,18 @@ pub fn routing_hdr(file: &MediaFile) -> Option<&str> {
     }
 }
 
+fn heavy_hevc_source(
+    codec: Option<&str>,
+    hdr: bool,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> bool {
+    matches!(codec, Some("hevc" | "h265" | "hevc10"))
+        && (hdr
+            || width.is_some_and(|width| width >= 3840)
+            || height.is_some_and(|height| height >= 2160))
+}
+
 /// Is this the kind of source that justifies hardware decode — and, with it,
 /// a GPU filter graph?
 ///
@@ -1557,10 +1531,12 @@ pub fn routing_hdr(file: &MediaFile) -> Option<&str> {
 /// that decodes in software would be a graph with nothing on the GPU to work
 /// on.
 pub fn heavy_source(source: &MediaFile) -> bool {
-    matches!(
+    heavy_hevc_source(
         source.video_codec.as_deref(),
-        Some("hevc" | "h265" | "hevc10")
-    ) && (source.hdr.is_some() || source.height.unwrap_or(0) >= 2160)
+        source.hdr.is_some(),
+        source.width.and_then(|width| u32::try_from(width).ok()),
+        source.height.and_then(|height| u32::try_from(height).ok()),
+    )
 }
 
 #[cfg(test)]
@@ -2007,14 +1983,18 @@ fn hls_args_inner(
         );
         let complex = if let Some(sub) = overlay {
             let prepared = sub.replace("[sburn]", ",format=yuva420p[sburn]");
-            format!("[{filter_input}]{vf}[vburn];{prepared};[vburn][sburn]overlay_videotoolbox=bitmap=1:eof_action=pass{BURNED_VIDEO_LABEL}")
+            format!(
+                "[{filter_input}]{vf}[vburn];{prepared};[vburn][sburn]overlay_videotoolbox=bitmap=1:eof_action=pass{BURNED_VIDEO_LABEL}"
+            )
         } else {
             let prepared = with_subtitles(Vec::new(), opts, &source_path).replacen(
                 "subtitles=",
                 "subtitles_vt_images=",
                 1,
             );
-            format!("[{filter_input}]{vf},split[vburn][sclock];[sclock]{prepared}[sburn];[vburn][sburn]overlay_videotoolbox=ass=1:eof_action=pass{BURNED_VIDEO_LABEL}")
+            format!(
+                "[{filter_input}]{vf},split[vburn][sclock];[sclock]{prepared}[sburn];[vburn][sburn]overlay_videotoolbox=ass=1:eof_action=pass{BURNED_VIDEO_LABEL}"
+            )
         };
         assert_no_pq_at_8_bit(&complex);
         args.push("-filter_complex".into());
@@ -2556,6 +2536,35 @@ fn copy_input_args(
     video: CopyVideoOptions,
     audio: Option<&crate::playback::audio::AudioDelivery>,
 ) -> Vec<String> {
+    copy_input_args_with_offset_mode(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        video,
+        audio,
+        CopyAudioOffsetMode::LegacySecondInput,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CopyAudioOffsetMode {
+    LegacySecondInput,
+    SingleInputPacketTimestamps,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_input_args_with_offset_mode(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+    offset_mode: CopyAudioOffsetMode,
+) -> Vec<String> {
     let transcode_audio = audio.map_or(transcode_audio, |audio| audio.transcodes());
     let source_path = source.path.to_string_lossy().into_owned();
     let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
@@ -2577,13 +2586,22 @@ fn copy_input_args(
 
     // A per-file A/V sync correction (positive = audio later). COPIED audio
     // cannot take a filter — copy moves packets, filters need frames — so
-    // that case keeps the second `-itsoffset`'d input of the same file, used
-    // only for its audio. Audio that is being transcoded anyway takes the
+    // legacy mode keeps the second `-itsoffset`'d input of the same file,
+    // used only for audio. The measured mode shifts packet clocks below. Audio that is being transcoded anyway takes the
     // correction as a filter on the one input instead: the second demuxer
     // read the whole source again — on NAS media, double the read traffic in
     // exactly the sessions that need the disk most (review §3.4).
     let has_offset = source.audio_offset_ms != 0 && !source.audio_streams.is_empty();
-    let audio_input = if has_offset && !transcode_audio {
+    let copied_packet_offset = offset_mode == CopyAudioOffsetMode::SingleInputPacketTimestamps
+        && has_offset
+        && !transcode_audio
+        && audio.is_none_or(|delivery| {
+            !matches!(delivery.action, crate::playback::audio::AudioAction::None)
+        });
+    let audio_input = if has_offset
+        && !transcode_audio
+        && offset_mode == CopyAudioOffsetMode::LegacySecondInput
+    {
         args.extend(copy_input_seek_args(start_seconds));
         pacing.push(&mut args);
         args.push("-itsoffset".into());
@@ -2689,6 +2707,17 @@ fn copy_input_args(
         args.push("-c:a".into());
         args.push("copy".into());
     }
+    if copied_packet_offset {
+        // setts evaluates these in the audio input TB and rounds to packet
+        // ticks. Keep absent timestamps absent; never force DTS equal to PTS.
+        // n8.0/libavcodec/bsf/setts.c uses double eval + llrint, so this is not
+        // an arbitrary-i64 rational-timestamp equivalence proof.
+        let offset = source.audio_offset_ms;
+        args.extend([
+            "-bsf:a".into(),
+            format!("setts=pts='if(eq(PTS,NOPTS),NOPTS,PTS+({offset})/(1000*TB))':dts='if(eq(DTS,NOPTS),NOPTS,DTS+({offset})/(1000*TB))'"),
+        ]);
+    }
     args
 }
 
@@ -2750,9 +2779,10 @@ pub fn copy_index_shared_args_with_input(
         "-loglevel".into(),
         if hevc { "info" } else { "error" }.into(),
     ];
-    if hevc {
-        args.push("-xerror".into());
-    }
+    // Match ordinary copy playback: the muxer may repair a reordered DTS
+    // head. Treating every muxer diagnostic as fatal makes those playable
+    // titles permanently unindexable. HEVC trace parsing, parameter-set
+    // validation and complete-video coverage still decide artifact validity.
     args.push("-i".into());
     args.push(input.to_owned());
     for (at, video) in videos.iter().enumerate() {
@@ -2766,6 +2796,14 @@ pub fn copy_index_shared_args_with_input(
     args
 }
 
+#[derive(Clone, Copy)]
+enum CopyMp4Timeline {
+    /// Existing copy/index consumers expect a zero-based muxed presentation.
+    Rebased,
+    /// Clocked companions compare exact samples and retain track start offsets.
+    SourceClock,
+}
+
 /// One identity's output block of the index pipe, writing to `url`. `trace`
 /// prepends `trace_headers` to an HEVC block's bitstream filters; see
 /// [`copy_index_shared_args_with_input`] for why only one block carries it.
@@ -2774,6 +2812,16 @@ pub fn copy_index_output_args(
     video: CopyVideoOptions,
     url: &str,
     trace: bool,
+) -> Vec<String> {
+    copy_index_output_args_with_timeline(source, video, url, trace, CopyMp4Timeline::Rebased)
+}
+
+fn copy_index_output_args_with_timeline(
+    source: &MediaFile,
+    video: CopyVideoOptions,
+    url: &str,
+    trace: bool,
+    timeline: CopyMp4Timeline,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-map_chapters".into(),
@@ -2784,21 +2832,7 @@ pub fn copy_index_output_args(
         "-sn".into(),
     ];
     args.extend(strip_plurx_markers(&copy_video_args(source, video)));
-    args.extend(
-        [
-            "-avoid_negative_ts",
-            "make_zero",
-            "-movflags",
-            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
-            "-use_editlist",
-            "0",
-            "-f",
-            "mp4",
-        ]
-        .iter()
-        .map(|s| s.to_string()),
-    );
-    args.push(url.to_owned());
+    append_copy_mp4_output_with_timeline(&mut args, url, timeline);
     if trace && matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
         if let Some(index) = args.iter().position(|arg| arg == "-bsf:v") {
             args[index + 1] = format!("trace_headers,{}", args[index + 1]);
@@ -2809,6 +2843,49 @@ pub fn copy_index_output_args(
         }
     }
     args
+}
+
+/// The common fragmented MP4 mux contract for playback and index outputs.
+fn append_copy_mp4_output(args: &mut Vec<String>, url: &str) {
+    append_copy_mp4_output_with_timeline(args, url, CopyMp4Timeline::Rebased);
+}
+
+fn append_copy_mp4_output_with_timeline(
+    args: &mut Vec<String>,
+    url: &str,
+    timeline: CopyMp4Timeline,
+) {
+    let (negative_ts, movflags) = match timeline {
+        CopyMp4Timeline::Rebased => (
+            "make_zero",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+        ),
+        // MAKE_ZERO plus no edit list makes MOV stretch a late track's first
+        // sample to start at zero. AAC priming then changes only the AV
+        // companion's first video duration. Shift negative input clocks as a
+        // group, and retain one common track origin via the initial discont;
+        // without discont, MOV independently rebases each track and loses its
+        // A/V start offset. No sample or edit-list repair is needed in Rust.
+        CopyMp4Timeline::SourceClock => (
+            "make_non_negative",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov+frag_discont",
+        ),
+    };
+    args.extend(
+        [
+            "-avoid_negative_ts",
+            negative_ts,
+            "-movflags",
+            movflags,
+            "-use_editlist",
+            "0",
+            "-f",
+            "mp4",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    args.push(url.to_owned());
 }
 
 /// Build ffmpeg args for a copy session that plurx segments itself.
@@ -2888,22 +2965,190 @@ pub fn copy_pipe_args_with_audio_delivery(
         video,
         audio,
     );
+    append_copy_mp4_output(&mut args, "pipe:1");
+    args
+}
+
+/// One production playback output plus canonical video-only measurement,
+/// sharing the input and selected video recipe. The caller must inherit and
+/// concurrently drain `measurement_url` (a `pipe:N` descriptor with N >= 3).
+/// HEVC tracing belongs only to the measurement output and requires info logs.
+///
+/// Copied audio offsets use a distinct one-input packet-timestamp recipe;
+/// legacy playback APIs retain their second offset input unchanged. This argv
+/// alone does not qualify seeked measurements as equal to the whole-file index.
+#[allow(clippy::too_many_arguments)]
+pub fn copy_pipe_args_with_index_measurement(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+    measurement_url: &str,
+) -> Result<Vec<String>, &'static str> {
+    copy_pipe_args_with_index_measurement_timeline(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        video,
+        audio,
+        measurement_url,
+        CopyMp4Timeline::Rebased,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_pipe_args_with_index_measurement_timeline(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+    measurement_url: &str,
+    timeline: CopyMp4Timeline,
+) -> Result<Vec<String>, &'static str> {
+    let descriptor = measurement_url
+        .strip_prefix("pipe:")
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|descriptor| *descriptor >= 3);
+    if descriptor.is_none() {
+        return Err("index measurement requires an inherited pipe descriptor >= 3");
+    }
+    let mut args = copy_input_args_with_offset_mode(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        video,
+        audio,
+        CopyAudioOffsetMode::SingleInputPacketTimestamps,
+    );
+    append_copy_mp4_output_with_timeline(&mut args, "pipe:1", timeline);
+    if args.iter().filter(|arg| arg.as_str() == "-i").count() != 1 {
+        return Err("index measurement requires a single production input");
+    }
+    if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
+        // This is a global option; change the existing option before the
+        // input rather than appending another loglevel between outputs.
+        if let Some(level) = args.iter().position(|arg| arg == "-loglevel") {
+            args[level + 1] = "info".to_owned();
+        }
+    }
+    args.extend(copy_index_output_args_with_timeline(
+        source,
+        video,
+        measurement_url,
+        true,
+        timeline,
+    ));
+    Ok(args)
+}
+
+/// Add a selected-video packet-clock observation output to the one-input
+/// playback/canonical-measurement recipe. Clock packets retain source decode
+/// timestamps with `-copyts`. Both MP4 outputs preserve sample durations and
+/// track start offsets: only negative timestamps are shifted, and the initial
+/// fragment has a common track origin. Per-output MAKE_ZERO would stretch a
+/// late track's first sample differently when only the AV mux carries audio.
+/// Seeked measurements still require qualification before binding a range.
+///
+/// Sizes/checksums describe packets after FFmpeg filters and before any Rust
+/// Dolby Vision rewrite. The caller must correlate packet order with samples
+/// and drain all three outputs concurrently. No trace filter runs on clocks.
+#[allow(clippy::too_many_arguments)]
+pub fn copy_pipe_args_with_index_and_packet_clock(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+    measurement_url: &str,
+    clock_url: &str,
+) -> Result<Vec<String>, &'static str> {
+    let clock_descriptor = clock_url
+        .strip_prefix("pipe:")
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|descriptor| *descriptor >= 3)
+        .ok_or("packet clock requires an inherited pipe descriptor >= 3")?;
+    let mut args = copy_pipe_args_with_index_measurement_timeline(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        video,
+        audio,
+        measurement_url,
+        CopyMp4Timeline::SourceClock,
+    )?;
+    let measurement_descriptor = measurement_url[5..]
+        .parse::<i32>()
+        .map_err(|_| "invalid measurement descriptor")?;
+    if clock_descriptor == measurement_descriptor {
+        return Err("packet clock and measurement require different descriptors");
+    }
+    args.insert(0, "-copyts".to_owned());
+    args.extend(["-map", "0:v:0?", "-an", "-sn"].map(str::to_owned));
+    args.extend(strip_plurx_markers(&copy_video_args(source, video)));
     args.extend(
         [
+            "-copytb",
+            "1",
             "-avoid_negative_ts",
-            "make_zero",
-            "-movflags",
-            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
-            "-use_editlist",
-            "0",
+            "disabled",
             "-f",
-            "mp4",
-            "pipe:1",
+            "framecrc",
+            clock_url,
         ]
-        .iter()
-        .map(|s| s.to_string()),
+        .map(str::to_owned),
     );
-    args
+    Ok(args)
+}
+
+/// A bounded head census using the identical measured recipe. All three
+/// outputs stop at one selected video packet; the caller independently caps
+/// source bytes/time and joins the actual child and every drain. The artificial
+/// one-packet MP4 fragment is metadata, never canonical row coverage.
+pub fn copy_head_census_args(
+    source: &MediaFile,
+    video: CopyVideoOptions,
+    measurement_url: &str,
+    clock_url: &str,
+) -> Result<Vec<String>, &'static str> {
+    let mut args = copy_pipe_args_with_index_and_packet_clock(
+        source,
+        0.0,
+        None,
+        false,
+        Pacing::unpaced(),
+        video,
+        None,
+        measurement_url,
+        clock_url,
+    )?;
+    for output in ["pipe:1", measurement_url, clock_url] {
+        let index = args
+            .iter()
+            .rposition(|arg| arg == output)
+            .ok_or("head census output missing")?;
+        let mut limit = vec!["-frames:v".to_owned(), "1".to_owned()];
+        if output == "pipe:1" {
+            limit.insert(0, "-an".to_owned());
+        }
+        args.splice(index..index, limit);
+    }
+    Ok(args)
 }
 
 /// Build ffmpeg args to *copy* the source video into HLS (fMP4 segments) with

@@ -11,6 +11,7 @@ use plurx_core::adaptive_resources::runtime::ordinary_finite_collector::Ordinary
 /// Each opaque reference keeps its independent envelope allowance until the
 /// actual Arc allocation has been dropped. No Weak or raw Arc escapes.
 #[cfg(target_os = "linux")]
+#[derive(Clone)]
 pub(super) struct FiniteClosingRef {
     inner: Option<Arc<FiniteClosingOwner>>,
     slot: Option<OrdinarySlot>,
@@ -32,16 +33,6 @@ impl FiniteClosingRef {
     }
     pub(super) fn collector_slot(&self) -> Option<&OrdinarySlot> {
         self.slot.as_ref()
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Clone for FiniteClosingRef {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.as_ref().map(Arc::clone),
-            slot: self.slot.clone(),
-        }
     }
 }
 
@@ -520,6 +511,11 @@ impl PreparedAttemptRendition {
             .as_ref()
             .ok_or("adaptive rendition lost its planned encoding")?;
         let request = VodRecipeRequest {
+            admission_priority: if envelope.request.passive_vod {
+                crate::admission::Priority::Speculative
+            } else {
+                crate::admission::Priority::Live
+            },
             root_admission: None,
             measured_candidate: None,
             retained_capture: RetainedOutputCapture::New,
@@ -1012,7 +1008,11 @@ impl Shared {
         }
         tokio::time::timeout(
             TERMINAL_ROUTE_CONFIRM_TIMEOUT,
-            self.store.media_session_route(session_id),
+            crate::media_sessions::read_media_session_route(
+                &*self.store,
+                crate::media_sessions::RouteReadSite::Verdict,
+                session_id,
+            ),
         )
         .await
         .ok()
@@ -1449,9 +1449,28 @@ impl Shared {
         if self.finite_closing.lock().await.contains_key(key) {
             return Err("finite rendition cleanup remains in progress".into());
         }
+
+        let source_telemetry = recipe.source_telemetry;
+        if source_telemetry {
+            let existing = {
+                self.renditions
+                    .lock()
+                    .await
+                    .get(key)
+                    .filter(|rendition| {
+                        rendition.failure().is_none() && !rendition.closed.load(Relaxed)
+                    })
+                    .cloned()
+            };
+            if let Some(existing) = existing {
+                existing.source_owners.declare_source_telemetry().await?;
+            }
+        }
+
         // Single-flight only this key. No Store, filesystem, process, manifest,
         // or reader await below owns the node-wide registry mutex.
         let existing = {
+            #[allow(unused_mut)] // The Linux carrier can remove a closed incarnation.
             let mut renditions = self.renditions.lock().await;
             match renditions.get(key).map(Arc::clone) {
                 // A carrier serves only sessions its retained S captured
@@ -1605,6 +1624,9 @@ impl Shared {
                 (rendition, true)
             }
         };
+        if source_telemetry {
+            rendition.source_owners.declare_source_telemetry().await?;
+        }
         if installed {
             if rendition.ephemeral_processing {
                 let shared = Arc::clone(self);

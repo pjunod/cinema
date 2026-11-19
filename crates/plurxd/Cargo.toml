@@ -22,6 +22,8 @@ repository.workspace = true
 cluster-integration-tests = []
 
 [dependencies]
+# Production FEL disk RPU authoring and verified readback.
+dolby_vision = { workspace = true }
 async-trait = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # CPU-only inference, loaded only when semantic search is enabled.
@@ -74,7 +76,7 @@ mdns-sd = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
 qrcode = { workspace = true }
-sha2 = { workspace = true }
+sha2 = { workspace = true, features = ["compress"] }
 hmac = { workspace = true }
 base64 = "0.22"
 hex = { workspace = true }
@@ -111,8 +113,6 @@ windows-sys = { version = "0.61", features = [
 wasmtime = { version = "=50.0.0", default-features = false, features = ["std", "runtime", "cranelift"] }
 
 [dev-dependencies]
-# Rewrites the checked RPU for byte-bound processed lifecycle controls only.
-dolby_vision = { workspace = true }
 # Invitation seam tests compose the released broker Router and trusted local TLS.
 plurx-notification-broker = { path = "../plurx-notification-broker" }
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
@@ -138,6 +138,8 @@ tokio = { workspace = true, features = ["test-util"] }
 # The discarded-Store-result regression parses production Rust syntax instead
 # of guessing from receiver spelling or a bounded source suffix.
 syn = { version = "2", features = ["full", "visit"] }
+# The cluster census scans macro bodies, which `syn` leaves as raw tokens.
+proc-macro2 = "1"
 
 [lints]
 workspace = true

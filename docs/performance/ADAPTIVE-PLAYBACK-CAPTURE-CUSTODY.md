@@ -166,4 +166,3 @@ Still open: full inventory/M0, M3a/C2 native and allocator bounds, production
 trials, V1–V5, broader adapters/platforms, current-main integration and Main
 promotion. The actor-application lease regression and selected-static FFmpeg
 `-display_rotation` decision remain separate open items. No deployment.
-

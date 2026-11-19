@@ -812,7 +812,136 @@ class CompleteCommandUnitCase(unittest.TestCase):
                 argv=json.loads(raw.splitlines()[0].removeprefix('COMMAND '));record['origin']['command']=shlex.join(argv)
             with self.assertRaises(receipts.ReceiptError):self.validate(proof)
 
+    def test_original_conditional_rust_jobs_require_the_unretained_dispatch(self):
+        source = q.ORIGINAL_RUST_6713_SOURCE
+        inputs = {'promotion_pr': '1399', 'promotion_head_sha': source,
+                  'promotion_base_sha': '8c654d37b5ee3f1418fa3393662c671a6555455e'}
+        for kind, (job_id, task_id, status) in q.ORIGINAL_RUST_6713_JOBS.items():
+            job = {'id': job_id, 'task_id': task_id, 'status': status}
+            q.require_original_conditional_rust_dispatch(source, inputs, 6713, job, kind)
+            with self.subTest(kind=kind), self.assertRaises(receipts.ReceiptError):
+                q.require_original_conditional_rust_dispatch(
+                    source, {**inputs, 'retained_units_sha256': 'a' * 64}, 6713, job, kind)
+            with self.assertRaises(receipts.ReceiptError):
+                q.require_original_conditional_rust_dispatch(
+                    source, inputs, 6713, {**job, 'task_id': 1}, kind)
+
+    def test_archived_store_requires_the_reviewed_source_and_exact_executor_manifest(self):
+        from validation import store_native_capture as captures
+        record = fixture()['commands'][0]['records'][0]
+        item = {'name': 'store_contract:1'}
+        source = captures.FIRST_SOURCE
+        record['source_commit'] = source
+        record['origin']['execution'] = {
+            'mode': 'archived-store-native', 'first_line': 1, 'capture': captures.CAPTURES[source],
+        }
+        replacement = log('{"different":"executor"}')
+        with self.assertRaisesRegex(receipts.ReceiptError, 'manifest changed'):
+            q.bound_execution(record, item, 'COMMAND []', proof={'logs': {
+                captures.CAPTURES[source]: replacement,
+            }})
+        record['source_commit'] = CANDIDATE
+        with self.assertRaisesRegex(receipts.ReceiptError, 'Unknown archived Store'):
+            q.bound_execution(record, item, 'COMMAND []', proof={'logs': {}})
+
     def test_native_argv_must_be_the_preserved_fingerprint_binary(self):
         for key,value in [('binary_path','/different/store_contract-deadbeef'),('fingerprint_path','/owned/.fingerprint/plurx-core-ffffffff/test-integration-test-store_contract.json')]:
             proof=fixture();proof['commands'][0]['records'][0]['origin']['execution'][key]=value
             with self.assertRaises(receipts.ReceiptError):self.validate(proof)
+
+
+class NativeTopologyWorkflowTailCase(unittest.TestCase):
+    def test_native_topology_tail_requires_reviewed_workflow_and_stays_outside_unit_coverage(self):
+        record = {'source_commit': 'a' * 40, 'origin': {'kind': 'authenticated-ci'}}
+        recipe = ['$(CARGO) test --locked -p plurx-cluster-check final --lib -- --exact']
+        with patch.object(q.retention, 'git_bytes', return_value=b'cluster-harness-unit-check: ## reviewed\n'), patch.object(q, 'make_commands', side_effect=lambda text, target: list(recipe) if target == 'cluster-harness-unit-check' else ['$(CARGO) run --locked -p plurx-cluster-check -- check']), patch.object(q, 'historical_command', return_value=True):
+            actual = q.historical_recipe(record, 'topology')
+            self.assertEqual(actual[:-1], recipe)
+            self.assertEqual(actual[-1], '$(CARGO) run --locked -p plurx-cluster-check -- check')
+        with patch.object(q.retention, 'git_bytes', return_value=b'cluster-harness-unit-check: ## unknown\n'), patch.object(q, 'make_commands', return_value=list(recipe)), patch.object(q, 'historical_command', return_value=False):
+            with self.assertRaises(receipts.ReceiptError):
+                q.historical_recipe(record, 'topology')
+        record['origin']['kind'] = 'attested-local'
+        with patch.object(q.retention, 'git_bytes', return_value=b'cluster-harness-unit-check: ## local\n'), patch.object(q, 'make_commands', return_value=list(recipe)), patch.object(q, 'historical_command', side_effect=AssertionError('local invocation has no workflow tail')):
+            self.assertEqual(q.historical_recipe(record, 'topology'), recipe)
+
+
+class HistoricalRetentionExecutorCase(unittest.TestCase):
+    """The real pre-retention dispatch used conditional jobs but no evidence input."""
+
+    SOURCE = '5ca3abcb0259b401b7da3716c41f6026e2b95415'
+
+    def workflow(self):
+        raw = q.retention.git_bytes(self.SOURCE, '.github/workflows/ci.yml')
+        self.assertIsNotNone(raw, 'historical workflow source must be available')
+        return raw.decode()
+
+    def test_actual_conditional_rust_executors_keep_the_make_branch_available(self):
+        workflow = self.workflow()
+        for kind in ('store_contract', 'wal', 'topology', 'transport'):
+            with self.subTest(kind=kind):
+                self.assertTrue(q.retention_enabled_rust_executor(workflow, kind))
+                self.assertTrue(q.historical_command(workflow, kind))
+                q.require_unretained_historical_event(workflow, kind, {})
+
+    def test_changed_conditional_commands_or_environment_refuse(self):
+        workflow = self.workflow()
+        changed = (
+            ('store_contract', 'make cluster-store-check 2>&1 | tee',
+             'make cluster-store-check --quick 2>&1 | tee'),
+            ('wal', 'RETAIN_WAL_UNITS: ${{ needs.scope.outputs.retain_wal_units }}',
+             'RETAIN_WAL_UNITS: true'),
+            ('topology', 'make cluster-harness-nonunit-check',
+             'make cluster-harness-check'),
+            ('transport', 'test "$(uname -s)" = Linux',
+             'test "$(uname -s)" = Darwin'),
+        )
+        for kind, before, after in changed:
+            with self.subTest(kind=kind):
+                self.assertIn(before, workflow)
+                altered = workflow.replace(before, after, 1)
+                try:
+                    self.assertFalse(q.historical_command(altered, kind))
+                except receipts.ReceiptError:
+                    pass  # An exact step with forged env must fail closed.
+
+    def test_alternate_step_keys_and_env_merges_refuse(self):
+        workflow = self.workflow()
+        original = ('          RETAIN_STORE_UNITS: '
+                    '${{ needs.scope.outputs.retain_store_contract_units }}')
+        for replacement in (
+            '          "RETAIN_STORE_UNITS": ${{ needs.scope.outputs.retain_store_contract_units }}',
+            original + '\n          EXTRA: true',
+            original + '\n          <<: *override',
+            original + '\n          RETAIN_STORE_UNITS: true',
+        ):
+            with self.subTest(replacement=replacement):
+                altered = workflow.replace(original, replacement, 1)
+                self.assertNotEqual(altered, workflow)
+                try:
+                    self.assertFalse(q.historical_command(altered, 'store_contract'))
+                except receipts.ReceiptError:
+                    pass
+
+    def test_quoted_duplicate_scope_output_refuses(self):
+        workflow = self.workflow()
+        original = ('      retain_store_contract_units: '
+                    '${{ steps.retention.outputs.retain_store_contract_units }}')
+        altered = workflow.replace(original, original + '\n      "retain_store_contract_units": true', 1)
+        self.assertNotEqual(altered, workflow)
+        with self.assertRaises(receipts.ReceiptError):
+            q.require_unretained_historical_event(altered, 'store_contract', {})
+
+    def test_retention_inputs_and_scope_rebinding_refuse_old_full_execution(self):
+        workflow = self.workflow()
+        for kind in ('store_contract', 'wal', 'topology', 'transport'):
+            with self.subTest(kind=kind):
+                with self.assertRaises(receipts.ReceiptError):
+                    q.require_unretained_historical_event(workflow, kind,
+                        {'retained_units_sha256': 'a' * 64})
+                altered = workflow.replace(
+                    "if: inputs.retained_units_sha256 != '' || inputs.retained_units_attachment_id != '' || inputs.retained_units_attachment_uuid != ''",
+                    "if: inputs.retained_units_sha256 == '' || inputs.retained_units_attachment_id != '' || inputs.retained_units_attachment_uuid != ''", 1)
+                self.assertNotEqual(altered, workflow)
+                with self.assertRaises(receipts.ReceiptError):
+                    q.require_unretained_historical_event(altered, kind, {})

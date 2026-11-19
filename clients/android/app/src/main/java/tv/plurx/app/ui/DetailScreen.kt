@@ -289,6 +289,7 @@ private fun DetailContent(
                     }
                 }
                 item.overview?.takeIf { it.isNotBlank() }?.let { Text(it, color = Muted, style = MaterialTheme.typography.bodyMedium) }
+                if (item.hasOffloadedLeaves) OffloadSection(vm, item, onReload = onWatchedChanged)
                 Actions(vm = vm, item = item, annotations = annotations, onAnnotations = { annotations = it },
                     onAnnotationsRevert = { list, attempted ->
                         annotations = annotations?.let { now ->

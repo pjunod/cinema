@@ -43,7 +43,10 @@
 //! re-decides from the file's facts and reaches the delivery that needs no
 //! rewrite; nothing is served in between.
 
+use std::sync::Arc;
+
 use crate::fmp4::{self, Fmp4Error, Fragment, Init};
+use crate::transcode::dv_refit_serve::{ServedCurveTable, SourceClock};
 use crate::transcode::dvconvert::{self, Converted, EnhancementLayer};
 
 /// What one session's conversion observed, folded across its fragments.
@@ -59,6 +62,8 @@ pub struct Report {
     pub enhancement_layer: EnhancementLayer,
     /// The profile the first RPU declared.
     pub source_profile: Option<u8>,
+    /// RPUs that now carry F+ curves.
+    pub refitted: u64,
 }
 
 impl Default for Report {
@@ -67,6 +72,7 @@ impl Default for Report {
             rpus: 0,
             enhancement_layer: EnhancementLayer::None,
             source_profile: None,
+            refitted: 0,
         }
     }
 }
@@ -81,6 +87,7 @@ impl Report {
     /// boundaries happened to fall.
     fn absorb(&mut self, batch: Converted) {
         self.rpus += batch.rpus;
+        self.refitted += batch.refitted;
         if self.source_profile.is_none() {
             self.source_profile = batch.source_profile;
             self.enhancement_layer = batch.enhancement_layer;
@@ -112,6 +119,21 @@ pub struct Converter {
     /// parse needs.
     tracks: Vec<crate::fmp4::Track>,
     report: Report,
+    /// The session's pinned F+ table and where the video track's timeline
+    /// sits in the source. `None` converts with identity curves (v1).
+    refit: Option<Refit>,
+}
+
+/// F+ curves for one session's conversion (FEL-RPU-REFIT-BUILD.md §3.5).
+///
+/// The table is the one the session read when it started; every fragment it
+/// converts uses it, whatever is published later. Each sample's scene is
+/// found from its own presentation time through `clock`, so a window that
+/// starts mid-title gets the same RPU bytes the whole-title pass wrote there.
+#[derive(Debug, Clone)]
+struct Refit {
+    table: Arc<ServedCurveTable>,
+    clock: SourceClock,
 }
 
 impl Converter {
@@ -135,7 +157,41 @@ impl Converter {
             nal_length_size: video.nal_length_size,
             tracks: init.tracks.clone(),
             report: Report::default(),
+            refit: None,
         })
+    }
+
+    /// Write `table`'s curves into every RPU, each sample's scene found by
+    /// mapping its presentation time through `clock`.
+    ///
+    /// Refuses a clock that does not describe this init's video track or the
+    /// table's time base: a mismatch would place every sample in the wrong
+    /// scene and nothing downstream could tell.
+    pub fn with_refit(
+        mut self,
+        table: Arc<ServedCurveTable>,
+        clock: SourceClock,
+    ) -> Result<Converter, Refused> {
+        let timescale = self
+            .tracks
+            .iter()
+            .find(|track| track.id == self.video_track)
+            .map(|track| track.timescale);
+        if timescale != Some(clock.track_timescale) {
+            return Err(Refused(format!(
+                "the F+ clock is for a {}-tick track and the video track has {timescale:?}",
+                clock.track_timescale
+            )));
+        }
+        if clock.source_time_base != table.time_base() {
+            return Err(Refused(format!(
+                "the F+ clock maps to time base {:?} and the curve table is keyed in {:?}",
+                clock.source_time_base,
+                table.time_base()
+            )));
+        }
+        self.refit = Some(Refit { table, clock });
+        Ok(self)
     }
 
     /// What the conversion has seen so far.
@@ -153,22 +209,38 @@ impl Converter {
         let width = self.nal_length_size;
         let mut batch = Converted::default();
         let mut scratch = Vec::new();
-        let changed =
-            fmp4::rewrite_video_samples(fragment, &self.tracks, self.video_track, |sample| {
-                let seen = dvconvert::convert_length_prefixed(sample, width, &mut scratch)
+        let refit = self.refit.as_ref();
+        let changed = fmp4::rewrite_timed_video_samples(
+            fragment,
+            &self.tracks,
+            self.video_track,
+            |sample, time| {
+                let curves = match refit {
+                    Some(refit) => {
+                        let pts = refit
+                            .clock
+                            .source_pts(time.presentation())
+                            .map_err(|error| Fmp4Error::Unsupported(error.to_string()))?;
+                        refit.table.curves_at(pts)
+                    }
+                    None => None,
+                };
+                let seen = dvconvert::convert_length_prefixed(sample, width, curves, &mut scratch)
                     .map_err(|error| Fmp4Error::Unsupported(error.to_string()))?;
                 // Folded here rather than after the call, because
                 // `rewrite_video_samples` collects every edit before applying any:
                 // a refusal on a later sample must leave neither the bytes nor the
                 // tally changed, and `batch` is discarded with the error.
                 batch.rpus += seen.rpus;
+                batch.refitted += seen.refitted;
                 if batch.source_profile.is_none() {
                     batch.source_profile = seen.source_profile;
                     batch.enhancement_layer = seen.enhancement_layer;
                 }
                 Ok(std::mem::take(&mut scratch))
-            })
-            .map_err(|error| Refused(error.to_string()))?;
+            },
+        )
+        .map_err(|error| Refused(error.to_string()))?;
         self.report.absorb(batch);
         Ok(changed)
     }

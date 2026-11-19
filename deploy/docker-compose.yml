@@ -47,6 +47,9 @@ services:
       context: ..            # repo root (where the Dockerfile + workspace live)
       dockerfile: Dockerfile
       args:
+        # Public by default; Dockerfile fixes the digest independently of the repository.
+        # Explicit mirror overrides also work in .env when Compose is run directly.
+        PLURX_MEDIA_RUNTIME_REPOSITORY: ${PLURX_MEDIA_RUNTIME_REPOSITORY:-${PLURX_MEDIA_RUNTIME_REPOSITORY_DEFAULT:-ghcr.io/pjunod/cinema-media-runtime}}
         # Which commit this image is. `.git` is deliberately outside the build
         # context, so the build script cannot work it out for itself and a
         # bare `docker compose up -d --build` produces an image stamped
@@ -162,6 +165,20 @@ services:
       # unit tests and failed on the device.
       # PLURX_HLS_FORCED_AUTOSELECT: "1"
     volumes:
+      # Linux source ownership must survive a host reboot, including raw readers.
+      # Long bind syntax refuses missing sources instead of creating directories.
+      - type: bind
+        source: /etc/machine-id
+        target: /run/plurx-host-machine-id
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /proc/sys/kernel/random/boot_id
+        target: /run/plurx-host-boot-id
+        read_only: true
+        bind:
+          create_host_path: false
       # The database and everything else that must survive a rebuild. Create
       # it first, owned by the same uid the container runs as:
       #   sudo install -d -o $(id -u) -g $(id -g) /srv/plurx

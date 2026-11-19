@@ -356,6 +356,7 @@ fn a_switch_onto_media_that_never_published_aborts_the_preparation() {
     // survive to be acknowledged.
     let binding = || PreparedActionBinding {
         successor: PreparedSuccessorAction {
+            delivered_dolby_vision_profile: None,
             enhancement: None,
             control: None,
             staged_incarnation_id: staged.clone(),
@@ -366,6 +367,7 @@ fn a_switch_onto_media_that_never_published_aborts_the_preparation() {
             effective_selection: selection.clone(),
         },
         action: ControlAction::Prepare {
+            delivered_dolby_vision_profile: None,
             enhancement: None,
             control: None,
             action_id: action_id.clone(),
@@ -985,6 +987,9 @@ fn vod_status_delivering(
 ) -> HlsSessionInfo {
     HlsSessionInfo::Vod(Box::new(crate::vodserve::VodSessionInfo {
         resource_service: None,
+        dolby_vision_refit: None,
+        dv_refit_digest: None,
+        dv_refit_identity_reason: None,
         stream_format: None,
         active_encode_milli_realtime: None,
         active_encode_age_ms: None,
@@ -2336,6 +2341,7 @@ fn a_commit_naming_an_origin_the_offer_did_not_is_refused() {
         let control = ControlState {
             prepared_action: Some(PreparedActionBinding {
                 successor: PreparedSuccessorAction {
+                    delivered_dolby_vision_profile: None,
                     enhancement: None,
                     control: None,
                     staged_incarnation_id: staged.clone(),
@@ -2355,6 +2361,7 @@ fn a_commit_naming_an_origin_the_offer_did_not_is_refused() {
                     },
                 },
                 action: ControlAction::Prepare {
+                    delivered_dolby_vision_profile: None,
                     enhancement: None,
                     control: None,
                     action_id: action_id.clone(),
@@ -2472,13 +2479,18 @@ fn a_commit_carries_the_origin_it_adopted_and_not_a_wall_clock() {
     // Range, so a garbage origin is refused at the door rather than
     // compared against an offer it could never match.
     assert_eq!(
-        ack(AcknowledgementState::Committed, Some(-1), None).validate(),
+        ack(
+            AcknowledgementState::Committed,
+            Some(-MAX_MEDIA_ORIGIN_MILLIS - 1),
+            None
+        )
+        .validate(),
         Err("acknowledgement.committed_media_origin_ms"),
     );
     assert_eq!(
         ack(
             AcknowledgementState::Committed,
-            Some(MAX_MEDIA_MILLIS + 1),
+            Some(MAX_MEDIA_ORIGIN_MILLIS + 1),
             None,
         )
         .validate(),
@@ -2605,6 +2617,7 @@ fn the_preparation_action_is_a_transaction_not_a_report() {
 fn a_relayed_preparation_cannot_point_a_client_anywhere() {
     let session = uuid::Uuid::new_v4().to_string();
     let honest = ControlAction::Prepare {
+        delivered_dolby_vision_profile: None,
         control: None,
         enhancement: None,
         action_id: uuid::Uuid::new_v4().to_string(),
@@ -2631,6 +2644,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "a protocol-relative URL onto another host",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2643,6 +2657,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "an absolute URL onto another host",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2655,6 +2670,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "no session at all",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2667,6 +2683,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "no action id to fence the acknowledgement with",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: String::new(),
@@ -2679,6 +2696,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "an action id that acknowledgements cannot parse",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: "not-a-uuid".to_owned(),
@@ -2691,6 +2709,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "a backslash-relative URL, which browsers treat as //",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2703,6 +2722,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "the session named only in a query parameter",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2715,6 +2735,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "the session named only in a fragment",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2727,6 +2748,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "a path that climbs out of the session's own",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2739,6 +2761,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "encoded dot segments normalized after validation",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2751,6 +2774,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "an internal backslash normalized as a path separator",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2763,6 +2787,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "an arbitrary same-origin route containing the session id",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2775,6 +2800,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "a session id that is not one",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2785,14 +2811,17 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
             },
         ),
         (
-            "an origin before the start of the film",
+            // Origins are signed source time (a copy range may start before
+            // zero); only one outside the representable range is garbage.
+            "an origin outside the representable media range",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
                 session_id: session_id.clone(),
                 playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
-                media_origin_ms: -1,
+                media_origin_ms: -MAX_MEDIA_ORIGIN_MILLIS - 1,
                 effective_selection: effective_selection.clone(),
             },
         ),
@@ -2803,6 +2832,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
     let mut invalid_selection = effective_selection;
     invalid_selection.height = crate::transcode::MAX_HEIGHT + 1;
     let invalid_nested = ControlAction::Prepare {
+        delivered_dolby_vision_profile: None,
         control: None,
         enhancement: None,
         action_id,
@@ -2834,6 +2864,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
 fn a_relayed_preparation_needs_the_declared_vocabulary() {
     let session = uuid::Uuid::new_v4().to_string();
     let action = ControlAction::Prepare {
+        delivered_dolby_vision_profile: None,
         control: None,
         enhancement: None,
         action_id: uuid::Uuid::new_v4().to_string(),
@@ -2856,6 +2887,7 @@ fn a_relayed_preparation_needs_the_declared_vocabulary() {
 fn prepare_action() -> ControlAction {
     let session = uuid::Uuid::new_v4().to_string();
     ControlAction::Prepare {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         action_id: uuid::Uuid::new_v4().to_string(),
@@ -2964,6 +2996,7 @@ fn a_new_ask_in_the_same_packet_refuses_the_old_asks_commit() {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            delivered_dolby_vision_profile: None,
             enhancement: None,
             control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
@@ -3227,6 +3260,7 @@ fn a_refused_packet_cannot_advance_the_ask_and_strand_a_successor() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
@@ -3343,6 +3377,7 @@ fn a_successor_staged_without_a_recorded_ask_still_commits() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
@@ -3728,6 +3763,7 @@ fn a_prepared_successor_gets_one_action_identity_and_replays_it_exactly() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id,
@@ -3827,6 +3863,7 @@ fn preparation_acknowledgements_are_fenced_recorded_and_replayed() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
@@ -3992,6 +4029,7 @@ fn failed_preparation_acknowledgement_moves_the_slot_to_aborting() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
@@ -4082,6 +4120,7 @@ fn expired_or_abort_won_commit_acknowledgement_is_rejected_and_replayed() {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            delivered_dolby_vision_profile: None,
             enhancement: None,
             control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
@@ -4177,6 +4216,7 @@ fn settled_deadline_abort_still_rejects_its_late_commit_acknowledgement() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
@@ -4327,6 +4367,7 @@ fn vocabulary_is_frozen_for_the_sequence_that_was_accepted() {
     ));
     let session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id,
@@ -4382,6 +4423,7 @@ fn a_changed_payload_cannot_consume_the_next_sequence() {
     ));
     let session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id,
@@ -4444,6 +4486,7 @@ fn owner_epoch_rollover_aborts_instead_of_reannouncing_old_staging() {
     ));
     let session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id,
@@ -4499,6 +4542,7 @@ fn an_expired_preparation_cannot_cross_the_acceptance_boundary() {
     ));
     let session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id,
@@ -5216,6 +5260,7 @@ async fn a_staged_successor_round_trips_through_the_actor_mailbox() {
     let request = request();
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id: "successor-1".to_owned(),
@@ -5304,6 +5349,7 @@ async fn preparation_ownership_transfers_before_a_dropped_actor_reply() {
     );
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
@@ -6205,7 +6251,9 @@ async fn terminal_commands_claim_due_expiry_before_end_or_authority_fence() {
             RollingTerminalCause::AuthorityFence => handle.authority_fence().await,
             RollingTerminalCause::LeaseExpired
             | RollingTerminalCause::StartupExpired
-            | RollingTerminalCause::PauseExpired => {
+            | RollingTerminalCause::PauseExpired
+            | RollingTerminalCause::Released
+            | RollingTerminalCause::Stopped => {
                 unreachable!()
             }
         }
@@ -8292,6 +8340,81 @@ fn exit_seals_preceding_progress_and_later_progress_stays_terminal() {
 }
 
 #[test]
+fn rolling_first_media_clock_requires_an_exact_attempt_body_commit() {
+    let started = Instant::now();
+    let mut actor =
+        RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+    let attempt = actor
+        .begin_producer_attempt_at(started)
+        .expect("first attempt");
+    assert!(actor.observe_publication_at(started, publication(attempt, true, 2, 48_000, None)));
+    assert!(actor.commit_media_at(
+        started + Duration::from_secs(1),
+        "init",
+        attempt,
+        None,
+        None
+    ));
+    assert_eq!(
+        actor.delivery.first_media_committed_at, None,
+        "metadata and publication are not media consumption"
+    );
+    let first = started + Duration::from_secs(2);
+    assert!(actor.commit_media_at(first, "segment", attempt, Some(0), Some(16_000)));
+    assert!(actor.commit_media_at(
+        started + Duration::from_secs(3),
+        "segment",
+        attempt,
+        Some(1),
+        Some(32_000)
+    ));
+    assert_eq!(
+        actor.delivery.first_media_committed_at,
+        Some(first),
+        "downloads cannot continually restart the consumption clock"
+    );
+}
+
+#[test]
+fn rolling_first_media_clock_resets_with_a_prepublication_attempt() {
+    let started = Instant::now();
+    let mut actor =
+        RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+    let attempt = actor
+        .begin_producer_attempt_at(started)
+        .expect("unpublished first attempt");
+    let replacement = actor
+        .begin_producer_attempt_at(started + Duration::from_secs(4))
+        .expect("unpublished replacement attempt");
+    assert_eq!(actor.delivery.first_media_committed_at, None);
+    assert!(!actor.commit_media_at(
+        started + Duration::from_secs(5),
+        "segment",
+        attempt,
+        Some(2),
+        Some(48_000)
+    ));
+    assert_eq!(
+        actor.delivery.first_media_committed_at, None,
+        "predecessor delivery cannot start the replacement clock"
+    );
+    assert!(actor.observe_publication_at(
+        started + Duration::from_secs(5),
+        publication(replacement, true, 0, 16_000, None)
+    ));
+    assert_eq!(
+        actor.delivery.first_media_committed_at, None,
+        "replacement publication cannot start consumption"
+    );
+    let next = started + Duration::from_secs(6);
+    assert!(actor.commit_media_at(next, "segment", replacement, Some(0), Some(16_000)));
+    assert_eq!(
+        actor.snapshot_at(next).delivery.first_media_committed_at,
+        Some(next)
+    );
+}
+
+#[test]
 fn rolling_equal_fetch_resolves_its_pending_end() {
     let started = Instant::now();
     let mut actor =
@@ -10023,8 +10146,10 @@ fn every_axis_is_prepared_and_names_itself() {
 
 fn session_request(kind: SessionKind) -> crate::transcode::SessionRequest {
     crate::transcode::SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -10641,8 +10766,10 @@ fn a_grade_intent_comes_off_the_request() {
 
     fn request(kind: SessionKind, hdr10: bool) -> SessionRequest {
         SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -16774,6 +16901,7 @@ fn accept_step_rejection_order() {
     };
     let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
     let successor = |media_origin_ms: i64| PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
         deadline_ms: i64::MAX,
@@ -17707,4 +17835,218 @@ fn a_published_attempt_is_not_failed_by_the_prepublication_check() {
         classify_prepublication_attempt(&snapshot, 1, 1),
         PrepublicationAttemptOutcome::Waiting
     );
+}
+
+#[test]
+fn rolling_seek_projection_uses_the_explicit_target_instead_of_the_predecessor_clock() {
+    let mut demand = PlaybackDemandSnapshot::test_default(ClientPlatform::Web);
+    demand.position_ms = 1_417_211;
+    demand.seek_target_ms = Some(1_234_749);
+    demand.render_state = RenderState::Seeking;
+    demand.demand = PlaybackDemand::Active;
+    assert_eq!(
+        rolling_estimated_position_ms(&demand, Duration::from_secs(30)),
+        1_234_749
+    );
+    demand.demand = PlaybackDemand::Hold;
+    assert_eq!(
+        rolling_estimated_position_ms(&demand, Duration::from_secs(30)),
+        1_234_749
+    );
+    demand.seek_target_ms = None;
+    assert_eq!(
+        rolling_estimated_position_ms(&demand, Duration::ZERO),
+        1_417_211
+    );
+}
+
+/// R1: the two lifecycle causes are wire-visible through `status()`, but the
+/// HTTP 410 body keeps an existing durable reason so older clients decode it.
+#[test]
+fn release_and_stop_causes_keep_existing_durable_reasons() {
+    use crate::vodserve::Terminal;
+
+    assert_eq!(
+        [
+            RollingTerminalCause::Released,
+            RollingTerminalCause::Stopped
+        ]
+        .map(RollingTerminalCause::status),
+        ["released", "stopped"]
+    );
+    assert_eq!(
+        RollingTerminalCause::Released.terminal_reason(),
+        Terminal::Deleted
+    );
+    assert_eq!(
+        RollingTerminalCause::Stopped.terminal_reason(),
+        Terminal::AdminStop
+    );
+    assert_eq!(
+        RollingTerminalCause::release_for(Terminal::Deleted),
+        Some(RollingTerminalCause::Released)
+    );
+    assert_eq!(
+        RollingTerminalCause::release_for(Terminal::AdminStop),
+        Some(RollingTerminalCause::Stopped)
+    );
+    for authority in [
+        Terminal::Superseded,
+        Terminal::Revoked,
+        Terminal::Replaced,
+        Terminal::AuthorityFenced,
+    ] {
+        assert_eq!(RollingTerminalCause::release_for(authority), None);
+    }
+    for cause in [
+        RollingTerminalCause::End,
+        RollingTerminalCause::AuthorityFence,
+        RollingTerminalCause::LeaseExpired,
+        RollingTerminalCause::StartupExpired,
+        RollingTerminalCause::PauseExpired,
+        RollingTerminalCause::Released,
+        RollingTerminalCause::Stopped,
+    ] {
+        assert_eq!(
+            RollingTerminalCause::from_projection(cause.projection()),
+            Some(cause)
+        );
+    }
+    let metrics = prometheus();
+    for event in ["released", "stopped"] {
+        for outcome in ["won", "already_terminal"] {
+            assert!(metrics.contains(&format!(
+                "plurx_playback_rolling_terminal_events_total{{event=\"{event}\",outcome=\"{outcome}\"}}"
+            )));
+        }
+    }
+}
+
+/// R1: a release projected on the handle is the actor's first terminal and
+/// keeps its cause; a fence or End that projected first keeps theirs.
+#[tokio::test]
+async fn release_projection_is_the_first_terminal_and_keeps_its_cause() {
+    let released = RollingControlHandle::spawn_for_test("session-start");
+    released.release_unavailable(RollingTerminalCause::Released);
+    assert!(released.is_retired());
+    assert_eq!(
+        released.projected_release(),
+        Some(RollingTerminalCause::Released)
+    );
+    released.fence_unavailable();
+    assert_eq!(
+        released.snapshot().await.expect("snapshot").terminal,
+        Some(RollingTerminalCause::Released),
+        "the actor imports the projected release, not the default fence"
+    );
+    assert_eq!(
+        released.end().await.expect("late end").cause(),
+        RollingTerminalCause::Released
+    );
+
+    let fenced = RollingControlHandle::spawn_for_test("session-start");
+    fenced.fence_unavailable();
+    fenced.release_unavailable(RollingTerminalCause::Stopped);
+    assert_eq!(fenced.projected_release(), None);
+    assert_eq!(
+        fenced.snapshot().await.expect("snapshot").terminal,
+        Some(RollingTerminalCause::AuthorityFence),
+        "a release cannot relabel an earlier serving fence"
+    );
+
+    let ended = RollingControlHandle::spawn_for_test("session-start");
+    assert!(ended.end().await.expect("end").won());
+    ended.release_unavailable(RollingTerminalCause::Released);
+    assert_eq!(ended.projected_release(), None);
+    assert_eq!(
+        ended.snapshot().await.expect("snapshot").terminal,
+        Some(RollingTerminalCause::End)
+    );
+}
+
+#[test]
+fn prepared_timeline_origin_is_signed_but_protocol_bounded() {
+    let session = uuid::Uuid::new_v4().to_string();
+    let playlist = format!("/api/v1/hls/{session}/index.m3u8");
+    let selection = prepared_selection();
+    for origin in [-MAX_MEDIA_ORIGIN_MILLIS, -83, 0, MAX_MEDIA_ORIGIN_MILLIS] {
+        assert!(prepared_payload_is_valid(
+            None, &session, &playlist, origin, &selection
+        ));
+    }
+    for origin in [
+        i64::MIN,
+        -MAX_MEDIA_ORIGIN_MILLIS - 1,
+        MAX_MEDIA_ORIGIN_MILLIS + 1,
+        i64::MAX,
+    ] {
+        assert!(!prepared_payload_is_valid(
+            None, &session, &playlist, origin, &selection
+        ));
+    }
+}
+
+#[test]
+fn committed_timeline_origin_is_signed_without_widening_buffer_positions() {
+    let mut ack = ActionAcknowledgement {
+        action_id: uuid::Uuid::new_v4().to_string(),
+        state: AcknowledgementState::Committed,
+        buffered_through_ms: Some(0),
+        committed_media_origin_ms: Some(-83),
+        first_frame_unix_ms: Some(1_700_000_000_000),
+    };
+    assert!(ack.validate().is_ok());
+    ack.committed_media_origin_ms = Some(MAX_MEDIA_ORIGIN_MILLIS + 1);
+    assert_eq!(
+        ack.validate(),
+        Err("acknowledgement.committed_media_origin_ms")
+    );
+    ack.committed_media_origin_ms = Some(-83);
+    ack.buffered_through_ms = Some(-1);
+    assert_eq!(ack.validate(), Err("acknowledgement.buffered_through_ms"));
+}
+
+#[test]
+fn prepared_delivery_profile_survives_wire_and_legacy_absence() {
+    let session = uuid::Uuid::new_v4().to_string();
+    let mut selection = prepared_selection();
+    selection.dynamic_range = Some("dolby_vision".to_owned());
+    let action = PreparedSuccessorAction {
+        staged_incarnation_id: uuid::Uuid::new_v4().to_string(),
+        deadline_ms: i64::MAX,
+        session_id: session.clone(),
+        playlist_url: format!("/api/v1/hls/{session}/index.m3u8"),
+        control: None,
+        media_origin_ms: 0,
+        effective_selection: selection,
+        enhancement: None,
+        delivered_dolby_vision_profile: Some(8),
+    }
+    .into_action();
+    let mut wire = serde_json::to_value(&action).expect("Prepare serialization");
+    assert_eq!(wire["delivered_dolby_vision_profile"], 8);
+    assert_eq!(wire["effective_selection"]["dynamic_range"], "dolby_vision");
+    let round_trip: ControlAction = serde_json::from_value(wire.clone()).expect("Prepare decoding");
+    assert_eq!(round_trip, action);
+    assert!(
+        believable(&round_trip),
+        "the delivery fields survive a response relay"
+    );
+    wire.as_object_mut()
+        .expect("Prepare object")
+        .remove("delivered_dolby_vision_profile");
+    let legacy: ControlAction = serde_json::from_value(wire.clone()).expect("legacy Prepare");
+    assert!(matches!(
+        legacy,
+        ControlAction::Prepare {
+            delivered_dolby_vision_profile: None,
+            ..
+        }
+    ));
+    assert!(serde_json::to_value(legacy)
+        .expect("legacy serialization")
+        .get("delivered_dolby_vision_profile")
+        .is_none());
+    wire["delivered_dolby_vision_profile"] = serde_json::json!("8");
+    assert!(serde_json::from_value::<ControlAction>(wire).is_err());
 }

@@ -1676,6 +1676,11 @@ impl super::TranscodeManager {
             envelope.request.audio_offset_ms.clamp(-15_000, 15_000)
         };
         let mut recipe = crate::vodserve::VodRecipeRequest {
+            admission_priority: if envelope.request.passive_vod {
+                crate::admission::Priority::Speculative
+            } else {
+                crate::admission::Priority::Live
+            },
             root_admission: None,
             measured_candidate: None,
             retained_capture: crate::vodserve::RetainedOutputCapture::New,

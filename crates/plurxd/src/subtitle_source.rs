@@ -556,6 +556,16 @@ impl StoreAccess {
         self.membership.as_ref()
     }
 
+    pub(crate) fn foreground_source_request(
+        &self,
+        file: &MediaFile,
+        lifetime: &str,
+    ) -> Option<crate::source_custody::SourceRequest> {
+        self.jobs
+            .as_ref()
+            .and_then(|jobs| jobs.foreground_source_request(file, lifetime))
+    }
+
     pub(crate) fn jobs(&self) -> Option<&std::sync::Arc<crate::state::JobManager>> {
         self.jobs.as_ref()
     }
@@ -2769,6 +2779,7 @@ mod tests {
             .expect("second");
         let bad = crate::http::peer_transport::PeerResponse {
             dv_processing_header: None,
+            processing_skip_header: None,
             clock_timing: None,
             status: reqwest::StatusCode::OK,
             body: b"invalid!".to_vec(),
@@ -2780,6 +2791,7 @@ mod tests {
         forget_stale_publication(&catalog, &stale).await;
         let good = crate::http::peer_transport::PeerResponse {
             dv_processing_header: None,
+            processing_skip_header: None,
             clock_timing: None,
             status: reqwest::StatusCode::OK,
             body: b"verified".to_vec(),
@@ -2801,6 +2813,7 @@ mod tests {
         let holder = publication(0, "extracted", "kept", 1);
         let missing = crate::http::peer_transport::PeerResponse {
             dv_processing_header: None,
+            processing_skip_header: None,
             clock_timing: None,
             status: reqwest::StatusCode::NOT_FOUND,
             body: Vec::new(),
@@ -2811,6 +2824,7 @@ mod tests {
         );
         let unavailable = crate::http::peer_transport::PeerResponse {
             dv_processing_header: None,
+            processing_skip_header: None,
             clock_timing: None,
             status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
             body: Vec::new(),

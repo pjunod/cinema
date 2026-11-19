@@ -71,7 +71,7 @@ fn ending_a_session_reads_its_owner_inside_the_transaction() {
         "the pin delete covers every epoch of the ended incarnation"
     );
     assert!(
-        source.contains("Ok(route_by(self, \"incarnation_id\", &route.incarnation_id)"),
+        source.split_whitespace().collect::<Vec<_>>().join(" ").contains("Ok(route_by( \"end_media_session\", self, \"incarnation_id\", &route.incarnation_id, )"),
         "the returned route must be re-read after the transaction commits"
     );
 }
@@ -130,7 +130,10 @@ fn preparation_neither_reaps_nor_repoints() {
         normalized_method.contains("let statements = prepare_statements(preparation, layout)?;")
             && method.matches("let statements =").count() == 1
             && method.matches(".txn(").count() == 1
-            && method.matches(".txn(statements)").count() == 1
+            && method
+                .matches(".txn(\"prepare_media_session\", statements)")
+                .count()
+                == 1
             && !method.contains("statements.push(")
             && !method.contains("statements.extend(")
             && !method.contains("statements.insert(")
@@ -233,7 +236,7 @@ fn preparation_abort_is_ledger_gated_in_every_statement() {
                 "let statements = abort_statements( user_id, playback_id, &request.staged_incarnation_id, &request.expected_predecessor_owner_node_id, request.expected_predecessor_owner_epoch, request.now_ms, layout, );"
             ) && method.matches("let statements =").count() == 1
                 && method.matches(".txn(").count() == 1
-                && method.matches(".txn(statements)").count() == 1
+                && method.matches(".txn(\"abort_media_session_preparation\", statements)").count() == 1
                 && !method.contains("statements.push(")
                 && !method.contains("statements.extend(")
                 && !method.contains("statements.insert(")
@@ -315,7 +318,9 @@ fn preparation_abort_is_ledger_gated_in_every_statement() {
 #[test]
 fn activation_losing_pointer_read_race_is_a_read_only_replay() {
     let wrapper = method_source("activate_media_session");
-    assert!(wrapper.contains("activate_with_authority(self, activation, None, None).await"));
+    assert!(wrapper.contains(
+        "activate_with_authority(\"activate_media_session\", self, activation, None, None).await"
+    ));
     let source = SOURCE
         .split_once("async fn activate_with_authority(")
         .expect("activation helper")
@@ -376,4 +381,64 @@ fn direct_v9_upgrade_uses_the_frozen_v10_session_shape() {
     assert!(MEDIA_SESSIONS_SCHEMA.contains("publication_ready_at_ms"));
     assert!(MEDIA_SESSION_TERMINAL_REASON_MIGRATION.contains("terminal_reason"));
     assert!(MEDIA_SESSION_PUBLICATION_FENCE_MIGRATION.contains("publication_ready_at_ms"));
+}
+
+/// E1c review N6: `validation_assume_installed_session_layout` exists only
+/// under `cluster-read-cost-validation`, which another workspace crate turns
+/// on, so feature unification can compile it into a daemon. This pins that
+/// nothing outside the store-contract tests ever calls it: the definition is
+/// the only occurrence in any crate's `src/`.
+#[test]
+fn the_assumed_layout_hook_has_no_caller_outside_the_store_contract() {
+    fn walk(path: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(path).expect("read a source directory") {
+            let path = entry.expect("a source entry").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    const HOOK: &str = "validation_assume_installed_session_layout";
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the crates directory");
+    let mut sources = Vec::new();
+    for entry in std::fs::read_dir(crates).expect("read crates") {
+        let src = entry.expect("a crate").path().join("src");
+        if src.is_dir() {
+            walk(&src, &mut sources);
+        }
+    }
+    let this = file!().replace('\\', "/");
+    let mut found = Vec::new();
+    for path in sources {
+        let rel = path.to_string_lossy().replace('\\', "/");
+        if rel.ends_with(this.rsplit("crates/").next().unwrap_or(&this)) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read a source file");
+        for _ in text.matches(HOOK) {
+            found.push(rel.clone());
+        }
+    }
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].ends_with("plurx-core/src/store/hiqlite_sessions.rs"),
+        "{found:?}"
+    );
+    assert!(SOURCE.contains(&format!("    pub fn {HOOK}(&self)")));
+    let definition = SOURCE
+        .split(&format!("pub fn {HOOK}"))
+        .next()
+        .expect("definition");
+    assert!(
+        definition
+            .trim_end()
+            .rsplit('\n')
+            .take(3)
+            .any(|line| line.contains("#[cfg(feature = \"cluster-read-cost-validation\")]")),
+        "the hook stays behind the validation feature"
+    );
 }

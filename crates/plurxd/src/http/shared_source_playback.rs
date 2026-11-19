@@ -7,6 +7,8 @@ use axum::http::{HeaderMap, StatusCode};
 use serde_json::Value;
 use uuid::Uuid;
 
+pub(crate) mod receiver_presentation;
+
 #[path = "shared_source_forwarding.rs"]
 pub(crate) mod forwarding;
 use forwarding::{AuthenticationHeaders, SourceHeaders};
@@ -33,6 +35,8 @@ pub(crate) struct SourceStartRegistry {
     forwarding: forwarding::ForwardingRegistry,
     entries: std::sync::Mutex<Vec<std::sync::Arc<SourceStartEntry>>>,
     settled: std::sync::Mutex<std::collections::VecDeque<std::sync::Arc<SourceStartEntry>>>,
+    #[cfg(test)]
+    discovery_pause: crate::seam_hooks::PauseSlot,
 }
 struct SourceStartEntry {
     identity: SourceStartIdentity,
@@ -273,6 +277,9 @@ struct SourceStartIdentity {
     request_id: Uuid,
     reference: SourcePlaybackTarget,
     recipe_hash: [u8; 32],
+    public_recipe_hash: [u8; 32],
+    recipe: Vec<u8>,
+    receiver_range: bool,
 }
 /// The typed refusal of a shared Dolby Vision delivery, on the Source and on
 /// B's own Start validation alike.
@@ -281,6 +288,11 @@ pub(crate) const SHARING_START_DOLBY_VISION_UNSUPPORTED: &str =
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceStartFailure {
     Unavailable,
+    RescanRequired,
+    CopyTargetExceeded,
+    CopyInitContractChanged,
+    CopyClockUnknown,
+    CopySyncUnverified,
     Capacity,
     Conflict,
     Unresolved,
@@ -289,6 +301,8 @@ enum SourceStartFailure {
     /// its own typed code after a fresh invocation claim, before admission.
     DolbyVisionUnsupported,
     Deadline,
+    /// Only the Store's exact atomic no-claim proof constructs this result.
+    RetargetUnassigned,
 }
 impl SourceStartRegistry {
     // This object is installed on one actual manager. No global pointer map,
@@ -308,6 +322,10 @@ impl SourceStartRegistry {
             request_id: input.request_id,
             reference: input.reference.clone(),
             recipe_hash: sha2::Sha256::digest(&input.canonical_recipe).into(),
+            public_recipe_hash: receiver_presentation::public_recipe_hash(&input.canonical_recipe)
+                .map_err(|_| SourceStartFailure::Conflict)?,
+            recipe: input.canonical_recipe.clone(),
+            receiver_range: receiver_presentation::range_bound(input),
         };
         let mut entries = self.entries.lock().expect("Source HTTP starts");
         // Bookkeeping capacity follows in-process ownership. An entry leaves
@@ -731,6 +749,18 @@ impl SourceStartEntry {
         owner
     }
 }
+#[cfg(test)]
+impl SourceStartRegistry {
+    /// Entries still holding one of the registry's slots.
+    pub(crate) fn live_entries(&self) -> usize {
+        self.entries
+            .lock()
+            .expect("Source HTTP starts")
+            .iter()
+            .filter(|entry| !entry.actual_finished())
+            .count()
+    }
+}
 impl SourceStartRegistry {
     fn current_entry(
         &self,
@@ -765,8 +795,8 @@ impl SourceStartRegistry {
         viewer: &str,
         input: &SourceStartInput,
     ) -> Result<std::sync::Arc<SourceStartEntry>, SourceStartFailure> {
-        use sha2::Digest;
-        let recipe_hash: [u8; 32] = sha2::Sha256::digest(&input.canonical_recipe).into();
+        let recipe_hash = receiver_presentation::public_recipe_hash(&input.canonical_recipe)
+            .map_err(|_| SourceStartFailure::Conflict)?;
         let entries = self.entries.lock().expect("Source HTTP starts");
         let settled = self.settled.lock().expect("Source settled HTTP receipts");
         let entry = entries
@@ -783,7 +813,8 @@ impl SourceStartRegistry {
                         .any(|h| h == hash)
             })
             .ok_or(SourceStartFailure::Unresolved)?;
-        if entry.identity.reference != input.reference || entry.identity.recipe_hash != recipe_hash
+        if entry.identity.reference != input.reference
+            || entry.identity.public_recipe_hash != recipe_hash
         {
             return Err(SourceStartFailure::Conflict);
         }
@@ -909,6 +940,7 @@ async fn live_operation_owner(
     entry
         .validate_known(input.known.as_ref())
         .map_err(SourceStartFailure::response)?;
+    receiver_presentation::require_current_receiver(&entry, headers)?;
     let owned = entry
         .wait(deadline)
         .await
@@ -923,18 +955,17 @@ async fn live_operation_owner(
     .await?;
     Ok((entry, owned))
 }
-async fn live_operation_response(
+async fn live_operation_response<G>(
     state: crate::state::AppState,
     headers: &SourceHeaders,
     input: SourceOperationInput,
     entry: &SourceStartEntry,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
-    content: (
-        &'static str,
-        Value,
-        crate::transcode::source_actor::SourceResponseGuard,
-    ),
-) -> Result<axum::response::Response, ApiError> {
+    content: (&'static str, Value, G),
+) -> Result<axum::response::Response, ApiError>
+where
+    G: Into<std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>>,
+{
     let (field, value, guard) = content;
     let assignment = ingress::actual_assignment(entry).ok_or_else(unavailable)?;
     ingress::publication_allowed(&state, &assignment).await?;
@@ -957,7 +988,7 @@ async fn live_operation_response(
     Ok(super::shared_library::guard_source_response(
         state,
         connection.map(|c| c.0),
-        hold_start_body(response, guard),
+        hold_source_body(response, guard.into()),
     )
     .await)
 }
@@ -1129,6 +1160,7 @@ async fn status(
         || ledger.state.is_sealed()
         || entry.ending.lock().expect("Source ending owner").is_some();
     if !cleanup_only {
+        receiver_presentation::require_current_receiver(&entry, &headers)?;
         ingress::register_local(
             &state,
             &connection.as_ref().ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_status.connection", error_class = "absent", "Source status refused"); unavailable() })?.0,
@@ -1261,6 +1293,11 @@ impl From<crate::transcode::source_actor::SourceWorkerError> for SourceStartFail
         use crate::transcode::source_actor::SourceWorkerError as E;
         match value {
             E::Unavailable => Self::Unavailable,
+            E::RescanRequired => Self::RescanRequired,
+            E::CopyTargetExceeded => Self::CopyTargetExceeded,
+            E::CopyInitContractChanged => Self::CopyInitContractChanged,
+            E::CopyClockUnknown => Self::CopyClockUnknown,
+            E::CopySyncUnverified => Self::CopySyncUnverified,
             E::Capacity => Self::Capacity,
             E::Conflict => Self::Conflict,
             E::Deadline => Self::Deadline,
@@ -1273,6 +1310,12 @@ impl SourceStartFailure {
     fn response(self) -> ApiError {
         let (status, code) = match self {
             Self::Conflict => (StatusCode::CONFLICT, "sharing_start_conflict"),
+            Self::RescanRequired => (StatusCode::CONFLICT, "source_rescan_required"),
+            Self::CopyTargetExceeded => (StatusCode::UNPROCESSABLE_ENTITY, "copy_target_exceeded"),
+            Self::CopyInitContractChanged => (StatusCode::CONFLICT, "copy_init_contract_changed"),
+            Self::CopyClockUnknown => (StatusCode::UNPROCESSABLE_ENTITY, "copy_clock_unknown"),
+            Self::CopySyncUnverified => (StatusCode::UNPROCESSABLE_ENTITY, "copy_sync_unverified"),
+            Self::RetargetUnassigned => (StatusCode::CONFLICT, "sharing_start_relocate_unassigned"),
             Self::Capacity => (StatusCode::TOO_MANY_REQUESTS, "sharing_start_capacity"),
             Self::Unsupported => (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1286,6 +1329,8 @@ impl SourceStartFailure {
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unavailable"),
             Self::Deadline => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_deadline"),
         };
+        #[cfg(test)]
+        eprintln!("actual Source Start refusal={code}");
         ApiError::typed(status, code, "Shared start is unavailable")
     }
 }
@@ -1502,6 +1547,7 @@ impl Drop for SourceReadFile {
 struct SourceFileReader {
     file: std::sync::Mutex<SourceReadFile>,
     guard: std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>,
+    _source_custody: Option<crate::source_custody::SourceCustody>,
 }
 pub(super) static SOURCE_READ_JOBS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(8)));
@@ -1524,6 +1570,16 @@ async fn source_file_body(
         #[cfg(target_os = "linux")]
         crate::vodserve::ReadyFile::Copy { .. } => return Err(unavailable()),
     };
+    let source_custody = match &guard.source_request {
+        Some(request) => Some(
+            request
+                .register(format!("range-{}-{len}", start.unwrap_or(0)))
+                .await
+                .map_err(|_| unavailable())?,
+        ),
+        None => None,
+    };
+    let source_observer = source_custody.as_ref().map(|custody| custody.observer());
     let conversion_guard = std::sync::Arc::clone(&guard);
     // Tokio may already own an outstanding blocking operation. The conversion
     // task is detached from waiter cancellation and holds the real barrier until
@@ -1541,6 +1597,7 @@ async fn source_file_body(
                 gate,
             }),
             guard: conversion_guard,
+            _source_custody: source_custody,
         }))
     });
     let reader = tokio::select! {biased;
@@ -1548,10 +1605,38 @@ async fn source_file_body(
         result=conversion=>result.map_err(|_|unavailable())?.map_err(|_|unavailable())?,
     };
     let stream = futures_util::stream::try_unfold(
-        (reader, len),
-        |(reader, remaining)| async move {
+        (
+            reader,
+            len,
+            source_observer,
+            None::<plurx_core::store::background_jobs_resources::SourceServiceGrant>,
+            0_u64,
+        ),
+        |(reader, remaining, observer, mut grant, mut used)| async move {
             if remaining == 0 {
                 return Ok(None);
+            }
+            if let (Some(observer), Some(current)) = (&observer, &grant) {
+                let now = crate::fragment_index_cluster::unix_ms();
+                if used >= current.foreground_bytes && now < current.expires_at_ms {
+                    observer.idle().await.map_err(std::io::Error::other)?;
+                    tokio::select! { biased;
+                        ()=reader.guard.cancelled()=>return Err(std::io::Error::other("Source body retired")),
+                        ()=tokio::time::sleep(std::time::Duration::from_millis((current.expires_at_ms-now) as u64))=>{},
+                    }
+                }
+                if used >= current.foreground_bytes
+                    || crate::fragment_index_cluster::unix_ms() >= current.expires_at_ms
+                {
+                    observer.refill().await.map_err(std::io::Error::other)?;
+                    grant = Some(
+                        observer
+                            .transfer_epoch()
+                            .await
+                            .map_err(std::io::Error::other)?,
+                    );
+                    used = 0;
+                }
             }
             // Wait for a read slot rather than failing a live body: a long
             // direct body and a segment share these slots. Retirement still
@@ -1561,8 +1646,16 @@ async fn source_file_body(
                 permit=std::sync::Arc::clone(&SOURCE_READ_JOBS).acquire_owned()=>permit.map_err(|_| std::io::Error::other("Source read capacity"))?,
             };
             let job_reader = std::sync::Arc::clone(&reader);
-            let size = remaining.min(64 * 1024) as usize;
+            let allowance = grant.as_ref().map_or(64 * 1024, |grant| {
+                grant.foreground_bytes.saturating_sub(used)
+            });
+            let size = remaining.min(64 * 1024).min(allowance) as usize;
+            let read_activity = match &observer {
+                Some(observer) => Some(observer.begin_read().await.map_err(std::io::Error::other)?),
+                None => None,
+            };
             let job = tokio::task::spawn_blocking(move || {
+                let read_activity = read_activity;
                 use std::io::Read;
                 let _permit = permit;
                 let mut bytes = vec![0; size];
@@ -1586,6 +1679,11 @@ async fn source_file_body(
                         .store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 bytes.truncate(n);
+                if n > 0 {
+                    if let Some(activity) = &read_activity {
+                        activity.completed();
+                    }
+                }
                 Ok::<_, std::io::Error>(bytes)
             });
             let bytes = tokio::select! {biased;
@@ -1598,8 +1696,22 @@ async fn source_file_body(
                     "Source resource truncated",
                 ));
             }
-            let remaining = remaining - bytes.len() as u64;
-            Ok(Some((bytes::Bytes::from(bytes), (reader, remaining))))
+            if grant.is_none() {
+                if let Some(observer) = &observer {
+                    grant = Some(
+                        observer
+                            .transfer_epoch()
+                            .await
+                            .map_err(std::io::Error::other)?,
+                    );
+                }
+            }
+            let count = bytes.len() as u64;
+            let remaining = remaining - count;
+            Ok(Some((
+                bytes::Bytes::from(bytes),
+                (reader, remaining, observer, grant, used + count),
+            )))
         },
     );
     Ok(axum::body::Body::from_stream(stream))
@@ -1663,6 +1775,7 @@ async fn resources(
         .source_http_starts
         .current_entry(grant, &hash, &viewer, &input.operation.start)
         .map_err(SourceStartFailure::response)?;
+    receiver_presentation::require_current_receiver(&entry, &headers)?;
     entry
         .validate_known(input.operation.known.as_ref())
         .map_err(SourceStartFailure::response)?;
@@ -1678,17 +1791,34 @@ async fn resources(
         deadline,
     )
     .await?;
-    let opened = owned
-        .actor
-        .open_resource(&input.resource, deadline)
-        .await
-        .map_err(|e| SourceStartFailure::from(e).response())?;
+    let opened = owned.actor.open_resource(&input.resource, deadline).await;
     let (_, current_grant) =
         current_reference(&state, &headers, &input.operation.start.reference).await?;
     ingress::publication_allowed(&state, &owned.assignment).await?;
     if current_grant != grant {
         return Err(unavailable());
     }
+    let opened = opened.map_err(|error| {
+        use crate::transcode::source_actor::SourceWorkerError;
+        let native_caption = input.resource.cached_subtitle_revision().is_none()
+            && matches!(
+                input.resource.kind(),
+                SharingHlsResourceKind::SubtitlePlaylist { .. }
+                    | SharingHlsResourceKind::SubtitleSegment { .. }
+            );
+        if error == SourceWorkerError::Capacity
+            || (error == SourceWorkerError::Deadline && native_caption)
+        {
+            ApiError::TypedRetry {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                code: "sharing_resource_busy",
+                message: "The shared playback resource is still preparing".into(),
+                retry_after_seconds: 1,
+            }
+        } else {
+            SourceStartFailure::from(error).response()
+        }
+    })?;
     let (payload, guard) = opened.into_parts();
     let guard = std::sync::Arc::new(guard);
     let mut subtitle_complete = None;
@@ -1812,9 +1942,13 @@ async fn start(
     headers: SourceHeaders,
     axum::extract::Path((item, file)): axum::extract::Path<(String, String)>,
     connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
+    clock: Option<axum::Extension<SourceStartClock>>,
     body: axum::body::Body,
 ) -> Result<axum::response::Response, ApiError> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(305);
+    let clock = clock
+        .map(|clock| clock.0)
+        .unwrap_or_else(|| SourceStartClock::new(&headers));
+    let deadline = clock.work_deadline();
     let bytes = axum::body::to_bytes(body, 128 * 1024)
         .await
         .map_err(|_| invalid())?;
@@ -1822,28 +1956,38 @@ async fn start(
     let viewer = viewer_hash(&headers)?;
     let (authenticated_hash, grant) = current_reference(&state, &headers, &input.reference).await?;
     let target = input.reference.clone();
+    receiver_presentation::require_receiver_for_start(&input, &headers)?;
     let (entry, new) = state
         .transcode
         .source_http_starts
         .register(grant, &viewer, &input, &authenticated_hash)
-        .map_err(SourceStartFailure::response)?;
+        .map_err(|failure| clock.refusal(failure))?;
     if new {
         // No await separates insertion and spawning the owned task. Disconnect
         // drops only a waiter; durable/physical work stays owned by this entry.
         let state = std::sync::Arc::new(state.clone());
         entry.start_owned_task(state, headers.clone(), input, deadline);
     }
-    let assignment = ingress::assigned(&state, &entry, deadline).await?;
+    let assignment = clock
+        .answer(ingress::assigned(&state, &entry, deadline))
+        .await??;
     let connection = connection.ok_or_else(unavailable)?;
     ingress::register_local(&state, &connection.0, &entry, &assignment, deadline).await?;
-    let owned = entry
-        .wait(deadline)
-        .await
+    let owned = clock
+        .answer(entry.wait(deadline))
+        .await?
         .map_err(SourceStartFailure::response)?;
     if owned.actor.is_direct() {
         return direct::published_reply(&state, &headers, &entry, &owned, &target, grant, deadline)
             .await;
     }
+    // Wait for the first publication on the viewer's clock alone, then open
+    // the response under the owner's: opening reserves a body and is not
+    // abandoned midway.
+    clock
+        .answer(owned.actor.wait_ready(deadline))
+        .await?
+        .map_err(|e| SourceStartFailure::from(e).response())?;
     let (response, guard) = owned
         .actor
         .open_start_response(deadline)
@@ -1863,6 +2007,69 @@ async fn start(
         serde_json::json!({"reference":target,"incarnation_id":owned.assignment.binding().incarnation_id(),"response":response}),
     )?;
     Ok(hold_start_body(response, guard))
+}
+/// A peer Start's clock. A receiver that sends the viewer's remaining start
+/// (only to a Source advertising `START_BUDGET_FEATURE`) gets the local
+/// create's answer rule: an answer by `CreateStartupBudget::deadline`, and a
+/// typed `startup_timeout` if the entry is still working then. The clock
+/// bounds answers only. The entry's owned work keeps the fixed bound below,
+/// which the worker caps with its own `source_start_budget_for_request`, so
+/// a cold index outlives the viewer that asked for it and persists for the
+/// next play. A Start without the header (an older receiver) keeps today's
+/// refusals as well.
+#[derive(Clone)]
+pub(super) struct SourceStartClock {
+    budget: Option<crate::media_pool::CreateStartupBudget>,
+    fixed: std::time::Instant,
+}
+impl SourceStartClock {
+    pub(super) fn new(headers: &HeaderMap) -> Self {
+        Self {
+            budget: super::hls::startup_allowance(headers)
+                .map(crate::media_pool::CreateStartupBudget::new),
+            fixed: std::time::Instant::now() + std::time::Duration::from_secs(305),
+        }
+    }
+    /// Whether the caller sent the viewer's clock.
+    pub(super) fn clocked(&self) -> bool {
+        self.budget.is_some()
+    }
+    /// The bound of the entry's owned work, whatever the viewer sent.
+    fn work_deadline(&self) -> std::time::Instant {
+        self.fixed
+    }
+    /// Run a pure wait to the viewer's answer deadline; past it, the typed
+    /// "not yet" (the owned work is untouched). Without a clock, the wait
+    /// runs exactly as it always has.
+    pub(super) async fn answer<T>(
+        &self,
+        wait: impl std::future::Future<Output = T>,
+    ) -> Result<T, ApiError> {
+        let Some(budget) = &self.budget else {
+            return Ok(wait.await);
+        };
+        tokio::time::timeout_at(budget.deadline, wait)
+            .await
+            .map_err(|_| {
+                super::hls::create_still_starting("The Source is still preparing this stream")
+            })
+    }
+    /// Registration capacity is a full registry: no entry was made, so a
+    /// retry later is a fresh, bounded attempt. A receiver that reads typed
+    /// retries is told when, as the 429 `Retry-After` every busy peer answer
+    /// carries (`PeerError::Busy` at B); B gives its viewer the local
+    /// create's `media_session_overloaded`.
+    fn refusal(&self, failure: SourceStartFailure) -> ApiError {
+        if self.budget.is_some() && failure == SourceStartFailure::Capacity {
+            return ApiError::TypedRetry {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                code: "sharing_start_capacity",
+                message: "The Source has no free start slot right now".to_owned(),
+                retry_after_seconds: super::hls::MEDIA_SESSION_OVERLOADED_RETRY_AFTER_SECS,
+            };
+        }
+        failure.response()
+    }
 }
 fn hold_start_body(
     response: axum::response::Response,
@@ -1930,13 +2137,10 @@ async fn own_start(
         SourceClaimOutcome, SourceIntentRead, SourceSessionRequest, SourceWriteAuthorityRead,
     };
     let reference = input.reference.clone();
-    // v2 identifies this complete canonical wire invocation, before fallible
-    // physical preparation. Engine normalization remains in prepared inputs.
-    use sha2::Digest;
-    let mut invocation = sha2::Sha256::new();
-    invocation.update(b"plurx.sharing-source-invocation.v2\0");
-    invocation.update(&input.canonical_recipe);
-    let invocation_fingerprint = format!("{:x}", invocation.finalize());
+    // Legacy v2 remains byte-for-byte stable. A separate bounded domain
+    // proves new-protocol invocation provenance rather than trusting a token
+    // that an old client could have injected into a historical v2 body.
+    let invocation_fingerprint = ingress::fingerprint(&input);
     let (hash, current_grant) = current_reference(&state, &headers, &reference)
         .await
         .map_err(|_| SourceStartFailure::Unavailable)?;
@@ -1992,6 +2196,22 @@ async fn own_start(
         .await
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unavailable)?;
+    // Pure planning precedes owner designation; the claim rechecks the exact
+    // catalog file revision atomically. No producer or Source I/O custody is
+    // admitted by this preparation.
+    let source_presentation = if receiver_presentation::range_bound(&input) {
+        super::hls::SourceCopyPresentation::BoundedRange
+    } else {
+        super::hls::SourceCopyPresentation::FullVod
+    };
+    validate_initial_source_start(&input.session)?;
+    let mut prepared = Box::pin(direct::prepare_source_start(
+        &state,
+        &headers,
+        reference.clone(),
+        input.session,
+    ))
+    .await?;
     entry.retain_stage(SourceStartTaskStage::Claiming {
         planned_incarnation,
         intent: (*intent).clone(),
@@ -2011,19 +2231,15 @@ async fn own_start(
         SourceClaimOutcome::Conflict => return Err(SourceStartFailure::Conflict),
         SourceClaimOutcome::Unavailable => return Err(SourceStartFailure::Unavailable),
         SourceClaimOutcome::Capacity(_) => return Err(SourceStartFailure::Capacity),
+        SourceClaimOutcome::RetargetUnassigned => {
+            // This is an affirmative atomic no-binding result, unlike an
+            // error/lost reply. Preserve no ambiguous-claim cleanup obligation.
+            entry.retain_stage(SourceStartTaskStage::Registered);
+            return Err(SourceStartFailure::RetargetUnassigned);
+        }
     };
     entry.retain_stage(SourceStartTaskStage::Acquired(binding.clone()));
-    // Only this fresh Acquired factory may cover preparation refusal. A
-    // historical or commit-unknown claim never reaches this stage.
-    validate_initial_source_start(&input.session)?;
-    let mut prepared = Box::pin(direct::prepare_source_start(
-        &state,
-        &headers,
-        reference.clone(),
-        input.session,
-    ))
-    .await?;
-    prepared.bind_invocation(&binding)?;
+    prepared.bind_invocation(&binding, source_presentation)?;
     if prepared.fingerprint() != invocation_fingerprint {
         return Err(SourceStartFailure::Unresolved);
     }
@@ -2315,6 +2531,7 @@ async fn fixture_start(
     let value: Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
     let code = [
         "sharing_start_conflict",
+        "sharing_start_relocate_unassigned",
         "sharing_start_capacity",
         "sharing_start_unsupported",
         SHARING_START_DOLBY_VISION_UNSUPPORTED,
@@ -2478,9 +2695,13 @@ pub(crate) fn real_source_start_fixture(
     real_source_start_fixture_with(SourceFixtureMode::Copy, None)
 }
 #[cfg(test)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum SourceFixtureMode {
     Copy,
+    /// The Copy fixture with no pre-built fragment index (its scan facts and
+    /// stored probe evidence are kept), so a Start runs the Source's cold
+    /// index scan, where a test can park it.
+    ColdCopy,
     Encoded,
     NativeCopy,
     NativeEncoded,
@@ -2670,16 +2891,18 @@ async fn build_real_source_start_fixture(
     };
     eprintln!("real Source HTTP fixture: original custody startup returned or not selected");
     let client = selected.local_client().expect("local voter client");
-    eprintln!("real Source HTTP fixture: before original State construction");
-    let mut state = Arc::new(crate::http::source_actor_test_state());
-    eprintln!("real Source HTTP fixture: original State constructed");
+    let mut state = Arc::new(super::tests::test_state_with_store(
+        Arc::clone(&selected.store),
+        selected.identity.node_id.clone(),
+    ));
     let state_mut = Arc::get_mut(&mut state).expect("sole initial State");
+    state_mut.replace_membership(selected.membership_manager());
     #[cfg(target_os = "linux")]
     if let Some(runtime) = direct_runtime {
-        state_mut.resource_runtime = Some(runtime);
+        Arc::get_mut(&mut state)
+            .expect("sole initial State")
+            .resource_runtime = Some(runtime);
     }
-    state_mut.store = Arc::clone(&selected.store);
-    state_mut.membership = selected.membership_manager();
     state_mut.clock_observer = if let Some(clock) = &startup_clock {
         clock
             .observer()
@@ -3039,7 +3262,7 @@ async fn build_real_source_start_fixture(
         file_id: SourceId::parse("1").expect("file"),
         revision: key.file_revision(&witness).expect("actual revision"),
     };
-    if !native && !encoded {
+    if !native && !encoded && !matches!(mode, SourceFixtureMode::ColdCopy) {
         let media = store.get_file(1).await.expect("file read").expect("file");
         let crate::fragindex::IndexOutcome::Built(index) = Box::pin(crate::fragindex::build(
             &media,
@@ -3065,6 +3288,11 @@ async fn build_real_source_start_fixture(
             plurx_core::transcode::EncoderCaps::default(),
             plurx_core::transcode::Pipeline::Cpu,
         )
+        .with_source_identity(
+            state.node_id.clone(),
+            state.sharing.accepted_drivers.boot_id(),
+        )
+        .with_subtitle_jobs(Arc::clone(&state.jobs))
         // The boot proof the HDR10 rung needs; the planner still decides the
         // grade from the player's caps.
         .with_hdr10_passthrough(matches!(mode, SourceFixtureMode::Hdr10)),

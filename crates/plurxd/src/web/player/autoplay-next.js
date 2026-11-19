@@ -51,7 +51,9 @@ async function resolveNextEpisodePage(itemId,preparation){
       next=(nsd?.children||[]).find(c=>c.kind==="episode");
     }
   }
-  if(!next)return null;
+  // An offloaded successor has no file: stop here, prepare nothing. Next Up
+  // still lists it, flagged, and Get it back is on its page.
+  if(!next||next.offloaded)return null;
   const id=exactWireId(next);
   const data=await read(`/items/${id}`);
   const libs=await preparation.run(()=>libsCached());
@@ -191,6 +193,11 @@ async function handleEnded(fileId){
   // total===0 means no runtime is known for this file (nothing probed, and a
   // growing stream's own duration is not a substitute). There is nothing
   // better to judge by, so `ended` stands.
+  if(!(total>0)&&p.rangePresentation){
+    // Ending an unknown-length range proves neither watched nor autoplay-next.
+    await reportProgress(fileId,false);
+    return;
+  }
   if(!(total>0) || pos>=total-ENDED_SLACK_SEC){
     await reportProgress(fileId,true);
     if(!current()) return;

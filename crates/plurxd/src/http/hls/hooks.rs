@@ -17,8 +17,9 @@ use crate::seam_hooks::HookFuture;
 /// scheduling. `Any` is a supertrait only so a test can reach the test hooks
 /// behind the state.
 pub(crate) trait HlsRouteHooks: std::any::Any + Send + Sync {
-    /// A create has recorded the viewer's ask and holds the revision it
-    /// recorded, before it admits serving authority and activates.
+    /// A create's claim has recorded the viewer's ask (D3c) and the create
+    /// holds the revision it recorded, before it places the session and
+    /// activates.
     fn after_create_ask_recorded(&self) -> HookFuture<'_>;
     /// Whether the staged-ledger read of a control exchange for
     /// `incarnation_id` fails, in place of its result.

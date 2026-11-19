@@ -64,6 +64,13 @@ pub(crate) struct ClusterNodeOperationsStatus {
     pub build: String,
     pub protocol_min: i64,
     pub protocol_max: i64,
+    /// The media-pool placement protocol this node speaks
+    /// (`media_pool::PROTOCOL_VERSION`). Distinct from the authentication
+    /// range above: placement requires an exact match, so an operator reads
+    /// build, this and placement eligibility independently during a rolling
+    /// upgrade. Absent from a node that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_protocol: Option<i64>,
     pub process: ProcessStatus,
     pub serving: ReadinessEvaluation,
     pub raft: RaftStatus,
@@ -72,6 +79,9 @@ pub(crate) struct ClusterNodeOperationsStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<SnapshotTransportStatus>,
     pub media: MediaDrainStatus,
+    /// Node-owned background observation; available for voter and learner workers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<Box<super::internal_activity::ActivityWorkers>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -207,6 +217,23 @@ pub(crate) struct ClusterNodeObservation {
     /// outside `status` so a closed public listener cannot hide recovery.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<SnapshotTransportStatus>,
+    /// Whether the answering ingress would place media on this node now,
+    /// read from its media-pool snapshot cache. Filled only by the panel's
+    /// aggregate; never by the peer itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PlacementOwnerView>,
+}
+
+/// One ingress's placement view of one node. The three facts placement
+/// compares independently — build (reported), protocol (exact match
+/// required) and eligibility (a fresh, bounded snapshot that can answer) —
+/// are shown side by side so a skewed rolling upgrade is visible rather than
+/// inferred from missing offers.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct PlacementOwnerView {
+    pub eligible_owner: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -286,13 +313,54 @@ where
 pub(crate) async fn collect_aggregate(
     state: &AppState,
 ) -> Result<ClusterOperationsAggregate, ApiError> {
-    collect_aggregate_with_cached_sources(
+    let mut aggregate = collect_aggregate_with_cached_sources(
         &state.node_id,
         || state.membership_status_cache.fresh(),
         || local_snapshot(state),
         || state.peer_status_cache.fresh(),
     )
-    .await
+    .await?;
+    let local = crate::media_pool::local_snapshot(state).await;
+    let peers = state.media_pool.placement_owner_reasons().await;
+    annotate_placement(&mut aggregate, &state.node_id, &local, &peers);
+    Ok(aggregate)
+}
+
+/// Placement eligibility per node, from the ingress's own cache: the local
+/// node from its live snapshot, a peer from its cached advertisement. A peer
+/// with no cached snapshot is ineligible, and the reason says whether its
+/// self-reported media protocol differs from ours — the cache only ever
+/// holds exact-protocol snapshots, so a skewed peer is simply absent there.
+fn annotate_placement(
+    aggregate: &mut ClusterOperationsAggregate,
+    local_node_id: &str,
+    local: &crate::media_pool::MediaNodeSnapshot,
+    peers: &BTreeMap<String, Option<&'static str>>,
+) {
+    let local_protocol = crate::media_pool::PROTOCOL_VERSION;
+    for node in &mut aggregate.nodes {
+        let node_id = node.membership.node_id.as_str();
+        let reason = if node_id == local_node_id {
+            crate::media_pool::placement_refusal(local).map(str::to_owned)
+        } else {
+            match peers.get(node_id) {
+                Some(reason) => reason.map(str::to_owned),
+                None => Some(
+                    match node.status.as_ref().map(|status| status.media_protocol) {
+                        Some(Some(protocol)) if protocol != local_protocol => {
+                            format!("protocol_mismatch:{protocol}")
+                        }
+                        Some(None) => "protocol_unreported".to_owned(),
+                        _ => "no_fresh_snapshot".to_owned(),
+                    },
+                ),
+            }
+        };
+        node.placement = Some(PlacementOwnerView {
+            eligible_owner: reason.is_none(),
+            reason,
+        });
+    }
 }
 
 /// Safety-changing operations re-read committed membership and make fresh,
@@ -1279,6 +1347,7 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
         build: crate::version::BUILD.to_owned(),
         protocol_min: plurx_core::store::AUTH_PROTOCOL_MIN,
         protocol_max: plurx_core::store::AUTH_PROTOCOL_MAX,
+        media_protocol: Some(crate::media_pool::PROTOCOL_VERSION),
         process: ProcessStatus { live: true },
         serving: operations_readiness(state),
         raft: RaftStatus {
@@ -1306,6 +1375,7 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
         snapshot,
         transport: state.replication.transport_status_snapshot(),
         media: media_drain_status(active_sessions, owned_work, drain),
+        workers: state.peer_status_cache.cached_local_workers().map(Box::new),
     }
 }
 
@@ -1552,6 +1622,13 @@ impl MembershipStatusCache {
 #[derive(Clone, Default)]
 pub(crate) struct PeerStatusCache {
     inner: std::sync::Arc<tokio::sync::Mutex<Option<CachedPeerStatuses>>>,
+    local_workers: std::sync::Arc<std::sync::RwLock<Option<CachedLocalWorkers>>>,
+}
+
+#[derive(Clone)]
+struct CachedLocalWorkers {
+    stored_at: tokio::time::Instant,
+    workers: super::internal_activity::ActivityWorkers,
 }
 
 #[derive(Clone)]
@@ -1576,6 +1653,49 @@ impl From<BTreeMap<String, PeerStatusOutcome>> for PeerStatusCacheRead {
 }
 
 impl PeerStatusCache {
+    fn cached_local_workers(&self) -> Option<super::internal_activity::ActivityWorkers> {
+        self.local_workers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|cached| cached.stored_at.elapsed() < PEER_STATUS_CACHE_TTL)
+            .map(|cached| cached.workers.clone())
+    }
+
+    fn store_local_workers(&self, workers: super::internal_activity::ActivityWorkers) {
+        *self
+            .local_workers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(CachedLocalWorkers {
+            stored_at: tokio::time::Instant::now(),
+            workers: workers.capacity_only(),
+        });
+    }
+
+    pub(super) async fn worker_observations(
+        &self,
+    ) -> BTreeMap<String, super::internal_activity::ActivityWorkers> {
+        let PeerStatusCacheRead::Fresh(statuses, _) = self.fresh().await else {
+            return BTreeMap::new();
+        };
+        statuses
+            .into_iter()
+            .filter_map(|(id, outcome)| {
+                if outcome.state != ObservationState::Answered || outcome.node_id != id {
+                    return None;
+                }
+                let status = outcome.status?;
+                if status.node_id != id {
+                    return None;
+                }
+                let workers = status.workers?;
+                workers
+                    .bounded(&id)
+                    .then_some((id, workers.capacity_only()))
+            })
+            .collect()
+    }
+
     async fn fresh(&self) -> PeerStatusCacheRead {
         let cache = self.inner.lock().await;
         let Some(cached) = cache.as_ref() else {
@@ -1791,6 +1911,27 @@ pub(crate) async fn membership_status_cache_loop(
 
 /// Refresh authenticated peer observations away from page renders and
 /// Prometheus scrapes. The request path reads the five-second cache only.
+/// Sampling may read settings, so it runs independently of the Store-free
+/// operations handlers and the peer refresh's fixed timing budget.
+pub(crate) async fn worker_status_cache_loop(
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    loop {
+        let started = tokio::time::Instant::now();
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            result = tokio::time::timeout(Duration::from_secs(1), super::internal_activity::local_worker_capacity(&state)) => {
+                if let Ok(workers) = result { state.peer_status_cache.store_local_workers(workers); }
+            }
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            () = tokio::time::sleep_until(started + PEER_STATUS_REFRESH_INTERVAL) => {}
+        }
+    }
+}
+
 pub(crate) async fn peer_status_cache_loop(
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
@@ -2007,7 +2148,12 @@ async fn fetch_peer_status(
     let (state, status) = match response {
         Ok(response) if response.status.is_success() => {
             match serde_json::from_slice::<ClusterNodeOperationsStatus>(&response.body) {
-                Ok(status) if status.node_id == expected_node_id => {
+                Ok(mut status) if status.node_id == expected_node_id => {
+                    status.workers = status.workers.take().and_then(|workers| {
+                        workers
+                            .bounded(expected_node_id)
+                            .then(|| Box::new(workers.capacity_only()))
+                    });
                     (ObservationState::Answered, Some(status))
                 }
                 Ok(_) => (ObservationState::IdentityMismatch, None),
@@ -2145,6 +2291,7 @@ where
             error_class,
             status,
             transport,
+            placement: None,
         });
     }
     rows

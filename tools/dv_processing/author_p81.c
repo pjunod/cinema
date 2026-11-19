@@ -168,9 +168,19 @@ static bool fmp4_grid_bounds(int64_t first, int64_t step, int count) {
          count <= MAX_FRAMES && first <= INT64_MAX - (int64_t)count * step;
 }
 int main(int argc, char **argv) {
-  need(argc == 5 || (argc == 6 && !strcmp(argv[5], "fmp4")),
-       "usage: author_p81 ENCODED TIMING.tsv RPU_DIR OUTPUT [fmp4]");
-  bool fmp4 = argc == 6;
+  bool fmp4 = argc == 11 && !strcmp(argv[5], "fmp4");
+  need(argc == 10 || fmp4,
+       "usage: author_p81 ENCODED TIMING.tsv RPU_DIR OUTPUT [fmp4] TARGET_KBPS PEAK_KBPS BUFFER_KBITS HEVC_LEVEL_IDC DV_LEVEL");
+  int first = fmp4 ? 6 : 5;
+  int64_t budget[5];
+  for (int i = 0; i < 5; i++) {
+    char *end;
+    errno = 0;
+    budget[i] = strtoll(argv[first + i], &end, 10);
+    need(!errno && *argv[first + i] && !*end && budget[i] > 0 &&
+             budget[i] <= INT_MAX, "explicit frozen rate envelope");
+  }
+  need(budget[1] >= budget[0], "peak never lowers selected video target");
   FILE *timing = fopen(argv[2], "r");
   need(timing != NULL, "renderer timeline");
   struct row rows[MAX_FRAMES] = {0};
@@ -215,26 +225,48 @@ int main(int argc, char **argv) {
   need(par->extradata_size >= 23 && par->extradata[0] == 1 &&
            (par->extradata[21] & 3) == 3,
        "length-prefixed HEVC");
-  // FFmpeg dovi_rpuenc.c levels 1..9; select against the shortest actual
-  // interval rather than an average that hides a high-rate VFR burst.
-  static const int pps[9] = {
-      1280 * 720 * 24,  1280 * 720 * 30,  1920 * 1080 * 24,
+  // Independently validate the caller's frozen envelope against actual coded
+  // level plus every renderer duration. Source geometry alone cannot select DV.
+  static const int64_t pps[13] = {
+      1280 * 720 * 24, 1280 * 720 * 30, 1920 * 1080 * 24,
       1920 * 1080 * 30, 1920 * 1080 * 60, 3840 * 2160 * 24,
-      3840 * 2160 * 30, 3840 * 2160 * 48, 3840 * 2160 * 60};
-  static const int widths[9] = {1280, 1280, 1920, 2560, 3840,
-                                3840, 3840, 3840, 3840};
-  static const int mbps[9] = {50, 50, 70, 70, 70, 130, 130, 130, 130};
-  int level = 0;
-  for (int candidate = 0; candidate < 9 && !level; candidate++) {
-    int fits = par->width <= widths[candidate];
-    for (int i = 0; i < count; i++)
-      fits &= av_compare_ts(rows[i].duration, (AVRational){1, rows[i].dd},
-                            (int64_t)par->width * par->height,
-                            (AVRational){1, pps[candidate]}) >= 0;
-    if (fits)
-      level = candidate + 1;
+      3840 * 2160 * 30, 3840 * 2160 * 48, 3840 * 2160 * 60,
+      3840 * 2160 * 120, 3840 * 2160 * 120,
+      7680LL * 4320 * 60, 7680LL * 4320 * 120};
+  static const int widths[13] = {1280,1280,1920,2560,3840,3840,3840,3840,3840,3840,7680,7680,7680};
+  static const int mbps[13] = {50,50,70,70,70,130,130,130,130,240,240,450,800};
+  static const struct { int idc; int64_t picture, samples, high_kbps, cpb_kbits; } hevc[] = {
+      {120,2228224,66846720,30000,30000},
+      {123,2228224,133693440,50000,50000},
+      {150,8912896,267386880,100000,100000},
+      {153,8912896,534773760,160000,160000},
+      {156,8912896,1069547520,240000,240000},
+      {180,35651584,1069547520,240000,240000},
+      {183,35651584,2139095040,480000,480000},
+      {186,35651584,4278190080LL,800000,800000}};
+  int level = (int)budget[4];
+  need(level >= 1 && level <= 13 && budget[1] <= (int64_t)mbps[level-1]*1000 &&
+           par->width <= widths[level-1], "frozen Dolby Vision level rate bound");
+  int hevc_index = -1;
+  for (size_t i = 0; i < sizeof(hevc)/sizeof(hevc[0]); i++)
+    if (hevc[i].idc == budget[3]) hevc_index = (int)i;
+  need(hevc_index >= 0 && par->level == budget[3] &&
+           par->extradata[12] == budget[3] && (par->extradata[1] & 0x20) &&
+           (par->extradata[1] & 31) == 2,
+       "actual encoded Main10 High-tier level matches frozen envelope");
+  need(budget[1] <= hevc[hevc_index].high_kbps &&
+           budget[2] <= hevc[hevc_index].cpb_kbits &&
+           (int64_t)par->width*par->height <= hevc[hevc_index].picture,
+       "frozen HEVC High-tier BR/CPB bounds");
+  for (int i = 0; i < count; i++) {
+    need(rows[i].duration * pps[level-1] >= (int64_t)par->width*par->height*rows[i].dd,
+         "frozen Dolby Vision coded picture rate");
+    // duration <= INT_MAX and samples <= 4278190080, so both products
+    // fit signed64 without narrowing a Level6.2 denominator to AVRational.
+    need(rows[i].duration * hevc[hevc_index].samples >=
+             (int64_t)par->width * par->height * rows[i].dd,
+         "frozen HEVC coded picture rate");
   }
-  need(level > 0, "bounded Dolby Vision coded picture rate");
   if (fmp4) {
     int64_t first_pts = av_rescale_q(rows[0].pts,
                                   (AVRational){1, rows[0].pd}, src->time_base);

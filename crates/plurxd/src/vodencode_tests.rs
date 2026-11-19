@@ -337,6 +337,221 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
 }
 
 #[tokio::test]
+async fn ordinary_auto_vod_start_registers_live_wait_over_background() {
+    use crate::admission::{Priority, TranscodeResourceEstimate};
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("ordinary Auto admission");
+    let serve = bare_serve(base.path());
+    let (file, mut encoding) = encoded_fixture(base.path()).await;
+    // This is the fresh encoding marker prepare_vod_encoding derives from
+    // automatic + candidate_context. It describes possible Auto trials, not
+    // this already active viewer's attachment purpose.
+    Arc::get_mut(&mut encoding)
+        .expect("unshared recipe")
+        .nonpreemptive_trial = true;
+    let budget = encoding.resources().cpu_threads + 1;
+    encoding
+        .store
+        .put_setting(
+            plurx_core::store::keys::SW_POOL_THREADS,
+            &budget.to_string(),
+        )
+        .await
+        .expect("software budget");
+    let background = encoding
+        .admissions
+        .try_admit_bundle(
+            2,
+            budget,
+            &TranscodeResourceEstimate {
+                hardware_slot: false,
+                cpu_threads: 1,
+                decoder_threads: None,
+            },
+            Priority::Background,
+        )
+        .expect("background owns the settlement barrier");
+    let mut req = request("ordinary-auto", 0.0);
+    req.kind = SessionKind::Transcode { height: 144 };
+    req.automatic = true;
+    serve
+        .try_create(
+            VodRecipeRequest {
+                admission_priority: Priority::Live,
+                encoding: Some(Arc::clone(&encoding)),
+                ..(&req).into()
+            },
+            &file,
+            &settings(),
+            VodAttribution {
+                user_name: "test",
+                item_title: "ordinary Auto",
+                supersession_user: "test",
+            },
+            "ordinary-auto".into(),
+        )
+        .await
+        .expect("ordinary attachment");
+    let rendition = rendition_of(&serve, "ordinary-auto").await;
+    assert_eq!(
+        rendition.readers.lock().await["ordinary-auto"].admission_priority,
+        Priority::Live
+    );
+    let init = tokio::spawn({
+        let serve = Arc::clone(&serve);
+        async move { fetched_bytes(&serve, "ordinary-auto", INIT_NAME).await }
+    });
+    wait_until(
+        "ordinary Auto asks background to yield",
+        Duration::from_secs(5),
+        async || encoding.admissions.live_is_waiting(),
+    )
+    .await;
+    assert!(
+        !init.is_finished(),
+        "the real background permit still blocks admission"
+    );
+    drop(background);
+    assert!(!tokio::time::timeout(Duration::from_secs(20), init)
+        .await
+        .expect("init after background settlement")
+        .expect("init task")
+        .is_empty());
+    assert!(
+        encoding.nonpreemptive_trial,
+        "cached recipe metadata is not mutated"
+    );
+    serve.end("ordinary-auto", Terminal::Deleted).await;
+}
+
+#[tokio::test]
+async fn explicit_vod_attachment_priority_isolated_from_cached_auto_recipe() {
+    use crate::admission::{Priority, TranscodeResourceEstimate};
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("attachment purpose isolation");
+    let (file, source) = encoded_fixture(base.path()).await;
+    for cached_trial in [false, true] {
+        let cache = base.path().join(if cached_trial {
+            "cached-trial"
+        } else {
+            "cached-live"
+        });
+        let serve = bare_serve(&cache);
+        let mut encoding = source
+            .clone_with_admissions_for_test(crate::admission::Admissions::new())
+            .await;
+        Arc::get_mut(&mut encoding)
+            .expect("unshared recipe")
+            .nonpreemptive_trial = cached_trial;
+        if cached_trial {
+            encoding.mark_speculative();
+        }
+        let budget = encoding.resources().cpu_threads + 1;
+        encoding
+            .store
+            .put_setting(
+                plurx_core::store::keys::SW_POOL_THREADS,
+                &budget.to_string(),
+            )
+            .await
+            .expect("software budget");
+        let background = encoding
+            .admissions
+            .try_admit_bundle(
+                2,
+                budget,
+                &TranscodeResourceEstimate {
+                    hardware_slot: false,
+                    cpu_threads: 1,
+                    decoder_threads: None,
+                },
+                Priority::Background,
+            )
+            .expect("background barrier");
+        let mut prepared = request("prepared-purpose", 0.0);
+        prepared.kind = SessionKind::Transcode { height: 144 };
+        prepared.automatic = cached_trial;
+        serve
+            .try_create(
+                VodRecipeRequest {
+                    admission_priority: Priority::Speculative,
+                    encoding: Some(Arc::clone(&encoding)),
+                    ..(&prepared).into()
+                },
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "test",
+                    item_title: "prepared",
+                    supersession_user: "test",
+                },
+                "prepared-purpose".into(),
+            )
+            .await
+            .expect("prepared attachment");
+        let rendition = rendition_of(&serve, "prepared-purpose").await;
+        assert_eq!(rendition.readers.lock().await["prepared-purpose"].admission_priority, Priority::Speculative,
+            "a prepared attachment never inherits foreground admission from an ordinary cached recipe");
+        assert!(
+            !encoding.admissions.live_is_waiting(),
+            "preparation cannot preempt background work"
+        );
+        let mut active = request("active-purpose", 0.0);
+        active.kind = SessionKind::Transcode { height: 144 };
+        active.automatic = true;
+        serve
+            .try_create(
+                VodRecipeRequest {
+                    admission_priority: Priority::Live,
+                    encoding: Some(Arc::clone(&encoding)),
+                    ..(&active).into()
+                },
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "test",
+                    item_title: "active",
+                    supersession_user: "test",
+                },
+                "active-purpose".into(),
+            )
+            .await
+            .expect("active attachment on the same cache");
+        assert!(Arc::ptr_eq(
+            &rendition,
+            &rendition_of(&serve, "active-purpose").await
+        ));
+        {
+            let readers = rendition.readers.lock().await;
+            assert_eq!(
+                readers["prepared-purpose"].admission_priority,
+                Priority::Speculative
+            );
+            assert_eq!(readers["active-purpose"].admission_priority, Priority::Live);
+            assert_eq!(
+                reader_admission_priority(&serve.shared.pool, &rendition, &readers),
+                Some(Priority::Live)
+            );
+        }
+        serve.end("active-purpose", Terminal::Deleted).await;
+        {
+            let readers = rendition.readers.lock().await;
+            assert_eq!(
+                reader_admission_priority(&serve.shared.pool, &rendition, &readers),
+                Some(Priority::Speculative)
+            );
+        }
+        assert_eq!(
+            encoding.is_speculative(),
+            cached_trial,
+            "shared recipe state is unchanged"
+        );
+        serve.end("prepared-purpose", Terminal::Deleted).await;
+        drop(background);
+    }
+}
+
+#[tokio::test]
 async fn playback_info_stream_format_is_the_attached_frozen_recipe() {
     let base = crate::test_tempdir().expect("base");
     let serve = bare_serve(base.path());
@@ -344,13 +559,22 @@ async fn playback_info_stream_format_is_the_attached_frozen_recipe() {
     let mut rendition = synthetic_rendition(base.path()).await;
     let live = Arc::get_mut(&mut rendition).expect("unshared rendition");
     live.recipe.file = file;
+    // Source tags cannot turn an ordinary frozen SDR encoding into DV. Only
+    // its own admitted processing plan may describe a processed DV carrier.
+    live.recipe.file.hdr = Some("dolby_vision".into());
+    live.recipe.file.dolby_vision.profile = Some(7);
     live.recipe.encoding = Some(Arc::clone(&encoding));
     let touched = Instant::now();
     insert_control_session(&serve, "attached-a", rendition.clone(), touched).await;
     // A saved setting cannot relabel an already frozen rendition as Metal.
-    encoding.store.put_setting(
-        plurx_core::store::keys::MACOS_VIDEO_PROCESSING_ENABLED, "true",
-    ).await.expect("operator preference");
+    encoding
+        .store
+        .put_setting(
+            plurx_core::store::keys::MACOS_VIDEO_PROCESSING_ENABLED,
+            "true",
+        )
+        .await
+        .expect("operator preference");
     let status = serve.status("attached-a").await.expect("attached status");
     let json = serde_json::to_value(status).expect("status JSON");
     assert_eq!(json["stream_format"]["video_codec"], "h264");
@@ -367,8 +591,17 @@ async fn playback_info_stream_format_is_the_attached_frozen_recipe() {
     assert_eq!(json["stream_format"]["dynamic_range"], "sdr");
     assert_eq!(json["stream_format"]["rendition_id"], rendition.key);
     assert_eq!(json["stream_format"]["ffmpeg_build"], encoding.ffmpeg_build);
-    assert!(json["tone_map_peak_nits"].is_null(), "an SDR encode has no HDR tone-map peak");
-    assert_eq!(*serve.shared.sessions.lock().await["attached-a"].last_touch.lock().expect("touch"), touched);
+    assert!(
+        json["tone_map_peak_nits"].is_null(),
+        "an SDR encode has no HDR tone-map peak"
+    );
+    assert_eq!(
+        *serve.shared.sessions.lock().await["attached-a"]
+            .last_touch
+            .lock()
+            .expect("touch"),
+        touched
+    );
 }
 
 #[tokio::test]
@@ -389,15 +622,23 @@ async fn playback_info_stream_format_copy_does_not_relabel_source_hdr_as_output(
     assert_eq!(json["stream_format"]["video_action"], "copy");
     assert_eq!(json["stream_format"]["dimensions_basis"], "source_copy");
     assert_eq!(json["stream_format"]["encoder"], "copy");
-    assert!(json["stream_format"]["dynamic_range"].is_null(), "copy can change DV signaling");
+    assert!(
+        json["stream_format"]["dynamic_range"].is_null(),
+        "copy can change DV signaling"
+    );
     assert!(json["tone_map_peak_nits"].is_null());
 }
 
 async fn fetched_bytes(serve: &Arc<VodServe>, session: &str, name: &str) -> Vec<u8> {
     let mut ready = fetch(serve, session, name).await;
-    let bytes = ready.file
-        .read_all_bounded(ready.len, Instant::now() + std::time::Duration::from_secs(30))
-        .await.expect("read served file");
+    let bytes = ready
+        .file
+        .read_all_bounded(
+            ready.len,
+            Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("read served file");
     assert_eq!(bytes.len() as u64, ready.len);
     bytes.to_vec()
 }
@@ -484,6 +725,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         .expect("audio admits without a video hardware slot");
     assert_eq!(encoding.admissions.software_in_use(), 3);
     let recipe = Recipe {
+        source_telemetry: false,
         retained_logical: None,
         measured_candidate: None,
         file: file.clone(),
@@ -491,8 +733,10 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         aac: true,
         audio_delivery: None,
         video: CopyVideoOptions::new(false, false),
+        dv_refit_gain: None,
         source_object_version: Some(encoding.source_object_version.clone()),
         cluster_cache_key: None,
+        copy_index_init_contract: None,
         encoding: Some(Arc::clone(&encoding)),
     };
     let producer_args = recipe_pipe_args(&recipe, 0.0, false);
@@ -601,7 +845,9 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         family_generation: uuid::Uuid::new_v4().to_string(),
         role: crate::transcode::ContinuousMediaRole::Video,
     }));
-    let attach = || VodRecipeRequest { root_admission: None,
+    let attach = || VodRecipeRequest {
+        admission_priority: crate::admission::Priority::Live,
+        root_admission: None,
         measured_candidate: None,
         retained_capture: RetainedOutputCapture::New,
         companion: None,
@@ -616,7 +862,8 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     };
     // Idle exclusive-family admission is legal; refusal requires real
     // unrelated work, while retaining the original one-thread-short budget.
-    let unrelated_live = encoding.admissions
+    let unrelated_live = encoding
+        .admissions
         .try_admit_software(budget - 1, 1, crate::admission::Priority::Live)
         .expect("unrelated live CPU credit");
     assert!(serve
@@ -697,9 +944,14 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         .expect("parent");
     let mut ready = publication.result.expect("init ready").expect("exact init");
     assert_eq!(ready.etag, init_sha);
-    let child_init = ready.file
-        .read_all_bounded(ready.len, Instant::now() + std::time::Duration::from_secs(30))
-        .await.expect("verified open descriptor");
+    let child_init = ready
+        .file
+        .read_all_bounded(
+            ready.len,
+            Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("verified open descriptor");
     assert_eq!(child_init, cached_init);
     assert!(
         serve
@@ -774,7 +1026,9 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     let media = parent_request.continuous_media.as_mut().expect("role");
     media.autonomous_companion = Some(companion_id);
     let family_budget = budget + companion.resources().cpu_threads;
-    let autonomous = || VodRecipeRequest { root_admission: None,
+    let autonomous = || VodRecipeRequest {
+        admission_priority: crate::admission::Priority::Live,
+        root_admission: None,
         measured_candidate: None,
         retained_capture: RetainedOutputCapture::New,
         request: &parent_request,
@@ -989,9 +1243,11 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         serde_json::from_slice(&verified.description().expect("durable bytes"))
             .expect("the durable shape older nodes parse");
     assert_eq!(durable.video.len(), 2);
-    assert!(!String::from_utf8(verified.description().expect("durable bytes"))
-        .expect("utf8")
-        .contains("sustained_bps"));
+    assert!(
+        !String::from_utf8(verified.description().expect("durable bytes"))
+            .expect("utf8")
+            .contains("sustained_bps")
+    );
     let intervals = serve
         .quality_ready_before(
             &parent,
@@ -1475,6 +1731,7 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
             "candidate-cache",
             None,
             Recipe {
+                source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
                 file,
@@ -1482,8 +1739,10 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
                 aac: true,
                 audio_delivery: None,
                 video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
+                copy_index_init_contract: None,
                 encoding: Some(Arc::clone(&encoding)),
             },
             encoding.grid.plan(8_000, 428_000),
@@ -1603,6 +1862,7 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
             "legacy-candidate-cache",
             None,
             Recipe {
+                source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
                 audio_delivery: None,
@@ -1610,8 +1870,10 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
                 audio_index: None,
                 aac: true,
                 video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
                 source_object_version: Some(legacy_encoding.source_object_version.clone()),
                 cluster_cache_key: None,
+                copy_index_init_contract: None,
                 encoding: Some(Arc::clone(&legacy_encoding)),
             },
             legacy_encoding.grid.plan(8_000, 428_000),
@@ -1810,7 +2072,9 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     let mut req = request("source-replacement", 0.0);
     req.kind = SessionKind::Transcode { height: 64 };
     old.try_create(
-        VodRecipeRequest { root_admission: None,
+        VodRecipeRequest {
+            admission_priority: crate::admission::Priority::Live,
+            root_admission: None,
             measured_candidate: None,
             retained_capture: RetainedOutputCapture::New,
             companion: None,
@@ -1861,7 +2125,9 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     let new = bare_serve(&cache);
     let refused = new
         .try_create(
-            VodRecipeRequest { root_admission: None,
+            VodRecipeRequest {
+                admission_priority: crate::admission::Priority::Live,
+                root_admission: None,
                 measured_candidate: None,
                 retained_capture: RetainedOutputCapture::New,
                 companion: None,
@@ -1923,7 +2189,9 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         hooks: Box::new(crate::vodencode::EncodingAdmissionPause::default()),
     });
     new.try_create(
-        VodRecipeRequest { root_admission: None,
+        VodRecipeRequest {
+            admission_priority: crate::admission::Priority::Live,
+            root_admission: None,
             measured_candidate: None,
             retained_capture: RetainedOutputCapture::New,
             companion: None,
@@ -2016,7 +2284,9 @@ async fn absent_producer_scheduler_idle_revokes_rate_before_next_processed_windo
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("logical production hold");
     let (_, mut encoding) = encoded_fixture(base.path()).await;
-    Arc::get_mut(&mut encoding).expect("unattached encoding").candidate_recipe = Some([9; 32]);
+    Arc::get_mut(&mut encoding)
+        .expect("unattached encoding")
+        .candidate_recipe = Some([9; 32]);
     let permit = encoding.try_permit().await.expect("exact reservation");
     encoding.reset_active_production(7, true);
     encoding.note_active_segment(7, 0, 4000);
@@ -2027,16 +2297,31 @@ async fn absent_producer_scheduler_idle_revokes_rate_before_next_processed_windo
     assert!(encoding.production_proofs.get([9; 32]).is_some());
     let serve = bare_serve(base.path());
     let mut rendition = synthetic_rendition(base.path()).await;
-    Arc::get_mut(&mut rendition).expect("unattached rendition").recipe.encoding = Some(Arc::clone(&encoding));
+    Arc::get_mut(&mut rendition)
+        .expect("unattached rendition")
+        .recipe
+        .encoding = Some(Arc::clone(&encoding));
     rendition.retained_admission.bind(permit.clone());
-    assert!(matches!(rendition.slot.belief().await, Producer::Absent { .. }));
+    assert!(matches!(
+        rendition.slot.belief().await,
+        Producer::Absent { .. }
+    ));
     driver_pass(&serve.shared, &rendition).await;
-    assert!(matches!(rendition.slot.belief().await, Producer::Absent { .. }));
-    assert!(encoding.active_production_evidence().is_none(), "idle without an OS stop revokes evidence");
+    assert!(matches!(
+        rendition.slot.belief().await,
+        Producer::Absent { .. }
+    ));
+    assert!(
+        encoding.active_production_evidence().is_none(),
+        "idle without an OS stop revokes evidence"
+    );
     assert!(encoding.production_proofs.get([9; 32]).is_none());
     encoding.begin_processed_window(8, 3, &permit);
     encoding.note_active_segment(8, 3, 16_000);
-    assert!(encoding.active_production_evidence().is_none(), "contiguous next entry starts a new episode after hold");
+    assert!(
+        encoding.active_production_evidence().is_none(),
+        "contiguous next entry starts a new episode after hold"
+    );
 }
 
 #[tokio::test]
@@ -2044,62 +2329,146 @@ async fn prepared_root_reuses_one_credit_without_private_readers_and_refuses_sub
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("prepared root");
     let (file, encoding) = encoded_fixture(base.path()).await;
-    encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
-        .await.expect("exact pool");
+    encoding
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
+        .await
+        .expect("exact pool");
     let permit = encoding.try_permit().await.expect("one complete admission");
     let serve = local_serve(base.path().join("vod"), Arc::clone(&encoding.store));
     let mut req = request("prepared-root", 0.0);
-    req.kind = SessionKind::Transcode { height: encoding.options.target_height };
-    let attribution = VodAttribution { user_name: "user", item_title: "prepared root", supersession_user: "user" };
-    let attach = |admitted_encoding: Arc<crate::vodencode::Encoding>, permit| VodRecipeRequest {
-        root_admission: Some(PreparedRootAdmission { reuse_scope: None, reused_parent: None, instance_allowance: None, instance_nonce: None, encoding: admitted_encoding, permit }),
-        request: &req, encoding: Some(Arc::clone(&encoding)),
-        measured_candidate: None, retained_capture: RetainedOutputCapture::New,
-        soundtrack: None, companion: None,
+    req.kind = SessionKind::Transcode {
+        height: encoding.options.target_height,
     };
-    serve.try_create(attach(Arc::clone(&encoding), permit), &file, &settings(), attribution,
-        "prepared-root-first".into()).await.expect("transfer prepared root");
+    let attribution = VodAttribution {
+        user_name: "user",
+        item_title: "prepared root",
+        supersession_user: "user",
+    };
+    let attach = |admitted_encoding: Arc<crate::vodencode::Encoding>, permit| VodRecipeRequest {
+        admission_priority: crate::admission::Priority::Live,
+        root_admission: Some(PreparedRootAdmission {
+            reuse_scope: None,
+            reused_parent: None,
+            instance_allowance: None,
+            instance_nonce: None,
+            encoding: admitted_encoding,
+            permit,
+        }),
+        request: &req,
+        encoding: Some(Arc::clone(&encoding)),
+        measured_candidate: None,
+        retained_capture: RetainedOutputCapture::New,
+        soundtrack: None,
+        companion: None,
+    };
+    serve
+        .try_create(
+            attach(Arc::clone(&encoding), permit),
+            &file,
+            &settings(),
+            attribution,
+            "prepared-root-first".into(),
+        )
+        .await
+        .expect("transfer prepared root");
     let rendition = rendition_of(&serve, "prepared-root-first").await;
     {
         let sessions = serve.shared.sessions.lock().await;
         let parent = &sessions["prepared-root-first"];
         assert!(parent.root_admission.is_some());
-        assert!(parent.children.is_empty(), "the root has no stale private demand");
+        assert!(
+            parent.children.is_empty(),
+            "the root has no stale private demand"
+        );
     }
     assert_eq!(rendition.readers.lock().await.len(), 1);
-    let reopen = rendition.retained_admission.current().expect("exact live credit");
-    serve.try_create(attach(Arc::clone(&encoding), reopen), &file, &settings(), attribution,
-        "prepared-root-reopen".into()).await.expect("saturated same-rendition attachment");
+    let reopen = rendition
+        .retained_admission
+        .current()
+        .expect("exact live credit");
+    serve
+        .try_create(
+            attach(Arc::clone(&encoding), reopen),
+            &file,
+            &settings(),
+            attribution,
+            "prepared-root-reopen".into(),
+        )
+        .await
+        .expect("saturated same-rendition attachment");
     assert_eq!(encoding.admissions.software_in_use(), 2);
     assert_eq!(rendition.readers.lock().await.len(), 2);
-    let substitute = encoding.clone_with_admissions_for_test(encoding.admissions.clone()).await;
-    let borrowed = rendition.retained_admission.current().expect("existing exact credit");
-    let refused = serve.try_create(attach(substitute, borrowed), &file, &settings(), attribution,
-        "prepared-root-substitute".into()).await.expect_err("same-key substitution refused");
+    let substitute = encoding
+        .clone_with_admissions_for_test(encoding.admissions.clone())
+        .await;
+    let borrowed = rendition
+        .retained_admission
+        .current()
+        .expect("existing exact credit");
+    let refused = serve
+        .try_create(
+            attach(substitute, borrowed),
+            &file,
+            &settings(),
+            attribution,
+            "prepared-root-substitute".into(),
+        )
+        .await
+        .expect_err("same-key substitution refused");
     assert!(refused.contains("vod_preparation_changed"));
-    assert!(!serve.shared.sessions.lock().await.contains_key("prepared-root-substitute"));
+    assert!(!serve
+        .shared
+        .sessions
+        .lock()
+        .await
+        .contains_key("prepared-root-substitute"));
     assert_eq!(encoding.admissions.software_in_use(), 2);
     assert!(serve.end("prepared-root-first", Terminal::Deleted).await);
-    assert_eq!(encoding.admissions.software_in_use(), 2, "second parent retains capacity");
+    assert_eq!(
+        encoding.admissions.software_in_use(),
+        2,
+        "second parent retains capacity"
+    );
     assert!(serve.end("prepared-root-reopen", Terminal::Deleted).await);
     rendition.gen_epoch.fetch_add(1, Relaxed);
-    let _ = rendition.slot.perform(Step::Terminate { why: Termination::Idle }, || {}).await;
-    wait_until("prepared root physically reaped", Duration::from_secs(5), async ||
-        encoding.admissions.software_in_use() == 0).await;
+    let _ = rendition
+        .slot
+        .perform(
+            Step::Terminate {
+                why: Termination::Idle,
+            },
+            || {},
+        )
+        .await;
+    wait_until(
+        "prepared root physically reaped",
+        Duration::from_secs(5),
+        async || encoding.admissions.software_in_use() == 0,
+    )
+    .await;
     assert!(rendition.readers.lock().await.is_empty());
-    assert!(rendition.retained_admission.current().is_none(), "cache owns no credit");
+    assert!(
+        rendition.retained_admission.current().is_none(),
+        "cache owns no credit"
+    );
 }
-
 
 #[tokio::test]
 async fn processed_root_reuse_needs_no_speed_or_missing_qualification_window() {
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("correctness-only reuse");
     let (file, encoding) = encoded_fixture(base.path()).await;
-    encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
-        .await.expect("one graph fills the pool");
+    encoding
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
+        .await
+        .expect("one graph fills the pool");
     let permit = encoding.try_permit().await.expect("incumbent admission");
-    let worker = permit.clone().try_claim_worker().expect("one physical producer");
+    let worker = permit
+        .clone()
+        .try_claim_worker()
+        .expect("one physical producer");
     let serve = local_serve(base.path().join("vod"), Arc::clone(&encoding.store));
     // Custody control, not normal driver/reap qualification: this fixture holds
     // the real worker externally, so coordinate the otherwise empty slot before
@@ -2107,20 +2476,51 @@ async fn processed_root_reuse_needs_no_speed_or_missing_qualification_window() {
     let _driver = serve.control_driver_for_test(&encoding);
     let mut req = request("correctness-only", 0.0);
     req.request_id = Some(uuid::Uuid::new_v4().to_string());
-    req.kind = SessionKind::Transcode { height: encoding.options.target_height };
+    req.kind = SessionKind::Transcode {
+        height: encoding.options.target_height,
+    };
     let scope = [51; 32];
-    let attribution = VodAttribution { user_name: "user", item_title: "reuse", supersession_user: "user" };
-    serve.try_create(VodRecipeRequest {
-        root_admission: Some(PreparedRootAdmission {
-            reuse_scope: Some(scope), reused_parent: None, instance_allowance: None,
-            instance_nonce: Some([8; 16]), encoding: Arc::clone(&encoding), permit,
-        }), request: &req, encoding: Some(Arc::clone(&encoding)), ..(&req).into()
-    }, &file, &settings(), attribution, "incumbent".into()).await.expect("incumbent");
-    serve.assert_controlled_driver_held_for_test(&encoding).await;
+    let attribution = VodAttribution {
+        user_name: "user",
+        item_title: "reuse",
+        supersession_user: "user",
+    };
+    serve
+        .try_create(
+            VodRecipeRequest {
+                root_admission: Some(PreparedRootAdmission {
+                    reuse_scope: Some(scope),
+                    reused_parent: None,
+                    instance_allowance: None,
+                    instance_nonce: Some([8; 16]),
+                    encoding: Arc::clone(&encoding),
+                    permit,
+                }),
+                request: &req,
+                encoding: Some(Arc::clone(&encoding)),
+                ..(&req).into()
+            },
+            &file,
+            &settings(),
+            attribution,
+            "incumbent".into(),
+        )
+        .await
+        .expect("incumbent");
+    serve
+        .assert_controlled_driver_held_for_test(&encoding)
+        .await;
     let rendition = rendition_of(&serve, "incumbent").await;
-    assert!(encoding.try_permit().await.is_none(), "unrelated graph still needs fresh capacity");
+    assert!(
+        encoding.try_permit().await.is_none(),
+        "unrelated graph still needs fresh capacity"
+    );
     let last = rendition.plan.entries.last().expect("finite plan").index;
-    for (case, start, complete) in [("idle", 0, false), ("last-two", last.saturating_sub(1), false), ("complete", last, true)] {
+    for (case, start, complete) in [
+        ("idle", 0, false),
+        ("last-two", last.saturating_sub(1), false),
+        ("complete", last, true),
+    ] {
         if complete {
             let mut manifest = rendition.manifest.lock().await;
             for entry in &rendition.plan.entries {
@@ -2133,32 +2533,92 @@ async fn processed_root_reuse_needs_no_speed_or_missing_qualification_window() {
         let mut successor = req.clone();
         successor.request_id = Some(uuid::Uuid::new_v4().to_string());
         successor.previous_session_id = Some("incumbent".into());
-        successor.start_seconds = ticks_to_ms(rendition.plan.entry(start).expect("start").start_ticks, rendition.timescale) as f64 / 1000.0;
-        let root = serve.capture_processed_root(&successor, "user", scope, Instant::now() + Duration::from_secs(5)).await.expect("exact retained root");
-        assert!(root.permit.clone().try_claim_worker().is_none(), "no concurrent producer under borrowed credit");
+        successor.start_seconds = ticks_to_ms(
+            rendition.plan.entry(start).expect("start").start_ticks,
+            rendition.timescale,
+        ) as f64
+            / 1000.0;
+        let root = serve
+            .capture_processed_root(
+                &successor,
+                "user",
+                scope,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("exact retained root");
+        assert!(
+            root.permit.clone().try_claim_worker().is_none(),
+            "no concurrent producer under borrowed credit"
+        );
         let readers_before = rendition.readers.lock().await.len();
-        serve.try_create(VodRecipeRequest {
-            root_admission: Some(root), request: &successor, encoding: Some(Arc::clone(&encoding)), ..(&successor).into()
-        }, &file, &settings(), attribution, case.into()).await.expect("same graph attaches without a speed receipt");
-        serve.assert_controlled_driver_held_for_test(&encoding).await;
+        serve
+            .try_create(
+                VodRecipeRequest {
+                    root_admission: Some(root),
+                    request: &successor,
+                    encoding: Some(Arc::clone(&encoding)),
+                    ..(&successor).into()
+                },
+                &file,
+                &settings(),
+                attribution,
+                case.into(),
+            )
+            .await
+            .expect("same graph attaches without a speed receipt");
+        serve
+            .assert_controlled_driver_held_for_test(&encoding)
+            .await;
         assert!(Arc::ptr_eq(&rendition, &rendition_of(&serve, case).await));
-        assert_eq!(rendition.readers.lock().await.len(), readers_before + 1, "only the actual successor reader was added");
+        assert_eq!(
+            rendition.readers.lock().await.len(),
+            readers_before + 1,
+            "only the actual successor reader was added"
+        );
         assert_eq!(encoding.admissions.software_in_use(), 2);
         assert!(serve.end(case, Terminal::Deleted).await);
     }
     let mut cancelled = req.clone();
     cancelled.request_id = Some(uuid::Uuid::new_v4().to_string());
     cancelled.previous_session_id = Some("incumbent".into());
-    let root = serve.capture_processed_root(&cancelled, "user", scope, Instant::now() + Duration::from_secs(5)).await.expect("capture for cancellation");
+    let root = serve
+        .capture_processed_root(
+            &cancelled,
+            "user",
+            scope,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect("capture for cancellation");
     drop(root);
-    assert_eq!(rendition.readers.lock().await.len(), 1, "cancellation installed no private demand");
+    assert_eq!(
+        rendition.readers.lock().await.len(),
+        1,
+        "cancellation installed no private demand"
+    );
     assert!(serve.end("incumbent", Terminal::Deleted).await);
     serve.finish_controlled_driver_for_test(&encoding).await;
-    assert_eq!(encoding.admissions.software_in_use(), 2, "unreaped worker retains credit after last parent");
+    assert_eq!(
+        encoding.admissions.software_in_use(),
+        2,
+        "unreaped worker retains credit after last parent"
+    );
     drop(worker);
-    wait_until("last worker releases credit", Duration::from_secs(5), async || encoding.admissions.software_in_use() == 0).await;
-    assert!(rendition.retained_admission.current().is_none(), "cached graph cannot pin capacity");
-    assert!(encoding.try_permit().await.is_some(), "fresh admission works after actual release");
+    wait_until(
+        "last worker releases credit",
+        Duration::from_secs(5),
+        async || encoding.admissions.software_in_use() == 0,
+    )
+    .await;
+    assert!(
+        rendition.retained_admission.current().is_none(),
+        "cached graph cannot pin capacity"
+    );
+    assert!(
+        encoding.try_permit().await.is_some(),
+        "fresh admission works after actual release"
+    );
 }
 
 #[tokio::test]
@@ -2166,71 +2626,174 @@ async fn processed_root_reuse_rejects_expiry_scope_and_ended_exact_owner() {
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("exact processed reuse");
     let (file, encoding) = encoded_fixture(base.path()).await;
-    encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2").await.expect("pool");
+    encoding
+        .store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
+        .await
+        .expect("pool");
     let permit = encoding.try_permit().await.expect("root capacity");
     let serve = local_serve(base.path().join("vod"), Arc::clone(&encoding.store));
     let mut req = request("exact-root", 0.0);
     req.request_id = Some("original-incarnation".into());
-    req.kind = SessionKind::Transcode { height: encoding.options.target_height };
+    req.kind = SessionKind::Transcode {
+        height: encoding.options.target_height,
+    };
     let scope = [42; 32];
-    let attribution = VodAttribution { user_name: "user", item_title: "processed", supersession_user: "user" };
-    serve.try_create(VodRecipeRequest {
-        root_admission: Some(PreparedRootAdmission {
-            reuse_scope: Some(scope), reused_parent: None, instance_allowance: None,
-            instance_nonce: Some([7; 16]), encoding: Arc::clone(&encoding), permit,
-        }), request: &req, encoding: Some(Arc::clone(&encoding)),
-        ..(&req).into()
-    }, &file, &settings(), attribution, "original".into()).await.expect("original");
+    let attribution = VodAttribution {
+        user_name: "user",
+        item_title: "processed",
+        supersession_user: "user",
+    };
+    serve
+        .try_create(
+            VodRecipeRequest {
+                root_admission: Some(PreparedRootAdmission {
+                    reuse_scope: Some(scope),
+                    reused_parent: None,
+                    instance_allowance: None,
+                    instance_nonce: Some([7; 16]),
+                    encoding: Arc::clone(&encoding),
+                    permit,
+                }),
+                request: &req,
+                encoding: Some(Arc::clone(&encoding)),
+                ..(&req).into()
+            },
+            &file,
+            &settings(),
+            attribution,
+            "original".into(),
+        )
+        .await
+        .expect("original");
     let (rendition, permit, owner) = {
         let sessions = serve.shared.sessions.lock().await;
         let session = &sessions["original"];
-        (Arc::clone(session.live_rendition().expect("live")), session.root_admission.clone().expect("credit"), session.response_owner())
+        (
+            Arc::clone(session.live_rendition().expect("live")),
+            session.root_admission.clone().expect("credit"),
+            session.response_owner(),
+        )
     };
     let mut token = ProcessedRootReuse {
-        session_id: "original".into(), scope, owner, rendition: Arc::clone(&rendition),
+        session_id: "original".into(),
+        scope,
+        owner,
+        rendition: Arc::clone(&rendition),
         deadline: Instant::now() + Duration::from_secs(10),
-
     };
     {
         let sessions = serve.shared.sessions.lock().await;
         let session = &sessions["original"];
         assert!(token.matches(session, &permit));
         token.scope = [43; 32];
-        assert!(!token.matches(session, &permit), "different immutable query scope");
+        assert!(
+            !token.matches(session, &permit),
+            "different immutable query scope"
+        );
         token.scope = scope;
         token.deadline = Instant::now() - Duration::from_millis(1);
-        assert!(!token.matches(session, &permit), "fixed expiry cannot renew");
+        assert!(
+            !token.matches(session, &permit),
+            "fixed expiry cannot renew"
+        );
         token.deadline = Instant::now() + Duration::from_secs(10);
     }
     let mut successor = req.clone();
     successor.previous_session_id = Some("original".into());
     successor.request_id = Some("successor-incarnation".into());
-    assert!(serve.capture_processed_root(&successor, "another-user", scope, token.deadline).await.is_none());
-    assert!(serve.capture_processed_root(&successor, "user", [43; 32], token.deadline).await.is_none());
-    let mut wrong_owner = serve.capture_processed_root(&successor, "user", scope, token.deadline).await.expect("capture before replacement");
+    assert!(serve
+        .capture_processed_root(&successor, "another-user", scope, token.deadline)
+        .await
+        .is_none());
+    assert!(serve
+        .capture_processed_root(&successor, "user", [43; 32], token.deadline)
+        .await
+        .is_none());
+    let mut wrong_owner = serve
+        .capture_processed_root(&successor, "user", scope, token.deadline)
+        .await
+        .expect("capture before replacement");
 
-    wrong_owner.reused_parent.as_mut().expect("token").owner.incarnation = Arc::new(());
+    wrong_owner
+        .reused_parent
+        .as_mut()
+        .expect("token")
+        .owner
+        .incarnation = Arc::new(());
 
-    let refusal = serve.try_create(VodRecipeRequest { root_admission: Some(wrong_owner), request: &successor, encoding: Some(Arc::clone(&encoding)), ..(&successor).into() },
-        &file, &settings(), attribution, "wrong-incarnation".into()).await.expect_err("replacement incarnation");
+    let refusal = serve
+        .try_create(
+            VodRecipeRequest {
+                root_admission: Some(wrong_owner),
+                request: &successor,
+                encoding: Some(Arc::clone(&encoding)),
+                ..(&successor).into()
+            },
+            &file,
+            &settings(),
+            attribution,
+            "wrong-incarnation".into(),
+        )
+        .await
+        .expect_err("replacement incarnation");
     assert!(refusal.contains("vod_preparation_changed"));
-    let qualified = serve.capture_processed_root(&successor, "user", scope, token.deadline).await.expect("exact parent capture");
+    let qualified = serve
+        .capture_processed_root(&successor, "user", scope, token.deadline)
+        .await
+        .expect("exact parent capture");
     // Pacing/absence of speed observations cannot revoke retained capacity.
     encoding.reset_active_production(100, false);
     assert!(encoding.active_production_evidence().is_none());
-    serve.try_create(VodRecipeRequest { root_admission: Some(qualified), request: &successor, encoding: Some(Arc::clone(&encoding)), ..(&successor).into() },
-        &file, &settings(), attribution, "positive-successor".into()).await.expect("exact saturated reuse");
-    assert_eq!(encoding.admissions.software_in_use(), 2, "one physical credit for both parents");
-    let qualified = serve.capture_processed_root(&successor, "user", scope, token.deadline).await.expect("still exact predecessor");
+    serve
+        .try_create(
+            VodRecipeRequest {
+                root_admission: Some(qualified),
+                request: &successor,
+                encoding: Some(Arc::clone(&encoding)),
+                ..(&successor).into()
+            },
+            &file,
+            &settings(),
+            attribution,
+            "positive-successor".into(),
+        )
+        .await
+        .expect("exact saturated reuse");
+    assert_eq!(
+        encoding.admissions.software_in_use(),
+        2,
+        "one physical credit for both parents"
+    );
+    let qualified = serve
+        .capture_processed_root(&successor, "user", scope, token.deadline)
+        .await
+        .expect("still exact predecessor");
     assert!(serve.end("original", Terminal::Deleted).await);
     // The retained graph and capacity remain accessible through local Arcs,
     // but no longer confer the exact parent's live authority.
-    let refused = serve.try_create(VodRecipeRequest {
-        root_admission: Some(qualified), request: &successor, encoding: Some(Arc::clone(&encoding)),
-        ..(&successor).into()
-    }, &file, &settings(), attribution, "refused-successor".into()).await.expect_err("ended predecessor");
+    let refused = serve
+        .try_create(
+            VodRecipeRequest {
+                root_admission: Some(qualified),
+                request: &successor,
+                encoding: Some(Arc::clone(&encoding)),
+                ..(&successor).into()
+            },
+            &file,
+            &settings(),
+            attribution,
+            "refused-successor".into(),
+        )
+        .await
+        .expect_err("ended predecessor");
     assert!(refused.contains("vod_preparation_changed"));
-    assert!(!serve.shared.sessions.lock().await.contains_key("refused-successor"));
+    assert!(!serve
+        .shared
+        .sessions
+        .lock()
+        .await
+        .contains_key("refused-successor"));
     assert!(serve.end("positive-successor", Terminal::Deleted).await);
 }
 
@@ -2290,6 +2853,7 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
             "held-admission",
             None,
             Recipe {
+                source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
                 file,
@@ -2297,8 +2861,10 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
                 aac: true,
                 audio_delivery: None,
                 video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
+                copy_index_init_contract: None,
                 encoding: Some(Arc::clone(&encoding)),
             },
             plan,
@@ -2449,6 +3015,7 @@ async fn an_expired_deadline_without_an_encoder_permit_is_capacity_not_producer_
             "capacity-verdict",
             None,
             Recipe {
+                source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
                 file,
@@ -2456,8 +3023,10 @@ async fn an_expired_deadline_without_an_encoder_permit_is_capacity_not_producer_
                 aac: true,
                 audio_delivery: None,
                 video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
+                copy_index_init_contract: None,
                 encoding: Some(Arc::clone(&encoding)),
             },
             plan,
@@ -2572,6 +3141,7 @@ async fn an_expired_verdict_waits_for_the_producer_state_instead_of_guessing() {
             "verdict-read",
             None,
             Recipe {
+                source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
                 file,
@@ -2579,8 +3149,10 @@ async fn an_expired_verdict_waits_for_the_producer_state_instead_of_guessing() {
                 aac: true,
                 audio_delivery: None,
                 video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
+                copy_index_init_contract: None,
                 encoding: Some(Arc::clone(&encoding)),
             },
             plan,
@@ -2592,7 +3164,10 @@ async fn an_expired_verdict_waits_for_the_producer_state_instead_of_guessing() {
         .admissions
         .try_admit_software(2, 1, crate::admission::Priority::Background)
         .expect("background work holds a permit");
-    assert!(encoding.try_permit().await.is_none(), "the permit is refused");
+    assert!(
+        encoding.try_permit().await.is_none(),
+        "the permit is refused"
+    );
     assert!(encoding.is_waiting() && encoding.last_refusal().is_some());
     // The rendition's producer is running all the same.
     let child = tokio::process::Command::new("/bin/sleep")
@@ -2904,7 +3479,9 @@ async fn encoded_pair(
     req.kind = SessionKind::Transcode { height: 144 };
     serve
         .try_create(
-            VodRecipeRequest { root_admission: None,
+            VodRecipeRequest {
+                admission_priority: crate::admission::Priority::Live,
+                root_admission: None,
                 measured_candidate: None,
                 retained_capture: RetainedOutputCapture::New,
                 companion: None,
@@ -3336,7 +3913,9 @@ async fn assert_encoded_restarts(
         req.audio_offset_ms = file.audio_offset_ms;
         let started = serve
             .try_create(
-                VodRecipeRequest { root_admission: None,
+                VodRecipeRequest {
+                    admission_priority: crate::admission::Priority::Live,
+                    root_admission: None,
                     measured_candidate: None,
                     retained_capture: RetainedOutputCapture::New,
                     companion: None,
@@ -3837,7 +4416,9 @@ async fn copy_and_encoded_vod_refuse_missing_or_nonpositive_duration_without_att
             }
             let refusal = serve
                 .try_create(
-                    VodRecipeRequest { root_admission: None,
+                    VodRecipeRequest {
+                        admission_priority: crate::admission::Priority::Live,
+                        root_admission: None,
                         measured_candidate: None,
                         retained_capture: crate::vodserve::RetainedOutputCapture::New,
                         companion: None,
@@ -3869,29 +4450,60 @@ async fn continuous_family_start_preempts_background_and_cleans_up_cancelled_wai
     let (_, encoding) = encoded_fixture(base.path()).await;
     let pool = encoding.admissions.clone();
     let mut rendition = synthetic_rendition(base.path()).await;
-    Arc::get_mut(&mut rendition).expect("unshared rendition").recipe.encoding = Some(encoding);
+    Arc::get_mut(&mut rendition)
+        .expect("unshared rendition")
+        .recipe
+        .encoding = Some(encoding);
     let media = vec![rendition];
-    let background = pool.try_admit_software(64, 1, crate::admission::Priority::Background)
+    let background = pool
+        .try_admit_software(64, 1, crate::admission::Priority::Background)
         .expect("background index owns capacity");
     // Speculative work must remain an immediate, non-preempting attempt.
-    assert!(VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative)).await.is_err());
+    assert!(
+        VodServe::reserve_media_group(&media, crate::admission::Priority::Speculative)
+            .await
+            .is_err()
+    );
     assert!(!pool.live_is_waiting());
-    let cancelled = tokio::time::timeout(Duration::from_millis(50), VodServe::reserve_media_group(&media, None)).await;
-    assert!(cancelled.is_err(), "a foreground start must wait for the background owner");
-    assert!(!pool.live_is_waiting(), "cancellation releases the foreground waiter");
-    assert_eq!(pool.software_in_use(), 1, "no partial family reservation leaked");
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(50),
+        VodServe::reserve_media_group(&media, crate::admission::Priority::Live),
+    )
+    .await;
+    assert!(
+        cancelled.is_err(),
+        "a foreground start must wait for the background owner"
+    );
+    assert!(
+        !pool.live_is_waiting(),
+        "cancellation releases the foreground waiter"
+    );
+    assert_eq!(
+        pool.software_in_use(),
+        1,
+        "no partial family reservation leaked"
+    );
     let observer = pool.clone();
     let yield_background = async move {
         tokio::time::timeout(Duration::from_secs(2), async {
             while !observer.live_is_waiting() {
                 tokio::task::yield_now().await;
             }
-        }).await.expect("foreground signals the background worker");
+        })
+        .await
+        .expect("foreground signals the background worker");
         drop(background);
-        assert!(observer.try_admit_software(64, 1, crate::admission::Priority::Background).is_none(),
-            "background cannot reclaim capacity while the viewer waits");
+        assert!(
+            observer
+                .try_admit_software(64, 1, crate::admission::Priority::Background)
+                .is_none(),
+            "background cannot reclaim capacity while the viewer waits"
+        );
     };
-    let (permits, ()) = tokio::join!(VodServe::reserve_media_group(&media, None), yield_background);
+    let (permits, ()) = tokio::join!(
+        VodServe::reserve_media_group(&media, crate::admission::Priority::Live),
+        yield_background
+    );
     let permits = permits.expect("foreground family starts after background yields");
     assert!(!pool.live_is_waiting());
     assert!(pool.software_in_use() > 0);
@@ -4090,4 +4702,235 @@ async fn performed_encoded_driver_phases_preserve_original_frontier_and_event_ti
         Producer::Absent { .. }
     ));
     assert_eq!(encoding.admissions.snapshot().reservations, 0);
+}
+
+#[tokio::test]
+async fn controlled_continuous_start_defers_companion_until_primary_presentation() {
+    use plurx_core::playback::continuous_quality::{
+        QualityAttachment, QualityOperation, QualityTransitionRequest,
+    };
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("deferred continuous startup");
+    let (file, mut video) = encoded_fixture(base.path()).await;
+    let mut soundtrack = video
+        .clone_with_admissions_for_test(video.admissions.clone())
+        .await;
+    let audio = Arc::get_mut(&mut soundtrack).expect("new audio recipe");
+    audio.shared_audio = plurx_core::transcode::VodSharedAudioRecipe::from_plan(&audio.plan);
+    let primary = Arc::get_mut(&mut video).expect("new primary recipe");
+    primary.options.normalized_geometry = true;
+    primary.options.video_sample_envelope =
+        plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50;
+    primary.options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+    refresh_encoded_plan(&file, primary);
+    let mut companion = video
+        .clone_with_admissions_for_test(video.admissions.clone())
+        .await;
+    let optional = Arc::get_mut(&mut companion).expect("new companion recipe");
+    optional.options.target_height = 72;
+    refresh_encoded_plan(&file, optional);
+    let budget = video.resources().cpu_threads
+        + soundtrack.resources().cpu_threads
+        + companion.resources().cpu_threads;
+    video
+        .store
+        .put_setting(
+            plurx_core::store::keys::SW_POOL_THREADS,
+            &budget.to_string(),
+        )
+        .await
+        .expect("family capacity");
+    let store = Arc::new(SqliteStore::open_in_memory().expect("session store"));
+    let serve = local_serve(base.path().join("deferred-cache"), store.clone());
+    let parent = uuid::Uuid::new_v4().to_string();
+    let generation = uuid::Uuid::new_v4().to_string();
+    let primary_id = plurx_core::playback::candidate::CandidateId([7; 16]);
+    let companion_id = plurx_core::playback::candidate::CandidateId([9; 16]);
+    let mut start = request(&parent, 0.0);
+    start.kind = SessionKind::Transcode {
+        height: video.options.target_height,
+    };
+    start.candidate_context = Some(Box::new(
+        crate::transcode::continuous_test_candidate_context(
+            primary_id,
+            [8; 32],
+            u32::try_from(video.options.target_height).expect("primary height"),
+        ),
+    ));
+    start.continuous_media = Some(Box::new(crate::transcode::ContinuousMediaRequest {
+        version: 2,
+        controlled: true,
+        family_generation: generation.clone(),
+        role: crate::transcode::ContinuousMediaRole::Video,
+        autonomous_companion: Some(companion_id),
+        companion_catalog: None,
+        companion_context: None,
+        family_descriptor: None,
+    }));
+    let mut optional_request = start.clone();
+    optional_request.kind = SessionKind::Transcode { height: 72 };
+    optional_request.candidate_context = Some(Box::new(
+        crate::transcode::continuous_test_candidate_context(companion_id, [10; 32], 72),
+    ));
+    let owner = serve.shared.cluster_node_id.clone().expect("owner node");
+    activate_control_route_with_recipe(store.as_ref(), &parent, &generation, &owner, &serde_json::json!({
+        "candidate_id":primary_id,"request":{"continuous_media":{"version":2,"role":"video","controlled":true,
+            "family_generation":generation,"autonomous_companion":companion_id}}
+    }).to_string()).await;
+    serve
+        .try_create(
+            VodRecipeRequest {
+                admission_priority: crate::admission::Priority::Live,
+                root_admission: None,
+                measured_candidate: None,
+                retained_capture: RetainedOutputCapture::New,
+                request: &start,
+                encoding: Some(Arc::clone(&video)),
+                soundtrack: Some(Arc::clone(&soundtrack)),
+                companion: Some((optional_request, Arc::clone(&companion))),
+            },
+            &file,
+            &settings(),
+            VodAttribution {
+                user_name: "test",
+                item_title: "deferred startup",
+                supersession_user: "test",
+            },
+            parent.clone(),
+        )
+        .await
+        .expect("foreground pair attaches");
+    let optional_rendition = {
+        let sessions = serve.shared.sessions.lock().await;
+        let child = sessions[&parent]
+            .children
+            .iter()
+            .find(|child| child.candidate_id == Some(companion_id))
+            .expect("companion");
+        assert!(child._reservation.is_none());
+        assert!(child.companion_bootstrap);
+        assert!(child.rendition.readers.lock().await[&child.reader_id].authority_only);
+        Arc::clone(&child.rendition)
+    };
+    let deadline = || Instant::now() + Duration::from_secs(30);
+    let first = serve
+        .continuous_family_description_before(&parent, deadline())
+        .await
+        .expect("family")
+        .result
+        .expect("verified foreground")
+        .expect("bytes");
+    let first: serde_json::Value = serde_json::from_slice(&first).expect("descriptor");
+    assert_eq!(first["version"], 2);
+    assert_eq!(first["family_revision"], 1);
+    assert_eq!(first["video"].as_array().expect("video").len(), 1);
+    assert!(
+        !optional_rendition.dir.has_init().await,
+        "optional producer has no source demand before presentation"
+    );
+    let transaction = uuid::Uuid::new_v4().to_string();
+    let primary_key = first["video"][0]["rendition_id"]
+        .as_str()
+        .expect("primary")
+        .to_owned();
+    let attachment = QualityAttachment {
+        client_instance_id: uuid::Uuid::new_v4().to_string(),
+        lifetime_id: "one-film".into(),
+        attachment_id: uuid::Uuid::new_v4().to_string(),
+        family_id: first["family_id"].as_str().expect("family ID").into(),
+    };
+    let mut transition = QualityTransitionRequest {
+        version: 1,
+        generation: generation.clone(),
+        control_epoch: 1,
+        sequence: 1,
+        attachment: attachment.clone(),
+        transaction_id: transaction,
+        operation: QualityOperation::Prepare {
+            intent_revision: 1,
+            target_rendition_id: primary_key,
+        },
+    };
+    let mut request = super::vod_serve_quality::QualityScheduleRequest {
+        version: 1,
+        generation: generation.clone(),
+        control_epoch: 1,
+        attachment,
+        transition: Some(transition.clone()),
+        window: None,
+        frontier: Some(super::vod_serve_quality::QualityAppendFrontier {
+            timescale: 24000,
+            through_tick: 0,
+        }),
+    };
+    let prepared = serve
+        .quality_schedule_before(&parent, &owner, &request, deadline())
+        .await
+        .expect("primary preparation");
+    let intervals = prepared.ledger.transactions[0].ready.clone();
+    assert!(!intervals.is_empty());
+    request.frontier = None;
+    for operation in [
+        QualityOperation::Scheduled {
+            intervals: intervals.clone(),
+        },
+        QualityOperation::Appended {
+            intervals: intervals.clone(),
+        },
+    ] {
+        transition.sequence += 1;
+        transition.operation = operation;
+        request.transition = Some(transition.clone());
+        serve
+            .quality_schedule_before(&parent, &owner, &request, deadline())
+            .await
+            .expect("accepted primary bytes");
+        assert!(
+            !optional_rendition.dir.has_init().await,
+            "append facts alone do not start companion"
+        );
+    }
+    transition.sequence += 1;
+    transition.operation = QualityOperation::Presented {
+        artifact_id: intervals[0].artifact_id.clone(),
+        film_tick: intervals[0].from_tick,
+        observed_at_ms: crate::media_sessions::unix_ms(),
+    };
+    request.transition = Some(transition);
+    serve
+        .quality_schedule_before(&parent, &owner, &request, deadline())
+        .await
+        .expect("first-frame acknowledgement");
+    {
+        let sessions = serve.shared.sessions.lock().await;
+        let child = sessions[&parent]
+            .children
+            .iter()
+            .find(|child| child.candidate_id == Some(companion_id))
+            .expect("companion");
+        assert!(child._reservation.is_some());
+        assert!(!child.rendition.readers.lock().await[&child.reader_id].authority_only);
+    }
+    wait_until(
+        "companion verified init",
+        Duration::from_secs(15),
+        async || optional_rendition.dir.has_init().await,
+    )
+    .await;
+    let second = serve
+        .continuous_family_description_before(&parent, deadline())
+        .await
+        .expect("same family")
+        .result
+        .expect("verified extension")
+        .expect("bytes");
+    let second: serde_json::Value = serde_json::from_slice(&second).expect("descriptor");
+    assert_eq!(second["family_id"], first["family_id"]);
+    assert_eq!(second["family_revision"], 2);
+    assert!(second["video"]
+        .as_array()
+        .expect("video")
+        .contains(&first["video"][0]));
+    assert_eq!(second["audio"], first["audio"]);
+    assert!(serve.end(&parent, Terminal::Deleted).await);
 }

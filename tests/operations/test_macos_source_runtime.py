@@ -242,6 +242,8 @@ class MacosSourceInstallerRoutingTests(unittest.TestCase):
         self.env = {**os.environ, "HOME": str(self.root / "home"),
                     "PATH": str(self.root / "bin") + os.pathsep + os.environ["PATH"], "SOURCE_TEST_LOG": str(self.log)}
         self.executable("id", '#!/bin/sh\ncase "$1" in -u) echo 501;; -g) echo 20;; esac\n')
+        # The fixture host is a Mac, and Macs are Apple Silicon only.
+        self.executable("uname", '#!/bin/sh\ncase "$1" in -m) echo arm64;; *) exec /usr/bin/uname "$@";; esac\n')
         self.executable("launchctl", '#!/bin/sh\necho "launchctl $*" >> "$SOURCE_TEST_LOG"\nexit 113\n')
         self.executable("curl", '#!/bin/sh\necho ready\n')
         builder = self.root / "scripts/build-macos-source-runtime"

@@ -9,6 +9,7 @@
   - Live reference; maintained with behavior changes. No overall status line.
 - **Read further only for:**
   - install and run (Docker, service, bare metal): `## Running it`
+  - upgrading a cluster one node at a time: [Rolling upgrades](#rolling-upgrades)
   - settings, ports and listeners: `## Configuration surface`; `## Ports`
   - what a pill, scan state, storage number or the stats overlay means: `## Reading the activity pill`; `## Reading library scan status`; `## Reading playback (and the stats overlay)`
   - runbooks: sharing addresses, Curator, channels, Jellyfin, Live TV: `## Sharing Cinema addresses — set up before creating invitations`; `## Pairing another application (Curator) — the runbook`; `## Library channels — the runbook`; `## Jellyfin client compatibility`; `## Live TV (HDHomeRun) — the runbook`
@@ -495,6 +496,14 @@ one voter or merge writes from a surviving minority. A post-activation code
 rollback still means rolling forward with a binary that supports the active
 replicated schema, against the retained Hiqlite target. The SQLite commands
 below are only for the pre-activation case.
+
+**Pipeline contract v2 is a one-way schema step.** The first start of a binary
+with it stamps SQLite v126 and the replicated managed resource view v5 (a
+targeted scan reserves no source reader). An older binary refuses both: SQLite
+with "database schema is v126, but this binary only knows v125", Hiqlite with
+"managed subtitle schema is partial or incompatible". After that, going back to
+an older release means restoring the backup taken before the upgrade, not
+redeploying the old image.
 
 ### Standalone SQLite: connection recovery and the boot integrity check
 
@@ -1072,35 +1081,36 @@ point of that view. It defers under a dialog like everything else.
 
 Use **Enter maintenance** for an update or reboot. Do not use **Remove** or
 **Leave this cluster**: those permanently tombstone the node identity, while
-maintenance is a reversible replicated fence.
+maintenance is a reversible replicated fence. A plain stop (SIGTERM) of the
+leader also hands leadership to a caught-up voter first; only maintenance
+drains its sessions.
 
 The server accepts maintenance only when every active member proves it runs a
 binary that understands the fence, no join, promotion, removal, or other
 maintenance is pending, and taking the target offline still leaves the current
-reachable voter quorum. This is based on live reachability, not only the
-configured voter count: a three-voter cluster with one voter already down also
-refuses maintenance on either survivor. A one-voter cluster may enter
-maintenance with an expected service outage.
+reachable voter quorum, by live reachability rather than voter count: a
+three-voter cluster with one voter down refuses maintenance on either survivor.
+A one-voter cluster may enter maintenance with an expected service outage.
 
 Open the exact target backend before choosing **Enter maintenance**. In a
-multi-voter cluster, the target-specific maintenance preflight requires fresh
-direct evidence from the voter set and proves that fencing this target still
-leaves the current quorum. Unlike the stricter rollout candidate, it may approve
+multi-voter cluster, the target's maintenance preflight requires fresh direct
+evidence from the voter set and proves that fencing it still leaves the
+current quorum. Unlike the stricter rollout candidate, it may approve
 the current leader or a node with existing streams: the maintenance operation
 first fences new admissions, hands leadership off when needed, and lets that
 existing work drain. A stable caught-up learner may also enter maintenance
-without subtracting a vote. A directly observed one-voter server is the explicit
-service-outage exception. Sending either action through another cluster node or
-a non-sticky load balancer is refused because only the target can linearize its
-own work admissions and inspect its local process registries.
+without subtracting a vote; a directly observed one-voter server is the
+service-outage exception. Either action sent through another node or a
+non-sticky load balancer is refused: only the target can linearize its own
+work admissions and inspect its local process registries.
 
-Before that local fence begins, the target atomically acquires the same
-replicated planned-outage lease used by ordinary restart preparation. Only one
-node can hold it. A maintenance claimant converts its exact lease into the
+Before that local fence begins, the target atomically acquires the
+replicated planned-outage lease that restart preparation also uses. Only one
+node can hold it. A maintenance claimant turns its exact lease into the
 durable maintenance row in one replicated transaction after any leader
-handoff; failure releases the claim, while heartbeat cleanup expires a claim
-left by a crashed caller. That cleanup is a replicated schema trigger, so even
-a previous-release heartbeat ages out an expired claim after a full rollback.
+handoff; failure releases the claim, and heartbeat cleanup expires one a
+crashed caller left. That cleanup is a replicated schema trigger, so even a
+previous-release heartbeat ages out an expired claim after a full rollback.
 Replicated schema guards also reject lifecycle-begin writes from a
 previous-release join, promotion, or removal coordinator while the lease
 exists, so the exclusion remains effective throughout a rolling upgrade or
@@ -1139,7 +1149,7 @@ snapshot, protocol, media, and build evidence:
 The maintenance row is replicated and survives the target process restarting.
 `GET /readyz` answers `503 maintenance`, new application work answers the typed
 `node_maintenance` refusal, and the target remains a Raft member. Losing the UI
-or restarting the process cannot silently reopen it. A binary that predates
+cannot silently reopen it. A binary that predates
 maintenance cannot publish the transaction-local heartbeat intent; replicated
 SQLite rejects that heartbeat while the fence exists, so an accidental code
 rollback fails closed instead of serving through maintenance.
@@ -2126,11 +2136,11 @@ stays `max_in_snapshot_log_to_keep = 1`.
 
 Snapshot builds check `2 × live DB bytes + max(live WAL bytes, 32 MiB) +
 64 MiB` on the state-machine filesystem before requesting the writer cut.
-Insufficient or unknown space defers for ten seconds per recheck, bounded
-by ten minutes; expiry attempts the existing path and cannot claim success
-on a full disk. `plurx_raft_snapshot_deferrals_total{reason="storage"}` counts
-retries; `plurx_raft_snapshot_required_storage_bytes` is the last known local
-floor, not a promise about current free space. Promotion needs the target's
+Below `DB + max(WAL, 32 MiB) + 64 MiB` a build cannot fit and waits,
+rechecked every 10 s, unbounded. Short of the floor but able to fit, or
+unknown, waits at most ten minutes, then attempts.
+`plurx_raft_snapshot_deferrals_total{reason="storage"}` counts retries;
+`plurx_raft_snapshot_required_storage_bytes` is the last known local floor. Promotion needs the target's
 fresh same-heartbeat floor proof and `max(512 MiB, floor)` headroom. Upgrade a
 legacy target before promotion; its old 512 MiB-only readiness is unknown for
 this proof. No new Developer toggle gates this automatic correctness path.
@@ -2826,6 +2836,29 @@ is how many entries each expired-entry sweep walks; and
 are not in the lookup counts. None of these changes the cache; the plan's §6.4
 says how to read them.
 
+The playback-start E1a baseline ([PLAYBACK-START-E1-BUILD.md](streaming/PLAYBACK-START-E1-BUILD.md)
+§7, §9) adds, all loaded from atomics at scrape time:
+`plurx_media_session_route_reads_total{site,source}` counts every
+session-keyed route read by the decision it serves (`routing`, `status_first`,
+`status_bracket`, `status_reclassify`, `control`, `verdict`, `receipt_fence`,
+`receipt_candidate`, `observer`); `source` is `authority` until E1c.
+`plurx_applied_view_reads_total{view,source,reason}` and
+`plurx_applied_view_reloads_total{view}` count applied-view reads and stamp
+reloads (`view="settings"` since E1b, whose settings memo reloads at most once
+per settings change a reader saw; `view="route"` stays 0 until E1c);
+`plurx_applied_view_table_changes_total{view}` is how often this replica
+applied a change to `settings` or `media_sessions`, the most a per-table memo
+would reload. `plurx_applied_view_proof{mode}`,
+`plurx_applied_view_image_stable`, `plurx_applied_view_applied_index` and
+`plurx_applied_view_failed_replacements_total` say whether the view could
+answer now, and `plurx_hiqlite_read_pool_wait_seconds` is the wait for a local
+read-pool connection. Settings → Developer → Applied view shows the same facts.
+
+Since E1b, request-path settings reads answer from this replica while it
+holds the proof; `reason="floor"` is this node reading back its own settings
+write until its replica applied it, `reason="reload_in_flight"` a page that
+met another reader's memo reload. Inventory: `http/applied_settings_inventory.rs`.
+
 Backups do not become interchangeable merely because the database is
 replicated. Preserve the data directory, node identity, and cluster secrets for
 each voter in host/storage backups so the original majority can be restored.
@@ -3307,6 +3340,39 @@ that its Raft id is no longer a voter and refuses. To add that machine again,
 stop it, discard its old plurx data directory, and join from a fresh directory
 with a newly issued token. Never copy the removed directory back into service.
 
+## Rolling upgrades
+
+Settings → Cluster reports each node's build, media protocol
+(`PROTOCOL_VERSION` in `crates/plurxd/src/media_pool.rs`), and eligible-owner
+status. Placement requires a fresh, exact-protocol advertisement, available
+egress and an encoder; the card explains refusals. Different protocols form
+separate placement cohorts. Build skew alone does not prevent placement.
+
+1. Upgrade one node at a time. Confirm ready, the new build/protocol and
+   eligible-owner status before proceeding.
+2. Keep an eligible owner in each protocol cohort while its ingress serves
+   requests. Without one, old ingress can only start locally.
+3. Drain old ingress and finish or move its sessions before upgrading the
+   last old node: new-protocol workers cannot accept old placement.
+
+Strict media-pool envelope changes require a protocol bump and dated note
+here (`make paperwork` checks this). Newest first:
+
+- 2026-11-13: protocol 11 — a server-selected F+ curve digest on the strict
+  `SessionRequest` media-worker envelope, combined with protocol 10 catalog
+  provenance. Use the cohort/drain procedure above; clients send no new
+  platform signal. Detail:
+  [FEL-RPU-REFIT-BUILD.md](streaming/FEL-RPU-REFIT-BUILD.md).
+
+- 2026-11-13: protocol 10 — retain validated source, track and full-capability
+  catalog-query provenance in `CandidateCatalogContext` so processed commits
+  preserve Copy discovery after Encode normalization. This descriptive query
+  grants no execution authority. Follow the cohort/drain sequence above.
+  Old processed rows without provenance cannot commit; retain or reopen
+  ordinary playback instead.
+- 2026-11-07 (recorded): protocol 9 — resolved audio claim and delivery on
+  `SessionRequest`, `QualityCatalogRequest` and `RemoteStartResponse`.
+
 ## Configuration surface
 
 Precedence, lowest to highest: **built-in defaults → TOML file → `PLURX_*` env**.
@@ -3357,7 +3423,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_DOVI_TOOL` | — | `dovi_tool` | `dovi_tool` binary for permanent Profile 7 → 8.1 conversion; probed at boot and required only when that feature is enabled |
 | `PLURX_MKVMERGE` | — | `mkvmerge` | MKVToolNix muxer for the verified Profile 8.1 replacement; version 68 or newer is required |
 | `PLURX_HWACCEL` | — | `auto` | Preferred encoder: `auto` · `qsv` · `vaapi` · `nvenc` · `videotoolbox` |
-| `PLURX_VAAPI_DEVICE` | — | `/dev/dri/renderD128` | VA-API render node |
+| `PLURX_VAAPI_DEVICE` | — | first VA-API-driver render node (i915, xe, amdgpu, radeon), else `/dev/dri/renderD128` | VA-API render node; skips NVIDIA nodes |
 | `PLURX_TONEMAP` | — | zscale | The **CPU** tone-map operator: `zscale` · `libplacebo` · `off` (no tone-map — plays HDR washed, but a useful test/escape hatch). Which *pipeline* runs — GPU or CPU — is probed at boot, not configured; this only chooses the operator when the CPU chain is the one running |
 | `PLURX_HWDECODE` | — | on | Set `off` to force software decode (still hardware-encodes) — for a GPU that decodes a stream to garbage, e.g. some Dolby Vision |
 | `PLURX_GDM_PORT` | — | `32414` | Host UDP port for GDM discovery (move if Plex owns 32414) |
@@ -3380,14 +3446,9 @@ native-subtitle work: a physical Apple TV rejecting a copied Dolby Vision
 master with CoreMedia `-12927`
 ([docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md](clients/APPLE-NATIVE-SUBTITLES-PLAN.md) §5.4).
 
-Its sibling, `PLURX_HLS_CLOSED_CAPTIONS_NONE`, was retired in favour of
-shipping `CLOSED-CAPTIONS=NONE` on every variant unconditionally. None of
-these variants carries a caption track, so saying so is correct authoring
-rather than an experiment — and an unset rung is not evidence about anything.
-A variant that stays silent lets AVFoundation and ExoPlayer both synthesise a
-phantom CEA-608 option into the text group, which shifts every rendition
-ordinal beneath it: a client asking for the first subtitle rendition by
-position gets the second.
+Its sibling, `PLURX_HLS_CLOSED_CAPTIONS_NONE`, was retired:
+`CLOSED-CAPTIONS=NONE` now ships on every variant. Why is in
+[APPLE-NATIVE-SUBTITLES-PLAN.md](clients/APPLE-NATIVE-SUBTITLES-PLAN.md) §5.4.
 
 | Var | What it adds | Why it might matter |
 |---|---|---|
@@ -4571,8 +4632,9 @@ without duplicating the same computation or multiplying NAS reads by node count.
 Settings → Libraries → Shared storage budgets assigns the same domain name to
 mount paths on the same NAS. Independent storage may use different names. A
 multi-root library conservatively reserves all of its domains, even for a
-file-specific job. Save mapping changes while background jobs are idle; an
-active reservation cannot change identity. Ordinary library path edits that
+file-specific job. Saves persist at once;
+[pending status](server/STORAGE-DOMAINS-DEFERRED-APPLY-STATUS.md) explains
+application. Ordinary library path edits that
 change required domains stop renewal and publication until a later attempt
 acquires the new slots. Enable switches remain independent of these mappings
 and their advisory observations.
@@ -4700,7 +4762,11 @@ transcode copies share this permit. A media-probe batch may execute up to two
 one-thread probes within that admission when its reserved CPU budget permits.
 Each probe claims its own shared storage reader. Only one background reader
 per domain is allowed; the second reader is reserved for playback. Scans
-probe inline under their own reservation. Repair batches can run two probes
+probe inline under their own reservation. A targeted scan request (`POST
+/api/v1/scan`, one directory) takes no background reader: it waits only for a
+running scan of its own library, so a full scan of another library on the same
+storage does not hold it. It still yields to playback and runs one walker at a
+time. Repair batches can run two probes
 only across separate available domains. The node detail panel reports the
 batch ceiling. Other worker loops, playback and transfers
 have their own admission limits. An available heavy slot still needs eligible
@@ -4735,15 +4801,15 @@ requires the stopped-writer maintenance procedure in the
 [queue migration contract](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md#7-migration-and-rollback--one-ownership-system-after-cutover);
 do not perform a mixed-version rolling cutover or a binary-only downgrade.
 
-Queue count, oldest age, source-I/O reservations and legacy backlog gauges
-come from the existing cached Store sampler. Worker-event counters and claim,
-queue-wait and execution histograms are process-local; every metrics scrape is
-Store-free. Counts of acknowledged transitions can undercount lost replies and
-reset on restart; durable attempts remain the audit record. Increasing
+Queue, age, reservation and legacy backlog gauges come from the cached Store
+sampler. Worker counters and histograms are process-local; scrapes are
+Store-free. Transition counts can undercount lost replies and reset on
+restart; durable attempts are the audit record. Rising
 `plurx_background_legacy_pending` needs migration attention. Queued work with
-idle compatible workers suggests source/admission trouble; rising age with all
-reservations held suggests capacity pressure. `claim_write` events without
-eligible work indicate an idle-poll regression.
+idle workers suggests admission trouble; rising age with all reservations held
+suggests capacity pressure. `claim_write` counts proposals, `claim_refused`
+their refusals; a claim the local replica shows refused counts
+`plurx_background_claim_skipped_total{kind,reason}` instead.
 
 The cache bytes remain node-local. With P5 remote placement enabled, any
 ingress may select a voter that advertises the exact verified generation and
@@ -4828,13 +4894,13 @@ and give the daemon uid permission to create, rename, read, and remove entries.
 The id is combined with the durable cluster identity, so the same operator name
 in two unrelated clusters does not alias replicated cache state.
 
-Startup does not trust matching configuration. Every committed voter must pass
-an authenticated two-way canary: each node writes unpredictable bytes, a peer
-reads them and writes a response, and the origin reads that response back. Only
-then does the node classify completed portable generations as shared. A
-one-voter cluster performs the same write/read proof locally. Missing mounts,
-read-only mounts, different filesystems, identity mismatches, and unreachable
-voters leave the fast path unavailable while P5 local-holder routing continues.
+Startup does not trust matching configuration. Each node runs an authenticated
+two-way canary against the voters: it writes unpredictable bytes, a voter reads
+them and writes a response, and the origin reads that back. A node treats
+portable generations as shared only while a majority of voters, itself
+included, agrees with it. A one-voter cluster proves it locally. A missing,
+read-only or different mount cannot reach a majority, so that node's fast path
+stays off while P5 local-holder routing continues.
 
 Portable, manifest-fenced speculative generations are copied into immutable
 shared generation directories after local publication succeeds. A nonproducer
@@ -5967,6 +6033,80 @@ A `dead` or `degraded` verdict warns at most once an hour, and the hour only
 re-arms after the verdict has been clean for several consecutive samples — a
 queue that flaps between `degraded` and `healthy` logs on the hour, not on every
 sample.
+
+### Indexing while serving
+
+A node no longer stops indexing because one of its encoders is in use. The
+analysis worker claims requests one after another for as long as the claim's
+source-capacity rule admits one (two readers per storage domain; without a live
+viewer, a background read takes only a domain no other reader holds), and the
+rule is asked again before the read starts, while it reads (every 2 s; the
+node-local "viewer queuing" check every 0.5 s) and before the result is
+submitted — a foreground stream that takes the source in between makes
+the request yield, back to the queue uncharged, as `foreground_preempted`. A
+viewer queuing for this node's encoder limits claims to requests a playback is
+waiting on.
+
+An idle node (no encoder in use, nobody queuing) also claims other nodes'
+fragment-index requests that asked for exactly its engine. Work a viewer is
+waiting on comes first wherever it is targeted, then the node's own requests,
+then other nodes'. A request naming a copy-video pipeline the executor cannot
+produce (Dolby Vision tooling it lacks, a Profile 7 conversion it has turned
+off) goes back uncharged once, and that executor then leaves requests naming
+that pipeline to other nodes for 15 minutes rather than taking them back on
+every pass. The request keeps its target: the executor builds the index and publishes its own
+copy, delivery hydrates the node that asked, and the request is `ready` only
+once that node holds it. A target membership has removed is never worked for.
+`plurx_analysis_completed_total{node}` counts, per executing node, the
+fragment-index requests it ran that reached their target since the process
+started (it reads the attempt history, so pruning after 30 days can lower it,
+which reads as a counter reset). **Settings → Developer → Indexing while
+serving** shows what this node's indexer may do right now; it is advisory and
+switches nothing.
+
+### Processed Dolby Vision as an upgrade after the first frame
+
+A create no longer renders or verifies processed Dolby Vision / HDR10-E before
+it answers: it resolves the ordinary plan, and a declined upgrade (setting off,
+no `hvc1` HLS fMP4, burned subtitles, the continuous route) is named on the
+start's enhancement details as before. When the upgrade applies, the node that
+owns the session waits for the viewer's first frame (the `ttff` beacon naming
+the session), then runs one bounded trial (8 s) in its one processed-preparation
+slot. The trial verifies its window where the viewer is (the session's latest
+accepted control position advanced by its age, plus the trial's budget), and
+the successor is staged at the viewer's position when the trial ends, so the
+client's alignment finds it at the playhead. When this node has already
+described the processed recipe, this playback's recovery evidence and Auto's
+link evidence are read before the trial, and a refused recipe costs no GPU.
+The control exchange offers the successor like any other prepared switch; the
+client aligns it, proves a decoded frame and switches, or keeps the ordinary
+session. Every refusal — slot busy, trial failure, this playback's recovery
+evidence, Auto's link evidence, a viewer's own quality change taking the
+playback's preparation slot, a release, a newer session — leaves the ordinary
+session playing untouched. A create that names a processed candidate (a reopen
+of a processed session), and a viewer who picks the processed rung on an
+ordinary session, get the ordinary rung it enhances, and are upgraded after
+that session's first frame. An ordinary prepared successor this node owns is
+upgraded the same way once committed (the commit proves the successor's
+frame). A start the ingress placed on another node is not upgraded: its owner
+lacks the create's catalog scope.
+
+`plurx_playback_preparation_processed_upgrades_total{outcome}` counts the
+upgrades (`scheduled`, `staged`, `not_staged`, `declined`,
+`admission_refused`, `not_applicable`, `qualification_pending`, `displaced`,
+`cancelled`).
+`plurx_playback_preparation_seams_total{platform,processed,outcome}` counts the
+prepared switches the clients reported at their seam (`committed`, `refused`,
+`switched_without_a_frame`) and
+`plurx_playback_preparation_seams_qualified_total{platform,processed}` the
+committed ones with complete ±2 s frame samples, zero dropped frames,
+independently observed audio continuity and no reopen (a reopen the change
+actually took within the window, as each client observed it). `processed` is
+read from the durable recipe of the session the report names: `true` for a
+switch to a processed successor. **Settings → Developer → Processed DV upgrade**
+reads the `processed="true"` counts per platform against Paul's bar of twenty; until a platform has
+them its row reads `unqualified`. The rows are advisory: the upgrade runs
+either way. The counts are this node's since it started.
 
 ### Putting a failed queue back to work
 

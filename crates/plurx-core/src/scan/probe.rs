@@ -17,6 +17,9 @@ use crate::domain::{
 };
 use crate::error::ProbeError;
 
+mod input;
+pub use input::{probe_input_provider, with_probe_inputs, ProbeInput, ProbeInputProvider};
+
 fn ffprobe_bin() -> String {
     crate::process::media_tool_bin("ffprobe", std::env::var("PLURX_FFPROBE").ok())
 }
@@ -116,6 +119,29 @@ fn probe_invocation(path: &Path) -> ProbeInvocation {
 /// the reporter is unknown — which is a distinct value from any known build,
 /// never a wildcard that matches one.
 pub const REPORTER_FIELD: &str = "plurx_probe_reporter";
+
+/// Every field the application grafts onto a stored FFprobe document after
+/// the scan (parameter-set census, content encoding, Dolby Vision title and
+/// FEL facts, pending FEL requests and variants, the reporter stamp) is named
+/// under this prefix, at the document root, and FFprobe itself never emits a
+/// key that starts with it. A key is an application field by its name, so a
+/// new graft is excluded from the source-identity comparison without anyone
+/// having to list it.
+///
+/// Two rules follow, for whoever adds a graft. Write it at the root under
+/// this prefix (`store_probe_writes_stay_in_the_application_namespace`
+/// checks the store's literal paths). And never graft a fact that identifies
+/// the source bytes here: the comparison ignores this namespace by design,
+/// so such a fact belongs among the FFprobe measurements it compares.
+pub const APPLICATION_FIELD_PREFIX: &str = "plurx_";
+
+/// Whether a root key of a stored probe is application metadata rather than
+/// an FFprobe measurement of the source. The reporter stamp is application
+/// metadata too, but the comparison reads it to tell two builds apart, so it
+/// is the one application field a comparison keeps.
+pub fn is_application_graft(key: &str) -> bool {
+    key.starts_with(APPLICATION_FIELD_PREFIX) && key != REPORTER_FIELD
+}
 
 /// A reporter name longer than this is truncated. The string comes from an
 /// external executable and is stored on every file row.
@@ -294,11 +320,21 @@ async fn probe_with_threads(
     path: &Path,
     threads: Option<usize>,
 ) -> Result<ProbeResult, ProbeError> {
+    let input = input::prepare(path).await?;
+    let result = probe_with_input(path, input.location(), threads).await;
+    input.finish(result).await
+}
+
+async fn probe_with_input(
+    path: &Path,
+    input_path: &Path,
+    threads: Option<usize>,
+) -> Result<ProbeResult, ProbeError> {
     // `-v error` rather than `-v quiet`: on success stderr stays empty, and on
     // failure it holds the one thing worth reporting — *why* ffprobe refused.
     // "Permission denied" and "Invalid data found" are opposite problems with
     // opposite fixes, and an exit code alone tells them apart for nobody.
-    let mut invocation = probe_invocation(path);
+    let mut invocation = probe_invocation(input_path);
     if let Some(threads) = threads {
         invocation
             .args
@@ -343,6 +379,15 @@ async fn probe_with_threads(
     };
     let mut json: Value = serde_json::from_slice(&stdout)
         .map_err(|e| ProbeError::Parse(format!("ffprobe json: {e}")))?;
+    // The bridge is an input capability, not a catalog filename.
+    if input_path != path {
+        if let Some(format) = json.get_mut("format").and_then(Value::as_object_mut) {
+            format.insert(
+                "filename".into(),
+                Value::String(path.to_string_lossy().into_owned()),
+            );
+        }
+    }
     // Stamped before the document is retained, so a later comparison against a
     // fresh probe can tell an unchanged source from a changed reporter.
     if let Some(reporter_bin) = invocation.reporter {
@@ -367,7 +412,8 @@ async fn probe_with_threads(
         // or SDR for an unsignalled transfer): the scan's job is the stream
         // document, and a later probe document is what earns the file another
         // look.
-        if let Ok(frame) = probe_first_frame(path, threads, "library scan first-frame probe").await
+        if let Ok(frame) =
+            probe_first_frame(input_path, threads, "library scan first-frame probe").await
         {
             if transfer_unsignalled {
                 apply_frame_dynamic_range(&mut result, &json, &frame);
@@ -407,7 +453,7 @@ pub async fn first_frame_luminance(
     path: &Path,
     purpose: &'static str,
 ) -> Result<Option<FrameLuminance>, ProbeError> {
-    let document = probe_first_frame(path, Some(1), purpose).await?;
+    let document = first_frame_document(path, purpose).await?;
     Ok(frame_luminance_from(&document))
 }
 
@@ -461,7 +507,9 @@ pub fn classify_frame_dynamic_range(probe_json: &str, frame: &Value) -> Option<F
 /// ffprobe document for [`classify_frame_dynamic_range`]. `Err` means the
 /// read did not happen or ffprobe refused the file.
 pub async fn first_frame_document(path: &Path, purpose: &'static str) -> Result<Value, ProbeError> {
-    probe_first_frame(path, Some(1), purpose).await
+    let input = input::prepare(path).await?;
+    let result = probe_first_frame(input.location(), Some(1), purpose).await;
+    input.finish(result).await
 }
 
 fn frame_luminance_from(document: &Value) -> Option<FrameLuminance> {
@@ -2147,5 +2195,61 @@ pub(crate) mod tests {
         ] {
             assert_eq!(ScanType::from_field_order(value), expected, "{value:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    /// Every literal JSON path the store writes into or reads from
+    /// `probe_json` is an FFprobe section or a root key in the application
+    /// namespace. A graft written outside the namespace would make every
+    /// held-source comparison of that title refuse an unchanged source.
+    /// Paths built with `format!` resolve to the graft constants, which the
+    /// comparison's own tests hold to the namespace.
+    #[test]
+    fn store_probe_writes_stay_in_the_application_namespace() {
+        let mut pending = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store")];
+        let mut checked = 0;
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("store sources") {
+                let path = entry.expect("store entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("store source");
+                for (at, _) in source.match_indices("probe_json") {
+                    let rest = source[at + "probe_json".len()..].trim_start();
+                    let Some(rest) = rest.strip_prefix(',') else {
+                        continue;
+                    };
+                    let Some(rest) = rest.trim_start().strip_prefix("'$.") else {
+                        continue;
+                    };
+                    let key: String = rest
+                        .chars()
+                        .take_while(|c| {
+                            c.is_ascii_alphanumeric() || *c == '_' || *c == '{' || *c == '}'
+                        })
+                        .collect();
+                    if key.starts_with('{') {
+                        continue;
+                    }
+                    assert!(
+                    key == "chapters" || key == "streams" || key.starts_with(super::APPLICATION_FIELD_PREFIX),
+                    "{}: probe_json path '$.{key}' is neither an FFprobe section nor an application graft",
+                    path.display()
+                );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked >= 20,
+            "the scan found only {checked} literal probe_json paths"
+        );
     }
 }

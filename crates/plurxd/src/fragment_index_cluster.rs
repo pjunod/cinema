@@ -19,6 +19,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 
+mod source_digest;
+
 pub(crate) const PEER_PATH_PREFIX: &str = "/internal/media/fragment-index/";
 const PEER_DEADLINE: Duration = Duration::from_secs(8);
 const HASH_CHUNK: usize = 256 * 1024;
@@ -137,6 +139,7 @@ async fn sampled_source_digest(
             .unwrap_or(u32::MAX)
             .to_be_bytes(),
     );
+    let budget = crate::background_jobs::source_budget();
     let mut buffer = vec![0_u8; HASH_CHUNK];
     let mut read_total = 0_u64;
     for (offset, len) in extents {
@@ -148,7 +151,12 @@ async fn sampled_source_digest(
             .map_err(|error| format!("seeking {}: {error}", path.display()))?;
         let mut remaining = len;
         while remaining > 0 {
-            let want = usize::try_from(remaining.min(HASH_CHUNK as u64)).unwrap_or(HASH_CHUNK);
+            plurx_core::process::bounded::check_cancellation()
+                .map_err(|error| error.to_string())?;
+            let mut want = usize::try_from(remaining.min(HASH_CHUNK as u64)).unwrap_or(HASH_CHUNK);
+            if let Some(budget) = &budget {
+                want = budget.allowance(want).await?;
+            }
             let read = source
                 .read(&mut buffer[..want])
                 .await
@@ -271,6 +279,46 @@ impl SourceFence {
     )]
     pub(crate) fn requested_heap_bytes(&self) -> usize {
         self.object_version.capacity()
+    }
+
+    /// Preserve an existing descriptor capability when a probe has no separate
+    /// attestation argument. Parent callers still enforce their original key.
+    pub(crate) fn clone_current_held(source: &std::fs::File) -> Result<Self, String> {
+        #[cfg(unix)]
+        let version = object_version(
+            &source
+                .metadata()
+                .map_err(|error| format!("checking held source: {error}"))?,
+        )?;
+        #[cfg(windows)]
+        let version = windows_object_version(source)?;
+        Self::clone_held(source, &version)
+    }
+
+    /// Duplicate a held descriptor for the daemon-owned AVIO bridge. The
+    /// bridge uses positioned reads, so no shared seek cursor is advanced.
+    pub(crate) fn clone_held(
+        source: &std::fs::File,
+        expected_version: &str,
+    ) -> Result<Self, String> {
+        let handle = source
+            .try_clone()
+            .map_err(|error| format!("duplicating held source: {error}"))?;
+        #[cfg(unix)]
+        let version = object_version(
+            &handle
+                .metadata()
+                .map_err(|error| format!("checking held source: {error}"))?,
+        )?;
+        #[cfg(windows)]
+        let version = windows_object_version(&handle)?;
+        if version != local_object_version(expected_version) {
+            return Err("held source identity changed before AVIO input".into());
+        }
+        Ok(Self {
+            handle: SourceHandle::Legacy(handle),
+            object_version: version,
+        })
     }
 
     pub(crate) fn object_version(&self) -> &str {
@@ -809,13 +857,23 @@ pub(crate) async fn open_verified_local_blob(
     let Some(path) = cache_path(root, &artifact.cache_key) else {
         return Err("invalid fragment-index cache key".to_owned());
     };
-    let pin = crate::playback_cache::pin(&path).map_err(|error| error.to_string())?;
-    let mut file = match plurx_core::fs_secure::open_read_nofollow(&path).await {
+    open_verified_blob_at(&path, artifact.bytes, &artifact.blob_sha256).await
+}
+
+/// The descriptor verification shared by every content-addressed index blob:
+/// the exact catalogued size and SHA-256, read through the handle returned.
+pub(crate) async fn open_verified_blob_at(
+    path: &Path,
+    bytes: i64,
+    blob_sha256: &str,
+) -> Result<Option<PinnedFragmentBlob>, String> {
+    let pin = crate::playback_cache::pin(path).map_err(|error| error.to_string())?;
+    let mut file = match plurx_core::fs_secure::open_read_nofollow(path).await {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("open {}: {error}", path.display())),
     };
-    let expected = u64::try_from(artifact.bytes)
+    let expected = u64::try_from(bytes)
         .ok()
         .filter(|bytes| *bytes <= MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES as u64)
         .ok_or_else(|| "fragment-index catalog has an invalid blob size".to_owned())?;
@@ -849,9 +907,7 @@ pub(crate) async fn open_verified_local_blob(
         seen = seen.saturating_add(read as u64);
         digest.update(&buffer[..read]);
     }
-    if seen != expected
-        || !hex::encode(digest.finalize()).eq_ignore_ascii_case(&artifact.blob_sha256)
-    {
+    if seen != expected || !hex::encode(digest.finalize()).eq_ignore_ascii_case(blob_sha256) {
         return Err("fragment-index blob checksum or size mismatch".to_owned());
     }
     file.seek(SeekFrom::Start(0))
@@ -987,25 +1043,104 @@ pub(crate) async fn attest_source(
     memo: Option<&FragmentIndexSourceObservation>,
     progress: &(dyn Fn(u64) + Sync),
 ) -> Result<AttestedSource, String> {
-    attest_source_mode(node_id, file, memo, progress, false).await
+    attest_source_mode(node_id, file, memo, progress, false, None).await
 }
 
 /// Copy proofs may cross nodes only after every byte is attested. Keep this
 /// regime separate from subtitle/sample observations and their memo keys.
+#[cfg(test)]
 pub(crate) async fn attest_copy_source(
     node_id: &str,
     file: &MediaFile,
     memo: Option<&FragmentIndexSourceObservation>,
     progress: &(dyn Fn(u64) + Sync),
 ) -> Result<AttestedSource, String> {
-    attest_source_mode(node_id, file, memo, progress, is_hevc(file)).await
+    attest_source_mode(node_id, file, memo, progress, is_hevc(file), None).await
+}
+
+/// Production whole-file attestation retains restart-safe continuation input
+/// on durable node storage and references it under the current job fence.
+pub(crate) async fn attest_copy_source_persistent(
+    node_id: &str,
+    file: &MediaFile,
+    memo: Option<&FragmentIndexSourceObservation>,
+    progress: &(dyn Fn(u64) + Sync),
+    checkpoint_root: Option<&Path>,
+    fence: &crate::background_jobs::JobFence,
+) -> Result<AttestedSource, String> {
+    let Some(checkpoint_root) = checkpoint_root else {
+        return attest_source_mode(node_id, file, memo, progress, is_hevc(file), None).await;
+    };
+    if !is_hevc(file) {
+        return attest_source_mode(node_id, file, memo, progress, false, None).await;
+    }
+    let persistence = source_digest::CheckpointStorage::open(
+        checkpoint_root,
+        source_digest::CheckpointOwner::Job(fence),
+    )
+    .await?;
+    attest_source_mode(node_id, file, memo, progress, true, Some(&persistence)).await
+}
+
+/// Analysis preparation precedes common fragment-job creation and therefore
+/// retains its continuation reference under the existing analysis lease.
+pub(crate) async fn attest_analysis_copy_source_persistent(
+    node_id: &str,
+    file: &MediaFile,
+    memo: Option<&FragmentIndexSourceObservation>,
+    progress: &(dyn Fn(u64) + Sync),
+    checkpoint_root: Option<&Path>,
+    store: &dyn Store,
+    request: &plurx_core::store::AnalysisRequest,
+) -> Result<AttestedSource, String> {
+    let Some(checkpoint_root) = checkpoint_root else {
+        return attest_source_mode(node_id, file, memo, progress, is_hevc(file), None).await;
+    };
+    if !is_hevc(file) {
+        return attest_source_mode(node_id, file, memo, progress, false, None).await;
+    }
+    let persistence = source_digest::CheckpointStorage::open(
+        checkpoint_root,
+        source_digest::CheckpointOwner::Analysis { store, request },
+    )
+    .await?;
+    attest_source_mode(node_id, file, memo, progress, true, Some(&persistence)).await
+}
+
+/// The v3 canonical index uses complete-byte attestation for every codec.
+/// Reuse the existing resumable full-v1 regime; this is not a sampled digest.
+pub(crate) async fn attest_coordination_source_full_persistent(
+    node_id: &str,
+    file: &MediaFile,
+    progress: &(dyn Fn(u64) + Sync),
+    checkpoint_root: Option<&Path>,
+    store: &dyn Store,
+    request: &plurx_core::store::AnalysisRequest,
+) -> Result<AttestedSource, String> {
+    let persistence = match checkpoint_root {
+        Some(root) => Some(
+            source_digest::CheckpointStorage::open(
+                root,
+                source_digest::CheckpointOwner::Analysis { store, request },
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    attest_source_mode(node_id, file, None, progress, true, persistence.as_ref()).await
 }
 
 fn is_hevc(file: &MediaFile) -> bool {
     matches!(file.video_codec.as_deref(), Some("hevc" | "h265"))
 }
 
-const FULL_COPY_PREFIX: &str = "hevc-full-v1:";
+pub(crate) const FULL_COPY_PREFIX: &str = "hevc-full-v1:";
+
+/// The object-version spelling a full-file (not sampled) v2 receipt is stored
+/// under; the v3 publication accepts exactly these receipts too.
+pub(crate) fn full_copy_object_version(version: &str) -> String {
+    format!("{FULL_COPY_PREFIX}{version}")
+}
 
 pub(crate) fn local_object_version(version: &str) -> &str {
     version.strip_prefix(FULL_COPY_PREFIX).unwrap_or(version)
@@ -1031,7 +1166,8 @@ pub(crate) fn copy_attestation_read_bytes(file: &MediaFile) -> u64 {
 
 /// The object a whole-file digest is being computed for. A checkpoint is
 /// only ever resumed by an attempt whose freshly observed key is identical.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FullDigestKey {
     node_id: String,
     file_id: i64,
@@ -1042,11 +1178,12 @@ struct FullDigestKey {
 }
 
 /// How far a whole-file HEVC digest had got when its attempt was dropped.
-#[derive(Clone)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FullDigestCheckpoint {
     key: FullDigestKey,
     offset: u64,
-    digest: Sha256,
+    digest: source_digest::Continuation,
 }
 
 /// Progress of whole-file digests whose attempts were preempted.
@@ -1071,7 +1208,8 @@ struct FullDigestCheckpoint {
 /// may preempt it before it is recorded, or the claim may be lost. The retry
 /// then reruns both identity checks and skips the read. Once the result is
 /// recorded, the source memo serves later attempts and the entry ages out of
-/// the bound. The table lives in memory, so a restarted daemon starts over.
+/// the bound. Production mirrors these states into versioned durable node
+/// artifacts before recording their exact job-fenced references.
 #[derive(Default)]
 struct FullDigestCheckpoints {
     entries: Vec<FullDigestCheckpoint>,
@@ -1135,9 +1273,27 @@ async fn full_source_digest(
     source: &mut tokio::fs::File,
     key: &FullDigestKey,
     progress: &(dyn Fn(u64) + Sync),
+    persistence: Option<&source_digest::CheckpointStorage<'_>>,
 ) -> Result<String, String> {
     let size = key.size;
-    let resume = full_digest_checkpoints().load(key);
+    if size > u64::MAX / 8 - source_digest::DOMAIN.len() as u64 - 8 - 128 {
+        return Err("source exceeds SHA-256 length bound".into());
+    }
+    let memory = full_digest_checkpoints().load(key);
+    let resume = match persistence {
+        Some(persistence) => {
+            let durable = persistence.load(key).await?;
+            match (memory, durable) {
+                (Some(memory), Some(durable)) => Some(if memory.offset >= durable.offset {
+                    memory
+                } else {
+                    durable
+                }),
+                (memory, durable) => memory.or(durable),
+            }
+        }
+        None => memory,
+    };
     let (mut digest, mut offset) = match resume {
         Some(checkpoint) => {
             source
@@ -1154,16 +1310,53 @@ async fn full_source_digest(
             (checkpoint.digest, checkpoint.offset)
         }
         None => {
-            let mut digest = Sha256::new();
-            digest.update(b"plurx/source-attestation/hevc-full-v1\0");
-            digest.update(size.to_be_bytes());
+            let mut digest = source_digest::Continuation::new();
+            digest.update(source_digest::DOMAIN);
+            digest.update(&size.to_be_bytes());
             (digest, 0)
         }
     };
+    let budget = crate::background_jobs::source_budget();
     let mut buffer = vec![0; HASH_CHUNK];
     let mut next_checkpoint = offset.saturating_add(FULL_DIGEST_CHECKPOINT_BYTES);
     while offset < size {
-        let want = (size - offset).min(HASH_CHUNK as u64) as usize;
+        if let Err(error) = plurx_core::process::bounded::check_cancellation() {
+            // A finite sharing quantum can be smaller than the periodic save
+            // interval. Preserve every settled byte at cooperative yield so
+            // repeated grants still advance instead of rereading one prefix.
+            let checkpoint = FullDigestCheckpoint {
+                key: key.clone(),
+                offset,
+                digest: digest.clone(),
+            };
+            full_digest_checkpoints().save(checkpoint.clone());
+            if let Some(persistence) = persistence {
+                if let Err(error) = persistence.save(checkpoint).await {
+                    tracing::debug!(file_id=key.file_id,%error,"source hash yield retained only its bounded memory continuation");
+                }
+            }
+            return Err(error.to_string());
+        }
+        let mut want = (size - offset).min(HASH_CHUNK as u64) as usize;
+        if let Some(budget) = &budget {
+            want = match budget.allowance(want).await {
+                Ok(want) => want,
+                Err(error) => {
+                    let checkpoint = FullDigestCheckpoint {
+                        key: key.clone(),
+                        offset,
+                        digest: digest.clone(),
+                    };
+                    full_digest_checkpoints().save(checkpoint.clone());
+                    if let Some(persistence) = persistence {
+                        if let Err(error) = persistence.save(checkpoint).await {
+                            tracing::debug!(file_id=key.file_id,%error,"interrupted byte service retained bounded memory hash continuation");
+                        }
+                    }
+                    return Err(error);
+                }
+            };
+        }
         let read = match source.read(&mut buffer[..want]).await {
             Ok(0) => {
                 full_digest_checkpoints().clear(key);
@@ -1179,11 +1372,15 @@ async fn full_source_digest(
         offset += read as u64;
         progress(offset);
         if offset >= next_checkpoint || offset == size {
-            full_digest_checkpoints().save(FullDigestCheckpoint {
+            let checkpoint = FullDigestCheckpoint {
                 key: key.clone(),
                 offset,
                 digest: digest.clone(),
-            });
+            };
+            full_digest_checkpoints().save(checkpoint.clone());
+            if let Some(persistence) = persistence {
+                persistence.save(checkpoint).await?;
+            }
             next_checkpoint = offset.saturating_add(FULL_DIGEST_CHECKPOINT_BYTES);
         }
     }
@@ -1196,6 +1393,7 @@ async fn attest_source_mode(
     memo: Option<&FragmentIndexSourceObservation>,
     progress: &(dyn Fn(u64) + Sync),
     full: bool,
+    persistence: Option<&source_digest::CheckpointStorage<'_>>,
 ) -> Result<AttestedSource, String> {
     #[cfg(unix)]
     let mut source = tokio::fs::File::open(&file.path)
@@ -1248,7 +1446,7 @@ async fn attest_source_mode(
                 object_version: version.clone(),
                 size: before.len(),
             };
-            full_source_digest(&mut source, &key, progress).await?
+            full_source_digest(&mut source, &key, progress, persistence).await?
         } else {
             sampled_source_digest(&mut source, before.len(), &file.path, progress).await?
         };
@@ -1485,6 +1683,9 @@ fn pipeline_digest_for_transform(
     // old fragment sizes and init metadata under a still-valid engine digest.
     if let (true, Some(transform)) = (video.converts_dolby_vision(), transform) {
         args.push(format!("{{plurx-output-transform:{transform}}}"));
+        if let Some(digest) = video.dolby_vision_refit() {
+            args.push(format!("{{plurx-dv-refit-digest:{}}}", hex::encode(digest)));
+        }
     }
     cluster_fragment_index_pipeline_digest(engine_sha256, &args)
         .expect("the engine probe always returns a SHA-256 digest")
@@ -2251,13 +2452,40 @@ mod tests {
         }
     }
 
+    /// Take what is left of the current poll's cooperative budget, so the
+    /// next tokio resource this task polls parks it. Polling
+    /// `consume_budget` with a waker that does nothing takes one unit each
+    /// time and is pending once none is left; a poll with no budget (outside
+    /// a runtime) never is, hence the bound.
+    fn spend_cooperative_budget() {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        for _ in 0..1024 {
+            let unit = std::pin::pin!(tokio::task::consume_budget());
+            if std::future::Future::poll(unit, &mut context).is_pending() {
+                return;
+            }
+        }
+        panic!("the attempt is polled without a cooperative budget; it cannot be parked");
+    }
+
     /// Run a whole-file attestation and drop it once it has read `past` bytes,
     /// the way a playback preemption drops the attempt future.
+    ///
+    /// A dropped future stops at the await it is parked on, so the attempt
+    /// has to park once after it reports `past`. Reading does not promise
+    /// that: `tokio::fs::File` hands each read to a blocking thread, and when
+    /// that thread finishes before the attempt polls it (one CPU, a loaded
+    /// runner) the read is ready at once, the attempt hashes on to the end of
+    /// the fixture inside a single poll, and there was nothing left to
+    /// preempt. So the report spends the poll's cooperative budget: tokio
+    /// then parks the attempt at its next blocking read whatever the thread
+    /// did, and the biased select below sees `stop` first.
     async fn preempt_full_attestation(node_id: &str, file: &MediaFile, past: u64) {
         let stop = tokio::sync::Notify::new();
         let report = |bytes: u64| {
             if bytes >= past {
                 stop.notify_one();
+                spend_cooperative_budget();
             }
         };
         tokio::select! {
@@ -2284,6 +2512,44 @@ mod tests {
             .expect("progress values")
             .expect("at least one progress report");
         (first, attested.observation.source_sha256)
+    }
+
+    #[tokio::test]
+    async fn cooperative_service_quanta_smaller_than_periodic_checkpoint_still_advance_hashing() {
+        let directory = tempfile::tempdir().expect("service quantum fixture");
+        let path = directory.path().join("finite-grants.bin");
+        let bytes = filler(3 * HASH_CHUNK + 17);
+        tokio::fs::write(&path, &bytes).await.expect("source");
+        let file = sampled_file(path);
+        let node = "bounded-service-quantum-node";
+        let key = full_key(node, &file);
+        for quantum in 1..=3 {
+            let cancellation = tokio_util::sync::CancellationToken::new();
+            let signal = cancellation.clone();
+            let report = |offset| {
+                if offset >= quantum * HASH_CHUNK as u64 {
+                    signal.cancel();
+                }
+            };
+            let result = plurx_core::process::bounded::cancellable(
+                cancellation,
+                attest_copy_source(node, &file, None, &report),
+            )
+            .await;
+            assert!(result.is_err(), "the finite service grant yielded");
+            let saved = full_digest_checkpoints()
+                .load(&key)
+                .expect("each settled quantum checkpoints");
+            assert_eq!(saved.offset, quantum * HASH_CHUNK as u64);
+            assert!(saved.offset < FULL_DIGEST_CHECKPOINT_BYTES);
+        }
+        let (from, digest) = first_progress_and_digest(node, &file).await;
+        assert_eq!(from, 3 * HASH_CHUNK as u64);
+        let mut expected = Sha256::new();
+        expected.update(source_digest::DOMAIN);
+        expected.update((bytes.len() as u64).to_be_bytes());
+        expected.update(bytes);
+        assert_eq!(digest, hex::encode(expected.finalize()));
     }
 
     /// The incident shape: a 79.5 GB source preempted every few minutes never
@@ -2410,7 +2676,7 @@ mod tests {
         let checkpoint = |key: FullDigestKey, offset: u64| FullDigestCheckpoint {
             key,
             offset,
-            digest: Sha256::new(),
+            digest: source_digest::Continuation::new(),
         };
         let mut table = FullDigestCheckpoints::default();
         table.save(checkpoint(key(1, "v1"), 10));

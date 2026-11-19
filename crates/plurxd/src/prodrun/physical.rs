@@ -42,7 +42,7 @@ impl EmptyProducerSlot {
         let crate::producer_spawn::CustodiedSpawned { mut graph, root } =
             crate::producer_spawn::spawn_custodied(program, args, options, reservation).await?;
         // No sender barrier: core joins the actual task before the event.
-        let registration = new_registration(None);
+        let registration = new_registration(None, None);
         let writer_registration = registration.clone();
         graph
             .spawn_root_writer(root, |pipes| writer(writer_registration, pipes))
@@ -89,7 +89,7 @@ impl ProducerChild {
     ) -> io::Result<bool> {
         match self {
             Self::Legacy(child) => {
-                crate::process_control::signal(child.id().ok_or_else(no_child)?, signal)
+                crate::source_custody::signal_group(child.id().ok_or_else(no_child)?, signal)
             }
             Self::Physical { graph, root } => graph.signal_root(*root, signal).await,
         }

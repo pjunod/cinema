@@ -2,6 +2,199 @@ use super::*;
 use plurx_core::segplan::{self, SEGPLAN_VERSION};
 use plurx_core::testfixtures;
 
+/// A source with a nonzero start and reordered pictures exercises both parts
+/// of the fitted clock: the source DTS origin removed by the copy muxer and
+/// each sample's signed composition offset. This compares the real ffprobe
+/// packet census with the real ffmpeg index pipe, not a synthetic timeline.
+#[cfg(unix)]
+#[tokio::test]
+async fn fitted_index_clock_matches_nonzero_start_b_frame_packet_pts() {
+    use plurx_core::segplan::ranges::{normalize_to_index_ticks, SourceTimestamp};
+    use plurx_core::transcode::dv_refit_serve::SourceClock;
+    use std::process::Command;
+
+    testfixtures::require_ffmpeg();
+    let temp = crate::test_tempdir().expect("clock fixture directory");
+    let source = temp.path().join("nonzero-bframes.mkv");
+    let mut encode = Command::new(testfixtures::ffmpeg());
+    encode.args(["-y", "-v", "error", "-f", "lavfi", "-i",
+        "testsrc2=size=160x96:rate=24:duration=3", "-vf", "setpts=PTS+7/TB",
+        "-c:v", "libx265", "-preset", "ultrafast", "-x265-params",
+        "keyint=24:min-keyint=24:open-gop=0:bframes=3:repeat-headers=1:scenecut=0:log-level=none:pools=1",
+        "-an"])
+        .arg(&source);
+    testfixtures::run(&mut encode);
+    let probe = Command::new(testfixtures::ffprobe())
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_packets",
+            "-show_streams",
+            "-show_entries",
+            "packet=dts,pts:stream=time_base",
+            "-of",
+            "json",
+        ])
+        .arg(&source)
+        .output()
+        .expect("ffprobe packet census");
+    assert!(
+        probe.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&probe.stdout).expect("ffprobe JSON");
+    let packets = document["packets"].as_array().expect("video packets");
+    let (num, den) = parse_time_base(
+        document["streams"][0]["time_base"]
+            .as_str()
+            .expect("source time base"),
+    )
+    .expect("rational time base");
+    let (num, den) = (
+        u32::try_from(num).expect("num"),
+        u32::try_from(den).expect("den"),
+    );
+    let packet_time = |packet: &serde_json::Value, key: &str| -> i64 {
+        packet[key].as_i64().expect("integer packet timestamp")
+    };
+    let first_pts = packet_time(&packets[0], "pts");
+    assert!(first_pts > 0, "fixture must retain its nonzero start");
+    assert!(
+        packets.iter().any(|packet| packet["dts"]
+            .as_i64()
+            .is_some_and(|dts| packet_time(packet, "pts") != dts)),
+        "fixture must contain reordered B frames"
+    );
+
+    // Matroska may omit the reordered head's DTS. Bind the measured first
+    // PTS to the exact same independently hashed packet before resolving it
+    // from the muxer's signed composition offset, as the production pass does.
+    let mut identity_probe = Command::new(testfixtures::ffmpeg());
+    identity_probe.args(filtered_packet_hash_args(
+        source.to_str().expect("fixture path"),
+        0,
+        false,
+    ));
+    let identity = testfixtures::run(&mut identity_probe);
+    let origin_probe = RefitPacketOrigin {
+        first_dts: packets[0]["dts"].as_i64(),
+        first_pts,
+        time_base_num: num,
+        time_base_den: den,
+        first_sample_sha256: Some(
+            filtered_packet_hash(&identity, first_pts, (num, den))
+                .expect("independent first packet"),
+        ),
+    };
+
+    let mut command = Command::new(testfixtures::ffmpeg());
+    command
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(&source)
+        .args([
+            "-map_chapters",
+            "-1",
+            "-map",
+            "0:v:0?",
+            "-an",
+            "-sn",
+            "-c:v",
+            "copy",
+            "-tag:v",
+            "hvc1",
+            "-bsf:v",
+            "filter_units=remove_types=32-34",
+            "-avoid_negative_ts",
+            "make_zero",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "-use_editlist",
+            "0",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]);
+    let output = testfixtures::run(&mut command);
+    let mut reader = FragmentReader::new();
+    reader.push(&output);
+    let Some(Unit::Init(init)) = reader.next_unit().expect("index init") else {
+        panic!("index init missing");
+    };
+    let video = init.video().expect("video track");
+    let mut observed = Vec::new();
+    let mut first_fragment = None;
+    while let Some(unit) = reader.next_unit().expect("index fragment") {
+        if let Unit::Fragment(fragment) = unit {
+            first_fragment.get_or_insert_with(|| fragment.clone());
+            let track = fragment.track(video.id).expect("video fragment");
+            let mut dts = track.base_decode_time;
+            for sample in track.samples() {
+                observed.push((dts, sample.cto));
+                dts += u64::from(sample.duration);
+            }
+        }
+    }
+    assert_eq!(
+        observed.len(),
+        packets.len(),
+        "copy must preserve every video packet"
+    );
+    let output_origin = observed[0].0;
+    let resolved = origin_probe
+        .resolve(&init, &first_fragment.expect("first copy fragment"))
+        .expect("exact matched packet clock");
+    let first_dts = resolved.first_dts;
+    assert!(
+        first_dts > 0,
+        "the derived decode origin must retain the nonzero start"
+    );
+    let origin = SourceTimestamp {
+        dts: first_dts,
+        time_base_num: num,
+        time_base_den: den,
+    };
+    let clock = SourceClock {
+        track_timescale: video.timescale,
+        track_ticks: i128::from(output_origin),
+        source_pts: first_dts,
+        source_time_base: (num, den),
+    };
+    let mut known_decode_times = 0;
+    for ((dts, cto), packet) in observed.iter().zip(packets) {
+        let source_pts = packet_time(packet, "pts");
+        if let Some(source_dts) = packet["dts"].as_i64() {
+            let indexed_dts = normalize_to_index_ticks(
+                SourceTimestamp {
+                    dts: source_dts,
+                    time_base_num: num,
+                    time_base_den: den,
+                },
+                origin,
+                output_origin,
+                video.timescale,
+            )
+            .expect("exact source DTS normalization");
+            assert_eq!(
+                *dts, indexed_dts,
+                "known source DTS and copy fragment diverged"
+            );
+            known_decode_times += 1;
+        }
+        assert_eq!(
+            clock.source_pts(i128::from(*dts) + i128::from(*cto)),
+            Ok(source_pts),
+            "source packet PTS and copy composition offset diverged"
+        );
+    }
+    assert!(
+        known_decode_times > 0,
+        "later known DTS values independently check the resolved head"
+    );
+}
+
 #[tokio::test]
 async fn changing_content_light_keeps_indexed_copy_and_scans_nonkey_samples() {
     let input = index_pipe_bytes("closed-gop");
@@ -765,11 +958,16 @@ async fn a_shared_pass_builds_exactly_what_each_identity_builds_alone() {
     let plain_path = temp.path().join("plain.mp4");
     std::fs::write(&plain_path, &plain_mp4.stdout).expect("plain fixture");
     let truncated_path = temp.path().join("truncated.mp4");
-    std::fs::write(
-        &truncated_path,
-        &plain_mp4.stdout[..plain_mp4.stdout.len() * 2 / 5],
-    )
-    .expect("truncated fixture");
+    // A percentage cut can leave a valid fragmented-MP4 prefix whose probed
+    // extent is simply shorter. Keep ftyp, then stop inside the moov header
+    // so neither indexer can obtain valid initialization/track metadata.
+    assert_eq!(&plain_mp4.stdout[4..8], b"ftyp");
+    let ftyp_size =
+        u32::from_be_bytes(plain_mp4.stdout[..4].try_into().expect("ftyp size")) as usize;
+    assert!(ftyp_size >= 8);
+    assert_eq!(&plain_mp4.stdout[ftyp_size + 4..ftyp_size + 8], b"moov");
+    std::fs::write(&truncated_path, &plain_mp4.stdout[..ftyp_size + 6])
+        .expect("truncated initialization fixture");
 
     let p7 = |path: &Path| {
         let mut file = hevc_file(
@@ -1042,7 +1240,7 @@ async fn a_shared_pass_that_runs_out_of_budget_fails_every_identity() {
     }
 }
 
-fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
+pub(super) fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
     MediaFile {
         downloaded_subtitles: Vec::new(),
         id: 77,
@@ -2059,6 +2257,88 @@ mod dv_title_companion {
             spawn < build && build < finish,
             "spawned before the pass, judged after it"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn budgeted_companion_inherits_no_raw_source_and_refused_pass_joins_its_input() {
+        use plurx_core::transcode::dv_processing::{DvBackendIdentity, DvDigest};
+        use std::os::unix::fs::PermissionsExt;
+        let directory = crate::test_tempdir().expect("companion custody fixture");
+        let scanner = directory.path().join("scanner");
+        std::fs::write(
+            &scanner,
+            r#"#!/bin/sh
+set -eu
+case "$1" in http://127.0.0.1:*/*) ;; *) exit 91 ;; esac
+test "$2" = 0
+test ! -e /proc/self/fd/3
+printf '%s' "$1" > "${0%/*}/scanner.input"
+printf '%s' "$$" > "${0%/*}/scanner.pid"
+exec /bin/sleep 60
+"#,
+        )
+        .expect("write capability-checking scanner");
+        std::fs::set_permissions(&scanner, std::fs::Permissions::from_mode(0o700))
+            .expect("executable scanner fixture");
+        let digest = || DvDigest::new("a".repeat(64)).expect("fixture digest");
+        let identity = DvBackendIdentity::new(digest(), digest(), digest(), digest(), 1, digest())
+            .expect("fixture backend identity");
+        let tools = crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture_with_scanner(
+            identity, scanner,
+        )
+        .expect("identity-bound scanner fixture");
+        let ride = DvTitleRide {
+            tools: Arc::new(tools),
+            stream_index: 0,
+        };
+        let source_path = directory.path().join("original.mkv");
+        std::fs::write(&source_path, b"original media capability").expect("held source fixture");
+        let source = std::fs::File::open(source_path).expect("source descriptor");
+        let (_store, _job, active) = crate::background_jobs::tests::active().await;
+        let task = crate::background_jobs::budgeted(active.fence().source_budget(), async {
+            ride.spawn(&source, Duration::from_secs(60))
+                .expect("owned companion")
+        })
+        .await;
+        let pid_path = directory.path().join("scanner.pid");
+        let pid: i32 = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(pid) = tokio::fs::read_to_string(&pid_path).await {
+                    if let Ok(pid) = pid.parse() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("scanner accepted URL and no inherited source FD");
+        let url = tokio::fs::read_to_string(directory.path().join("scanner.input"))
+            .await
+            .expect("actual private input URL");
+        assert!(
+            ride.finish(1, task, false, Duration::from_secs(1))
+                .await
+                .is_none(),
+            "a refused index pass keeps no title aggregate"
+        );
+        // SAFETY: zero observes only this fixture's already-joined process.
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "refusal returns only after scanner reap"
+        );
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .expect("local capability client");
+        assert!(
+            client.get(url).send().await.is_err(),
+            "companion source listener is revoked and joined before return"
+        );
+        active.finish().await;
     }
 
     /// The daemon's own index pass on a real title, with an installed

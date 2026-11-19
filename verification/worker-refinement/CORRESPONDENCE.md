@@ -29,6 +29,302 @@ The 18 source-boundary IDs are `select.queue_loss`, `select.domain_loss`,
 `release.retry`, `release.ambiguous_fallback`, `retire.claim`,
 `drop.admission`, and `sql.complete_library_work.trigger`.
 
+The dated reviews below refer to the source snapshots they identify. The
+adaptive/current-main candidate requires a fresh correspondence check. The
+seven conformance schedules observe selected events. Positive heartbeat join,
+ambiguous token retirement, joined physical-source settlement, release of the
+last admission alias, and native closure remain outside those observations.
+
+## Current-main item pin reconciliation — 2026-11-18
+
+PR1676 head `804633cb4` is integrated with main `965900224` without changing
+incoming Rust, SQL, model, configuration or toolchain bytes. Main moved
+claim execution into `claim_attempt` and `local_claim_verdict`, and split
+`CLAIM_SQL` into predicate macros. The former state-predicate anchor now
+selects `macro_rules! claim_state`; keeping only that item would lose the
+rest of the formerly pinned claim statement. Eleven additional dependency
+rows pin the statement/verdict constants, moved helpers and extracted
+predicate macros. The existing mutation checks exercise every moved item.
+
+The selected library candidate listing retains `admissible_only: false`.
+The daemon records the incoming Skipped/Settled/Proposed classification;
+claim acknowledgement and deadline resolution retain their existing wait
+and authority boundaries. The finite models do not establish local-replica
+application liveness or qualify the new title/artifact admission paths.
+Only the nine drifted item pins across the three packages are refreshed.
+Source correspondence is separate from affected formal smokes and full
+Main promotion qualification; historical receipts retain their identities.
+
+## Item pins replace whole-file pins — 2026-11-15
+
+Paul ruled on 2026-11-15 that a mapping pins the anchored item, not the whole
+source file. Each action and boundary row now records the item its anchor
+selects, and each conformance test pins its own function;
+[the README](../durable-jobs/README.md#source-pins-cover-the-anchored-item)
+defines the items and the hash. The migration ran at main `40cc6460d`, where
+every whole-file pin matched.
+
+**Coverage changed, and this is what it is now.** Rows anchored on a match
+arm of `perform` or `poll_work` pin that function without the bodies of the
+other arms. Every other row pins its whole function, including
+`heartbeat.queue.deadline`, whose deadline channel and fence are built in
+`ActiveBackgroundJob::start` before the anchored task is spawned. That row
+named `ActiveBackgroundJob::claim`, a function that does not exist; it now
+names `::start`, and the check requires each row's symbol to hold its anchor.
+
+A new `dependencies` list in `correspondence.json` pins 45 same-file
+functions and constants the pinned items read: the claim, settlement and
+fence helpers of `background_jobs.rs`, `RELEASE_ATTEMPTS` and
+`RELEASE_RETRY_DELAY`, the request helpers of the worker and its environment,
+`trait ClusterJobAuthority`, and the fixtures the seven conformance tests
+stand on in `library_work.rs` and `formal_publication.rs`.
+
+**Accepted loss.** A fixture's own helpers, and anything in another file
+except the trait above, are not followed.
+
+No model, configuration or property changes. This is a change to the drift
+check, not review or execution evidence.
+
+## Pipeline v2 request status (T4) — scoped correspondence review on 2026-11-08
+
+Claude (`claude-opus-5-5`) reviewed PR #1407
+(`claude/pipeline-v2-m5-t4-status`) against its parent T3. This is an author
+review awaiting an independent check, not execution evidence.
+
+| T4 behaviour (source) | Model action or property | Still holds? | Model change |
+|---|---|---|---|
+| `scan_request` joins the request record with its v2 sidecar (`waiting_on`, `files`); `scan_request_creator` reads the creating key ([`library_work.rs`](../../crates/plurxd/src/library_work.rs)) | None; read-only observation by the HTTP caller | Yes: reads only; no queue, domain, binding or publication state changes | None |
+| The status projection reports `running` for a pending request whose job holds a live claim, and `code: path_unreadable` for a failed request whose error says so ([`state.rs`](../../crates/plurxd/src/state.rs)) | None; derived from the durable record | Yes: pure projection of existing fields | None |
+
+Whole-file pins only are refreshed; models, configurations and properties are
+unchanged.
+
+## Pipeline v2 request handler (T3) — scoped correspondence review on 2026-11-08
+
+Claude (`claude-opus-5-5`) reviewed PR #1406
+(`claude/pipeline-v2-m5-t3-handler`) against its parent T2. This is an
+author review awaiting an independent check, not execution evidence. T3
+adds typed path outcomes, `request_key` replay, `wait_ms` and
+`expected_files` to `POST /api/v1/scan`.
+
+| T3 behaviour (source) | Model action or property | Still holds? | Model change |
+|---|---|---|---|
+| `request_scan_v2`: admission through `enqueue_library_work_v2` (reviewed with T1); a colliding `request_key` answers with the existing request; an advisory `queue_position:<n>` write when the request joins a running targeted job ([`library_work.rs`](../../crates/plurxd/src/library_work.rs)) | None in the worker models: each starts with one selected durable request already admitted | Yes: admission creates or joins demand through the unchanged `ENQUEUE_SQL`; the replay read and the advisory write change no queue, domain, binding or publication state | None |
+| `await_scan_request`: the HTTP caller waits on a per-request local `Notify` with a bounded re-read of the durable record, then forgets the signal | None; caller-side waiting outside the worker | Yes: the worker's completion transaction and its waiter settlement are unchanged; the durable record stays the authority | None |
+| A target under a root that cannot be read becomes `TargetError::Unreadable`, recorded as the request's failed result; a target outside every root stays `OutsideRoots` ([`library_work.rs`](../../crates/plurxd/src/library_work.rs), [`scan/mod.rs`](../../crates/plurx-core/src/scan/mod.rs), new `scan/containment.rs`) | Durable jobs `ApplyPublication` (none happens); operation progress `CompleteSend`/`StoreApply` (`complete_library_work` records the per-request result); worker refinement `CompleteSend` | Yes: the scan publishes nothing for that target and completes the request through the same fenced `complete_library_work` path that already recorded `OutsideRoots` failures | None |
+| `ScanAdmission` re-export ([`state.rs`](../../crates/plurxd/src/state.rs)) | None | Yes | None |
+
+Whole-file pins only are refreshed; models, configurations and properties are
+unchanged.
+
+## Pipeline v2 targeted job (T2) — scoped correspondence review on 2026-11-08
+
+Claude (`claude-opus-5-5`, the pipeline-v2 builder) reviewed PR #1405
+(`claude/pipeline-v2-m5-t2-targeted-job`, T2 of `effort/pipeline-v2`) against
+its parent T1 `dd22ccd21` and main `1d11f0cdf`. This is an author review
+checked independently in #15422 and revised for the decision in #15516; it
+is not execution evidence or a refinement theorem. Contract v2 §5.1 adds a
+targeted library request as its own job: kind `library_scan`, generation
+`library-targeted-v1`, dedupe `library:targeted:{id}`, priority 3. It claims
+with a probe-only admission and no background source reader, and the
+per-library fence serialises it against a running full scan of its own
+library.
+
+| T2 behaviour (source) | Model action or property | Still holds? | Model change |
+|---|---|---|---|
+| Targeted enqueue: new generation, priority 3, own dedupe key, optional sidecar in the command body ([`background_jobs_library.rs`](../../crates/plurx-core/src/store/background_jobs_library.rs)) | Durable jobs `SendClaim`…`DeliverClaim`, S1–S8; `ENQUEUE_SQL` and `CLAIM_SQL` unchanged. The model does not represent kind, generation or priority | Yes: claim CAS, attempt and reservation triggers, binding, renewal and settlement are the existing ones for `library_scan` | None |
+| Managed resource view v5 (SQLite v126, guarded Hiqlite upgrade from v4): a `library_scan` job of generation `library-targeted-v1` requires no `source_io` key; provider keys and every other kind are unchanged ([`subtitle_managed_resources_v5.sql`](../../crates/plurx-core/src/store/subtitle_managed_resources_v5.sql)) | Durable jobs `ApplyClaim` (reservation trigger), `ApplyRenew`, `LoseResource`; durable jobs states the claim-rule scope on its `ApplyClaim` operator row | Yes: a dropped requirement only removes a refusal; the targeted job's reservations still go through the same claim and renew triggers, and existing reservations stay owned until their ordinary retirement. A drifted v4 predecessor refuses without advancing the ordinal | None |
+| `claim_library` accepts the targeted generation beside `library-work-v1`, through main's dispatch-turn readiness ([`background_jobs.rs`](../../crates/plurxd/src/background_jobs.rs)) | Operation progress `ProbeReturn`, `Admission`, `ClaimSend`; worker refinement `Admission`/`ClaimSend` (eligibility over-approximated) | Yes: same `claim_with_resolution`, `ActiveBackgroundJob` and shared library driver; an unknown generation is still skipped | None |
+| Probe-only admission: no heavy permit and no CPU/GPU bundle; `fragment_worker_idle` is always true for it, so heavy-lane occupancy never raises pressure ([`construct.rs`](../../crates/plurxd/src/transcode/manager/construct.rs)) | Operation progress `Admission`, `DropAdmission`, `AdmissionUntilJoined`, `AttemptCleanup`; durable jobs `PauseSource`/`ResumeSource`; worker refinement boundary `select.admission_pressure` | Yes: the admission is still one owned object, held in the environment's `Arc` through `JoinWork` and dropped after release. Removing heavy-lane pressure only removes optional pause and pressure schedules; a subset of the modeled schedules keeps S8 and the safety results. Foreground source pressure still reaches the Linux source driver. Operation progress's `Admission` premise (try-only) describes the `library-work-v1` path; the targeted path skips `admit_fragment` and `Tick` pressure cancel and does not instantiate it | None |
+| A targeted candidate this node does not claim: skipped before the claim while playback protection is set (`background_yield_reason()`) or this node may not run cluster jobs (`may_run_cluster_jobs`), or refused by `CLAIM_SQL` at the two-holder provider cap or on a lost race. While the job is still queued (protection, the provider cap), `refresh_targeted_wait` rewrites `waiting_on` to `full_scan:<library>` when its own fence's lease is visibly live, otherwise to empty ([`background_jobs.rs`](../../crates/plurxd/src/background_jobs.rs) `claim_library`, `library_candidate_readiness`) | No modeled transition: operation progress `StoreApply` claims unconditionally and has no claim-refused outcome | Yes: the job holds no claim, domain or binding; the probe-only admission is dropped at `continue`. The lease read is a local hint (`lease_expiry_hint`) and the write is advisory sidecar state, holding no lock | None |
+| Fence refusal of a targeted job: advisory `waiting_on = full_scan:<library>`, yield with not-before `min(driver, now+250 ms)`; acquired fence clears `waiting_on`; a non-targeted release wakes the local library loop ([`env.rs`](../../crates/plurxd/src/library_work/env.rs)) | Durable jobs `AcquireDomain`, `RefusalRelease`, `RefusalSettle` (`notBefore = sample + YieldMs`); operation progress `PeerAcquire`, `CallerReturn` (domain refused), `Wake`; worker refinement `DomainSend`/`DomainApply`, `Wake` | Yes: the refusal still releases nothing it does not own and yields with a positive not-before. `YieldMs` (2) is an abstract positive delay; the model keeps no duration ratio (its `LeaseMs` is 1). The concrete 5 s and 250 ms both map to it. The local wake only shortens polling, a fairness premise | None; the bind-refusal row now names both delays |
+| Targeted scan with `expected_files`: forced probe of the named files and per-file placed reports written to the sidecar ([`library_work.rs`](../../crates/plurxd/src/library_work.rs), [`scan/mod.rs`](../../crates/plurx-core/src/scan/mod.rs) `scan_path_targeted`) | Durable jobs `BindAttempt` → `FacadePrecheck`/`Submit`/`ApplyPublication`; operation progress `ScanStart`…`ScanFinish`, `ItemSend`, `CompleteSend`; worker refinement `ScanStart`, `ItemSend` | Yes: it publishes through the same bound `PublicationStore` and `insert_item_fenced` after binding (bind-before-work unchanged). The report write is advisory sidecar state | None |
+| Local completion signals for `wait_ms` and the targeted scan returning placed reports ([`state.rs`](../../crates/plurxd/src/state.rs)) | None; caller-side waiting outside the worker | Yes: node-local `Notify`; the durable request record stays the authority | None |
+| At the start of a targeted pass, `process_library_requests` clears the requests' `waiting_on` ([`library_work.rs`](../../crates/plurxd/src/library_work.rs)) | None; inside `ScanStart`'s bound work, before any publication | Yes: a plain sidecar write through the Store, not the publisher; it holds no queue-token or publication lock across the await and changes no authority state | None |
+
+**Isolation from a running scan.** The targeted job requires no source
+reader, so `CLAIM_SQL`'s second-reader clause never refuses it. Beside a
+running scan of its own library it is claimed, the per-library fence refuses
+it, and the fence refusal writes `waiting_on = full_scan:<library>`. Beside a
+running scan of another library in the same storage domain (or with an
+unmapped root, whose generic `source_io` key conflicts with every domain) it
+runs. `library_scan` also requires `provider:tmdb` and `provider:anilist`,
+each with two reservation slots (`background_job_claim_effects`). One running
+scan leaves one slot free; two running scans of other libraries hold both, and
+`CLAIM_SQL` refuses the targeted claim until one settles. The regressions
+assert the written `waiting_on`, the claim beside another library's scan in
+one domain, and the rewritten `waiting_on` behind the provider cap.
+
+What bounds a targeted job once it no longer reserves a reader is not the
+64-entry `expected_files` cap, which bounds only the files it force-probes:
+it walks the request path's whole subtree and probes every new or changed
+file there, and one job drains up to 256 requests. Its bounds are one serial
+walker per job, one library job per node at a time, playback protection,
+which keeps it from starting while a viewer needs the source, and the
+provider cap. Curator names one publication directory per request, so in
+practice the walk is that directory.
+
+A fence-blocked targeted job is now claimed, gets an attempt row and yields
+on every due poll, where `CLAIM_SQL` used to refuse it outright; attempt
+compaction bounds those rows, and each yield sends one idempotent
+`waiting_on` write.
+
+An earlier author revision (218fa2f93) had the reader clause refuse the
+targeted job and wrote `waiting_on` from the refusal. It said a running scan
+always holds its library's reader; #15422 corrected that the reader is the
+storage domain's, or the generic `source_io` key for an unmapped root. The
+reader reservation does not protect a running scan's reconciliation:
+known-minus-seen pruning is per library, and the per-library fence already
+serialises a targeted job against its own library's scan.
+
+**Limits.** No model or configuration byte changes, and no TLC run is
+claimed for these sources. Pins are refreshed by whole file; their
+`review_basis` notes name the behaviour each changed anchor gained.
+Progress for a targeted request is not proved: operation progress has no
+claim-refused transition and its `Admission` premise describes only
+`library-work-v1`. It rests on a running scan of its own library finishing,
+the premise the models state for a domain peer.
+
+## Promotion merge of main into effort/pipeline-v2 — scoped review on 2026-11-08
+
+Claude (`claude-sonnet-5-5`) reviewed the authority-source drift left where
+main and `effort/pipeline-v2` both changed pinned files, against each side's
+last reviewed bytes. This is an author review awaiting an independent check,
+not execution evidence.
+
+| Changed source | Change | Model action or property | Still holds? |
+|---|---|---|---|
+| `plurx-core/store/background_jobs.rs`, `store/sqlite/mod.rs`, `store/hiqlite.rs` (main) | Adds read-only `analysis_source_admission` and `analysis_completions_executed_by` queue reads and their SQL; no claim, settle, release or fence write changes | None; the library claim/settlement protocol the model covers is unchanged and the effort's targeted-claim edits are separate hunks | Yes |
+| `plurxd/state.rs`, `plurxd/background_jobs.rs`, `transcode/manager/construct.rs` (main) | Playback and analysis state wiring, two lines in `background_jobs.rs`, one line in `construct.rs` | None; no library worker claim, wait or lock-order change | Yes |
+| `plurx-core/tests/store_contract.rs` (main) | Test-only additions | None | Yes |
+
+No model, configuration or property changes; only whole-file pins are
+refreshed.
+
+## Main direct-push source drift — scoped review on 2026-11-08
+
+Claude (`claude-opus-5-5`) reviewed the authority-source drift that direct
+pushes left on main `ce11e8fd2`, against the last reviewed bytes. This is an
+author review awaiting an independent check, not execution evidence.
+
+| Changed source (commit) | Change | Model action or property | Still holds? |
+|---|---|---|---|
+| `plurxd/background_jobs.rs` (4f417e852) | Test-only: inside `#[cfg(test)] mod tests`, the fixture `lost_claim_acknowledgement_resolves_the_original_attempt` stops the heartbeat and settles joined source custody before reading the candidate | None; no production code changes. `ReplayClaim`/`ResolveClaim` correspondence and every claim/settlement body are unchanged | Yes |
+| `plurxd/main.rs` (d9a0ebc76) | `spawn_background_loops` also starts `worker_status_cache_loop`, a read-only, cancellable once-per-interval refresh of local worker capacity for Activity | None; the selected worker spawn, its wait/lock order and the queue/domain authority paths are unchanged | Yes |
+| `plurxd/transcode/manager/produce.rs` (0a33ddc02) | One `tracing::warn!` gains `target: "plurxd::transcode"` | None; no control flow change | Yes |
+
+No model, configuration or property changes; only whole-file pins are
+refreshed.
+
+## Scan stack and canonical bootstrap — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` reviewed the frozen
+[library environment](../../crates/plurxd/src/library_work/env.rs) correction
+against `460d8e6d3ec494f2335ed4bbdfa6601f54bfa380`. All 13 prior environment
+fingerprints match the base, and retained anchors remain unique. Refresh those
+13 existing action/boundary source pins and the containing correspondence
+hash; retain all 57 actions, 18 boundaries, trust classifications and seven
+selected schedules. This is an authored audit, not independent review or an
+execution receipt.
+
+The extracted `probe_work` factory heap-pins `process_library_requests` before
+the generic scopes receive it. Direct await preserves task-local probe input,
+budget, cancellation and pause bindings. The existing outer work future still
+owns its publisher and domain reference; admission stays retained until joined
+work releases it. `CancelWork`, `JoinWork`, publisher drop, domain release,
+queue retirement, environment field order and shared driver bodies are
+unchanged. Heap allocation supplies no new authority transition or fairness.
+
+The related [canonical version-4 bootstrap correction](../durable-jobs/CONTRACT.md#scan-stack-and-canonical-bootstrap--scoped-source-audit-on-2026-11-04)
+preserves the existing exact DDL/marker validation and resource view. Startup
+and schema installation remain outside this closed worker correspondence.
+Neither native stack exhaustion nor heap allocation is modeled. The PR's
+future-size check and ordinary-stack empty scan are separate runtime evidence;
+they do not prove a full UI/media scan, whole-daemon progress, or source reboot
+recovery. Model, configuration, bounds, properties, fairness and historical
+receipts are unchanged; fresh static/TLC results remain separate evidence.
+
+## Verified host-reboot recovery — scoped source audit on 2026-11-04
+
+Codex agent `/root/recovery_design_audit` compared source `88fa37663` in
+[PR #1378](http://forge.lan:3000/noirr/plurx/pulls/1378) with
+`edf6d08faf549554b9892dee582406ff79af1c97`. The agent contributed recovery
+implementation/tests; this is an authored source audit, not independent
+review or execution. All 18 affected action/boundary source fingerprints
+match that base before refresh, and every retained anchor remains unique.
+
+The only selected-worker file delta is
+[queue ownership](../../crates/plurxd/src/background_jobs.rs) passing its
+exact Store to source-journal cleanup. Acquisition, claim/renewal, binding,
+token/publication locks, queue heartbeat join and retirement retain their
+implementations. The 57 actions, 18 boundaries, trust classifications and
+seven selected schedule definitions remain. `FinishRetire`'s gap now explicitly
+retains post-retirement physical settlement and journal cleanup outside the
+modeled transition and its liveness result.
+
+[Custody integration](../../crates/plurxd/src/source_custody.rs) and
+[recovery](../../crates/plurxd/src/source_custody/recovery.rs) additionally
+persist active-reader evidence, reconcile aborts against the exact Store,
+and settle only after independently verified host reboot. They are external
+source dependencies, not extra actions in this closed correspondence inventory.
+The [durable contract](../durable-jobs/CONTRACT.md#verified-host-reboot-recovery--scoped-source-audit-on-2026-11-04)
+and [operation wait map](../operation-progress/WAIT-MAP.md#verified-host-reboot-recovery--scoped-source-audit-on-2026-11-04)
+record the broader source audit and explicit dependency pins. Changed-boot
+proof, descendant termination, durable directory publication, fallback-Store
+isolation, legacy preparation and successful physical recovery are not proved
+by this model or its existing paired-worker schedule.
+
+Startup/scheduler recovery can wait on filesystem and Store work before a
+library worker is dispatched. An unchanged boot or missing evidence can keep
+source custody unavailable indefinitely. The model's external-return and
+fairness premises neither force a reboot nor prove those new paths terminate.
+The new crash/replay tests are runtime regressions, not additions to the seven
+mapped worker schedules or a refinement argument.
+
+Refresh only the 18 whole-file source pins and containing correspondence hash,
+plus the explicit `FinishRetire` gap. Model, configuration, bounds, properties,
+fairness, checker and historical receipt identities remain unchanged. Fresh
+static/TLC smoke and independent Astra review are separate evidence.
+
+## Playback startup custody — scoped source review on 2026-11-03
+
+Codex agent `/root/other_formal_correspondence` compared base
+`bd213c81942175f591912e4bb0a2cc10f2a7a195` with source candidate
+`594210a783986d4da5ec7184f0895433ffe98b90`. Every previous mapped source
+fingerprint matches the base. The detailed source audit and external waits
+are in the [operation-progress wait map](../operation-progress/WAIT-MAP.md#playback-startup-custody--scoped-source-review-on-2026-11-03).
+
+[Queue ownership](../../crates/plurxd/src/background_jobs.rs) adds custody
+registration/activation before heartbeat startup and joined-source settlement
+after heartbeat join and token retirement. Settlement awaits durable local
+journal persistence, replicated proof and exact custody deletion, retrying
+without a local completion bound. Thus `FinishRetire` retains its existing
+queue meaning; its source anchor also contains an additional unmodeled wait
+before `DropAdmission`. A model cleanup result does not prove this wait ends.
+
+[The environment](../../crates/plurxd/src/library_work/env.rs) retains the
+physical admission `Arc` in the awaited work future. Work join still precedes
+domain release, queue retirement and physical admission drop. Linux source
+pressure now uses verified pause and durable source-slot reacquisition inside
+that future; other-platform source pressure selects cancellation. These source
+slots are distinct from modeled physical admission. Custody, pause/resume,
+byte pacing, private input, process-group quiescence and settlement replay
+have no state/action/fairness mapping or schedule coverage in this package.
+Additional core claim eligibility and paused-reservation renewal states also
+remain outside the model. Neither selected lock facts nor existing filesystem,
+backend and runtime premises establish progress through these new mechanisms.
+
+[The library entry file](../../crates/plurxd/src/library_work.rs) only adds
+the probe-input module declaration; its selected bodies and test schedules
+are unchanged. [The storage schedules](../../crates/plurx-core/tests/store_contract/formal_publication.rs)
+only gate an `Arc` import by their existing feature. These source edits add
+no schedule execution evidence. Retain every action/boundary, exact anchor,
+trust classification, schedule and gap; refresh only their reviewed source
+fingerprints and the containing correspondence fingerprint. Model/configuration
+bytes and historical qualification identities remain unchanged. This authored
+audit supplies no independent review, new execution, simulation proof or
+custody/pause liveness guarantee.
+
 ## Original queue heartbeat delegation — scoped source review on 2026-11-04
 
 Source `d39b42631656b1962f183f2561f2422ffb635d9d` changes the shared

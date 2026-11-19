@@ -242,7 +242,7 @@ final class PlaybackControlSession {
         linkReceipt: @escaping @MainActor @Sendable () -> String? = { nil },
         onSubtitleReady: @escaping @MainActor @Sendable () -> Void = {},
         onSubtitleUnavailable: @escaping @MainActor @Sendable () -> Void = {},
-        onProcessingGeneration: @escaping @MainActor @Sendable (String?, EffectiveProcessingReport?) -> Void = { _, _ in },
+        onProcessingGeneration: @escaping @MainActor @Sendable (String?, EffectiveProcessingReport?, ProcessingSkip?) -> Void = { _, _, _ in },
 
         // The prepared-handoff return path. A `prepare` reaches the player
         // already proven whole — the reporter refuses a malformed one as a
@@ -322,7 +322,7 @@ final class PlaybackControlSession {
                     guard self?.activeGeneration == generation,
                           exchange.capture.hasSameIntent(as: latest.load()) else { return }
                     onProcessingGeneration(exchange.response == nil ? nil : exchange.request.generation,
-                                           exchange.response?.effectiveProcessing)
+                                           exchange.response?.effectiveProcessing, exchange.response?.processingSkip)
                 }
                 if let failure = exchange.failure {
                     scheduleSubtitleReady {

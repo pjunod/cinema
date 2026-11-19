@@ -29,14 +29,25 @@ fn admitted_source_body(
     guard: std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>,
     start: u64,
     length: u64,
+    transfer: Option<crate::source_custody::DirectTransfer>,
 ) -> axum::body::Body {
     let stream = futures_util::stream::try_unfold(
-        (owner, body, guard, start, length),
-        |(owner, body, guard, offset, remaining)| async move {
+        (owner, body, guard, start, length, transfer),
+        |(owner, body, guard, offset, remaining, mut transfer)| async move {
             if remaining == 0 {
                 return Ok::<_, std::io::Error>(None);
             }
             let chunk = remaining.min(64 * 1024) as usize;
+            let (chunk, activity) = match transfer.as_mut() {
+                Some(transfer) => {
+                    let (chunk, activity) = tokio::select! { biased;
+                        () = guard.cancelled() => return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Source body retired")),
+                        reservation = transfer.reserve_read(chunk) => reservation?,
+                    };
+                    (chunk, Some(activity))
+                }
+                None => (chunk, None),
+            };
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
             let permit = tokio::select! { biased;
                 () = guard.cancelled() => return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Source body retired")),
@@ -44,7 +55,7 @@ fn admitted_source_body(
             };
             let buffer = tokio::select! { biased;
                 () = guard.cancelled() => return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Source body retired")),
-                result = owner.read_at(&body, offset, chunk, permit, deadline) => result.map_err(std::io::Error::other)?,
+                result = owner.read_at_with_guard(&body, offset, chunk, permit, deadline, activity) => result.map_err(std::io::Error::other)?,
             };
             if buffer.is_empty() {
                 return Err(std::io::Error::new(
@@ -60,7 +71,7 @@ fn admitted_source_body(
             let bytes = bytes::Bytes::from_owner(buffer);
             Ok(Some((
                 bytes,
-                (owner, body, guard, next, remaining - actual),
+                (owner, body, guard, next, remaining - actual, transfer),
             )))
         },
     );
@@ -315,15 +326,19 @@ impl PreparedSourceStart {
     pub(super) fn bind_invocation(
         &mut self,
         binding: &plurx_core::sharing_source_sessions::SourceBindingHandle,
+        presentation: crate::http::hls::SourceCopyPresentation,
     ) -> Result<(), SourceStartFailure> {
         if self.principal() != binding.principal() || self.playback_id() != binding.playback_id() {
             return Err(SourceStartFailure::Unresolved);
         }
         match self {
             Self::Hls(prepared) => prepared
-                .bind_source_invocation(binding)
+                .bind_source_invocation(binding, presentation)
                 .map_err(|_| SourceStartFailure::Unresolved),
             Self::Direct(prepared) => {
+                if presentation != crate::http::hls::SourceCopyPresentation::FullVod {
+                    return Err(SourceStartFailure::Unresolved);
+                }
                 let target = &prepared.target;
                 if binding.request_id() != prepared.request_id
                     || binding.source_server_id() != target.server_id
@@ -582,13 +597,31 @@ pub(super) async fn direct_bytes(
     let body = match body {
         Some(start) => match payload {
             #[cfg(target_os = "linux")]
-            SourceDirectPayload::Admitted { owner, body } => admitted_source_body(
-                owner,
-                body,
-                std::sync::Arc::clone(&guard),
-                start,
-                body_length,
-            ),
+            SourceDirectPayload::Admitted { owner, body } => {
+                let transfer = if let Some(request) = guard.source_request.clone() {
+                    let version = owner.object_version().map_err(|_| unavailable())?;
+                    Some(
+                        crate::source_custody::DirectTransfer::start(
+                            request,
+                            &version,
+                            start,
+                            body_length,
+                        )
+                        .await
+                        .map_err(|_| unavailable())?,
+                    )
+                } else {
+                    None
+                };
+                admitted_source_body(
+                    owner,
+                    body,
+                    std::sync::Arc::clone(&guard),
+                    start,
+                    body_length,
+                    transfer,
+                )
+            }
             #[cfg(not(target_os = "linux"))]
             SourceDirectPayload::Legacy(file) => {
                 source_file_body(

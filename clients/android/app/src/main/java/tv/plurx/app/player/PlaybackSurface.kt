@@ -258,6 +258,7 @@ internal object SurfaceSources {
     const val REPEATED_EARLY_END = "repeated_early_end"
     const val DEGRADED_NOTICE = "degraded_notice"
     const val LOG_ONLY = "log_only"
+    const val CREATE_CAPACITY_TERMINAL = "create_capacity_terminal"
 }
 
 /** The fixture's `sources`, in fixture order. Order is the precedence rule. */
@@ -339,7 +340,8 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
             "media_owner_transition",
             "vod_index_pending",
             "vod_engine_unattested",
-            "transcode_capacity_pending", "quality_catalog_unavailable",
+            "transcode_capacity_pending", "media_session_overloaded",
+            "quality_catalog_unavailable",
         ),
         retryable = true,
     ),
@@ -393,7 +395,18 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
         SurfaceClass.Hold,
         retiredBy = setOf(SurfaceRetirement.SystemResumed),
     ),
-    SurfaceSourceRow(SurfaceSources.MEDIA_WAITING, "attached", SurfaceClass.Buffering),
+    SurfaceSourceRow(
+        SurfaceSources.MEDIA_WAITING,
+        "attached",
+        SurfaceClass.Buffering,
+        retiredBy = setOf(
+            SurfaceRetirement.Presenting,
+            SurfaceRetirement.PlaybackNotRequested,
+            SurfaceRetirement.IntentSettled,
+            SurfaceRetirement.IntentSuperseded,
+            SurfaceRetirement.AttachedRetired,
+        ),
+    ),
     SurfaceSourceRow(SurfaceSources.OWNER_RECOVERY_STEP, "any", SurfaceClass.Recovering),
     SurfaceSourceRow(SurfaceSources.READINESS_DEADLINE_RUNGS_LEFT, "any", SurfaceClass.Recovering),
     SurfaceSourceRow(
@@ -417,6 +430,17 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
     ),
     SurfaceSourceRow(SurfaceSources.DEGRADED_NOTICE, "any", SurfaceClass.Degraded),
     SurfaceSourceRow(SurfaceSources.LOG_ONLY, "any", null),
+    SurfaceSourceRow(
+        SurfaceSources.CREATE_CAPACITY_TERMINAL,
+        "start",
+        SurfaceClass.Stopped,
+        requiresPlayerStopped = true,
+        codes = listOf(
+            "transcode_height_unavailable",
+            "transcode_scratch_exhausted",
+            "replacement_expired",
+        ),
+    ),
 )
 
 /**
@@ -528,6 +552,7 @@ internal data class PlaybackFault(
     val thenWhenStopped: SurfaceClass? = null,
     val demoted: Boolean = false,
     val seq: Long = 0,
+    val observationOwner: String? = null,
 )
 
 /** What is drawn over the picture. Rendered FROM this and nothing else. */
@@ -640,6 +665,7 @@ internal sealed interface SurfaceEvent {
         val positionMs: Long? = null,
         val title: String? = null,
         val detail: String? = null,
+        val observationOwner: String? = null,
     ) : SurfaceEvent
 
     data class IntentSettled(val intent: Long) : SurfaceEvent
@@ -648,6 +674,13 @@ internal sealed interface SurfaceEvent {
 
     /** The owner reports that its recovery produced attached [generation]. */
     data class OwnerSuccess(val generation: Long) : SurfaceEvent
+
+    /** A scoped observation withdrawal, never evidence or recovery success. */
+    data class ObservationUnavailable(
+        val owner: String,
+        val attached: Long,
+        val intent: Long?,
+    ) : SurfaceEvent
 
     /**
      * The viewer pressed an action. The reducer clears the fault the action
@@ -759,6 +792,17 @@ internal class PlaybackSurfaceReducer {
             is SurfaceEvent.Hidden -> applyHidden(next, event.hidden)
             is SurfaceEvent.Presenting -> applyPresenting(next, log, event)
             is SurfaceEvent.Raise -> applyRaise(next, log, event)
+            is SurfaceEvent.ObservationUnavailable -> if (event.owner.isNotEmpty() && next.attached == event.attached) {
+                val sources = setOf("client_preparing", "media_waiting", "owner_recovery_step", "readiness_deadline_rungs_left")
+                dropFaults(next, log, "observation_unavailable") { fault ->
+                    fault.attached == event.attached && fault.intent == event.intent &&
+                        fault.observationOwner == event.owner && !fault.playerStopped &&
+                        fault.cls in setOf(SurfaceClass.Preparing, SurfaceClass.Buffering, SurfaceClass.Recovering) &&
+                        fault.source in sources
+                }
+            } else {
+                next
+            }
             is SurfaceEvent.IntentSettled -> dropFaults(next, log, "intent_settled") { fault ->
                 fault.intent == event.intent &&
                     retiredBy(fault).contains(SurfaceRetirement.IntentSettled)
@@ -944,6 +988,7 @@ internal class PlaybackSurfaceReducer {
                 detail = event.detail,
                 actions = rowActions,
                 playerStopped = event.playerStopped,
+                observationOwner = event.observationOwner,
                 thenWhenStopped = row.thenWhenStopped,
                 seq = seq,
             )

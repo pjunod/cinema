@@ -9,7 +9,7 @@ env:
 jobs:
   cluster-store-backstop:
     name: full unsharded replicated Store contracts
-    runs-on: [self-hosted, Linux, X64, lab, ci-store]
+    runs-on: [ci-nonvoter-store]
     timeout-minutes: 40
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

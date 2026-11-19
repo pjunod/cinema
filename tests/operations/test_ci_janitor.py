@@ -52,6 +52,11 @@ case "$1 $2" in
     exit 0 ;;
 esac
 if [ "$1" = show ]; then
+  if [ "$3" = --timestamp=unix ]; then
+    printf '%s\\n' "ExecMainStartTimestamp=@${FIXTURE_STARTED:-2147483647}" "KillMode=${FIXTURE_KILL_MODE:-mixed}" \
+      "KillSignal=15" "ExecStop=" "TimeoutStopUSec=${FIXTURE_SYSTEMD_STOP:-infinity}"
+    exit 0
+  fi
   config=$FIXTURE_CONFIG
   [ "$5" = "$FIXTURE_UNIT2" ] && config=$FIXTURE_CONFIG2
   case "$3" in
@@ -105,6 +110,7 @@ DOCKER = """#!/bin/sh
 if [ "$1" = ps ]; then
   [ -z "${FIXTURE_DOCKER_PS_HANG:-}" ] || sleep "$FIXTURE_DOCKER_PS_HANG"
   [ "${FIXTURE_DOCKER_PS_STATUS:-0}" = 0 ] || exit "$FIXTURE_DOCKER_PS_STATUS"
+  case "$*" in *"status=created"*) printf '%s\\n' "$FIXTURE_CREATED_CONTAINER" ;; esac
   pattern=.
   for argument do
     case "$argument" in name=*) pattern=${argument#name=} ;; esac
@@ -117,9 +123,13 @@ case "$1 $2" in
   "info --format") printf '%s\\n' "$FIXTURE_DOCKER_ROOT"; exit 0 ;;
 esac
 [ "$1" = info ] && exit 0
-printf '%s %s\\n' "$1" "$2" >> "$FIXTURE_DOCKER_LOG"
+printf '%s\\n' "$*" >> "$FIXTURE_DOCKER_LOG"
 exit 0
 """
+
+
+# The unprivileged identity a root-run suite drops to (`nobody` on Linux).
+NOBODY = 65534
 
 
 class JanitorContractCase(unittest.TestCase):
@@ -152,7 +162,7 @@ class JanitorContractCase(unittest.TestCase):
 
         self.config = self.runner_root / "config.yml"
         self.config.write_text(
-            "runner:\n  capacity: 1\ncache:\n  enabled: true\n"
+            "runner:\n  capacity: 1\n  timeout: 1s\n  shutdown_timeout: 2s\ncache:\n  enabled: true\n"
             f"  dir: {self.cache}\ncontainer:\n  network: host\n",
             encoding="utf-8",
         )
@@ -206,7 +216,7 @@ class JanitorContractCase(unittest.TestCase):
         (cache / "bolt.db").write_bytes(b"index")
         config = root / "config.yml"
         config.write_text(
-            f"runner:\n  capacity: 1\ncache:\n  enabled: true\n  dir: {cache}\n",
+            f"runner:\n  capacity: 1\n  timeout: 1s\n  shutdown_timeout: 2s\ncache:\n  enabled: true\n  dir: {cache}\n",
             encoding="utf-8",
         )
         (self.cgroup / "system.slice" / UNIT2).mkdir(parents=True)
@@ -217,12 +227,13 @@ class JanitorContractCase(unittest.TestCase):
         self.environment["FIXTURE_CONFIG2"] = str(config)
         return cache
 
-    def run_janitor(self, *arguments):
+    def run_janitor(self, *arguments, preexec_fn=None):
         return subprocess.run(
             [str(SCRIPT), *arguments],
             env=self.environment,
             capture_output=True,
             text=True,
+            preexec_fn=preexec_fn,
         )
 
     def systemctl_calls(self):
@@ -270,6 +281,51 @@ class JanitorContractCase(unittest.TestCase):
         self.assertFalse(self.cache.exists())
         self.assertEqual(self.systemctl_calls(), ["stop", UNIT, "start", UNIT])
         self.assertEqual(self.last_run()["reset"], 1)
+
+    def test_new_assignment_requires_a_loaded_full_job_drain(self):
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        original = self.config.read_text()
+        for name, config, overrides in (
+            ("immediate cancellation", original.replace("  shutdown_timeout: 2s\n", ""), {}),
+            ("ambiguous config", original.replace("  shutdown_timeout: 2s", '  shutdown_timeout: 2s\n  "shutdown_timeout": 0s'), {}),
+            ("short runner drain", original.replace("timeout: 1s", "timeout: 3s"), {}),
+            ("group-wide TERM", original, {"FIXTURE_KILL_MODE": "control-group"}),
+            ("short systemd grace", original, {"FIXTURE_SYSTEMD_STOP": "1s"}),
+            ("unloaded config", original, {"FIXTURE_STARTED": "1"}),
+        ):
+            with self.subTest(name=name):
+                self.config.write_text(config)
+                self.environment.update(overrides)
+                result = self.run_janitor()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("cannot prove a safe drain", result.stdout)
+                self.assertEqual(self.systemctl_calls(), [])
+                self.assertTrue((self.cache / "bolt.db").is_file())
+                for key in overrides:
+                    self.environment.pop(key)
+
+    def test_created_job_holds_the_cache_before_its_first_process_starts(self):
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        self.environment["FIXTURE_CREATED_CONTAINER"] = "FORGEJO-ACTIONS-TASK-17"
+        result = self.run_janitor()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.systemctl_calls(), [])
+        self.assertIn("containerised job", result.stdout)
+
+    def test_index_only_cache_cannot_recover_the_reserve(self):
+        self.environment["FIXTURE_USED_KB"] = "24"
+        self.environment["FIXTURE_AVAIL_KB"] = str(8 * 1024 * 1024)
+        result = self.run_janitor()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.systemctl_calls(), [])
+        self.assertIn("no useful reset", result.stdout)
+
+    def test_small_cache_that_closes_the_reserve_gap_can_still_reset(self):
+        self.environment["FIXTURE_USED_KB"] = "1024"
+        self.environment["FIXTURE_AVAIL_KB"] = str(25 * 1024 * 1024 - 512)
+        result = self.run_janitor()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.systemctl_calls(), ["stop", UNIT, "start", UNIT])
 
     def test_a_runner_that_is_working_keeps_its_cache(self):
         self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
@@ -413,6 +469,14 @@ class JanitorContractCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("leaving Docker for the next pass", result.stdout)
         self.assertFalse(self.last_run()["docker_pruned"])
+
+    def test_prune_preserves_a_container_created_after_the_idle_check(self):
+        self.environment["FIXTURE_DOCKER_ROOT"] = str(self.runner_root)
+        self.environment["FIXTURE_AVAIL_KB"] = str(9 * 1024 * 1024)
+        result = self.run_janitor()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = Path(self.environment["FIXTURE_DOCKER_LOG"]).read_text().splitlines()
+        self.assertIn("container prune -f --filter until=168h", commands)
 
     def test_a_runner_that_will_not_stop_is_never_left_stopped(self):
         self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
@@ -796,14 +860,26 @@ class JanitorContractCase(unittest.TestCase):
         recover it either: nothing here ever starts a runner it did not itself
         stop.
         """
-        if os.geteuid() == 0:
-            self.skipTest("root deletes anything; the mode below proves nothing")
         self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
         undeletable = self.cache / "cache/0a"
+        unprivileged = None
+        if os.geteuid() == 0:
+            # Root deletes through any mode (CI containers run the suite as
+            # root), so the janitor runs as an unprivileged owner of the
+            # fixture instead: the 0500 directory below is then as
+            # undeletable as it is for a runner's own user.
+            fixture = Path(self._directory.name)
+            for path in [fixture, *fixture.rglob("*")]:
+                os.lchown(path, NOBODY, NOBODY)
+
+            def unprivileged():
+                os.setgroups([])
+                os.setgid(NOBODY)
+                os.setuid(NOBODY)
         undeletable.chmod(0o500)
         self.addCleanup(undeletable.chmod, 0o700)
 
-        result = self.run_janitor()
+        result = self.run_janitor(preexec_fn=unprivileged)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("could not fully delete", result.stdout)
@@ -1174,7 +1250,7 @@ class MacosJanitorContractCase(unittest.TestCase):
         (self.cache / "bolt.db").write_bytes(b"index")
         self.config = self.runner_root / "config.yml"
         self.config.write_text(
-            f"runner:\n  capacity: 1\ncache:\n  enabled: true\n  dir: {self.cache}\n",
+            f"runner:\n  capacity: 1\n  timeout: 1s\n  shutdown_timeout: 2s\ncache:\n  enabled: true\n  dir: {self.cache}\n",
             encoding="utf-8",
         )
 

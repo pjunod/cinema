@@ -192,6 +192,10 @@ async fn jellyfin_native_hls_duplicate_entries_share_one_activation_and_preserve
 }
 #[tokio::test]
 async fn jellyfin_native_hls_encoded_without_copy_index_preserves_ranges_clock_and_stop() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
     Box::pin(native_hls_copy_flow(false, true)).await;
 }
 async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
@@ -321,7 +325,8 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
         .replace("MediaSourceId=", "mediaSourceId=")
         .replace("PlaySessionId=", "playSessionId=")
         .replace("ApiKey=", "apiKey=");
-    let response = if duplicate {
+    let startup_started = std::time::Instant::now();
+    let mut response = if duplicate {
         let (first, second) = tokio::join!(
             f.app
                 .clone()
@@ -363,6 +368,36 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
             .await
             .expect("native root")
     };
+    // Encoded init inspection has its own finite response budget. Source
+    // service turns may outlive it, so honor the documented pending response
+    // without changing the server deadline or accepting any other failure.
+    while encoded && response.status() == StatusCode::SERVICE_UNAVAILABLE {
+        let pending = response
+            .into_body()
+            .collect()
+            .await
+            .expect("pending body")
+            .to_bytes();
+        let pending: Value = serde_json::from_slice(&pending).expect("typed pending response");
+        assert!(
+            matches!(
+                pending["code"].as_str(),
+                Some("startup_timeout" | "response_state_changed")
+            ),
+            "{pending}"
+        );
+        assert!(
+            startup_started.elapsed() < std::time::Duration::from_secs(60),
+            "native encoded initialization never completed: {pending}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        response = f
+            .app
+            .clone()
+            .oneshot(request("GET", &lowered, None, Value::Null))
+            .await
+            .expect("native init retry");
+    }
     let status = response.status();
     let bytes = response
         .into_body()
@@ -526,14 +561,51 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
         .await
         .expect("init bytes")
         .to_bytes();
-    let mut range = request("GET", segment_url, Some(&f.token), Value::Null);
-    range.headers_mut().insert(
-        "range",
-        format!("bytes={}-{}", init.len() - 3, init.len() + 4)
-            .parse()
-            .expect("range"),
-    );
-    let response = f.app.clone().oneshot(range).await.expect("crossing range");
+    let crossing_range = || {
+        let mut range = request("GET", segment_url, Some(&f.token), Value::Null);
+        range.headers_mut().insert(
+            "range",
+            format!("bytes={}-{}", init.len() - 3, init.len() + 4)
+                .parse()
+                .expect("range"),
+        );
+        range
+    };
+    let segment_started = std::time::Instant::now();
+    let mut response = f
+        .app
+        .clone()
+        .oneshot(crossing_range())
+        .await
+        .expect("crossing range");
+    while encoded && response.status() == StatusCode::SERVICE_UNAVAILABLE {
+        assert_eq!(
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+        let pending = response
+            .into_body()
+            .collect()
+            .await
+            .expect("pending segment body")
+            .to_bytes();
+        let pending: Value = serde_json::from_slice(&pending).expect("typed pending segment");
+        assert_eq!(pending["code"], "segment_pending", "{pending}");
+        assert!(
+            segment_started.elapsed() < std::time::Duration::from_secs(60),
+            "native encoded segment never completed: {pending}"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        response = f
+            .app
+            .clone()
+            .oneshot(crossing_range())
+            .await
+            .expect("crossing range retry");
+    }
     let status = response.status();
     let bytes = response
         .into_body()
@@ -671,12 +743,42 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
         .lines()
         .rfind(|line| !line.is_empty() && !line.starts_with("#"))
         .expect("last segment");
-    let resumed = f
+    let resume_started = std::time::Instant::now();
+    let mut resumed = f
         .app
         .clone()
         .oneshot(request("GET", resume_url, Some(&f.token), Value::Null))
         .await
         .expect("resume after idle reap");
+    while encoded && resumed.status() == StatusCode::SERVICE_UNAVAILABLE {
+        assert_eq!(
+            resumed
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+        let pending = resumed
+            .into_body()
+            .collect()
+            .await
+            .expect("pending resumed segment body")
+            .to_bytes();
+        let pending: Value =
+            serde_json::from_slice(&pending).expect("typed pending resumed segment");
+        assert_eq!(pending["code"], "segment_pending", "{pending}");
+        assert!(
+            resume_started.elapsed() < std::time::Duration::from_secs(60),
+            "native encoded resume never completed: {pending}"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        resumed = f
+            .app
+            .clone()
+            .oneshot(request("GET", resume_url, Some(&f.token), Value::Null))
+            .await
+            .expect("resume after idle reap retry");
+    }
     let resumed_status = resumed.status();
     let resumed_bytes = resumed
         .into_body()
@@ -862,7 +964,14 @@ async fn playback_fixture() -> PlaybackFixture {
         .expect("canonical media root")
         .join("movie.mp4");
     std::fs::write(&path, b"0123456789abcdef").expect("bytes");
-    state.store.upsert_file(native_item,path.to_str().expect("path"),16,1,&ProbeResult {duration_ms:Some(100_000),container:Some("mp4".into()),video_codec:Some("h264".into()),video_codec_tag:Some("avc1".into()),video_profile:Some("Main".into()),width:Some(1920),height:Some(1080),bit_depth:Some(8),bitrate:Some(100_000),audio_streams:vec![AudioStream {index:0,codec:"aac".into(), channel_layout: None,channels:Some(2),sample_rate:Some(48_000),language:None,title:None,default:true}],raw_json:Some(json!({"streams":[{"index":0,"codec_type":"audio","codec_name":"aac","channels":2,"sample_rate":"48000"},{"index":1,"codec_type":"video","codec_name":"h264","width":1920,"height":1080}]}).to_string()),..Default::default()}).await.expect("file");
+    let mtime = std::fs::metadata(&path)
+        .expect("source metadata")
+        .modified()
+        .expect("source mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("source epoch")
+        .as_secs() as i64;
+    state.store.upsert_file(native_item,path.to_str().expect("path"),16,mtime,&ProbeResult {duration_ms:Some(100_000),container:Some("mp4".into()),video_codec:Some("h264".into()),video_codec_tag:Some("avc1".into()),video_profile:Some("Main".into()),width:Some(1920),height:Some(1080),bit_depth:Some(8),bitrate:Some(100_000),audio_streams:vec![AudioStream {index:0,codec:"aac".into(), channel_layout: None,channels:Some(2),sample_rate:Some(48_000),language:None,title:None,default:true}],raw_json:Some(json!({"streams":[{"index":0,"codec_type":"audio","codec_name":"aac","channels":2,"sample_rate":"48000"},{"index":1,"codec_type":"video","codec_name":"h264","width":1920,"height":1080}]}).to_string()),..Default::default()}).await.expect("file");
     let (token, user) = facade_login(&app).await;
     let (status, page) = json_call(
         &app,
@@ -1886,6 +1995,10 @@ async fn jellyfin_subtitle_native_failures_and_bitmap_refusals_are_not_empty_suc
 
 #[tokio::test]
 async fn jellyfin_subtitle_aliases_reuse_native_extraction_with_global_indices_and_source_times() {
+    Box::pin(jellyfin_subtitle_aliases_flow()).await;
+}
+
+async fn jellyfin_subtitle_aliases_flow() {
     use plurx_core::testfixtures;
     testfixtures::require_ffmpeg();
     let f = playback_fixture().await;

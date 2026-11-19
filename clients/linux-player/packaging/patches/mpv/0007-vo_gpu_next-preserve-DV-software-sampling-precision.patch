@@ -1,0 +1,725 @@
+From: plurx contributors <noreply@plurx.invalid>
+Date: Tue, 3 Nov 2026 12:00:00 +0000
+Subject: [PATCH] vo_gpu_next: preserve DV and HDR10 planar 10-bit filtering precision
+
+Use the UNORM16 range for software DV BL/EL and limited BT.2020/PQ
+planar 10-bit planes by staging code<<6
+and declaring bits16/10/6. Preserve MPI storage, siting, negative-stride
+orientation and hardware/P010/UINT paths. Callback-null owned pointers
+are consumed or copied before return, including upload failure. Refuse
+missing/failed required EL mapping with explicit partial-frame cleanup.
+
+diff --git a/video/out/vo_gpu_next.c b/video/out/vo_gpu_next.c
+--- a/video/out/vo_gpu_next.c
++++ b/video/out/vo_gpu_next.c
+@@ -1,135 +1,136 @@
+ /*
+  * Copyright (C) 2021 Niklas Haas
+  *
+  * This file is part of mpv.
+  *
+  * mpv is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU Lesser General Public
+  * License as published by the Free Software Foundation; either
+  * version 2.1 of the License, or (at your option) any later version.
+  *
+  * mpv is distributed in the hope that it will be useful,
+  * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  * GNU Lesser General Public License for more details.
+  *
+  * You should have received a copy of the GNU Lesser General Public
+  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
+ #include <sys/stat.h>
+ #include <time.h>
+ 
+ #include <libplacebo/colorspace.h>
+ #include <libplacebo/options.h>
+ #include <libplacebo/renderer.h>
+ #include <libplacebo/shaders/lut.h>
+ #include <libplacebo/shaders/icc.h>
+ #include <libplacebo/utils/libav.h>
+ #include <libplacebo/utils/frame_queue.h>
+ 
+ #include "config.h"
+ #include "common/common.h"
+ #include "common/stats.h"
+ #include "misc/io_utils.h"
+ #include "options/m_config.h"
+ #include "options/options.h"
+ #include "options/path.h"
+ #include "osdep/io.h"
+ #include "osdep/threads.h"
+ #include "stream/stream.h"
+ #include "sub/draw_bmp.h"
+ #include "video/fmt-conversion.h"
+ #include "video/mp_image.h"
+ #include "video/out/placebo/ra_pl.h"
+ #include "video/out/placebo/plurx_dv.h"
++#include "video/out/placebo/dv_upload.h"
+ #if HAVE_WAYLAND
+ #include "video/out/wayland_common.h"
+ #endif
+ #include "placebo/utils.h"
+ #include "gpu/context.h"
+ #include "gpu/hwdec.h"
+ #include "gpu/utils.h"
+ #include "gpu/video.h"
+ #include "gpu/video_shaders.h"
+ #include "sub/osd.h"
+ #include "gpu_next/context.h"
+ 
+ #if HAVE_GL && defined(PL_HAVE_OPENGL)
+ #include <libplacebo/opengl.h>
+ #include "video/out/opengl/ra_gl.h"
+ #endif
+ 
+ #if HAVE_D3D11 && defined(PL_HAVE_D3D11)
+ #include <libplacebo/d3d11.h>
+ #include "video/out/d3d11/ra_d3d11.h"
+ #include "osdep/windows_utils.h"
+ #endif
+ 
+ 
+ struct osd_entry {
+     pl_tex tex;
+     struct pl_overlay_part *parts;
+     int num_parts;
+     int change_id;
+ };
+ 
+ struct osd_state {
+     struct osd_entry entries[MAX_OSD_PARTS];
+     struct pl_overlay *overlays;
+     int num_overlays;
+ };
+ 
+ struct scaler_params {
+     struct pl_filter_config config;
+ };
+ 
+ struct user_hook {
+     char *path;
+     const struct pl_hook *hook;
+ };
+ 
+ struct user_lut {
+     char *opt;
+     char *path;
+     int type;
+     struct pl_custom_lut *lut;
+ };
+ 
+ struct frame_info {
+     int count;
+     struct pl_dispatch_info info[VO_PASS_PERF_MAX];
+ };
+ 
+ struct cache {
+     struct mp_log *log;
+     struct mpv_global *global;
+     char *dir;
+     const char *name;
+     size_t size_limit;
+     pl_cache cache;
+ };
+ 
+ // Mapping state of single hwdec frame.
+ struct hwdec_slot {
+     struct ra_hwdec_mapper *mapper;
+     struct timer_pool *timer;
+     struct mp_pass_perf perf;
+     struct mp_image *owner;   // queue entry image that owns the mapping
+     bool acquired;            // between acquire and release of a render pass
+     pl_tex tex[4];            // plane textures of the current mapping
+ };
+ 
+ struct priv {
+     struct mp_log *log;
+     struct mpv_global *global;
+     struct stats_ctx *stats;
+     struct ra_ctx *ra_ctx;
+     struct gpu_ctx *context;
+     struct ra_hwdec_ctx hwdec_ctx;
+     struct hwdec_slot hwdec;
+     struct hwdec_slot el_hwdec;
+     struct timer_pool *sw_upload_timer;
+     struct mp_pass_perf sw_upload_perf;
+ 
+     // Allocated DR buffers
+@@ -885,385 +886,439 @@
+     ra_hwdec_mapper_end_access(s->mapper);
+     s->acquired = false;
+ }
+ 
+ static bool hwdec_acquire(pl_gpu gpu, struct pl_frame *frame)
+ {
+     struct mp_image *mpi = frame->user_data;
+     struct frame_priv *fp = mpi->priv;
+     struct priv *p = fp->vo->priv;
+     return slot_reconfig(p, &p->hwdec, fp->hwdec, &mpi->params) &&
+            slot_acquire(p, &p->hwdec, mpi, mpi, frame);
+ }
+ 
+ static void hwdec_release(pl_gpu gpu, struct pl_frame *frame)
+ {
+     struct mp_image *mpi = frame->user_data;
+     struct frame_priv *fp = mpi->priv;
+     struct priv *p = fp->vo->priv;
+     slot_release(&p->hwdec);
+ }
+ 
+ #if PL_API_VER >= 367
+ static bool hwdec_acquire_el(pl_gpu gpu, struct pl_frame *frame)
+ {
+     struct mp_image *bl_mpi = frame->user_data;
+     struct mp_image *el_mpi = bl_mpi->enhancement_layer;
+     struct frame_priv *fp = bl_mpi->priv;
+     struct priv *p = fp->vo->priv;
+     // The EL image belongs to the BL queue entry, which therefore owns the slot.
+     return slot_reconfig(p, &p->el_hwdec, fp->el_hwdec, &el_mpi->params) &&
+            slot_acquire(p, &p->el_hwdec, bl_mpi, el_mpi, frame);
+ }
+ 
+ static void hwdec_release_el(pl_gpu gpu, struct pl_frame *frame)
+ {
+     struct mp_image *bl_mpi = frame->user_data;
+     struct frame_priv *fp = bl_mpi->priv;
+     struct priv *p = fp->vo->priv;
+     slot_release(&p->el_hwdec);
+ }
+ #endif
+ 
+ static bool format_supported(struct vo *vo, int format, bool use_uint)
+ {
+     struct priv *p = vo->priv;
+     struct pl_bit_encoding bits;
+     struct pl_plane_data data[4] = {0};
+     int planes = plane_data_from_imgfmt(data, &bits, format, use_uint);
+     if (!planes)
+         return false;
+ 
+     for (int i = 0; i < planes; i++) {
+         if (!pl_plane_find_fmt(p->gpu, NULL, &data[i]))
+             return false;
+     }
+ 
+     return true;
+ }
+ 
+ // Effective reference white luminance in nits to assume for SDR content.
+ static float get_ref_luma(struct priv *p)
+ {
+     const struct gl_video_opts *opts = p->opts_cache->opts;
+     if (opts->hdr_reference_white)
+         return opts->hdr_reference_white;
+ 
+ #if PL_API_VER >= 371
+     // auto: follow the system reference white, if available
+     // Use auto mode only on libplacebo >= 371, to avoid luminance mismatches,
+     // on SDR->SDR in some corner cases. User override is still respected, to
+     // preserve previous behavior.
+     struct ra_swapchain *sw = p->ra_ctx->swapchain;
+     if (sw->fns->target_ref_luma)
+         return sw->fns->target_ref_luma(sw);
+ #endif
+ 
+     return 0;
+ }
+ 
+ static bool use_ref_luma(const struct pl_color_space *csp, const struct pl_color_space *target_csp)
+ {
+     if (!pl_color_transfer_is_hdr(csp->transfer))
+         return true;
+ #if PL_API_VER >= 362
+     if (csp->transfer == PL_COLOR_TRC_SCRGB && target_csp && !pl_color_transfer_is_hdr(target_csp->transfer))
+         return true;
+ #endif
+     return false;
+ }
+ 
++// Failed queue maps do not receive unmap/discard. Successful unmap calls
++// this after recycling overlays; failure has not created any overlays yet.
++static void free_frame_resources(pl_gpu gpu, struct mp_image *mpi)
++{
++    struct frame_priv *fp = mpi->priv;
++    struct priv *p = fp->vo->priv;
++    for (int i = 0; i < MP_ARRAY_SIZE(fp->el_tex); i++) {
++        if (fp->el_tex[i])
++            pl_tex_destroy(gpu, &fp->el_tex[i]);
++    }
++    slot_release_owner(p, &p->hwdec, mpi);
++    slot_release_owner(p, &p->el_hwdec, mpi);
++    talloc_free(mpi);
++}
++
++static bool frame_requires_el(const struct pl_frame *frame)
++{
++    return frame->repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && frame->repr.dovi &&
++           frame->repr.dovi->nlq_active;
++}
++
++// Refusing a required EL must also release a partially prepared frame:
++// libplacebo never calls unmap/discard after a map callback returns false.
++static bool allow_missing_el(pl_gpu gpu, struct mp_image *mpi,
++                             const struct pl_frame *frame)
++{
++    if (mpi->params.no_enhancement_layer || !frame_requires_el(frame))
++        return true;
++    struct frame_priv *fp = mpi->priv;
++    MP_ERR(fp->vo, "Missing or unusable required Dolby Vision enhancement layer.\n");
++    free_frame_resources(gpu, mpi);
++    return false;
++}
++
++static bool frame_needs_precise_sw10(const struct pl_frame *frame)
++{
++    return frame->repr.sys == PL_COLOR_SYSTEM_DOLBYVISION ||
++           (frame->repr.sys == PL_COLOR_SYSTEM_BT_2020_NC &&
++            frame->color.transfer == PL_COLOR_TRC_PQ &&
++            frame->color.primaries == PL_COLOR_PRIM_BT_2020 &&
++            frame->repr.levels == PL_COLOR_LEVELS_LIMITED);
++}
++
+ static bool upload_planes_sw(struct vo *vo, pl_gpu gpu, struct mp_image *mpi,
+-                             struct pl_frame *frame, pl_tex tex[4])
++                             struct pl_frame *frame, pl_tex tex[4], bool precise_sw10)
+ {
+     struct priv *p = vo->priv;
+     struct pl_plane_data data[4] = {0};
+ 
+     // At this point, we know that the format is supported, query_format()
+     // makes sure of that. Just check if we should use UINT as a fallback.
+     bool use_uint = !format_supported(vo, mpi->imgfmt, false);
+     int planes = plane_data_from_imgfmt(data, &frame->repr.bits, mpi->imgfmt,
+                                         use_uint);
+     if (!planes)
+         return false;
+ 
++    const bool shift10 = plurx_dv_shift10_supported(gpu, precise_sw10, planes,
++                                                      frame->repr.bits, data);
++    if (shift10)
++        frame->repr.bits.bit_shift = 6;
+     frame->num_planes = planes;
+     for (int n = 0; n < planes; n++) {
+         struct pl_plane *plane = &frame->planes[n];
+         data[n].width = mp_image_plane_w(mpi, n);
+         data[n].height = mp_image_plane_h(mpi, n);
++        if (shift10) {
++            if (!plurx_dv_upload_shift10(gpu, plane, &tex[n], data[n],
++                                        mpi->planes[n], mpi->stride[n]))
++                return false;
++            continue;
++        }
+         if (mpi->stride[n] < 0) {
+             data[n].pixels = mpi->planes[n] + (data[n].height - 1) * mpi->stride[n];
+             data[n].row_stride = -mpi->stride[n];
+             plane->flipped = true;
+         } else {
+             data[n].pixels = mpi->planes[n];
+             data[n].row_stride = mpi->stride[n];
+         }
+ 
+         pl_buf buf = get_dr_buf(p, data[n].pixels);
+         if (buf) {
+             data[n].buf = buf;
+             data[n].buf_offset = (uint8_t *) data[n].pixels - buf->data;
+             data[n].pixels = NULL;
+         }
+         // Keep the image alive until it's fully read.
+         if (gpu->limits.callbacks) {
+             data[n].callback = talloc_free;
+             data[n].priv = mp_image_new_ref(mpi);
+         }
+ 
+         if (!pl_upload_plane(gpu, plane, &tex[n], &data[n])) {
+             talloc_free(data[n].priv);
+             return false;
+         }
+ 
+         // Without async callback support, we have to poll...
+         if (!gpu->limits.callbacks && data[n].buf)
+             while (pl_buf_poll(gpu, data[n].buf, UINT64_MAX));
+     }
+ 
+     return true;
+ }
+ 
+ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src,
+                       struct pl_frame *frame)
+ {
+     struct mp_image *mpi = src->frame_data;
+     struct mp_image_params par = mpi->params;
+     struct frame_priv *fp = mpi->priv;
+     struct vo *vo = fp->vo;
+     struct priv *p = vo->priv;
+ 
+     fp->hwdec = ra_hwdec_get(&p->hwdec_ctx, mpi->imgfmt);
+     if (fp->hwdec) {
+         // Note: We don't actually need the mapper to map the frame yet, we
+         // only reconfig the mapper here (potentially creating it) to access
+         // `dst_params`. In practice, though, this should not matter unless the
+         // image format changes mid-stream.
+         if (!slot_reconfig(p, &p->hwdec, fp->hwdec, &mpi->params)) {
+             talloc_free(mpi);
+             return false;
+         }
+ 
+         par = p->hwdec.mapper->dst_params;
+     }
+ 
+     mp_image_params_guess_csp(&par);
+ 
+     *frame = (struct pl_frame) {
+         .color = par.color,
+         .repr = par.repr,
+         .profile = {
+             .data = mpi->icc_profile ? mpi->icc_profile->data : NULL,
+             .len = mpi->icc_profile ? mpi->icc_profile->size : 0,
+         },
+         .rotation = par.rotate / 90,
+         .user_data = mpi,
+     };
+ 
++    if (!mpi->enhancement_layer && !allow_missing_el(gpu, mpi, frame))
++        return false;
++
+     const struct gl_video_opts *opts = p->opts_cache->opts;
+     float ref_luma;
+     if (!pl_color_transfer_is_hdr(frame->color.transfer) && (ref_luma = get_ref_luma(p)))
+         frame->color.hdr.max_luma = ref_luma;
+ 
+     if (opts->treat_srgb_as_power22 & 1 && frame->color.transfer == PL_COLOR_TRC_SRGB) {
+         // The sRGB EOTF is a pure gamma 2.2 function. See reference display in
+         // IEC 61966-2-1-1999. Linearize sRGB to display light.
+         frame->color.transfer = PL_COLOR_TRC_GAMMA22;
+     }
+ 
+     if (fp->hwdec) {
+         p->sw_upload_perf.count = 0;
+ 
+         struct mp_imgfmt_desc desc = mp_imgfmt_get_desc(par.imgfmt);
+         frame->acquire = hwdec_acquire;
+         frame->release = hwdec_release;
+         setup_hwdec_plane_mapping(frame, &desc);
+     } else { // swdec
+         p->hwdec.perf.count = 0;
+ 
+         if (!p->sw_upload_timer)
+             p->sw_upload_timer = timer_pool_create(p->ra_ctx->ra);
+ 
+         stats_time_start(p->stats, "swdec-upload");
+         timer_pool_start(p->sw_upload_timer);
+-        bool ok = upload_planes_sw(vo, gpu, mpi, frame, tex);
++        bool ok = upload_planes_sw(vo, gpu, mpi, frame, tex,
++                                    frame_needs_precise_sw10(frame));
+         timer_pool_stop(p->sw_upload_timer);
+         stats_time_end(p->stats, "swdec-upload");
+         if (!ok) {
+             MP_ERR(vo, "Failed uploading frame!\n");
+             talloc_free(mpi);
+             return false;
+         }
+         p->sw_upload_perf = timer_pool_measure(p->sw_upload_timer);
+     }
+ 
+     // Update chroma location, must be done after initializing planes
+     pl_frame_set_chroma_location(frame, par.chroma_location);
+ 
+ #if PL_API_VER >= 367
+     if (mpi->enhancement_layer) {
+         struct mp_image *el = mpi->enhancement_layer;
+         fp->el_hwdec = ra_hwdec_get(&p->hwdec_ctx, el->imgfmt);
+ 
+         struct mp_image_params el_par = el->params;
+         bool el_ok = true;
+         if (fp->el_hwdec) {
+             if (slot_reconfig(p, &p->el_hwdec, fp->el_hwdec, &el->params)) {
+                 el_par = p->el_hwdec.mapper->dst_params;
+             } else {
+                 fp->el_hwdec = NULL;
+                 el_ok = false;
+             }
+         }
+         mp_image_params_guess_csp(&el_par);
+ 
+         fp->el_frame = (struct pl_frame) {
+             .color = el_par.color,
+             .repr  = el_par.repr,
+             .user_data = mpi, // BL mpi
+         };
+ 
+         if (el_ok && fp->el_hwdec) {
+             struct mp_imgfmt_desc desc = mp_imgfmt_get_desc(el_par.imgfmt);
+             fp->el_frame.acquire = hwdec_acquire_el;
+             fp->el_frame.release = hwdec_release_el;
+             setup_hwdec_plane_mapping(&fp->el_frame, &desc);
+         } else if (el_ok) {
+-            el_ok = upload_planes_sw(vo, gpu, el, &fp->el_frame, fp->el_tex);
++            el_ok = upload_planes_sw(vo, gpu, el, &fp->el_frame, fp->el_tex,
++                                     frame->repr.sys == PL_COLOR_SYSTEM_DOLBYVISION);
+         }
+ 
+         if (el_ok) {
+             pl_frame_set_chroma_location(&fp->el_frame, el_par.chroma_location);
+             frame->enhancement_layer = &fp->el_frame;
++        } else if (!allow_missing_el(gpu, mpi, frame)) {
++            return false;
+         } else {
+             MP_WARN(vo, "Failed setting up enhancement layer; "
+                     "rendering base layer only.\n");
+         }
+     }
+ #endif
+ 
+     if (mpi->film_grain)
+         pl_film_grain_from_av(&frame->film_grain, (AVFilmGrainParams *) mpi->film_grain->data);
+ 
+     // Compute a unique signature for any attached ICC profile. Wasteful in
+     // theory if the ICC profile is the same for multiple frames, but in
+     // practice ICC profiles are overwhelmingly going to be attached to
+     // still images so it shouldn't matter.
+     pl_icc_profile_compute_signature(&frame->profile);
+ 
+     // Update LUT attached to this frame
+     update_lut(p, &p->next_opts->image_lut);
+     frame->lut = p->next_opts->image_lut.lut;
+     frame->lut_type = p->next_opts->image_lut.type;
+     return true;
+ }
+ 
+ static void unmap_frame(pl_gpu gpu, struct pl_frame *frame,
+                         const struct pl_source_frame *src)
+ {
+     struct mp_image *mpi = src->frame_data;
+     struct frame_priv *fp = mpi->priv;
+     struct priv *p = fp->vo->priv;
+     for (int i = 0; i < MP_ARRAY_SIZE(fp->subs.entries); i++) {
+         pl_tex tex = fp->subs.entries[i].tex;
+         if (tex)
+             MP_TARRAY_APPEND(p, p->sub_tex, p->num_sub_tex, tex);
+     }
+-    for (int i = 0; i < MP_ARRAY_SIZE(fp->el_tex); i++) {
+-        if (fp->el_tex[i])
+-            pl_tex_destroy(gpu, &fp->el_tex[i]);
+-    }
+-    slot_release_owner(p, &p->hwdec, mpi);
+-    slot_release_owner(p, &p->el_hwdec, mpi);
+-    talloc_free(mpi);
++    free_frame_resources(gpu, mpi);
+ }
+ 
+ static void discard_frame(const struct pl_source_frame *src)
+ {
+     struct mp_image *mpi = src->frame_data;
+     talloc_free(mpi);
+ }
+ 
+ static void info_callback(void *priv, const struct pl_render_info *info)
+ {
+     struct vo *vo = priv;
+     struct priv *p = vo->priv;
+     if (info->index >= VO_PASS_PERF_MAX)
+         return; // silently ignore clipped passes, whatever
+ 
+     struct frame_info *frame;
+     switch (info->stage) {
+     case PL_RENDER_STAGE_FRAME: frame = &p->perf_fresh; break;
+     case PL_RENDER_STAGE_BLEND: frame = &p->perf_redraw; break;
+     default: abort();
+     }
+ 
+     frame->count = info->index + 1;
+     pl_dispatch_info_move(&frame->info[info->index], info->pass);
+ }
+ 
+ static void update_options(struct vo *vo)
+ {
+     struct priv *p = vo->priv;
+     pl_options pars = p->pars;
+     bool changed = m_config_cache_update(p->opts_cache);
+     changed = m_config_cache_update(p->next_opts_cache) || changed;
+     if (changed)
+         update_render_options(vo);
+ 
+     update_lut(p, &p->next_opts->lut);
+     pars->params.lut = p->next_opts->lut.lut;
+     pars->params.lut_type = p->next_opts->lut.type;
+ 
+     // Update equalizer state
+     struct mp_csp_params cparams = MP_CSP_PARAMS_DEFAULTS;
+     const struct gl_video_opts *opts = p->opts_cache->opts;
+     mp_csp_equalizer_state_get(p->video_eq, &cparams);
+     pars->color_adjustment.brightness = cparams.brightness;
+     pars->color_adjustment.contrast = cparams.contrast;
+     pars->color_adjustment.hue = cparams.hue;
+     pars->color_adjustment.saturation = cparams.saturation;
+     pars->color_adjustment.gamma = cparams.gamma * opts->gamma;
+     p->output_levels = cparams.levels_out;
+ 
+     for (char **kv = p->next_opts->raw_opts; kv && kv[0]; kv += 2)
+         pl_options_set_str(pars, kv[0], kv[1]);
+ }
+ 
+ static void apply_target_contrast(struct priv *p, struct pl_color_space *color, float min_luma)
+ {
+     const struct gl_video_opts *opts = p->opts_cache->opts;
+ 
+     // Auto mode, use target value if available
+     if (!opts->target_contrast) {
+         color->hdr.min_luma = min_luma;
+         return;
+     }
+ 
+     // Infinite contrast
+     if (opts->target_contrast == -1) {
+         color->hdr.min_luma = 1e-7;
+         mp_assert(color->hdr.min_luma > 0);
+         return;
+     }
+ 
+     // Infer max_luma for current pl_color_space
+     pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
+         .color = color,
+         // with HDR10 meta to respect value if already set
+         .metadata = PL_HDR_METADATA_HDR10,
+         .scaling = PL_HDR_NITS,
+         .out_max = &color->hdr.max_luma
+     ));
+ 
+     color->hdr.min_luma = color->hdr.max_luma / opts->target_contrast;
+ }
+ 
+ static void apply_target_options(struct priv *p, struct pl_frame *target,
+                                  float min_luma, bool hint, float target_ref_luma,
+                                  const struct pl_color_space *target_csp)
+ {
+     update_lut(p, &p->next_opts->target_lut);
+     target->lut = p->next_opts->target_lut.lut;
+     target->lut_type = p->next_opts->target_lut.type;
+diff --git a/video/out/placebo/dv_upload.h b/video/out/placebo/dv_upload.h
+new file mode 100644
+--- /dev/null
++++ b/video/out/placebo/dv_upload.h
+@@ -0,0 +1,119 @@
++/*
++ * Copyright (C) 2026 plurx contributors
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ */
++#ifndef MPV_DV_UPLOAD_H
++#define MPV_DV_UPLOAD_H
++
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++#include <libplacebo/utils/upload.h>
++#include "ta/ta.h"
++
++// Only native-endian planar low-aligned 10-bit samples in UNORM16 storage.
++// plane_data_from_imgfmt has already rejected non-native endian formats.
++// UINT/manual filtering, P010, hardware imports and other layouts keep their
++// original path. Require the actual selected format to support linear sampling.
++static inline bool plurx_dv_shift10_supported(pl_gpu gpu, bool precise_sw10, int planes,
++                                          struct pl_bit_encoding bits,
++                                          const struct pl_plane_data data[4])
++{
++    if (!precise_sw10 || planes != 3 || bits.sample_depth != 16 ||
++        bits.color_depth != 10 || bits.bit_shift != 0)
++        return false;
++    for (int p = 0; p < planes; p++) {
++        const struct pl_plane_data *d = &data[p];
++        if (d->type != PL_FMT_UNORM || d->swapped || d->pixel_stride != 2 ||
++            d->component_size[0] != 16 || d->component_pad[0] ||
++            d->component_map[0] != p)
++            return false;
++        for (int c = 1; c < 4; c++) {
++            if (d->component_size[c] || d->component_pad[c])
++                return false;
++        }
++        int mapping[4];
++        pl_fmt fmt = pl_plane_find_fmt(gpu, mapping, d);
++        if (!fmt || fmt->type != PL_FMT_UNORM || fmt->num_components != 1 ||
++            fmt->component_depth[0] != 16 || !(fmt->caps & PL_FMT_CAP_LINEAR))
++            return false;
++    }
++    return true;
++}
++
++static inline bool plurx_dv_shift10_size(int width, int height, ptrdiff_t stride,
++                                     size_t *row_bytes, size_t *bytes)
++{
++    if (width <= 0 || height <= 0 || stride == PTRDIFF_MIN ||
++        (size_t)width > SIZE_MAX / sizeof(uint16_t))
++        return false;
++    size_t row = (size_t)width * sizeof(uint16_t);
++    size_t pitch = stride < 0 ? (size_t)-stride : (size_t)stride;
++    if (pitch < row || row > PTRDIFF_MAX ||
++        (size_t)height > SIZE_MAX / row ||
++        (size_t)(height - 1) > ((size_t)PTRDIFF_MAX - row) / pitch)
++        return false;
++    *row_bytes = row;
++    *bytes = row * (size_t)height;
++    return true;
++}
++
++// Pack physical rows in ascending address order; retain the original flipped
++// flag so negative-stride images keep exactly the same sampled coordinates.
++// memcpy handles unaligned decoder storage without aliasing/alignment UB.
++static inline bool plurx_dv_shift10_pack(uint8_t *dst, size_t capacity,
++                                     const uint8_t *src, ptrdiff_t stride,
++                                     int width, int height)
++{
++    size_t row, bytes;
++    if (!src || !dst || !plurx_dv_shift10_size(width, height, stride, &row, &bytes) ||
++        capacity < bytes)
++        return false;
++    if (stride < 0) {
++        src += (height - 1) * stride;
++        stride = -stride;
++    }
++    for (int y = 0; y < height; y++) {
++        for (int x = 0; x < width; x++) {
++            uint16_t code;
++            memcpy(&code, src + (size_t)y * stride + (size_t)x * 2, 2);
++            if (code > 1023)
++                return false;
++            code <<= 6;
++            memcpy(dst + (size_t)y * row + (size_t)x * 2, &code, 2);
++        }
++    }
++    return true;
++}
++
++static inline bool plurx_dv_upload_shift10(pl_gpu gpu, struct pl_plane *plane,
++                                       pl_tex *tex, struct pl_plane_data data,
++                                       const uint8_t *src, ptrdiff_t stride)
++{
++    size_t row, bytes;
++    if (!plurx_dv_shift10_size(data.width, data.height, stride, &row, &bytes))
++        return false;
++    uint8_t *stage = ta_alloc_size(NULL, bytes);
++    if (!stage)
++        return false;
++    if (!plurx_dv_shift10_pack(stage, bytes, src, stride, data.width, data.height)) {
++        ta_free(stage);
++        return false;
++    }
++    data.pixels = stage;
++    data.row_stride = row;
++    data.buf = NULL;
++    data.buf_offset = 0;
++    data.callback = NULL;
++    data.priv = NULL;
++    plane->flipped = stride < 0;
++    // LP387 gpu.h guarantees callback-null host pointers are consumed/copied
++    // before return; the GPU transfer can continue from an internal PBO.
++    // Never attach this owned staging to the decoder's DR buffer or MPI.
++    // A callback is unsafe to free again on false: LP's PBO copy may call it
++    // immediately, then fail a subsequent GPU upload (gpu/utils.c).
++    bool ok = pl_upload_plane(gpu, plane, tex, &data);
++    ta_free(stage);
++    return ok;
++}
++#endif

@@ -377,10 +377,64 @@ class MainPreflightAdoptionCase(unittest.TestCase):
             adoption._TREE_CACHE.update(saved)
             adoption._DIGEST_CACHE.clear()
 
-    def test_knowledge_smoke_witness_binds_document_and_physical_child_bytes(self):
+    def test_media_runtime_witnesses_bind_only_the_recipes_they_read(self):
         root = Path(__file__).resolve().parents[2]
         rows = json.loads((root / "validation/main-preflight-inputs.json").read_text())["families"]
-        row = adoption.witness("operations:test_knowledge_pilot.KnowledgePilotSmokeTests.test_code_context_is_source_bound_and_utf8_bounded", rows)
+        media_only = (
+            "test_runtime_assets_layer_drops_build_time_state",
+            "test_docker_build_frees_each_ffmpeg_download_before_the_next",
+            "test_docker_build_requires_the_profile5_renderer_used_at_runtime",
+            "test_docker_build_requires_the_atsc3_audio_decoder",
+        )
+        both = ("test_dockerfile_base_images_are_pinned_by_digest",
+                "test_docker_build_pins_and_verifies_disk_conversion_tools")
+        old, new = "6" * 40, "7" * 40
+        files = {path: ("100644", "blob", "1" * 40) for path in
+                 ("Dockerfile", "Dockerfile.media-runtime", "scripts/build-static-ffprobe",
+                  ".github/workflows/ci.yml", "unrelated.txt")}
+        with mock.patch.dict(adoption._TREE_CACHE, {old: files}, clear=True), \
+             mock.patch.dict(adoption._DIGEST_CACHE, {}, clear=True):
+            for name in media_only + both:
+                row = adoption.witness("operations:test_contracts.OperationsContractCase." + name, rows)
+                for path in ("Dockerfile.media-runtime", "Dockerfile", "unrelated.txt"):
+                    with self.subTest(method=name, changed=path):
+                        adoption._TREE_CACHE[new] = {**files, path: ("100644", "blob", "2" * 40)}
+                        adoption._DIGEST_CACHE.clear()
+                        changed = adoption.input_digest(old, row) != adoption.input_digest(new, row)
+                        self.assertEqual(path == "Dockerfile.media-runtime" or
+                                         (path == "Dockerfile" and name in both), changed)
+
+    def test_release_publication_witness_binds_current_ci_recipe(self):
+        root = Path(__file__).resolve().parents[2]
+        rows = json.loads((root / "validation/main-preflight-inputs.json").read_text())["families"]
+        row = adoption.witness(
+            "operations:test_release_publication.ReleasePublicationContractCase."
+            "test_normal_package_ci_reuses_media_base_and_legacy_publication_remains_supported", rows)
+        old, new = "6" * 40, "7" * 40
+        paths = ("Dockerfile", ".github/workflows/ci.yml", ".github/workflows/publish-release.yml",
+                 "Dockerfile.media-runtime", "unrelated.txt")
+        files = {path: ("100644", "blob", "1" * 40) for path in paths}
+        with mock.patch.dict(adoption._TREE_CACHE, {old: files}, clear=True), \
+             mock.patch.dict(adoption._DIGEST_CACHE, {}, clear=True):
+            for path in paths:
+                with self.subTest(changed=path):
+                    adoption._TREE_CACHE[new] = {**files, path: ("100644", "blob", "2" * 40)}
+                    adoption._DIGEST_CACHE.clear()
+                    changed = adoption.input_digest(old, row) != adoption.input_digest(new, row)
+                    self.assertEqual(path in paths[:3], changed)
+
+    def test_document_and_child_glob_witness_binds_document_and_physical_child_bytes(self):
+        row = adoption.witness("operations:test_child_binding.Case.test_bytes", [{
+            "id_prefix": "operations:test_child_binding.",
+            "inputs": ["docs/PLAYBACK.md", "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md",
+                       "docs/streaming/PLAYBACK-CAPS-V2-PLAN.md",
+                       "crates/plurx-core/src/playback/**",
+                       "crates/plurxd/src/http/stream/**",
+                       "tests/validation/test_main_unit_receipts.py"],
+            "pathsets": ["crates/plurx-core/src/playback/**",
+                         "crates/plurxd/src/http/stream/**"],
+            "reason": "Synthetic row: named documents plus glob-selected child sources.",
+        }])
         selected = ["docs/PLAYBACK.md", "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md",
                     "docs/streaming/PLAYBACK-CAPS-V2-PLAN.md",
                     "crates/plurx-core/src/playback/tests/child.rs",

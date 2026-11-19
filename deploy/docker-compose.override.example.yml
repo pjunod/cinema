@@ -32,6 +32,10 @@ services:
     #   - "32443:32443"
 
     volumes:
+      # Actual-host identity binds are mandatory in docker-compose.yml.
+      # For an administrator-published legacy recovery proof only, expose the
+      # root-owned proof directory read-only; remove after acknowledged recovery.
+      # - /run/plurx-physical-stop:/run/plurx-physical-stop:ro
       # Optional supplied HTTPS identity directory. Use /etc/plurx/tls paths
       # in the HTTPS card and permit the service uid to read both PEM files.
       # Mount the certificate manager's symlink targets too; renew at restart.

@@ -225,6 +225,7 @@ impl SourceViewerActor {
         Ok(SourceResponseGuard {
             owner: Arc::clone(&self.0),
             source: None,
+            source_request: None,
         })
     }
     /// The published direct session for Start replay and status. It renews
@@ -315,9 +316,24 @@ impl SourceViewerActor {
             .direct_start
             .clone()
             .ok_or(SourceWorkerError::Unavailable)??;
-        let guard = self.reserve_direct_body(&start)?;
-        #[cfg(not(target_os = "linux"))]
-        let mut guard = guard;
+        let mut guard = self.reserve_direct_body(&start)?;
+        guard.source_request = self.0.manager.upgrade().and_then(|manager| {
+            let request = manager.foreground_source_request(
+                &direct.file,
+                &self.0.assignment.binding().incarnation_id().to_string(),
+                self.0.assignment.binding().incarnation_id(),
+                plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer,
+            )?;
+            #[cfg(not(target_os = "linux"))]
+            let request = match direct.object_version.as_deref() {
+                Some(version) => request.object_version(version),
+                None => request,
+            };
+            // The Linux transfer binds the exact S1 version from the admitted
+            // owner when the body range is known.
+            Some(request)
+        });
+
         let initial = self.0.gate.current_owned(&self.0.assignment).await?;
         initial
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
@@ -863,6 +879,7 @@ impl TranscodeManager {
             state: std::sync::Mutex::new(SourceViewerState {
                 direct: Some(Arc::new(direct_file)),
                 restart_admission: Some(restart_admission),
+                backing: SourceBacking::ImmutableVod,
                 start: None,
                 retirement_requested: false,
                 retirement_mode: crate::sharing_connection_custody::DriverCloseMode::Drain,

@@ -315,8 +315,10 @@ pub(super) fn valid_start_request() -> RemoteStartRequest {
         typeless_playlist: true,
         library_channel: None,
         request: SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -652,6 +654,7 @@ fn remote_start_status_carries_created_ownership_and_legacy_is_conservative() {
     let body = serde_json::to_vec(&valid_start_response()).expect("start response JSON");
     let created = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
         dv_processing_header: None,
+        processing_skip_header: None,
         clock_timing: None,
         status: reqwest::StatusCode::CREATED,
         body: body.clone(),
@@ -665,6 +668,7 @@ fn remote_start_status_carries_created_ownership_and_legacy_is_conservative() {
 
     let recovered = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
         dv_processing_header: None,
+        processing_skip_header: None,
         clock_timing: None,
         status: reqwest::StatusCode::ALREADY_REPORTED,
         body: body.clone(),
@@ -681,6 +685,7 @@ fn remote_start_status_carries_created_ownership_and_legacy_is_conservative() {
     legacy_info.activation_generation = None;
     let legacy = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
         dv_processing_header: None,
+        processing_skip_header: None,
         clock_timing: None,
         status: reqwest::StatusCode::OK,
         body: serde_json::to_vec(&legacy_info).expect("legacy start response JSON"),
@@ -1535,6 +1540,7 @@ fn auto_candidate_parser_floor_remote_context_is_retained_but_not_executed() {
             generation: 1,
             source_digest: "0".repeat(64),
         },
+        catalog_query: None,
     });
     request.presentation_target = Some(plurx_core::playback::candidate::PresentationTarget {
         width_px: 2400,
@@ -1706,6 +1712,7 @@ fn a_route_the_takeover_path_can_never_accept_is_unrecoverable() {
         request: SessionRequest {
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -1863,6 +1870,7 @@ fn the_takeover_recipe_validator_refuses_vod() {
         request: SessionRequest {
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -3186,6 +3194,7 @@ fn quality_reservation_burst_keeps_manual_control_budget_independent() {
 fn owner_answer(status: u16, body: &[u8]) -> PeerResponse {
     PeerResponse {
         dv_processing_header: None,
+        processing_skip_header: None,
         clock_timing: None,
         status: reqwest::StatusCode::from_u16(status).expect("status"),
         body: body.to_vec(),
@@ -3556,25 +3565,22 @@ fn stale_inventory_route_is_not_settled_after_its_lease_runway_is_spent() {
     assert!(settling.is_empty());
 }
 
-/// C-07 M5 (PLEX-FACADE-PAGING §5.4). The three ways a cached route
-/// lookup is answered are three separate series, and every map-lock and
-/// sweep site the lookups pass through is recorded exactly once per pass.
+/// C-07 M5 (PLEX-FACADE-PAGING §5.4), as E1c counts it. A view read, a
+/// cached view answer and a Store read are separate series, and every
+/// map-lock site the lookups pass through is recorded exactly once per pass.
+/// No scan runs below capacity (§4.4-3).
 #[tokio::test]
 async fn a_cache_hit_and_a_store_read_are_counted_separately() {
-    use plurx_core::cluster::membership::MembershipManager;
-    use plurx_core::store::SqliteStore;
-
-    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-    let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
+    let (coordinator, _replica, _store) = super::route_view_tests::coordinator_over_replica(true);
     let metrics = coordinator.route_cache_metrics();
     let session_id = "00000000-0000-4000-8000-0000000000d1";
     let other_id = "00000000-0000-4000-8000-0000000000d2";
 
     assert!(coordinator.route(session_id).await.expect("miss").is_none());
     assert_eq!(
-        metrics.lookups(RouteLookup::Store),
+        metrics.lookups(RouteLookup::View),
         1,
-        "a cold lookup reads the Store"
+        "a cold lookup reads the view"
     );
     assert_eq!(
         metrics.lookups(RouteLookup::CacheHit),
@@ -3590,29 +3596,32 @@ async fn a_cache_hit_and_a_store_read_are_counted_separately() {
         "each cached answer is one hit"
     );
     assert_eq!(
-        metrics.lookups(RouteLookup::Store),
+        metrics.lookups(RouteLookup::View),
         1,
-        "a cached answer must not also count as a Store read"
+        "a cached answer must not also count as a read"
     );
     assert!(coordinator.route(other_id).await.expect("miss").is_none());
-    assert_eq!(metrics.lookups(RouteLookup::Store), 2);
+    assert_eq!(metrics.lookups(RouteLookup::View), 2);
+    assert_eq!(metrics.lookups(RouteLookup::Store), 0);
     assert_eq!(metrics.lookups(RouteLookup::SingleFlightHit), 0);
 
     let exposition = metrics.prometheus();
     for line in [
         "plurx_media_session_route_lookups_total{result=\"cache_hit\"} 3\n",
         "plurx_media_session_route_lookups_total{result=\"single_flight_hit\"} 0\n",
-        "plurx_media_session_route_lookups_total{result=\"store\"} 2\n",
+        "plurx_media_session_route_lookups_total{result=\"observed\"} 0\n",
+        "plurx_media_session_route_lookups_total{result=\"view\"} 2\n",
+        "plurx_media_session_route_lookups_total{result=\"store\"} 0\n",
         // Two misses take the lookup lock twice each (before and after
         // the single-flight shard), three hits once each.
         "plurx_media_session_route_lock_seconds_count{site=\"lookup\"} 7\n",
-        // Each Store answer is published once.
+        // Each read's answer is published once.
         "plurx_media_session_route_lock_seconds_count{site=\"queried_insert\"} 2\n",
         "plurx_media_session_route_lock_seconds_count{site=\"insert\"} 0\n",
         "plurx_media_session_route_lock_seconds_count{site=\"generation_insert\"} 0\n",
-        // Two sweeps, over an empty map and then over the first answer.
-        "plurx_media_session_route_prune_entries_count 2\n",
-        "plurx_media_session_route_prune_entries_sum 1\n",
+        // Below capacity no eviction scan runs.
+        "plurx_media_session_route_prune_entries_count 0\n",
+        "plurx_media_session_route_prune_entries_sum 0\n",
         "plurx_media_session_route_cache_entries 2\n",
     ] {
         assert!(
@@ -3626,8 +3635,7 @@ async fn a_cache_hit_and_a_store_read_are_counted_separately() {
     let exposition = metrics.prometheus();
     for line in [
         "plurx_media_session_route_lock_seconds_count{site=\"insert\"} 1\n",
-        "plurx_media_session_route_prune_entries_count 3\n",
-        "plurx_media_session_route_prune_entries_sum 3\n",
+        "plurx_media_session_route_prune_entries_count 0\n",
         "plurx_media_session_route_cache_entries 3\n",
     ] {
         assert!(
@@ -3637,15 +3645,10 @@ async fn a_cache_hit_and_a_store_read_are_counted_separately() {
     }
 }
 
-/// C-07 M5 (PLEX-FACADE-PAGING §3.5 item 2). The prune histogram counts
-/// the entries each sweep WALKS, which is the O(n) cost under the map
-/// lock, not the entries it leaves (the gauge already says that). Time is
-/// paused so entries expire on demand, and each of the three sweep sites
-/// runs over expired entries: counting after `retain` would record 0
-/// there. It also covers the gauge update when a lookup removes an
-/// expired entry. No Store call is made, so paused time cannot fire a
-/// lookup deadline.
-#[tokio::test(start_paused = true)]
+/// The prune histogram counts entries the insertion walks at capacity. A
+/// lookup also removes a stale applied-view entry and updates the gauge
+/// before fetching its replacement.
+#[tokio::test]
 async fn each_route_sweep_counts_the_entries_it_walked_and_an_expired_lookup_lowers_the_gauge() {
     use plurx_core::cluster::membership::MembershipManager;
     use plurx_core::store::SqliteStore;
@@ -3653,7 +3656,7 @@ async fn each_route_sweep_counts_the_entries_it_walked_and_an_expired_lookup_low
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
     let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
     let metrics = coordinator.route_cache_metrics();
-    let value = |name: &str| -> u64 {
+    let metric = |metrics: &RouteCacheMetrics, name: &str| -> u64 {
         let exposition = metrics.prometheus();
         let prefix = format!("{name} ");
         exposition
@@ -3665,71 +3668,60 @@ async fn each_route_sweep_counts_the_entries_it_walked_and_an_expired_lookup_low
     };
     let sum = "plurx_media_session_route_prune_entries_sum";
     let entries = "plurx_media_session_route_cache_entries";
-    let generation = |session_id: &str| {
-        coordinator.route_generations[route_hash(session_id) % coordinator.route_generations.len()]
-            .load(std::sync::atomic::Ordering::Acquire)
-    };
-    let id = |n: u8| format!("00000000-0000-4000-8000-0000000000f{n}");
+    let id = |n: usize| format!("00000000-0000-4000-8000-{n:012x}");
 
-    coordinator.cache_route(media_route(&id(1))).await;
-    coordinator.cache_route(media_route(&id(2))).await;
-    assert_eq!(value(entries), 2);
-    tokio::time::advance(ROUTE_CACHE_TTL).await;
+    for n in 0..MAX_ROUTE_CACHE_ENTRIES {
+        coordinator.cache_route(media_route(&id(n))).await;
+    }
+    assert_eq!(metric(&metrics, entries), MAX_ROUTE_CACHE_ENTRIES as u64);
+    assert_eq!(metric(&metrics, sum), 0, "no insertion walk below capacity");
+    let inserted = id(MAX_ROUTE_CACHE_ENTRIES);
+    coordinator.cache_route(media_route(&inserted)).await;
+    assert_eq!(metric(&metrics, sum), MAX_ROUTE_CACHE_ENTRIES as u64);
 
-    // A lookup that finds its entry expired removes it and lowers the gauge.
-    assert!(coordinator.cached_route(&id(1)).await.is_none());
-    assert_eq!(value(entries), 1, "an expired lookup must lower the gauge");
-
-    // `cache_route_result` sweeps one expired entry and keeps none of it.
-    let before = value(sum);
-    coordinator.cache_route(media_route(&id(3))).await;
-    assert_eq!(
-        value(sum) - before,
-        1,
-        "insert sweep walked one expired entry"
-    );
-    assert_eq!(value(entries), 1);
-
-    // `cache_queried_route_result` sweeps two expired entries.
-    coordinator.cache_route(media_route(&id(4))).await;
-    assert_eq!(value(entries), 2);
-    tokio::time::advance(ROUTE_CACHE_TTL).await;
-    let before = value(sum);
+    let queried = id(MAX_ROUTE_CACHE_ENTRIES + 1);
     assert!(coordinator
-        .cache_queried_route_result(&id(5), None, generation(&id(5)))
+        .cache_queried_route_result(
+            &queried,
+            None,
+            coordinator.observed_now(),
+            coordinator.route_generation(&queried)
+        )
         .await
         .is_none());
-    assert_eq!(
-        value(sum) - before,
-        2,
-        "queried-insert sweep walked two expired entries"
-    );
-    assert_eq!(value(entries), 1);
+    assert_eq!(metric(&metrics, sum), 2 * MAX_ROUTE_CACHE_ENTRIES as u64);
 
-    // `cache_route_if_generation` sweeps two expired entries.
-    coordinator.cache_route(media_route(&id(6))).await;
-    assert_eq!(value(entries), 2);
-    tokio::time::advance(ROUTE_CACHE_TTL).await;
-    let before = value(sum);
+    let published = id(MAX_ROUTE_CACHE_ENTRIES + 2);
     assert!(
         coordinator
-            .cache_route_if_generation(media_route(&id(7)), generation(&id(7)))
+            .cache_route_if_generation(
+                media_route(&published),
+                coordinator.route_generation(&published)
+            )
             .await
     );
+    assert_eq!(metric(&metrics, sum), 3 * MAX_ROUTE_CACHE_ENTRIES as u64);
+    assert_eq!(metric(&metrics, entries), MAX_ROUTE_CACHE_ENTRIES as u64);
+
+    let (coordinator, replica, _store) = super::route_view_tests::coordinator_over_replica(true);
+    let metrics = coordinator.route_cache_metrics();
+    assert!(coordinator.route(&id(1)).await.expect("lookup").is_none());
+    assert!(coordinator.route(&id(2)).await.expect("lookup").is_none());
+    assert_eq!(metric(&metrics, entries), 2);
+    replica.apply(media_route(&id(3)));
+    assert!(matches!(
+        coordinator.cached_route(&id(1), false).await,
+        CachedLookup::View
+    ));
     assert_eq!(
-        value(sum) - before,
-        2,
-        "generation-insert sweep walked two expired entries"
+        metric(&metrics, entries),
+        1,
+        "stale lookup removes one entry"
     );
-    assert_eq!(value(entries), 1);
 }
 
-/// C-07 M5 (PLEX-FACADE-PAGING §2.4, §5.4). The measurement's reading of
-/// "store reads per session" depends on this: while one Store read for a
-/// capability is outstanding, every other lookup of that capability
-/// waits on its `route_queries` shard and is then answered by the cache
-/// the first read filled. The gate holds the first read open until every
-/// lookup has run as far as it can, so this does not pass by timing.
+/// A standalone Store is also the applied view. Concurrent misses use one
+/// local read, and the followers get the result within its observation lease.
 #[tokio::test]
 async fn concurrent_lookups_of_one_session_produce_one_store_read() {
     use plurx_core::cluster::membership::MembershipManager;
@@ -3739,11 +3731,7 @@ async fn concurrent_lookups_of_one_session_produce_one_store_read() {
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
     let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
     let metrics = coordinator.route_cache_metrics();
-    let gate = Arc::new(tokio::sync::Semaphore::new(0));
-    *coordinator
-        .route_store_gate
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
+    let (entered, gate) = coordinator.hold_route_store_for_test();
     let session_id = "00000000-0000-4000-8000-0000000000d4";
     let lookups = (0..LOOKUPS)
         .map(|_| {
@@ -3751,16 +3739,15 @@ async fn concurrent_lookups_of_one_session_produce_one_store_read() {
             tokio::spawn(async move { coordinator.route(session_id).await })
         })
         .collect::<Vec<_>>();
-    // A current-thread runtime: yielding lets every spawned lookup run
-    // until it parks, either at the gate or behind its query shard.
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("the first reader entered the Store path");
     for _ in 0..256 {
         tokio::task::yield_now().await;
     }
-    assert_eq!(
-        metrics.lookups(RouteLookup::Store),
-        1,
-        "while one Store read is outstanding, the other lookups of the same capability must wait behind its single-flight shard instead of reading the Store"
-    );
+    let shard = route_hash(session_id) % coordinator.route_queries.len();
+    assert!(coordinator.route_queries[shard].try_lock().is_err());
+    assert_eq!(metrics.lookups(RouteLookup::View), 0);
     gate.close();
     for lookup in lookups {
         assert!(lookup
@@ -3769,13 +3756,10 @@ async fn concurrent_lookups_of_one_session_produce_one_store_read() {
             .expect("lookup")
             .is_none());
     }
-    assert_eq!(metrics.lookups(RouteLookup::Store), 1);
-    assert_eq!(
-        metrics.lookups(RouteLookup::SingleFlightHit),
-        LOOKUPS - 1,
-        "every waiter is answered by the cache the one read filled"
-    );
+    assert_eq!(metrics.lookups(RouteLookup::View), 1);
+    assert_eq!(metrics.lookups(RouteLookup::Observed), LOOKUPS - 1);
     assert_eq!(metrics.lookups(RouteLookup::CacheHit), 0);
+    assert_eq!(metrics.lookups(RouteLookup::Store), 0);
 }
 
 /// The route-cache exposition has a fixed series count whatever traffic
@@ -3801,9 +3785,9 @@ fn route_cache_exposition_is_bounded_and_its_labels_match_their_bounds() {
     metrics.cache_entries(17);
     let exposition = metrics.prometheus();
     let series = |text: &str| text.lines().filter(|line| !line.starts_with('#')).count();
-    // 3 lookup results; 4 sites x (5 bounds + Inf + sum + count); 7 prune
+    // 5 lookup results; 4 sites x (5 bounds + Inf + sum + count); 7 prune
     // bounds + Inf + sum + count; 1 gauge.
-    assert_eq!(series(&empty), 3 + 4 * 8 + 10 + 1);
+    assert_eq!(series(&empty), 5 + 4 * 8 + 10 + 1);
     assert_eq!(series(&exposition), series(&empty));
     for line in [
         "plurx_media_session_route_lock_seconds_bucket{site=\"insert\",le=\"0.00001\"} 0\n",
@@ -3827,11 +3811,9 @@ fn route_cache_exposition_is_bounded_and_its_labels_match_their_bounds() {
 
 #[tokio::test]
 async fn route_misses_are_single_flight_and_activation_supersedes_them() {
-    use plurx_core::cluster::membership::MembershipManager;
-    use plurx_core::store::SqliteStore;
-
-    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-    let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
+    // No serving proof: every fact the cache holds is `Observed` and lives
+    // out its lease, so the cache's own ordering is what answers (E1c).
+    let (coordinator, _replica, _store) = super::route_view_tests::coordinator_over_replica(false);
     let session_id = "00000000-0000-4000-8000-0000000000c1";
     assert!(coordinator
         .route(session_id)
@@ -3858,7 +3840,12 @@ async fn route_misses_are_single_flight_and_activation_supersedes_them() {
     coordinator.routes.lock().await.remove(session_id);
     assert!(
         coordinator
-            .cache_queried_route_result(session_id, None, stale_miss_generation)
+            .cache_queried_route_result(
+                session_id,
+                None,
+                coordinator.observed_now(),
+                stale_miss_generation,
+            )
             .await
             .is_none(),
         "a stale in-flight miss must remain suppressed after cache eviction"
@@ -3887,7 +3874,12 @@ async fn route_misses_are_single_flight_and_activation_supersedes_them() {
     coordinator.routes.lock().await.remove(session_id);
     assert!(
         coordinator
-            .cache_queried_route_result(session_id, Some(stale_active), stale_active_generation,)
+            .cache_queried_route_result(
+                session_id,
+                Some(stale_active),
+                coordinator.observed_now(),
+                stale_active_generation,
+            )
             .await
             .is_none(),
         "an active read begun before fencing must stay suppressed after eviction"
@@ -4323,6 +4315,7 @@ async fn terminal_control_relay_accepts_and_replays_the_exact_ended_response() {
         let response = validated_control_relay_response(
             PeerResponse {
                 dv_processing_header: None,
+                processing_skip_header: None,
                 clock_timing: None,
                 status: reqwest::StatusCode::OK,
                 body: body.clone(),
@@ -4353,6 +4346,7 @@ async fn processing_owner_header_preserves_old_control_body_and_refuses_wrong_in
         let response = validated_control_relay_response(
             PeerResponse {
                 dv_processing_header: Some(header),
+                processing_skip_header: None,
                 clock_timing: None,
                 status: reqwest::StatusCode::OK,
                 body: body.clone(),
@@ -4391,4 +4385,520 @@ fn adaptive_settlement_guards_preserve_overlapping_ordinary_protection() {
     drop(second);
     assert!(!settlement_protected_ids().contains(&session));
     assert!(AdaptiveSessionSettlementGuard::try_begin(Uuid::nil()).is_none());
+}
+
+/// Review 1, S4 (D2: a dropped remote reply). A start whose reply was lost
+/// asks the same worker again and takes the session that worker already
+/// holds under the incarnation (`Recovered`), so the claim keeps one producer;
+/// a definitive answer is never asked twice; and a loss that persists through
+/// the re-ask comes back as that loss, which is when the create moves to its
+/// next candidate (the remaining second-producer window, PLAYBACK-START-PLAN
+/// §8).
+#[tokio::test]
+async fn a_dropped_remote_start_reply_takes_the_session_the_worker_already_holds() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let held = |ownership| {
+        Ok(RemoteSessionStart {
+            info: valid_start_response(),
+            ownership,
+        })
+    };
+
+    for lost in [
+        PeerTransportError::TimedOut,
+        PeerTransportError::Unreachable,
+    ] {
+        let asks = AtomicUsize::new(0);
+        let started = start_remote_recovering_lost_reply(deadline, || {
+            let ask = asks.fetch_add(1, SeqCst);
+            async move {
+                if ask == 0 {
+                    // The worker created the session; its reply never arrived.
+                    Err(RemoteStartFailure::Transport(lost))
+                } else {
+                    held(RemoteSessionStartOwnership::Recovered)
+                }
+            }
+        })
+        .await;
+        assert_eq!(
+            asks.load(SeqCst),
+            2,
+            "{lost:?}: the same worker is asked again"
+        );
+        let started = match started {
+            Ok(started) => started,
+            Err(failure) => panic!("{lost:?}: the re-ask was not recovered: {failure:?}"),
+        };
+        assert_eq!(started.ownership, RemoteSessionStartOwnership::Recovered);
+        assert_eq!(started.info.session_id, valid_start_response().session_id);
+    }
+
+    for answer in [
+        held(RemoteSessionStartOwnership::Created),
+        Err(RemoteStartFailure::Unavailable),
+        Err(RemoteStartFailure::Terminal(
+            crate::transcode::TRANSCODE_HEIGHT_UNAVAILABLE,
+        )),
+        Err(RemoteStartFailure::Transport(
+            PeerTransportError::InvalidResponse,
+        )),
+    ] {
+        let asks = AtomicUsize::new(0);
+        let expected_failure = answer.as_ref().err().copied();
+        let mut answer = Some(answer);
+        let result = start_remote_recovering_lost_reply(deadline, || {
+            asks.fetch_add(1, SeqCst);
+            std::future::ready(answer.take().expect("asked once"))
+        })
+        .await;
+        assert_eq!(
+            asks.load(SeqCst),
+            1,
+            "a definitive answer is not asked twice"
+        );
+        assert_eq!(result.err(), expected_failure);
+    }
+
+    // Still lost on the re-ask: the loss is the answer, and the caller moves on.
+    let asks = AtomicUsize::new(0);
+    let result = start_remote_recovering_lost_reply(deadline, || {
+        asks.fetch_add(1, SeqCst);
+        std::future::ready(Err(RemoteStartFailure::Transport(
+            PeerTransportError::TimedOut,
+        )))
+    })
+    .await;
+    assert_eq!(asks.load(SeqCst), 2);
+    assert_eq!(
+        result.err(),
+        Some(RemoteStartFailure::Transport(PeerTransportError::TimedOut))
+    );
+
+    // Past the placement deadline there is no second ask.
+    let asks = AtomicUsize::new(0);
+    let result = start_remote_recovering_lost_reply(tokio::time::Instant::now(), || {
+        asks.fetch_add(1, SeqCst);
+        std::future::ready(Err(RemoteStartFailure::Transport(
+            PeerTransportError::TimedOut,
+        )))
+    })
+    .await;
+    assert_eq!(asks.load(SeqCst), 1);
+    assert!(result.is_err());
+}
+
+/// D2 item 2, remote arm: a worker's terminal capacity refusal reaches the
+/// ingress as its code, so the viewer is not told to wait for a start that no
+/// retry can make; every other 503 — an older worker's bodiless one, a fence,
+/// a waitable refusal — stays the waitable answer.
+/// D3b, review S3: an owner whose plan differs at Authority answers the 409 a
+/// changed source always had, with a body naming the planning refusal; the
+/// ingress reads exactly that body as `PlanChanged`. A bare 409 (an older
+/// worker, a reused request id) and any other code stay a transport failure.
+#[tokio::test]
+async fn an_owner_plan_refusal_crosses_to_the_ingress_as_plan_changed() {
+    use axum::response::IntoResponse;
+    let worker =
+        crate::http::internal_media_sessions::RemoteStartError::PlanChanged.into_response();
+    assert_eq!(worker.status(), reqwest::StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(worker.into_body(), 4096)
+        .await
+        .expect("worker body");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("a JSON body"),
+        serde_json::json!({"code": "catalog_input_unavailable"})
+    );
+    assert!(remote_start_plan_changed(&body));
+    for other in [
+        &b""[..],
+        br#"{"code":"transcode_capacity_pending"}"#,
+        br#"{"error":"catalog_input_unavailable"}"#,
+        b"catalog_input_unavailable",
+    ] {
+        assert!(
+            !remote_start_plan_changed(other),
+            "{}",
+            String::from_utf8_lossy(other)
+        );
+    }
+    assert!(crate::http::hls::start_plan::ends_placement(
+        &RemoteStartFailure::PlanChanged
+    ));
+    for failure in [
+        RemoteStartFailure::Unavailable,
+        RemoteStartFailure::Terminal(crate::transcode::TRANSCODE_HEIGHT_UNAVAILABLE),
+        RemoteStartFailure::Transport(PeerTransportError::InvalidResponse),
+    ] {
+        assert!(!crate::http::hls::start_plan::ends_placement(&failure));
+    }
+}
+
+#[tokio::test]
+async fn a_worker_terminal_capacity_refusal_crosses_to_the_ingress_by_code() {
+    use axum::response::IntoResponse;
+    let worker = crate::http::internal_media_sessions::RemoteStartError::TerminalCapacity(
+        crate::transcode::TRANSCODE_HEIGHT_UNAVAILABLE,
+    )
+    .into_response();
+    assert_eq!(worker.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(worker.into_body(), 4096)
+        .await
+        .expect("worker body");
+    assert_eq!(
+        remote_start_refusal(&body),
+        RemoteStartFailure::Terminal(crate::transcode::TRANSCODE_HEIGHT_UNAVAILABLE)
+    );
+    for waitable in [
+        &b""[..],
+        crate::serving_fence::SERVING_FENCED_JSON.as_bytes(),
+        br#"{"code":"transcode_capacity_pending"}"#,
+        br#"{"code":"not_a_contract_code"}"#,
+    ] {
+        assert_eq!(
+            remote_start_refusal(waitable),
+            RemoteStartFailure::Unavailable,
+            "{}",
+            String::from_utf8_lossy(waitable)
+        );
+    }
+}
+
+/// E1a baseline: every session-keyed route read in production names the site
+/// that made it, so `plurx_media_session_route_reads_total` accounts for all of
+/// them. A new direct `media_session_route` call would be an uncounted read.
+#[test]
+fn every_session_keyed_route_read_names_its_site() {
+    fn walk(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(directory).expect("source directory") {
+            let path = entry.expect("source entry").path();
+            if path.is_dir() {
+                walk(&path, files);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    walk(&root, &mut files);
+    let mut direct = Vec::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(&root)
+            .expect("under src")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let file = relative.rsplit('/').next().unwrap_or_default();
+        if relative.contains("/tests/")
+            || relative.starts_with("tests/")
+            || file == "tests.rs"
+            || file.ends_with("_tests.rs")
+            || relative.contains("fixture")
+        {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("read source");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or_default();
+        for (line, text) in production.lines().enumerate() {
+            if text.contains(".media_session_route(") {
+                direct.push(format!("{relative}:{}", line + 1));
+            }
+        }
+    }
+    assert_eq!(direct.len(), 1, "uncounted route reads: {direct:?}");
+    assert!(direct[0].starts_with("media_sessions.rs:"), "{direct:?}");
+    let helper = include_str!("../media_sessions.rs")
+        .split_once("pub(crate) async fn read_media_session_route")
+        .expect("the counted read")
+        .1
+        .split_once("\n}\n")
+        .expect("end of the counted read")
+        .0;
+    assert!(helper.contains("ROUTE_READS[site.index()][0].fetch_add(1, Ordering::Relaxed);"));
+    assert!(helper.contains("store.media_session_route(session_id).await"));
+}
+
+#[test]
+fn route_reads_are_exposed_for_every_site_and_source() {
+    // Each variant owns its own label and its own counter row.
+    let labels: Vec<&str> = RouteReadSite::ALL.iter().map(|site| site.label()).collect();
+    for (position, site) in RouteReadSite::ALL.iter().enumerate() {
+        assert_eq!(site.index(), position, "{site:?} indexes its own row");
+    }
+    let mut unique = labels.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        labels.len(),
+        "labels are distinct: {labels:?}"
+    );
+    crate::media_sessions::ROUTE_READS[RouteReadSite::ReceiptFence.index()][0]
+        .fetch_add(1, Ordering::Relaxed);
+    let exposition = crate::media_sessions::prometheus();
+    assert!(exposition.contains("# TYPE plurx_media_session_route_reads_total counter\n"));
+    for site in [
+        "routing",
+        "status_first",
+        "status_bracket",
+        "status_reclassify",
+        "control",
+        "verdict",
+        "receipt_fence",
+        "receipt_candidate",
+        "observer",
+    ] {
+        for source in ["authority", "view"] {
+            assert!(
+                exposition.contains(&format!(
+                    "plurx_media_session_route_reads_total{{site=\"{site}\",source=\"{source}\"}} "
+                )),
+                "{site}/{source}"
+            );
+        }
+    }
+    assert!(!exposition.contains(
+        "plurx_media_session_route_reads_total{site=\"receipt_fence\",source=\"authority\"} 0\n"
+    ));
+}
+
+#[tokio::test]
+async fn skipped_processing_owner_reason_survives_relay_only_for_its_generation() {
+    let request = terminal_relay_request();
+    let expected = terminal_relay_response(&request);
+    for generation in [&request.generation, &request.session_id] {
+        let response = validated_control_relay_response(
+            PeerResponse {
+                dv_processing_header: None,
+                processing_skip_header: Some(
+                    serde_json::json!({"generation": generation,
+                "reason": "the title is being measured"})
+                    .to_string(),
+                ),
+                clock_timing: None,
+                status: reqwest::StatusCode::OK,
+                body: serde_json::to_vec(&expected).expect("legacy body"),
+            },
+            &request,
+        )
+        .expect("compatible relay");
+        assert_eq!(
+            response.headers().contains_key("x-plurx-processing-skip"),
+            generation == &request.generation
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .expect("bounded body");
+        let parsed: crate::playback_control::ControlResponseV1 =
+            serde_json::from_slice(&bytes).expect("strict legacy body");
+        assert_eq!(parsed, expected);
+    }
+}
+
+/// A transformed Encode request cannot reconstruct its original Copy query.
+/// Retain that descriptive scope through the same strict worker/durable wire.
+fn processed_catalog_provenance_fixture() -> RemoteStartRequest {
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    let mut request = valid_start_request();
+    let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
+        "v":2,"video":[{"codec":"hevc","profiles":["main10"],"present":["sdr","pq"],"max_height":2160}],
+        "audio":["aac","eac3"],"audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
+            {"codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}],
+        "containers":["mp4","mkv"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"]
+    })).expect("full capabilities");
+    request.request.hdr10 = true;
+    request.request.audio_claim =
+        plurx_core::playback::audio::AudioClaim::from_caps(&caps).expect("claim");
+    request.decoder_caps = Some(
+        crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1).expect("decoder"),
+    );
+    let digest = [0x71; 32];
+    let candidate = QualityCandidate {
+        id: CandidateId::for_recipe_digest(digest),
+        recipe_digest: digest,
+        route: CandidateRoute::Encode,
+        planned_codec: Some("hevc".into()),
+        processed_dv: true,
+        normalized_geometry: true,
+        width: 1280,
+        height: 720,
+        target_height: 720,
+        average_bps: None,
+        peak_bps: None,
+        grade: plurx_core::transcode::OutputGrade::Hdr10,
+        decoder_compatible: true,
+        complete_cache: false,
+        sustainable: true,
+    };
+    let query = crate::media_pool::QualityCatalogRequest {
+        file_id: request.request.file_id,
+        source_size: request.source_size,
+        source_mtime: request.source_mtime,
+        caps: caps.clone(),
+        audio_index: request.request.audio_index,
+        audio_offset_ms: request.request.audio_offset_ms,
+        subtitle_burn: request.request.subtitle_burn,
+        presentation: request.request.presentation,
+        audio_claim: request.request.audio_claim.clone(),
+        audio_delivery: None,
+        copy_contract: Some((false, true, true)),
+    };
+    request.candidate_id = Some(candidate.id);
+    request.candidate_catalog = Some(CandidateCatalogContext {
+        caps,
+        candidate,
+        binding: crate::media_pool::PlanningBinding {
+            generation: 1,
+            source_digest: "0".repeat(64),
+        },
+        catalog_query: Some(query),
+    });
+    request
+}
+
+#[test]
+fn processed_catalog_provenance_survives_the_worker_and_durable_wire() {
+    let request = processed_catalog_provenance_fixture();
+    assert!(request.is_valid());
+    assert!(matches!(
+        request.request.kind,
+        SessionKind::Transcode { .. }
+    ));
+    let wire = serde_json::to_value(&request).expect("strict envelope");
+    let restored: RemoteStartRequest = serde_json::from_value(wire).expect("wire roundtrip");
+    assert!(restored.is_valid());
+    let context = restored
+        .candidate_catalog
+        .as_ref()
+        .expect("catalog context");
+    let query = context
+        .validated_catalog_query(
+            &restored.request,
+            restored.source_size,
+            restored.source_mtime,
+        )
+        .expect("original query");
+    assert_eq!(query.copy_contract, Some((false, true, true)));
+    assert_eq!(query.caps.audio, vec!["aac".to_owned(), "eac3".to_owned()]);
+    assert_eq!(
+        query.caps.hls_hevc_sample_entries,
+        Some(vec!["hvc1".to_owned()])
+    );
+    assert_eq!(query.caps.audio_sinks.len(), 2);
+    // Removing descriptive provenance grants no authority to guess a
+    // processed query from its transformed carrier.
+    let mut missing = restored.clone();
+    missing
+        .candidate_catalog
+        .as_mut()
+        .expect("catalog")
+        .catalog_query = None;
+    assert!(missing
+        .candidate_catalog
+        .as_ref()
+        .expect("catalog")
+        .validated_catalog_query(&missing.request, missing.source_size, missing.source_mtime)
+        .is_none());
+}
+
+#[test]
+fn catalog_provenance_cannot_change_source_tracks_or_capabilities() {
+    let request = processed_catalog_provenance_fixture();
+    for mutation in [
+        "file",
+        "size",
+        "mtime",
+        "track",
+        "offset",
+        "subtitle",
+        "presentation",
+        "caps",
+        "claim",
+        "copy_contract",
+    ] {
+        let mut changed = request.clone();
+        let query = changed
+            .candidate_catalog
+            .as_mut()
+            .expect("catalog")
+            .catalog_query
+            .as_mut()
+            .expect("query");
+        match mutation {
+            "file" => query.file_id += 1,
+            "size" => query.source_size += 1,
+            "mtime" => query.source_mtime += 1,
+            "track" => query.audio_index = Some(2),
+            "offset" => query.audio_offset_ms = 175,
+            "subtitle" => query.subtitle_burn = Some(3),
+            "presentation" => query.presentation = crate::transcode::Presentation::Live,
+            "caps" => query.caps.hls_hevc_sample_entries = None,
+            "claim" => query.audio_claim = None,
+            "copy_contract" => query.copy_contract = Some((false, false, true)),
+            _ => unreachable!(),
+        }
+        assert!(
+            !changed.is_valid(),
+            "mismatched {mutation} is not accepted as catalog provenance"
+        );
+    }
+}
+
+/// `peer_base`'s answer for every roster case, against the body it replaced
+/// (a `media_peers` read per call, copied from `dd76bb88e`).
+#[test]
+fn owner_base_answers_as_the_media_peers_lookup_did() {
+    use plurx_core::cluster::membership::ActivityPeer;
+    fn was(
+        answer: Option<Result<Vec<ActivityPeer>, ()>>,
+        node_id: &str,
+    ) -> Result<String, PeerTransportError> {
+        answer
+            .ok_or(PeerTransportError::TimedOut)?
+            .map_err(|_| PeerTransportError::Unreachable)?
+            .into_iter()
+            .find(|peer| peer.node_id == node_id && peer.reachable)
+            .and_then(|peer| peer.http_base)
+            .ok_or(PeerTransportError::Unreachable)
+    }
+    let peer = |node: &str, reachable: bool, base: bool| ActivityPeer {
+        node_id: node.to_owned(),
+        raft_id: 2,
+        http_base: base.then(|| format!("http://{node}.invalid")),
+        reachable,
+    };
+    let roster = vec![
+        peer("up", true, true),
+        peer("down", false, true),
+        peer("baseless", true, false),
+    ];
+    for node in ["up", "down", "baseless", "missing"] {
+        let new = owner_base(
+            Some(Ok(crate::cluster::Peers::for_test(roster.clone()))),
+            node,
+        );
+        assert_eq!(new, was(Some(Ok(roster.clone())), node), "{node}");
+    }
+    assert_eq!(
+        owner_base(
+            Some(Ok(crate::cluster::Peers::for_test(roster.clone()))),
+            "up"
+        ),
+        Ok("http://up.invalid".to_owned())
+    );
+    assert_eq!(owner_base(None, "up"), Err(PeerTransportError::TimedOut));
+    assert_eq!(was(None, "up"), Err(PeerTransportError::TimedOut));
+    assert_eq!(
+        owner_base(Some(Err(crate::cluster::ClusterError::for_test())), "up"),
+        Err(PeerTransportError::Unreachable)
+    );
+    assert_eq!(
+        was(Some(Err(())), "up"),
+        Err(PeerTransportError::Unreachable)
+    );
 }

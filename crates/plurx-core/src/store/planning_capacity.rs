@@ -162,7 +162,7 @@ pub(super) fn selected_keys(keys: &[&str]) -> Result<String, StoreError> {
     all.extend(CAPACITY_KEYS);
     all.sort_unstable();
     all.dedup();
-    super::selected_settings_json(&all)
+    super::selected_planning_keys_json(&all)
 }
 
 /// Exactly two full statement templates. The fallback mentions NO optional

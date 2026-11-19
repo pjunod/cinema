@@ -1,11 +1,16 @@
 "use strict";
+require("./control-final-exchange.test.js");
+require("./prepared-control-ownership.test.js");
+require("./native-forward-alignment.test.js");
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
 // Native startup is part of the same required web-control lane.
 require("./native-hls-startup.test.js");
+require("./native-source-ownership.test.js");
 require("./paused-hls-resume.test.js");
 require("./prepared-frame-rendezvous.test.js");
+require("./resume-quality-boundary.test.js");
 const fs = require("node:fs");
 const path = require("node:path");
 const control = require("../../crates/plurxd/src/web/playback-control.js");
@@ -32,8 +37,10 @@ const SHIPPED_UI = shellSource().bodyScript;
 // Keep its validation real: diagnostic files below use canonical local IDs.
 const FILE_CONTEXT_SOURCE=fs.readFileSync(path.join(__dirname,
   "../../crates/plurxd/src/web/core/file-context.js"),"utf8");
+const PLAYBACK_FRAME_SOURCE=fs.readFileSync(path.join(__dirname,
+  "../../crates/plurxd/src/web/player/video-frames.js"),"utf8");
 function PlaybackContextFunction(...args){
-  args[args.length-1]=FILE_CONTEXT_SOURCE+"\n"+args[args.length-1];
+  args[args.length-1]=FILE_CONTEXT_SOURCE+"\n"+PLAYBACK_FRAME_SOURCE+"\n"+args[args.length-1];
   return new Function(...args);
 }
 const DECLARATIONS = ["\nfunction ", "\nasync function "];
@@ -165,7 +172,8 @@ function fullOpenHarness() {
     "const requestIds=[];function newRequestId(){const id='rq-'+requestIds.length;requestIds.push(id);return id;}",
     shippedSource("playbackRetryDelay"),shippedSource("playbackCreateRetryContext"),
     shippedSource("openSessionRetryingNotYet"),
-    "function prePlayApplication(d,s){return {subtitle:s?.subtitle??null,burnedSub:null,textSub:null};} function autoskipOn(){return false;}",
+    shippedSource("prePlayBurnNeeded"),shippedSource("prePlayApplication"),
+    "function autoskipOn(){return false;}",
     "function newAttempt(){} function selectedAudioIndex(p){return p.audio[p.curAudio]?.index||0;} function setupAirplay(){} function setupTrackMenus(){}",
     "function renderPlayerInfo(){} function autoNextOn(){return false;} function useNativeHls(){return false;} function segmentedRemuxOk(){return false;}",
     "function tok(url){return url;} function armStall(){} function remuxUrl(url,audio,pos){return '/remux?audio='+audio+'&start='+pos;}",
@@ -285,6 +293,54 @@ function bootstrap() {
   };
 }
 
+test("native default subtitle waits for track registration without reopening",async()=>{
+  const listeners=new Set();
+  const tracks={addEventListener(type,fn){assert.equal(type,"addtrack");listeners.add(fn);},
+    removeEventListener(type,fn){listeners.delete(fn);},[Symbol.iterator]:function*(){if(this[0])yield this[0];}};
+  const v={textTracks:tracks,querySelectorAll:()=>[]};
+  const p={sessionId:"native-start",curSub:0,subs:[{index:0}],offset:0,mediaAttachment:{},captionIntentSerial:1};
+  const build=new PlaybackContextFunction("video","player",[
+    "let PLAYER=player;const document={getElementById:()=>video};",
+    "function pbSyncSubIcon(){}function nativeHlsSubtitleOrdinal(){return 0;}",
+    shippedSource("clearSubs"),shippedSource("attachPlaybackSubtitle"),
+    "return {attach:()=>attachPlaybackSubtitle(video,player,0),clear:()=>clearSubs(video),replace(){player.mediaAttachment={};}};",
+  ].join("\n"));
+  const h=build(v,p);
+  await h.attach();
+  assert.equal(listeners.size,1,"selection waits on the track edge");
+  tracks[0]={mode:"disabled"};for(const fn of [...listeners])fn();
+  assert.equal(tracks[0].mode,"showing");assert.equal(listeners.size,0);
+  delete tracks[0];await h.attach();h.replace();
+  tracks[0]={mode:"disabled"};for(const fn of [...listeners])fn();
+  assert.equal(tracks[0].mode,"disabled","a replaced attachment cannot select a late track");
+  assert.equal(listeners.size,0);
+  delete tracks[0];await h.attach();assert.equal(listeners.size,1);
+  h.clear();assert.equal(listeners.size,0,"Close/replacement releases the listener");
+});
+
+test("Gran Turismo's default subtitle cannot supersede a slow initial HLS create", async()=>{
+  const h=fullOpenHarness();
+  const opening=h.play(7095,"Gran Turismo",0,8_055_589,{});
+  await flush();
+  h.decisions[0].resolve({method:"remux",source:{video_codec:"h264",duration_ms:8_055_589},
+    delivery:{requires_hls:true},audio:[{index:0,default:true}],
+    subtitles:[{index:0,codec:"subrip",text:true,default:true}],
+    selection:{subtitle_index:0,subtitle_requires_burn_in:false}});
+  for(let i=0;i<12;i++)await flush();
+  assert.equal(h.sessions.length,1);
+  assert.equal(h.current().preplay.subtitle,0,"default is frozen in the initial recipe");
+  h.advance(800);
+  for(let i=0;i<12;i++)await flush();
+  assert.equal(h.decisions.length,1,"no automatic subtitle command starts another play");
+  assert.equal(h.sessions.length,1);
+  assert.equal(h.sessions[0].signal.aborted,false,"the original create remains owned");
+  h.sessions[0].resolve({});
+  await opening;
+  assert.equal(h.current().curSub,0);
+  assert.equal(h.video.textTracks[0].mode,"showing");
+  assert.equal(h.sessions.length,1);
+});
+
 test("a refused cold start keeps its player identity and can close", async()=>{
  for(const previouslyPlayed of [false,true]){
   const h=fullOpenHarness();
@@ -378,6 +434,8 @@ async function flushDeep() {
 }
 
 async function main() {
+  const preparedDelivery=preparedDeliveryTests();
+  if(process.argv.includes('--prepared-delivery')) return preparedDelivery;
   const preparedRecovery=preparedHlsRecoveryTests();
   if(process.argv.includes('--prepared-hls-recovery')) return preparedRecovery;
   await test("Close and pagehide retain an unacknowledged commit's predecessor after decoder retirement",()=>{
@@ -1054,7 +1112,7 @@ async function main() {
     const callbacks=[];
     const queue=new PlaybackContextFunction("getPlayer",shippedSource("queuePlaybackFrame").replaceAll("PLAYER","getPlayer()")+"; return queuePlaybackFrame;")(()=>p);
     const p={started:true,offset:0,source:{video_codec:"h264"},controlHasFrameCallbacks:true};
-    const v={currentTime:80,paused:false,seeking:false,readyState:2,
+    const v={currentTime:80,paused:false,seeking:false,readyState:2,src:"blob:frame-epoch-fixture",
       addEventListener(){},removeEventListener(){},cancelVideoFrameCallback(){},
       requestVideoFrameCallback:callback=>callbacks.push(callback)};
     const epochs=[];
@@ -1079,17 +1137,25 @@ async function main() {
     const p={controlPresentationEpoch:0};
     let current=p;
     const queue=new PlaybackContextFunction("getPlayer",shippedSource("queuePlaybackFrame").replaceAll("PLAYER","getPlayer()")+"; return queuePlaybackFrame;")(()=>current);
-    const events=new Map(),registered=[],delivered=[],cancelled=[];
-    const v={readyState:0,seeking:false,
-      addEventListener(type,fn){if(!events.has(type))events.set(type,new Set());events.get(type).add(fn);},
-      removeEventListener(type,fn){events.get(type)?.delete(fn);},
+    const registered=[],delivered=[],cancelled=[];
+    const makeVideo=()=>Object.assign(new EventTarget(),{readyState:0,seeking:false,paused:false,listeners:new Map(),
+      addEventListener(type,fn,options){
+        if(!this.listeners.has(type))this.listeners.set(type,new Set());
+        this.listeners.get(type).add(fn);
+        EventTarget.prototype.addEventListener.call(this,type,fn,options);
+      },
+      removeEventListener(type,fn,options){
+        this.listeners.get(type)?.delete(fn);
+        EventTarget.prototype.removeEventListener.call(this,type,fn,options);
+      },
       cancelVideoFrameCallback(id){cancelled.push(id);},
       requestVideoFrameCallback(fn){registered.push({fn,deliverable:this.readyState>=2&&!this.seeking});return registered.length;}
-    };
-    const emit=type=>[...(events.get(type)||[])].forEach(fn=>fn());
+    });
+    const v=makeVideo(),events=v.listeners;
+    const emit=type=>v.dispatchEvent(new Event(type));
     queue(v,p,(_now,meta,epoch)=>delivered.push({time:meta.mediaTime,epoch}));
     assert.equal(registered.length,0,"initial frame registration waits for current media data");
-    v.readyState=2;v.seeking=true;emit("loadeddata");
+    v.readyState=3;v.seeking=true;emit("loadeddata");
     assert.equal(registered.length,0,"loadeddata during the initial seek must not strand a frame request");
     p.controlPresentationEpoch=1;v.seeking=false;emit("seeked");
     assert.equal(registered.length,1,"seek completion registers exactly one frame request");
@@ -1099,16 +1165,16 @@ async function main() {
     assert.deepEqual(delivered,[{time:566.055,epoch:0}],"waiting must preserve the request's presentation epoch");
     emit("loadeddata");emit("seeked");assert.equal(registered.length,1,"readiness listeners retire after registration");
     queue(v,p,()=>{});assert.equal(registered.length,2,"established playback immediately queues its next frame");
-    v.readyState=0;queue(v,p,()=>{});current={};v.readyState=2;emit("loadeddata");
+    v.readyState=0;queue(v,p,()=>{});current={};v.readyState=3;emit("loadeddata");
     assert.equal(registered.length,2,"a replaced player cannot register a delayed callback");
     current=p;v.readyState=0;queue(v,p,()=>{throw new Error("superseded listener");});
-    queue(v,p,()=>delivered.push("replacement"));v.readyState=2;emit("loadeddata");
+    queue(v,p,()=>delivered.push("replacement"));v.readyState=3;emit("loadeddata");
     assert.equal(registered.length,3,"a new observer replaces the element's pending readiness listener");
     assert.equal(typeof v._plurxFrameCancel,"function");
     const beforeReset=registered[2];
     v.readyState=0;emit("emptied");
     assert.ok(cancelled.includes(3),"source replacement cancels the outstanding native request");
-    v.readyState=2;v.seeking=true;emit("loadeddata");
+    v.readyState=3;v.seeking=true;emit("loadeddata");
     assert.equal(registered.length,3,"replacement data cannot rearm before the seek finishes");
     v.seeking=false;emit("seeked");assert.equal(registered.length,4);
     beforeReset.fn(200,{mediaTime:9});
@@ -1121,7 +1187,7 @@ async function main() {
     assert.ok([...events.values()].every(set=>set.size===0),"retirement removes every media lifecycle listener");
     queue(v,p,()=>delivered.push("retired-element"));
     const retiredRequest=registered.at(-1);
-    const adopted={...v,_plurxFrameCancel:null};
+    const adopted=Object.assign(makeVideo(),{readyState:v.readyState,seeking:v.seeking,paused:v.paused});
     queue(adopted,p,()=>delivered.push("adopted-element"));
     assert.equal(v._plurxFrameCancel,null,"adopting an element retires the player's former subscription");
     retiredRequest.fn(300,{mediaTime:61});
@@ -2410,11 +2476,18 @@ async function main() {
       effective_selection: { ...PREPARE_FIXTURE.effective_selection, audio_offset_ms: 15_001 } }],
     ["an unknown dynamic range", {
       effective_selection: { ...PREPARE_FIXTURE.effective_selection, dynamic_range: "hdr12" } }],
+    ["a string delivered DV profile", { delivered_dolby_vision_profile: "8" }],
+    ["a fractional delivered DV profile", { delivered_dolby_vision_profile: 8.1 }],
+    ["an out-of-range delivered DV profile", { delivered_dolby_vision_profile: 256 }],
     ["no effective_selection", { effective_selection: undefined }],
   ]) {
     assert.equal(control.validPreparation(Object.assign({}, PREPARE_FIXTURE, patch)), false,
       `${label} is refused`);
   }
+  assert.equal(control.validPreparation({...PREPARE_FIXTURE,
+    delivered_dolby_vision_profile:8,
+    effective_selection:{...PREPARE_FIXTURE.effective_selection,dynamic_range:"dolby_vision"}}),true);
+  assert.equal(control.validPreparation({...PREPARE_FIXTURE,delivered_dolby_vision_profile:null}),true);
   // …and a key this build has never heard of is tolerated: `ControlAction`
   // carries no `deny_unknown_fields`, so a later server may add one.
   assert.equal(control.validPreparation(
@@ -4111,9 +4184,9 @@ async function main() {
     const removed = [];
     const timers = new Map();
     const intervals = [];
-    let nextTimer = 1;
-    const element = (id) => ({
-      id, muted: id !== "video", volume: 1, paused: true, currentTime: 0,
+    let nextTimer = 1, nextFrame = 1;
+    const element = (id) => Object.assign(new EventTarget(), {
+      id, muted: id !== "video", volume: 1, paused: true, currentTime: 0, readyState: 4,
       playbackRate: 1, defaultPlaybackRate: 1,
       videoWidth: options.hasVideo === false ? 0 : 1920,
       style: { display: id === "video" ? "" : "none" },
@@ -4130,11 +4203,16 @@ async function main() {
       removeAttribute(name) { if (name === "src") this.src = null; delete this.attributes[name]; },
       querySelectorAll() { return []; },
       setAttribute(name, value) { this.attributes[name] = value; },
-      addEventListener(name, fn) { (this.listeners[name] = this.listeners[name] || []).push(fn); },
-      removeEventListener(name, fn) {
-        this.listeners[name] = (this.listeners[name] || []).filter((f) => f !== fn);
+      addEventListener(name, fn, options) {
+        const listeners=this.listeners[name]||(this.listeners[name]=[]);
+        if(!listeners.includes(fn)) listeners.push(fn);
+        EventTarget.prototype.addEventListener.call(this,name,fn,options);
       },
-      emit(name) { for (const fn of (this.listeners[name] || []).slice()) fn(); },
+      removeEventListener(name, fn, options) {
+        this.listeners[name] = (this.listeners[name] || []).filter((f) => f !== fn);
+        EventTarget.prototype.removeEventListener.call(this,name,fn,options);
+      },
+      emit(name) { this.dispatchEvent(new Event(name)); },
     });
     const live = element("video");
     live.buffered.owner = live;
@@ -4162,14 +4240,24 @@ async function main() {
         const node = element("");
         node.buffered.owner = node;
         if (options.videoFrameCallback !== false) {
-          node.requestVideoFrameCallback = (fn) => { node.frameCallback = fn; };
+          node.requestVideoFrameCallback = (fn) => {
+            node.frameCallback=fn;return node.frameCallbackId=nextFrame++;
+          };
+          node.cancelVideoFrameCallback = (id) => {
+            if(node.frameCallbackId===id) delete node.frameCallback;
+          };
         }
         created.push(node);
         return node;
       },
     };
     if (options.videoFrameCallback !== false) {
-      live.requestVideoFrameCallback = (fn) => { live.frameCallback = fn; };
+      live.requestVideoFrameCallback = (fn) => {
+        live.frameCallback=fn;return live.frameCallbackId=nextFrame++;
+      };
+      live.cancelVideoFrameCallback = (id) => {
+        if(live.frameCallbackId===id) delete live.frameCallback;
+      };
     }
     const instances = [];
     class FakeHls {
@@ -4187,7 +4275,7 @@ async function main() {
         this.events[event]=previous?(...args)=>{previous(...args);fn(...args);}:fn;
       }
       loadSource(url) { this.source = url; }
-      attachMedia(media) { this.media = media; }
+      attachMedia(media) { this.media = media;media.src="blob:prepared-hls-fixture"; }
       stopLoad() { this.loadsStopped = (this.loadsStopped || 0) + 1; }
       startLoad() { this.loadsResumed = (this.loadsResumed || 0) + 1; }
       recoverMediaError() { this.mediaRecoveries = (this.mediaRecoveries || 0) + 1; }
@@ -4270,14 +4358,21 @@ async function main() {
         shippedSource("resumePreparedIncumbentLoad"),
         shippedSource("notePreparedMetadata"), shippedSource("preparedBufferedThroughMs"),
         shippedConst("PREPARED_ALIGN_SEEK_MS"), shippedConst("PREPARED_ALIGN_ATTEMPTS"),
+        shippedConst("PREPARED_CHASE_ATTEMPTS"), shippedConst("PREPARED_CHASE_LEAD_MS"),
+        shippedSource("preparedSuccessorBehind"), shippedSource("preparedChaseTargetSec"),
+        shippedSource("preparedChaseIncumbent"),
         shippedSource("notePreparedBuffer"), shippedSource("preparedClockAlignmentSlackMs"), shippedSource("commitPreparedReplacement"),
         // §7.3: the commit is two phases now. Alignment finishes before the
         // successor is exposed, so a corrective seek can no longer put a
         // blank element in front of the viewer.
-        shippedSource("alignPreparedReplacement"), shippedSource("preparedAlignSeek"),
+        shippedSource("alignPreparedReplacement"), shippedSource("holdPreparedNativeSuccessor"), shippedSource("preparedAlignSeek"),
         shippedSource("preparedAlignedBuffered"), shippedSource("preparedFrameCadence"),
         shippedSource("preparedFramesMeet"), shippedSource("exposePreparedReplacementAtFrame"),
+        shippedSource("preparedDecodedFrameCount"), shippedSource("exposePreparedReplacementAfterDecodedFrames"),
         shippedSource("exposePreparedReplacement"),
+        // D1: the seam's outcome, reported (beacon only).
+        shippedSource("reportPreparedSeam"), shippedSource("reportPreparedSeamAfterWindow"),
+        shippedSource("preparedSeamReopenMark"), shippedSource("preparedSeamReopened"),
         // M3's instruments. Sliced rather than stubbed, so a commit in this
         // harness exercises the real recording and the assertions below can
         // read what it recorded.
@@ -4458,6 +4553,48 @@ async function main() {
 
   await test("prepared HLS buffer readiness follows incumbent clock and releases listener ownership",
     ()=>preparedBufferObservationTests(preparedHarness,preparedPlayer,prepareAction));
+
+  function preparedDeliveryTests(){
+    const prepareAction=(overrides={})=>({...PREPARE_FIXTURE,...overrides});
+    const preparedPlayer=overrides=>({offset:0,vod:true,hls:null,prepared:null,priorKbps:0,
+      controlAcknowledgement:null,pendingMediaChange:null,wantsPlayback:true,...overrides});
+    return Promise.all([
+    test("prepared delivery adopts verified Profile 8.1 over the candidate HDR10 base",()=>{
+    for(const catalogPresent of [true,false]){
+      const h=preparedHarness();
+      const candidate={id:"processed-p81",route:"encode",target_height:2160,grade:"hdr10"};
+      const p=h.set(preparedPlayer({hls:{destroy(){}},deliveredRange:"dolby_vision",deliveredDvProfile:7,
+        qualityCandidates:catalogPresent?[candidate]:[]}));
+      const state=h.handle(prepareAction({delivered_dolby_vision_profile:8,
+        effective_selection:{...PREPARE_FIXTURE.effective_selection,candidate_id:candidate.id,
+          dynamic_range:"dolby_vision"}}));
+      assert.equal(state.deliveredDvProfile,8);
+      h.instances[0].events.manifest();h.spare.ranges=[[0,30]];
+      h.instances[0].events.append();h.provePrepared();
+      assert.equal(p.deliveredRange,"dolby_vision","the built carrier wins with or without a catalog entry");
+      assert.equal(p.deliveredDvProfile,8,"source Profile7 cannot leak into the successor");
+    }
+  }),
+
+    test("prepared delivery clears absent profiles and rollback restores its predecessor profile",()=>{
+    for(const offeredRange of ["hdr10","dolby_vision"]){
+      const h=preparedHarness(),incumbent={destroy(){}};
+      const p=h.set(preparedPlayer({hls:incumbent,deliveredRange:"dolby_vision",deliveredDvProfile:7}));
+      h.handle(prepareAction({effective_selection:{...PREPARE_FIXTURE.effective_selection,
+        dynamic_range:offeredRange}}));
+      h.instances[0].events.manifest();h.spare.ranges=[[0,30]];
+      h.instances[0].events.append();h.provePrepared(false);
+      assert.equal(p.deliveredRange,offeredRange);
+      assert.equal(p.deliveredDvProfile,null,"an older offer cannot inherit source Profile7");
+      h.fireAll();
+      assert.equal(p.hls,incumbent);
+      assert.equal(p.deliveredRange,"dolby_vision");
+      assert.equal(p.deliveredDvProfile,7,"rollback restores the incumbent's own profile");
+    }
+  }),
+
+    ]);
+  }
 
   function preparedHlsRecoveryTests(){
     const preparedPlayer=overrides=>({offset:0,vod:true,hls:null,prepared:null,priorKbps:0,
@@ -7666,7 +7803,7 @@ test("late control terminal and typed 410 preserve authority retirement before n
       "function notifyPlaybackControl(){return null;}function clearStall(){}function pbTick(){}function pbSyncPlayIcon(){}function endWait(){}function clientLog(){}function playbackContext(){return {};}function playbackSurfaceGeneration(){return null;}",
       "function positionForPlaybackIntent(){return 42;}function stallRecoverySnapshot(p,v,facts){return facts;}function seekTo(...args){reopens.push(args);}function raisePlaybackSurface(){}function showStallRecoveryFailure(){throw Error('unexpected exhausted recovery');}function startTranscodeFallback(){rescues.push(true);}function finishStallRecovery(){return false;}function playbackIsReal(){return false;}function streamRejectionFacts(){return {};}",
       shippedSource('noteStreamFailure'),shippedSource('currentStreamFailureOverlay'),shippedSource('startPlaybackControl'),
-      shippedSource('recoverServingFencedAttachment'),shippedSource('wirePlayerMedia'),shippedSource('effectiveHdrProcessing'),shippedSource('clearEffectiveProcessing'),
+      shippedSource('recoverServingFencedAttachment'),shippedSource('wirePlayerMedia'),shippedSource('effectiveHdrProcessing'),shippedSource('processingSkipFromWire'),shippedSource('clearEffectiveProcessing'),
       "const v={error:{code:3},currentSrc:'/retired',getAttribute:()=>'/retired',addEventListener:(name,fn)=>callbacks[name]=fn};",
       "const reporter=startPlaybackControl(v,PLAYER,{lease_timeout_ms:1000});if(!reporter)throw Error('control owner did not start');wirePlayerMedia(v);",
       "return {player:PLAYER,reopens,rescues,retire:()=>noteStreamFailure(503,JSON.stringify({code:'serving_fenced',message:'proof expired'}),{attachment:PLAYER.mediaAttachment}),exchange:event=>reporter.config.onExchange({...event,request:{demand:'active',render_state:'playing'},capture:reporter.config.capture()}),error:()=>callbacks.error(),overlay:currentStreamFailureOverlay};",
@@ -7806,6 +7943,7 @@ function continuousChangeOwner(){
     "const released=[];function recordAutoSwitch(){}function releaseAutoFallback(p){released.push(p);}",
     "const clock={t:1};const performance={now:()=>clock.t};const timers=[];function setTimeout(run,ms){timers.push({run,ms});return timers.length;}function clearTimeout(){}",
     "const video={currentTime:0,paused:false,seeking:false,playbackRate:1};const document={getElementById:()=>video};function positionForPlaybackIntent(){return 0;}",
+    shippedConst("PREPARED_OFFER_BOUND_MS"),
     shippedConst("CONTINUOUS_CONTROL_BUDGET_MS"),shippedConst("CONTINUOUS_OBSERVATION_GRACE_SECONDS"),shippedConst("CONTINUOUS_OBSERVATION_POLL_MS"),
     shippedSource("continuousTargetBoundary"),shippedSource("continuousObservationDue"),shippedSource("armContinuousObservation"),
     nextEpisodeCancellationSources(),
@@ -7817,7 +7955,8 @@ function continuousChangeOwner(){
 }
 function continuousChangeHarness(owner,{autoMove=null}={}){
   let release;const gate=new Promise(resolve=>release=resolve),attachment={};
-  const adapter={protocol:{ledger:{latest_intent_revision:1,transactions:[]}},
+  const adapter={family:{version:2,video:[{candidate_id:"target"}]},
+    protocol:{ledger:{latest_intent_revision:1,transactions:[]}},
     async choose(id,live){await gate;return live()?"continuous":"superseded";}};
   const p={controlIntentGeneration:4,sessionId:"incumbent",started:true,mediaAttachment:attachment,
     continuousQuality:adapter,wantsPlayback:true,abr:{switching:!!autoMove,requestedCandidateId:autoMove?.candidateId||null}};
@@ -8411,4 +8550,30 @@ test('permission retry preserves startup and pending destinations but resumes es
   assert.equal(h.video.src,`/remux?audio=1&start=${expectedMs/1000}`);
   assert.ok(media.events.includes('authorized-play'));
  }
+});
+
+test("a session opens with no skipped upgrade, so its first exchange does not repaint the panel",()=>{
+  // The control exchange repaints Playback Info when the processing skip
+  // changes. A session that left it undefined saw undefined -> null on its
+  // first exchange and repainted (it moved the quality control's label in the
+  // UI structure golden). Session open sets it beside effectiveProcessing.
+  const source=fs.readFileSync(path.join(__dirname,
+    "../../crates/plurxd/src/web/player/directed-change.js"),"utf8");
+  const open=source.indexOf("t.effectiveProcessing=effectiveHdrProcessing(info.effective_processing");
+  assert.ok(open>=0,"session open still records the effective processing report");
+  const paint=source.indexOf("renderPlayerInfo()",open);
+  const skip=source.indexOf("t.processingSkip=null",open);
+  assert.ok(skip>open&&skip<paint,"session open clears the processing skip before its first paint");
+  const exchange=source.indexOf("const skip=processingSkipFromWire(response?.processing_skip");
+  assert.ok(exchange>=0);
+  assert.match(source.slice(exchange,exchange+400),/JSON\.stringify\(p\.processingSkip\)!==JSON\.stringify\(skip\)/);
+});
+
+test("prepared delivery profile parsing accepts legacy absence and numeric wire facts",()=>{
+  for(const value of [undefined,null,8]){
+    assert.equal(control.validPreparation({...PREPARE_FIXTURE,delivered_dolby_vision_profile:value}),true);
+  }
+  for(const value of ["8",8.1,-1,256]){
+    assert.equal(control.validPreparation({...PREPARE_FIXTURE,delivered_dolby_vision_profile:value}),false);
+  }
 });

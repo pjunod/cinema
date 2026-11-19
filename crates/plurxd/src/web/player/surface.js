@@ -32,6 +32,12 @@ function playbackSurfaceGeneration(p){ return (p&&p.attemptId)||null; }
 // destination outlives the media element that was carrying it, which is exactly
 // what `controlSeek` already is.
 function playbackSurfaceIntent(p){ const seek=p&&p.controlSeek; return seek?seek.sequence:null; }
+// An observation owner is distinct from a server/control authority. Intent
+// ownership is separate: an attached observation need not concern a seek.
+function playbackSurfaceObservationOwner(p){
+  const generation=playbackSurfaceGeneration(p);
+  return generation==null?null:`playback-observation:${generation}`;
+}
 // `start` before this playback has presented anything, `change` while a
 // viewer-requested replacement is pending over a predecessor, `attached`
 // otherwise — the three the fixture declares.
@@ -58,9 +64,9 @@ function playbackSurfacePromptUp(){
   const surface=PLAYBACK_SURFACE.surface;
   return !!surface&&surface.kind!=="none"&&(surface.actions||[]).length>0;
 }
-function playbackSurfaceHasLiveFault(source,attached){
+function playbackSurfaceHasLiveFault(source,attached,intent){
   return PLAYBACK_SURFACE.state.faults.some(
-    fault=>fault.source===source&&fault.attached===attached);
+    fault=>fault.source===source&&fault.attached===attached&&fault.intent===intent);
 }
 // The buttons a stalled recipe offers. Force transcode is not offered on a
 // session that already IS one — the same condition the hand-written HTML had —
@@ -99,14 +105,21 @@ function resetPlaybackSurface(){
 function raisePlaybackSurface(source,fault,options){
   const p=PLAYER, given=fault||{};
   const attached=given.attached!==undefined?given.attached:playbackSurfaceGeneration(p);
-  // A fact the owner is restating rather than a new one: a `waiting` that fires
-  // at every fragment boundary must not push a fault per boundary at the ring.
-  if(options&&options.once&&playbackSurfaceHasLiveFault(source,attached)) return null;
+  const observationOwner=given.observation_owner!==undefined?given.observation_owner:
+    ["client_preparing","media_waiting"].includes(source)?playbackSurfaceObservationOwner(p):null;
+  // media_waiting is attached unless its producer explicitly identifies the
+  // unresolved destination. An observation owner alone cannot supply intent.
+  const intent=given.intent!==undefined?given.intent:
+    source!=="media_waiting"&&observationOwner?playbackSurfaceIntent(p):null;
+  // Repeated fragment boundaries restate one fact, but a new destination on
+  // this same attachment is a distinct owner and must not be deduplicated.
+  if(options&&options.once&&playbackSurfaceHasLiveFault(source,attached,intent)) return null;
   return playbackSurfaceStep({
     raise:source,
     context:given.context||playbackSurfaceContext(p),
     attached,
-    intent:given.intent!==undefined?given.intent:null,
+    intent,
+    observation_owner:observationOwner,
     player_stopped:!!given.player_stopped,
     title:given.title!==undefined?given.title:null,
     detail:given.detail!==undefined?given.detail:null,

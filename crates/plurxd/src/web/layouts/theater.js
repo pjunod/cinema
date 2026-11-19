@@ -315,6 +315,7 @@ function theaterLibraryShell(m){
       <span class="th-cpair"><span class="lbl">Show</span>
         <select data-library-watch-filter aria-label="Show" onchange="LIB_FILTER=this.value;${m.reload}">
           ${libOpt("all","Everything",LIB_FILTER)}${libOpt("unwatched","Unwatched",LIB_FILTER)}${libOpt("inprogress","In progress",LIB_FILTER)}${libOpt("watched","Watched",LIB_FILTER)}</select></span>
+      ${libPresenceSelect(m.reload)}
       ${libraryPageSize()}
       <span class="muted" id="libcount"></span></div>`;
   return `${head}${bar}<div class="th-grid"><div id="libbody"><div class="empty">Loading…</div></div></div>`
@@ -403,7 +404,9 @@ function theaterItemBody(p){
     // decided once, in loadItem(), for every layout.
     const resume=p.resume, playable=p.playable, pmeta=playbackMetaFor(p,playable);
     const watchBtn=watchControls(it);
-    if(playable){
+    if(it.offloaded){
+      acts=offloadActions(it); watchOffload(exactWireId(it));
+    } else if(playable){
       acts=`<div class="actions">
         <button class="btnplay" onclick='play(${playable.id},${esc(JSON.stringify(it.title))},${resume},${playable.duration_ms||0},${esc(JSON.stringify(pmeta))})'>▶ ${resume?`Resume · ${fmtDur(resume)}`:'Play'}</button>
         ${resume?`<button class="ghost" onclick='play(${playable.id},${esc(JSON.stringify(it.title))},0,${playable.duration_ms||0},${esc(JSON.stringify(pmeta))})'>Start over</button>`:''}
@@ -429,12 +432,12 @@ function theaterItemBody(p){
     }).join("");
   } else if(p.shape==="episodes"){
     const a=watchControls(it);
-    if(a) acts=`<div class="actions">${a}</div>`;
+    acts=(a?`<div class="actions">${a}</div>`:'')+offloadContainerActions(it);
     rest=`<h2 class="section">${p.children.length} episode${p.children.length>1?'s':''}</h2>
       <div class="eplist">${p.children.map(episodeRow).join("")}</div>`;
   } else if(p.shape==="children"){
     const a=watchControls(it);
-    if(a) acts=`<div class="actions">${a}</div>`;
+    acts=(a?`<div class="actions">${a}</div>`:'')+offloadContainerActions(it);
     // `p.childLabel` straight, with no folder re-test on top of it: the model
     // already answers 'Contents' for a folder, 'Seasons' for a show and
     // 'Episodes' otherwise. classic and catalog both wrap it in a ternary that

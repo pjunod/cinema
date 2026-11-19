@@ -1,0 +1,66 @@
+--- a/src/renderer.c
++++ b/src/renderer.c
+@@ -1689,6 +1689,7 @@
+ {
+     const struct pl_render_params *params = pass->params;
+     struct pl_frame *image = &pass->image;
++    const int diag_source_signal_depth = image->repr.bits.color_depth;
+     pl_renderer rr = pass->rr;
+ 
+     struct plane_state planes[4];
+@@ -2090,6 +2091,55 @@
+             }
+         }
+ #endif
++        if (pass->img.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && pass->img.repr.dovi) {
++            struct pl_bit_encoding diag_before = pass->img.repr.bits;
++            struct pl_color_repr diag_before_copy = pass->img.repr;
++            pl_color_repr_normalize(&diag_before_copy);
++            pl_transform3x3 diag_before_affine = pl_color_repr_decode(&diag_before_copy, params->color_adjustment);
++            bool diag_apply = image->repr.levels == PL_COLOR_LEVELS_FULL &&
++                              pass->img.repr.levels == PL_COLOR_LEVELS_FULL &&
++                              diag_source_signal_depth == 10 &&
++                              pass->img.repr.bits.bit_shift == 0 &&
++                              !image->lut && !params->lut && params->num_hooks == 0;
++            if (diag_apply) {
++                pass->img.repr.bits.sample_depth = diag_source_signal_depth;
++                pass->img.repr.bits.color_depth = diag_source_signal_depth;
++                pass->img.repr.bits.bit_shift = 0;
++            }
++            PL_WARN(rr, "{\"kind\":\"diagnostic_dv_bitdepth_control\",\"applied\":%s,"
++                    "\"original_signal_depth\":%d,\"before_bits\":[%d,%d,%d],\"after_bits\":[%d,%d,%d],"
++                    "\"copy_before_decode_matrix\":[[%.9g,%.9g,%.9g],[%.9g,%.9g,%.9g],[%.9g,%.9g,%.9g]],"
++                    "\"copy_before_decode_offset\":[%.9g,%.9g,%.9g],"
++                    "\"scope\":\"diagnostic observed full-range DV10, normalized shift0, no LUT or hooks\"}",
++                    diag_apply?"true":"false",diag_source_signal_depth,
++                    diag_before.sample_depth,diag_before.color_depth,diag_before.bit_shift,
++                    pass->img.repr.bits.sample_depth,pass->img.repr.bits.color_depth,pass->img.repr.bits.bit_shift,
++                    (double)diag_before_affine.mat.m[0][0],(double)diag_before_affine.mat.m[0][1],(double)diag_before_affine.mat.m[0][2],
++                    (double)diag_before_affine.mat.m[1][0],(double)diag_before_affine.mat.m[1][1],(double)diag_before_affine.mat.m[1][2],
++                    (double)diag_before_affine.mat.m[2][0],(double)diag_before_affine.mat.m[2][1],(double)diag_before_affine.mat.m[2][2],
++                    (double)diag_before_affine.c[0],(double)diag_before_affine.c[1],(double)diag_before_affine.c[2]);
++        }
++        if (pass->img.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && pass->img.repr.dovi) {
++            struct pl_color_repr diag = pass->img.repr;
++            float diag_scale = pl_color_repr_normalize(&diag);
++            struct pl_bit_encoding diag_decode_bits = diag.bits;
++            pl_transform3x3 diag_affine = pl_color_repr_decode(&diag, params->color_adjustment);
++            PL_WARN(rr, "{\"kind\":\"diagnostic_effective_dv_decode_state\","
++                    "\"effective_pass_bits\":[%d,%d,%d],\"initial_image_bits\":[%d,%d,%d],"
++                    "\"effective_sys\":%d,\"effective_levels\":%d,\"enhancement_shader_present\":%s,"
++                    "\"copy_shader_first_normalization_scale\":%.9g,\"copy_decode_input_bits\":[%d,%d,%d],"
++                    "\"copy_decode_matrix\":[[%.9g,%.9g,%.9g],[%.9g,%.9g,%.9g],[%.9g,%.9g,%.9g]],"
++                    "\"copy_decode_offset\":[%.9g,%.9g,%.9g],"
++                    "\"interpretation\":\"actual pre-decode pass representation; affine evaluated on a copy with identical parameters\"}",
++                    pass->img.repr.bits.sample_depth,pass->img.repr.bits.color_depth,pass->img.repr.bits.bit_shift,
++                    image->repr.bits.sample_depth,image->repr.bits.color_depth,image->repr.bits.bit_shift,
++                    pass->img.repr.sys,pass->img.repr.levels,el_sh?"true":"false",(double)diag_scale,
++                    diag_decode_bits.sample_depth,diag_decode_bits.color_depth,diag_decode_bits.bit_shift,
++                    (double)diag_affine.mat.m[0][0],(double)diag_affine.mat.m[0][1],(double)diag_affine.mat.m[0][2],
++                    (double)diag_affine.mat.m[1][0],(double)diag_affine.mat.m[1][1],(double)diag_affine.mat.m[1][2],
++                    (double)diag_affine.mat.m[2][0],(double)diag_affine.mat.m[2][1],(double)diag_affine.mat.m[2][2],
++                    (double)diag_affine.c[0],(double)diag_affine.c[1],(double)diag_affine.c[2]);
++        }
+         pl_shader_decode_color_ex(sh, pl_color_decode_args(
+             .repr              = &pass->img.repr,
+             .color_adjustment  = params->color_adjustment,

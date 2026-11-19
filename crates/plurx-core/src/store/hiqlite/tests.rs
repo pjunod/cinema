@@ -165,7 +165,7 @@ fn media_session_dump_retains_terminal_and_publication_fence_fields() {
     let row = MediaSessionDumpRow {
         incarnation_id: "incarnation".to_owned(),
         session_id: "session".to_owned(),
-        user_id: 1,
+        user_id: Some(1),
         playback_id: "playback".to_owned(),
         request_fingerprint: "fingerprint".to_owned(),
         owner_node_id: "node".to_owned(),
@@ -187,6 +187,39 @@ fn media_session_dump_retains_terminal_and_publication_fence_fields() {
     let encoded = serde_json::to_value(row).expect("serialize media session dump row");
     assert_eq!(encoded["terminal_reason"], "deleted");
     assert_eq!(encoded["publication_ready_at_ms"], 4);
+}
+
+/// A sharing session is principal-less: its owner is a grant and viewer key,
+/// and `user_id` is NULL. The replica-equality dump covers every principal row
+/// regardless of kind, so each of the four principal-keyed rows must decode it.
+#[test]
+fn principal_keyed_dump_rows_decode_a_sharing_row_with_no_user() {
+    fn decodes<T: serde::de::DeserializeOwned>(mut row: serde_json::Value) {
+        row["user_id"] = serde_json::Value::Null;
+        serde_json::from_value::<T>(row).expect("a sharing row has no local user");
+    }
+    decodes::<MediaSessionRequestDumpRow>(serde_json::json!({
+        "request_id": "r", "request_fingerprint": "f", "playback_id": "p",
+        "state": "starting", "claim_expires_at_ms": 1, "incarnation_id": "i",
+        "owner_node_id": null, "response_json": null, "updated_at_ms": 2
+    }));
+    decodes::<MediaPlaybackPointerDumpRow>(serde_json::json!({
+        "playback_id": "p", "current_incarnation_id": "i", "updated_at_ms": 2
+    }));
+    decodes::<MediaSessionPreparationDumpRow>(serde_json::json!({
+        "playback_id": "p", "staged_incarnation_id": "s",
+        "expected_predecessor_incarnation_id": "e", "deadline_ms": 1,
+        "created_at_ms": 2, "updated_at_ms": 3
+    }));
+    decodes::<MediaSessionDumpRow>(serde_json::json!({
+        "incarnation_id": "i", "session_id": "s", "playback_id": "p",
+        "request_fingerprint": "f", "owner_node_id": "n", "owner_epoch": 1,
+        "lease_expires_at_ms": 1, "state": "active", "terminal_reason": null,
+        "publication_ready_at_ms": 0, "recipe_json": "{}", "response_json": "{}",
+        "produced_playable_through_ms": 0, "fetched_through_ms": 0,
+        "media_origin_ms": 0, "media_sequence": 0, "discontinuity_sequence": 0,
+        "updated_at_ms": 2
+    }));
 }
 
 #[tokio::test(start_paused = true)]
@@ -478,6 +511,7 @@ async fn store_operation_timer_classifies_completion_error_and_cancellation() {
     time_store_operation(
         &TEST_STORE_OPERATION_METRICS,
         StoreOperationClass::LocalRead,
+        "store_operation_timer_classifies_completion_error_and_cancellation",
         async { Ok::<_, StoreError>(()) },
         |_| true,
     )
@@ -486,6 +520,7 @@ async fn store_operation_timer_classifies_completion_error_and_cancellation() {
     let error = time_store_operation(
         &TEST_STORE_OPERATION_METRICS,
         StoreOperationClass::AuthorityRead,
+        "store_operation_timer_classifies_completion_error_and_cancellation",
         async { Err::<(), _>(StoreError::Database("injected failure".to_owned())) },
         |_| true,
     )
@@ -495,6 +530,7 @@ async fn store_operation_timer_classifies_completion_error_and_cancellation() {
     let nested = time_store_operation(
         &TEST_STORE_OPERATION_METRICS,
         StoreOperationClass::Write,
+        "store_operation_timer_classifies_completion_error_and_cancellation",
         async { Ok::<_, StoreError>(vec![Ok::<(), &'static str>(()), Err("constraint failure")]) },
         |results| results.iter().all(Result::is_ok),
     )
@@ -505,6 +541,7 @@ async fn store_operation_timer_classifies_completion_error_and_cancellation() {
     let mut cancelled = Box::pin(time_store_operation(
         &TEST_STORE_OPERATION_METRICS,
         StoreOperationClass::Write,
+        "store_operation_timer_classifies_completion_error_and_cancellation",
         std::future::pending::<Result<(), StoreError>>(),
         |_| true,
     ));
@@ -550,6 +587,7 @@ async fn validation_control_preserves_results_without_recording_any_outcome() {
     time_store_operation_controlled(
         metrics,
         StoreOperationClass::LocalRead,
+        "validation_control_preserves_results_without_recording_any_outcome",
         async { Ok::<_, StoreError>(17) },
         |_| true,
         false,
@@ -559,6 +597,7 @@ async fn validation_control_preserves_results_without_recording_any_outcome() {
     let error = time_store_operation_controlled(
         metrics,
         StoreOperationClass::AuthorityRead,
+        "validation_control_preserves_results_without_recording_any_outcome",
         async { Err::<(), _>(StoreError::Database("control error".to_owned())) },
         |_| true,
         false,
@@ -569,6 +608,7 @@ async fn validation_control_preserves_results_without_recording_any_outcome() {
     let mut cancelled = Box::pin(time_store_operation_controlled(
         metrics,
         StoreOperationClass::Write,
+        "validation_control_preserves_results_without_recording_any_outcome",
         std::future::pending::<Result<(), StoreError>>(),
         |_| true,
         false,
@@ -583,6 +623,7 @@ async fn validation_control_preserves_results_without_recording_any_outcome() {
     time_store_operation_controlled(
         metrics,
         StoreOperationClass::LocalRead,
+        "validation_control_preserves_results_without_recording_any_outcome",
         async { Ok::<_, StoreError>(17) },
         |_| true,
         true,
@@ -592,6 +633,7 @@ async fn validation_control_preserves_results_without_recording_any_outcome() {
     let _ = time_store_operation_controlled(
         metrics,
         StoreOperationClass::AuthorityRead,
+        "validation_control_preserves_results_without_recording_any_outcome",
         async { Err::<(), _>(StoreError::Database("measured error".to_owned())) },
         |_| true,
         true,
@@ -600,6 +642,7 @@ async fn validation_control_preserves_results_without_recording_any_outcome() {
     let mut cancelled = Box::pin(time_store_operation_controlled(
         metrics,
         StoreOperationClass::Write,
+        "validation_control_preserves_results_without_recording_any_outcome",
         std::future::pending::<Result<(), StoreError>>(),
         |_| true,
         true,
@@ -647,6 +690,7 @@ async fn takeover_authority_attribution_settings_pair_reaches_timed_client_retri
             media_session_projection: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             client: TimedClient {
                 inner: TimedClientInner::InjectedConsistentRead(Arc::clone(&io)),
+                facts: super::super::applied_view::SettingsWriteFloor::detached(),
                 #[cfg(feature = "cluster-read-cost-validation")]
                 operations: Arc::new(OperationCounters::default()),
             },
@@ -813,8 +857,11 @@ async fn takeover_authority_attribution_counts_retries_errors_and_excludes_other
         keys::CLUSTER_MEDIA_POOL_ENABLED,
     );
     let mut calls = 0;
-    let value =
-        time_scoped_authority_read_with_retry(store_metrics, scope.metrics(&metrics), || {
+    let value = time_scoped_authority_read_with_retry(
+        store_metrics,
+        "takeover_authority_attribution_counts_retries_errors_and_excludes_other_pairs",
+        scope.metrics(&metrics),
+        || {
             calls += 1;
             let call = calls;
             async move {
@@ -826,9 +873,10 @@ async fn takeover_authority_attribution_counts_retries_errors_and_excludes_other
                     _ => Ok(42),
                 }
             }
-        })
-        .await
-        .expect("existing retry policy recovers");
+        },
+    )
+    .await
+    .expect("existing retry policy recovers");
     assert_eq!((value, calls), (42, 4));
     assert_eq!(metrics.started.load(Ordering::Relaxed), 4);
     assert_eq!(
@@ -840,12 +888,14 @@ async fn takeover_authority_attribution_counts_retries_errors_and_excludes_other
         1
     );
 
-    let error =
-        time_scoped_authority_read_with_retry(store_metrics, scope.metrics(&metrics), || async {
-            Err::<(), _>(StoreError::Database("bad row".to_owned()))
-        })
-        .await
-        .expect_err("permanent error is not retried");
+    let error = time_scoped_authority_read_with_retry(
+        store_metrics,
+        "takeover_authority_attribution_counts_retries_errors_and_excludes_other_pairs",
+        scope.metrics(&metrics),
+        || async { Err::<(), _>(StoreError::Database("bad row".to_owned())) },
+    )
+    .await
+    .expect_err("permanent error is not retried");
     assert_eq!(error.to_string(), "database error: bad row");
     assert_eq!(metrics.started.load(Ordering::Relaxed), 5);
     assert_eq!(
@@ -854,9 +904,12 @@ async fn takeover_authority_attribution_counts_retries_errors_and_excludes_other
     );
 
     let other = AuthorityReadScope::settings_pair(keys::MONARR_URL, keys::MONARR_API_KEY);
-    time_scoped_authority_read_with_retry(store_metrics, other.metrics(&metrics), || async {
-        Ok(())
-    })
+    time_scoped_authority_read_with_retry(
+        store_metrics,
+        "takeover_authority_attribution_counts_retries_errors_and_excludes_other_pairs",
+        other.metrics(&metrics),
+        || async { Ok(()) },
+    )
     .await
     .expect("unrelated authority read succeeds");
     assert_eq!(
@@ -885,14 +938,17 @@ async fn takeover_authority_attribution_starts_on_poll_and_retains_cancelled_att
         keys::CLUSTER_MEDIA_POOL_ENABLED,
         keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
     );
-    let unpolled =
-        time_scoped_authority_read_with_retry(store_metrics, scope.metrics(&metrics), || {
-            std::future::pending::<Result<(), StoreError>>()
-        });
+    let unpolled = time_scoped_authority_read_with_retry(
+        store_metrics,
+        "takeover_authority_attribution_starts_on_poll_and_retains_cancelled_attempts",
+        scope.metrics(&metrics),
+        std::future::pending::<Result<(), StoreError>>,
+    );
     drop(unpolled);
     assert_eq!(metrics.started.load(Ordering::Relaxed), 0);
     let mut pending = Box::pin(time_scoped_authority_read_with_retry(
         store_metrics,
+        "takeover_authority_attribution_starts_on_poll_and_retains_cancelled_attempts",
         scope.metrics(&metrics),
         std::future::pending::<Result<(), StoreError>>,
     ));
@@ -922,6 +978,7 @@ async fn takeover_authority_attribution_starts_on_poll_and_retains_cancelled_att
 
     let mut backoff = Box::pin(time_scoped_authority_read_with_retry(
         store_metrics,
+        "takeover_authority_attribution_starts_on_poll_and_retains_cancelled_attempts",
         scope.metrics(&metrics),
         || async { Err::<(), _>(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())) },
     ));
@@ -946,12 +1003,17 @@ async fn takeover_authority_attribution_starts_on_poll_and_retains_cancelled_att
 
     let slow_attempt = STORE_TIMEOUT - Duration::from_millis(100);
     let started = tokio::time::Instant::now();
-    time_scoped_authority_read_with_retry(store_metrics, scope.metrics(&metrics), || async {
-        tokio::time::sleep(slow_attempt).await;
-        Err::<(), _>(StoreError::Database(
-            "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
-        ))
-    })
+    time_scoped_authority_read_with_retry(
+        store_metrics,
+        "takeover_authority_attribution_starts_on_poll_and_retains_cancelled_attempts",
+        scope.metrics(&metrics),
+        || async {
+            tokio::time::sleep(slow_attempt).await;
+            Err::<(), _>(StoreError::Database(
+                "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
+            ))
+        },
+    )
     .await
     .expect_err("absolute quorum deadline cancels the final attempt");
     assert_eq!(
@@ -983,19 +1045,24 @@ async fn takeover_authority_attribution_starts_on_poll_and_retains_cancelled_att
 async fn authority_reads_retry_timeouts_once_and_quorum_failures_through_election() {
     let timeout_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let retried = time_scoped_authority_read_with_retry(timeout_metrics, None, {
-        let attempts = Arc::clone(&attempts);
-        move || {
-            let attempt = attempts.fetch_add(1, Ordering::Relaxed);
-            async move {
-                if attempt == 0 {
-                    Err(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))
-                } else {
-                    Ok(42)
+    let retried = time_scoped_authority_read_with_retry(
+        timeout_metrics,
+        "authority_reads_retry_timeouts_once_and_quorum_failures_through_election",
+        None,
+        {
+            let attempts = Arc::clone(&attempts);
+            move || {
+                let attempt = attempts.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    if attempt == 0 {
+                        Err(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))
+                    } else {
+                        Ok(42)
+                    }
                 }
             }
-        }
-    })
+        },
+    )
     .await
     .expect("the bounded retry recovers");
     assert_eq!(retried, 42);
@@ -1024,21 +1091,26 @@ async fn authority_reads_retry_timeouts_once_and_quorum_failures_through_electio
 
     let quorum_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
     let quorum_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let recovered = time_scoped_authority_read_with_retry(quorum_metrics, None, {
-        let attempts = Arc::clone(&quorum_attempts);
-        move || {
-            let attempt = attempts.fetch_add(1, Ordering::Relaxed);
-            async move {
-                if attempt < 4 {
-                    Err(StoreError::Database(
-                        "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
-                    ))
-                } else {
-                    Ok(84)
+    let recovered = time_scoped_authority_read_with_retry(
+        quorum_metrics,
+        "authority_reads_retry_timeouts_once_and_quorum_failures_through_election",
+        None,
+        {
+            let attempts = Arc::clone(&quorum_attempts);
+            move || {
+                let attempt = attempts.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    if attempt < 4 {
+                        Err(StoreError::Database(
+                            "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
+                        ))
+                    } else {
+                        Ok(84)
+                    }
                 }
             }
-        }
-    })
+        },
+    )
     .await
     .expect("the election-window retry recovers a late quorum");
     assert_eq!(recovered, 84);
@@ -1068,17 +1140,22 @@ async fn authority_reads_retry_timeouts_once_and_quorum_failures_through_electio
     let exhausted_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
     let exhausted_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let started = tokio::time::Instant::now();
-    let error = time_scoped_authority_read_with_retry(exhausted_metrics, None, {
-        let attempts = Arc::clone(&exhausted_attempts);
-        move || {
-            attempts.fetch_add(1, Ordering::Relaxed);
-            async {
-                Err::<(), _>(StoreError::Database(
-                    "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
-                ))
+    let error = time_scoped_authority_read_with_retry(
+        exhausted_metrics,
+        "authority_reads_retry_timeouts_once_and_quorum_failures_through_election",
+        None,
+        {
+            let attempts = Arc::clone(&exhausted_attempts);
+            move || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                async {
+                    Err::<(), _>(StoreError::Database(
+                        "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
+                    ))
+                }
             }
-        }
-    })
+        },
+    )
     .await
     .expect_err("a persistent quorum loss exhausts the election window");
     let elapsed = started.elapsed();
@@ -1107,18 +1184,23 @@ async fn authority_reads_retry_timeouts_once_and_quorum_failures_through_electio
     let slow_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let slow_attempt = STORE_TIMEOUT - Duration::from_millis(100);
     let started = tokio::time::Instant::now();
-    let error = time_scoped_authority_read_with_retry(slow_metrics, None, {
-        let attempts = Arc::clone(&slow_attempts);
-        move || {
-            attempts.fetch_add(1, Ordering::Relaxed);
-            async move {
-                tokio::time::sleep(slow_attempt).await;
-                Err::<(), _>(StoreError::Database(
-                    "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
-                ))
+    let error = time_scoped_authority_read_with_retry(
+        slow_metrics,
+        "authority_reads_retry_timeouts_once_and_quorum_failures_through_election",
+        None,
+        {
+            let attempts = Arc::clone(&slow_attempts);
+            move || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    tokio::time::sleep(slow_attempt).await;
+                    Err::<(), _>(StoreError::Database(
+                        "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
+                    ))
+                }
             }
-        }
-    })
+        },
+    )
     .await
     .expect_err("an in-flight quorum retry is cancelled at the absolute deadline");
     assert_eq!(
@@ -1154,13 +1236,18 @@ async fn authority_reads_retry_timeouts_once_and_quorum_failures_through_electio
 
     let permanent_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
     let permanent_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let error = time_scoped_authority_read_with_retry(permanent_metrics, None, {
-        let attempts = Arc::clone(&permanent_attempts);
-        move || {
-            attempts.fetch_add(1, Ordering::Relaxed);
-            async { Err::<(), _>(StoreError::Database("bad row".to_owned())) }
-        }
-    })
+    let error = time_scoped_authority_read_with_retry(
+        permanent_metrics,
+        "authority_reads_retry_timeouts_once_and_quorum_failures_through_election",
+        None,
+        {
+            let attempts = Arc::clone(&permanent_attempts);
+            move || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                async { Err::<(), _>(StoreError::Database("bad row".to_owned())) }
+            }
+        },
+    )
     .await
     .expect_err("non-timeout database errors are terminal");
     assert_eq!(error.to_string(), "database error: bad row");
@@ -1194,19 +1281,23 @@ fn authority_reads_fit_the_end_to_end_leader_recovery_budget() {
 async fn idempotent_writes_absorb_two_election_deadlines_and_nothing_else() {
     let metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let value = time_idempotent_write_with_retry(metrics, {
-        let attempts = Arc::clone(&attempts);
-        move || {
-            let attempt = attempts.fetch_add(1, Ordering::Relaxed);
-            async move {
-                if attempt < 2 {
-                    Err(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))
-                } else {
-                    Ok(42)
+    let value = time_idempotent_write_with_retry(
+        metrics,
+        "idempotent_writes_absorb_two_election_deadlines_and_nothing_else",
+        {
+            let attempts = Arc::clone(&attempts);
+            move || {
+                let attempt = attempts.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    if attempt < 2 {
+                        Err(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))
+                    } else {
+                        Ok(42)
+                    }
                 }
             }
-        }
-    })
+        },
+    )
     .await
     .expect("the third exact-state attempt recovers after election");
     assert_eq!(value, 42);
@@ -1228,26 +1319,34 @@ async fn idempotent_writes_absorb_two_election_deadlines_and_nothing_else() {
     );
 
     let permanent_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let error = time_idempotent_write_with_retry(metrics, {
-        let attempts = Arc::clone(&permanent_attempts);
-        move || {
-            attempts.fetch_add(1, Ordering::Relaxed);
-            async { Err::<(), _>(StoreError::Database("constraint".to_owned())) }
-        }
-    })
+    let error = time_idempotent_write_with_retry(
+        metrics,
+        "idempotent_writes_absorb_two_election_deadlines_and_nothing_else",
+        {
+            let attempts = Arc::clone(&permanent_attempts);
+            move || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                async { Err::<(), _>(StoreError::Database("constraint".to_owned())) }
+            }
+        },
+    )
     .await
     .expect_err("non-timeout write errors are terminal");
     assert_eq!(error.to_string(), "database error: constraint");
     assert_eq!(permanent_attempts.load(Ordering::Relaxed), 1);
 
     let exhausted_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let error = time_idempotent_write_with_retry(metrics, {
-        let attempts = Arc::clone(&exhausted_attempts);
-        move || {
-            attempts.fetch_add(1, Ordering::Relaxed);
-            async { Err::<(), _>(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())) }
-        }
-    })
+    let error = time_idempotent_write_with_retry(
+        metrics,
+        "idempotent_writes_absorb_two_election_deadlines_and_nothing_else",
+        {
+            let attempts = Arc::clone(&exhausted_attempts);
+            move || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                async { Err::<(), _>(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())) }
+            }
+        },
+    )
     .await
     .expect_err("the exact-state retry budget remains bounded");
     assert_eq!(
@@ -1478,12 +1577,20 @@ async fn timed_read_accessors_reject_misordered_placeholders_before_io() {
     let client = disconnected_test_client();
     for error in [
         client
-            .query_consistent_map::<CountRow, _>("SELECT $2 AS count WHERE $1 = 1", params!(1, 2))
+            .query_consistent_map::<CountRow, _>(
+                "timed_read_accessors_reject_misordered_placeholders_before_io",
+                "SELECT $2 AS count WHERE $1 = 1",
+                params!(1, 2),
+            )
             .await
             .err()
             .expect("consistent helper must validate SQL"),
         client
-            .query_map::<CountRow, _>("SELECT $2 AS count WHERE $1 = 1", params!(1, 2))
+            .query_map::<CountRow, _>(
+                "timed_read_accessors_reject_misordered_placeholders_before_io",
+                "SELECT $2 AS count WHERE $1 = 1",
+                params!(1, 2),
+            )
             .await
             .err()
             .expect("local helper must validate SQL"),
@@ -2353,4 +2460,244 @@ fn daemon_schema_gate_accepts_the_complete_supported_chain() {
         .expect("an activated cluster may still be migrated by this binary"),
         SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE)
     );
+}
+
+fn class_totals(metrics: &StoreOperationMetrics) -> [u64; 3] {
+    std::array::from_fn(|class| {
+        let class = StoreOperationClass::ALL[class];
+        StoreOperationOutcome::ALL
+            .iter()
+            .map(|outcome| metrics.cell(class, *outcome).count.load(Ordering::Relaxed))
+            .sum()
+    })
+}
+
+fn method_totals(methods: &[(&'static str, [u64; 3])]) -> [u64; 3] {
+    methods.iter().fold([0; 3], |mut sum, (_, counts)| {
+        for (total, count) in sum.iter_mut().zip(counts) {
+            *total += count;
+        }
+        sum
+    })
+}
+
+/// Every counted operation lands, by method, in exactly one of the request's
+/// split or the process-wide background table: together they are the class
+/// counters. A membership operation is in the membership table as well,
+/// whichever scope it ran in; a Store operation never is.
+#[tokio::test]
+async fn background_and_request_attribution_partition_every_counted_operation() {
+    let metrics: &'static StoreOperationMetrics =
+        Box::leak(Box::new(StoreOperationMetrics::default()));
+    let store = |class: StoreOperationClass, method: &'static str| {
+        time_store_operation(
+            metrics,
+            class,
+            method,
+            async { Ok::<_, StoreError>(()) },
+            |_| true,
+        )
+    };
+    let member = |class: StoreOperationClass, label: &'static str, ok: bool| {
+        time_counted_operation_with(
+            metrics,
+            class,
+            label,
+            true,
+            async move {
+                if ok {
+                    Ok(())
+                } else {
+                    Err("refused")
+                }
+            },
+            |_| true,
+        )
+    };
+    store(StoreOperationClass::LocalRead, "get_settings")
+        .await
+        .expect("store");
+    store(StoreOperationClass::AuthorityRead, "get_settings")
+        .await
+        .expect("store");
+    let _ = member(StoreOperationClass::AuthorityRead, "heartbeat", false).await;
+    // An operation dropped mid-flight still counts, as cancelled.
+    drop(StoreOperationTimer::start(
+        metrics,
+        StoreOperationClass::Write,
+        "claim_job",
+    ));
+    let request = super::super::HttpStoreOperationCounts::default();
+    super::super::scope_http_store_operations(request.clone(), async {
+        store(StoreOperationClass::AuthorityRead, "get_file")
+            .await
+            .expect("store");
+        store(StoreOperationClass::Write, "get_settings")
+            .await
+            .expect("store");
+        member(
+            StoreOperationClass::AuthorityRead,
+            "verify_live_peer_authority",
+            true,
+        )
+        .await
+        .expect("member");
+    })
+    .await;
+
+    assert_eq!(
+        metrics.background_snapshot(),
+        vec![
+            ("claim_job", [0, 0, 1]),
+            ("get_settings", [1, 1, 0]),
+            ("heartbeat", [0, 1, 0]),
+        ],
+        "only the operations outside a request are background work"
+    );
+    assert_eq!(
+        request.method_snapshot(),
+        vec![
+            ("get_file", [0, 1, 0]),
+            ("get_settings", [0, 0, 1]),
+            ("verify_live_peer_authority", [0, 1, 0]),
+        ],
+        "a request's operations, the membership manager's included, stay in the request"
+    );
+    assert_eq!(
+        metrics.membership_snapshot(),
+        vec![
+            ("heartbeat", [0, 1, 0]),
+            ("verify_live_peer_authority", [0, 1, 0])
+        ],
+        "the membership table sees the manager's operations in both scopes, and nothing else"
+    );
+    let partition: [u64; 3] = std::array::from_fn(|class| {
+        method_totals(&metrics.background_snapshot())[class]
+            + method_totals(&request.method_snapshot())[class]
+    });
+    assert_eq!(partition, class_totals(metrics));
+    assert_eq!(class_totals(metrics), [1, 4, 2]);
+}
+
+/// The background and membership tables are process-wide, so their bound is
+/// a fixed number of methods; past it the rest are counted, not dropped.
+#[test]
+fn the_process_wide_method_tables_are_capped_and_overflow_is_counted() {
+    let mut table = super::super::MethodOperationCounts::default();
+    for method in ["a", "b", "c", "a", "d"] {
+        table.record_capped(method, 1, 2);
+    }
+    assert_eq!(
+        table
+            .by_method
+            .iter()
+            .map(|(m, c)| (*m, *c))
+            .collect::<Vec<_>>(),
+        vec![("a", [0, 2, 0]), ("other", [0, 3, 0])],
+        "the cap counts the overflow label: known methods keep counting, new ones fold into it"
+    );
+    assert_eq!(table.by_method.len(), 2, "never more keys than the cap");
+
+    let metrics: &'static StoreOperationMetrics =
+        Box::leak(Box::new(StoreOperationMetrics::default()));
+    let extra = 5;
+    for index in 0..MAX_ATTRIBUTED_METHODS + extra {
+        let label: &'static str = Box::leak(format!("method_{index:05}").into_boxed_str());
+        metrics.attribute(StoreOperationClass::LocalRead, label, Duration::ZERO, true);
+    }
+    for snapshot in [metrics.background_snapshot(), metrics.membership_snapshot()] {
+        assert_eq!(
+            snapshot.len(),
+            MAX_ATTRIBUTED_METHODS,
+            "exactly the cap, overflow included"
+        );
+        assert!(snapshot.contains(&(
+            super::super::METHOD_OVERFLOW_LABEL,
+            [extra as u64 + 1, 0, 0]
+        )));
+        assert_eq!(
+            method_totals(&snapshot),
+            [(MAX_ATTRIBUTED_METHODS + extra) as u64, 0, 0],
+            "the table still sums to every operation it was given"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_by_method_families_render_each_class_under_its_own_label() {
+    let metrics: &'static StoreOperationMetrics =
+        Box::leak(Box::new(StoreOperationMetrics::default()));
+    time_store_operation(
+        metrics,
+        StoreOperationClass::LocalRead,
+        "list_libraries",
+        async { Ok::<_, StoreError>(()) },
+        |_| true,
+    )
+    .await
+    .expect("store");
+    for class in [
+        StoreOperationClass::Write,
+        StoreOperationClass::AuthorityRead,
+    ] {
+        time_counted_operation_with(
+            metrics,
+            class,
+            "commit_heartbeat",
+            true,
+            async { Ok::<_, ()>(()) },
+            |_| true,
+        )
+        .await
+        .expect("member");
+    }
+    let text = metrics.render();
+    for line in [
+        "# TYPE plurx_background_store_operations_by_method_total counter",
+        "# TYPE plurx_cluster_membership_operations_by_method_total counter",
+        "plurx_background_store_operations_by_method_total{class=\"local_read\",method=\"list_libraries\"} 1",
+        "plurx_background_store_operations_by_method_total{class=\"authority_read\",method=\"commit_heartbeat\"} 1",
+        "plurx_background_store_operations_by_method_total{class=\"write\",method=\"commit_heartbeat\"} 1",
+        "plurx_cluster_membership_operations_by_method_total{class=\"authority_read\",method=\"commit_heartbeat\"} 1",
+        "plurx_cluster_membership_operations_by_method_total{class=\"write\",method=\"commit_heartbeat\"} 1",
+    ] {
+        assert!(text.lines().any(|candidate| candidate == line), "missing {line}:\n{text}");
+    }
+    // A class a method never used has no series, and a Store method is not
+    // a membership operation.
+    assert!(!text.contains("class=\"local_read\",method=\"commit_heartbeat\""));
+    assert!(!text.contains(
+        "plurx_cluster_membership_operations_by_method_total{class=\"local_read\",method=\"list_libraries\"}"
+    ));
+}
+
+/// A scope nobody claimed (made outside any request, as
+/// `spawn_in_http_store_scope` does when there is no request) is background
+/// work: its operations reach the background table when it is dropped,
+/// instead of no family at all.
+#[tokio::test]
+async fn an_unclaimed_scope_folds_into_the_background_table_when_dropped() {
+    const LABEL: &str = "background_test_unclaimed_scope";
+    let counted = |label: &str| {
+        background_store_operations_by_method()
+            .into_iter()
+            .find(|(method, _)| *method == label)
+            .map(|(_, counts)| counts)
+    };
+    let counts = super::super::HttpStoreOperationCounts::default();
+    super::super::scope_http_store_operations(counts.clone(), async {
+        time_store_operation(
+            &TEST_STORE_OPERATION_METRICS,
+            StoreOperationClass::AuthorityRead,
+            LABEL,
+            async { Ok::<_, StoreError>(()) },
+            |_| true,
+        )
+        .await
+        .expect("store");
+    })
+    .await;
+    assert_eq!(counted(LABEL), None, "still held: in no family yet");
+    drop(counts);
+    assert_eq!(counted(LABEL), Some([0, 1, 0]));
 }

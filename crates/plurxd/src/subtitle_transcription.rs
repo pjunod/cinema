@@ -76,7 +76,19 @@ impl Settings {
     }
 }
 async fn read_settings(state: &AppState) -> Result<Settings, StoreError> {
-    let value = state.store.get_setting(&format!("{PREFIX}config")).await?;
+    parse_settings(state.store.get_setting(&format!("{PREFIX}config")).await?)
+}
+
+/// [`read_settings`] from this node's applied settings view, for the 15 s
+/// pass's look at whether transcription is on and how (A4). The job it then
+/// claims is claimed through the Store, and a save made here raises the
+/// settings floor, so it is read back from the authority until this replica
+/// holds it.
+async fn pass_settings(applied: &plurx_core::store::AppliedView) -> Result<Settings, StoreError> {
+    parse_settings(applied.setting(&format!("{PREFIX}config")).await?)
+}
+
+fn parse_settings(value: Option<String>) -> Result<Settings, StoreError> {
     match value {
         None => Ok(Settings::default()),
         Some(value) => {
@@ -1027,6 +1039,24 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
     } else {
         "2"
     };
+    let source_budget = if input.purpose == Purpose::Generation {
+        crate::background_jobs::source_budget()
+    } else {
+        None
+    };
+    let source_input = match source_budget.as_ref() {
+        Some(budget) => Some(
+            crate::source_input::SourceInput::open_background_held(
+                crate::fragment_index_cluster::SourceFence::clone_current_held(source)
+                    .map_err(StoreError::Task)?,
+                "application/octet-stream",
+                Arc::clone(budget),
+            )
+            .await
+            .map_err(StoreError::Task)?,
+        ),
+        None => None,
+    };
     let mut decode = tokio::process::Command::new(decoder);
     if input.purpose == Purpose::SelfTest {
         decode.args(["-filter_threads", "1"]);
@@ -1042,21 +1072,29 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
         "-copyts",
         "-start_at_zero",
         "-protocol_whitelist",
-        "file,pipe",
+        if source_input.is_some() {
+            "file,pipe,http,tcp"
+        } else {
+            "file,pipe"
+        },
         "-threads",
         decode_threads,
         "-i",
     ]);
-    #[cfg(unix)]
-    {
-        decode.arg("/dev/fd/3");
-        crate::ffmpeg::inherit_file_descriptors(&mut decode, &[(source, 3)]);
-    }
-    #[cfg(windows)]
-    {
-        crate::ffmpeg::verify_windows_source_path(source, input.source_path)
-            .map_err(StoreError::Task)?;
-        decode.arg(input.source_path);
+    if let Some(source_input) = source_input.as_ref() {
+        decode.arg(source_input.url());
+    } else {
+        #[cfg(unix)]
+        {
+            decode.arg("/dev/fd/3");
+            crate::ffmpeg::inherit_file_descriptors(&mut decode, &[(source, 3)]);
+        }
+        #[cfg(windows)]
+        {
+            crate::ffmpeg::verify_windows_source_path(source, input.source_path)
+                .map_err(StoreError::Task)?;
+            decode.arg(input.source_path);
+        }
     }
     decode
         .args([
@@ -1086,7 +1124,7 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
                 &format!("bounded transcription output unavailable: {error}"),
             )
         })?;
-    let output = pipeline_output(
+    let decoding = pipeline_output(
         &input,
         &mut decode,
         if input.purpose == Purpose::SelfTest {
@@ -1096,9 +1134,21 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
         },
         256 * 1024,
         plurx_core::process::ChildWork::background("subtitle transcription audio"),
-    )
-    .await
-    .map_err(|error| input.child_failure(error, false))?;
+    );
+    tokio::pin!(decoding);
+    let output = tokio::select! {
+        output=&mut decoding=>output,
+        ()=async {match source_budget.as_ref() {Some(budget)=>budget.wait_pressure().await,None=>std::future::pending().await}}=>{
+            cancel.cancel(); decoding.await
+        },
+    };
+    if let Some(source_input) = source_input {
+        source_input
+            .close_and_wait()
+            .await
+            .map_err(|_| input.source_failure())?;
+    }
+    let output = output.map_err(|error| input.child_failure(error, false))?;
     // Under -v error any diagnostic is an error, even if a demuxer/decoder
     // tolerates partial corruption and exits zero. Never let that partial
     // waveform become complete captions that suppress later discovery.
@@ -1757,7 +1807,7 @@ async fn pass(
     shutdown: &CancellationToken,
     model_cache: &mut Option<(String, Model)>,
 ) -> Result<(), StoreError> {
-    let config = read_settings(state).await?;
+    let config = pass_settings(&state.applied).await?;
     if !config.enabled {
         return Ok(());
     }
@@ -1824,6 +1874,7 @@ async fn pass(
             after: None,
             now_ms: crate::state::clock_ms(),
             limit: 32,
+            admissible_only: false,
         })
         .await?;
     for candidate in page.jobs {
@@ -1894,7 +1945,8 @@ async fn pass(
                 .ok_or_else(|| StoreError::Task("transcription claim missing token".into()))?,
             deadline,
             JobKind::SubtitleTranscribe,
-        )?;
+        )
+        .await?;
         let fence = active.fence();
         let Some(file) = file else {
             let _ = fence
@@ -1931,6 +1983,7 @@ async fn pass(
             )
             .await
         };
+        let operation = crate::background_jobs::budgeted(fence.source_budget(), operation);
         let result =
             await_claimed_inference(operation, &state.transcode, &admission, shutdown, &cancel)
                 .await;
@@ -2091,6 +2144,39 @@ async fn automatic_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A4: the 15 s pass looks at the transcription settings through the
+    /// node's applied view (a standalone view counts a `view` read; a direct
+    /// Store read counts nothing), and follows a save.
+    #[tokio::test]
+    async fn the_pass_reads_its_settings_through_the_applied_view() {
+        use plurx_core::store::{
+            AppliedTable, AppliedView, SettingsStore, SqliteStore, ViewSource,
+        };
+        let store = std::sync::Arc::new(SqliteStore::open_in_memory().expect("SQLite"));
+        let applied = AppliedView::authority(store.clone());
+        assert!(!pass_settings(&applied).await.expect("defaults").enabled);
+        let enabled = Settings {
+            enabled: true,
+            ..Settings::default()
+        };
+        store
+            .put_setting(
+                &format!("{PREFIX}config"),
+                &serde_json::to_string(&enabled).expect("settings"),
+            )
+            .await
+            .expect("save");
+        assert!(pass_settings(&applied).await.expect("saved").enabled);
+        let observation = applied.observation();
+        assert_eq!(
+            (
+                observation.view_total(AppliedTable::Settings, ViewSource::View),
+                observation.view_total(AppliedTable::Settings, ViewSource::Authority),
+            ),
+            (2, 0)
+        );
+    }
 
     fn write_pcm_fixture(path: &Path, signal: bool) {
         let mut bytes = b"RIFF".to_vec();
@@ -3451,6 +3537,7 @@ mod tests {
                 after: None,
                 now_ms: now,
                 limit: 1,
+                admissible_only: false,
             })
             .await
             .expect("candidate")
@@ -3484,6 +3571,7 @@ mod tests {
             deadline,
             JobKind::SubtitleModelOperation,
         )
+        .await
         .expect("active claim");
         let fence = active.fence();
         let manager_cancel = fence.loss_token().child_token();

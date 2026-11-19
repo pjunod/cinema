@@ -1682,7 +1682,26 @@ impl LiveTvManager {
     ) {
         let mut last_retention = 0_i64;
         loop {
-            if let Ok((live_tv, dvr)) = self.dvr_configs().await {
+            // The applied view says whether this node records (Live TV and
+            // recording both on, A4). Only that case, or a node that holds a
+            // transport, pays the Store's read, and the tick acts on the
+            // Store's answer: a view that has not applied an enable saved
+            // elsewhere must not close a transport or a capture started
+            // under it. A node holding nothing has nothing to close, and
+            // finalization re-reads the Store before it writes.
+            let configs =
+                match crate::live_tv::viewed_configs(&self.applied_view(), &self.node_id).await {
+                    Ok((live_tv, dvr))
+                        if (live_tv.owner_node_id == self.node_id
+                            && live_tv.enabled
+                            && dvr.enabled)
+                            || self.holds_transports() =>
+                    {
+                        self.dvr_configs().await
+                    }
+                    viewed => viewed,
+                };
+            if let Ok((live_tv, dvr)) = configs {
                 let ours = live_tv.owner_node_id == self.node_id;
                 if ours && live_tv.enabled && dvr.enabled && self.serving.admit().is_some() {
                     self.dvr_storage_free_bytes.store(
@@ -1717,7 +1736,7 @@ impl LiveTvManager {
                 // Disabling capture must still preserve useful partial work.
                 if self.serving.admit().is_some() {
                     if !live_tv.enabled || !dvr.enabled {
-                        self.finish_disabled_recordings(&live_tv, &events).await;
+                        self.finish_disabled_recordings(&events).await;
                     }
                     if let Err(error) = self.dvr_purge_deleted().await {
                         tracing::debug!(%error, "recording deletion will retry");
@@ -1734,12 +1753,17 @@ impl LiveTvManager {
         }
     }
 
-    async fn finish_disabled_recordings(
-        &self,
-        live_tv: &LiveTvConfig,
-        events: &super::webhook::DvrEventSink,
-    ) {
+    async fn finish_disabled_recordings(&self, events: &super::webhook::DvrEventSink) {
         if let Ok(rows) = self.dvr_rows(&[DvrState::Recording]).await {
+            if rows.is_empty() {
+                return;
+            }
+            let Ok((live_tv, dvr)) = self.dvr_configs().await else {
+                return;
+            };
+            if live_tv.enabled && dvr.enabled {
+                return;
+            }
             for row in rows {
                 if self.stop_sink(&row.id, row.attempt).await == SinkStopResult::Settling {
                     continue;
@@ -3075,6 +3099,16 @@ impl LiveTvManager {
         close_transport_original(Arc::downgrade(&self.registry), transport).await;
     }
 
+    /// Whether this process holds any transport (and so any capture).
+    fn holds_transports(&self) -> bool {
+        !self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .transports
+            .is_empty()
+    }
+
     pub(crate) async fn close_all_transports(&self) {
         let transports = {
             let registry = self
@@ -4027,12 +4061,17 @@ pub(crate) async fn reminder_loop(
     shutdown: CancellationToken,
 ) {
     loop {
-        let ours_and_serving = match manager.dvr_configs().await {
-            Ok((live_tv, _)) => {
-                live_tv.owner_node_id == manager.node_id && manager.serving.admit().is_some()
-            }
-            Err(_) => false,
-        };
+        // The configuration's owner is the node reading it, so the read
+        // decides nothing but whether settings are readable at all; the
+        // applied view answers that without a leader round trip (A4). The
+        // tick's own reads and writes go through the Store.
+        let ours_and_serving =
+            match crate::live_tv::viewed_configs(&manager.applied_view(), &manager.node_id).await {
+                Ok((live_tv, _)) => {
+                    live_tv.owner_node_id == manager.node_id && manager.serving.admit().is_some()
+                }
+                Err(_) => false,
+            };
         if ours_and_serving {
             if let Err(error) = reminder_tick(&manager, &events).await {
                 tracing::warn!(
@@ -4088,7 +4127,15 @@ async fn reminder_tick_at(
 
     // A programme that moved is worth saying so about: the reminder names a
     // time that no longer has that programme in it, and firing it would send
-    // someone to the wrong thing.
+    // someone to the wrong thing. Without a guide there is nothing to
+    // compare: the applied view says so without a leader round trip (A4),
+    // and a guide it shows on is confirmed by the Store's read.
+    if matches!(
+        crate::live_tv::viewed_configs(&manager.applied_view(), &manager.node_id).await,
+        Ok((live_tv, _)) if !live_tv.guide_fetches()
+    ) {
+        return Ok(());
+    }
     let (live_tv, _) = manager.dvr_configs().await?;
     if !live_tv.guide_fetches() {
         return Ok(());
@@ -4189,6 +4236,23 @@ async fn reminder_tick_at(
 /// that finishes while the scanner is busy, or while this node is restarting,
 /// still has to reach the shelf. A row with no `item_id` is a standing request
 /// that survives both.
+/// Whether this node's applied settings view holds recording on, a root, and
+/// this node as the owner; an unreadable view answers yes, so the Store
+/// decides.
+pub(super) async fn recordings_library_viewed_ours(
+    applied: &plurx_core::store::AppliedView,
+    node_id: &str,
+) -> bool {
+    match applied.settings_snapshot().await {
+        Ok(snapshot) => {
+            let live_tv = LiveTvConfig::from_snapshot(&snapshot.values, node_id);
+            let dvr = DvrConfig::from_snapshot(&snapshot.values);
+            dvr.enabled && !dvr.root.is_empty() && live_tv.owner_node_id == node_id
+        }
+        Err(_) => true,
+    }
+}
+
 pub(crate) async fn dvr_library_loop(state: crate::state::AppState, shutdown: CancellationToken) {
     const SWEEP: std::time::Duration = std::time::Duration::from_secs(60);
     loop {
@@ -4205,6 +4269,11 @@ pub(crate) async fn dvr_library_loop(state: crate::state::AppState, shutdown: Ca
 async fn sweep_recordings_library(
     state: &crate::state::AppState,
 ) -> Result<(), plurx_core::error::StoreError> {
+    // The applied view says whether recording is on with a root here (A4);
+    // only then is the configuration read from the Store and acted on.
+    if !recordings_library_viewed_ours(&state.applied, &state.node_id).await {
+        return Ok(());
+    }
     let settings = state.store.settings_snapshot().await?;
     let live_tv = LiveTvConfig::from_snapshot(&settings, &state.node_id);
     let dvr = DvrConfig::from_snapshot(&settings);

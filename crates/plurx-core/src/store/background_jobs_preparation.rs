@@ -50,13 +50,17 @@ pub(super) async fn demands<T: QueueSql>(
     if now_ms < 0 {
         return Err(StoreError::Task("invalid preparation time".into()));
     }
+    // Local sessions carry a user_id in both the admitted predecessor and
+    // principal-rebuilt layouts. The rebuilt schema requires Shared sessions
+    // to have NULL user_id, so this excludes them without depending on the
+    // principal_kind column that is installed only after writers drain.
     let sql = format!(
         r#"
 WITH hot AS ({HOT_ITEMS}), viewers AS (
  SELECT user_id, CASE WHEN json_valid(recipe_json) THEN json_extract(recipe_json,'$.request.file_id') END AS file_id
  FROM (SELECT user_id, recipe_json, updated_at_ms,
    ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY updated_at_ms DESC, incarnation_id) AS ordinal
-   FROM media_sessions WHERE state = 'active' AND lease_expires_at_ms > json_extract($1, '$.now_ms'))
+   FROM media_sessions WHERE user_id IS NOT NULL AND state = 'active' AND lease_expires_at_ms > json_extract($1, '$.now_ms'))
  WHERE ordinal = 1 ORDER BY updated_at_ms DESC, user_id LIMIT 64
 ), viewer_next AS (
  SELECT viewer.user_id, (SELECT candidate.id FROM files playing

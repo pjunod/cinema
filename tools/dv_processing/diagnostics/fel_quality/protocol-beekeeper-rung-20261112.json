@@ -1,0 +1,12 @@
+{"schema":1,"id":"protocol-beekeeper-rung-20261112","status":"Fixed before any output (designed by Fable 5.2 after the held-out stack failed). Diagnostic only: nothing here is admissible under the 130 Mb/s screen.",
+ "baseline":"protocol-roi-zeromean-qpm6-20261111.json arm_Z6 (identical_to protocol-roi-zeromean-20261111.json; dark block < 1.0 nit; zero-mean); dark offset -6 QP (qoffset -6/63) where a map is used",
+ "fixture":"beekeeper1800 (held-out window of protocol-heldout-beekeeper-20261111.json)",
+ "stage0":"no encode: the unencoded export (PRE) vs F, four models, all-48 lattice and frames 0/24; stop the rung if PRE's pooled mean >= 0.9 x F's",
+ "arms":{"P0r129":"no map (mode none) + x265-params += cbqpoffs=-9:crqpoffs=-12:aq-strength=0:psy-rd=0:psy-rdoq=0, landed at 129 (closure arm)",
+  "P0r145":"P0r129 recipe landed at 145","P0r158":"P0r129 recipe landed at 158",
+  "P1r145":"protocol-stack-20261112.json P1 (Zfn1 map) landed at 145","P1r158":"P1 landed at 158"},
+ "harness_modes":{"P1r145":{"mode":"lumazfs","threshold_nits":1.0,"qp_offset":-6},"P1r158":{"mode":"lumazfs","threshold_nits":1.0,"qp_offset":-6}},
+ "rate_rule":"land_rate.py --target T: secant on b only, <=4 encodes, predicted authored packet average in [T-0.75, T+0.75] Mb/s; maxrate=160000k, bufsize=174080k (the baseline's 1.088 ratio); level 5.1 High receipts from the qualifier",
+ "readouts":"pooled whole-picture mean vs F (models A-D); frames whose whole-picture mean beats F; shadow-p99 frames beating F; frames 0/24 full resolution; crossover rate by log-rate interpolation per recipe, for mean and shadows separately",
+ "accept":"none (diagnostic). Report the crossover or 'no crossover at <= 160 Mb/s'. P0r129 beating F pooled in all four models with >= 24 shadow wins would reopen the 130 Mb/s question",
+ "not_claimed":["admission","HRD/CPB or Dolby peak-rate conformance","a production rate policy"]}

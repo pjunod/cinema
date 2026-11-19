@@ -22,7 +22,7 @@ from . import DEVICE_NAME, VERSION
 from .api import ApiError, Http, error_text
 from .caps import device_caps
 from .handoff import HandoffUrlError, normalize_origin, parse_handoff_url
-from .mpv import Mpv, MpvError, resolve_binary
+from .mpv import Mpv, MpvError, native_dovi_capable, resolve_binary
 from .playback import Playback, PlaybackError, Timing
 from .trust import TrustStore, default_config_dir, ensure_trusted, zenity_confirm, zenity_error
 
@@ -137,7 +137,7 @@ def parse_args(argv):
                         help="extra CA certificate for a server with a private certificate; "
                              "remembered for that server")
     parser.add_argument("--mpv", metavar="PATH",
-                        help="mpv binary (default: /usr/lib/plurx-player/bin/mpv, then mpv on PATH)")
+                        help="mpv binary (default: /usr/bin/mpv, then mpv on PATH)")
     parser.add_argument("--version", action="version", version=f"plurx-player {VERSION}")
     return parser.parse_args(argv)
 
@@ -207,6 +207,7 @@ def _redeem_and_play(args, deps, handoff, http, gate):
         binary = resolve_binary(args.mpv)
         if not binary:
             raise PlaybackError("mpv is not installed")
+        caps = device_caps(VERSION, native_dovi=native_dovi_capable(binary))
         runtime = tempfile.mkdtemp(prefix="plurx-player-", dir=_runtime_base(deps))
         mpv = Mpv(binary, os.path.join(runtime, "mpv.sock"),
                   config_dir=os.path.join(deps.config_dir or default_config_dir(), "mpv"))
@@ -214,7 +215,7 @@ def _redeem_and_play(args, deps, handoff, http, gate):
         from .cinema import Preferences
         preferences = Preferences(deps.config_dir or default_config_dir())
         while True:
-            playback = Playback(http, mpv, redeemed, device_caps(VERSION), deps.clock, deps.sleep,
+            playback = Playback(http, mpv, redeemed, caps, deps.clock, deps.sleep,
                                 deps.timing, log, preferences)
             code = playback.run()
             if playback.next_handoff is None or mpv.closed:

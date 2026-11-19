@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Assemble a native macOS daemon candidate in a new directory; never install.
 
-Usage: package-macos --daemon BUILT_PLURXD --ffmpeg-package COMBINED_PACKAGE
+Usage: package-macos --daemon BUILT_PLURXD --ffmpeg-package FFMPEG_PACKAGE
        --subtitle-engine-package VERIFIED_ENGINE --output NEW_DIRECTORY
        [--sign DEVELOPER_ID_IDENTITY] [--debug-symbols MATCHED_DSYM]
-The combined FFmpeg package must already contain its exact-source WASM parser
+The arm64 FFmpeg package must already contain its exact-source WASM parser
 and provenance. The daemon and both tools live together in bin/: the daemon's
 ordinary sibling resolver finds these defaults; explicit operator paths win.
 The verified subtitle engine is copied as a complete bin/subtitle-engine bundle.
@@ -97,53 +97,6 @@ def validate_native_package(package):
     return manifest
 
 
-def combine_ffmpeg_packages(arm, intel, output):
-    """Combine two independently verified packages, retaining both slice facts."""
-    if not output.is_absolute() or output.exists():
-        raise ValueError("universal media output must be an absolute new directory")
-    left, right = validate_native_package(arm), validate_native_package(intel)
-    parser_identity = ["source_commit", "source_sha256", "parser_abi", "module_sha256", "module_bytes"]
-    if any(left.get(key) != right.get(key) for key in parser_identity):
-        raise ValueError("universal media slices have different source parser bytes/ABI")
-    facts = [json.loads((item / "provenance/manifest.json").read_text()) for item in [arm, intel]]
-    fonts = [fact.get("font_tools") for fact in facts]
-    if (fonts[0] is None) != (fonts[1] is None):
-        raise ValueError("universal media slices have different font-tool cohorts")
-    names = ["ffmpeg", "ffprobe"] + (["fc-list", "fc-conflist"] if fonts[0] else [])
-    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"}
-    for package, architecture in [(arm, "arm64"), (intel, "x86_64")]:
-        for name in names:
-            observed = subprocess.check_output(["/usr/bin/lipo", "-archs", str(package / name)], env=env, timeout=30).decode().strip()
-            if observed != architecture:
-                raise ValueError("universal media input is not its claimed native slice")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".universal-media-", dir=output.parent) as temporary:
-        stage = Path(temporary) / "package"
-        shutil.copytree(arm, stage)
-        manifest = facts[0]
-        (stage / "provenance/slices").mkdir()
-        for architecture, fact in zip(["arm64", "x86_64"], facts):
-            (stage / f"provenance/slices/{architecture}.json").write_text(json.dumps(fact, indent=2, sort_keys=True) + "\n")
-        manifest["universal_slices"] = {architecture: {"manifest_sha256": hashlib.sha256((package / "provenance/manifest.json").read_bytes()).hexdigest()}
-                                        for architecture, package in [("arm64", arm), ("x86_64", intel)]}
-        for name in names:
-            destination = stage / name
-            destination.unlink()
-            subprocess.run(["/usr/bin/lipo", "-create", str(arm / name), str(intel / name), "-output", str(destination)], env=env, check=True, timeout=60)
-            destination.chmod(0o755)
-            subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(destination)], env=env, check=True, timeout=60)
-            subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(destination)], env=env, check=True, timeout=60)
-            fact = manifest["binaries"][name] if name in ["ffmpeg", "ffprobe"] else manifest["font_tools"]["binaries"][name]
-            fact["sha256"] = recipe().digest(destination)
-            fact["architecture"] = "x86_64 arm64"
-            if "bytes" in fact:
-                fact["bytes"] = destination.stat().st_size
-        (stage / "provenance/manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-        validate_native_package(stage)
-        stage.rename(output)
-    return manifest
-
-
 def attach_desktop(output, app, controls, version, source_commit, signing_identity):
     """Add the complete desktop/control cohort without installing on this host."""
     if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version or "") is None or re.fullmatch(r"[0-9a-f]{40}", source_commit or "") is None:
@@ -163,8 +116,8 @@ def attach_desktop(output, app, controls, version, source_commit, signing_identi
         if not source.is_absolute() or source.is_symlink() or not source.is_file():
             raise ValueError(f"missing built controller {name}")
         architectures = set(subprocess.check_output(["/usr/bin/lipo", "-archs", str(source)], env=env, timeout=30).decode().split())
-        if architectures != {"arm64", "x86_64"}:
-            raise ValueError(f"controller {name} is not universal")
+        if architectures != {"arm64"}:
+            raise ValueError(f"controller {name} is not arm64")
         destination = output / "control" / name
         shutil.copyfile(source, destination)
         destination.chmod(0o755)
@@ -173,7 +126,7 @@ def attach_desktop(output, app, controls, version, source_commit, signing_identi
     destination = output / "Plurx Server.app"
     shutil.copytree(app, destination, symlinks=True)
     # The GUI invokes only its bundled frontend. Install the identical signed
-    # universal controller, then reseal the outer app after nested code changes.
+    # arm64 controller, then reseal the outer app after nested code changes.
     embedded = destination / "Contents/MacOS/plurx-control"
     if embedded.is_symlink():
         raise ValueError("unsafe embedded desktop controller")
@@ -188,17 +141,17 @@ def attach_desktop(output, app, controls, version, source_commit, signing_identi
     executable = destination / "Contents/MacOS" / info["CFBundleExecutable"]
     if executable.is_symlink() or not executable.is_file() or executable.parent != destination / "Contents/MacOS":
         raise ValueError("unsafe desktop application executable")
-    if set(subprocess.check_output(["/usr/bin/lipo", "-archs", str(executable)], env=env, timeout=30).decode().split()) != {"arm64", "x86_64"}:
-        raise ValueError("desktop application is not universal")
+    if set(subprocess.check_output(["/usr/bin/lipo", "-archs", str(executable)], env=env, timeout=30).decode().split()) != {"arm64"}:
+        raise ValueError("desktop application is not arm64")
     root = Path(__file__).resolve().parent.parent
     shutil.copyfile(root / "deploy/install", output / "install")
     (output / "install").chmod(0o755)
     facts = {"schema_version": 1, "version": version, "source_commit": source_commit,
-             "architecture": "universal", "bundle_identifier": info["CFBundleIdentifier"],
+             "architecture": "arm64", "bundle_identifier": info["CFBundleIdentifier"],
              "trust_key_ids": [], "qualification": "package integrity; real signing roots and native install acceptance remain required"}
     (output / "provenance/desktop-release.json").write_text(json.dumps(facts, sort_keys=True, indent=2) + "\n")
     release = {"schema_version": 1, "repository": "pjunod/cinema", "version": version,
-               "source_commit": source_commit, "architecture": "universal"}
+               "source_commit": source_commit, "architecture": "arm64"}
     (output / "release.json").write_text(json.dumps(release, sort_keys=True, indent=2) + "\n")
     closure = {"schema_version": 1, "version": version, "files": []}
     for path in sorted(output.rglob("*")):
@@ -294,9 +247,9 @@ def archive_native(package, output, epoch=0):
         raise ValueError("archive epoch must fit a portable gzip timestamp")
     release, _, _ = verify_package_closure(package)
     fields = {"schema_version", "repository", "version", "source_commit", "architecture"}
-    if set(release) != fields or release["schema_version"] != 1 or release["repository"] != "pjunod/cinema" or release["architecture"] != "universal" or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", release["version"]) is None or re.fullmatch(r"[0-9a-f]{40}", release["source_commit"]) is None:
+    if set(release) != fields or release["schema_version"] != 1 or release["repository"] != "pjunod/cinema" or release["architecture"] != "arm64" or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", release["version"]) is None or re.fullmatch(r"[0-9a-f]{40}", release["source_commit"]) is None:
         raise ValueError("archive native release identity is invalid")
-    wrapper = f"plurxd-{release['version']}-macos-universal"
+    wrapper = f"plurxd-{release['version']}-macos-arm64"
     if output.name != wrapper + ".tar.gz":
         raise ValueError("archive filename must match the canonical release identity")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -450,7 +403,7 @@ def assemble(daemon, package, output, signing_identity, debug_symbols=None, engi
     if engine_package is None:
         raise ValueError("native daemon package requires the pinned subtitle engine package")
     engine_facts = engine_recipe().verify(engine_package)
-    if engine_facts.get("platform") not in ["macos-arm64", "macos-x86_64", "macos-universal"]:
+    if engine_facts.get("platform") != "macos-arm64":
         raise ValueError("native daemon package requires a macOS subtitle engine")
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".macos-package-", dir=output.parent) as temporary:
@@ -534,7 +487,6 @@ def main():
     parser.add_argument("--verify-distribution", type=Path)
     parser.add_argument("--archive", type=Path, help="complete native package root to wrap in strict portable USTAR")
     parser.add_argument("--team-id")
-    parser.add_argument("--combine-ffmpeg", nargs=2, type=Path, metavar=("ARM64", "X86_64"))
     parser.add_argument("--desktop-app", type=Path)
     parser.add_argument("--control-dir", type=Path)
     parser.add_argument("--version")
@@ -552,9 +504,6 @@ def main():
         return
     if args.output is None:
         parser.error("--output is required for assembly")
-    if args.combine_ffmpeg:
-        print(json.dumps(combine_ffmpeg_packages(*args.combine_ffmpeg, args.output), sort_keys=True))
-        return
     if args.daemon is None or args.ffmpeg_package is None or args.subtitle_engine_package is None:
         parser.error("--daemon, --ffmpeg-package and --subtitle-engine-package are required")
     if any([args.desktop_app, args.control_dir, args.version, args.source_commit]) and not all([args.desktop_app, args.control_dir, args.version, args.source_commit]):

@@ -70,7 +70,14 @@ async fn a_one_voter_bootstrap_and_reopen_retain_local_membership_admission() {
     let (mut cluster, _) = start_cluster_with_port_retry(&harness_binary(), root.path(), 1)
         .await
         .expect("start real admitted voter");
-    for request in [Request::Bootstrap, Request::Open] {
+    // Current canonical managed schema must survive repeated bootstrap, and
+    // must still reject a different persisted identity before reopening.
+    for request in [
+        Request::Bootstrap,
+        Request::Bootstrap,
+        Request::RejectIdentityDrift,
+        Request::Open,
+    ] {
         require_ok(
             cluster
                 .request(1, request)
@@ -1115,6 +1122,24 @@ fn the_request_and_response_encoding_is_stable() {
         r#"{"Metrics":{"leader":1,"current_term":7,"voters":[1,2,3],"members":[1,2,3,4],"applied_index":null,"quorum_acknowledged":true}}"#
     );
 
+    assert_eq!(
+        serde_json::to_string(&Request::ShutdownHandoff).expect("encode"),
+        r#""ShutdownHandoff""#
+    );
+    assert_eq!(
+        serde_json::to_string(&Request::StartWriteLoad { writer: 2 }).expect("encode"),
+        r#"{"StartWriteLoad":{"writer":2}}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&Response::ShutdownHandoff {
+            outcome: "handed_off".to_owned(),
+            successor: Some(2),
+            elapsed_ms: 640,
+        })
+        .expect("encode"),
+        r#"{"ShutdownHandoff":{"outcome":"handed_off","successor":2,"elapsed_ms":640}}"#
+    );
+
     let decoded: Request =
         serde_json::from_str(r#"{"PostLossWrite":{"target":"leader","position_ms":60000}}"#)
             .expect("decode");
@@ -1141,6 +1166,14 @@ async fn every_argument_rejection_names_what_was_wrong() {
         (
             vec!["harness", "leader-leave", "extra"],
             "leader-leave accepts no arguments",
+        ),
+        (
+            vec!["harness", "leader-shutdown", "extra"],
+            "leader-shutdown accepts no arguments",
+        ),
+        (
+            vec!["harness", "leader-shutdown-load", "extra"],
+            "leader-shutdown-load accepts no arguments",
         ),
         (
             vec!["harness", "node"],

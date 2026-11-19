@@ -546,6 +546,7 @@ async fn pass(
             after: cursor.clone(),
             now_ms: now_ms(),
             limit: 128,
+            admissible_only: false,
         })
         .await?;
     page.jobs.retain(|job| matches!(job.supported_payload(), Ok(JobPayload::ArtifactHydrate { artifact_key, target_node_id }) if parse_key(&artifact_key).is_some() && target_node_id == state.node_id));
@@ -612,7 +613,8 @@ async fn pass(
                 .ok_or_else(|| StoreError::Task("copy claim missing token".into()))?,
             deadline,
             JobKind::ArtifactHydrate,
-        )?;
+        )
+        .await?;
         let fence = active.fence();
         let cancel = fence.loss_token().child_token();
         let result = {

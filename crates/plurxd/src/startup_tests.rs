@@ -2547,6 +2547,7 @@ fn booted_state(dir: &std::path::Path) -> AppState {
     let config = config_in(dir);
     let store = store_in(dir);
     let catalogue = plurx_core::store::CatalogueReader::authority(Arc::clone(&store));
+    let applied = plurx_core::store::AppliedView::authority(Arc::clone(&store));
     build_state(
         &config,
         "test-node".to_owned(),
@@ -2556,6 +2557,7 @@ fn booted_state(dir: &std::path::Path) -> AppState {
         plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
         plurx_core::cluster::membership::MembershipManager::unavailable(),
         catalogue,
+        applied,
         store,
         create_dirs(dir).expect("dirs"),
         Default::default(),
@@ -2588,6 +2590,7 @@ async fn https_prepared_socket_is_released_when_later_http_boot_binding_fails() 
         .await
         .expect("store");
     let catalogue = plurx_core::store::CatalogueReader::authority(handle.store.clone());
+    let applied = plurx_core::store::AppliedView::authority(handle.store.clone());
     let result = boot(
         config,
         Boot {
@@ -2595,6 +2598,7 @@ async fn https_prepared_socket_is_released_when_later_http_boot_binding_fails() 
             resource_runtime: None,
             store: handle.store,
             catalogue,
+            applied,
             replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
             membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
             identity: handle.identity,
@@ -3452,6 +3456,7 @@ async fn boot_serve_and_drain_in_runtime(
         .expect("store");
     let store = Arc::clone(&handle.store);
     let catalogue = plurx_core::store::CatalogueReader::authority(Arc::clone(&handle.store));
+    let applied = plurx_core::store::AppliedView::authority(Arc::clone(&handle.store));
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
 
     let booted = tokio::spawn(boot(
@@ -3461,6 +3466,7 @@ async fn boot_serve_and_drain_in_runtime(
             resource_runtime: None,
             store: handle.store,
             catalogue,
+            applied,
             replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
             membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
             identity: handle.identity,
@@ -4979,4 +4985,167 @@ fn explicit_bind_advertises_only_that_address() {
 
     assert!(!info.is_addr_auto());
     assert!(info.get_addresses().contains(&address));
+}
+
+/// The signal path's first act is the stop-time leadership handoff, while
+/// Raft and every listener are still up: before the drain token is
+/// cancelled (which also starts committed-leave teardown), before media
+/// starts are fenced, and before either listener stops accepting.
+#[test]
+fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
+    let source = include_str!("main.rs");
+    assert_eq!(
+        source.matches(".handoff_for_shutdown()").count(),
+        1,
+        "the daemon has exactly one stop-time handoff call"
+    );
+    let future = source
+        .split_once("    let shutdown = async move {\n        tokio::select! {")
+        .expect("the boot shutdown future")
+        .1;
+    let future = future
+        .split_once("\n    };\n")
+        .expect("end of the boot shutdown future")
+        .0;
+    let select_end = future
+        .find("\n        }\n")
+        .expect("the signal/leave select ends the future's first statement");
+    let handoff = future
+        .find("membership_shutdown.handoff_for_shutdown().await;")
+        .expect("the shutdown future hands leadership off");
+    let first_await = future[select_end..]
+        .find(".await")
+        .map(|at| at + select_end)
+        .expect("the drain awaits");
+    assert_eq!(
+        first_await,
+        handoff + "membership_shutdown.handoff_for_shutdown()".len(),
+        "the handoff is the drain's first await"
+    );
+    for later in [
+        "leave_shutdown.cancel();",
+        "begin_restart_preparation_until(",
+        "public_listener_stop.cancel();",
+        "jellyfin_stop.cancel();",
+    ] {
+        let at = future
+            .find(later)
+            .unwrap_or_else(|| panic!("the drain still runs {later}"));
+        assert!(handoff < at, "the handoff must run before {later}");
+    }
+    let clone = source
+        .find("let membership_shutdown = state.membership.clone();")
+        .expect("the handoff owns a membership clone");
+    let router = source
+        .find("let app = http::router(state);")
+        .expect("the router takes the state");
+    assert!(
+        clone < router,
+        "clone membership before the router takes the state"
+    );
+}
+
+/// Audit C7: a database Raft core that quit on a fatal error resolves the
+/// same drain a signal resolves, and the drained process then exits with an
+/// error (status 1 from `daemon_main`), where a signal's drain exits cleanly.
+#[test]
+fn a_dead_raft_core_drains_like_a_signal_and_exits_non_zero() {
+    assert!(
+        exit_after_drain(None, Ok(())).is_ok(),
+        "a signal's drain exits zero"
+    );
+    let serving = exit_after_drain(None, Err(anyhow::anyhow!("listener failed")))
+        .expect_err("a serving error still fails a signal's drain");
+    assert!(!drained_a_dead_core(&Err(serving)));
+    let both = exit_after_drain(
+        Some(&"database or disk is full".to_owned()),
+        Err(anyhow::anyhow!("listener failed")),
+    );
+    assert!(
+        drained_a_dead_core(&both),
+        "a dead core's verdict survives a serving error in the same drain"
+    );
+    let error = exit_after_drain(Some(&"database or disk is full".to_owned()), Ok(()))
+        .expect_err("a dead core's drain exits non-zero");
+    assert!(format!("{error:#}").contains("database or disk is full"));
+    let drained = Err(error.context("serving"));
+    assert!(
+        drained_a_dead_core(&drained),
+        "the verdict stays recognisable through context"
+    );
+    assert!(!drained_a_dead_core(&Ok(())));
+    assert!(!drained_a_dead_core(&Err(anyhow::anyhow!(
+        "listener failed"
+    ))));
+
+    let source = include_str!("main.rs");
+    let created = source
+        .find("let raft_core_failure = state.cluster.core_failure();")
+        .expect("the daemon watches its own Raft core");
+    let router = source
+        .find("let app = http::router(state);")
+        .expect("the router takes the state");
+    assert!(
+        created < router,
+        "watch the core before the router takes the state"
+    );
+    let future = source
+        .split_once("    let shutdown = async move {\n")
+        .expect("the boot shutdown future")
+        .1
+        .split_once("        tokio::select! {\n")
+        .expect("the drain select")
+        .1
+        .split_once("\n        }\n")
+        .expect("the select ends")
+        .0;
+    let biased = future.find("biased;").expect("the select is biased");
+    let signal = future.find("() = shutdown => {}").expect("the signal arm");
+    let leave = future
+        .find("() = leave_shutdown.cancelled() => {")
+        .expect("the leave arm");
+    let fatal = future
+        .find("error = raft_core_failure => {")
+        .expect("the dead core resolves the same select as the signal");
+    assert!(
+        biased < signal && signal < leave && leave < fatal,
+        "a pending signal or leave wins over a core failure"
+    );
+    let arm = &future[fatal..];
+    assert!(arm.contains("tracing::error!("), "one error line names it");
+    assert!(arm.contains("raft_core_fatal_drain.set(error)"));
+    assert_eq!(source.matches("state.cluster.core_failure()").count(), 1);
+    assert!(
+        source.contains("exit_after_drain(raft_core_fatal.get(), served.map(drop))"),
+        "the drained boot ends with the recorded verdict"
+    );
+    assert!(
+        source.contains(".map_or(1, |error| error.code)"),
+        "an error from the daemon is exit status 1"
+    );
+    assert!(
+        source.contains("let shutdown = if native_commit || drained_a_dead_core(&result) {"),
+        "a dead core's store close is bounded like a committed native close"
+    );
+    let daemon = source
+        .split_once("fn daemon_main() -> anyhow::Result<()> {")
+        .expect("daemon_main")
+        .1
+        .split_once("\n}\n")
+        .expect("end of daemon_main")
+        .0;
+    let ran = daemon
+        .find("runtime.block_on(daemon_run())")
+        .expect("the daemon runs on its own runtime");
+    let dropped = daemon
+        .find("runtime.shutdown_timeout(RUNTIME_SHUTDOWN);")
+        .expect("the runtime is shut down");
+    let exited = daemon
+        .find("std::process::exit(code)")
+        .expect("an error exits with its status");
+    assert!(
+        ran < dropped && dropped < exited,
+        "the runtime drops before the process exits"
+    );
+    assert_eq!(source.matches("std::process::exit(code)").count(), 1);
 }

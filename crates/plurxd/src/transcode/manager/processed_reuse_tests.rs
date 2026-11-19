@@ -268,6 +268,13 @@ async fn staged_processed_replacement_never_inherits_preparation_or_cleanup_auth
             .response_owner;
         let replacement_state = f.manager.vod.test_prepared_reader_state(&session).await;
         assert!(
+            f.manager
+                .prepared_hls_facts(&session, &incarnation)
+                .await
+                .is_none(),
+            "a same-id replacement cannot project the previous preparation's delivery facts"
+        );
+        assert!(
             !f.manager
                 .vod
                 .response_owner_is_live(&session, &previous)
@@ -743,6 +750,176 @@ async fn fixture(destination: DvDestination) -> Fixture {
 }
 
 #[tokio::test]
+async fn prepared_hls_facts_require_the_exact_live_primed_incarnation() {
+    use plurx_core::playback::enhancement::EnhancementBadge;
+    for destination in [DvDestination::Hdr10, DvDestination::Profile81] {
+        let f = fixture(destination).await;
+        let incarnation = &f.remote.incarnation_id;
+        let file_id = f.remote.request.file_id;
+        let profile81 = destination == DvDestination::Profile81;
+        let range = Some(if profile81 { "dolby_vision" } else { "hdr10" });
+        let profile = profile81.then_some(8);
+        assert!(
+            f.manager
+                .prepared_hls_facts(&f.session_id, incarnation)
+                .await
+                .is_none(),
+            "an ordinary attached session is not preparation authority"
+        );
+        assert!(
+            crate::http::hls::prepared_successor_enhancement(
+                &f.manager,
+                &f.session_id,
+                incarnation,
+                file_id,
+                range,
+                profile,
+            )
+            .await
+            .is_none(),
+            "an unmarked attachment cannot supply an enhancement claim"
+        );
+        f.manager
+            .vod
+            .mark_prepared_incarnation(&f.session_id, incarnation)
+            .await;
+        {
+            let (facts, _owner_guard) = f
+                .manager
+                .prepared_hls_facts(&f.session_id, incarnation)
+                .await
+                .expect("exact live primed attachment");
+            let encoding = facts.encoding.as_ref().expect("actual attached encoding");
+            assert!(Arc::ptr_eq(encoding, &f.encoding));
+            assert_eq!(encoding.preserves_processed_dv(), profile81);
+            assert_eq!(encoding.processed_fel(), Some(true));
+        }
+        // Call the production HTTP projection after releasing the explicit
+        // guard above: the projection acquires its own exact owner fence.
+        let enhancement = crate::http::hls::prepared_successor_enhancement(
+            &f.manager,
+            &f.session_id,
+            incarnation,
+            file_id,
+            range,
+            profile,
+        )
+        .await
+        .expect("fresh enhancement from the actual primed owner");
+        assert!(enhancement.active.contains(&EnhancementBadge::Fel));
+        assert_eq!(enhancement.requires_effective_processing, !profile81);
+        for (wrong_file, wrong_range, wrong_profile) in [
+            (file_id + 1, range, profile),
+            (
+                file_id,
+                Some(if profile81 { "hdr10" } else { "dolby_vision" }),
+                profile,
+            ),
+            (file_id, range, Some(7)),
+            (file_id, None, profile),
+        ] {
+            assert!(
+                crate::http::hls::prepared_successor_enhancement(
+                    &f.manager,
+                    &f.session_id,
+                    incarnation,
+                    wrong_file,
+                    wrong_range,
+                    wrong_profile,
+                )
+                .await
+                .is_none(),
+                "stored selection fields must match the exact attached delivery"
+            );
+        }
+        let wrong_incarnation = uuid::Uuid::new_v4().to_string();
+        assert!(
+            f.manager
+                .prepared_hls_facts(&f.session_id, &wrong_incarnation)
+                .await
+                .is_none(),
+            "another durable incarnation cannot borrow these delivery facts"
+        );
+        assert!(
+            crate::http::hls::prepared_successor_enhancement(
+                &f.manager,
+                &f.session_id,
+                &wrong_incarnation,
+                file_id,
+                range,
+                profile,
+            )
+            .await
+            .is_none(),
+            "an enhancement cannot cross durable incarnations"
+        );
+        assert!(
+            f.manager
+                .vod
+                .end(&f.session_id, crate::vodserve::Terminal::Deleted)
+                .await
+        );
+        assert!(
+            f.manager
+                .prepared_hls_facts(&f.session_id, incarnation)
+                .await
+                .is_none(),
+            "a stopped preparation has no fresh owner-local delivery facts"
+        );
+        assert!(
+            crate::http::hls::prepared_successor_enhancement(
+                &f.manager,
+                &f.session_id,
+                incarnation,
+                file_id,
+                range,
+                profile,
+            )
+            .await
+            .is_none(),
+            "a stopped preparation cannot retain a fresh enhancement claim"
+        );
+    }
+}
+
+#[tokio::test]
+async fn processed_stream_format_reports_the_attached_carrier_not_its_pq_base() {
+    for destination in [DvDestination::Hdr10, DvDestination::Profile81] {
+        let f = fixture(destination).await;
+        assert_eq!(
+            f.encoding.plan.output_contract().output_dynamic_range(),
+            "hdr10",
+            "both admitted processing destinations encode a PQ base"
+        );
+        let status = f
+            .manager
+            .vod
+            .status(&f.session_id)
+            .await
+            .expect("attached status");
+        let json = serde_json::to_value(status).expect("status JSON");
+        assert_eq!(
+            json["stream_format"]["dynamic_range"],
+            if destination == DvDestination::Profile81 {
+                "dolby_vision"
+            } else {
+                "hdr10"
+            },
+            "only the exact attached P81 processing plan supplies DV signaling"
+        );
+        assert_eq!(
+            json["stream_format"]["pipeline"],
+            f.encoding.plan.options().pipeline.name(),
+            "the carrier does not relabel the frozen processing pipeline"
+        );
+        assert_eq!(
+            json["stream_format"]["encoder"],
+            f.encoding.delivered_output_encoder()
+        );
+    }
+}
+
+#[tokio::test]
 async fn processed_profile81_master_declares_hdr10_compatibility() {
     for destination in [DvDestination::Hdr10, DvDestination::Profile81] {
         let f = fixture(destination).await;
@@ -780,6 +957,83 @@ async fn processed_profile81_master_declares_hdr10_compatibility() {
 async fn fixture_with_audio(
     destination: DvDestination,
     audio: Option<(Option<i64>, i64)>,
+) -> Fixture {
+    fixture_with_encoder(destination, audio, Encoder::Software, None).await
+}
+
+#[tokio::test]
+async fn processed_cache_args_match_the_destination_window_encoder() {
+    use plurx_core::transcode::{Pacing, TranscodeExecution, VaapiHdrPolicy};
+
+    let policy = Some(VaapiHdrPolicy::MesaRadeonsiVbaq);
+    for (destination, encoder, vaapi_policy, compression, transfer) in [
+        (
+            DvDestination::Hdr10,
+            Encoder::Vaapi,
+            policy,
+            Some("19"),
+            "smpte2084",
+        ),
+        (
+            DvDestination::Profile81,
+            Encoder::Vaapi,
+            policy,
+            Some("0"),
+            "smpte2084",
+        ),
+        (
+            DvDestination::Sdr,
+            Encoder::Vaapi,
+            policy,
+            Some("19"),
+            "bt709",
+        ),
+        (
+            DvDestination::Profile81,
+            Encoder::Software,
+            None,
+            None,
+            "smpte2084",
+        ),
+    ] {
+        let f = fixture_with_encoder(destination, None, encoder, vaapi_policy).await;
+        let encoding = &f.encoding;
+        let file = encoding
+            .store
+            .get_file(f.remote.request.file_id)
+            .await
+            .expect("read bound source")
+            .expect("bound source");
+        let runtime = encoding
+            .dv_runtime
+            .as_ref()
+            .expect("admitted processed recipe");
+        let mut options = encoding.options.clone();
+        options.start_seconds = 0.0;
+        let execution = TranscodeExecution::from_options(&file, &options, Pacing::unpaced(), ".")
+            .expect("window execution");
+        let end = file.duration_ms.expect("source duration") as f64 / 1000.0;
+        let window = runtime
+            .window_encoder_args(&file, &encoding.plan, &execution, encoding.grid, end)
+            .expect("actual encoder arguments");
+        let planned = encoding.args(&file, 0.0, end);
+        assert_eq!(planned, window, "{destination:?} {encoder:?}");
+        let flag = |name: &str| {
+            planned
+                .windows(2)
+                .find(|pair| pair[0] == name)
+                .map(|pair| pair[1].as_str())
+        };
+        assert_eq!(flag("-compression_level"), compression);
+        assert_eq!(flag("-color_trc"), Some(transfer));
+    }
+}
+
+async fn fixture_with_encoder(
+    destination: DvDestination,
+    audio: Option<(Option<i64>, i64)>,
+    encoder: Encoder,
+    vaapi_hdr_policy: Option<plurx_core::transcode::VaapiHdrPolicy>,
 ) -> Fixture {
     use std::os::unix::fs::MetadataExt;
     let root = crate::test_tempdir().expect("processed lifecycle");
@@ -1006,7 +1260,8 @@ async fn fixture_with_audio(
             root.path().join("cache"),
             crate::ffmpeg::ffmpeg_build().await,
             "node".into(),
-        ),
+        )
+        .with_source_identity("node".into(), uuid::Uuid::new_v4()),
     );
     manager.test_hooks();
     let backend = DvBackendIdentity::new(
@@ -1084,6 +1339,7 @@ async fn fixture_with_audio(
                     }
                     _ => TitleConstant::Unknown,
                 },
+                el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
             }
         };
         let raw_rpus = vec![
@@ -1129,8 +1385,25 @@ async fn fixture_with_audio(
                 r#"#!/bin/sh
 set -eu
 test "$2" = 0
-test "$(wc -c < "$1")" -eq {}
-test "$(sha256sum "$1" | cut -d ' ' -f 1)" = '{}'
+case "$1" in http://127.0.0.1:*) ;; *) exit 1 ;; esac
+observed="$(python3 - "$1" <<'PYTHON'
+import hashlib, sys, urllib.request
+try:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({{}}))
+    digest, count = hashlib.sha256(), 0
+    with opener.open(sys.argv[1]) as source:
+        while True:
+            chunk = source.read(65536)
+            if not chunk:
+                break
+            count += len(chunk)
+            digest.update(chunk)
+    print(count, digest.hexdigest())
+except Exception:
+    raise SystemExit("owned source capability read failed")
+PYTHON
+)"
+test "$observed" = '{} {}'
 printf '%s\n' '{}'
 "#,
                 source_file.size,
@@ -1460,14 +1733,15 @@ printf '%s\n' '{}'
         source_clock,
         source_mastering: Ok(None),
         source_mastering_minimum: Ok(None),
+        source_master_metadata: None,
         source_frame_probe: None,
         preferences,
         destination,
         mode: DvProcessingMode::Fel,
         decode: crate::dv_segment::RendererDecode::Software,
         reconstruction_slot: None,
-        encoder: Encoder::Software,
-        vaapi_hdr_policy: None,
+        encoder,
+        vaapi_hdr_policy,
         runtime_cache: root.path().join("runtime"),
         shader_cache: Arc::new(crate::test_tempdir().expect("shader cache")),
         prepared: std::sync::Mutex::new(None),
@@ -1560,10 +1834,12 @@ printf '%s\n' '{}'
     let incarnation = uuid::Uuid::new_v4().to_string();
     let session_id = uuid::Uuid::new_v4().to_string();
     let request = SessionRequest {
+        source_telemetry: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: Some(Box::new(context)),
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,
@@ -1595,6 +1871,7 @@ printf '%s\n' '{}'
             caps,
             candidate,
             binding,
+            catalog_query: None,
         }),
         presentation_target: None,
         decoder_caps: None,
@@ -2113,5 +2390,74 @@ async fn assert_admitted_delivery(f: &Fixture, session: &str, destination: DvDes
         assert_eq!(recovered.processed_dv_profile, None);
     } else {
         assert!(master.contains("VIDEO-RANGE=PQ"), "{master}");
+    }
+}
+
+async fn prepare_without_admitted_epoch(f: &Fixture, session: &str, json: &str) -> bool {
+    f.manager
+        .vod_prepare_first_before(
+            json,
+            session,
+            f.user_id,
+            PreparedVodOwner {
+                node_id: "node".into(),
+                source_authority: None,
+            },
+            f.manager.session_adoption_token(session).expect("adoption"),
+            None,
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+}
+
+/// D1: the processed upgrade's successor. Its predecessor is the ordinary
+/// session, which has no processed root to lend, so the successor's first
+/// preparation consumes the exact root the post-first-frame trial verified and
+/// held for that successor's incarnation — once — and serves the admitted
+/// processed delivery from it. Without a held root (the old path) the same
+/// staged processed successor cannot prime at all.
+#[tokio::test]
+async fn a_processed_upgrade_successor_primes_from_the_root_its_trial_held() {
+    for destination in [DvDestination::Hdr10, DvDestination::Profile81] {
+        let f = fixture(destination).await;
+        // No admitted predecessor epoch: the processed-predecessor seed is
+        // unavailable, exactly as for an ordinary predecessor.
+        let (incarnation, session, json) = stage(&f).await;
+        assert!(
+            !prepare_without_admitted_epoch(&f, &session, &json).await,
+            "a processed successor with neither a processed parent nor a held root cannot prime"
+        );
+        let (_, root) = f
+            .manager
+            .vod
+            .capture_staged_processed_root(
+                &SessionRequest {
+                    request_id: Some(incarnation.clone()),
+                    ..f.remote.request.clone()
+                },
+                &expectation(&f, &incarnation, &session),
+                &principal_supersession_scope(&f.remote.principal),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("the trial's verified root");
+        let context = f
+            .remote
+            .request
+            .candidate_context
+            .as_deref()
+            .cloned()
+            .expect("processed context");
+        let _lease = f
+            .manager
+            .hold_processed_upgrade_root(&incarnation, context, root);
+        assert!(prepare_without_admitted_epoch(&f, &session, &json).await);
+        assert!(
+            f.manager
+                .take_processed_upgrade_root(&incarnation)
+                .is_none(),
+            "the successor's first preparation consumed the held root"
+        );
+        assert_admitted_delivery(&f, &session, destination).await;
     }
 }

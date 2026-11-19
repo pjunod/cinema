@@ -21,12 +21,21 @@ const SHARED_DECISION=(()=>{
       sharing_start_conflict:"This shared playback request changed. Reopen the item and try again.",
       sharing_start_unsupported:"This shared playback change is not available yet.",
       sharing_start_dolby_vision_unsupported:"Dolby Vision is not available for shared playback yet.",
-      sharing_decision_unavailable:"The sharing host could not determine how to play this file."};
+      sharing_decision_unavailable:"The sharing host could not determine how to play this file.",
+      // A local create's retryable "not yet" codes, which B answers only to a
+      // Start that sent its start clock.
+      startup_timeout:"The sharing host is still preparing this stream.",
+      media_session_overloaded:"The sharing host is busy starting other streams. Retrying shortly."};
     const code=typeof value?.code==="string"&&Object.hasOwn(messages,value.code)?value.code:null;
     const message=status===401||status===403?"Shared playback authorization is no longer available.":
       code?messages[code]:mode==="start"||mode==="restart"?"Shared playback could not prepare.":"Shared decision unavailable";
     console.warn("Shared playback request refused",{status,mode,code:code||"unrecognized_refusal"});
-    throw Object.assign(new Error(message),{status,...(code?{code}:{})});
+    // A "not yet" carries the same `streamFailure` a Local create's refusal
+    // does, parsed by the same parser from this closed code and fixed sentence
+    // (never the peer's prose), so the create ladder retries it like a Local
+    // one. Terminal shared refusals keep their existing handling.
+    const streamFailure=code==="startup_timeout"||code==="media_session_overloaded"?PlaybackPolicy.parseStreamFailure({status,body:JSON.stringify({code,message})}):null;
+    throw Object.assign(new Error(message),{status,...(code?{code}:{}),...(streamFailure?{streamFailure}:{})});
   }
   function authorized(c){return c.auth===AUTH_GENERATION&&c.token===TOKEN&&c.origin===API;}
   function current(c){return c.auth===AUTH_GENERATION&&c.token===TOKEN&&c.origin===API&&c.generation===PAGE_RENDER_GENERATION&&c.route===location.hash;}
@@ -38,12 +47,12 @@ const SHARED_DECISION=(()=>{
   // Engine fields stay numbers where exact, while future/identity integers that
   // cannot be represented by Number remain lossless BigInts.
   function engine(value){if(typeof value==="bigint"&&value>=BigInt(Number.MIN_SAFE_INTEGER)&&value<=BigInt(Number.MAX_SAFE_INTEGER))return Number(value);if(Array.isArray(value))return value.map(engine);if(value&&typeof value==="object"){const o=Object.create(null);for(const [k,v]of Object.entries(value))o[k]=engine(v);return o;}return value;}
-  async function read(path,c,body=null,signal=null,mode="page",conflict=false){
+  async function read(path,c,body=null,signal=null,mode="page",conflict=false,startupRemainingMs=null){
     const valid=()=>mode==="session"||mode==="restart"?authorized(c):current(c);
     if(!valid()||signal?.aborted)fail("request_lifecycle");const controller=new AbortController(),job={controller,reader:null};jobs.add(job);
     const abort=()=>controller.abort();signal?.addEventListener("abort",abort,{once:true});const timer=setTimeout(abort,mode==="start"||mode==="restart"?310000:30000);
     try{
-      const expected=origin(c)+path,response=await fetch(expected,{method:body===null?"GET":"POST",headers:{authorization:"Bearer "+c.token,...(body===null?{}:{"content-type":"application/json"})},...(body===null?{}:{body}),credentials:"omit",cache:"no-store",redirect:"error",signal:controller.signal});
+      const expected=origin(c)+path,response=await fetch(expected,{method:body===null?"GET":"POST",headers:{authorization:"Bearer "+c.token,...startupRemainingHeaders(startupRemainingMs),...(body===null?{}:{"content-type":"application/json"})},...(body===null?{}:{body}),credentials:"omit",cache:"no-store",redirect:"error",signal:controller.signal});
       if(!valid()||controller.signal.aborted||response.redirected||response.url!==expected){await response.body?.cancel();fail("response_origin_or_lifecycle");}
       if(response.status===401||response.status===403){retireAuthorization();void response.body?.cancel().catch(()=>{});refusal(response.status,null,mode);}
       const rejected=response.status!==200&&!(conflict&&response.status===409),maximum=rejected?16384:MAX;
@@ -90,7 +99,7 @@ const SHARED_DECISION=(()=>{
   // context keeps the same accepted record, so its ordered watch state (the
   // progress sequence) carries on instead of being re-seeded. Like progress,
   // it outlives browsing but not an account change.
-  async function start(context,body,signal=null){
+  async function start(context,body,signal=null,startupRemainingMs=null){
     const restart=!!context?.session_id,base=restart?bases.get(context):context,c=restart?accepted.get(context):contexts.get(base);
     if(!c||!base||base.session_id||(restart?!authorized(c):!current(c)))fail();playbackFileContext(base);
     if(!body||typeof body!=="object"||Array.isArray(body))fail();
@@ -105,7 +114,7 @@ const SHARED_DECISION=(()=>{
     if(body.caps?.v!==2||typeof body.playback_id!=="string"||!body.playback_id||body.playback_id.length>128||/[\u0000-\u001f\u007f]/.test(body.playback_id)
       ||typeof body.request_id!=="string"||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.request_id))fail("start_identity");
     const text=JSON.stringify(body);if(new TextEncoder().encode(text).length>24*1024)fail();
-    const raw=await read(playbackFileUrl(base,"hls/sessions"),c,text,signal,restart?"restart":"start"),response=engine(raw);
+    const raw=await read(playbackFileUrl(base,"hls/sessions"),c,text,signal,restart?"restart":"start",false,startupRemainingMs),response=engine(raw);
     if(restart?!authorized(c):!current(c))fail();
     const bound=direct?sharedPlaybackDirectStartContext(base,response):sharedPlaybackStartContext(base,response);accepted.set(bound,c);bases.set(bound,base);
     if(c.watch.pending&&c.watch.pending.session_id!==bound.session_id)c.watch.pending=null;

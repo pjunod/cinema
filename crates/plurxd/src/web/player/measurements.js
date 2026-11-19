@@ -91,10 +91,13 @@ function beginPlaybackPreparation(isCurrent,{background=false}={}){
     // intent owns the surface.
     expiry:null,
     cancel(){abandoned=true;controller.abort();rejectPending?.(cancelled());},
+    // What is left of the 20 s lifetime, which a session create also tells
+    // the server so it answers inside it.
+    remainingMs(){return 20000-(performance.now()-began);},
     finish(){if(beginPlaybackPreparation.active===owner)beginPlaybackPreparation.active=null;},
     async run(operation,release){
       if(abandoned||!isCurrent()) throw cancelled();
-      const remaining=20000-(performance.now()-began);
+      const remaining=owner.remainingMs();
       if(remaining<=0){abandoned=true;controller.abort();throw timedOut();}
       let timer;
       const deadline=new Promise((_,reject)=>{
@@ -107,7 +110,7 @@ function beginPlaybackPreparation(isCurrent,{background=false}={}){
       });
       try{
         const result=Promise.resolve(operation(controller.signal)).then(value=>{
-          if(!abandoned&&performance.now()-began>=20000){
+          if(!abandoned&&owner.remainingMs()<=0){
             abandoned=true;controller.abort();if(release)release(value);throw timedOut();
           }
           if(abandoned||!isCurrent()){
@@ -120,8 +123,18 @@ function beginPlaybackPreparation(isCurrent,{background=false}={}){
       }finally{clearTimeout(timer);rejectPending=null;}
     }
   };
+  // The operation's signal carries this lifetime's clock, so a request made
+  // under it can say how much is left (`preparationRemainingMs`). Not
+  // enumerable, and gone with the signal.
+  Object.defineProperty(controller.signal,"plurxStartupRemainingMs",{value:()=>owner.remainingMs()});
   if(!background) beginPlaybackPreparation.active=owner;
   return owner;
+}
+// What remains of the preparation whose operation was handed `signal`, or
+// null when the request runs under none.
+function preparationRemainingMs(signal){
+  const remaining=signal?/** @type {any} */(signal).plurxStartupRemainingMs:null;
+  return typeof remaining==="function"?Math.max(0,remaining()):null;
 }
 // Set by a caller that is about to re-enter play() for a reason play()
 // cannot infer — a quality change looks exactly like a resume from the
@@ -420,6 +433,14 @@ function stallRecoverySnapshot(p,v,{began,kind,cause,action,position,targetHeigh
 // and explicit quality choices remain exact.
 async function persistentWait(v,p,began,generation,actionGeneration){
   if(!playbackOwnsAttachedMedia(p)) return;
+  const observer=p.controlFrameObservation;
+  if(observer?.unavailable&&observer.attachment===p.mediaAttachment&&observer.element===v
+    &&observer.epoch===(p.controlPresentationEpoch||0)
+    &&observer.intent===(p.controlSeek?.sequence||0)
+    &&observer.intentGeneration===(p.controlIntentGeneration||0)&&!v.seeking
+    &&performance.now()-observer.lastAdvanceAt<PLAYBACK_SAMPLING_PERIOD_MS*3){
+      endWait(false);return;
+    }
   if(PLAYER!==p || p.waitAt!==began || !(p.started||p.controlSeek?.executed) ||
      (p._seekToken||0)!==generation ||
      (p.controlIntentGeneration||0)!==actionGeneration ||
@@ -664,9 +685,11 @@ async function persistentWait(v,p,began,generation,actionGeneration){
 // Native decode errors after an authoritative retirement use the existing
 // one-recovery owner and seek/create retry path. Admission waits for fresh
 // server authority; no new timer or codec recipe is introduced here.
-function recoverServingFencedAttachment(v,p){
+function recoverServingFencedAttachment(v,p,sourceOwner=null){
   const terminal=p&&p.sessionTerminal;
-  if(!playbackOwnsAttachedMedia(p)||!terminal
+  const owns=sourceOwner?sourceOwner.player===p&&sourceOwner.video===v&&sourceOwner.current()
+    :playbackOwnsAttachedMedia(p);
+  if(!owns||!terminal
     ||terminal.attachment!==p.mediaAttachment||terminal.sessionId!==p.sessionId
     ||!['serving_fenced','authority_fenced'].includes(terminal.reason)) return false;
   if(p.recoveringStall) return true;

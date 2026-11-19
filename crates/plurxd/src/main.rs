@@ -24,6 +24,11 @@ mod backup;
 mod cachekeep;
 mod channel_subjects;
 mod clock_offset;
+mod cluster;
+mod copy_analysis;
+mod copy_index_v3;
+mod copy_normalization;
+mod copyrange;
 mod copyseg;
 mod decode_facts;
 mod decoder_health;
@@ -33,6 +38,7 @@ mod desktop_control;
 mod diagnostics;
 mod diagnostics_delivery;
 mod dv_disk;
+mod dv_refit_serving;
 #[cfg(unix)]
 mod dv_segment;
 mod dvpipe;
@@ -92,6 +98,9 @@ mod sharing_host;
 mod sharing_network;
 #[cfg(test)]
 mod sharing_protocol_fixture;
+mod source_custody;
+mod source_generation;
+mod source_input;
 mod source_probe;
 mod state;
 mod store_result;
@@ -431,6 +440,12 @@ enum Command {
     Healthcheck,
     /// Print the exact fragment-index engine identity used by this binary.
     MediaRuntimeIdentity,
+    /// Validate the installed Dolby Vision helper bundle exactly as the worker
+    /// does and print its identity; exit 1 when this binary would refuse it or
+    /// none is installed. The image build runs this, so an image cannot ship a
+    /// bundle its own daemon rejects.
+    #[cfg(target_os = "linux")]
+    DvHelperIdentity,
     /// Advertise a bridge-networked server on the host's Bonjour interfaces.
     /// This is intended for the discovery companion container; the HTTP server
     /// remains attached to its normal Docker networks.
@@ -613,6 +628,7 @@ fn main() -> anyhow::Result<()> {
         result.context("launching namespace-bound probe")?;
         anyhow::bail!("probe exec unexpectedly returned");
     }
+    crate::source_custody::note_process_start();
     daemon_main()
 }
 
@@ -628,29 +644,50 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(all(not(unix), plurx_dv_segment_probe))]
 compile_error!("DV segment physical probe requires Unix descriptor custody");
 
-#[tokio::main]
-async fn daemon_main() -> anyhow::Result<()> {
+/// How long the runtime's own shutdown may wait for blocking work once the
+/// daemon has returned, before the process exits anyway.
+const RUNTIME_SHUTDOWN: Duration = Duration::from_secs(10);
+
+/// Run the daemon, then drop its runtime (and every task, listener and store
+/// handle it still owns) before the process exits: an error's exit status is
+/// set only after that, never with `std::process::exit` from inside it.
+fn daemon_main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building the Tokio runtime")?;
+    let outcome = runtime.block_on(daemon_run());
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN);
+    match outcome {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            let code = error
+                .downcast_ref::<CliExit>()
+                .map_or(1, |error| error.code);
+            eprintln!("{error:#}");
+            std::process::exit(code);
+        }
+        // Parsing and configuration errors return from `main` as before.
+        Err(error) => Err(error),
+    }
+}
+
+/// The command line and configuration (whose errors `main` returns), then
+/// the command's own outcome.
+async fn daemon_run() -> anyhow::Result<anyhow::Result<()>> {
     let cli = Cli::parse();
     #[cfg(unix)]
     if cli.source_commit {
         println!("{}", crate::version::SOURCE_COMMIT);
-        return Ok(());
+        return Ok(Ok(()));
     }
     let config = Config::load(cli.config.as_deref()).context("loading configuration")?;
-    if let Err(error) = dispatch(
+    Ok(dispatch(
         cli.command.unwrap_or(Command::Run),
         config,
         cli.config.as_deref(),
     )
-    .await
-    {
-        let code = error
-            .downcast_ref::<CliExit>()
-            .map_or(1, |error| error.code);
-        eprintln!("{error:#}");
-        std::process::exit(code);
-    }
-    Ok(())
+    .await)
 }
 
 /// The deliberate panic behind `plurxd diagnostic-panic`. Its own function, and
@@ -681,6 +718,8 @@ async fn dispatch(
             canonicalize_configured_dir(&mut config.storage.data_dir, "data")?;
         }
         Command::RefreshMetadata { .. } => {}
+        #[cfg(target_os = "linux")]
+        Command::DvHelperIdentity => {}
         Command::Healthcheck
         | Command::MediaRuntimeIdentity
         | Command::Advertise { .. }
@@ -735,6 +774,22 @@ async fn dispatch(
                 serde_json::to_string(&media_runtime_identity().await)?
             );
             Ok(())
+        }
+        #[cfg(target_os = "linux")]
+        Command::DvHelperIdentity => {
+            #[cfg(target_os = "linux")]
+            {
+                match crate::vodencode::dv_runtime::installed_helper_identity().await {
+                    Ok(identity) => println!("{identity}"),
+                    Err(error) => {
+                        eprintln!("DV helper bundle refused: {error}");
+                        std::process::exit(1);
+                    }
+                }
+                Ok(())
+            }
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("DV helper bundles are supported only on Linux")
         }
         Command::Advertise { server } => advertise(&server).await,
         Command::ResetPassword { username, password } => {
@@ -1916,6 +1971,11 @@ async fn run(config: Config) -> anyhow::Result<()> {
             tracing::info!("shutdown signal received during store activation; not serving");
             return Ok(());
         }
+        crate::source_custody::validate_recovery_startup(
+            selected.backend == SelectedBackend::Replicated,
+        )
+        .map_err(anyhow::Error::msg)
+        .context("validating physical source recovery before serving")?;
         let source_layout_ready = Box::pin(selected.prepare_source_schema_before_serving())
             .await
             .context("qualifying Source schema before serving")?;
@@ -1923,12 +1983,30 @@ async fn run(config: Config) -> anyhow::Result<()> {
             tracing::info!(target:"plurx::sharing","Source schema readiness pending; Local serving continues");
         }
         let store = Arc::clone(&selected.store);
+        crate::source_custody::configure_settlement_journal(&config.storage.data_dir);
+        crate::source_custody::configure_recovery_backend(
+            &store,
+            &config.storage.data_dir,
+            selected.backend == SelectedBackend::Replicated,
+        )
+        .map_err(anyhow::Error::msg)
+        .context("configuring exact-Store source recovery")?;
+        if let Err(error) =
+            crate::source_custody::replay_verified_recovery(&store, &selected.identity.node_id)
+                .await
+        {
+            tracing::warn!(%error, "source recovery evidence retained for retry");
+        }
         let replication = selected.replication_monitor();
         let membership = selected.membership_manager();
         let catalogue = selected.catalogue_reader();
+        let applied = selected.applied_view();
         let resource_runtime =
             resource_runtime::open_before_cleanup(&mut selected, &config).await?;
         let dirs = create_dirs_for_config_with_runtime(&config, resource_runtime.as_deref())?;
+        if let Err(error) = crate::source_custody::configure_access_roots(&config, &dirs).await {
+            tracing::warn!(%error, "source-access roots unavailable; launches remain unverified");
+        }
         // Probing only measures ffmpeg and the host, so cancelling it leaves
         // nothing half-written. Racing it is what keeps `docker stop` during a
         // slow probe from waiting out its grace period while this process
@@ -1949,6 +2027,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             replication,
             membership,
             catalogue,
+            applied,
             identity: selected.identity.clone(),
             credential_key: Arc::clone(&selected.credential_key),
             backup_client: selected.local_client(),
@@ -1978,11 +2057,13 @@ async fn run(config: Config) -> anyhow::Result<()> {
     };
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let native_commit = false;
-    let shutdown = if native_commit {
+    // A committed native close, and the close after a dead Raft core, are
+    // bounded: neither may hold the process open past 30 s.
+    let shutdown = if native_commit || drained_a_dead_core(&result) {
         match tokio::time::timeout(Duration::from_secs(30), selected.shutdown()).await {
             Ok(result) => result.context("stopping local Hiqlite voter"),
             Err(_) => Err(anyhow::anyhow!(
-                "local Hiqlite store close timed out during committed native shutdown"
+                "local Hiqlite store close timed out after 30 s during a bounded shutdown"
             )),
         }
     } else {
@@ -2004,6 +2085,7 @@ struct Boot {
     resource_runtime: Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
     store: Arc<dyn plurx_core::store::Store>,
     catalogue: plurx_core::store::CatalogueReader,
+    applied: plurx_core::store::AppliedView,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
     identity: plurx_core::cluster::ClusterIdentity,
@@ -2359,6 +2441,7 @@ async fn boot_observing(
         replication,
         membership,
         catalogue,
+        applied,
         identity,
         credential_key,
         backup_client,
@@ -2396,6 +2479,7 @@ async fn boot_observing(
         replication,
         membership,
         catalogue,
+        applied,
         store,
         dirs,
         encoder_caps,
@@ -2525,6 +2609,14 @@ async fn boot_observing(
     let leave_shutdown = state.shutdown.clone();
     let live_tv_shutdown = Arc::clone(&state.live_tv);
     let serving_shutdown = state.serving.clone();
+    let membership_shutdown = state.membership.clone();
+    // The database Raft core's own terminal state. A core that quit on a
+    // fatal error (a full disk, a storage error, a panic) never serves again
+    // in this process, so it resolves the same drain a signal does and the
+    // process then exits non-zero for its supervisor to restart.
+    let raft_core_failure = state.cluster.core_failure();
+    let raft_core_fatal = Arc::new(std::sync::OnceLock::<String>::new());
+    let raft_core_fatal_drain = Arc::clone(&raft_core_fatal);
     let jellyfin_standard_port = Arc::clone(&state.jellyfin_standard_port);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let desktop_server = if let Some(desktop) = &desktop {
@@ -2584,13 +2676,31 @@ async fn boot_observing(
     // listener (including its startup-observation handoff) redirects.
     let app = https::redirect::router(app, https_redirect_port);
 
+    // The select is biased, in order: a signal or a leave that is already
+    // pending wins over a core failure, so a deliberate stop is never recorded
+    // as a dead core (and never exits non-zero) just because both were ready.
     let shutdown = async move {
         tokio::select! {
+            biased;
             () = shutdown => {}
             () = leave_shutdown.cancelled() => {
                 tracing::info!("local shutdown requested, draining");
             }
+            error = raft_core_failure => {
+                tracing::error!(
+                    target: "plurx::cluster",
+                    %error,
+                    "the database Raft core stopped with a fatal error; draining and exiting"
+                );
+                let _ = raft_core_fatal_drain.set(error);
+            }
         }
+        // The drain's first act, while Raft and every listener are still
+        // fully up: a stopping leader moves leadership to a caught-up voter
+        // (bounded at 10 s), and every replicated node stops campaigning, so
+        // the drain's own writes go to the successor and the survivors never
+        // wait out a timeout election. It never fails; the drain continues.
+        membership_shutdown.handoff_for_shutdown().await;
         // One drain token for both causes: owners that must hand work back
         // before exit (shared session retirement) observe `state.shutdown`,
         // and a signal is as much a drain as a committed leave.
@@ -2715,7 +2825,51 @@ async fn boot_observing(
     {
         tracing::warn!(%error, "could not record the Plex façade census at shutdown");
     }
-    served.map(|_| ())
+    exit_after_drain(raft_core_fatal.get(), served.map(drop))
+}
+
+/// How a drained daemon ends: as serving ended after a signal or a leave,
+/// and with the dead core's verdict, so a non-zero exit status and a bounded
+/// store close, after its database Raft core died. The verdict wins over a
+/// serving error during that drain, which is logged: the core is the cause.
+fn exit_after_drain(
+    raft_core_fatal: Option<&String>,
+    served: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match raft_core_fatal {
+        None => served,
+        Some(error) => {
+            if let Err(serving) = served {
+                tracing::error!(error = %format!("{serving:#}"), "serving also failed while a dead Raft core drained");
+            }
+            Err(RaftCoreFatal(error.clone()).into())
+        }
+    }
+}
+
+/// The drain's verdict after the database Raft core died. Typed, so the
+/// store's close after it is bounded like a committed native close: a dead
+/// core's store must not hold the exit, and so the restart, open.
+#[derive(Debug)]
+struct RaftCoreFatal(String);
+
+impl std::fmt::Display for RaftCoreFatal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the database Raft core stopped with a fatal error: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for RaftCoreFatal {}
+
+/// Whether the serving result is a dead core's drain.
+fn drained_a_dead_core(result: &anyhow::Result<()>) -> bool {
+    result
+        .as_ref()
+        .is_err_and(|error| error.downcast_ref::<RaftCoreFatal>().is_some())
 }
 
 /// How a Bonjour record gets published. A parameter rather than a direct call
@@ -2726,7 +2880,7 @@ type MdnsAdvertiser =
 
 /// Widen the inherited open-file limit and say what it now is.
 ///
-/// `#[tokio::main]` builds the runtime before any of `main`'s body runs, so
+/// `daemon_main` builds the runtime before any of the daemon's body runs, so
 /// there is no "before the runtime starts" to run this in. What matters is
 /// that the limit is consulted when a descriptor is opened, and this runs
 /// before the store, the system probe and every listener open theirs.
@@ -3571,6 +3725,7 @@ fn build_state(
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
     catalogue: plurx_core::store::CatalogueReader,
+    applied: plurx_core::store::AppliedView,
     store: Arc<dyn plurx_core::store::Store>,
     dirs: crate::state::Dirs,
     encoder_caps: plurx_core::transcode::EncoderCaps,
@@ -3593,6 +3748,7 @@ fn build_state(
             shared_cache_dir: config.cluster.shared_cache_dir.clone(),
             shared_cache_id: config.cluster.shared_cache_id.clone(),
             catalogue,
+            applied,
             snapshot_recovery_budgets: crate::state::SnapshotRecoveryBudgets {
                 chunk_secs: config.cluster.snapshot_chunk_timeout_secs,
                 transfer_secs: config.cluster.snapshot_transfer_timeout_secs,
@@ -3733,6 +3889,10 @@ fn spawn_background_loops(
         ),
     );
     tokio::spawn(crate::http::cluster_operations::peer_status_cache_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
+    tokio::spawn(crate::http::cluster_operations::worker_status_cache_loop(
         state.clone(),
         background_shutdown.clone(),
     ));

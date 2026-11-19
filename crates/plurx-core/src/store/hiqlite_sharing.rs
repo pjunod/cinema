@@ -81,7 +81,7 @@ impl Backend for HiqliteAuthStore {
         Ok(self
             .client()
             // authority: grant and assignment revocations must be committed before access.
-            .query_consistent_map::<Payload, _>(sql, values(params))
+            .query_consistent_map::<Payload, _>("sharing_read", sql, values(params))
             .await?
             .into_iter()
             .map(|r| r.0)
@@ -95,7 +95,7 @@ impl Backend for HiqliteAuthStore {
             stmts.push((sql, values(params)));
         }
         self.client()
-            .txn(stmts)
+            .txn("sharing_txn", stmts)
             .await?
             .into_iter()
             .map(|r| r.map_err(super::hiqlite::database_error))

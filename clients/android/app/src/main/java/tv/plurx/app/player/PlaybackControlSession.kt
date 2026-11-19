@@ -423,11 +423,11 @@ class PlaybackControlSession(
         linkReceipt: () -> String? = { null },
         transport: PlaybackControlTransport = PlaybackControlTransport(Session.origin),
         onSubtitleReady: () -> Unit = {},
-        onProcessingGeneration: (String?, tv.plurx.app.data.EffectiveProcessingReport?) -> Unit = { _, _ -> },
+        onProcessingGeneration: (String?, tv.plurx.app.data.EffectiveProcessingReport?, tv.plurx.app.data.ProcessingSkip?) -> Unit = { _, _, _ -> },
         /** The server has given up on the selected track, not merely not got to it. */
         onSubtitleUnavailable: () -> Unit = {},
         onPrepare: (ControlAction) -> Unit = {},
-        onAcknowledged: (ActionAcknowledgement) -> Unit = {},
+        onAcknowledged: (ActionAcknowledgement, ControlResponse) -> Unit = { _, _ -> },
         onEffectiveSelection: (EffectiveSelection) -> Unit = {},
         /** The reporter stopped for good. A fact to record, never a surface. */
         onGaveUp: (String) -> Unit = {},
@@ -484,7 +484,8 @@ class PlaybackControlSession(
                     if (generation == answerGeneration) {
                         if (exchange.capture.hasSameIntent(latest.get())) {
                             onProcessingGeneration(if (exchange.response == null) null else exchange.request.generation,
-                                tv.plurx.app.data.EffectiveProcessingReport.fromJson(exchange.response?.effectiveProcessing))
+                                tv.plurx.app.data.EffectiveProcessingReport.fromJson(exchange.response?.effectiveProcessing),
+                                tv.plurx.app.data.ProcessingSkip.fromJson(exchange.response?.processingSkip))
                         }
                         answersSeen += 1
                         if (exchange.failure == "transport:409:owner_changed") {
@@ -549,7 +550,7 @@ class PlaybackControlSession(
                 // retry replays the exact request, which is what makes a lost
                 // commit go again instead of vanishing.
                 if (exchange.response != null && generation == answerGeneration) {
-                    exchange.request.acknowledgement?.let { onAcknowledged(it) }
+                    exchange.request.acknowledgement?.let { onAcknowledged(it, exchange.response) }
                 }
                 val action = exchange.response?.action
                 // A staged successor is named on an ordinary exchange, not only

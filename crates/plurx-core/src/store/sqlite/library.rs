@@ -58,6 +58,29 @@ impl LibraryStore for SqliteStore {
         .await
     }
 
+    async fn create_library_with_scan_interval(
+        &self,
+        library: &NewLibrary,
+        scan_interval_mins: i64,
+    ) -> Result<Library, StoreError> {
+        let name = library.name.clone();
+        let kind = library.kind.as_str();
+        let paths = paths_json(&library.paths)?;
+        let anime = library.anime as i64;
+        let interval = scan_interval_mins.max(0);
+        self.with_conn(move |conn| {
+            Ok(conn.query_row(
+                &format!(
+                    "INSERT INTO libraries (name, kind, paths, anime, scan_interval_mins)
+                     VALUES (?1, ?2, ?3, ?4, ?5) RETURNING {LIB_COLS}"
+                ),
+                params![name, kind, paths, anime, interval],
+                library_from_row,
+            )?)
+        })
+        .await
+    }
+
     async fn update_library(
         &self,
         id: i64,

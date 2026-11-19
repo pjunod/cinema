@@ -124,9 +124,11 @@
       && typeof action.action_id === "string" && ACTION_ID_RE.test(action.action_id)
       && typeof action.session_id === "string" && action.session_id !== ""
       && preparedPlaylistUrl(action.session_id, action.playlist_url) !== null
-      && boundedInteger(action.media_origin_ms, 0, MAX_MEDIA_MS)
+      && boundedInteger(action.media_origin_ms, -MAX_MEDIA_MS, MAX_MEDIA_MS)
       && (action.control == null || (validBootstrap(action.control)
         && action.control.url === `/api/v1/hls/${action.session_id}/control`))
+      && (action.delivered_dolby_vision_profile == null
+        || boundedInteger(action.delivered_dolby_vision_profile, 0, 255))
       && validEffectiveSelection(action.effective_selection);
   }
 
@@ -155,7 +157,7 @@
       && (value.first_frame_unix_ms == null
         || (Number.isSafeInteger(value.first_frame_unix_ms) && value.first_frame_unix_ms > 0))
       && (value.committed_media_origin_ms == null
-        || boundedInteger(value.committed_media_origin_ms, 0, MAX_MEDIA_MS))
+        || boundedInteger(value.committed_media_origin_ms, -MAX_MEDIA_MS, MAX_MEDIA_MS))
       && (value.state !== "buffer_ready" || value.buffered_through_ms != null)
       && (value.state !== "committed" || value.first_frame_unix_ms != null)
       && (value.state !== "committed" || value.committed_media_origin_ms != null)
@@ -305,7 +307,12 @@
       // and a Shared session is Shared on every exchange.
       this.supportedActions = value.sharedSuccessor === true
         ? SHARED_SUPPORTED_ACTIONS : SUPPORTED_ACTIONS;
-      this.capture = value.capture;
+      // A final exchange keeps the source turn that authored it, even after
+      // the visible media changes or its live capture becomes unavailable.
+      this.terminalCapture = null;
+      this.finalAccepted = false;
+      this.acceptingCapture = null;
+      this.capture = () => this.terminalCapture || value.capture();
       this.send = value.send;
       // Wrapped, not assigned. `setTimeout` and `clearTimeout` are
       // WindowTimers methods and every browser brand-checks their receiver:
@@ -343,9 +350,30 @@
       return this;
     }
 
-    notify(value) {
+    // Freeze this reporter's remaining work. Earlier uncertain requests keep
+    // their exact retry; once they settle, only this immutable capture drains.
+    // An accepted final may synchronously hand off to another explicit final
+    // (commit then end), but ordinary notifications cannot extend its life.
+    finish(value) {
       if (this.stopped) return null;
-      const newest = value || this.capture();
+      // An accepted earlier request may already have settled the ACK at the
+      // queued final's head. Only its synchronous success callback can replace
+      // that still-unsent final; external callers cannot overwrite it.
+      const acceptedBeforeFinal = this.acceptingCapture !== null
+        && this.acceptingCapture !== this.terminalCapture
+        && this.pending === this.terminalCapture;
+      if (!this.terminalCapture || this.finalAccepted || acceptedBeforeFinal) {
+        const finalCapture = value && capture(value.snapshot, value.intentGeneration, value.owner);
+        if (!finalCapture) return null;
+        this.terminalCapture = finalCapture;
+        this.finalAccepted = false;
+      }
+      return this.notify(this.terminalCapture);
+    }
+
+    notify(value) {
+      if (this.stopped || this.finalAccepted) return null;
+      const newest = this.terminalCapture || value || this.capture();
       if (!newest || !validSnapshot(newest.snapshot)) return null;
       this.pending = newest;
       if (this.timer !== null) {
@@ -455,8 +483,17 @@
           this.nextAllowedAt = this.now()
             + Math.max(MIN_EXCHANGE_MS, response.action.after_ms);
         }
-        this.onExchange({ request, response, error: null, capture:requestCapture,
-          intentGeneration:requestCapture.intentGeneration });
+        const acceptedFinal = requestCapture === this.terminalCapture;
+        if (acceptedFinal) this.finalAccepted = true;
+        this.acceptingCapture = requestCapture;
+        try {
+          this.onExchange({ request, response, error: null, capture:requestCapture,
+            intentGeneration:requestCapture.intentGeneration });
+        } finally {
+          this.acceptingCapture = null;
+          if (acceptedFinal && requestCapture === this.terminalCapture) this.stop();
+        }
+        if (this.stopped) return;
         // A terminal verdict ends reporting. It does not tear down the player:
         // this reporter still owns no recovery, and the buffer already fetched
         // is still worth playing. The milestone that moves that authority is
@@ -535,6 +572,9 @@
     }
 
     resetForOwner(error) {
+      // A frozen settlement belongs to its original owner tuple. Replaying it
+      // against a new incarnation would authorize an unrelated transaction.
+      if (this.terminalCapture) return false;
       const generation = error && error.generation;
       const epoch = Number(error && error.controlEpoch);
       const generationChanged = typeof generation === "string"
@@ -771,6 +811,30 @@
     return ms == null ? "Not measured" : `${ms} ms`;
   }
 
+  const PREPARED_SEAM_OUTCOMES = Object.freeze(["committed", "refused", "switched_without_a_frame"]);
+
+  /// The `prepared_seam` beacon body, identical in shape on every client.
+  /// `frames_complete` is the coverage clause: a window sampled end to end
+  /// on both sides, never a zero over part of it. `audio_observed` is true
+  /// only when an instrument of its own measured the audio; a platform that
+  /// does not measure it says so and its switches do not count toward the
+  /// twenty. Null for an outcome outside the vocabulary.
+  function preparedSeamReport(options) {
+    const outcome = options && options.outcome;
+    if (!PREPARED_SEAM_OUTCOMES.includes(outcome)) return null;
+    const delta = options.frames || null;
+    const complete = !!(delta && delta.count != null && finiteNumber(delta.coveredMs)
+      && finiteNumber(delta.spanMs) && delta.spanMs > 0 && delta.coveredMs >= delta.spanMs);
+    return {
+      platform: options.platform || "web",
+      outcome,
+      frames_complete: complete,
+      dropped_frames: delta && delta.count != null ? delta.count : null,
+      audio_observed: options.audioObserved === true,
+      reopened: options.reopened === true,
+    };
+  }
+
   return Object.freeze({ PROTOCOL, PREPARE_REPLACEMENT_ACTION, PREPARE_ACTION_TAG,
     SUPPORTED_ACTIONS, SHARED_PREPARE_REPLACEMENT_ACTION, SHARED_SUPPORTED_ACTIONS, Reporter, capture, sameIntent, validBootstrap, validResponse,
     validPreparation, validAcknowledgement, preparedPlaylistUrl,
@@ -779,5 +843,5 @@
     preparedSwitchCounterDelta, preparedSwitchSilenceRunMs, preparedSwitchSeam,
     preparedSwitchVisibleInMs, preparedSwitchFramesRow,
     preparedSwitchAudioEventRow, preparedSwitchAudioSeamRow,
-    preparedSwitchVisibleRow });
+    preparedSwitchVisibleRow, PREPARED_SEAM_OUTCOMES, preparedSeamReport });
 });

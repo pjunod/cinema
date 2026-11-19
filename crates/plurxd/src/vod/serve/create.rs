@@ -664,6 +664,10 @@ impl VodServe {
                     "the captured processing graph changed",
                 ));
             }
+            drop(cached);
+            if recipe.source_telemetry {
+                rendition.source_owners.declare_source_telemetry().await?;
+            }
             return Ok((
                 RenditionAttachment {
                     rendition,
@@ -1433,12 +1437,56 @@ impl VodServe {
             preserve_dolby_vision,
             convert_dolby_vision,
         );
+        let (video, dv_refit_gain) = if prepared.encoding.is_none() {
+            crate::dv_refit_serving::rendition_refit(
+                self.shared.store.as_ref(),
+                file,
+                video,
+                req.dv_refit_digest.as_deref(),
+            )
+            .await
+            .map_err(|error| format!("resolving fitted copy rendition: {error}"))?
+        } else {
+            (video, None)
+        };
         let identity = match prepared.encoding.as_ref() {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
             None => crate::fragindex::identity_for(file, video),
         };
         let cluster_cache_enabled = prepared.encoding.is_none() && settings.index_cluster_cache;
-        let cluster_index = if prepared.encoding.is_some() {
+        // A published v3 copy index is preferred over the v2 cluster artifact
+        // and the node-local index; without one the order below is unchanged.
+        let (copy_index, own_source) = match prepared.encoding {
+            None => match self.try_copy_index_v3(file, video).await {
+                Some(found) => (found.index, Some(found.own)),
+                None => (None, None),
+            },
+            Some(_) => (None, None),
+        };
+        // A local viewer's copy start without a v3 index asks the Analysis
+        // worker to build one, whether or not a legacy or v2 index serves
+        // this start: v3 is the index every node shares, and playing a title
+        // is what migrates it. This start is unchanged: it plans from the
+        // index order below and waits on nothing the demand sets off.
+        if let (None, Some(own), Some(viewer)) = (&copy_index, own_source, viewer) {
+            let recipe = crate::copy_analysis::CopyRecipe {
+                video,
+                audio_index: req.audio_index,
+                transcode_audio: aac,
+                audio_delivery: req.audio_delivery.clone(),
+            };
+            self.demand_copy_index(file, own, recipe, viewer);
+        }
+        let copy_index_init_contract = copy_index
+            .as_ref()
+            .map(|found| found.init_contract_sha256.clone());
+        let cluster_index = if let Some(found) = copy_index {
+            Ok(Some((
+                found.index,
+                found.object_version,
+                found.rendition_cache_key,
+            )))
+        } else if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
             self.try_cluster_fragment_index(file, video, viewer).await
@@ -1645,6 +1693,8 @@ impl VodServe {
             video,
         ));
         let recipe = Recipe {
+            source_telemetry: req.source_telemetry
+                == Some(crate::transcode::SourceTelemetry::FilmV1),
             retained_logical: incoming_logical.clone(),
             measured_candidate: prepared.measured_candidate.take(),
             file: file.clone(),
@@ -1656,8 +1706,10 @@ impl VodServe {
                 .and_then(|encoding| encoding.options.audio.clone())
                 .or_else(|| req.audio_delivery.clone()),
             video,
+            dv_refit_gain,
             source_object_version,
             cluster_cache_key,
+            copy_index_init_contract,
             encoding: prepared.encoding.take(),
         };
         Ok(PreparedVodRecipe {
@@ -1671,7 +1723,7 @@ impl VodServe {
 
     pub(super) async fn reserve_media_group(
         media: &[Arc<Rendition>],
-        priority: Option<crate::admission::Priority>,
+        priority: crate::admission::Priority,
     ) -> Result<Vec<crate::vodencode::EncodePermit>, String> {
         let refuse = || {
             crate::transcode::vod_refusal_error(
@@ -1717,16 +1769,6 @@ impl VodServe {
             .iter()
             .map(|encoding| encoding.resources())
             .collect::<Vec<_>>();
-        let priority = priority.unwrap_or_else(|| {
-            if encodings
-                .iter()
-                .any(|encoding| encoding.is_speculative() || encoding.nonpreemptive_trial)
-            {
-                crate::admission::Priority::Speculative
-            } else {
-                crate::admission::Priority::Live
-            }
-        });
         // Foreground family starts participate in the same preemption protocol
         // as ordinary encoders. Keep the waiter alive across every attempt so
         // background indexing yields and cannot reclaim its released budget.
@@ -1874,15 +1916,7 @@ impl VodServe {
             .encoding
             .as_ref()
             .is_some_and(|encoding| encoding.nonpreemptive_trial);
-        let admission_priority = if prepared
-            .encoding
-            .as_ref()
-            .is_some_and(|encoding| encoding.is_speculative() || encoding.nonpreemptive_trial)
-        {
-            crate::admission::Priority::Speculative
-        } else {
-            crate::admission::Priority::Live
-        };
+        let admission_priority = prepared.admission_priority;
         let passive_grant = if req.passive_vod {
             if !req.vod_only || req.presentation != crate::transcode::Presentation::Vod {
                 return Err(crate::transcode::vod_refusal_error(
@@ -2010,6 +2044,7 @@ impl VodServe {
                 let attachment = self
                     .resolve_rendition(
                         &mut VodRecipeRequest {
+                            admission_priority,
                             root_admission: None,
                             measured_candidate: None,
                             retained_capture: RetainedOutputCapture::New,
@@ -2049,6 +2084,7 @@ impl VodServe {
                 let attachment = self
                     .resolve_rendition(
                         &mut VodRecipeRequest {
+                            admission_priority,
                             root_admission: None,
                             measured_candidate: None,
                             retained_capture: RetainedOutputCapture::New,
@@ -2129,37 +2165,64 @@ impl VodServe {
             }
         }
         let mut private_media = if continuous {
-            let permits = Self::reserve_media_group(&media, Some(admission_priority)).await?;
+            let deferred = |child: &Arc<Rendition>| {
+                req.continuous_media
+                    .as_ref()
+                    .is_some_and(|media| media.controlled && media.version == 2)
+                    && companion_rendition
+                        .as_ref()
+                        .is_some_and(|companion| Arc::ptr_eq(companion, child))
+            };
+            let admitted = media
+                .iter()
+                .filter(|child| !deferred(child))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut permits = Self::reserve_media_group(&admitted, admission_priority)
+                .await?
+                .into_iter();
             media
                 .into_iter()
-                .zip(permits)
-                .map(|(child, permit)| ParentMediaReader {
-                    controlled: req
-                        .continuous_media
-                        .as_ref()
-                        .is_some_and(|media| media.controlled)
-                        && child
-                            .recipe
-                            .encoding
-                            .as_ref()
-                            .is_some_and(|encoding| encoding.shared_audio.is_none()),
-                    candidate_id: if Arc::ptr_eq(&child, &rendition) {
-                        req.candidate_context
-                            .as_ref()
-                            .map(|context| context.candidate_id)
-                    } else if companion_rendition
-                        .as_ref()
-                        .is_some_and(|companion| Arc::ptr_eq(&child, companion))
-                    {
-                        req.continuous_media
-                            .as_ref()
-                            .and_then(|media| media.autonomous_companion)
-                    } else {
+                .map(|child| {
+                    let companion_bootstrap = deferred(&child);
+                    let permit = if companion_bootstrap {
                         None
-                    },
-                    reader_id: uuid::Uuid::new_v4().to_string(),
-                    rendition: child,
-                    _reservation: Some(permit),
+                    } else {
+                        permits.next()
+                    };
+                    ParentMediaReader {
+                        versioned_family: req
+                            .continuous_media
+                            .as_ref()
+                            .is_some_and(|media| media.version == 2),
+                        companion_bootstrap,
+                        controlled: req
+                            .continuous_media
+                            .as_ref()
+                            .is_some_and(|media| media.controlled)
+                            && child
+                                .recipe
+                                .encoding
+                                .as_ref()
+                                .is_some_and(|encoding| encoding.shared_audio.is_none()),
+                        candidate_id: if Arc::ptr_eq(&child, &rendition) {
+                            req.candidate_context
+                                .as_ref()
+                                .map(|context| context.candidate_id)
+                        } else if companion_rendition
+                            .as_ref()
+                            .is_some_and(|companion| Arc::ptr_eq(&child, companion))
+                        {
+                            req.continuous_media
+                                .as_ref()
+                                .and_then(|media| media.autonomous_companion)
+                        } else {
+                            None
+                        },
+                        reader_id: uuid::Uuid::new_v4().to_string(),
+                        rendition: child,
+                        _reservation: permit,
+                    }
                 })
                 .collect::<Vec<_>>()
         } else {
@@ -2488,8 +2551,17 @@ impl VodServe {
             if Arc::ptr_eq(&child.rendition, &rendition) {
                 replacement_readers
                     .try_insert(child.reader_id.clone(), {
-                        let mut reader = Reader::with_priority(entry, admission_priority);
+                        let mut reader = Reader::with_priority(
+                            entry,
+                            if child.companion_bootstrap {
+                                crate::admission::Priority::Speculative
+                            } else {
+                                admission_priority
+                            },
+                        );
                         reader.nonpreemptive_trial = nonpreemptive_trial;
+                        reader.companion_bootstrap = child.companion_bootstrap;
+                        reader.authority_only = child.companion_bootstrap;
                         reader
                     })
                     .expect("private-media reader uses the legacy table");
@@ -2505,8 +2577,17 @@ impl VodServe {
                 .expect("private media reader guard");
                 readers
                     .try_insert(child.reader_id.clone(), {
-                        let mut reader = Reader::with_priority(entry, admission_priority);
+                        let mut reader = Reader::with_priority(
+                            entry,
+                            if child.companion_bootstrap {
+                                crate::admission::Priority::Speculative
+                            } else {
+                                admission_priority
+                            },
+                        );
                         reader.nonpreemptive_trial = nonpreemptive_trial;
+                        reader.companion_bootstrap = child.companion_bootstrap;
+                        reader.authority_only = child.companion_bootstrap;
                         reader
                     })
                     .expect("private-media reader uses the legacy table");
@@ -3456,6 +3537,18 @@ impl VodServe {
             preserve_dolby_vision,
             convert_dolby_vision,
         );
+        let (video, dv_refit_gain) = if prepared.encoding.is_none() {
+            crate::dv_refit_serving::rendition_refit(
+                self.shared.store.as_ref(),
+                file,
+                video,
+                prepared.request.dv_refit_digest.as_deref(),
+            )
+            .await
+            .map_err(|error| format!("resolving fitted source copy rendition: {error}"))?
+        } else {
+            (video, None)
+        };
         let identity = match prepared.encoding.as_ref() {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
             None => crate::fragindex::identity_for(file, video),
@@ -3473,7 +3566,25 @@ impl VodServe {
                         "1" | "true" | "yes" | "on"
                     )
                 });
-        let cluster_index = if prepared.encoding.is_some() || source_binding.is_some() {
+        // The origin's published v3 copy index serves a Source rendition too:
+        // reading it queues nothing and joins no local viewer interest.
+        let copy_index = if prepared.encoding.is_none() {
+            self.try_copy_index_v3(file, video)
+                .await
+                .and_then(|found| found.index)
+        } else {
+            None
+        };
+        let copy_index_init_contract = copy_index
+            .as_ref()
+            .map(|found| found.init_contract_sha256.clone());
+        let cluster_index = if let Some(found) = copy_index {
+            Ok(Some((
+                found.index,
+                found.object_version,
+                found.rendition_cache_key,
+            )))
+        } else if prepared.encoding.is_some() || source_binding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
             self.try_cluster_fragment_index(file, video, fences.viewer.as_ref())
@@ -3673,6 +3784,8 @@ impl VodServe {
             ));
         }
         let recipe = Recipe {
+            source_telemetry: req.source_telemetry
+                == Some(crate::transcode::SourceTelemetry::FilmV1),
             measured_candidate: None,
             retained_logical: None,
             audio_delivery: prepared
@@ -3684,8 +3797,10 @@ impl VodServe {
             audio_index: req.audio_index,
             aac,
             video,
+            dv_refit_gain,
             source_object_version,
             cluster_cache_key,
+            copy_index_init_contract,
             encoding: prepared.encoding,
         };
         let key = source_binding.map_or_else(
@@ -3901,6 +4016,7 @@ mod principal_demand_tests {
             None,
         );
         let request = SessionRequest {
+            source_telemetry: None,
             quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
@@ -3932,6 +4048,7 @@ mod principal_demand_tests {
             audio_delivery: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
         };
         let initial_cap = serve.shared.pool.global_cap();
         let settings = VodSettings {

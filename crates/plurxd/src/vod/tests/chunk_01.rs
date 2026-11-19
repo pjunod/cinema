@@ -11,6 +11,35 @@ use plurx_core::testfixtures;
 
 use crate::fragindex::IndexOutcome;
 
+#[tokio::test]
+async fn fitted_status_uses_only_the_attached_digest_and_does_not_change_rendition_key() {
+    let base = crate::test_tempdir().expect("refit status fixture");
+    let rendition = synthetic_rendition(base.path()).await;
+    let mut recipe = rendition.recipe.clone();
+    let identity = crate::fragindex::identity_for(&recipe.file, recipe.video);
+    let key = rendition_key(&recipe, &identity);
+    let digest = [0x31; 32];
+    recipe.dv_refit_gain = Some(crate::dv_refit_serving::PinnedRefitGain {
+        digest,
+        gain: Some(0.37),
+    });
+    assert_eq!(rendition_key(&recipe, &identity), key);
+    assert!(recipe.fitted_refit_report().is_none());
+
+    recipe.video = recipe.video.with_dolby_vision_conversion(true);
+    let identity_report = recipe.refit_report().expect("actual To81 identity copy");
+    assert_eq!(identity_report.state, "identity");
+    assert!(identity_report.reason.is_some());
+    recipe.video = recipe.video.with_dolby_vision_refit(Some(digest));
+    let report = recipe.fitted_refit_report().expect("matching attached table");
+    assert_eq!(report.state, "fitted");
+    assert_eq!(report.gain, Some(0.37));
+    assert_eq!(report.reason, None);
+
+    recipe.dv_refit_gain.as_mut().expect("fact").digest = [0x32; 32];
+    assert!(recipe.fitted_refit_report().is_none());
+}
+
 struct CleanupObservingCommitter {
     rendition: Arc<Rendition>,
     session_id: String,
@@ -447,8 +476,10 @@ pub(super) fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
 
 fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
     SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -792,6 +823,83 @@ async fn insert_control_session(
     );
 }
 
+#[tokio::test]
+async fn continuous_private_readers_share_source_from_exact_parent_control() {
+    let base = crate::test_tempdir().expect("base");
+    let serve = bare_serve(base.path());
+    let root = synthetic_rendition(base.path()).await;
+    let video = synthetic_rendition(base.path()).await;
+    let audio = synthetic_rendition(base.path()).await;
+    let companion = synthetic_rendition(base.path()).await;
+    insert_control_session(&serve, "parent", Arc::clone(&root), Instant::now()).await;
+    let children = [
+        ("video-reader", Arc::clone(&video), false),
+        ("audio-reader", Arc::clone(&audio), false),
+        ("companion-reader", Arc::clone(&companion), true),
+    ];
+    for (id, rendition, _) in &children {
+        rendition.attach_reader(id, 0).await;
+    }
+    {
+        let mut sessions = serve.shared.sessions.lock().await;
+        let parent = sessions.get_mut("parent").expect("parent");
+        parent.control_observed_at = Some(Instant::now());
+        parent.last_control_snapshot = Some(
+            crate::playback_control::PlaybackDemandSnapshot::test_default(
+                crate::playback_control::ClientPlatform::Apple,
+            ),
+        );
+        for (id, rendition, companion_bootstrap) in &children {
+            parent.children.push(ParentMediaReader {
+                versioned_family: true,
+                companion_bootstrap: *companion_bootstrap,
+                controlled: true,
+                candidate_id: None,
+                reader_id: (*id).into(),
+                rendition: Arc::clone(rendition),
+                _reservation: None,
+            });
+        }
+        for (id, rendition, _) in &children {
+            let owner = driver::source_control_session(&sessions, rendition, id)
+                .expect("private reader resolves its parent");
+            assert!(owner.last_control_snapshot.is_some());
+            assert!(Arc::ptr_eq(&owner.incarnation, &sessions["parent"].incarnation));
+        }
+        assert!(driver::source_control_session(&sessions, &root, "parent").is_some());
+    }
+    serve.shared.sessions.lock().await.remove("parent");
+    let replacement = synthetic_rendition(base.path()).await;
+    insert_control_session(&serve, "parent", Arc::clone(&replacement), Instant::now()).await;
+    let sessions = serve.shared.sessions.lock().await;
+    for (id, rendition, _) in &children {
+        assert!(driver::source_control_session(&sessions, rendition, id).is_none(),
+            "old private reader cannot inherit same-ID replacement control");
+    }
+    assert!(driver::source_control_session(&sessions, &root, "parent").is_none());
+}
+
+#[tokio::test]
+async fn companion_source_purpose_follows_selected_and_optional_generations() {
+    let base = crate::test_tempdir().expect("base");
+    let rendition = synthetic_rendition(base.path()).await;
+    let mut companion = Reader::with_priority(0, crate::admission::Priority::Speculative);
+    companion.companion_bootstrap = true;
+    rendition.readers.lock().await.insert("companion".into(), companion);
+    assert!(driver::source_readers_are_optional(&rendition).await);
+    rendition.readers.lock().await.get_mut("companion").expect("reader")
+        .admission_priority = crate::admission::Priority::Live;
+    assert!(!driver::source_readers_are_optional(&rendition).await,
+        "accepted selection makes every subsequent generation required");
+    rendition.readers.lock().await.get_mut("companion").expect("reader")
+        .admission_priority = crate::admission::Priority::Speculative;
+    assert!(driver::source_readers_are_optional(&rendition).await,
+        "supersession restores optional service on the same rendition");
+    rendition.readers.lock().await.insert("other-selected".into(), Reader::new(0));
+    assert!(!driver::source_readers_are_optional(&rendition).await,
+        "a second actual required reader keeps the shared producer required");
+}
+
 async fn insert_finished_terminal_session(
     serve: &VodServe,
     session_id: &str,
@@ -902,6 +1010,8 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         key: "synthetic-rendition".to_string(),
         dir,
         recipe: Recipe {
+            dv_refit_gain: None,
+            source_telemetry:false,
             retained_logical: None,
             measured_candidate: None,
             file: media_file_at(PathBuf::from("unused.mkv"), ms),
@@ -911,6 +1021,7 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
             video: CopyVideoOptions::new(false, false),
             source_object_version: None,
             cluster_cache_key: None,
+            copy_index_init_contract: None,
             encoding: None,
         },
         source: None,
@@ -2650,7 +2761,7 @@ async fn continuous_group_automatic_ignores_zero_rollback_cache_but_preserves_ze
         ReadState::LegacyAmbiguous
     );
     assert!(
-        VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
+        VodServe::reserve_media_group(&media, crate::admission::Priority::Speculative)
             .await
             .is_err(),
         "legacy hardware zero remains disabled"
@@ -2665,7 +2776,7 @@ async fn continuous_group_automatic_ignores_zero_rollback_cache_but_preserves_ze
         .await
         .expect("typed explicit zero"));
     assert!(
-        VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
+        VodServe::reserve_media_group(&media, crate::admission::Priority::Speculative)
             .await
             .is_err(),
         "explicit hardware zero remains disabled"
@@ -2707,7 +2818,7 @@ async fn continuous_group_automatic_ignores_zero_rollback_cache_but_preserves_ze
         "both Automatic policies ignore their original zero rollback caches"
     );
     let permits =
-        VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
+        VodServe::reserve_media_group(&media, crate::admission::Priority::Speculative)
             .await
             .expect("verified Automatic ignores both zero rollback caches");
     assert_eq!(permits.len(), 1);
@@ -2748,7 +2859,7 @@ async fn continuous_group_automatic_ignores_zero_rollback_cache_but_preserves_ze
         .try_admit_software(0, incumbent_weight, crate::admission::Priority::Live)
         .expect("actual incumbent software permit");
     assert!(
-        VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
+        VodServe::reserve_media_group(&media, crate::admission::Priority::Speculative)
             .await
             .is_err(),
         "explicit software zero cannot admit a family beside the incumbent"
@@ -2756,7 +2867,7 @@ async fn continuous_group_automatic_ignores_zero_rollback_cache_but_preserves_ze
     drop(incumbent);
     assert_eq!(encoding.admissions.snapshot(), baseline);
     let permits =
-        VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
+        VodServe::reserve_media_group(&media, crate::admission::Priority::Speculative)
             .await
             .expect("software zero permits the original idle-pool family");
     assert!(

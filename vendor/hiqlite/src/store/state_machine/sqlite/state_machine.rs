@@ -303,6 +303,9 @@ pub struct StateMachineSqlite {
     snapshot_storage_deferral: std::time::Duration,
     snapshot_files: Arc<Mutex<SnapshotFileState>>,
     snapshot_recovery_pending: Arc<AtomicBool>,
+    /// Plurx patch 27: odd from before `SnapshotApply` is sent until the read
+    /// pool has been reconnected to the replaced image.
+    applied_mark: Arc<crate::applied_mark::AppliedMark>,
 
     #[cfg(feature = "s3")]
     s3_config: Option<Arc<crate::s3::S3Config>>,
@@ -325,6 +328,7 @@ impl StateMachineSqlite {
         do_reset_metadata: bool,
         #[cfg(feature = "backup")] local_backup_keep_days: u16,
         staged_startup: bool,
+        applied_mark: Arc<crate::applied_mark::AppliedMark>,
     ) -> Result<StateMachineSqlite, StorageError<NodeId>> {
         let mut startup_writer = crate::startup_cleanup::StartupStorageOwner::new(staged_startup);
         // IMPORTANT: Do NOT change the order of the db exists check!
@@ -338,8 +342,11 @@ impl StateMachineSqlite {
             PathSnapshots(path_snapshots),
             PathLockFile(path_lock_file),
         ) = Self::build_folders(data_dir, true).await;
-
         Self::check_set_lock_file(&path_lock_file, &path_db, &mut db_exists).await;
+        // Plurx patch 34: this process now owns the directory and nothing
+        // builds yet, so a build temporary here was abandoned by a crash or
+        // a full disk.
+        super::snapshot_builder::remove_abandoned_build_temps(&path_snapshots).await;
 
         // Always start the writer first! -> creates mandatory tables
         let conn = Self::connect(
@@ -360,6 +367,7 @@ impl StateMachineSqlite {
             do_reset_metadata,
             #[cfg(feature = "backup")]
             local_backup_keep_days,
+            Arc::clone(&applied_mark),
         );
         // Retain the handle before the first post-spawn await. Recoverable
         // read-pool/recovery errors and constructor panic cannot orphan it.
@@ -390,6 +398,7 @@ impl StateMachineSqlite {
             snapshot_files: Arc::new(Mutex::new(SnapshotFileState::default())),
             snapshot_storage_deferral,
             snapshot_recovery_pending: Arc::new(AtomicBool::new(false)),
+            applied_mark,
             #[cfg(feature = "s3")]
             s3_config,
             read_pool,
@@ -760,10 +769,15 @@ impl StateMachineSqlite {
         );
     }
 
+    /// Start-up restore (no database file, a current snapshot) and pending
+    /// snapshot recovery both replace the image here.
     async fn update_state_machine_(
         &mut self,
         snapshot_path: String,
     ) -> Result<(), StorageError<NodeId>> {
+        // Plurx patch 27: odd before the restore is sent, even only after the
+        // read pool sees the new image. An early return leaves it odd.
+        let replacement = self.applied_mark.begin_replacement();
         let (tx, rx) = oneshot::channel();
         self.write_tx
             .send_async(WriterRequest::SnapshotApply((snapshot_path, tx)))
@@ -779,7 +793,9 @@ impl StateMachineSqlite {
             self.prepared_statement_cache_capacity,
             self.read_pool_size,
         )
-        .await
+        .await?;
+        replacement.complete();
+        Ok(())
     }
 
     async fn initialize_snapshot_pointer(&mut self, db_exists: bool) -> StorageResult<()> {
@@ -1468,6 +1484,7 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
         let read_pool_size = self.read_pool_size;
         let path_snapshots = self.path_snapshots.clone();
         let snapshot_recovery_pending = self.snapshot_recovery_pending.clone();
+        let applied_mark = Arc::clone(&self.applied_mark);
         #[cfg(feature = "backup")]
         let path_backups = self.path_backups.clone();
         snapshot_recovery_pending.store(true, Ordering::Release);
@@ -1489,6 +1506,9 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
                 }
             }
             snapshot_files_guard.pending_id = Some(snapshot_id.clone());
+            // Plurx patch 27: the install's own replacement guard, paired at
+            // this reconnect point like `update_state_machine_`.
+            let replacement = applied_mark.begin_replacement();
             let (tx, rx) = oneshot::channel();
             write_tx
                 .send_async(WriterRequest::SnapshotApply((dest, tx)))
@@ -1504,6 +1524,7 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
                 read_pool_size,
             )
             .await?;
+            replacement.complete();
             publish_current_snapshot(&path_snapshots, Some(&snapshot_id)).await?;
             snapshot_files_guard.current_id = Some(snapshot_id);
             clear_pending_snapshot(&path_snapshots).await?;
@@ -1652,6 +1673,7 @@ mod snapshot_metrics_contracts {
             #[cfg(feature = "backup")]
             30,
             false,
+            crate::applied_mark::AppliedMark::new(&["applied_rows"]),
         )
         .await
     }
@@ -1816,6 +1838,93 @@ mod snapshot_metrics_contracts {
         fs::remove_dir_all(&root).await.expect("remove test root");
     }
 
+    /// The install task's guard: odd from before `SnapshotApply` is sent
+    /// (the writer is held, so the restore cannot have run yet) until the
+    /// read pool is reconnected; every slot moves with the restore.
+    #[tokio::test]
+    async fn install_snapshot_holds_the_generation_odd_until_the_pool_reconnects() {
+        let root = std::env::temp_dir().join(format!("hiqlite-mark-install-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).await.expect("create test root");
+        let root = root.to_str().expect("UTF-8 temp path").to_owned();
+        let mut state = new_test_state(&root, "mark.db")
+            .await
+            .expect("create SQLite state machine");
+        let mark = state.applied_mark.handle();
+        let slot = mark.slot("applied_rows").expect("registered test table");
+        assert_eq!(mark.generation(), 0);
+
+        let mut builder = state.get_snapshot_builder().await;
+        let snapshot = builder.build_snapshot().await.expect("build snapshot");
+        let snapshot_path = format!("{}/{}", state.path_snapshots, snapshot.meta.snapshot_id);
+        let receive_path = format!("{}/temp", state.path_snapshots);
+        fs::copy(&snapshot_path, &receive_path)
+            .await
+            .expect("stage snapshot install");
+        let receive = fs::File::open(&receive_path)
+            .await
+            .expect("open staged snapshot");
+        let before = mark.revision(slot);
+
+        let (entered, entered_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        state
+            .write_tx
+            .send_async(WriterRequest::HoldForStartupDrain {
+                entered,
+                release: release_rx,
+            })
+            .await
+            .expect("hold the writer");
+        entered_rx.await.expect("writer held");
+
+        let meta = snapshot.meta.clone();
+        let install = task::spawn(async move {
+            let result = state.install_snapshot(&meta, Box::new(receive)).await;
+            (state, result)
+        });
+        time::timeout(Duration::from_secs(5), async {
+            while mark.generation() & 1 == 0 {
+                time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the install marks the image as being replaced");
+        assert_eq!(mark.revision(slot), before, "the restore has not run");
+
+        release.send(()).expect("release the writer");
+        let (state, result) = install.await.expect("install task");
+        result.expect("install real SQLite snapshot");
+        assert_eq!(mark.generation(), 2);
+        assert_eq!(mark.revision(slot), before + 1);
+        assert_eq!(mark.observation().failed_replacements, 0);
+        shutdown_state(&state).await;
+        drop(state);
+        fs::remove_dir_all(root).await.expect("remove test root");
+    }
+
+    /// A restore that fails leaves the image odd: the view stays closed until
+    /// restart rather than reopening on an image nobody vouched for.
+    #[tokio::test]
+    async fn a_failed_restore_leaves_the_generation_odd() {
+        let root = std::env::temp_dir().join(format!("hiqlite-mark-failed-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).await.expect("create test root");
+        let root = root.to_str().expect("UTF-8 temp path").to_owned();
+        let mut state = new_test_state(&root, "mark.db")
+            .await
+            .expect("create SQLite state machine");
+        let mark = state.applied_mark.handle();
+        let corrupt = format!("{root}/not-a-database");
+        fs::write(&corrupt, b"not an SQLite image")
+            .await
+            .expect("write corrupt snapshot");
+        assert!(state.update_state_machine_(corrupt).await.is_err());
+        assert_eq!(mark.generation() & 1, 1);
+        assert_eq!(mark.observation().failed_replacements, 1);
+        shutdown_state(&state).await;
+        drop(state);
+        fs::remove_dir_all(root).await.expect("remove test root");
+    }
+
     #[tokio::test]
     async fn storage_deferral_does_not_block_incoming_receive_or_install() {
         use std::future::Future;
@@ -1894,10 +2003,17 @@ mod snapshot_metrics_contracts {
                 .await
                 .is_err()
         );
+        // Plurx patch 34: the failed build removed its image and journal.
+        assert_eq!(
+            build_temporaries(&state.path_snapshots).await,
+            Vec::<String>::new(),
+            "a failed build leaves nothing behind"
+        );
         let current = state.get_current_snapshot().await.unwrap().unwrap();
         assert_eq!(current.meta.snapshot_id, before_id);
         drop(current);
         let database = format!("{}/{}", state.path_db, state.filename_db);
+        let expected_id = before_id.clone();
         task::spawn_blocking(move || {
             let conn = rusqlite::Connection::open(database).unwrap();
             assert_eq!(
@@ -1911,13 +2027,55 @@ mod snapshot_metrics_contracts {
                 })
                 .unwrap();
             let meta: StateMachineData = deserialize(&bytes).unwrap();
-            assert_eq!(meta.last_snapshot_id.as_deref(), Some(before_id.as_str()));
+            assert_eq!(meta.last_snapshot_id.as_deref(), Some(expected_id.as_str()));
         })
         .await
         .unwrap();
+        // A build a crash abandoned mid-copy: its image and journal stay on
+        // disk until the next start sweeps them.
+        let path_snapshots = state.path_snapshots.clone();
         shutdown_state(&state).await;
         drop(state);
+        let abandoned = format!("{path_snapshots}/{}.temp", Uuid::now_v7());
+        fs::copy(format!("{path_snapshots}/{before_id}"), &abandoned)
+            .await
+            .unwrap();
+        fs::write(format!("{abandoned}-journal"), b"journal")
+            .await
+            .unwrap();
+        assert_eq!(build_temporaries(&path_snapshots).await.len(), 2);
+        let mut restarted = new_test_state(root.to_str().unwrap(), "copy.db")
+            .await
+            .unwrap();
+        assert_eq!(
+            build_temporaries(&restarted.path_snapshots).await,
+            Vec::<String>::new(),
+            "startup removes what an abandoned build wrote"
+        );
+        let current = restarted.get_current_snapshot().await.unwrap().unwrap();
+        assert_eq!(current.meta.snapshot_id, before_id);
+        drop(current);
+        shutdown_state(&restarted).await;
+        drop(restarted);
         fs::remove_dir_all(root).await.unwrap();
+    }
+
+    /// Snapshot build temporaries (`<uuid>.temp`, `<uuid>.temp-journal`) in a
+    /// snapshots directory.
+    async fn build_temporaries(path_snapshots: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut list = fs::read_dir(path_snapshots).await.unwrap();
+        while let Some(entry) = list.next_entry().await.unwrap() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.contains(".temp")
+                && !name.starts_with("current")
+                && !name.starts_with("pending")
+            {
+                found.push(name);
+            }
+        }
+        found.sort();
+        found
     }
 
     #[tokio::test]
@@ -1980,6 +2138,10 @@ mod snapshot_metrics_contracts {
         let mut state = new_test_state(&root, "legacy.db")
             .await
             .expect("recover legacy snapshots");
+        // No database file and a current snapshot: the start-up restore
+        // went odd and back to even through `update_state_machine_`.
+        assert_eq!(state.applied_mark.handle().generation(), 2);
+        assert_eq!(state.applied_mark.handle().applied_index(), 200);
         let current = state
             .get_current_snapshot()
             .await
@@ -2183,6 +2345,16 @@ mod snapshot_metrics_contracts {
         let mut restarted = new_test_state(&root, "pending.db")
             .await
             .expect("recover durable pending generation");
+        // Pending-snapshot recovery is the second caller of the same guard.
+        assert_eq!(restarted.applied_mark.handle().generation(), 2);
+        assert_eq!(
+            restarted
+                .applied_mark
+                .handle()
+                .observation()
+                .failed_replacements,
+            0
+        );
         let current = restarted
             .get_current_snapshot()
             .await

@@ -9,12 +9,14 @@ impl From<&mut Row<'_>> for PayloadRow {
     }
 }
 async fn predicate(
-    client: &Client,
+    label: &'static str,
+    client: &CountedClient,
     guard: String,
     bindings: Vec<Param>,
 ) -> Result<bool, MembershipError> {
     let rows = client
         .query_consistent_map::<CountRow, _>(
+            label,
             format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
             bindings,
         )
@@ -22,23 +24,32 @@ async fn predicate(
     Ok(matches!(rows.as_slice(),[row] if row.count==1))
 }
 async fn transaction(
-    client: &Client,
+    label: &'static str,
+    client: &CountedClient,
     statements: Vec<(String, Vec<Param>)>,
 ) -> Result<(), MembershipError> {
-    let results = client.txn(statements).await?;
+    let results = client.txn(label, statements).await?;
     results.into_iter().collect::<Result<Vec<_>, _>>()?;
     Ok(())
 }
-async fn verify_layout(client: &Client) -> Result<bool, MembershipError> {
+async fn verify_layout(client: &CountedClient) -> Result<bool, MembershipError> {
     let rows = client
         .query_consistent_map::<CountRow, _>(
+            "verify_layout",
             "SELECT schema_version AS count FROM cluster_meta WHERE singleton=1",
             params!(),
         )
         .await?;
     match rows.as_slice() {
         [row] if row.count == layout::SOURCE_SCHEMA_VERSION => {
-            if predicate(client, layout::installed_guard(), params!()).await? {
+            if predicate(
+                "verify_layout",
+                client,
+                layout::installed_guard(),
+                params!(),
+            )
+            .await?
+            {
                 Ok(true)
             } else {
                 Err(MembershipError::Incompatible)
@@ -46,6 +57,7 @@ async fn verify_layout(client: &Client) -> Result<bool, MembershipError> {
         }
         [row] if row.count == layout::SOURCE_SCHEMA_PREDECESSOR => {
             if predicate(
+                "verify_layout",
                 client,
                 layout::predecessor_layout_guard_for(
                     crate::store::adaptive_resource_attempts::schema::OutageFence::Replicated,
@@ -63,9 +75,10 @@ async fn verify_layout(client: &Client) -> Result<bool, MembershipError> {
         _ => Err(MembershipError::Incompatible),
     }
 }
-async fn boot_table_present(client: &Client) -> Result<bool, MembershipError> {
+async fn boot_table_present(client: &CountedClient) -> Result<bool, MembershipError> {
     let rows = client
         .query_consistent_map::<CountRow, _>(
+            "boot_table_present",
             "SELECT count(*) AS count FROM sqlite_master WHERE name='sharing_source_boot_intents'",
             params!(),
         )
@@ -74,7 +87,13 @@ async fn boot_table_present(client: &Client) -> Result<bool, MembershipError> {
         [row] if row.count == 0 => Ok(false),
         [row]
             if row.count == 1
-                && predicate(client, layout::boot_shape_guard(), params!()).await? =>
+                && predicate(
+                    "boot_table_present",
+                    client,
+                    layout::boot_shape_guard(),
+                    params!(),
+                )
+                .await? =>
         {
             Ok(true)
         }
@@ -94,7 +113,7 @@ async fn ensure_boot_table(
         return Ok(false);
     };
     let (guard, roster, cutoff, now) = members.write_guard(unix_ms()?, 1, 2, 3)?;
-    let attempt=transaction(&inner.client,vec![
+    let attempt=transaction("ensure_boot_table", &inner.client,vec![
         ("DELETE FROM sharing_purpose_transaction_guard".to_owned(),params!()),
         (format!("INSERT INTO sharing_purpose_transaction_guard VALUES(1,CASE WHEN ({guard}) AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='sharing_source_boot_intents') THEN 1 ELSE 0 END)"),params!(roster,cutoff,now)),
         (layout::BOOT_INTENTS_SCHEMA.to_owned(),params!()),
@@ -140,7 +159,7 @@ async fn install(inner: &ReplicatedMembership, live: bool) -> Result<bool, Membe
     let captured = if live {
         "[]".to_owned()
     } else {
-        let rows=inner.client.query_consistent_map::<PayloadRow,_>("SELECT json_array(intent.node_id,intent.raft_id,intent.attempt_id,intent.master_fingerprint,intent.membership_generation) AS payload FROM sharing_source_boot_intents intent JOIN cluster_nodes node ON node.node_id=intent.node_id AND node.raft_id=intent.raft_id WHERE node.removed_at IS NULL ORDER BY intent.node_id LIMIT 257",params!()).await?;
+        let rows=inner.client.query_consistent_map::<PayloadRow,_>("membership_install", "SELECT json_array(intent.node_id,intent.raft_id,intent.attempt_id,intent.master_fingerprint,intent.membership_generation) AS payload FROM sharing_source_boot_intents intent JOIN cluster_nodes node ON node.node_id=intent.node_id AND node.raft_id=intent.raft_id WHERE node.removed_at IS NULL ORDER BY intent.node_id LIMIT 257",params!()).await?;
         if rows.is_empty() || rows.len() > 256 {
             return Ok(false);
         }
@@ -167,6 +186,7 @@ async fn install(inner: &ReplicatedMembership, live: bool) -> Result<bool, Membe
     // Authority: presence dispatch avoids preparing optional-table SQL against
     // an absent adjunct; both selected branches assert their shape at commit.
     let adjunct = inner.client.query_consistent_map::<CountRow,_>(
+        "activate_source_schema",
         "SELECT count(*) AS count FROM sqlite_master WHERE name GLOB 'media_resource_*' OR tbl_name GLOB 'media_resource_*'", params!()
     ).await?;
     let adaptive = match adjunct.as_slice() {
@@ -198,6 +218,7 @@ async fn install(inner: &ReplicatedMembership, live: bool) -> Result<bool, Membe
         inner.identity.raft_id
     );
     if !predicate(
+        "membership_install",
         &inner.client,
         format!("({authority}) AND ({})", predecessor),
         params!(roster.clone(), cutoff, now, captured.clone()),
@@ -238,7 +259,7 @@ async fn install(inner: &ReplicatedMembership, live: bool) -> Result<bool, Membe
         (format!("INSERT INTO sharing_source_schema_transaction_guard VALUES(1,CASE WHEN ({authority}) AND ({}) THEN 1 ELSE 0 END)",layout::installed_shape_guard()),params!(roster,cutoff,now,captured)),
 
     ]);
-    let attempt = transaction(&inner.client, statements).await;
+    let attempt = transaction("membership_install", &inner.client, statements).await;
     match attempt {
         Ok(()) => verify_layout(&inner.client).await,
         Err(error) => {
@@ -266,6 +287,7 @@ async fn retire_previous_boot(
         inner.identity.raft_id as i64
     );
     if !predicate(
+        "retire_previous_boot",
         &inner.client,
         "EXISTS(SELECT 1 FROM sharing_source_boot_intents WHERE node_id=$1 AND raft_id=$2)"
             .to_owned(),
@@ -283,7 +305,7 @@ async fn retire_previous_boot(
         "({}) AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents) AND EXISTS(SELECT 1 FROM cluster_nodes node JOIN cluster_node_capabilities proof ON proof.node_id=node.node_id AND proof.last_seen_at=node.last_seen_at WHERE node.node_id=$1 AND node.raft_id=$2 AND node.removed_at IS NULL AND proof.capability=$3 AND NOT EXISTS(SELECT 1 FROM cluster_node_capabilities boot WHERE boot.node_id=node.node_id AND boot.last_seen_at=node.last_seen_at AND boot.capability GLOB 'sharing_source_boot_v1:*'))",
         layout::boot_shape_guard()
     );
-    transaction(&inner.client,vec![
+    transaction("retire_previous_boot", &inner.client,vec![
         ("DELETE FROM sharing_purpose_transaction_guard".to_owned(),params!()),
         (format!("INSERT INTO sharing_purpose_transaction_guard VALUES(1,CASE WHEN {safe} THEN 1 ELSE 0 END)"),params!(inner.identity.node_id.as_str(),inner.identity.raft_id as i64,selected)),
         ("DELETE FROM sharing_source_boot_intents WHERE node_id=$1 AND raft_id=$2".to_owned(),own.clone()),
@@ -295,7 +317,9 @@ async fn retire_previous_boot(
 /// The older complete guard protocol remains a recognized Local-only state.
 /// It grants no factory authority: only exact untouched legacy definitions,
 /// generation shape and absence of new guard fragments receive this disposition.
-async fn recognized_legacy_admission_schema(client: &Client) -> Result<bool, MembershipError> {
+async fn recognized_legacy_admission_schema(
+    client: &CountedClient,
+) -> Result<bool, MembershipError> {
     let legacy = sharing_member_admission_guard_schema()
         .into_iter()
         .filter(|sql| !sql.contains("cluster_sharing_purpose_keys_"))
@@ -318,10 +342,17 @@ async fn recognized_legacy_admission_schema(client: &Client) -> Result<bool, Mem
         legacy.len(),
         predicates.join(") AND (")
     );
-    if !predicate(client, guard, params!()).await? {
+    if !predicate(
+        "recognized_legacy_admission_schema",
+        client,
+        guard,
+        params!(),
+    )
+    .await?
+    {
         return Ok(false);
     }
-    predicate(client,format!("({}) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN('sharing_source_schema_installation','sharing_source_schema_transaction_guard'))",sharing_membership_generation_shape_predicate()),params!()).await
+    predicate("recognized_legacy_admission_schema", client,format!("({}) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN('sharing_source_schema_installation','sharing_source_schema_transaction_guard'))",sharing_membership_generation_shape_predicate()),params!()).await
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -331,10 +362,11 @@ enum StartupAdmissionLayout {
     Current,
 }
 async fn startup_admission_layout(
-    client: &Client,
+    client: &CountedClient,
 ) -> Result<StartupAdmissionLayout, MembershipError> {
     let count = client
         .query_consistent_map::<CountRow, _>(
+            "startup_admission_layout",
             "SELECT count(*) AS count FROM sqlite_master WHERE name GLOB 'cluster_sharing_*'",
             params!(),
         )
@@ -346,7 +378,7 @@ async fn startup_admission_layout(
         return Ok(StartupAdmissionLayout::Legacy);
     }
     let expected = sharing_admission_schema_names().len();
-    let bootstrap=client.query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM sqlite_master WHERE name='cluster_sharing_purpose_bootstrap_guard'",params!()).await?;
+    let bootstrap=client.query_consistent_map::<CountRow,_>("startup_admission_layout", "SELECT count(*) AS count FROM sqlite_master WHERE name='cluster_sharing_purpose_bootstrap_guard'",params!()).await?;
     let extra = match bootstrap.as_slice() {
         [row] if row.count == 0 => 0,
         [row] if row.count == 1 => 1,
@@ -354,6 +386,7 @@ async fn startup_admission_layout(
     };
     if !matches!(count.as_slice(),[row] if row.count==(expected+extra) as i64)
         || !predicate(
+            "startup_admission_layout",
             client,
             format!(
                 "({}) AND ({})",
@@ -366,7 +399,7 @@ async fn startup_admission_layout(
     {
         return Err(MembershipError::Incompatible);
     }
-    if extra==1 && !predicate(client,format!("EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='cluster_sharing_purpose_bootstrap_guard' AND sql='{}') AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='cluster_sharing_purpose_bootstrap_guard') AND EXISTS(SELECT 1 FROM cluster_sharing_purpose_bootstrap_guard WHERE singleton=1 AND passed=1)",PURPOSE_BOOTSTRAP_GUARD_SCHEMA.replace("'","''")),params!()).await? { return Err(MembershipError::Incompatible); }
+    if extra==1 && !predicate("startup_admission_layout", client,format!("EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='cluster_sharing_purpose_bootstrap_guard' AND sql='{}') AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='cluster_sharing_purpose_bootstrap_guard') AND EXISTS(SELECT 1 FROM cluster_sharing_purpose_bootstrap_guard WHERE singleton=1 AND passed=1)",PURPOSE_BOOTSTRAP_GUARD_SCHEMA.replace("'","''")),params!()).await? { return Err(MembershipError::Incompatible); }
     Ok(StartupAdmissionLayout::Current)
 }
 
@@ -438,6 +471,7 @@ impl MembershipManager {
             return Ok(false);
         }
         if !predicate(
+            "coordinate_source_schema_live",
             &inner.client,
             capability_ready_predicate(SHARING_SOURCE_LIVE_DISPATCH_CAPABILITY),
             params!(),

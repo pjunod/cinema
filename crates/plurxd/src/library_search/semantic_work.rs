@@ -96,6 +96,7 @@ pub(super) async fn run(
             after: cursor.clone(),
             now_ms: now_ms(),
             limit: 64,
+            admissible_only: false,
         })
         .await?;
     page.jobs.retain(|job| matches!(job.supported_payload(), Ok(JobPayload::SemanticEmbedding { model_digest, .. }) if model_digest == model_identity().digest()));
@@ -158,7 +159,8 @@ pub(super) async fn run(
                 .ok_or_else(|| anyhow::anyhow!("embedding claim missing token"))?,
             deadline,
             JobKind::SemanticEmbedding,
-        )?;
+        )
+        .await?;
         let fence = active.fence();
         let cancel = fence.loss_token().child_token();
         let result: Result<bool> = async {

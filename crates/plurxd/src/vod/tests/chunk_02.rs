@@ -1,3 +1,4 @@
+
 /// Liveness is the engine's half, and it answers before the slot is
 /// touched: a session that has ended takes no successor, and one that is
 /// gone from the registry has no gate at all.
@@ -161,6 +162,8 @@ async fn rendition_install_point_precedes_admission() {
     let duration_ms = index_video_ms(&index);
     let identity = SourceIdentity::new(1, 1, "fingerprint");
     let recipe = Recipe {
+        dv_refit_gain: None,
+        source_telemetry: false,
         retained_logical: None,
         measured_candidate: None,
         file: media_file_at(source_path, duration_ms),
@@ -170,6 +173,7 @@ async fn rendition_install_point_precedes_admission() {
         video: CopyVideoOptions::new(false, false),
         source_object_version: None,
         cluster_cache_key: None,
+        copy_index_init_contract: None,
         encoding: None,
     };
     let key = rendition_key(&recipe, &identity);
@@ -258,6 +262,8 @@ async fn cancelled_real_attach_is_accounted_reusable_and_purgeable() {
     let duration_ms = index_video_ms(&index);
     let identity = SourceIdentity::new(1, 1, "fingerprint");
     let recipe = Recipe {
+        dv_refit_gain: None,
+        source_telemetry: false,
         retained_logical: None,
         measured_candidate: None,
         file: media_file_at(source_path, duration_ms),
@@ -267,6 +273,7 @@ async fn cancelled_real_attach_is_accounted_reusable_and_purgeable() {
         video: CopyVideoOptions::new(false, false),
         source_object_version: None,
         cluster_cache_key: None,
+        copy_index_init_contract: None,
         encoding: None,
     };
     let key = rendition_key(&recipe, &identity);
@@ -1028,6 +1035,8 @@ async fn reattaching_elsewhere_retires_the_waits_left_behind() {
         .expect("parent")
         .children
         .push(ParentMediaReader {
+            versioned_family: false,
+            companion_bootstrap: false,
             controlled: false,
             candidate_id: None,
             reader_id: private_id.clone(),
@@ -1114,6 +1123,8 @@ async fn private_media_response_fences_rebinding_and_preserves_parent_frontier()
         .expect("parent")
         .children
         .push(ParentMediaReader {
+            versioned_family: false,
+            companion_bootstrap: false,
             controlled: false,
             candidate_id: None,
             reader_id: private_id.clone(),
@@ -1159,6 +1170,8 @@ async fn private_media_response_fences_rebinding_and_preserves_parent_frontier()
         let mut sessions = serve.shared.sessions.lock().await;
         let session = sessions.get_mut(&parent).expect("parent");
         session.children.push(ParentMediaReader {
+            versioned_family: false,
+            companion_bootstrap: false,
             controlled: false,
             candidate_id: None,
             reader_id: next_id.clone(),
@@ -1219,6 +1232,8 @@ async fn ending_a_parent_retires_its_private_media_readers_only() {
         .expect("parent")
         .children
         .push(ParentMediaReader {
+            versioned_family: false,
+            companion_bootstrap: false,
             controlled: false,
             candidate_id: None,
             reader_id: child_id.clone(),
@@ -1272,6 +1287,8 @@ async fn ending_a_parent_retires_its_private_media_readers_only() {
         .expect("other parent")
         .children
         .push(ParentMediaReader {
+            versioned_family: false,
+            companion_bootstrap: false,
             controlled: false,
             candidate_id: None,
             reader_id: next_child.clone(),
@@ -1304,6 +1321,8 @@ async fn cancelled_idle_reap_keeps_parent_gate_until_children_are_detached() {
         let mut sessions = serve.shared.sessions.lock().await;
         let session = sessions.get_mut(&parent).expect("parent");
         session.children.push(ParentMediaReader {
+            versioned_family: false,
+            companion_bootstrap: false,
             controlled: false,
             candidate_id: None,
             reader_id: child_id.clone(),
@@ -1750,6 +1769,10 @@ fn every_generation_failure_names_what_actually_happened() {
             Reason::EngineChanged,
         ),
         (
+            Failure::SealedInit("sealed".to_owned()),
+            Reason::RenditionInitChanged,
+        ),
+        (
             Failure::Landing("landing".to_owned()),
             Reason::MediaLandingFailed,
         ),
@@ -1788,6 +1811,62 @@ fn every_generation_failure_names_what_actually_happened() {
             describe_failure(&failure)
         );
     }
+}
+
+/// A recipe planned from a v3 copy index serves only when this
+/// generation's own promoted muxer init has the contract the index was
+/// sealed with; any other recipe is not asked.
+#[test]
+fn a_v3_recipe_serves_only_the_init_contract_its_index_was_sealed_with() {
+    let mut reader = plurx_core::fmp4::FragmentReader::new();
+    reader.push(&testfixtures::pipe("closed-gop"));
+    let Some(plurx_core::fmp4::Unit::Init(mut muxer)) = reader.next_unit().expect("fixture pipe")
+    else {
+        panic!("fixture init");
+    };
+    crate::copyseg::sanitize_stale_dolby_brand(&mut muxer);
+    let mut index = synthetic_index(4);
+    index.promotion.indexed_hdr10_metadata = true;
+    let sealed = crate::copy_normalization::served_init_contract_sha256(&muxer, &index.promotion)
+        .expect("the seal's init contract");
+    let mut recipe = Recipe {
+        dv_refit_gain: None,
+        source_telemetry: false,
+        retained_logical: None,
+        measured_candidate: None,
+        file: media_file_at(PathBuf::from("unused.mkv"), 12_000),
+        audio_index: None,
+        aac: true,
+        audio_delivery: None,
+        video: CopyVideoOptions::new(false, false),
+        source_object_version: None,
+        cluster_cache_key: Some("copy-index-v3:fixture".to_owned()),
+        copy_index_init_contract: Some(sealed.clone()),
+        encoding: None,
+    };
+    assert_eq!(sealed_init_refusal(&recipe, Some(&index), &muxer), None);
+
+    // The publisher's engine sealed another init than this one emits.
+    let other = "0".repeat(64);
+    recipe.copy_index_init_contract = Some(other.clone());
+    let refusal = sealed_init_refusal(&recipe, Some(&index), &muxer)
+        .expect("an init nobody sealed is refused");
+    assert!(
+        matches!(&refusal, SealedInitRefusal::Mismatch(reason)
+                if reason.contains(&sealed) && reason.contains(&other)),
+        "a computed contract that differs is the reportable mismatch: {refusal:?}"
+    );
+    assert!(
+        matches!(
+            sealed_init_refusal(&recipe, None, &muxer),
+            Some(SealedInitRefusal::Unverifiable(_))
+        ),
+        "a sealed contract without its index is refused, and says nothing about the variant"
+    );
+
+    // Legacy and v2 recipes carry no sealed contract.
+    recipe.copy_index_init_contract = None;
+    assert_eq!(sealed_init_refusal(&recipe, Some(&index), &muxer), None);
 }
 
 #[tokio::test]
@@ -2214,6 +2293,7 @@ async fn every_terminal_cause_answers_gone_and_supersession_spares_the_keeper() 
                     since_ms: None,
                     event: None,
                     limit: 20,
+                    ..Default::default()
                 })
                 .await
                 .expect("VOD lifecycle telemetry query");

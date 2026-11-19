@@ -302,6 +302,42 @@ pub(crate) async fn reprobe_macos_video(
     )
 }
 
+/// `GET /api/v1/developer/dv-refit/spool` — admin: this node's F+
+/// statistics spool, one entry per file.
+pub(crate) async fn refit_spool(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let root = crate::source_probe::refit_spool_root(&state.runtime_cache_dir);
+    let entries =
+        tokio::task::spawn_blocking(move || crate::source_probe::refit_spool_entries(&root))
+            .await
+            .unwrap_or_default();
+    let bytes: u64 = entries
+        .iter()
+        .map(|e| e["bytes"].as_u64().unwrap_or(0))
+        .sum();
+    Json(serde_json::json!({"node_id": state.node_id, "entries": entries, "bytes": bytes}))
+}
+
+/// `DELETE /api/v1/developer/dv-refit/spool` — admin: deletes this node's
+/// F+ statistics spool. Stored curve tables are unaffected; a later fit of
+/// a title decodes it again, and a running fit restarts its title.
+pub(crate) async fn clear_refit_spool(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let root = crate::source_probe::refit_spool_root(&state.runtime_cache_dir);
+    let removed =
+        tokio::task::spawn_blocking(move || crate::source_probe::refit_spool_clear(&root))
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(
+        serde_json::json!({"node_id": state.node_id, "removed": removed}),
+    ))
+}
+
 /// Neutral admin entry point; saved Mac choices do not govern Linux probing.
 pub(crate) async fn reprobe_video_processing(
     _admin: AdminUser,
@@ -466,7 +502,8 @@ pub(crate) async fn readiness(
     // Propagated, not defaulted. An empty map from a failed replicated read
     // would render as "the switch is off", which is a reading this route did
     // not take — the same dishonesty it exists to remove, one layer down.
-    let settings = state.store.settings_snapshot().await?;
+    // A polled page: this node's applied view (E1b, contract §6.3).
+    let settings = state.applied.settings_snapshot().await?.values;
     let live_tv = crate::live_tv::LiveTvConfig::from_snapshot(&settings, &state.node_id);
     let dvr_config = crate::live_tv::DvrConfig::from_snapshot(&settings);
     let dvr_on = dvr_config.enabled;
@@ -573,9 +610,12 @@ pub(crate) async fn readiness(
             ),
             event: Some("playback_display_mode".into()),
             limit: 2_000,
+            ..PlaybackEventQuery::default()
         })
         .await?;
 
+    let [refit_web, refit_apple, refit_android, refit_linux] =
+        dolby_vision_refit(&state, &settings).await;
     Ok(Json(DeveloperReadiness {
         observed_at_ms: crate::state::clock_ms(),
         items: vec![
@@ -624,6 +664,8 @@ pub(crate) async fn readiness(
             clock_measurement(&state, clock_guard_enforced),
             adaptive_remote_placement(&state),
             durable_cluster_work(&state).await,
+            indexing_while_serving(&state).await,
+            processed_dv_upgrade(&state).await,
             bounded_catalogue_reads(
                 &state,
                 plurx_core::store::stored_switch(
@@ -634,6 +676,13 @@ pub(crate) async fn readiness(
                 ),
             )
             .await,
+            applied_view(&state.applied.observation()),
+            create_plan(
+                &state.applied.observation(),
+                super::hls::start_plan::refusal_closes(),
+                super::hls::start_plan::stale_replans(),
+                super::hls::start_plan::peer_catalog_counts(),
+            ),
             cluster_backup(
                 &state,
                 settings.get(plurx_core::store::keys::BACKUP_DESTINATION),
@@ -676,6 +725,10 @@ pub(crate) async fn readiness(
             dolby_vision_fel_reencode(&state, plurx_core::store::stored_switch(
                 settings.get(plurx_core::store::keys::DV_FEL_REENCODE).map(String::as_str), false),
                 convert_on).await,
+            refit_apple,
+            refit_web,
+            refit_android,
+            refit_linux,
             source_probe_comparison().await,
             output_preparation(&state, &settings).await,
             rolling_retention(&state, &settings).await,
@@ -1151,6 +1204,230 @@ async fn bounded_catalogue_reads(state: &AppState, enabled: bool) -> DeveloperEn
     }
 }
 
+/// Playback-start E1: the node-local applied view of settings and routes.
+/// No switch; every row is a fact this process loads now, and none of them
+/// changes what the view does.
+pub(crate) fn applied_view(
+    observation: &plurx_core::store::AppliedViewObservation,
+) -> DeveloperEnableItem {
+    use plurx_core::store::ViewSource;
+    use RequirementStatus::{Met, Unknown, Unmet, Unobservable};
+    let (proof_status, proof_evidence) = match observation.mode {
+        "standalone" => (
+            Met,
+            "This node's SQLite store is the only copy, so the view is always current.".to_owned(),
+        ),
+        "remote_authority" => (
+            Unmet,
+            "This process has no local replica; every view read is a quorum read.".to_owned(),
+        ),
+        _ if observation.proof_present => (
+            Met,
+            "This node has applied a quorum-confirmed commit index whose confirmation is inside its one-second lease.".to_owned(),
+        ),
+        _ => (
+            Unmet,
+            "No current quorum proof (apply lag, a leader change, or an older leader during a rolling upgrade). Reads use quorum until it returns, with no wait.".to_owned(),
+        ),
+    };
+    let (image_status, image_evidence) = match observation.generation {
+        None => (
+            Unobservable,
+            "No applied mark here: the SQLite store and a remote-authority process have no replica image to replace.".to_owned(),
+        ),
+        Some(generation) if generation & 1 == 0 => (
+            Met,
+            format!(
+                "Image generation {generation} is stable; applied index {}; table revisions {}.",
+                observation.applied_index.unwrap_or_default(),
+                observation
+                    .revisions
+                    .iter()
+                    .map(|(view, revision)| format!("{view} {revision}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+        Some(generation) => (
+            Unmet,
+            if observation.failed_replacements > 0 {
+                format!(
+                    "Image generation {generation}: {} snapshot restore(s) did not complete in this process. Either one left the image closed, or a later install is in progress; reads use quorum until a restore completes or this node restarts.",
+                    observation.failed_replacements
+                )
+            } else {
+                format!("Image generation {generation}: a snapshot is being installed; reads use quorum until the read pool sees the new image.")
+            },
+        ),
+    };
+    use plurx_core::store::AppliedTable;
+    let view_reads = observation.total(ViewSource::View);
+    let authority_reads = observation.total(ViewSource::Authority);
+    let (reads_status, reads_evidence) = if view_reads == 0 && authority_reads == 0 {
+        (
+            Unknown,
+            "No view reads since start: settings and media-session routes read through this view once a request or page asks for one.".to_owned(),
+        )
+    } else {
+        let per_view = |table: AppliedTable, noun: &str| {
+            format!(
+                "{noun}: {} view, {} quorum",
+                observation.view_total(table, ViewSource::View),
+                observation.view_total(table, ViewSource::Authority)
+            )
+        };
+        (
+            if view_reads > 0 { Met } else { Unmet },
+            format!(
+                "Since start: {}; {}; last fallback {}.",
+                per_view(AppliedTable::Settings, "settings"),
+                per_view(AppliedTable::MediaSessions, "routes"),
+                observation
+                    .last_fallback
+                    .map_or("none", |reason| reason.label())
+            ),
+        )
+    };
+    // The last fallback is one cell for both views; say outright when the
+    // route view cannot open at all.
+    let reads_evidence = if observation.route_view_open == Some(false) {
+        format!(
+            "{reads_evidence} Routes: this replica's session table is still in the legacy layout (no Source installation yet), so every route read is a quorum read (reason legacy_layout)."
+        )
+    } else {
+        reads_evidence
+    };
+    DeveloperEnableItem {
+        id: "applied_view",
+        title: "Applied view",
+        enabled: None,
+        setting: None,
+        requirements: vec![
+            DeveloperRequirement {
+                id: "applied_view_proof",
+                title: "Replica proof present",
+                status: proof_status,
+                evidence: proof_evidence,
+            },
+            DeveloperRequirement {
+                id: "applied_view_image",
+                title: "Replica image stable",
+                status: image_status,
+                evidence: image_evidence,
+            },
+            DeveloperRequirement {
+                id: "applied_view_reads",
+                title: "Reads through the view",
+                status: reads_status,
+                evidence: reads_evidence,
+            },
+        ],
+    }
+}
+
+/// Playback-start D3b: the create's one planning read
+/// (`http/hls/start_plan.rs`). No switch; every row is a count this process
+/// loads now, and none changes how a create plans.
+pub(crate) fn create_plan(
+    observation: &plurx_core::store::AppliedViewObservation,
+    refusal_closes: u64,
+    stale_replans: u64,
+    peer_catalogs: (u64, u64),
+) -> DeveloperEnableItem {
+    use plurx_core::store::{AppliedTable, ViewSource};
+    use RequirementStatus::{Met, Unknown};
+    let view = observation.view_total(AppliedTable::Files, ViewSource::View);
+    let quorum = observation.view_total(AppliedTable::Files, ViewSource::Authority);
+    let by_reason = |reason: &str| {
+        observation
+            .reads
+            .iter()
+            .filter(|(read_view, source, read_reason, _)| {
+                *read_view == AppliedTable::Files.label()
+                    && *source == "authority"
+                    && *read_reason == reason
+            })
+            .map(|(_, _, _, count)| *count)
+            .sum::<u64>()
+    };
+    let (source_status, source_evidence) = if view + quorum == 0 {
+        (
+            Unknown,
+            "No create has planned on this node since start.".to_owned(),
+        )
+    } else if observation.mode == "standalone" {
+        // SQLite: the store is the only copy, so every plan read it.
+        (
+            Met,
+            format!(
+                "Since start: {} plans read the store (standalone: it is the only copy).",
+                view + quorum
+            ),
+        )
+    } else {
+        (
+            Met,
+            format!(
+                "Since start: {view} of {} plans ({}%) read this node's replica and {quorum} read quorum; last quorum reason {}.",
+                view + quorum,
+                view * 100 / (view + quorum),
+                observation
+                    .last_planning_fallback
+                    .map_or("none", |reason| reason.label())
+            ),
+        )
+    };
+    DeveloperEnableItem {
+        id: "create_plan",
+        title: "Create plan",
+        enabled: None,
+        setting: None,
+        requirements: vec![
+            DeveloperRequirement {
+                id: "create_plan_source",
+                title: "Plans from this replica",
+                status: source_status,
+                evidence: source_evidence,
+            },
+            DeveloperRequirement {
+                id: "create_plan_owner",
+                title: "Owner plans at a peer's binding",
+                status: Met,
+                evidence: format!(
+                    "Since start: {} plans asked quorum because this replica answered another binding than a peer planned at; {} plans for a start with no binding (an owner's legacy route, or this ingress confirming one) read quorum.",
+                    by_reason("binding_mismatch"),
+                    by_reason("unbound")
+                ),
+            },
+            DeveloperRequirement {
+                id: "create_plan_peer_catalogs",
+                title: "Peer catalogs at a sender's binding",
+                status: Met,
+                evidence: format!(
+                    "Since start: {} peer catalog requests planned from this replica at the sender's binding, {} refused as stale (Authority held another binding, so the sender's plan was the stale one and its create re-plans). This node's own create answers its local catalog from its plan and reads nothing for it.",
+                    peer_catalogs.0, peer_catalogs.1
+                ),
+            },
+            DeveloperRequirement {
+                id: "create_plan_replans",
+                title: "Re-plans after a catalog refuted the view",
+                status: Met,
+                evidence: format!(
+                    "Since start: {stale_replans}. Each is a create whose view plan a catalog's quorum read refuted before its claim; it closed this node's planning view and planned again from quorum in the same request."
+                ),
+            },
+            DeveloperRequirement {
+                id: "create_plan_refusals",
+                title: "Views closed after an owner refusal",
+                status: Met,
+                evidence: format!(
+                    "Since start: {refusal_closes}. Each is an owner that held another revision of a source or its settings than this node planned at; this node's planning view then reads quorum until its replica is proven to hold what the owner saw."
+                ),
+            },
+        ],
+    }
+}
+
 /// Facts only: these observations are never consulted by settings updates.
 async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
     use plurx_core::cluster::coordination::ClusterJobAuthority;
@@ -1205,6 +1482,292 @@ async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
             DeveloperRequirement { id: "durable_sources", title: "Source access on a worker", status: Unknown,
                 evidence: "This page does not scan library mounts. Each claimed job checks its source generation and readable descriptor on the chosen worker.".into() },
             DeveloperRequirement { id: "durable_peers", title: "Compatible peers", status: peer_status, evidence: peer_evidence },
+        ],
+    }
+}
+
+/// Two source-I/O resource keys contend when they are the same domain or
+/// either is the whole-source wildcard `source_io` -- the overlap rule of the
+/// claim's `domain_readers_full` term.
+fn source_domains_overlap(a: &str, b: &str) -> bool {
+    a == b
+        || (a.starts_with("source_io")
+            && b.starts_with("source_io")
+            && (a == "source_io" || b == "source_io"))
+}
+
+/// Readers per storage domain as the claim counts them: every distinct
+/// active reader (kind and work id, however many rows it holds) whose key
+/// overlaps the domain, a wildcard reader counting against every domain.
+fn domain_readers(
+    holders: &[plurx_core::store::background_jobs::SourceIoHolder],
+) -> std::collections::BTreeMap<String, usize> {
+    let active = holders
+        .iter()
+        .filter(|holder| holder.active_occupancy)
+        .collect::<Vec<_>>();
+    active
+        .iter()
+        .map(|holder| holder.resource_key.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|domain| {
+            let readers = active
+                .iter()
+                .filter(|holder| source_domains_overlap(&holder.resource_key, &domain))
+                .map(|holder| (holder.kind.as_str(), holder.work_id.as_str()))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            (domain, readers)
+        })
+        .collect()
+}
+
+/// How many measured switches each platform needs before the processed
+/// Dolby Vision upgrade leaves the Developer tab (Paul, 2026-11-07).
+const PROCESSED_UPGRADE_SWITCHES: u64 = 20;
+
+/// Processed Dolby Vision / HDR10-E is an upgrade after the first frame,
+/// switched in through the M6 prepared replacement (plan ruling 3). It always
+/// runs when the processing settings are on; these rows say whether the
+/// switch it rides on is qualified on each platform, from the `prepared_seam`
+/// reports this node has counted since it started, and whether this node can
+/// run an upgrade now. Advisory: nothing here gates anything.
+async fn processed_dv_upgrade(state: &AppState) -> DeveloperEnableItem {
+    use crate::playback_control::{prepared_seam_counts, processed_upgrade_count, ClientPlatform};
+    #[cfg(target_os = "linux")]
+    use RequirementStatus::Unavailable;
+    use RequirementStatus::{Met, Unmet};
+    let platform = |id: &'static str, title: &'static str, client: ClientPlatform, note: &str| {
+        // The processed upgrade's own switches: prepared switches to a
+        // processed successor. Ordinary rung changes ride the same seam but
+        // say nothing about the processed output's.
+        let (qualified, reported) = prepared_seam_counts(client, true);
+        DeveloperRequirement {
+            id,
+            title,
+            status: if qualified >= PROCESSED_UPGRADE_SWITCHES {
+                Met
+            } else {
+                Unmet
+            },
+            evidence: format!(
+                "{}: {qualified} of {PROCESSED_UPGRADE_SWITCHES} measured switches to a processed \
+                 successor (committed, complete ±2 s frame samples, zero dropped frames, \
+                 independently observed audio continuity, no reopen); {reported} prepared \
+                 switches to a processed successor reported to this node since it started.{note}",
+                if qualified >= PROCESSED_UPGRADE_SWITCHES {
+                    "qualified"
+                } else {
+                    "unqualified"
+                }
+            ),
+        }
+    };
+    #[cfg(target_os = "linux")]
+    let renderer = match crate::vodencode::dv_runtime::ToolSet::capture().await {
+        Ok(Some(_)) => (
+            Met,
+            "The processing helper is installed on this node.".to_owned(),
+        ),
+        Ok(None) => (
+            Unmet,
+            "No processing helper on this node: its sessions start ordinary and stay so."
+                .to_owned(),
+        ),
+        Err(error) => (
+            Unavailable,
+            format!("The processing helper could not be read: {error}"),
+        ),
+    };
+    #[cfg(not(target_os = "linux"))]
+    let renderer = (
+        Unmet,
+        "Processed output is rendered only on Linux workers.".to_owned(),
+    );
+    let slot = match state.transcode.processed_preparation_slot_free() {
+        Some(true) => (
+            Met,
+            "This node's one processed-preparation slot is free.".to_owned(),
+        ),
+        Some(false) => (
+            Unmet,
+            "This node's processed-preparation slot is in use: an upgrade that finds it busy \
+             declines and its session keeps playing ordinary."
+                .to_owned(),
+        ),
+        None => (
+            Unmet,
+            "This node has no processed-preparation slot.".to_owned(),
+        ),
+    };
+    DeveloperEnableItem {
+        id: "processed_dv_upgrade",
+        title: "Processed DV upgrade",
+        enabled: None,
+        setting: None,
+        requirements: vec![
+            platform(
+                "processed_upgrade_web",
+                "Web switches measured",
+                ClientPlatform::Web,
+                " The web client does not measure audio at the seam (an analyser would capture \
+                 the element's audio for its lifetime), so its switches report audio unobserved.",
+            ),
+            platform(
+                "processed_upgrade_apple",
+                "Apple switches measured",
+                ClientPlatform::Apple,
+                "",
+            ),
+            platform(
+                "processed_upgrade_android",
+                "Android switches measured",
+                ClientPlatform::Android,
+                "",
+            ),
+            DeveloperRequirement {
+                id: "processed_upgrade_renderer",
+                title: "Renderer present",
+                status: renderer.0,
+                evidence: renderer.1,
+            },
+            DeveloperRequirement {
+                id: "processed_upgrade_slot",
+                title: "Slot free",
+                status: slot.0,
+                evidence: slot.1,
+            },
+            DeveloperRequirement {
+                id: "processed_upgrade_activity",
+                title: "Upgrades on this node",
+                status: Met,
+                evidence: format!(
+                    "Since start: {} scheduled by a first frame, {} staged as a prepared \
+                     successor, {} declined, {} not admitted, {} cancelled. A declined or \
+                     cancelled upgrade leaves its session playing ordinary.",
+                    processed_upgrade_count("scheduled"),
+                    processed_upgrade_count("staged"),
+                    processed_upgrade_count("declined"),
+                    processed_upgrade_count("admission_refused"),
+                    processed_upgrade_count("cancelled"),
+                ),
+            },
+        ],
+    }
+}
+
+/// Content analysis no longer waits for an idle node (C1): a serving node
+/// keeps indexing its own requests, an idle one takes other nodes'. Nothing
+/// to switch; these rows say what this node's indexer may do right now.
+async fn indexing_while_serving(state: &AppState) -> DeveloperEnableItem {
+    use plurx_core::cluster::coordination::ClusterJobAuthority as _;
+    use plurx_core::store::background_jobs::JobKind;
+    use RequirementStatus::{Met, Unavailable, Unmet};
+    let observe = std::time::Duration::from_secs(3);
+    let live_waiting = state.transcode.admissions().live_is_waiting();
+    let (hardware, hardware_cap) = state.transcode.hardware_slots().await;
+    let software = state.transcode.admissions().software_in_use();
+    let idle = state.transcode.pretranscode_worker_idle();
+    let (readers_status, readers_evidence) = match tokio::time::timeout(
+        observe,
+        state.store.source_io_holders(crate::state::clock_ms()),
+    )
+    .await
+    {
+        Ok(Ok(holders)) => {
+            let domains = domain_readers(&holders);
+            let full = domains.values().any(|readers| *readers >= 2);
+            let listed = if domains.is_empty() {
+                "No storage domain has an active source reader".to_owned()
+            } else {
+                domains
+                    .iter()
+                    .take(8)
+                    .map(|(domain, readers)| format!("{domain}: {readers} of 2"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            (
+                if full { Unmet } else { Met },
+                format!(
+                    "{listed}. Each domain admits two source readers; without a live viewer a \
+                     background read takes only a domain no other reader holds"
+                ),
+            )
+        }
+        Ok(Err(error)) => (
+            Unavailable,
+            format!("The source-reader ledger could not be read: {error}"),
+        ),
+        Err(_) => (
+            Unavailable,
+            "The source-reader ledger did not answer within the three-second observation budget."
+                .into(),
+        ),
+    };
+    let (cross_status, cross_evidence) = match tokio::time::timeout(
+        observe,
+        state
+            .membership
+            .may_execute_job(JobKind::FragmentIndexBuild),
+    )
+    .await
+    {
+        Ok(authority) => (
+            if authority && idle { Met } else { Unmet },
+            format!(
+                "Fragment-index execution authority: {authority}; idle: {idle}. Only an idle \
+                 node with that authority claims other nodes' fragment-index requests for its \
+                 own engine; a serving node claims its own"
+            ),
+        ),
+        Err(_) => (
+            Unavailable,
+            "Worker authority did not answer within the three-second observation budget.".into(),
+        ),
+    };
+    DeveloperEnableItem {
+        id: "indexing_while_serving",
+        title: "Indexing while serving",
+        enabled: None,
+        setting: None,
+        requirements: vec![
+            DeveloperRequirement {
+                id: "serving_live_waiters",
+                title: "No viewer queuing for an encoder",
+                status: if live_waiting { Unmet } else { Met },
+                evidence: if live_waiting {
+                    "A viewer is queuing for this node's encoder: analysis claims only requests \
+                     with a live playback waiter until it is admitted"
+                } else {
+                    "No viewer is queuing for this node's encoder, so analysis claims any \
+                     request its source capacity admits"
+                }
+                .into(),
+            },
+            DeveloperRequirement {
+                id: "serving_slots_in_use",
+                title: "Encoder slots in use",
+                status: Met,
+                evidence: format!(
+                    "{hardware} of {hardware_cap} hardware slots and {software} software threads \
+                     are in use. An encoder in use does not stop analysis: its read holds a \
+                     source-domain reservation, not an encoder slot"
+                ),
+            },
+            DeveloperRequirement {
+                id: "serving_domain_readers",
+                title: "Storage-domain reader slots",
+                status: readers_status,
+                evidence: readers_evidence,
+            },
+            DeveloperRequirement {
+                id: "serving_cross_node",
+                title: "Takes other nodes' indexing",
+                status: cross_status,
+                evidence: cross_evidence,
+            },
         ],
     }
 }
@@ -1837,13 +2400,190 @@ async fn dolby_vision_fel_reencode(
     }
 }
 
+/// What the client platforms do with an 8.1 mapping they are served, as
+/// measured. Advisory: nothing reads it.
+pub(crate) const DV_REFIT_CLIENTS: &str = "measured: Apple app on macOS applies the 8.1 mapping (AVPlayerLayer); Lenovo TB322FC (Android) ignores it; iOS, tvOS, Google TV, web unobservable";
+
+/// The F+ curve fit's four per-platform switches (`playback.dolby_vision_refit_*`,
+/// in `ClientPlatform` order: web, apple, android, linux). The Apple row
+/// carries the node's readings; every row carries the measured client
+/// behaviour. All advisory: a switch saves whatever the rows say.
+async fn dolby_vision_refit(
+    state: &AppState,
+    settings: &std::collections::BTreeMap<String, String>,
+) -> [DeveloperEnableItem; 4] {
+    let on =
+        |key: &str| plurx_core::store::stored_switch(settings.get(key).map(String::as_str), false);
+    let keys = plurx_core::store::keys::DV_REFIT_PLATFORMS;
+    #[cfg(target_os = "linux")]
+    let helper = match crate::vodencode::dv_runtime::ToolSet::capture().await {
+        Ok(Some(tools)) => Ok(Some(format!(
+            "refit mode {}, decoder {}",
+            crate::vodencode::dv_runtime::REFIT_MODE_VERSION,
+            tools.decoder_abi()
+        ))),
+        Ok(None) => Ok(None),
+        Err(error) => Err(error),
+    };
+    #[cfg(not(target_os = "linux"))]
+    let helper: Result<Option<String>, String> = Ok(None);
+    let progress = state
+        .store
+        .dv_refit_progress()
+        .await
+        .map_err(|error| error.to_string());
+    let root = crate::source_probe::refit_spool_root(&state.runtime_cache_dir);
+    let spool = tokio::task::spawn_blocking(move || crate::source_probe::refit_spool_list(&root))
+        .await
+        .unwrap_or_default();
+    let [web, apple, android, linux] = dolby_vision_refit_items(
+        [on(keys[0]), on(keys[1]), on(keys[2]), on(keys[3])],
+        helper,
+        progress,
+        &spool,
+    );
+    [web, apple, android, linux]
+}
+
+fn dolby_vision_refit_items(
+    enabled: [bool; 4],
+    helper: Result<Option<String>, String>,
+    progress: Result<plurx_core::store::dv_refit_jobs::RefitProgress, String>,
+    spool: &[(bool, u64)],
+) -> [DeveloperEnableItem; 4] {
+    let clients = |id: &'static str| {
+        DeveloperRequirement {
+        id,
+        title: "Clients that apply the 8.1 mapping",
+        status: RequirementStatus::Unobservable,
+        evidence: format!("{DV_REFIT_CLIENTS}. Serving the curves to a platform that ignores them changes nothing it shows."),
+    }
+    };
+    let timing = |id: &'static str| {
+        DeveloperRequirement {
+        id,
+        title: "Fitted copy qualification",
+        status: RequirementStatus::Unmet,
+        evidence: "Fitted copy requires a matching picture timeline. Some AAC layouts change that timing and are refused before publication. Audio-bearing copy acceptance remains pending. Fitted copies requiring retained in-band parameter sets are unsupported by the current muxer.".into(),
+    }
+    };
+    let helper = match helper {
+        Ok(Some(identity)) => DeveloperRequirement {
+            id: "refit_helper",
+            title: "Helper supports --refit-stats on this node",
+            status: RequirementStatus::Met,
+            evidence: format!("The DV processing bundle on this node was built from this build's sources ({identity})."),
+        },
+        Ok(None) => DeveloperRequirement {
+            id: "refit_helper",
+            title: "Helper supports --refit-stats on this node",
+            status: RequirementStatus::Unmet,
+            evidence: "No DV processing bundle on this node: it fits no titles. Other nodes may.".into(),
+        },
+        Err(error) => DeveloperRequirement {
+            id: "refit_helper",
+            title: "Helper supports --refit-stats on this node",
+            status: RequirementStatus::Unavailable,
+            evidence: format!("The DV processing bundle could not be read: {error}."),
+        },
+    };
+    let coverage = match progress {
+        Ok(p) => DeveloperRequirement {
+            id: "refit_coverage",
+            title: "Profile 7 FEL titles fitted",
+            status: if p.fitted + p.identity + p.refused >= p.fel_titles {
+                RequirementStatus::Met
+            } else {
+                RequirementStatus::Unmet
+            },
+            evidence: format!(
+                "{} of {} Profile 7 FEL titles fitted for their current source ({} keep identity curves, {} refused by the helper). Fits run in the background while a switch is on.",
+                p.fitted, p.fel_titles, p.identity, p.refused
+            ),
+        },
+        Err(error) => DeveloperRequirement {
+            id: "refit_coverage",
+            title: "Profile 7 FEL titles fitted",
+            status: RequirementStatus::Unavailable,
+            evidence: format!("The fit counts could not be read: {error}."),
+        },
+    };
+    let (complete, partial, bytes) = spool.iter().fold((0, 0, 0u64), |(c, p, b), (done, size)| {
+        if *done {
+            (c + 1, p, b + size)
+        } else {
+            (c, p + 1, b + size)
+        }
+    });
+    let spool = DeveloperRequirement {
+        id: "refit_spool",
+        title: "Statistics spool on this node",
+        status: RequirementStatus::Met,
+        evidence: format!(
+            "{complete} complete and {partial} partial runs, {:.1} MiB, under the runtime cache's {} directory. Delete it from this card; a later fit decodes its title again.",
+            bytes as f64 / (1024.0 * 1024.0),
+            crate::source_probe::REFIT_SPOOL_DIR
+        ),
+    };
+    let item =
+        |id: &'static str, title: &'static str, enabled: bool, requirements| DeveloperEnableItem {
+            id,
+            title,
+            enabled: Some(enabled),
+            setting: Some(id),
+            requirements,
+        };
+    [
+        item(
+            "dolby_vision_refit_web",
+            "Dolby Vision F+ curves: web",
+            enabled[0],
+            vec![
+                clients("refit_web_clients"),
+                timing("refit_web_copy_timing"),
+            ],
+        ),
+        item(
+            "dolby_vision_refit_apple",
+            "Dolby Vision F+ curves: Apple",
+            enabled[1],
+            // The web card reads these Apple requirement IDs directly.
+            vec![
+                helper,
+                coverage,
+                clients("refit_clients"),
+                timing("refit_copy_timing"),
+                spool,
+            ],
+        ),
+        item(
+            "dolby_vision_refit_android",
+            "Dolby Vision F+ curves: Android",
+            enabled[2],
+            vec![
+                clients("refit_android_clients"),
+                timing("refit_android_copy_timing"),
+            ],
+        ),
+        item(
+            "dolby_vision_refit_linux",
+            "Dolby Vision F+ curves: Linux",
+            enabled[3],
+            vec![
+                clients("refit_linux_clients"),
+                timing("refit_linux_copy_timing"),
+            ],
+        ),
+    ]
+}
+
 /// What this node knows about the per-title FEL qualification.
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug, Clone)]
 #[cfg(any(target_os = "linux", test))]
 struct FelQualityFacts {
-    /// radeonsi VA-API with its Main10 graph: the only encoder the route's
-    /// recipe and its verdicts are measured on.
+    /// A supported hardware completed-picture encoder. Every device and
+    /// actual recipe still requires its own title quality measurement.
     capable: bool,
     /// Titles holding a verdict for this node's renderer and the route's
     /// recipe, and how many of those admit the reconstruction.
@@ -1868,8 +2608,8 @@ fn fel_quality_requirement(facts: &FelQualityFacts) -> DeveloperRequirement {
     let (status, measured) = match (&facts.counts, facts.capable) {
         (_, false) => (
             RequirementStatus::Unmet,
-            "This node's encoder has no qualified reconstruction recipe (the route is measured \
-             on radeonsi VA-API only)."
+            "This node has no proved hardware reconstruction measurement path. \
+             Supported paths are Intel/AMD VA-API and NVIDIA NVENC; each measures its own recipe."
                 .to_owned(),
         ),
         (Err(reason), true) => (
@@ -3274,9 +4014,178 @@ async fn display_target_hdr10(
     }
 }
 
+/// Node-local observations only. No enable or recovery path reads this route.
+static SOURCE_RECOVERY_SCAN: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
+
+fn unavailable_source_recovery(node_name: &str, launches: serde_json::Value) -> serde_json::Value {
+    local_source_diagnostics(
+        serde_json::json!({"error": "unavailable", "poisoned": null}),
+        node_name,
+        launches,
+        crate::source_custody::access_roots_fact(),
+    )
+}
+
+/// Process-local readings every answer carries, including an unavailable one.
+fn local_source_diagnostics(
+    mut reading: serde_json::Value,
+    node_name: &str,
+    launches: serde_json::Value,
+    roots: serde_json::Value,
+) -> serde_json::Value {
+    reading["node_name"] = serde_json::json!(node_name);
+    reading["launches"] = launches;
+    for key in ["roots_configured", "roots_unconfigured_reason"] {
+        reading[key] = roots[key].clone();
+    }
+    reading
+}
+
+pub async fn source_recovery(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let node_name = state
+        .node_hostname
+        .as_deref()
+        .unwrap_or(&state.node_id)
+        .to_owned();
+    let launches = serde_json::json!(plurx_core::process::source_lifetime::launch_snapshot());
+    let permit = match SOURCE_RECOVERY_SCAN.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return Json(unavailable_source_recovery(&node_name, launches));
+        }
+    };
+    let store = std::sync::Arc::clone(&state.store);
+    let reading = match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        crate::source_custody::recovery_status(&store)
+    })
+    .await
+    {
+        Ok(reading) => reading,
+        Err(_) => return Json(unavailable_source_recovery(&node_name, launches)),
+    };
+    Json(local_source_diagnostics(
+        reading,
+        &node_name,
+        launches,
+        crate::source_custody::access_roots_fact(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refit_platform_requirements_are_unique_and_preserve_web_lookup_ids() {
+        let items = dolby_vision_refit_items(
+            [false; 4],
+            Ok(None),
+            Ok(plurx_core::store::dv_refit_jobs::RefitProgress::default()),
+            &[],
+        );
+        let mut ids = std::collections::BTreeSet::new();
+        for item in &items {
+            for requirement in &item.requirements {
+                assert!(
+                    ids.insert(requirement.id),
+                    "{} repeats requirement {}",
+                    item.id,
+                    requirement.id
+                );
+            }
+        }
+        assert_eq!(ids.len(), 11);
+        let apple = items
+            .iter()
+            .find(|item| item.id == "dolby_vision_refit_apple")
+            .expect("web readiness source");
+        assert_eq!(
+            apple
+                .requirements
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [
+                "refit_helper",
+                "refit_coverage",
+                "refit_clients",
+                "refit_copy_timing",
+                "refit_spool",
+            ]
+        );
+    }
+
+    #[test]
+    fn unavailable_source_recovery_preserves_local_diagnostics_without_a_poison_count() {
+        let launches = serde_json::json!({"total": 3});
+        let response = unavailable_source_recovery("media1", launches.clone());
+        assert_eq!(response["error"], "unavailable");
+        assert!(response["poisoned"].is_null());
+        assert_eq!(response["node_name"], "media1");
+        assert_eq!(response["launches"], launches);
+        assert!(response["roots_configured"].is_boolean());
+    }
+
+    #[test]
+    fn source_recovery_names_unconfigured_roots_and_their_reason() {
+        let roots = serde_json::json!({
+            "roots_configured": false,
+            "roots_unconfigured_reason": "reader roots cannot be empty",
+        });
+        let response = local_source_diagnostics(
+            serde_json::json!({"supported": true}),
+            "media1",
+            serde_json::json!({"unverified": 2}),
+            roots,
+        );
+        assert_eq!(response["supported"], true);
+        assert_eq!(response["roots_configured"], false);
+        assert_eq!(
+            response["roots_unconfigured_reason"],
+            "reader roots cannot be empty"
+        );
+    }
+
+    /// Review 2 of C1 (S9): the row counts readers the way the claim does --
+    /// a whole-source (`source_io`) reader contends with every domain, and a
+    /// reader holding several rows is one reader.
+    #[test]
+    fn domain_readers_follow_the_claims_overlap_and_distinct_reader_rules() {
+        use plurx_core::store::background_jobs::SourceIoHolder;
+        let holder = |key: &str, work: &str, active: bool| SourceIoHolder {
+            active_occupancy: active,
+            resource_key: key.to_owned(),
+            work_id: work.to_owned(),
+            kind: "analysis_source".to_owned(),
+            priority: "maintenance".to_owned(),
+            started_at_ms: 0,
+            lease_expires_at_ms: 0,
+            phase: None,
+            last_phase_at_ms: None,
+            origin_node_id: None,
+            origin_job_kind: None,
+            origin_job_state: None,
+        };
+        let readers = domain_readers(&[
+            holder("source_io:nas-a", "one", true),
+            holder("source_io:nas-a", "one", true),
+            holder("source_io", "everything", true),
+            holder("source_io:nas-b", "two", true),
+            holder("source_io:nas-b", "paused", false),
+        ]);
+        assert_eq!(readers.get("source_io:nas-a"), Some(&2), "{readers:?}");
+        assert_eq!(readers.get("source_io:nas-b"), Some(&2), "{readers:?}");
+        assert_eq!(readers.get("source_io"), Some(&3), "{readers:?}");
+        assert!(!source_domains_overlap(
+            "source_io:nas-a",
+            "source_io:nas-b"
+        ));
+    }
 
     #[test]
     fn sharing_endpoint_readiness_distinguishes_missing_configured_and_unreadable() {
@@ -3321,7 +4230,9 @@ mod tests {
         let incapable = row(false, Ok((3, 1)));
         assert_eq!(incapable.status, RequirementStatus::Unmet);
         assert!(
-            incapable.evidence.contains("radeonsi VA-API only"),
+            incapable
+                .evidence
+                .contains("Intel/AMD VA-API and NVIDIA NVENC"),
             "{}",
             incapable.evidence
         );
@@ -3631,5 +4542,137 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// D3b: the Create plan row reports the planning view's share, an
+    /// owner's authority plans by reason and the refusal closes, and has no
+    /// switch.
+    #[test]
+    fn create_plan_rows_name_the_share_the_owner_plans_and_the_refusals() {
+        let store: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let mut observation = plurx_core::store::AppliedView::authority(store).observation();
+        let item = super::create_plan(&observation, 0, 0, (0, 0));
+        assert_eq!(item.id, "create_plan");
+        assert!(
+            item.enabled.is_none() && item.setting.is_none(),
+            "no switch"
+        );
+        let row = |item: &super::DeveloperEnableItem, id: &str| {
+            item.requirements
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| (row.status, row.evidence.clone()))
+                .expect("row")
+        };
+        assert_eq!(
+            row(&item, "create_plan_source"),
+            (
+                super::RequirementStatus::Unknown,
+                "No create has planned on this node since start.".to_owned()
+            )
+        );
+        observation.reads.extend([
+            ("planning", "view", "ok", 3),
+            ("planning", "authority", "floor", 1),
+            ("planning", "authority", "binding_mismatch", 2),
+            ("planning", "authority", "unbound", 4),
+            ("settings", "authority", "binding_mismatch", 9),
+        ]);
+        observation.last_planning_fallback = Some(plurx_core::store::ViewFallback::Floor);
+        // A SQLite node's plans all read the store.
+        let (status, evidence) = row(
+            &super::create_plan(&observation, 5, 1, (7, 2)),
+            "create_plan_source",
+        );
+        assert_eq!(status, super::RequirementStatus::Met);
+        assert!(evidence.contains("10 plans read the store"), "{evidence}");
+        observation.mode = "replicated";
+        let item = super::create_plan(&observation, 5, 1, (7, 2));
+        let (status, evidence) = row(&item, "create_plan_source");
+        assert_eq!(status, super::RequirementStatus::Met);
+        assert!(
+            evidence.contains("3 of 10 plans (30%) read this node's replica and 7 read quorum; last quorum reason floor"),
+            "{evidence}"
+        );
+        let (_, evidence) = row(&item, "create_plan_owner");
+        assert!(evidence.contains(": 2 plans asked quorum"), "{evidence}");
+        assert!(
+            evidence.contains("; 4 plans for a start with no binding"),
+            "{evidence}"
+        );
+        assert!(row(&item, "create_plan_refusals")
+            .1
+            .starts_with("Since start: 5."));
+    }
+
+    /// E1a: the Applied view row reports what the observation says, with a
+    /// failed restore named as closed until a restore completes or a restart,
+    /// and no reads since start named as such.
+    #[test]
+    fn applied_view_rows_name_proof_image_and_readers() {
+        let store: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let mut observation = plurx_core::store::AppliedView::authority(store).observation();
+        let item = super::applied_view(&observation);
+        assert_eq!(item.id, "applied_view");
+        assert!(
+            item.enabled.is_none() && item.setting.is_none(),
+            "no switch"
+        );
+        let status = |item: &super::DeveloperEnableItem, id: &str| {
+            item.requirements
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| (row.status, row.evidence.clone()))
+                .expect("row")
+        };
+        assert_eq!(
+            status(&item, "applied_view_proof").0,
+            super::RequirementStatus::Met
+        );
+        assert_eq!(
+            status(&item, "applied_view_image").0,
+            super::RequirementStatus::Unobservable
+        );
+        let (reads, evidence) = status(&item, "applied_view_reads");
+        assert_eq!(reads, super::RequirementStatus::Unknown);
+        assert!(evidence.starts_with("No view reads since start"));
+
+        // E1c: the row names the route view's reads beside the settings'.
+        observation.reads.extend([
+            ("route", "view", "ok", 3),
+            ("route", "authority", "no_proof", 1),
+            ("settings", "authority", "floor", 2),
+        ]);
+        let item = super::applied_view(&observation);
+        let (reads, evidence) = status(&item, "applied_view_reads");
+        assert_eq!(reads, super::RequirementStatus::Met);
+        assert!(
+            evidence.contains("settings: 0 view, 2 quorum; routes: 3 view, 1 quorum"),
+            "{evidence}"
+        );
+        assert!(!evidence.contains("legacy layout"), "{evidence}");
+        observation.route_view_open = Some(false);
+        let (_, evidence) = status(&super::applied_view(&observation), "applied_view_reads");
+        assert!(
+            evidence.contains("still in the legacy layout"),
+            "{evidence}"
+        );
+        observation.route_view_open = None;
+
+        observation.mode = "replicated";
+        observation.proof_present = false;
+        observation.generation = Some(5);
+        observation.applied_index = Some(9);
+        observation.failed_replacements = 1;
+        let item = super::applied_view(&observation);
+        assert_eq!(
+            status(&item, "applied_view_proof").0,
+            super::RequirementStatus::Unmet
+        );
+        let (image, evidence) = status(&item, "applied_view_image");
+        assert_eq!(image, super::RequirementStatus::Unmet);
+        assert!(evidence.contains("or this node restarts"), "{evidence}");
     }
 }

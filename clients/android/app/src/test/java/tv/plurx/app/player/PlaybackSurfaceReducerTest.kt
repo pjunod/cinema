@@ -345,6 +345,11 @@ class PlaybackSurfaceReducerTest {
             presenting = event.getValue("presenting").jsonPrimitive.boolean,
             attached = event["attached"]?.let { id(it) },
         )
+        event.containsKey("observation_unavailable") -> SurfaceEvent.ObservationUnavailable(
+            owner = event.getValue("observation_unavailable").jsonPrimitive.content,
+            attached = id(event.getValue("attached")),
+            intent = event["intent"]?.let { id(it) },
+        )
         event.containsKey("raise") -> SurfaceEvent.Raise(
             source = event.getValue("raise").jsonPrimitive.content,
             context = contextOf(event.getValue("context").jsonPrimitive.content),
@@ -355,6 +360,7 @@ class PlaybackSurfaceReducerTest {
             positionMs = longOrNull(event["position_ms"]),
             title = stringOrNull(event["title"]),
             detail = stringOrNull(event["detail"]),
+            observationOwner = stringOrNull(event["observation_owner"]),
         )
         event.containsKey("intent_settled") ->
             SurfaceEvent.IntentSettled(id(event.getValue("intent_settled")))

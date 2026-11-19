@@ -74,11 +74,12 @@ def test_window_metadata_graph():
     assert a == b == decode(production / 'out.nut', 'rgb48le')
     results.append({'case': 'retained-trims-unapplied-master', 'rgb_sha256': hashlib.sha256(a).hexdigest(), 'rgb_bytes': len(a), 'same_plain_master': True})
     encoded = valid / 'encoded.mp4'
-    cmd = ['ffmpeg', '-nostdin', '-v', 'error', '-n', '-threads', '1', '-copyts', '-i', str(valid / 'out.nut'), '-filter_threads', '1', '-vf', 'zscale=matrixin=gbr:transferin=smpte2084:primariesin=2020:rangein=full:matrix=2020_ncl:transfer=smpte2084:primaries=2020:range=limited:chromal=center:filter=point,format=yuv420p10le', '-c:v', 'libx265', '-threads', '1', '-profile:v', 'main10', '-x265-params', 'pools=none:frame-threads=1:qp=0:bframes=2:repeat-headers=1:chromaloc=1:colorprim=9:transfer=16:colormatrix=9:range=limited', '-fps_mode', 'passthrough', '-enc_time_base', '1/1000', '-r', '24', '-an', str(encoded)]
+    envelope = ['20000', '30000', '40000', '123', '6']
+    cmd = ['ffmpeg', '-nostdin', '-v', 'error', '-n', '-threads', '1', '-copyts', '-i', str(valid / 'out.nut'), '-filter_threads', '1', '-vf', 'zscale=matrixin=gbr:transferin=smpte2084:primariesin=2020:rangein=full:matrix=2020_ncl:transfer=smpte2084:primaries=2020:range=limited:chromal=center:filter=point,format=yuv420p10le', '-c:v', 'libx265', '-threads', '1', '-profile:v', 'main10', '-x265-params', 'pools=none:frame-threads=1:bitrate=20000:vbv-maxrate=30000:vbv-bufsize=40000:high-tier=1:level-idc=4.1:hrd=1:bframes=2:b-adapt=0:repeat-headers=1:chromaloc=1:colorprim=9:transfer=16:colormatrix=9:range=limited', '-fps_mode', 'passthrough', '-enc_time_base', '1/1000', '-an', str(encoded)]
     p = subprocess.run(cmd, capture_output=True)
     (valid / 'encoder.stderr').write_bytes(p.stderr)
     assert p.returncode == 0, p.stderr.decode()
-    result = subprocess.run([str(R / 'bin/author_p81'), str(encoded), str(valid / 'timing.tsv'), str(valid / 'rpus'), str(valid / 'authored.mkv')], capture_output=True, env=env)
+    result = subprocess.run([str(R / 'bin/author_p81'), str(encoded), str(valid / 'timing.tsv'), str(valid / 'rpus'), str(valid / 'authored.mkv'), *envelope], capture_output=True, env=env)
     (valid / 'author.stdout').write_bytes(result.stdout)
     (valid / 'author.stderr').write_bytes(result.stderr)
     assert result.returncode == 0, result.stderr.decode()

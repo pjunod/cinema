@@ -40,12 +40,12 @@ function fixture({holdScheduled=false,sharedAudio=false,startLevel=undefined}={}
   [prefix+`video/${primary.rendition_id}/segment/0.m4s`,firstMedia],[prefix+`video/${target.rendition_id}/segment/0.m4s`,secondMedia]]);
  let frame=null,ledger=null,revision=0,releaseScheduled=null,refusePrepares=0;
  const requests=[],events={},surface=new BufferSurface();
- const video={videoWidth:1280,videoHeight:720,requestVideoFrameCallback(callback){frame=callback;return 1;},cancelVideoFrameCallback(){frame=null;}};
+ const video={src:'blob:test',addEventListener(){},removeEventListener(){},videoWidth:1280,videoHeight:720,requestVideoFrameCallback(callback){frame=callback;return 1;},cancelVideoFrameCallback(){frame=null;}};
  const player={abr:{},qualityCandidates:[{id:primary.candidate_id,target_height:720},{id:target.candidate_id,target_height:1080}]};
  const Hls={Events:{MANIFEST_PARSED:'manifest',BUFFER_CREATED:'buffers',MEDIA_DETACHED:'detached'}};
  const context=vm.createContext({ArrayBuffer,Uint8Array,DataView,crypto:webcrypto,URL,location:{href:'http://localhost/'},
   Hls,performance:{now:()=>0},CONTROL_CLIENT_ID:uuid(3),newRequestId:()=>uuid(4),setTimeout,clearTimeout,AbortController,TextDecoder});
- for(const path of ['continuous-media.js','continuous-quality.js'])vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/'+path,'utf8'),context);
+ for(const path of ['video-frames.js','continuous-media.js','continuous-quality.js'])vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/'+path,'utf8'),context);
  // The shipped settlement owner the adapter calls on presentation.
  const directed=fs.readFileSync('crates/plurxd/src/web/player/directed-change.js','utf8');
  for(const name of ['settleContinuousDirectedChange','settleDirectedChange']){

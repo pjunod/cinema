@@ -1270,6 +1270,8 @@ async fn accepted_seek_intent_controls_demand_and_retention_in_both_directions()
         let mut sessions = serve.shared.sessions.lock().await;
         let session = sessions.get_mut(VIEWER).expect("parent");
         session.children.push(ParentMediaReader {
+            versioned_family: false,
+            companion_bootstrap: false,
             controlled: false,
             candidate_id: None,
             reader_id: "private-audio".into(),
@@ -1277,6 +1279,8 @@ async fn accepted_seek_intent_controls_demand_and_retention_in_both_directions()
             _reservation: None,
         });
         session.children.push(ParentMediaReader {
+            versioned_family: false,
+            companion_bootstrap: false,
             controlled: false,
             candidate_id: None,
             reader_id: "private-root".into(),
@@ -1810,6 +1814,12 @@ fn controlled_future_loading_retires_work_without_disposing_incumbent_bytes() {
         .transactions
         .push(transaction(2, "b".repeat(64), QualityState::Ready, None));
     ledger.latest_intent_revision = 2;
+    ledger.transactions[1].state = QualityState::Preparing;
+    assert!(
+        VodServe::companion_source_required(&ledger, &"b".repeat(64)),
+        "accepted Prepare upgrades source purpose before init is ready"
+    );
+    ledger.transactions[1].state = QualityState::Ready;
     let active = |ledger: &QualityLedger| {
         VodServe::controlled_video_demand(ledger)
             .expect("active")
@@ -1824,6 +1834,10 @@ fn controlled_future_loading_retires_work_without_disposing_incumbent_bytes() {
     assert!(!ledger.transactions[0].cancel_requested);
     ledger.transactions[1].cancel_requested = true;
     assert_eq!(active(&ledger), vec!["a".repeat(64)]);
+    assert!(
+        !VodServe::companion_source_required(&ledger, &"b".repeat(64)),
+        "superseded optional target gives source service back"
+    );
     ledger.transactions[1].cancel_requested = false;
     ledger.transactions[1].state = QualityState::Presented;
     ledger.transactions[1].first_presented_tick = Some(48);
@@ -1834,6 +1848,361 @@ fn controlled_future_loading_retires_work_without_disposing_incumbent_bytes() {
         vec!["b".repeat(64)],
         "ordinary eviction does not retire wanted loading"
     );
+}
+
+#[tokio::test]
+async fn discovered_companion_upgrades_on_accepted_prepare_then_returns_to_optional() {
+    use plurx_core::playback::continuous_quality::{
+        QualityAttachment, QualityLedger, QualityState, QualityTransaction,
+    };
+    let base = crate::test_tempdir().expect("quality settlement fixture");
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let serve = local_serve(base.path().to_path_buf(), store.clone());
+    let generation = uuid::Uuid::new_v4().to_string();
+    let session_id = uuid::Uuid::new_v4().to_string();
+    activate_control_route(&store, &session_id, &generation).await;
+    let mut incumbent = synthetic_rendition(base.path()).await;
+    Arc::get_mut(&mut incumbent).expect("private incumbent").key = "a".repeat(64);
+    let mut companion = synthetic_rendition(base.path()).await;
+    Arc::get_mut(&mut companion).expect("private companion").key = "b".repeat(64);
+    insert_control_session(&serve, &session_id, Arc::clone(&incumbent), Instant::now()).await;
+    companion.attach_reader("companion", 0).await;
+    {
+        let mut readers = companion.readers.lock().await;
+        let reader = readers.get_mut("companion").expect("attached companion");
+        reader.companion_bootstrap = true;
+        reader.admission_priority = crate::admission::Priority::Speculative;
+    }
+    let owner = {
+        let mut sessions = serve.shared.sessions.lock().await;
+        let parent = sessions.get_mut(&session_id).expect("parent");
+        // Family discovery clears this transient flag before revision 2
+        // can be accepted. The Reader role must survive that transition.
+        parent.children.push(ParentMediaReader {
+            versioned_family: true,
+            companion_bootstrap: false,
+            controlled: true,
+            candidate_id: None,
+            reader_id: "companion".into(),
+            rendition: Arc::clone(&companion),
+            _reservation: None,
+        });
+        parent.response_owner()
+    };
+    let id = || uuid::Uuid::new_v4().to_string();
+    let transaction =
+        |revision, target: String, state, presented: Option<u64>| QualityTransaction {
+            transaction_id: id(),
+            intent_revision: revision,
+            target_rendition_id: target,
+            state,
+            intent_superseded: false,
+            cancel_requested: false,
+            preparation: None,
+            ready: vec![],
+            reserved: vec![],
+            appended: vec![],
+            ever_appended: presented.is_some(),
+            disposed: vec![],
+            first_presented_tick: presented,
+            first_presented_at_ms: presented.map(|_| 1),
+        };
+    let attachment = QualityAttachment {
+        client_instance_id: id(),
+        lifetime_id: session_id.clone(),
+        attachment_id: id(),
+        family_id: "c".repeat(64),
+    };
+    let mut ledger = QualityLedger::new(generation, 1, attachment).expect("ledger");
+    ledger.transactions.push(transaction(
+        1,
+        incumbent.key.clone(),
+        QualityState::Presented,
+        Some(0),
+    ));
+    ledger.transactions.push(transaction(
+        2,
+        companion.key.clone(),
+        QualityState::Preparing,
+        None,
+    ));
+    ledger.latest_intent_revision = 2;
+    assert!(store
+        .write_quality_ledger(&ledger, "node-a", 0, now_ms())
+        .await
+        .expect("prepare write"));
+    serve
+        .settle_controlled_video(&session_id, &owner, &ledger)
+        .await
+        .expect("accepted prepare settlement");
+    assert_eq!(
+        companion.readers.lock().await["companion"].admission_priority,
+        crate::admission::Priority::Live,
+        "accepted Preparing needs source before init"
+    );
+    ledger.transactions[1].intent_superseded = true;
+    ledger.transactions[1].cancel_requested = true;
+    assert!(store
+        .write_quality_ledger(&ledger, "node-a", 1, now_ms())
+        .await
+        .expect("supersession write"));
+    serve
+        .settle_controlled_video(&session_id, &owner, &ledger)
+        .await
+        .expect("supersession settlement");
+    assert_eq!(
+        companion.readers.lock().await["companion"].admission_priority,
+        crate::admission::Priority::Speculative,
+        "superseded target returns to finite service"
+    );
+}
+
+#[tokio::test]
+async fn accepted_parent_candidate_selection_requires_only_its_companion_before_discovery() {
+    use crate::playback_control::{
+        ClientPlatform, LocalControlRequest, PreparedSuccessorObservation, QualitySelection,
+    };
+    use plurx_core::playback::continuous_quality::{
+        QualityAttachment, QualityLedger, QualityState, QualityTransaction,
+    };
+    let base = crate::test_tempdir().expect("pending companion fixture");
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let serve = local_serve(base.path().to_path_buf(), store.clone());
+    let generation = uuid::Uuid::new_v4().to_string();
+    let first = uuid::Uuid::new_v4().to_string();
+    let second = uuid::Uuid::new_v4().to_string();
+    activate_control_route(&store, &first, &generation).await;
+    let other_generation = uuid::Uuid::new_v4().to_string();
+    activate_control_route(&store, &second, &other_generation).await;
+    let mut root = synthetic_rendition(&base.path().join("first")).await;
+    Arc::get_mut(&mut root).expect("private root").key = "a".repeat(64);
+    let mut other_root = synthetic_rendition(&base.path().join("second")).await;
+    Arc::get_mut(&mut other_root)
+        .expect("private other root")
+        .key = "c".repeat(64);
+    let mut companion = synthetic_rendition(&base.path().join("pending-companion")).await;
+    Arc::get_mut(&mut companion).expect("private companion").key = "b".repeat(64);
+    insert_control_session(&serve, &first, root, Instant::now()).await;
+    insert_control_session(&serve, &second, other_root, Instant::now()).await;
+    let candidate = plurx_core::playback::candidate::CandidateId([7; 16]);
+    for (parent, reader_id) in [(&first, "first-companion"), (&second, "other-companion")] {
+        companion.attach_reader(reader_id, 0).await;
+        let mut readers = companion.readers.lock().await;
+        let reader = readers.get_mut(reader_id).expect("companion reader");
+        reader.companion_bootstrap = true;
+        reader.admission_priority = crate::admission::Priority::Speculative;
+        drop(readers);
+        serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get_mut(parent)
+            .expect("parent")
+            .children
+            .push(ParentMediaReader {
+                versioned_family: true,
+                companion_bootstrap: true,
+                controlled: true,
+                candidate_id: Some(candidate),
+                reader_id: reader_id.into(),
+                rendition: Arc::clone(&companion),
+                _reservation: None,
+            });
+    }
+    let mut pending =
+        crate::playback_control::PlaybackDemandSnapshot::test_default(ClientPlatform::Apple);
+    pending.selection.quality = QualitySelection::Auto {
+        height: None,
+        candidate_id: Some(candidate),
+    };
+    let control = |sequence, snapshot| LocalControlRequest {
+        session_id: first.as_str(),
+        generation: generation.as_str(),
+        owner_node_id: "node-a",
+        owner_epoch: 1,
+        client_instance_id: "00000000-0000-4000-8000-000000000005",
+        sequence,
+        snapshot,
+        prepared_successor: PreparedSuccessorObservation::NotRequested,
+    };
+    let accepted = serve
+        .control(control(1, pending.clone()))
+        .await
+        .expect("parent exists")
+        .expect("accepted selection");
+    assert_eq!(accepted.accepted_sequence, 1);
+    {
+        let readers = companion.readers.lock().await;
+        assert_eq!(
+            readers["first-companion"].admission_priority,
+            crate::admission::Priority::Live,
+            "the accepted candidate needs init before family revision 2"
+        );
+        assert_eq!(
+            readers["other-companion"].admission_priority,
+            crate::admission::Priority::Speculative,
+            "a second viewer cannot borrow the selection"
+        );
+    }
+    let id = || uuid::Uuid::new_v4().to_string();
+    let transaction =
+        |revision, target: String, state, presented: Option<u64>| QualityTransaction {
+            transaction_id: id(),
+            intent_revision: revision,
+            target_rendition_id: target,
+            state,
+            intent_superseded: false,
+            cancel_requested: false,
+            preparation: None,
+            ready: vec![],
+            reserved: vec![],
+            appended: vec![],
+            ever_appended: presented.is_some(),
+            disposed: vec![],
+            first_presented_tick: presented,
+            first_presented_at_ms: presented.map(|_| 1),
+        };
+    let attachment = QualityAttachment {
+        client_instance_id: id(),
+        lifetime_id: first.clone(),
+        attachment_id: id(),
+        family_id: "e".repeat(64),
+    };
+    let mut ledger = QualityLedger::new(generation.clone(), 1, attachment).expect("ledger");
+    ledger.transactions.push(transaction(
+        1,
+        "a".repeat(64),
+        QualityState::Presented,
+        Some(0),
+    ));
+    ledger.latest_intent_revision = 1;
+    assert!(store
+        .write_quality_ledger(&ledger, "node-a", 0, now_ms())
+        .await
+        .expect("incumbent ledger"));
+    let owner = serve.shared.sessions.lock().await[&first].response_owner();
+    serve
+        .settle_controlled_video(&first, &owner, &ledger)
+        .await
+        .expect("old incumbent settlement");
+    assert_eq!(
+        companion.readers.lock().await["first-companion"].admission_priority,
+        crate::admission::Priority::Live,
+        "old ledger cannot revoke accepted pending selection"
+    );
+    // A later family response clears the transient bootstrap marker.
+    serve
+        .shared
+        .sessions
+        .lock()
+        .await
+        .get_mut(&first)
+        .expect("parent")
+        .children[0]
+        .companion_bootstrap = false;
+    assert_eq!(
+        companion.readers.lock().await["first-companion"].admission_priority,
+        crate::admission::Priority::Live
+    );
+    ledger.transactions.push(transaction(
+        2,
+        companion.key.clone(),
+        QualityState::Preparing,
+        None,
+    ));
+    ledger.latest_intent_revision = 2;
+    assert!(store
+        .write_quality_ledger(&ledger, "node-a", 1, now_ms())
+        .await
+        .expect("accepted prepare"));
+    serve
+        .settle_controlled_video(&first, &owner, &ledger)
+        .await
+        .expect("prepare settlement");
+    let replay = serve
+        .control(control(
+            1,
+            crate::playback_control::PlaybackDemandSnapshot::test_default(ClientPlatform::Apple),
+        ))
+        .await
+        .expect("parent exists")
+        .expect("same sequence replays");
+    assert_eq!(
+        replay.disposition,
+        crate::playback_control::ControlDisposition::Replay
+    );
+    assert_eq!(replay.accepted_sequence, 1);
+    {
+        let readers = companion.readers.lock().await;
+        assert!(readers["first-companion"].control_required);
+        assert!(readers["first-companion"].quality_required);
+        assert_eq!(
+            readers["first-companion"].admission_priority,
+            crate::admission::Priority::Live,
+            "replay cannot undo the accepted selection"
+        );
+        assert!(!readers["other-companion"].control_required);
+        assert!(!readers["other-companion"].quality_required);
+        assert_eq!(
+            readers["other-companion"].admission_priority,
+            crate::admission::Priority::Speculative,
+            "replay cannot borrow another viewer's selection"
+        );
+    }
+    let incumbent =
+        crate::playback_control::PlaybackDemandSnapshot::test_default(ClientPlatform::Apple);
+    // A new accepted sequence must also honor the control fence's 250 ms
+    // rate limit; the replay above does not advance that interval.
+    tokio::time::sleep(Duration::from_millis(260)).await;
+    let restored = serve
+        .control(control(2, incumbent))
+        .await
+        .expect("parent exists")
+        .expect("accepted incumbent");
+    assert_eq!(restored.accepted_sequence, 2);
+    {
+        let readers = companion.readers.lock().await;
+        assert!(!readers["first-companion"].control_required);
+        assert!(readers["first-companion"].quality_required);
+        assert_eq!(
+            readers["first-companion"].admission_priority,
+            crate::admission::Priority::Live,
+            "incumbent control cannot revoke accepted Preparing"
+        );
+        assert!(!readers["other-companion"].control_required);
+        assert!(!readers["other-companion"].quality_required);
+        assert_eq!(
+            readers["other-companion"].admission_priority,
+            crate::admission::Priority::Speculative
+        );
+    }
+    ledger.transactions[1].intent_superseded = true;
+    ledger.transactions[1].cancel_requested = true;
+    assert!(store
+        .write_quality_ledger(&ledger, "node-a", 2, now_ms())
+        .await
+        .expect("accepted cancellation"));
+    serve
+        .settle_controlled_video(&first, &owner, &ledger)
+        .await
+        .expect("cancellation settlement");
+    {
+        let readers = companion.readers.lock().await;
+        assert!(!readers["first-companion"].control_required);
+        assert!(!readers["first-companion"].quality_required);
+        assert_eq!(
+            readers["first-companion"].admission_priority,
+            crate::admission::Priority::Speculative,
+            "supersession returns optional source service"
+        );
+        assert!(!readers["other-companion"].control_required);
+        assert!(!readers["other-companion"].quality_required);
+        assert_eq!(
+            readers["other-companion"].admission_priority,
+            crate::admission::Priority::Speculative
+        );
+    }
 }
 
 #[tokio::test]
@@ -1930,6 +2299,8 @@ async fn admitted_controlled_target_moves_preparation_frontier_without_duplicate
         .expect("parent")
         .children
         .push(ParentMediaReader {
+            versioned_family: false,
+            companion_bootstrap: false,
             controlled: true,
             candidate_id: Some(plurx_core::playback::candidate::CandidateId([1; 16])),
             reader_id: "target".into(),
@@ -2614,6 +2985,8 @@ async fn rendition_shipped_shape() {
             "shipped-shape",
             None,
             Recipe {
+                dv_refit_gain: None,
+                source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
                 file,
@@ -2623,6 +2996,7 @@ async fn rendition_shipped_shape() {
                 video: CopyVideoOptions::new(false, false),
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
+                copy_index_init_contract: None,
                 encoding: Some(Arc::clone(&encoding)),
             },
             plan,
@@ -3582,6 +3956,8 @@ async fn cached_live_recipe_uses_scoped_prepared_reader_admission() {
         let mut sessions = serve.shared.sessions.lock().await;
         let parent = sessions.get_mut("target").expect("prepared family");
         parent.children.push(ParentMediaReader {
+            versioned_family: false,
+            companion_bootstrap: false,
             controlled: true,
             candidate_id: None,
             reader_id: "owned-child".into(),
@@ -3642,6 +4018,8 @@ async fn committed_predecessor_drains_exact_readers_without_cold_ahead_fill() {
         .expect("old")
         .children
         .push(ParentMediaReader {
+            versioned_family: false,
+            companion_bootstrap: false,
             controlled: false,
             candidate_id: None,
             reader_id: "old-child".into(),
@@ -4125,6 +4503,279 @@ async fn an_admitted_prepared_handoff_survives_retry_expiry_until_abort() {
         "abort releases the exact transfer"
     );
     drop(permit);
+}
+
+const TRIAL_INCARNATION: &str = "6c2f9e1a-3b7d-4f5e-9a1c-2d8e4b6f0a17";
+
+/// Give `old-session` (the predecessor's only reader) a fresh accepted
+/// playhead at film zero, the trial claim's runway anchor.
+#[cfg(unix)]
+async fn viewer_at_film_start(fixture: &HandoffFixture) {
+    let mut sessions = fixture.serve.shared.sessions.lock().await;
+    let session = sessions.get_mut("old-session").expect("incumbent session");
+    let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
+        crate::playback_control::ClientPlatform::Apple,
+    );
+    demand.position_ms = 0;
+    demand.buffered_from_ms = Some(0);
+    demand.buffered_through_ms = 0;
+    session.last_control_snapshot = Some(demand);
+    session.control_observed_at = Some(Instant::now());
+}
+
+#[cfg(unix)]
+async fn claim_for_trial(
+    fixture: &HandoffFixture,
+    reserve_ms: i64,
+) -> Option<IncumbentPermitClaim> {
+    let budget = fixture.successor_encoding.resources.cpu_threads.max(1);
+    fixture
+        .serve
+        .claim_incumbent_permit(
+            "old-session",
+            TRIAL_INCARNATION,
+            fixture.successor_encoding.resources,
+            1,
+            budget,
+            reserve_ms,
+        )
+        .await
+}
+
+#[cfg(unix)]
+async fn predecessor_yields(fixture: &HandoffFixture) -> bool {
+    driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
+    for _ in 0..40 {
+        if matches!(
+            fixture.predecessor.slot.belief().await,
+            Producer::Absent { .. }
+        ) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+
+/// The Air (Profile 5) defect: the viewer's own encoded incumbent held the
+/// capacity its processed upgrade needed, and the trial was refused at
+/// once. With a claim, the incumbent yields through the predecessor
+/// handoff and the capacity is reserved for the trial alone — without the
+/// trial ever registering a pool waiter other viewers would yield to.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_processed_trial_claims_its_own_viewers_encoder_permit() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("base");
+    let fixture = prepared_handoff_fixture(base.path(), false).await;
+    viewer_at_film_start(&fixture).await;
+    let admissions = fixture.successor_encoding.admissions.clone();
+    let budget = fixture.successor_encoding.resources.cpu_threads.max(1);
+    assert!(
+        admissions
+            .try_admit_bundle(
+                1,
+                budget,
+                &fixture.successor_encoding.resources,
+                crate::admission::Priority::Live
+            )
+            .is_none(),
+        "the incumbent holds the node's only encoder permit"
+    );
+    let claim = claim_for_trial(&fixture, 0)
+        .await
+        .expect("its own viewer's incumbent");
+    assert!(fixture.predecessor.handoff_requested());
+    assert!(
+        predecessor_yields(&fixture).await,
+        "the incumbent gives its permit back"
+    );
+    let token = claim
+        .claim()
+        .token()
+        .expect("capacity reserved for the trial");
+    assert_eq!(
+        admissions.snapshot().live_waiting,
+        0,
+        "the claim registers no pool waiter"
+    );
+    assert!(
+        admissions
+            .try_admit_bundle(
+                1,
+                budget,
+                &fixture.successor_encoding.resources,
+                crate::admission::Priority::Live
+            )
+            .is_none(),
+        "another live start cannot take the trial's reservation"
+    );
+    let permit = admissions
+        .try_admit_bundle_claiming(
+            1,
+            budget,
+            &fixture.successor_encoding.resources,
+            crate::admission::Priority::Live,
+            Some(token),
+        )
+        .expect("the trial admits with its reservation");
+    claim.claim().mark_admitted();
+    driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
+    assert!(
+        matches!(
+            fixture.predecessor.slot.belief().await,
+            Producer::Absent { .. }
+        ),
+        "a parked incumbent does not take the permit back while the claim stands"
+    );
+    drop(permit);
+    drop(claim);
+    assert!(
+        !fixture.predecessor.handoff_requested(),
+        "the claim's drop releases it"
+    );
+}
+
+/// The trial claim takes nothing it is not owed: not without runway that
+/// covers a failed hand-back, and never a rendition another viewer reads.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_trial_claim_needs_runway_and_an_unshared_incumbent() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("base");
+    let fixture = prepared_handoff_fixture(base.path(), false).await;
+    viewer_at_film_start(&fixture).await;
+    // The fixture publishes entries 0..=3 from film zero: the runway is
+    // the published end on the plan's own boundaries.
+    let entry = fixture.predecessor.plan.entry(3).expect("fourth entry");
+    let published_ms =
+        (entry.end_ticks() * 1_000 / u64::from(fixture.predecessor.timescale)) as i64;
+    assert!(
+        claim_for_trial(&fixture, published_ms + 100)
+            .await
+            .is_none(),
+        "runway short of the reserve"
+    );
+    assert!(!fixture.predecessor.handoff_requested());
+    let covered = claim_for_trial(&fixture, published_ms - 100)
+        .await
+        .expect("runway covers the reserve");
+    drop(covered);
+    assert!(!fixture.predecessor.handoff_requested());
+    insert_control_session(
+        &fixture.serve,
+        "someone-else",
+        Arc::clone(&fixture.predecessor),
+        Instant::now(),
+    )
+    .await;
+    fixture
+        .serve
+        .shared
+        .sessions
+        .lock()
+        .await
+        .get_mut("someone-else")
+        .expect("second viewer")
+        .playback_id = "another-playback".into();
+    assert!(
+        claim_for_trial(&fixture, 0).await.is_none(),
+        "another viewer reads it"
+    );
+    assert!(!fixture.predecessor.handoff_requested());
+    driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
+    assert!(matches!(
+        fixture.predecessor.slot.belief().await,
+        Producer::Running { .. }
+    ));
+    retire_predecessor(&fixture).await;
+}
+
+/// A trial that fails or is cancelled gives everything back: the request
+/// lapses at once and the unused reservation returns to the pool. A claim
+/// whose runway is spent while parked closes itself.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dropped_or_spent_trial_claim_releases_its_incumbent() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("base");
+    let fixture = prepared_handoff_fixture(base.path(), false).await;
+    viewer_at_film_start(&fixture).await;
+    let admissions = fixture.successor_encoding.admissions.clone();
+    let claim = claim_for_trial(&fixture, 0).await.expect("claim");
+    assert!(predecessor_yields(&fixture).await);
+    assert_eq!(admissions.snapshot().reservations, 1);
+    drop(claim);
+    assert!(!fixture.predecessor.handoff_requested());
+    assert_eq!(
+        admissions.snapshot().reservations,
+        0,
+        "the unused reservation is returned"
+    );
+
+    // A seek past the published runway ends a claim on the next pass.
+    let base = crate::test_tempdir().expect("base");
+    let fixture = prepared_handoff_fixture(base.path(), false).await;
+    viewer_at_film_start(&fixture).await;
+    let claim = claim_for_trial(&fixture, 1).await.expect("claim");
+    fixture
+        .serve
+        .shared
+        .sessions
+        .lock()
+        .await
+        .get_mut("old-session")
+        .expect("viewer")
+        .last_control_snapshot
+        .as_mut()
+        .expect("demand")
+        .position_ms = 3_600_000;
+    driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
+    assert!(
+        claim.claim().is_closed(),
+        "the spent claim tells the upgrade to give back"
+    );
+    assert!(!fixture.predecessor.handoff_requested());
+    retire_predecessor(&fixture).await;
+}
+
+/// Once its successor is staged under the same incarnation, the trial's
+/// handoff is owned by the preparation slot: it outlives the claim's
+/// owner, survives an unrelated settlement, and ends with the slot.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_staged_trial_keeps_its_incumbent_parked_until_the_slot_settles() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("base");
+    let fixture = prepared_handoff_fixture(base.path(), false).await;
+    viewer_at_film_start(&fixture).await;
+    let claim = claim_for_trial(&fixture, 0).await.expect("claim");
+    assert!(predecessor_yields(&fixture).await);
+    fixture.predecessor.release_handoff_unless(None);
+    assert!(
+        fixture.predecessor.handoff_requested(),
+        "an unstaged trial is not the slot's"
+    );
+    stage_successor(&fixture, TRIAL_INCARNATION).await;
+    claim.hand_to_staging();
+    driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
+    assert!(
+        fixture.predecessor.handoff_requested(),
+        "staged: the slot keeps it parked"
+    );
+    let gate = fixture
+        .serve
+        .preparation_gate("old-session")
+        .await
+        .expect("gate");
+    assert!(
+        gate.begin_abort_preparation_for_owner(TRIAL_INCARNATION, 1)
+            .await
+    );
+    assert!(
+        !fixture.predecessor.handoff_requested(),
+        "abort releases the staged trial"
+    );
 }
 
 /// A successor that closes or fails stops polling for a handoff and gives
@@ -4719,6 +5370,8 @@ async fn make_room_never_evicts_inside_a_live_readers_window() {
 fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
     let index = synthetic_index(24);
     let recipe = Recipe {
+        dv_refit_gain: None,
+        source_telemetry: false,
         retained_logical: None,
         measured_candidate: None,
         file: media_file_at(PathBuf::from("unused.mkv"), 0),
@@ -4728,6 +5381,7 @@ fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
         video: CopyVideoOptions::new(false, false),
         source_object_version: None,
         cluster_cache_key: None,
+        copy_index_init_contract: None,
         encoding: None,
     };
     let video_ms = index_video_ms(&index);

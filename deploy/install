@@ -234,6 +234,11 @@ detect_platform() {
   esac
 }
 [ "$mode" = auto ] && mode=$(detect_platform)
+# Refuse an Intel Mac before anything is changed: the release and every
+# bundled tool are Apple Silicon only.
+if [ "$mode" = macos ] && [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" != arm64 ]; then
+  die "Intel Macs are not supported: Cinema on macOS needs Apple Silicon (this Mac is $(uname -m))"
+fi
 
 # ---- shared steps ----------------------------------------------------------
 
@@ -551,7 +556,6 @@ macos_place_plist() {
 # copies equal); a new pin is a new versioned directory beside the old one.
 jellyfin_ffmpeg_version=8.1.3-1
 jellyfin_ffmpeg_sha256_arm64=22445d7299742749ad2eeb9ce87963d50def0357e45b3e6c7b69987c8365dbf6
-jellyfin_ffmpeg_sha256_x86_64=cb2b5c154d49a6b6bfe29fa6c16510e85dcbf60b805764121a167b093d4bb6fb
 macos_ffmpeg=
 macos_ffprobe=
 
@@ -667,8 +671,7 @@ macos_ensure_jellyfin_ffmpeg() {
   arch=$(uname -m)
   case $arch in
     arm64) target=macarm64; expected=$jellyfin_ffmpeg_sha256_arm64 ;;
-    x86_64) target=mac64; expected=$jellyfin_ffmpeg_sha256_x86_64 ;;
-    *) die "no Jellyfin FFmpeg build for this Mac's architecture: $arch" ;;
+    *) die "Intel Macs are not supported: Cinema on macOS needs Apple Silicon (this Mac is $arch)" ;;
   esac
   name=jellyfin-ffmpeg_${jellyfin_ffmpeg_version}_portable_${target}-gpl.tar.xz
   url=https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v$jellyfin_ffmpeg_version/$name

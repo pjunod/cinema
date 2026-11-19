@@ -8,7 +8,7 @@ function response(body,url="https://b.test"+asset,headers={"content-type":"image
 function harness(){
  const requests=[],bitmaps=[],canvases=[];let art=async()=>response(png()),metadata=async()=>({item:item(),files:[],delivery_status:"unavailable"}),decode=null,metadataResponse=null;
  const root={querySelectorAll(){return canvases;}},capture={generation:1,auth:1,token:"bearer-a",origin:"/api/v1",route:"#/shared"};
- const context=vm.createContext({URL,URLSearchParams,TextDecoder,Uint8Array,DataView,Blob,AbortController,console,AUTH_GENERATION:1,PAGE_RENDER_GENERATION:1,TOKEN:"bearer-a",API:"/api/v1",location:{hash:"#/shared",href:"https://b.test/#/shared"},innerHeight:900,innerWidth:1000,
+ const context=vm.createContext({setTimeout,clearTimeout,URL,URLSearchParams,TextDecoder,Uint8Array,DataView,Blob,AbortController,console,AUTH_GENERATION:1,PAGE_RENDER_GENERATION:1,TOKEN:"bearer-a",API:"/api/v1",location:{hash:"#/shared",href:"https://b.test/#/shared"},innerHeight:900,innerWidth:1000,
   PLAYBACK_FILE_UUID:/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,esc:String,fmtDur:String,
   document:{getElementById(){return root;}},
   api:async path=>metadataResponse?metadataResponse(path):response(JSON.stringify(await metadata(path)),new URL("/api/v1"+path,"https://b.test").href,{"content-type":"application/json"}),
@@ -100,3 +100,21 @@ test("retirement cancels actual metadata reader even before auth generation chan
 });
 
 test("leaving retires metadata proofs even before page generation changes",async()=>{const f=harness(),value=await f.trusted();f.h.markup(value,ref,f.capture);f.h.retire();assert.throws(()=>f.h.markup(value,ref,f.capture),/authenticated/);const fresh=await f.trusted();assert.match(f.h.markup(fresh,ref,f.capture),/data-shared-art/);});
+
+test("a 429 with Retry-After is retried exactly once and then renders; a second 429 gives up",async()=>{
+ const f=harness(),value=await f.trusted(),canvas=f.canvas(f.h.markup(value,ref,f.capture));let calls=0;
+ f.setArt(()=>{calls++;return calls===1?response("busy","https://b.test"+asset,{"content-type":"application/json","retry-after":"0"},429):response(png());});
+ f.h.hydrate(f.root);await f.idle();
+ for(let n=0;n<100&&canvas.draws===0;n++)await new Promise(r=>setTimeout(r,1));
+ assert.equal(calls,2);assert.equal(f.requests.length,2);assert.equal(canvas.draws,1);assert.equal(canvas.dataset.sharedArtReady,"true");
+ const g=harness(),v=await g.trusted(),c=g.canvas(g.h.markup(v,ref,g.capture));let again=0;
+ g.setArt(()=>{again++;return response("busy","https://b.test"+asset,{"content-type":"application/json","retry-after":"0"},429);});
+ g.h.hydrate(g.root);await g.idle();for(let n=0;n<50;n++)await new Promise(r=>setTimeout(r,1));
+ assert.equal(again,2,"one retry, never a loop");assert.equal(c.draws,0);assert.equal(g.h.snapshot().compressed.bytes,0);
+});
+test("retirement during the Retry-After wait cancels the retry",async()=>{
+ const f=harness(),value=await f.trusted(),canvas=f.canvas(f.h.markup(value,ref,f.capture));let calls=0;
+ f.setArt(()=>{calls++;return response("busy","https://b.test"+asset,{"content-type":"application/json","retry-after":"5"},429);});
+ f.h.hydrate(f.root);for(let n=0;n<20;n++)await new Promise(r=>setTimeout(r,1));f.h.retire();await f.idle();
+ assert.equal(calls,1);assert.equal(canvas.draws,0);assert.equal(f.h.snapshot().compressed.bytes,0);
+});

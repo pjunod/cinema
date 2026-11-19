@@ -12,6 +12,48 @@ describes the state on the day it was written, and
 merged-pull-request rule it held in `STATUS.md`.
 
 
+## Playback startup path: the per-read stall and the web scrim
+
+**Branch `effort/startup-read-path`, in a draft pull request; not deployed.** Two fixes: consistent reads on a cluster no longer wait 40 ms each on a delayed ACK (44.0 ms to 1.7 ms per read on three-voter TLS loopback; a start makes about forty), and the web scrim clears about two frames after playback starts instead of 500 to 1000 ms later. Fleet effect unmeasured. The remaining waits, ranked with owners, are in [PLAYBACK-STARTUP-PATH-FINDINGS.md](PLAYBACK-STARTUP-PATH-FINDINGS.md); its §5 client waits are unowned.
+
+## 2026-10-11 · Startup and tone-map: fewer create-path reads, a tone-map census, lab arms
+
+**Branch `effort/startup-tone-map`.** Executes [STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md](STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md)
+rev 6.
+
+- **Part B is built.** The create read-budget line had its authority and local labels swapped; that is corrected, and the line now carries `store_ms` and a per-phase split. Seven read reductions follow, none of which moves a read across a fence or changes its consistency.
+  - On a two-voter hiqlite test cluster, store time is nearly all of the handler's time on every request shape.
+  - Two regressions pin the source-replacement interval.
+  - The candidate-route rolling fallback re-validates its binding before starting. Without that, a carried snapshot could start the producer from a source that had already been replaced.
+- **The tone-map census (C-M0) and the single Dolby tonemapx builder (C-M1) are built.** The census is admin-started from System → HDR tone-map, yields to playback, can be stopped, and stores its results node-locally. Selection and filter strings are unchanged.
+- **The A-M0 lab arms are built.** The lab names the bootstrap value B only from runs of at least 30 minutes.
+- **Owed, all by the GPT session:**
+  - the lab runs (§9.3), which pick B;
+  - the census on every node (§9.2), which goes to Paul for R2;
+  - the two-build B-M4 measurement (§9.1).
+- **Waiting on those:** Part A's A-M1/A-M2 waits on B, and C-M2/C-M3 wait on R2.
+
+## 2026-10-10 · HDR tone-map on Apple Silicon runs on the GPU, held to CPU parity
+
+**Branch `effort/macos-gpu-tonemap-parity`.** An Apple M4 node's Transcoding
+backend row read "CPU tone-map — fell back" over a Vulkan `Cannot allocate
+memory` and an OpenCL graph 59 levels from the CPU picture. Causes, each
+reproduced on that node's Jellyfin FFmpeg 8.1.3: the macOS build has no
+Vulkan compiled in, and the probe ran the graph anyway; the OpenCL graph
+named `hable` but left Jellyfin's `tonemap_mode=auto` and desaturation on;
+and the probe never tried the native Metal graph, whose BT.2390/ITP spelling
+the Mac processing context used without any CPU comparison (29.5 levels
+away). Now: the probe reads the build's device types and filters and reports
+what it cannot express as not available; CUDA, OpenCL and Metal-on-PQ take
+the CPU chain's operator from one source that also keys plan identity; the
+Metal graph is the first VideoToolbox candidate (≈2.2× the CPU chain within
+10.3 levels), and a pass ends the race with node routing left on the CPU
+chain; and the Mac context offers its HDR10 Metal graphs only when that
+parity passed. GPU graphs now get the CPU chain's peak. HLG through Metal is
+unchanged. Use still goes through Mac video processing in Developer. Plan
+identity gains the curve terms, so CUDA HDR and Mac Metal renditions (HLG
+included) are made once more under new keys.
+
 ## 2026-10-04 · A leader restart no longer ends progressive or Live TV playback
 
 **[PR #807](http://forge.lan:3000/noirr/plurx/pulls/807), branch `fix/progressive-fence-grace`; not deployed.**

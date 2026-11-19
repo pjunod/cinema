@@ -593,6 +593,17 @@ impl ScopedKey {
         state: &AppState,
         scope: &'static str,
     ) -> Result<ScopedKey, ApiError> {
+        Self::require_any(parts, state, &[scope]).await
+    }
+
+    /// Extract a key and require at least one of `scopes`; the handler then
+    /// decides what each scope may see. The key is resolved once and its
+    /// activity touched at most once, whichever scope matched.
+    pub async fn require_any(
+        parts: &mut Parts,
+        state: &AppState,
+        scopes: &[&'static str],
+    ) -> Result<ScopedKey, ApiError> {
         let secret = token_from_parts(parts).ok_or(ApiError::Unauthorized)?;
         if !auth::is_api_key(&secret) {
             // A user token on a machine route. Unauthorized rather than
@@ -609,8 +620,8 @@ impl ScopedKey {
             // Revoked is indistinguishable from never-existed, on purpose.
             return Err(ApiError::Unauthorized);
         }
-        if !key.allows(scope) {
-            // A real key that lacks this scope: Forbidden, because the
+        if !scopes.iter().any(|scope| key.allows(scope)) {
+            // A real key that lacks every scope: Forbidden, because the
             // credential is valid and the answer is about permission.
             return Err(ApiError::Forbidden);
         }

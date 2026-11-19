@@ -9,7 +9,12 @@ fn retry_delay(
 ) -> Option<std::time::Duration> {
     let retryable = matches!(
         error.code(),
-        Some("startup_timeout" | "media_owner_transition" | "transcode_capacity_pending")
+        Some(
+            "startup_timeout"
+                | "media_owner_transition"
+                | "transcode_capacity_pending"
+                | "media_session_overloaded"
+        )
     ) || encoded && error.code() == Some("vod_engine_unattested");
     if !retryable {
         return None;
@@ -132,6 +137,7 @@ mod tests {
             "startup_timeout",
             "media_owner_transition",
             "transcode_capacity_pending",
+            "media_session_overloaded",
         ] {
             let error = ApiError::typed(
                 StatusCode::SERVICE_UNAVAILABLE,

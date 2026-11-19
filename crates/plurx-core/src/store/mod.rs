@@ -16,6 +16,15 @@
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
 pub mod adaptive_resource_attempts;
+pub mod analysis_coordination;
+mod copy_index_v3;
+pub mod playback_input_keys;
+pub use copy_index_v3::{
+    copy_index_v3_publish_payload, copy_index_v3_rebuild_generation, copy_index_v3_source_key,
+    CopyIndexSourceAttestation, CopyIndexV3Artifact, CopyIndexV3Head, CopyIndexV3HeadState,
+    CopyIndexV3Location, CopyIndexV3Quarantine, CopyIndexV3Variant,
+    COPY_INDEX_V3_CONTRADICTION_CODE, COPY_INDEX_V3_NO_HOLDER_CODE, COPY_INDEX_V3_SEALED_INIT_CODE,
+};
 pub mod sharing;
 pub use sharing::SharingStore;
 pub mod sharing_catalogue;
@@ -85,9 +94,11 @@ pub use downloaded_subtitles::{
     valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
 };
 pub use file_grants::{FileGrant, FileGrantStore, NewFileGrant, FILE_GRANTS_SCHEMA};
+pub mod delegation;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_playback_handoffs;
 pub mod playback_handoffs;
+pub use delegation::DelegationStore;
 pub use playback_handoffs::{
     NewPlaybackHandoff, PlaybackHandoff, PlaybackHandoffRedeemOutcome, PlaybackHandoffRedemption,
     PlaybackHandoffStore, PlaybackHandoffTokenScope, PLAYBACK_HANDOFF_CODE_TTL_SECS,
@@ -149,6 +160,7 @@ mod sqlite;
 mod telemetry;
 mod timeline_annotations;
 
+pub(crate) mod offload;
 mod publication;
 mod scan_identity_repair;
 mod schema_lineage;
@@ -165,6 +177,15 @@ pub use scan_identity_repair::{
     IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX,
 };
 
+pub mod applied_view;
+pub use applied_view::{
+    applied_mark_tables, SharingWatch, APPLIED_MARK_DELETES_ONLY, SHARING_WATCH_TABLES,
+};
+pub use applied_view::{
+    AppliedRoute, AppliedSettings, AppliedSnapshot, AppliedTable, AppliedView, AppliedViewMetrics,
+    AppliedViewObservation, FactInstant, SettingsDigest, SettingsWriteFloor, StampCheck,
+    ViewFallback, ViewSource, ViewStamp, APPLIED_VIEW_TABLES,
+};
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite;
 /// The replicated auth schema (`settings`, `users`, `tokens`, ...) the cluster
@@ -239,6 +260,7 @@ mod consistent_read_census;
 
 pub mod background_jobs;
 pub use background_jobs::{AnalysisViewerInterest, ArtifactViewerInterest, BackgroundJobStore};
+mod background_job_turns;
 pub mod background_jobs_artwork;
 mod background_jobs_copy_output;
 mod background_jobs_delivery;
@@ -265,6 +287,10 @@ mod background_jobs_tests;
 pub mod background_jobs_transcode;
 pub mod background_jobs_transcription;
 pub mod classification_schedule;
+#[cfg(test)]
+mod copy_index_v3_tests;
+mod custody_retention;
+pub mod dv_refit_jobs;
 pub mod dv_title_jobs;
 mod dv_title_jobs_schema;
 mod library_annotations_schema;
@@ -274,6 +300,9 @@ mod planning_capacity;
 pub mod replicated;
 mod resource_settings_schema;
 pub use planning_capacity::{CapacityInstallation, PlanningCapacity};
+pub mod scan_request_v2;
+mod storage_domain_pending;
+pub(crate) mod storage_domain_pending_api;
 mod subtitle_managed_schema;
 pub mod subtitle_text_translation;
 mod subtitle_text_translation_schema;
@@ -495,17 +524,44 @@ pub(crate) fn local_media_principal_id(
 pub const MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA: &str =
     include_str!("session_principal_rebuild.sql");
 
+/// Triggers on other tables which reference session tables during replacement.
+fn session_dependency_triggers() -> impl Iterator<Item = (&'static str, &'static str, &'static str)>
+{
+    let restore = background_jobs_resources::SOURCE_ARBITRATION_SCHEMA
+        .split("-- next statement")
+        .map(str::trim)
+        .find(|sql| {
+            sql.starts_with("CREATE TRIGGER IF NOT EXISTS playback_analysis_restore_effects\n")
+        })
+        .expect("closed source-interest restore trigger definition");
+    jellyfin_watch::session_dependency_triggers()
+        .map(|(name, sql)| (name, "watch_state", sql))
+        .chain(std::iter::once((
+            "playback_analysis_restore_effects",
+            "background_job_commands",
+            restore,
+        )))
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn session_dependency_guard() -> String {
+    session_dependency_triggers().map(|(name, table, sql)| {
+        let declaration = sql.trim_end_matches(';').replacen("CREATE TRIGGER IF NOT EXISTS", "CREATE TRIGGER", 1).replace('\'', "''");
+        format!("EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='{name}' AND tbl_name='{table}' AND sql='{declaration}')")
+    }).collect::<Vec<_>>().join(" AND ")
+}
+
 /// Current-schema orchestration around the unchanged frozen ownership layout.
-/// Execute every statement atomically; unrelated watch triggers stay installed.
+/// Execute every statement atomically; unrelated triggers stay installed.
 pub fn media_session_principal_rebuild_schema() -> String {
     let separator = "\n-- next statement\n";
-    let dependencies = jellyfin_watch::session_dependency_triggers().collect::<Vec<_>>();
+    let dependencies = session_dependency_triggers().collect::<Vec<_>>();
     let mut statements = dependencies
         .iter()
-        .map(|(name, _)| format!("DROP TRIGGER {name};"))
+        .map(|(name, _, _)| format!("DROP TRIGGER {name};"))
         .collect::<Vec<_>>();
     statements.push(MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA.to_owned());
-    statements.extend(dependencies.into_iter().map(|(_, sql)| sql.to_owned()));
+    statements.extend(dependencies.into_iter().map(|(_, _, sql)| sql.to_owned()));
     statements.join(separator)
 }
 
@@ -1111,7 +1167,12 @@ const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
     END;";
 
 #[cfg(feature = "hiqlite-store")]
+mod counted_client;
+#[cfg(feature = "hiqlite-store")]
+pub use self::counted_client::{CountedClient, DbRaftMetrics};
+#[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite::{
+    background_store_operations_by_method, cluster_membership_operations_by_method,
     prometheus_store_operations, ClusterCompatibility, HiqliteAuthStore, AUTH_LEARNER_PROTOCOL,
     AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_BASELINE_VERSION,
     AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
@@ -1128,21 +1189,26 @@ pub use fragment_index_cluster::{
     analysis_backoff_ms, bounded_analysis_backoff_base_secs, bounded_analysis_backoff_max_secs,
     bounded_analysis_lease_secs, bounded_analysis_max_attempts, bounded_subtitle_window_seconds,
     cluster_fragment_index_blob_sha256, cluster_fragment_index_generation_key,
-    cluster_fragment_index_key, cluster_fragment_index_pipeline_digest,
-    decode_cluster_fragment_index_blob, encode_cluster_fragment_index_blob, stored_switch,
-    AnalysisAttempt, AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter,
-    AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisIndexRepairCandidate,
-    AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
-    ClusterFragmentIndexStore, ClusterIndexAvailabilityProbe, FragmentIndexSourceObservation,
-    NewAnalysisRequest, NewClusterFragmentIndexJob, SubtitleBackfillCandidate,
-    SubtitleBackfillDiagnostics, SubtitleSourcePublication, SubtitleSourceStamp,
-    CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
+    cluster_fragment_index_key, cluster_fragment_index_output_identity,
+    cluster_fragment_index_pipeline_digest, cluster_fragment_index_v3_key,
+    decode_cluster_fragment_index_blob, decode_cluster_fragment_index_blob_v3,
+    decode_cluster_fragment_index_blob_with_provenance, encode_cluster_fragment_index_blob,
+    encode_cluster_fragment_index_blob_v3, stored_switch, AnalysisAttempt, AnalysisFileLabel,
+    AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryPage, AnalysisHistoryQuery,
+    AnalysisHistoryRow, AnalysisIndexRepairCandidate, AnalysisIndexRepairResult, AnalysisRequest,
+    AnalysisStatusSummary, ClusterFragmentIndexArtifact, ClusterFragmentIndexJob,
+    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, ClusterIndexAvailabilityProbe,
+    DecodedFragmentIndex, FragmentIndexBlobExpectations, FragmentIndexEngineProvenance,
+    FragmentIndexOutputIdentity, FragmentIndexProvenance, FragmentIndexSourceObservation,
+    LiveAnalysisEngines, NewAnalysisRequest, NewClusterFragmentIndexJob, StrandedRemedy,
+    SubtitleBackfillCandidate, SubtitleBackfillDiagnostics, SubtitleSourcePublication,
+    SubtitleSourceStamp, CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
     CONTENT_ANALYSIS_REPAIR_REVISION, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
     DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
-    DEFAULT_SUBTITLE_WINDOW_SECS, FRAGMENT_PRUNE_CANDIDATES, FRAGMENT_PRUNE_TERMINAL_JOBS,
-    MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
-    MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+    DEFAULT_SUBTITLE_WINDOW_SECS, FRAGMENT_INDEX_CONTRACT, FRAGMENT_PRUNE_CANDIDATES,
+    FRAGMENT_PRUNE_TERMINAL_JOBS, MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS,
+    MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES, MAX_ANALYSIS_LEASE_SECS,
+    MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_FILE_REQUEST_LOOKUP,
     MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT,
     SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
@@ -1155,14 +1221,15 @@ use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
     BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheStorageMember, CachedTranscode,
     DolbyVisionFacts, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage,
-    ItemSort, Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
-    MediaSessionActivationSettlement, MediaSessionProjectionCompletion, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
-    NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
-    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
-    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease,
-    PlaybackEvent, PlaybackEventQuery, PretranscodeJob, ProbeResult, ReadingState,
-    ReadingStateWrite, RecentItem, SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
+    ItemPresence, ItemSort, Library, MediaFile, MediaSessionActivation,
+    MediaSessionActivationOutcome, MediaSessionActivationSettlement,
+    MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRequestClaim,
+    MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch, NetworkPrior,
+    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, OfflineActivityPackage,
+    OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage, OfflinePackageStats,
+    OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease, PlaybackEvent,
+    PlaybackEventQuery, PretranscodeJob, ProbeResult, ReadingState, ReadingStateWrite, RecentItem,
+    SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -1257,13 +1324,48 @@ pub(crate) fn normalized_directory(directory: &str) -> Result<&str, StoreError> 
     Ok(trimmed)
 }
 
+/// Curator keeps additional physical copies in generated sibling folders.
+/// Their exact reserved suffix identifies one logical series directory; it
+/// does not change file paths or make arbitrary editions equivalent.
+pub(crate) fn show_directory_identity(directory: &str) -> String {
+    static COPY: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^(.+) \(Manual copy [0-9a-f]{10}\)(?: \(([2-9]|[1-9][0-9]+)\))?$")
+            .expect("valid manual copy suffix")
+    });
+    let separator = if directory.contains('/') { '/' } else { '\\' };
+    let directory = directory.trim_end_matches(separator);
+    let Some((parent, name)) = directory.rsplit_once(separator) else {
+        return directory.to_owned();
+    };
+    match COPY.captures(name).and_then(|caps| caps.get(1)) {
+        // Nested copies have no unambiguous single family identity.
+        Some(base) if !COPY.is_match(base.as_str()) => {
+            format!("{parent}{separator}{}", base.as_str())
+        }
+        _ => directory.to_owned(),
+    }
+}
+
+/// Indexable conservative range covering the physical base directory and
+/// generated siblings. Callers must validate exact family membership in Rust.
+/// Repair also snapshots every owner in this range for its atomic SQL guard:
+/// a new neighboring owner can refuse a repair, never silently join it.
+pub(crate) fn show_directory_path_bounds(directory: &str) -> Result<(String, String), StoreError> {
+    let directory = show_directory_identity(normalized_directory(directory)?);
+    let (_, upper) = directory_path_bounds(&directory)?;
+    Ok((format!("{directory} "), upper))
+}
+
 pub(crate) fn directory_matches_show_path(path: &str, directory: &str) -> bool {
     let path = std::path::Path::new(path);
     crate::scan::parse::parse_episode(path)
         .or_else(|_| crate::scan::parse::parse_anime_episode(path))
         .ok()
         .and_then(|parsed| parsed.source_directory)
-        .is_some_and(|candidate| candidate.to_string_lossy() == directory)
+        .is_some_and(|candidate| {
+            show_directory_identity(&candidate.to_string_lossy())
+                == show_directory_identity(directory)
+        })
 }
 
 pub(crate) fn directory_matches_movie_path(path: &str, directory: &str) -> bool {
@@ -1338,6 +1440,46 @@ pub const ANALYSIS_LIFECYCLE_METRICS: [(&str, &str); 27] = [
     ("failure", "other"),
     ("publication", "validated"),
 ];
+/// The bounded `code` label set of `plurx_analysis_queue_failed_by_code`:
+/// the failure codes Activity → Analysis explains
+/// (`crates/plurxd/src/web/pages/analysis.js`, `analysisErrorInfo`), with
+/// every other code — including none — counted as the final `other`.
+pub const ANALYSIS_FAILURE_CODES: [&str; 33] = [
+    "foreground_preempted",
+    "request_reconciled",
+    "source_unavailable",
+    "source_catalog_read_failed",
+    "source_attestation_failed",
+    "source_attestation_timeout",
+    "source_record_failed",
+    "source_superseded",
+    "source_changed",
+    "source_deleted",
+    "pipeline_superseded",
+    "invalid_cache_identity",
+    "queue_write_failed",
+    "queue_full_or_busy",
+    "job_terminal",
+    "lease_expired",
+    "queue_expired",
+    "node_local_refusal",
+    "attempt_limit",
+    "index_budget_exceeded",
+    "index_probe_timeout",
+    "index_source_io",
+    "index_process_failed",
+    "index_video_shortfall",
+    "index_completion_unverified",
+    "index_output_malformed",
+    "index_retry_window_expired",
+    "unsupported",
+    "truncated",
+    "encode_failed",
+    "pipeline_version_unavailable",
+    "local_publish_failed",
+    "other",
+];
+pub const ANALYSIS_FAILURE_CODE_SLOTS: usize = ANALYSIS_FAILURE_CODES.len();
 pub const ANALYSIS_QUEUE_METRIC_SLOTS: usize = ANALYSIS_METRIC_COMPONENTS.len()
     * ANALYSIS_METRIC_STATES.len()
     * ANALYSIS_METRIC_PRIORITIES.len()
@@ -1353,6 +1495,9 @@ pub struct AnalysisStoreMetrics {
     pub queue_oldest_age_seconds: [i64; ANALYSIS_QUEUE_METRIC_SLOTS],
     pub lifecycle_counts: [i64; ANALYSIS_LIFECYCLE_METRIC_SLOTS],
     pub marker_counts: [i64; ANALYSIS_MARKER_METRIC_SLOTS],
+    /// Failed analysis rows (requests without a job row, plus jobs) by
+    /// `last_error_code`, slotted by [`ANALYSIS_FAILURE_CODES`].
+    pub failed_by_code: [i64; ANALYSIS_FAILURE_CODE_SLOTS],
     pub health: AnalysisQueueHealth,
 }
 
@@ -1363,6 +1508,7 @@ impl Default for AnalysisStoreMetrics {
             queue_oldest_age_seconds: [0; ANALYSIS_QUEUE_METRIC_SLOTS],
             lifecycle_counts: [0; ANALYSIS_LIFECYCLE_METRIC_SLOTS],
             marker_counts: [0; ANALYSIS_MARKER_METRIC_SLOTS],
+            failed_by_code: [0; ANALYSIS_FAILURE_CODE_SLOTS],
             health: AnalysisQueueHealth::default(),
         }
     }
@@ -1397,6 +1543,49 @@ pub struct AnalysisQueueHealth {
     /// that has not run yet; a standing count is the outage's own signature.
     pub running_past_lease: i64,
     pub last_ready_at_ms: i64,
+    /// Fragment-index work inside a retry wait: pre-worker requests
+    /// (`analysis_requests`, `queued`, no worker cache key yet) before their
+    /// `not_before_ms`, plus queued worker jobs backing off after a failed
+    /// attempt. `claimable` counts neither, so without this a queue whose
+    /// whole backlog is backing off reads `idle`.
+    pub waiting: i64,
+    /// Due pre-worker requests whose `pipeline_version` no live engine runs —
+    /// work that cannot be claimed by anyone until it is reconciled. Zero
+    /// when the caller could not name the live engine set.
+    pub incompatible: i64,
+    /// Due work some live engine can claim: queued jobs past their retry
+    /// wait plus due, compatible pre-worker requests. `claimable` is the
+    /// same number under its historical name.
+    pub eligible: i64,
+    /// `created_at_ms` of the oldest queued pre-worker request, 0 when none.
+    pub oldest_queued_at_ms: i64,
+}
+
+impl AnalysisQueueHealth {
+    /// Assemble the health sample from the jobs-table half (`claimable_jobs`
+    /// = queued jobs past their retry wait) and the pre-worker request half
+    /// (`[waiting, incompatible, eligible_requests, oldest_queued_at_ms]`).
+    #[must_use]
+    pub fn with_requests(
+        jobs: [i64; 6],
+        [waiting, incompatible, eligible_requests, oldest_queued_at_ms]: [i64; 4],
+    ) -> Self {
+        let [ready_24h, attempt_limit_24h, claimed_24h, claimable_jobs, running_past_lease, last_ready_at_ms] =
+            jobs;
+        let eligible = claimable_jobs.saturating_add(eligible_requests);
+        Self {
+            ready_24h,
+            attempt_limit_24h,
+            claimed_24h,
+            claimable: eligible,
+            running_past_lease,
+            last_ready_at_ms,
+            waiting,
+            incompatible,
+            eligible,
+            oldest_queued_at_ms,
+        }
+    }
 }
 
 /// The one-word answer an operator needs before reading anything else.
@@ -1463,17 +1652,21 @@ pub fn analysis_queue_verdict(
     let nothing_happening = health.ready_24h == 0
         && health.claimed_24h == 0
         && health.claimable == 0
-        && health.running_past_lease == 0;
+        && health.running_past_lease == 0
+        && health.waiting == 0
+        && health.incompatible == 0;
     if nothing_happening {
         return AnalysisQueueVerdict::Idle;
     }
     if health.ready_24h == 0 {
-        // Two ways to be sure, and a wedged queue only ever shows one of
+        // Three ways to be sure, and a wedged queue only ever shows one of
         // them: it either claimed plenty and produced nothing, or it never
-        // claimed at all while work piled up in front of it.
+        // claimed at all while work piled up in front of it — claimable work,
+        // or work under an engine digest no live node runs any more.
         let claimed_enough_to_be_sure = health.claimed_24h >= ANALYSIS_DEAD_CLAIM_FLOOR;
-        let backlog_nobody_touched =
-            health.claimed_24h == 0 && health.claimable >= ANALYSIS_DEAD_BACKLOG_FLOOR;
+        let backlog_nobody_touched = health.claimed_24h == 0
+            && (health.claimable >= ANALYSIS_DEAD_BACKLOG_FLOOR
+                || health.incompatible >= ANALYSIS_DEAD_BACKLOG_FLOOR);
         return if claimed_enough_to_be_sure || backlog_nobody_touched {
             AnalysisQueueVerdict::Dead
         } else {
@@ -1493,7 +1686,14 @@ pub fn analysis_queue_verdict(
     // neither and a quiet night shrinks both together.
     let failures_over_budget =
         health.attempt_limit_24h > 0 && health.attempt_limit_24h * 10 >= health.claimed_24h;
-    if losses_over_budget || failures_over_budget || running_past_lease_samples >= 2 {
+    // Producing, but a standing cohort under a retired engine digest is work
+    // nobody will ever claim: not healthy, whatever the rest produces.
+    let stranded_backlog = health.incompatible >= ANALYSIS_DEAD_BACKLOG_FLOOR;
+    if losses_over_budget
+        || failures_over_budget
+        || stranded_backlog
+        || running_past_lease_samples >= 2
+    {
         return AnalysisQueueVerdict::Degraded;
     }
     AnalysisQueueVerdict::Healthy
@@ -1518,6 +1718,12 @@ struct AnalysisMarkerMetricRow {
 }
 
 #[derive(serde::Deserialize)]
+struct AnalysisFailureCodeRow {
+    code: String,
+    count: i64,
+}
+
+#[derive(serde::Deserialize)]
 struct AnalysisLifecycleMetricRow {
     event: String,
     reason: String,
@@ -1531,12 +1737,22 @@ pub(crate) fn analysis_store_metrics(
     queue_json: &str,
     marker_json: &str,
     lifecycle_json: &str,
+    failed_code_json: &str,
     health: AnalysisQueueHealth,
 ) -> AnalysisStoreMetrics {
     let mut metrics = AnalysisStoreMetrics {
         health,
         ..AnalysisStoreMetrics::default()
     };
+    for row in
+        serde_json::from_str::<Vec<AnalysisFailureCodeRow>>(failed_code_json).unwrap_or_default()
+    {
+        let slot = ANALYSIS_FAILURE_CODES
+            .iter()
+            .position(|value| *value == row.code)
+            .unwrap_or(ANALYSIS_FAILURE_CODE_SLOTS - 1);
+        metrics.failed_by_code[slot] += row.count.max(0);
+    }
     for row in serde_json::from_str::<Vec<AnalysisQueueMetricRow>>(queue_json).unwrap_or_default() {
         let Some(component) = ANALYSIS_METRIC_COMPONENTS
             .iter()
@@ -1611,11 +1827,75 @@ pub(crate) fn analysis_store_metrics(
 
 #[async_trait]
 pub trait MetricsStore: Send + Sync + 'static {
+    /// One complete Store-backed metrics sample. `now` is Unix seconds.
+    ///
+    /// `live_fragment_engines` is the last worker inventory (this node's
+    /// engine plus each fresh peer's). It splits due pre-worker requests into
+    /// `eligible` and `incompatible` by the stranded rule the reconciler and
+    /// the enqueue cap share ([`LiveAnalysisEngines`]); `None` means the
+    /// inventory is unknown, and every due request then counts as eligible
+    /// rather than as stranded.
+    async fn prometheus_store_snapshot_with(
+        &self,
+        node_id: &str,
+        now: i64,
+        live_fragment_engines: Option<&LiveAnalysisEngines>,
+    ) -> Result<PrometheusStoreSnapshot, StoreError>;
+
     async fn prometheus_store_snapshot(
         &self,
         node_id: &str,
         now: i64,
-    ) -> Result<PrometheusStoreSnapshot, StoreError>;
+    ) -> Result<PrometheusStoreSnapshot, StoreError> {
+        self.prometheus_store_snapshot_with(node_id, now, None)
+            .await
+    }
+}
+
+/// The JSON-array parameter both backends bind for a live engine set: the
+/// distinct digests, or NULL when the inventory is unknown.
+pub(crate) fn live_engines_param(live: Option<&LiveAnalysisEngines>) -> Option<String> {
+    live.map(|live| serde_json::to_string(&live.digests()).unwrap_or_else(|_| "[]".to_owned()))
+}
+
+/// Shared SQL for the pre-worker request half of [`AnalysisQueueHealth`] and
+/// the failed-by-code breakdown. `{now}` is Unix seconds and `{live}` the
+/// nullable JSON array of live engine digests; each backend substitutes its
+/// own placeholders. Pre-worker means `queued` with no worker cache key: once
+/// a worker claims a request it gains a `cluster_fragment_index_jobs` row and
+/// the jobs-table inputs take over, so the two lifecycles never double count.
+///
+/// `waiting` is every fragment-index row inside a retry wait: pre-worker
+/// requests not yet due, plus worker jobs (`cluster_fragment_index_jobs`)
+/// backing off after a failed attempt. Without the jobs half, 3,000 jobs in
+/// a job-level retry wait read `idle`. `incompatible` and `eligible` split
+/// the due pre-worker requests by the one stranded rule
+/// ([`fragment_index_cluster::analysis_request_stranded_sql`]).
+pub(crate) fn analysis_request_health_sql(now: &str, live: &str) -> String {
+    let pre_worker = "component = 'fragment_index' AND state = 'queued' \
+        AND COALESCE(result_cache_key, '') = ''";
+    let stranded = fragment_index_cluster::analysis_request_stranded_sql(live);
+    format!(
+        "((SELECT COUNT(*) FROM analysis_requests WHERE {pre_worker} \
+            AND not_before_ms > {now} * 1000) \
+          + (SELECT COUNT(*) FROM cluster_fragment_index_jobs WHERE state = 'queued' \
+            AND not_before_ms > {now} * 1000)) AS analysis_waiting, \
+         (SELECT COUNT(*) FROM analysis_requests WHERE {pre_worker} \
+            AND not_before_ms <= {now} * 1000 AND {stranded}) AS analysis_incompatible, \
+         (SELECT COUNT(*) FROM analysis_requests WHERE {pre_worker} \
+            AND not_before_ms <= {now} * 1000 AND NOT {stranded}) AS analysis_eligible_requests, \
+         (SELECT COALESCE(MIN(created_at_ms), 0) FROM analysis_requests WHERE {pre_worker}) \
+            AS analysis_oldest_queued_at_ms, \
+         (SELECT COALESCE(json_group_array(json_object('code', grouped.code, 'count', grouped.n)), '[]') \
+            FROM (SELECT COALESCE(failed.last_error_code, '') AS code, COUNT(*) AS n FROM ( \
+                SELECT last_error_code FROM analysis_requests WHERE state = 'failed' \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs job \
+                     WHERE job.cache_key = analysis_requests.result_cache_key \
+                       AND job.target_node_id = analysis_requests.target_node_id) \
+                UNION ALL \
+                SELECT last_error_code FROM cluster_fragment_index_jobs WHERE state = 'failed' \
+              ) failed GROUP BY code) grouped) AS analysis_failed_code_json"
+    )
 }
 
 /// Replicated owner/term/generation proof attached to every provider artwork
@@ -2051,6 +2331,22 @@ pub mod keys {
     /// Opt-in preference for qualified FEL reconstruction and P8.1 encoding.
     /// Missing is off; this never overrides the separate DV_CONVERT permission.
     pub const DV_FEL_REENCODE: &str = "playback.dolby_vision_fel_reencode";
+    /// F+ curve fits for Profile 7 FEL titles (FEL-RPU-REFIT-BUILD.md), one
+    /// switch per `playback_control::ClientPlatform`: whether copy playback
+    /// to that platform serves the fitted 8.1 mapping. Missing is off. With
+    /// any one on, idle nodes run the `dv_refit` job; copy-path serving
+    /// (milestone 4) reads each.
+    pub const DV_REFIT_WEB: &str = "playback.dolby_vision_refit_web";
+    pub const DV_REFIT_APPLE: &str = "playback.dolby_vision_refit_apple";
+    pub const DV_REFIT_ANDROID: &str = "playback.dolby_vision_refit_android";
+    pub const DV_REFIT_LINUX: &str = "playback.dolby_vision_refit_linux";
+    /// The four, in `ClientPlatform` order (web, apple, android, linux).
+    pub const DV_REFIT_PLATFORMS: [&str; 4] = [
+        DV_REFIT_WEB,
+        DV_REFIT_APPLE,
+        DV_REFIT_ANDROID,
+        DV_REFIT_LINUX,
+    ];
     /// Node-wide byte budget for un-admitted VOD rendition working sets.
     /// Absent takes the built-in default. A parsed zero is refused at the
     /// settings surface: "no working set" and "not configured" are opposite
@@ -2302,6 +2598,23 @@ pub(crate) fn selected_settings_json(keys: &[&str]) -> Result<String, StoreError
     serde_json::to_string(keys).map_err(|error| StoreError::Task(error.to_string()))
 }
 
+/// How many settings keys one planning snapshot may carry. The create reads
+/// every planning input in that one statement (playback-start D3b), which
+/// outgrew the keyed read's 32; the bound is still a bound.
+pub const PLANNING_SNAPSHOT_KEYS_MAX: usize = 64;
+
+/// [`selected_settings_json`] for the planning snapshot's own bound.
+pub(crate) fn selected_planning_keys_json(keys: &[&str]) -> Result<String, StoreError> {
+    if keys.len() > PLANNING_SNAPSHOT_KEYS_MAX
+        || keys.iter().any(|key| key.is_empty() || key.len() > 256)
+    {
+        return Err(StoreError::Task(format!(
+            "a planning snapshot requires at most {PLANNING_SNAPSHOT_KEYS_MAX} nonempty bounded keys"
+        )));
+    }
+    serde_json::to_string(keys).map_err(|error| StoreError::Task(error.to_string()))
+}
+
 pub(crate) fn validate_generated_settings(
     generation_key: &str,
     expected_generation: i64,
@@ -2456,6 +2769,15 @@ pub trait UserStore: Send + Sync + 'static {
 #[async_trait]
 pub trait LibraryStore: Send + Sync + 'static {
     async fn create_library(&self, library: &NewLibrary) -> Result<Library, StoreError>;
+    /// Create a library with its automatic scan interval (minutes; `0` = off)
+    /// in the same write, so a new library can never be left at the column
+    /// default by a failure between two writes. [`Self::create_library`]
+    /// keeps the column default, `0`.
+    async fn create_library_with_scan_interval(
+        &self,
+        library: &NewLibrary,
+        scan_interval_mins: i64,
+    ) -> Result<Library, StoreError>;
     async fn update_library(
         &self,
         id: i64,
@@ -2916,6 +3238,32 @@ pub trait MediaStore: Send + Sync + 'static {
         library_id: i64,
         directory: &str,
     ) -> Result<Vec<Item>, StoreError>;
+    /// The offloaded movie of this library carrying these external ids, for
+    /// placing files that come back after Get it back. Ids only, never a
+    /// title: a re-acquired title must not become a duplicate when its
+    /// release name differs from the library title (`Tar` / `Tár`).
+    async fn find_offloaded_movie(
+        &self,
+        library_id: i64,
+        tmdb_id: Option<i64>,
+        imdb_id: Option<&str>,
+    ) -> Result<Option<Item>, StoreError>;
+    /// The offloaded episode of the show with this TMDB id, by season and
+    /// episode number.
+    async fn find_offloaded_episode(
+        &self,
+        library_id: i64,
+        series_tmdb_id: i64,
+        season_number: i32,
+        episode_number: i32,
+    ) -> Result<Option<Item>, StoreError>;
+    /// How many offloaded leaves sit under each container, of how many in
+    /// all (the item itself counts when it is a leaf). A container with none
+    /// offloaded is absent.
+    async fn offloaded_leaf_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, crate::domain::LeafOffload>, StoreError>;
     async fn find_book(
         &self,
         library_id: i64,
@@ -3003,6 +3351,28 @@ pub trait MediaStore: Send + Sync + 'static {
         offset: i64,
         limit: i64,
         genre: Option<&str>,
+    ) -> Result<ItemPage, StoreError> {
+        self.list_top_items_filtered(
+            library_id,
+            sort,
+            offset,
+            limit,
+            genre,
+            ItemPresence::Everything,
+        )
+        .await
+    }
+    /// [`list_top_items_in_genre`](Self::list_top_items_in_genre) narrowed by
+    /// whether the title is on disk or offloaded. One `WHERE` term shared by
+    /// the count and the page, like the genre.
+    async fn list_top_items_filtered(
+        &self,
+        library_id: i64,
+        sort: ItemSort,
+        offset: i64,
+        limit: i64,
+        genre: Option<&str>,
+        presence: ItemPresence,
     ) -> Result<ItemPage, StoreError>;
     /// The unfiltered grid: every caller that had no opinion about genres
     /// before this existed and still has none. Provided rather than
@@ -3390,6 +3760,14 @@ pub trait MediaStore: Send + Sync + 'static {
     ) -> Result<Vec<MediaFile>, StoreError>;
     /// All known file paths in a library (for vanished-file detection).
     async fn library_file_paths(&self, library_id: i64) -> Result<Vec<(i64, PathBuf)>, StoreError>;
+    /// The known files at `folder` or anywhere below it, matched by whole
+    /// path component (`/m/Dune` does not match `/m/Dune (2021)/x.mkv`), so a
+    /// folder removal reads only its own subtree instead of the library.
+    async fn library_file_paths_under(
+        &self,
+        library_id: i64,
+        folder: &std::path::Path,
+    ) -> Result<Vec<(i64, PathBuf)>, StoreError>;
     /// Establish the stable identity of the mounted roots for this library,
     /// or compare a later scanner's observation with cluster truth.
     /// `configured_paths` is the path set the scan walked; when the library
@@ -3410,12 +3788,19 @@ pub trait MediaStore: Send + Sync + 'static {
     /// Atomically remove vanished files and their empty item hierarchy only
     /// when the scanner sees the expected roots and stays within its deletion
     /// budget. This is the M1c publication boundary; M4 adds its lease fence.
+    ///
+    /// `offload_keep` names movie/episode items an offload wants kept: any
+    /// of them left with no files by this very removal is marked offloaded
+    /// (`offloaded_at`) between the file delete and the leaf prune, in the
+    /// same transaction, so nothing can observe it fileless and unmarked.
     async fn reconcile_library(
         &self,
         library_id: i64,
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
     ) -> Result<ReconcileOutcome, StoreError>;
     /// Remove `file_ids` — files of the library that the caller found under
     /// none of `configured_paths`, which is what an operator removing a
@@ -4526,6 +4911,21 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
         requested_since: i64,
     ) -> Result<Vec<OfflinePackage>, StoreError>;
 
+    /// [`pending_offline_source_probes`](Self::pending_offline_source_probes)
+    /// as this node's own replica holds it, read without consensus and
+    /// without a leader round trip.
+    ///
+    /// A hint and never an authorization: a replica that has not applied a
+    /// new probe yet answers empty, and the probe is answered on the first
+    /// pass after it applies. The probe loop uses it only to decide whether
+    /// the authoritative read is owed; that read and the answer's write stay
+    /// the only things that act.
+    async fn local_pending_offline_source_probes(
+        &self,
+        node_id: &str,
+        requested_since: i64,
+    ) -> Result<Vec<OfflinePackage>, StoreError>;
+
     async fn answer_offline_source_probe(
         &self,
         package_id: &str,
@@ -4804,6 +5204,8 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<ReconcileOutcome, StoreError>;
@@ -4954,7 +5356,62 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         incarnation_id: &str,
         now_ms: i64,
         claim_expires_at_ms: i64,
-    ) -> Result<MediaSessionRequestClaim, StoreError>;
+    ) -> Result<MediaSessionRequestClaim, StoreError> {
+        Ok(self
+            .claim_media_session_request_recording(
+                principal,
+                request_id,
+                request_fingerprint,
+                playback_id,
+                incarnation_id,
+                now_ms,
+                claim_expires_at_ms,
+                None,
+            )
+            .await?
+            .0)
+    }
+
+    /// [`claim_media_session_request`](Self::claim_media_session_request) that
+    /// also records the viewer's ask (D3c). With `desired`, the claim that is
+    /// `Acquired` (a new row or a re-acquired one) upserts the selection in the
+    /// same transaction, under a predicate that matches only *this* claim
+    /// (this `incarnation_id`, `starting`, unexpired), and the answer carries
+    /// the recorded row. Every other answer (`InFlight`, `Resolved`,
+    /// `Conflict`, `Overloaded`) records nothing and carries `None`. The
+    /// upsert is [`record_desired_selection`](Self::record_desired_selection)'s
+    /// statement, so a repeated digest does not move the revision. Without
+    /// `desired` this is the plain claim.
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_media_session_request_recording(
+        &self,
+        principal: &crate::playback_principal::PlaybackPrincipal,
+        request_id: &str,
+        request_fingerprint: &str,
+        playback_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+        claim_expires_at_ms: i64,
+        desired: Option<&crate::domain::DesiredSelectionWrite<'_>>,
+    ) -> Result<
+        (
+            MediaSessionRequestClaim,
+            Option<crate::domain::DesiredOwnership>,
+        ),
+        StoreError,
+    >;
+
+    /// The claim row of `request_id`, read only. A retry waiting on an owner
+    /// that is still starting reads this between ticks instead of re-running
+    /// [`claim_media_session_request`](Self::claim_media_session_request),
+    /// which maintains the session tables first (a replicated write whenever
+    /// a cleanup is due) and reads the routes; it claims again only once the
+    /// row says the owner let go, resolved, or expired.
+    async fn media_session_request_progress(
+        &self,
+        principal: &crate::playback_principal::PlaybackPrincipal,
+        request_id: &str,
+    ) -> Result<Option<crate::domain::MediaSessionRequestProgress>, StoreError>;
 
     /// Bind a Library-channel start's canonical worker recipe to its claimed
     /// durable identity before producer placement.
@@ -5560,6 +6017,25 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         owner_node_id: &str,
         now_ms: i64,
     ) -> Result<Vec<OwnedMediaSessionLease>, StoreError>;
+
+    /// Whether this node's own replica holds an active session owned by
+    /// `owner_node_id` whose lease outlives `now_ms`, read without consensus
+    /// and without a leader round trip. Every row
+    /// [`owned_media_sessions`](Self::owned_media_sessions) returns satisfies
+    /// it, so `false` means the authoritative inventory would be empty on
+    /// this replica.
+    ///
+    /// A hint in both directions and never an authorization: `false` can be
+    /// a replica that has not applied a takeover yet, `true` a row the
+    /// inventory's other predicates exclude. The lease loop uses it only to
+    /// decide whether the inventory is owed on a tick when this process runs
+    /// and remembers no session; the inventory and the renewals stay the only
+    /// things that act.
+    async fn owned_media_sessions_hint(
+        &self,
+        owner_node_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
 }
 
 /// Node-local fragment indexes.
@@ -5858,6 +6334,7 @@ pub trait Store:
     + OfflinePackageStore
     + FileGrantStore
     + PlaybackHandoffStore
+    + DelegationStore
     + RemoteStore
     + InvitationStore
     + PlaybackTelemetryStore
@@ -5920,6 +6397,7 @@ impl<T> Store for T where
         + OfflinePackageStore
         + FileGrantStore
         + PlaybackHandoffStore
+        + DelegationStore
         + RemoteStore
         + InvitationStore
         + PlaybackTelemetryStore
@@ -5959,7 +6437,7 @@ pub async fn requeue_cluster_fragment_index_after_no_holder(
 /// Keeping the scope here, at the Store boundary, prevents route handlers from
 /// having to guess how many physical local, authority, or write operations a
 /// high-level Store method performed.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct HttpStoreOperationCounts {
     counts: std::sync::Arc<[std::sync::atomic::AtomicU64; 3]>,
     watch_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -5970,6 +6448,125 @@ pub struct HttpStoreOperationCounts {
     /// exceed the request's elapsed time; on the serial create path it is
     /// the share of the handler spent waiting on the Store.
     store_nanos: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The same operations split by the Store method that issued them.
+    methods: std::sync::Arc<std::sync::Mutex<MethodOperationCounts>>,
+    /// Folds [`Self::methods`] into a process-wide by-method family once,
+    /// when the last clone of these counts is dropped. See
+    /// [`HttpStoreOperationCounts::fold_methods_into`].
+    flush: std::sync::Arc<MethodFlush>,
+}
+
+impl Default for HttpStoreOperationCounts {
+    fn default() -> Self {
+        let methods = std::sync::Arc::<std::sync::Mutex<MethodOperationCounts>>::default();
+        Self {
+            counts: std::sync::Arc::default(),
+            watch_reads: std::sync::Arc::default(),
+            index_status_calls: std::sync::Arc::default(),
+            cluster_index_availability_calls: std::sync::Arc::default(),
+            store_nanos: std::sync::Arc::default(),
+            flush: std::sync::Arc::new(MethodFlush {
+                methods: std::sync::Arc::clone(&methods),
+                sink: std::sync::Mutex::new(None),
+            }),
+            methods,
+        }
+    }
+}
+
+/// Where a scope's by-method counts go when its last holder is gone.
+type MethodSink = Box<dyn FnOnce(&[(&'static str, [u64; 3])]) + Send>;
+
+/// Folding at the last drop, not when the request's handler returns, is what
+/// makes the by-method families add up: an operation a detached task makes
+/// after the response, or one made by a request whose future was dropped
+/// (the client went away), is still folded, exactly once. A scope nobody
+/// gave a sink (one made outside any request, as
+/// [`spawn_in_http_store_scope`] does when there is no request) folds into
+/// the background table.
+struct MethodFlush {
+    methods: std::sync::Arc<std::sync::Mutex<MethodOperationCounts>>,
+    sink: std::sync::Mutex<Option<MethodSink>>,
+}
+
+impl Drop for MethodFlush {
+    fn drop(&mut self) {
+        let methods: Vec<(&'static str, [u64; 3])> = self
+            .methods
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_method
+            .iter()
+            .map(|(method, counts)| (*method, *counts))
+            .collect();
+        let sink = self
+            .sink
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if methods.is_empty() {
+            return;
+        }
+        match sink {
+            Some(sink) => sink(&methods),
+            #[cfg(feature = "hiqlite-store")]
+            None => hiqlite::fold_into_background(&methods),
+            // Without the replicated backend nothing is ever counted here.
+            #[cfg(not(feature = "hiqlite-store"))]
+            None => {}
+        }
+    }
+}
+
+/// The most distinct Store-method labels one request records. A request that
+/// touches more folds the rest into [`METHOD_OVERFLOW_LABEL`], so a request's
+/// map (and the `methods=` log line built from it) is bounded whatever the
+/// call graph does. The widest request measured touches fewer than 40.
+pub const MAX_METHODS_PER_REQUEST: usize = 128;
+
+/// The label the operations of a request's 129th and later distinct methods
+/// are counted under.
+pub const METHOD_OVERFLOW_LABEL: &str = "other";
+
+/// Operations by Store method for one request: (local, authority, write)
+/// in [`HttpStoreOperationCounts::snapshot`]'s class order.
+#[derive(Default)]
+struct MethodOperationCounts {
+    by_method: std::collections::BTreeMap<&'static str, [u64; 3]>,
+}
+
+impl MethodOperationCounts {
+    fn record(&mut self, method: &'static str, class_index: usize) {
+        // A request keeps its first MAX_METHODS_PER_REQUEST methods and the
+        // overflow label beside them.
+        self.record_capped(method, class_index, MAX_METHODS_PER_REQUEST + 1);
+    }
+
+    /// Record under an exact bound: the map never holds more than `cap`
+    /// keys, the overflow label included. A new method is admitted while a
+    /// slot is left for [`METHOD_OVERFLOW_LABEL`]; past that it is counted
+    /// under the overflow label, so the counts always sum to the operations
+    /// recorded.
+    fn record_capped(&mut self, method: &'static str, class_index: usize, cap: usize) {
+        self.record_capped_n(method, class_index, 1, cap);
+    }
+
+    /// [`Self::record_capped`] for `count` operations at once.
+    fn record_capped_n(
+        &mut self,
+        method: &'static str,
+        class_index: usize,
+        count: u64,
+        cap: usize,
+    ) {
+        let key = if self.by_method.contains_key(method) || self.by_method.len() + 1 < cap {
+            method
+        } else {
+            METHOD_OVERFLOW_LABEL
+        };
+        let cell = self.by_method.entry(key).or_default();
+        cell[class_index] = cell[class_index].saturating_add(count);
+    }
 }
 
 impl HttpStoreOperationCounts {
@@ -6007,15 +6604,74 @@ impl HttpStoreOperationCounts {
         self.watch_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// [`Self::snapshot`] split by the Store method that issued each
+    /// operation, sorted by method name; each entry is `(method, [local,
+    /// authority, write])`. The entries sum to [`Self::snapshot`]. A method
+    /// beyond [`MAX_METHODS_PER_REQUEST`] distinct ones is counted under
+    /// [`METHOD_OVERFLOW_LABEL`].
+    #[must_use]
+    pub fn method_snapshot(&self) -> Vec<(&'static str, [u64; 3])> {
+        let methods = self
+            .methods
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        methods
+            .by_method
+            .iter()
+            .map(|(method, counts)| (*method, *counts))
+            .collect()
+    }
+
+    /// What this request did since `before`, a snapshot taken earlier from
+    /// [`Self::method_snapshot`], by Store method; only methods that did
+    /// something. The create budget line and the owner's start line log
+    /// this, so they describe their own window and not the whole request.
+    #[must_use]
+    pub fn method_snapshot_since(
+        &self,
+        before: &[(&'static str, [u64; 3])],
+    ) -> Vec<(&'static str, [u64; 3])> {
+        self.method_snapshot()
+            .into_iter()
+            .filter_map(|(method, now)| {
+                let was = before
+                    .iter()
+                    .find(|(name, _)| *name == method)
+                    .map_or([0; 3], |(_, counts)| *counts);
+                let delta = std::array::from_fn(|class| now[class].saturating_sub(was[class]));
+                (delta != [0; 3]).then_some((method, delta))
+            })
+            .collect()
+    }
+
+    /// Send these counts, split by method, to `sink` once, when the last
+    /// clone of them is dropped — after the handler and after any task it
+    /// spawned in this scope have finished. Without a sink they fold into
+    /// the process-wide background table. Replaces any earlier sink.
+    pub fn fold_methods_into(
+        &self,
+        sink: impl FnOnce(&[(&'static str, [u64; 3])]) + Send + 'static,
+    ) {
+        *self
+            .flush
+            .sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(sink));
+    }
+
     /// Summed wall time of every operation counted in [`Self::snapshot`].
     #[must_use]
     pub fn store_time(&self) -> std::time::Duration {
         std::time::Duration::from_nanos(self.store_nanos.load(std::sync::atomic::Ordering::Relaxed))
     }
 
-    fn record(&self, class_index: usize, elapsed: std::time::Duration) {
+    fn record(&self, class_index: usize, method: &'static str, elapsed: std::time::Duration) {
         use std::sync::atomic::Ordering;
 
+        self.methods
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record(method, class_index);
         let _ =
             self.counts[class_index].try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 (current != u64::MAX).then(|| current.saturating_add(1))
@@ -6027,6 +6683,18 @@ impl HttpStoreOperationCounts {
                 Some(current.saturating_add(nanos))
             });
     }
+}
+
+/// Render [`HttpStoreOperationCounts::method_snapshot`]-shaped counts as the
+/// `method=authority/local/write` list a log line carries, in the order the
+/// create budget line prints its totals.
+#[must_use]
+pub fn format_method_counts(methods: &[(&'static str, [u64; 3])]) -> String {
+    methods
+        .iter()
+        .map(|(method, [local, authority, write])| format!("{method}={authority}/{local}/{write}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 tokio::task_local! {
@@ -6049,8 +6717,33 @@ pub fn scope_http_store_operations<T>(
     HTTP_STORE_OPERATION_COUNTS.scope(counts, Box::pin(future))
 }
 
-pub(super) fn record_http_store_operation(class_index: usize, elapsed: std::time::Duration) {
-    let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index, elapsed));
+/// Spawn a detached task that counts its Store operations into the request
+/// that spawned it. A task-local scope is not inherited by `tokio::spawn`, so
+/// a bare spawn makes every operation inside it count nowhere, and an absent
+/// operation looks like a saved one. `make` gets the request's counts (a fresh
+/// set outside any request) so the task can report its own window with
+/// [`HttpStoreOperationCounts::method_snapshot_since`].
+pub fn spawn_in_http_store_scope<F, Fut>(make: F) -> tokio::task::JoinHandle<Fut::Output>
+where
+    F: FnOnce(HttpStoreOperationCounts) -> Fut,
+    Fut: std::future::Future + Send + 'static,
+    Fut::Output: Send + 'static,
+{
+    let counts = current_http_store_operations().unwrap_or_default();
+    tokio::spawn(scope_http_store_operations(counts.clone(), make(counts)))
+}
+
+/// Count one replicated operation into the current request. Returns whether
+/// a request scope took it: an operation outside any scope is the caller's to
+/// attribute as background work.
+pub(super) fn record_http_store_operation(
+    class_index: usize,
+    method: &'static str,
+    elapsed: std::time::Duration,
+) -> bool {
+    HTTP_STORE_OPERATION_COUNTS
+        .try_with(|counts| counts.record(class_index, method, elapsed))
+        .is_ok()
 }
 
 /// Count one watch-state read into the current request, if any. Called by
@@ -6514,6 +7207,27 @@ impl CatalogueReader {
         self.authority.get_item(id).await
     }
 
+    /// Offloaded leaves under each container, from the bounded replica when
+    /// it is proven fresh enough, like the item reads beside it.
+    pub async fn offloaded_leaf_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, crate::domain::LeafOffload>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let owned = ids.to_vec();
+            if let Some(result) = self
+                .bounded(
+                    move |store| async move { store.local_offloaded_leaf_counts(&owned).await },
+                )
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority.offloaded_leaf_counts(ids).await
+    }
+
     pub async fn get_item_children(&self, parent_id: i64) -> Result<Vec<Item>, StoreError> {
         #[cfg(feature = "hiqlite-store")]
         if let Some(result) = self
@@ -6533,6 +7247,26 @@ impl CatalogueReader {
         limit: i64,
         genre: Option<&str>,
     ) -> Result<ItemPage, StoreError> {
+        self.list_top_items_filtered(
+            library_id,
+            sort,
+            offset,
+            limit,
+            genre,
+            crate::domain::ItemPresence::Everything,
+        )
+        .await
+    }
+
+    pub async fn list_top_items_filtered(
+        &self,
+        library_id: i64,
+        sort: ItemSort,
+        offset: i64,
+        limit: i64,
+        genre: Option<&str>,
+        presence: crate::domain::ItemPresence,
+    ) -> Result<ItemPage, StoreError> {
         // Both the existing Authority implementation and this local variant
         // read the page and count in separate statements. The bounded permit
         // covers that whole operation but deliberately does not promise a
@@ -6549,6 +7283,7 @@ impl CatalogueReader {
                             offset,
                             limit,
                             genre.as_deref(),
+                            presence,
                         )
                         .await
                 })
@@ -6558,7 +7293,7 @@ impl CatalogueReader {
             }
         }
         self.authority
-            .list_top_items_in_genre(library_id, sort, offset, limit, genre)
+            .list_top_items_filtered(library_id, sort, offset, limit, genre, presence)
             .await
     }
 
@@ -6690,7 +7425,7 @@ impl CatalogueReader {
         // is not a new transaction spanning these independent aggregates.
         #[cfg(feature = "hiqlite-store")]
         if let Some(result) = self
-            .bounded(|store| async move { store.local_media_shape().await })
+            .bounded(|store| async move { store.local_media_shape("media_shape").await })
             .await
         {
             return Ok(result);
@@ -6782,3 +7517,6 @@ mod item_sort_order_tests;
 
 #[cfg(test)]
 mod sharing_recovery_principal_tests;
+
+#[cfg(test)]
+mod http_operation_method_tests;

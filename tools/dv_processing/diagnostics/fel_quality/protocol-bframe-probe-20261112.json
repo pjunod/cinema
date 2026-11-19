@@ -1,0 +1,11 @@
+{"schema":1,"id":"protocol-bframe-probe-20261112","status":"Fixed before any output. Diagnostic only; cannot be admitted (frozen author refuses reordered samples).",
+ "baseline":"protocol-roi-zeromean-qpm6-20261111.json arm_Z6 (identical_to protocol-roi-zeromean-20261111.json; dark block < 1.0 nit; zero-mean)",
+ "dark_offset":"-6 QP (qoffset -6/63)",
+ "arms":{"B10":"bf=4; x265-params += b-adapt=2:b-pyramid=1:weightb=1:b-intra=1:pbratio=1.0","B13":"as B10 with pbratio=1.3"},
+ "rate":"encoded mp4 video packet average + (baseline authored - baseline encoded) must land in [128.5,130.0]; same secant rule",
+ "scoring":"decoded frames in presentation order as unbound lattice candidate; per-frame slice type reported",
+ "decision":"pooled full mean <= landed Z6 * 0.95 on both fixtures, frames-beating-F >= landed Z6 => propose author change; else B-frames closed",
+ "not_claimed":["an authored or playable stream","admission","HRD/CPB conformance"],
+ "amendment_1":"Before any valid output (2026-11-12): the baseline x265-params carries bframes=0, which libx265.c applies after bf, so bf=4 alone left both first attempts P-only and byte-identical (kept under logs/refused-bframes-ineffective). Both arms therefore also append bframes=4 to x265-params. Required receipt: encoder info bframes=4 and B pictures present in presentation order.",
+ "amendment_2":"Before any valid output (Fable review 2026-11-12): (a) only an in-band landing is read; (b) the arm is accepted at the common bar of protocol-aq-psy-20261112.json and is then eligible for a stack; the 0.95 x Z6 rule is kept only as the trigger for re-baselining on B-frames (proposing the author change); (c) pooled mean and shadow-p99 wins are also reported by picture type (I/P/B, presentation order), and the B-picture stratum must be no worse than Z6 on the same frames."}
+

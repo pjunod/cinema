@@ -861,10 +861,18 @@ final class LiveTvTests: XCTestCase {
     /// without a "Leaves Developer" line.
     func testPlaybackOwnsTheGraduatedPauseAndHandoffSwitches() throws {
         let settings = try Self.appleSource("SettingsView.swift")
+        // One definition of the rows: under Playback on iPhone and iPad, under
+        // Advanced (the Developer category) on Apple TV.
+        let rows = try XCTUnwrap(settings.components(separatedBy: "@ViewBuilder private var playbackEngineeringRows: some View {").last)
+            .components(separatedBy: "\n    }\n")[0]
+        XCTAssertTrue(rows.contains("Toggle(\"Bounded pause/resume\", isOn: $boundedResumeEnabled)"))
+        XCTAssertTrue(rows.contains("Toggle(\"Prepared quality handoff\", isOn: $preparedHandoffEnabled)"))
+        XCTAssertTrue(rows.contains("{ PlaybackHandoffDetailsView() }"))
         let playback = try XCTUnwrap(settings.components(separatedBy: "Text(\"Playback\")").first)
-        XCTAssertTrue(playback.contains("Toggle(\"Bounded pause/resume\", isOn: $boundedResumeEnabled)"))
-        XCTAssertTrue(playback.contains("Toggle(\"Prepared quality handoff\", isOn: $preparedHandoffEnabled)"))
-        XCTAssertTrue(playback.contains("{ PlaybackHandoffDetailsView() }"))
+        XCTAssertTrue(playback.contains("#if !os(tvOS)\n                playbackEngineeringRows\n                #endif"))
+        let advanced = try XCTUnwrap(settings.components(separatedBy: "Text(TVSettingsCategory.developer.title)").first)
+            .components(separatedBy: "Section {").last ?? ""
+        XCTAssertTrue(advanced.contains("playbackEngineeringRows"))
         XCTAssertEqual(settings.components(separatedBy: "@AppStorage(\"plurx.boundedResume\") private var boundedResumeEnabled = true").count - 1, 2)
         XCTAssertEqual(settings.components(separatedBy: "@AppStorage(\"plurx.preparedHandoff\") private var preparedHandoffEnabled = true").count - 1, 2)
         let details = try XCTUnwrap(settings.components(separatedBy: "struct PlaybackHandoffDetailsView: View {").last)
@@ -887,7 +895,9 @@ final class LiveTvTests: XCTestCase {
     /// row that pushes the screen, on iOS and tvOS alike.
     func testSettingsReachesLiveTvSettingsLikeDeveloper() throws {
         let settings = try Self.appleSource("SettingsView.swift")
-        let link = "NavigationLink(\"On/off, tuner, guide, recording and Library channels\") { LiveTvSettingsView() }"
+        let link = "NavigationLink(liveTvSetupLabel) { LiveTvSettingsView() }"
+        XCTAssertTrue(settings.contains("return \"Live TV, guide and recording setup\""))
+        XCTAssertTrue(settings.contains("return \"On/off, tuner, guide, recording and Library channels\""))
         XCTAssertEqual(settings.components(separatedBy: link).count - 1, 1)
         let section = try XCTUnwrap(settings.range(of: link))
         let before = settings[..<section.lowerBound]
@@ -898,7 +908,8 @@ final class LiveTvTests: XCTestCase {
             XCTAssertGreaterThan(lastEnd!.lowerBound, lastCondition.lowerBound,
                                  "the Live TV settings row must not be platform-conditional")
         }
-        XCTAssertTrue(settings.contains("NavigationLink(\"Shared libraries, Cinema remotes and other features awaiting evidence\") { LiveTvDeveloperView() }"))
+        XCTAssertEqual(settings.components(separatedBy: "NavigationLink(testedFeaturesLabel) { LiveTvDeveloperView() }").count - 1, 2)
+        XCTAssertTrue(settings.contains("return \"Features still being tested\""))
         XCTAssertFalse(settings.contains("Enable Live TV"), "Enable Live TV graduated to Settings → Live TV")
     }
 
@@ -1571,7 +1582,17 @@ final class LiveTvTests: XCTestCase {
 
         // 3. Selecting a channel disabled every row while the tune ran and
         //    threw focus onto the toolbar. `busy` is checked in the action.
-        XCTAssertTrue(source.contains("Button { if !live.busy { selectAiring(channel) } } label: {"))
+        //    Select on a row watches full screen in the same press, through
+        //    the one tune path and the one presentation flag.
+        XCTAssertTrue(source.contains("Button { if !live.busy { watchFullScreen(channel) } } label: {"))
+        let watchFullScreen = source
+            .components(separatedBy: "private func watchFullScreen(_ channel: LiveTvChannel) {")[1]
+            .components(separatedBy: "private func selectAiring(")[0]
+        XCTAssertTrue(watchFullScreen.contains("await live.watch(channel)\n                closeSurfaceIfSessionFinished()"),
+                      "a tune that returns without a session must not strand the cover")
+        XCTAssertTrue(watchFullScreen.contains("fullscreen = true"))
+        XCTAssertTrue(watchFullScreen.contains("guard !fullscreen else { selectAiring(channel); return }"),
+                      "inside the cover the temporary guide keeps its own answer")
         let tvList = source
             .components(separatedBy: "private var tvChannelList: some View {")[1]
             .components(separatedBy: "private var channelFocusIdentity: String {")[0]
@@ -2915,12 +2936,17 @@ final class LiveTvTests: XCTestCase {
         // one start — so this counts the starts a stub lease actually sees.
         let requests = LiveTvCountingRequests()
         let controller = LiveTvPlayerController.testing(requests: requests)
-        controller.requestChannel(channel)
-        controller.requestChannel(channel)
-        controller.requestChannel(channel)
-        try await Task.sleep(nanoseconds: UInt64(LiveTvInputRouting.channelCoalesceMilliseconds + 250) * 1_000_000)
+        let first = controller.requestChannel(channel)
+        let second = controller.requestChannel(channel)
+        let last = controller.requestChannel(channel)
+        // Settle every submitted task, including the superseded requests.
+        // A fixed sleep races the debounce task on a loaded simulator.
+        await first.value
+        await second.value
+        await last.value
         XCTAssertEqual(requests.starts, 1, "three presses inside the window are one tuner start")
         XCTAssertEqual(LiveTvInputRouting.channelCoalesceMilliseconds, 350)
+        await controller.stop()
     }
 
     func testGuideFollowingNowAdvancesAfterIdleWithoutOverridingManualPaging() {

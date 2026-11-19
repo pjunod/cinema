@@ -97,6 +97,8 @@ impl TranscodeManager {
             dir: artifact.directory.clone(),
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen),
+            fallback_analysis_interest: std::sync::Mutex::new(None),
+            source_request: None,
             rolling_provenance: None,
             rolling_collection: None,
             rolling_artifact: Some(Arc::clone(&artifact)),

@@ -72,7 +72,7 @@ async fn manual_copy_queued_metadata_and_unsupported_versions_refuse_before_publ
     let active = crate::background_jobs::ActiveBackgroundJob::start(
         Arc::clone(&store), Arc::new(CopyPreparationAuthority), claimed.token.clone().expect("token"),
         tokio::time::Instant::now() + Duration::from_secs(30), JobKind::CopyOutputPrepare,
-    ).expect("owner");
+    ).await.expect("owner");
     let admission = manager.admit_fragment().await.expect("background admission");
     let error = manager.produce_copy_output_job(&current, &claimed, active.fence(),
         &admission, Instant::now() + Duration::from_secs(20)).await.expect_err("metadata refusal");
@@ -153,7 +153,7 @@ async fn manual_copy_manager_queue_worker_and_matching_new_attachment_use_only_l
         Arc::clone(&store), Arc::new(CopyPreparationAuthority),
         claimed.token.clone().expect("token"),
         tokio::time::Instant::now() + Duration::from_secs(30), JobKind::CopyOutputPrepare,
-    ).expect("owner");
+    ).await.expect("owner");
     let admission = manager.admit_fragment().await.expect("existing background admission");
     assert!(manager.produce_copy_output_job(&file, &claimed, active.fence(),
         &admission, Instant::now() + Duration::from_secs(20)).await.expect("real copy worker"));
@@ -366,7 +366,7 @@ async fn prepared_copy_consumer(control: u8) {
     let active = crate::background_jobs::ActiveBackgroundJob::start(
         Arc::clone(&store), Arc::new(CopyPreparationAuthority), job.token.expect("token"),
         tokio::time::Instant::now() + Duration::from_secs(30), JobKind::CopyOutputPrepare,
-    ).expect("active owner");
+    ).await.expect("active owner");
     if (10..=15).contains(&control) {
         let hooks = serve.shared.test_hooks();
         let pause = match control {
@@ -553,7 +553,7 @@ async fn prepared_copy_consumer(control: u8) {
         serve.end("incumbent", Terminal::Deleted).await; active.finish().await;
         return;
     }
-    serve.try_create(VodRecipeRequest { root_admission: None, soundtrack: None, companion: None,
+    serve.try_create(VodRecipeRequest { admission_priority: crate::admission::Priority::Live, root_admission: None, soundtrack: None, companion: None,
         request: &incoming, encoding: None, measured_candidate: None,
         retained_capture: RetainedOutputCapture::Restore(Some(facts.clone())),
     }, &file, &settings(), VodAttribution { user_name: "paul", item_title: "fixture", supersession_user: "user" },
@@ -653,6 +653,35 @@ async fn disabled_queued_rows_are_cancelled_without_a_claim() {
     assert_eq!(d2_job_state(&store, &kept).await, JobState::Queued);
 }
 
+/// A4 review: the preparation lane opens on the applied view, but the drain
+/// cancels work, so it acts on the Store's switch. A view that still says
+/// copy does not save a row the Store's switch has turned off, and a view
+/// that has not applied an enable does not cancel a row the Store admits.
+#[tokio::test]
+async fn the_output_drain_acts_on_the_store_switch_not_the_view() {
+    use plurx_core::store::background_jobs::JobState;
+    use crate::vodserve::OutputPreparation;
+    let (store, file, base) = d2_store_with_file().await;
+    let view: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("view store"));
+    let jobs = Arc::new(
+        crate::state::JobManager::new(Arc::clone(&store), base.path().join("art"))
+            .with_applied_view(plurx_core::store::AppliedView::authority(Arc::clone(&view))),
+    );
+    let key = plurx_core::store::keys::VOD_OUTPUT_PREPARATION;
+
+    view.put_setting(key, OutputPreparation::COPY).await.expect("view on");
+    store.put_setting(key, OutputPreparation::OFF).await.expect("store off");
+    let cancelled = d2_queue_copy_row(&store, &file, "absent-node", "store-off").await;
+    assert_eq!(jobs.drain_output_preparation_from_store().await, 1);
+    assert_eq!(d2_job_state(&store, &cancelled).await, JobState::Cancelled);
+
+    view.put_setting(key, OutputPreparation::OFF).await.expect("view off");
+    store.put_setting(key, OutputPreparation::COPY).await.expect("store on");
+    let kept = d2_queue_copy_row(&store, &file, "absent-node", "store-on").await;
+    assert_eq!(jobs.drain_output_preparation_from_store().await, 0);
+    assert_eq!(d2_job_state(&store, &kept).await, JobState::Queued);
+}
+
 #[tokio::test]
 async fn a_row_claimed_during_the_drain_settles_and_never_stays_cancelling() {
     use plurx_core::store::background_jobs::*;
@@ -674,7 +703,15 @@ async fn a_row_claimed_during_the_drain_settles_and_never_stays_cancelling() {
                 kind: JobKind::CopyOutputPrepare, payload_version: 1, now_ms: now, dispatched_at_ms: now,
             }).await.expect("claim") {
                 ClaimOutcome::Claimed { job } => {
-                    *token.lock().expect("token slot") = job.token;
+                    // The executor accepts physical custody before the drain
+                    // cancels its claim; cancellation cannot create a new owner.
+                    let active = crate::background_jobs::ActiveBackgroundJob::start(
+                        Arc::clone(&store), Arc::new(CopyPreparationAuthority),
+                        job.token.expect("claimed owner"),
+                        tokio::time::Instant::now() + Duration::from_secs(30),
+                        JobKind::CopyOutputPrepare,
+                    ).await.expect("owner accepted before cancellation");
+                    *token.lock().expect("owner slot") = Some(active);
                 }
                 other => panic!("claim {other:?}"),
             }
@@ -691,11 +728,7 @@ async fn a_row_claimed_during_the_drain_settles_and_never_stays_cancelling() {
     );
     assert_eq!(d2_job_state(&store, &live).await, JobState::Cancelling,
         "a row claimed during the drain goes to cancelling, never back to queued");
-    let claimed = token.lock().expect("token slot").take().expect("claimed in the window");
-    let active = crate::background_jobs::ActiveBackgroundJob::start(
-        Arc::clone(&store), Arc::new(CopyPreparationAuthority), claimed,
-        tokio::time::Instant::now() + Duration::from_secs(30), JobKind::CopyOutputPrepare,
-    ).expect("owner");
+    let active = token.lock().expect("owner slot").take().expect("accepted before the drain");
     active.fence().settle(JobSettlement::Cancel).await.expect("owner settles the cancel");
     active.finish().await;
     assert_eq!(d2_job_state(&store, &live).await, JobState::Cancelled);

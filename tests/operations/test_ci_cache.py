@@ -106,6 +106,9 @@ class CiCacheContractCase(unittest.TestCase):
         self.assertNotIn("inputs.persistent-eligible", action)
         self.assertIn("scripts/ci-runner-cache-audit", action)
         self.assertIn("scripts/ci-cargo-cache-prepare", action)
+        # Container (root) and host (runner user) executors on one runner
+        # never share a cache root, so neither can own the other's lanes.
+        self.assertIn('runner_name="${runner_name}-uid$(id -u)"', action)
         self.assertIn("ensure_child_directory", prepare)
         self.assertIn("plurx-ci", prepare)
         self.assertIn("toolchain=$(rustc -Vv", action)
@@ -584,6 +587,19 @@ class CiCacheContractCase(unittest.TestCase):
             self.assertIn(
                 "filesystem floor: 214748365 KiB", summary.read_text()
             )
+
+            # A small host can lower the lane limit, and a larger setting
+            # still respects the workflow's reviewed ceiling.
+            for ceiling, expected in [(10, 10), (75, 50)]:
+                subprocess.run(
+                    [str(script), "plurx-runner-01", "50"],
+                    check=True,
+                    env={**environment, "PLURX_CI_BUILDKIT_MAX_GB": str(ceiling),
+                         "DU_AFTER_BYTES": str(5 * 1024**3)},
+                )
+                arguments = log.read_text(encoding="utf-8").splitlines()
+                self.assertEqual(arguments[arguments.index("--max-used-space") + 1],
+                                 str(expected * 1024**3))
 
             marker.unlink()
             environment.update(

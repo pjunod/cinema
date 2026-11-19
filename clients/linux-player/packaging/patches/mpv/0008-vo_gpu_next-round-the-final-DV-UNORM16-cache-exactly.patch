@@ -1,0 +1,93 @@
+diff --git a/video/out/placebo/dv_unorm16.h b/video/out/placebo/dv_unorm16.h
+new file mode 100644
+--- /dev/null
++++ b/video/out/placebo/dv_unorm16.h
+@@ -0,0 +1,52 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef MP_DV_UNORM16_H
++#define MP_DV_UNORM16_H
++
++// This computation returns the nearest integer to the exact binary32 input
++// times 65535. A float multiply before roundEven can create false ties.
++static const char dv_unorm16_glsl[] =
++    "// Exact round-to-nearest, ties-to-even of clamp(x, 0, 1) * 65535.\n"
++    "// Policy for non-finite inputs: NaN and -infinity -> 0, +infinity -> 65535.\n"
++    "// Requires only core 32-bit GLSL integer operations (including umulExtended).\n"
++    "uint exact_unorm16_code(float x)\n"
++    "{\n"
++    "    uint bits = floatBitsToUint(x);\n"
++    "    // Unsigned bit ordering also puts every negative input above +infinity.\n"
++    "    if (bits > 0x7f800000u || bits < 0x37000000u)\n"
++    "        return 0u;\n"
++    "    if (bits >= 0x3f800000u)\n"
++    "        return 65535u;\n"
++    "\n"
++    "    uint significand = 0x800000u | (bits & 0x7fffffu);\n"
++    "    uint shift = 150u - (bits >> 23u); // 23 - unbiased exponent, in [24, 40]\n"
++    "    uint hi, lo;\n"
++    "    umulExtended(significand, 65535u, hi, lo);\n"
++    "\n"
++    "    uint code;\n"
++    "    uint guardWord;\n"
++    "    uint guardMask;\n"
++    "    bool lowSticky;\n"
++    "    if (shift > 32u) {\n"
++    "        uint highShift = shift - 32u;\n"
++    "        code = hi >> highShift;\n"
++    "        guardWord = hi;\n"
++    "        guardMask = 1u << (highShift - 1u);\n"
++    "        lowSticky = lo != 0u;\n"
++    "    } else {\n"
++    "        code = hi;\n"
++    "        if (shift < 32u)\n"
++    "            code = (hi << (32u - shift)) | (lo >> shift);\n"
++    "        guardWord = lo;\n"
++    "        guardMask = 1u << (shift - 1u);\n"
++    "        lowSticky = false;\n"
++    "    }\n"
++    "    bool guard = (guardWord & guardMask) != 0u;\n"
++    "    bool sticky = lowSticky || (guardWord & (guardMask - 1u)) != 0u;\n"
++    "    bool increment = guard && (sticky || (code & 1u) != 0u);\n"
++    "    return code + (increment ? 1u : 0u);\n"
++    "}\n"
++    "\n"
++    "// At an observed UNORM16 render target, store float(exact_unorm16_code(x)) / 65535.0.\n"
++    "// An integer R16/RGBA16 container can take the returned integer directly.\n";
++
++#endif
+diff --git a/video/out/placebo/plurx_dv.c b/video/out/placebo/plurx_dv.c
+--- a/video/out/placebo/plurx_dv.c
++++ b/video/out/placebo/plurx_dv.c
+@@ -35,6 +35,7 @@
+ 
+ #include "plurx_dv.h"
+ #include "dv_reconstruction.h"
++#include "dv_unorm16.h"
+ #include "video/mp_image.h"
+ 
+ // ------------------------------------------------------------------ target
+@@ -514,6 +515,24 @@
+             });
+             pl_shader_delinearize(sh, &pq);
+         }
++        // The Linux launcher uses Vulkan. Apply exact rounding only to the
++        // final 16-bit normalized cache, after any absolute-brightness gain.
++        const pl_fmt cache_fmt = s->mapped->params.format;
++        if (dv->gpu->glsl.vulkan && cache_fmt->type == PL_FMT_UNORM &&
++            cache_fmt->num_components == 4 && cache_fmt->component_depth[0] == 16 &&
++            cache_fmt->component_depth[1] == 16 && cache_fmt->component_depth[2] == 16 &&
++            cache_fmt->component_depth[3] == 16) {
++            if (!pl_shader_custom(sh, &(struct pl_custom_shader) {
++                    .description = "plurx mapped RGB UNORM16 rounding",
++                    .input = PL_SHADER_SIG_COLOR, .output = PL_SHADER_SIG_COLOR,
++                    .header = dv_unorm16_glsl,
++                    .body = "color.rgb = vec3(exact_unorm16_code(color.r), "
++                            "exact_unorm16_code(color.g), exact_unorm16_code(color.b)) / 65535.0;\n",
++                })) {
++                pl_dispatch_abort(dv->copy, &sh);
++                return refuse(why, "rounding the mapped RGB cache failed");
++            }
++        }
+         if (!pl_dispatch_finish(dv->copy, pl_dispatch_params(.shader = &sh, .target = s->mapped)))
+             return refuse(why, "copying the mapped frame failed");
+         s->mapped_target = *t;

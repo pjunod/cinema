@@ -2704,6 +2704,7 @@ pub struct ResolvedTranscode {
     /// Which artifact identity this plan's output belongs to. Set from the
     /// policy snapshot at resolution, never from anything observed afterwards.
     artifact_qualification: ArtifactQualification,
+    enhancement_rate: Option<super::EnhancementRateEnvelope>,
     decode: ResolvedDecode,
     encoder: Encoder,
     options: TranscodeMediaOptions,
@@ -2762,6 +2763,9 @@ impl<'a> CompletedReconstructedOutputPlan<'a> {
     }
     pub fn encode_args(&self, bitrate_kbps: u32, force_idr: bool) -> Vec<String> {
         let mut args = self.codec.encode_args(bitrate_kbps, force_idr, Some(1));
+        if let Some(envelope) = self.source.enhancement_rate {
+            envelope.apply_args(&mut args, self.encoder());
+        }
         args.extend(self.vaapi_hdr_policy.into_iter().flat_map(|policy| {
             if self.reconstructed_profile81 {
                 policy.reconstructed_profile81_flags()
@@ -2803,6 +2807,21 @@ impl ResolvedTranscode {
         Some(bytes)
     }
 
+    pub fn enhancement_rate_envelope(&self) -> Option<super::EnhancementRateEnvelope> {
+        self.enhancement_rate
+    }
+    pub fn with_enhancement_rate_envelope(
+        mut self,
+        envelope: super::EnhancementRateEnvelope,
+    ) -> Result<Self, &'static str> {
+        if self.options.video_bitrate_kbps != envelope.target_kbps()
+            || self.output_contract.output_codec() != "hevc"
+        {
+            return Err("enhancement envelope differs from resolved video plan");
+        }
+        self.enhancement_rate = Some(envelope);
+        Ok(self)
+    }
     /// Select only the encode half of an independently reconstructed PQ route.
     /// Source binding, decode, ordinary options and their digest stay unchanged.
     pub fn completed_reconstructed_output(
@@ -3091,6 +3110,12 @@ impl ResolvedTranscode {
                     proof.cadence().denominator()
                 )
                 .as_bytes(),
+            );
+        }
+        if let Some(envelope) = self.enhancement_rate {
+            feed(
+                "enhancement_rate_envelope_v2",
+                envelope.identity().as_bytes(),
             );
         }
         let options = &self.options;
@@ -3997,6 +4022,7 @@ pub fn resolve_transcode(
         super::output_metadata_policy_for(options.pipeline, options.tone_map, facts.is_hdr());
     Ok(ResolvedTranscode {
         artifact_qualification: policy.artifact_qualification(),
+        enhancement_rate: None,
         decode: ResolvedDecode {
             backend,
             software_decoder,
@@ -4640,8 +4666,8 @@ fn preferred_backend(
         }
         _ => {}
     }
-    let heavy = matches!(facts.codec(), Some("hevc" | "h265" | "hevc10"))
-        && (facts.is_hdr() || facts.height().is_some_and(|height| height >= 2160));
+    let heavy =
+        super::heavy_hevc_source(facts.codec(), facts.is_hdr(), facts.width(), facts.height());
     let backend = match encoder {
         Encoder::Software => DecodeBackend::Software,
         Encoder::Nvenc => DecodeBackend::Cuda,

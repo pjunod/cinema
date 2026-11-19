@@ -437,14 +437,14 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 | 9 | `vod_transcode_unavailable` | start | `stopped` | yes | class default | – |  |
 | 10 | `vod_subtitle_burn_unavailable` | start | `stopped` | yes | class default | – |  |
 | 11 | `vod_disabled` | start | `stopped` | yes | class default | – |  |
-| 12 | `create_503_not_yet` | start | `preparing` | no | class default | – | codes: `startup_timeout` · `media_owner_transition` · `vod_index_pending` · `vod_engine_unattested` · `transcode_capacity_pending` · `quality_catalog_unavailable`; retryable by the owner (M5) |
+| 12 | `create_503_not_yet` | start | `preparing` | no | class default | – | codes: `startup_timeout` · `media_owner_transition` · `vod_index_pending` · `vod_engine_unattested` · `transcode_capacity_pending` · `media_session_overloaded` · `quality_catalog_unavailable`; retryable by the owner (M5) |
 | 13 | `client_preparing` | any | `preparing` | no | class default | – |  |
 | 14 | `change_failed` | change | `refused` | no | `retry` | – |  |
 | 15 | `segment_503_not_yet` | attached | `recovering` | no | class default | – | codes: `startup_timeout` · `playlist_state_changed` · `segment_pending` · `segment_wait_busy` · `node_wait_capacity` · `media_owner_transition` · `vod_resurrection_unavailable` · `response_owner_transition` · `response_state_changed` · `response_owner_reclassification_unavailable` · `response_publication_timeout` · `response_completion_capacity` · `response_snapshot_capacity` · `node_maintenance` · `node_removal_fenced` · `learner_route_ineligible` |
 | 16 | `media_owner_lost_410` | any | `recovering` | no | class default | – | re-classes to `stopped` when the owner stops; carries `position_ms` |
 | 17 | `control_hold` | attached | `hold` | no | class default | – |  |
 | 18 | `system_interruption` | attached | `hold` | no | class default | `system_resumed` |  |
-| 19 | `media_waiting` | attached | `buffering` | no | class default | – |  |
+| 19 | `media_waiting` | attached | `buffering` | no | class default | `presenting` · `playback_not_requested` · `intent_settled` · `intent_superseded` · `attached_retired` |  |
 | 20 | `owner_recovery_step` | any | `recovering` | no | class default | – |  |
 | 21 | `readiness_deadline_rungs_left` | any | `recovering` | no | class default | – |  |
 | 22 | `decoder_failed` | any | `stopped` | yes | class default | – |  |
@@ -452,6 +452,7 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 | 24 | `repeated_early_end` | attached | `stopped` | yes | class default | – |  |
 | 25 | `degraded_notice` | any | `degraded` | no | class default | – |  |
 | 26 | `log_only` | any | *(log only)* | no | class default | – |  |
+| 27 | `create_capacity_terminal` | start | `stopped` | yes | class default | – | codes: `transcode_height_unavailable` · `transcode_scratch_exhausted` · `replacement_expired` |
 
 | Fixture error | Meaning |
 |---|---|
@@ -465,6 +466,7 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 - A retirement reason normally comes from the CLASS, but a source may declare an explicit `retired_by` override when its lifecycle is narrower. `system_interruption` uses that override because `system_resumed` retires that hold without retiring unrelated holds. `attached_retired` is an identity rule rather than either kind of retirement declaration, and the note above says why.
 - `owner_success: G` is the recovery owner reporting that its recovery produced attached generation G. There is one recovery owner per player, so it retires every `recovering` fault, not only the ones about the generation it replaced.
 - `playback_not_requested` is the viewer no longer wanting media. A `buffering` fault is about a player that WANTS it — the wait is only a wait while something is trying to play — so a pause makes the fault about nothing and it is retired. It is on `buffering` and on no other class: a `preparing` start has not been paused by a viewer who has not seen it yet, and a blocking prompt is answered by the viewer rather than by a transport change. Resuming raises nothing back; the raise sites decide what comes back, which is the same rule every other retirement follows.
+- observation_unavailable carries an observation owner plus exact attached generation and viewer intent (including null). It withdraws only explicitly tagged client_preparing, media_waiting, owner_recovery_step or readiness_deadline_rungs_left faults in preparing/buffering/recovering; never authority, player_stopped faults, presentation proof, or owner success.
 
 <!-- contract:surface-sources:end -->
 
@@ -523,7 +525,7 @@ presenter adds no detector and never infers from an event:
   current `mediaMutationEpoch`, foreground, `playWhenReady` true.
 
 A fault with an `intent` is never retired by evidence alone: the destination
-must settle (`markPlaybackControlSeekExecuted` / seek generation settled /
+must settle (`settlePlaybackControlSeek` after destination proof / seek generation settled /
 `pendingSeek == null`) or be superseded. A fault about `attached` generation
 N is dropped the moment N is retired, which is the existing
 `playbackOwnsAttachedMedia` / `isSuperseded(generation)` / epoch test — that
@@ -537,6 +539,18 @@ PiP report presenting through the platform's own flags
 `webkitCurrentPlaybackTargetIsWireless`) and a hidden page samples nothing —
 a fault raised before the page was hidden is neither cleared nor promoted
 until it is visible again.
+
+An observation owner may conclude `observation_unavailable` without claiming
+presentation or recovery success. The event carries its exact `attached`
+generation, `intent` (including null), and owner; only that currently attached
+scope's explicitly tagged `observation_owner` progress faults can be withdrawn.
+Eligible sources are `client_preparing`, `media_waiting`, `owner_recovery_step`
+and `readiness_deadline_rungs_left`, in `preparing`/`buffering`/`recovering`, with
+`player_stopped=false`. Permission/server authority, stopped faults and other
+owners or intents remain. The native owner offers a nonblocking notice with
+explicit Try again / Close actions; the reducer supplies no transport effects
+or presentation/seek proof. The shared fixture exercises this event on all
+three clients.
 
 ### 3.5 The fixture
 

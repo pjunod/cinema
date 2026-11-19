@@ -54,7 +54,8 @@ final class TVNavigationTests: TVNavigationTestCase {
     func testGridToolsAndJump416() throws { try toolsJourney(itemCount: 416, presentation: "grid") }
     func testGridToolsAndJump5000() throws { try toolsJourney(itemCount: 5000, presentation: "grid") }
     func testRowsViewAllOpensGroupAndBackRestoresHeader() throws {
-        let server = try TVNavigationServer(itemCount: 416)
+        // 600 titles: about 23 per letter, more than the 20 a row shows.
+        let server = try TVNavigationServer(itemCount: 600)
         let origin = try server.start()
         defer { server.stop() }
         let app = openLibrary(origin: origin, presentation: "rows")
@@ -62,9 +63,20 @@ final class TVNavigationTests: TVNavigationTestCase {
         let first = app.buttons["item:1"]
         reachForSetup(first, in: app, limit: 6)
         assertFocus(first, in: app, context: "Rows first title before group header")
+        // The heading is text. Down from a poster reaches the next row in
+        // one press; the group action is the tile at the end of its row.
+        remote.press(.down)
+        let nextRow = app.buttons.matching(NSPredicate(format: "hasFocus == true AND identifier BEGINSWITH %@ AND label BEGINSWITH %@", "item:", "B")).firstMatch
+        XCTAssertTrue(nextRow.waitForExistence(timeout: 5), "One Down from row A must land in row B: \(app.debugDescription)")
         remote.press(.up)
+        assertFocus(first, in: app, context: "Up from row B returns to row A")
         let viewAll = app.buttons["View all A items"]
-        assertFocus(viewAll, in: app, context: "Up from first title reaches readable View all")
+        var presses = 0
+        while presses < 20 && !hasNativeFocus(viewAll, in: app) {
+            remote.press(.right)
+            presses += 1
+        }
+        assertFocus(viewAll, in: app, context: "At most 20 Right presses reach row A's All tile")
         remote.press(.select)
         let groupTools = app.buttons["group:tools"]
         reachForSetup(groupTools, in: app, limit: 4)
@@ -146,6 +158,11 @@ final class TVNavigationTests: TVNavigationTestCase {
         defer { server.stop() }
         let app = openLibrary(origin: origin, presentation: presentation)
         defer { app.terminate() }
+        if presentation == "rows" && itemCount == 416 {
+            // 16 titles a letter: the whole group is in its row, so no tile.
+            XCTAssertTrue(app.buttons["item:1"].waitForExistence(timeout: 10), app.debugDescription)
+            XCTAssertFalse(app.buttons["View all A items"].exists, "A row of 20 or fewer titles has no All tile")
+        }
         var previousGroup = (letter: "A", index: 0)
         for (letter, groupIndex) in [("A", 0), ("M", 12), ("Z", 25), ("M", 12)] {
             let jump = app.buttons["library:jump"]
@@ -167,7 +184,7 @@ final class TVNavigationTests: TVNavigationTestCase {
             let index = (groupIndex * itemCount + 25) / 26
             let item = app.buttons["item:\(index + 1)"]
             assertFocus(item, in: app, context: "Jump \(letter) focuses first item")
-            let tools = ["view", "sort", "filter", "jump"].map { app.buttons["library:" + $0] }
+            let tools = ["view", "sort", "filter", "files", "jump"].map { app.buttons["library:" + $0] }
             // Leave the jump target so the bookmark is a title the viewer chose.
             remote.press(.right)
             let focusedItem = app.buttons.matching(NSPredicate(format: "hasFocus == true AND identifier BEGINSWITH %@", "item:")).firstMatch

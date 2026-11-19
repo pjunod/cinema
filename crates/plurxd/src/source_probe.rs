@@ -1,10 +1,65 @@
 //! Admitted leaf workers never mutate catalogue identity or scan completion.
 #[cfg(target_os = "linux")]
+mod dv_refit;
+#[cfg(target_os = "linux")]
 mod dv_title;
 #[cfg(target_os = "linux")]
 pub(crate) mod fel_qualification;
 #[cfg(target_os = "linux")]
+mod refit_work;
+#[cfg(target_os = "linux")]
 mod title_work;
+
+/// The F+ statistics spool under a node's runtime cache (decision A):
+/// node-local, never replicated, listed and deleted from Developer.
+pub(crate) const REFIT_SPOOL_DIR: &str = "dv-refit";
+
+pub(crate) fn refit_spool_root(runtime_cache: &std::path::Path) -> std::path::PathBuf {
+    runtime_cache.join(REFIT_SPOOL_DIR)
+}
+
+/// (complete, bytes) per spool file.
+pub(crate) fn refit_spool_list(root: &std::path::Path) -> Vec<(bool, u64)> {
+    #[cfg(target_os = "linux")]
+    {
+        dv_refit::list(root)
+            .into_iter()
+            .map(|e| (e.complete, e.bytes))
+            .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        Vec::new()
+    }
+}
+
+pub(crate) fn refit_spool_entries(root: &std::path::Path) -> Vec<serde_json::Value> {
+    #[cfg(target_os = "linux")]
+    {
+        dv_refit::list(root)
+            .into_iter()
+            .filter_map(|e| serde_json::to_value(e).ok())
+            .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        Vec::new()
+    }
+}
+
+pub(crate) fn refit_spool_clear(root: &std::path::Path) -> std::io::Result<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        dv_refit::clear(root)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        Ok(0)
+    }
+}
 
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use dv_title::{publish_title_for_control, publish_title_with_tools_for_control};
@@ -12,7 +67,7 @@ pub(crate) use dv_title::{publish_title_for_control, publish_title_with_tools_fo
 use crate::state::AppState;
 use plurx_core::store::background_jobs_probe::{ProbeOutput, MAX_PROBE_RESULT_BYTES};
 use plurx_core::{
-    error::StoreError,
+    error::{ProbeError, StoreError},
     scan::probe,
     store::background_jobs::{
         CandidateCursor, CandidateQuery, ClaimJob, JobKind, JobPayload, JobSettlement,
@@ -43,6 +98,38 @@ async fn snapshot(path: &Path) -> Option<(i64, i64)> {
     .ok()?;
     Some((size, mtime))
 }
+/// Keep the current lane owner polled while a higher-priority admission waits.
+/// Pressure retires that owner before the pending admission can acquire its lane.
+#[cfg(target_os = "linux")]
+async fn drive_playback_admission<T>(
+    admission: impl std::future::Future<Output = T>,
+    pressure: impl std::future::Future<Output = ()>,
+    refit: &mut Option<refit_work::RefitTask>,
+    shutdown: &CancellationToken,
+) -> Option<T> {
+    tokio::pin!(admission, pressure);
+    loop {
+        let has_refit = refit.is_some();
+        let fit = async {
+            match refit.as_mut() {
+                Some(work) => work.work.as_mut().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            result = &mut admission => return Some(result),
+            _ = fit => { refit.take(); }
+            () = &mut pressure, if has_refit => {
+                if let Some(work) = refit.take() { work.stop().await; }
+            }
+            () = shutdown.cancelled() => {
+                if let Some(work) = refit.take() { work.stop().await; }
+                return None;
+            }
+        }
+    }
+}
+
 pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     let boot = uuid::Uuid::new_v4().to_string();
     let mut cursor = None;
@@ -51,10 +138,22 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     let mut title: Option<title_work::TitleTask> = None;
     #[cfg(target_os = "linux")]
     let mut title_after = 0;
+    // The F+ fit shares the title lane: it starts only when no title scan
+    // does, and either one yields to ordinary probes.
+    #[cfg(target_os = "linux")]
+    let mut refit: Option<refit_work::RefitTask> = None;
+    #[cfg(target_os = "linux")]
+    let mut refit_after = 0;
+    #[cfg(target_os = "linux")]
+    let mut live_title_after = 0;
     loop {
         if shutdown.is_cancelled() {
             #[cfg(target_os = "linux")]
             if let Some(work) = title.take() {
+                work.stop().await;
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(work) = refit.take() {
                 work.stop().await;
             }
             return;
@@ -76,8 +175,42 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 Err(error) => tracing::warn!(%error,"title priority observation unavailable"),
             }
         }
+        // An exact active playback request is considered before ordinary
+        // probe pagination, including when that pagination has more pages.
         #[cfg(target_os = "linux")]
-        let ordinary_idle = title.is_none();
+        if title.is_none() && !shutdown.is_cancelled() {
+            let requested = state.transcode.playback_qualification_requested();
+            let admission = title_work::TitleTask::start(
+                &state,
+                &boot,
+                &mut title_after,
+                &mut live_title_after,
+                true,
+            );
+            match drive_playback_admission(admission, requested, &mut refit, &shutdown).await {
+                Some(Ok(work)) => title = work,
+                Some(Err(error)) => {
+                    tracing::warn!(%error,"playback qualification demand unavailable")
+                }
+                None => continue,
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(work) = refit.as_mut() {
+            match work.should_yield(&state).await {
+                Ok(true) => {
+                    if let Some(work) = refit.take() {
+                        work.stop().await;
+                    }
+                    cursor = None;
+                    yielded = true;
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error,"F+ priority observation unavailable"),
+            }
+        }
+        #[cfg(target_os = "linux")]
+        let ordinary_idle = title.is_none() && refit.is_none();
         #[cfg(not(target_os = "linux"))]
         let ordinary_idle = true;
         let published = if ordinary_idle {
@@ -93,11 +226,30 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             false
         };
         #[cfg(target_os = "linux")]
-        if title.is_none() && cursor.is_none() && !yielded && !published && !shutdown.is_cancelled()
+        if title.is_none()
+            && refit.is_none()
+            && cursor.is_none()
+            && !yielded
+            && !published
+            && !shutdown.is_cancelled()
         {
-            match title_work::TitleTask::start(&state, &boot, &mut title_after).await {
+            match title_work::TitleTask::start(
+                &state,
+                &boot,
+                &mut title_after,
+                &mut live_title_after,
+                false,
+            )
+            .await
+            {
                 Ok(work) => title = work,
                 Err(error) => tracing::warn!(%error,"title demand unavailable"),
+            }
+            if title.is_none() {
+                match refit_work::RefitTask::start(&state, &boot, &mut refit_after).await {
+                    Ok(work) => refit = work,
+                    Err(error) => tracing::warn!(%error, "F+ demand unavailable"),
+                }
             }
         }
         #[cfg(target_os = "linux")]
@@ -108,9 +260,16 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                     None => std::future::pending().await,
                 }
             };
+            let refit_poll = async {
+                match refit.as_mut() {
+                    Some(work) => work.work.as_mut().await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 () = shutdown.cancelled() => {},
                 _ = title_poll => { title = None; },
+                _ = refit_poll => { refit = None; },
                 () = tokio::time::sleep(idle.after_completion(published)) => {},
             }
         }
@@ -140,6 +299,7 @@ async fn pass(
             after: cursor.clone(),
             now_ms: now_ms(),
             limit: 128,
+            admissible_only: false,
         })
         .await?;
     page.jobs
@@ -234,7 +394,9 @@ async fn pass(
             token,
             deadline,
             JobKind::MediaProbe,
-        ) {
+        )
+        .await
+        {
             Ok(active) => active,
             Err(error) => {
                 tracing::warn!(%error, "probe heartbeat failed");
@@ -292,13 +454,93 @@ async fn execute(
             .jobs
             .start_probe_progress(token, file.id, file.size.max(0) as u64)
     });
-    let result = run_admitted_probe(
+    let source_version = crate::fragment_index_cluster::inspect_source(&file)
+        .await
+        .ok();
+    let probe_digest = match &payload {
+        JobPayload::MediaProbe { probe_digest, .. } => probe_digest,
+        _ => unreachable!(),
+    };
+    let result = run_source_admitted_probe(
         &state.transcode,
         &admission,
         &cancel,
         shutdown,
         progress.as_ref(),
-        probe::probe_single_threaded(&file.path),
+        &fence,
+        || async {
+            source_version.is_some()
+                && crate::fragment_index_cluster::inspect_source(&file)
+                    .await
+                    .ok()
+                    == source_version
+                && probe::pipeline_digest().await.as_ref() == Some(probe_digest)
+        },
+        async {
+            let input =
+                crate::source_input::SourceInput::open_background(&file, fence.source_budget())
+                    .await
+                    .map_err(|reason| ProbeError::Transient {
+                        path: file.path.display().to_string(),
+                        reason,
+                    })?;
+            let result = plurx_core::process::source_lifetime::mediated(
+                probe::probe_single_threaded(std::path::Path::new(input.url())),
+            )
+            .await;
+            // FFprobe reads through the bridge: a failed source read reaches
+            // it as truncated input, so its refusal is not a file verdict.
+            let result = match result {
+                Err(error) if error.is_file_verdict() && input.source_read_failed() => {
+                    Err(ProbeError::Transient {
+                        path: file.path.display().to_string(),
+                        reason: format!("source read failed during probe: {error}"),
+                    })
+                }
+                other => other,
+            };
+            input
+                .close_and_wait()
+                .await
+                .map_err(|error| ProbeError::Transient {
+                    path: file.path.display().to_string(),
+                    reason: format!("joining probe source input: {error}"),
+                })?;
+            let mut result = result?;
+            if source_version.is_none()
+                || crate::fragment_index_cluster::inspect_source(&file)
+                    .await
+                    .ok()
+                    != source_version
+            {
+                return Err(ProbeError::Transient {
+                    path: file.path.display().to_string(),
+                    reason: "source changed during admitted probe".into(),
+                });
+            }
+            // The private capability URL deliberately has no media extension.
+            // Preserve the catalog container classification from the real path.
+            if let Some(raw) = result.raw_json.as_deref() {
+                if let Ok(mut document) = serde_json::from_str::<serde_json::Value>(raw) {
+                    if let Some(format) = document
+                        .get_mut("format")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        format.insert(
+                            "filename".into(),
+                            serde_json::Value::String(file.path.to_string_lossy().into_owned()),
+                        );
+                    }
+                    result.raw_json = serde_json::to_string(&document).ok();
+                }
+            }
+            result.container = file
+                .path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(str::to_lowercase);
+            Ok(result)
+        },
     )
     .await;
     // Bounded process cancellation kills and reaps before returning above.
@@ -348,6 +590,17 @@ async fn execute(
                     }
                 }
             }
+            // FFprobe ran to completion on reads that all succeeded and
+            // refused this exact file. The verdict settles this generation
+            // (the next coordinator pass or a changed file enqueues anew);
+            // retrying it only keeps every waiter (an admin reanalyze, a scan
+            // page) queued to its deadline.
+            Err(error) if error.is_file_verdict() => {
+                tracing::warn!(job=job.id,%error,"leaf probe refused the file");
+                Some(JobSettlement::Fail {
+                    error_code: "probe_refused".into(),
+                })
+            }
             Err(error) => {
                 tracing::warn!(job=job.id,%error,"leaf probe failed");
                 Some(JobSettlement::Retry {
@@ -373,6 +626,7 @@ async fn execute(
 /// collector. Cooperative completion joins the original child and pipes.
 /// Abrupt Drop retains the original admission in their actual cleanup tasks
 /// and persistently fences readiness as Unknown; it proves no native absence.
+#[cfg(any(not(target_os = "linux"), test))]
 async fn run_admitted_probe<F, T, E>(
     transcode: &crate::transcode::TranscodeManager,
     admission: &Arc<crate::transcode::FragmentAdmission>,
@@ -405,9 +659,307 @@ where
     }
 }
 
+/// Source pressure suspends the exact owned scan; CPU/GPU preemption keeps
+/// the ordinary cancel-and-reap policy. The ledger, never the notification,
+/// authorizes slot release/reacquisition under the existing job fence.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owned scan retains both physical and durable controls plus source/tool identity validation"
+)]
+pub(crate) async fn run_source_admitted_probe<F, T, E, V, VF>(
+    transcode: &crate::transcode::TranscodeManager,
+    admission: &Arc<crate::transcode::FragmentAdmission>,
+    cancel: &CancellationToken,
+    shutdown: &CancellationToken,
+    progress: Option<&crate::state::AnalysisProgressGuard>,
+    fence: &crate::background_jobs::JobFence,
+    validate_resume: V,
+    work: F,
+) -> Result<T, E>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    V: Fn() -> VF,
+    VF: std::future::Future<Output = bool>,
+{
+    let source_budget = fence.source_budget();
+    let work = crate::background_jobs::budgeted(Arc::clone(&source_budget), work);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (fence, validate_resume);
+        run_admitted_probe(transcode, admission, cancel, shutdown, progress, work).await
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use plurx_core::process::bounded::{SourcePauseController, SourcePausePhase};
+        let control = SourcePauseController::new_slot_gated(Duration::from_secs(18 * 60 * 60));
+        let _pause_binding = source_budget.bind_pause_controller(control.clone());
+        // Close the claim-to-first-read race before polling the producer. An
+        // empty scope can acknowledge source quiescence without spawning.
+        if !fence.source_may_continue().await.unwrap_or(false) {
+            fence.source_budget().invalidate_grant();
+            control.request_pause();
+        }
+        let keeper: Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper> = admission.clone();
+        let work = plurx_core::process::bounded::with_original_work_keeper(
+            keeper,
+            plurx_core::process::bounded::pausable(
+                control.clone(),
+                plurx_core::process::bounded::cancellable(cancel.clone(), work),
+            ),
+        );
+        tokio::pin!(work);
+        let mut source_paused = false;
+        let mut pacing_hold = false;
+        let mut finite_hold_only = false;
+        let mut finite_hold_pressure_revision = None;
+        loop {
+            if shutdown.is_cancelled()
+                || !transcode.fragment_worker_idle(admission)
+                || control.pause_budget_exhausted()
+            {
+                cancel.cancel();
+            }
+            let observation = control.observation();
+            if observation.phase == SourcePausePhase::Paused
+                && !source_paused
+                && !cancel.is_cancelled()
+            {
+                match fence.pause_source().await {
+                    Ok(true) => {
+                        source_paused = true;
+                        if finite_hold_pressure_revision
+                            != Some(crate::source_custody::source_pressure_changed().revision())
+                        {
+                            // A foreground change may have occurred while
+                            // this owner awaited the pause Store RPC.
+                            finite_hold_only = false;
+                        }
+                        if finite_hold_only && control.quota_waiters() != 0 {
+                            // Physical stop was proved before the RPC. Only
+                            // its acknowledgement plus a live finite wait
+                            // may begin active-time credit.
+                            if !control.confirm_pause_slot(observation.revision) {
+                                cancel.cancel();
+                            }
+                        }
+                        tracing::debug!(
+                            pause_revision = observation.revision,
+                            source_pacing_hold = pacing_hold,
+                            "owned source scan paused with its claim retained"
+                        );
+                    }
+                    _ => cancel.cancel(),
+                }
+            }
+            if source_paused
+                && source_budget.pacing_waiters() != 0
+                && control.quota_waiters() != 0
+                && !cancel.is_cancelled()
+            {
+                let pressure = crate::source_custody::source_pressure_changed();
+                if finite_hold_only && finite_hold_pressure_revision == Some(pressure.revision()) {
+                    control.confirm_pause_slot(observation.revision);
+                } else {
+                    // A global projection notification may belong to another
+                    // domain. Stop credit before the Store query; the same
+                    // fence and a stable notification revision can restore
+                    // this finite hold while the process remains stopped.
+                    match revalidate_finite_source_hold(
+                        &control,
+                        observation.revision,
+                        || source_budget.pacing_waiters() != 0,
+                        || pressure.revision(),
+                        || async { fence.source_may_continue().await.unwrap_or(false) },
+                    )
+                    .await
+                    {
+                        Ok(revision) => {
+                            finite_hold_pressure_revision = revision;
+                            finite_hold_only = revision.is_some();
+                        }
+                        Err(()) => cancel.cancel(),
+                    }
+                }
+            }
+            if source_paused && source_budget.pacing_waiters() == 0 && !cancel.is_cancelled() {
+                // Validation and slot reacquisition are store/authority work,
+                // never a finite service hold. The child remains stopped.
+                control.suspend_pause_credit(observation.revision);
+                if !validate_resume().await {
+                    cancel.cancel();
+                } else if fence.resume_source().await.unwrap_or(false) {
+                    fence.source_budget().invalidate_grant();
+                    if !control.resume(observation.revision) {
+                        cancel.cancel();
+                    } else {
+                        source_paused = false;
+                        finite_hold_only = false;
+                        finite_hold_pressure_revision = None;
+                        tracing::debug!(
+                            pause_ms = observation.paused_for.as_millis(),
+                            source_pacing_hold = pacing_hold,
+                            timing_class = if pacing_hold {
+                                "source_paced"
+                            } else {
+                                "source_pressure"
+                            },
+                            "owned source scan resumed after source-slot reacquisition"
+                        );
+                        pacing_hold = false;
+                    }
+                }
+            }
+            tokio::select! {
+                result = &mut work => {
+                    // A completed/no-child stage cannot let the next stage
+                    // access source while this same claim's slot is paused.
+                    while source_paused && !cancel.is_cancelled() {
+                        control.suspend_pause_credit(control.observation().revision);
+                        if shutdown.is_cancelled() || !transcode.fragment_worker_idle(admission)
+                            || control.pause_budget_exhausted() || !validate_resume().await { cancel.cancel(); break; }
+                        if fence.resume_source().await.unwrap_or(false) {
+                            control.resume(control.observation().revision);
+                            break;
+                        }
+                        tokio::select! {
+                            ()=cancel.cancelled()=>{},
+                            ()=crate::source_custody::source_pressure_changed().notified()=>{},
+                            ()=tokio::time::sleep(Duration::from_millis(250))=>{},
+                        }
+                    }
+                    return result;
+                },
+                ()=crate::source_custody::source_pressure_changed().notified()=>{
+                    if source_paused {
+                        // This notification is not finite-byte evidence.
+                        // Recheck the same fence on the next owner iteration.
+                        finite_hold_only = false;
+                        finite_hold_pressure_revision = None;
+                        control.suspend_pause_credit(control.observation().revision);
+                    }
+                },
+                ()=tokio::time::sleep(Duration::from_millis(250))=>{},
+            }
+            if !cancel.is_cancelled() {
+                let paced = source_budget.pacing_waiters() != 0;
+                if !source_paused {
+                    let pressure_revision =
+                        crate::source_custody::source_pressure_changed().revision();
+                    let pressure = !fence.source_may_continue().await.unwrap_or(false)
+                        || crate::source_custody::source_pressure_changed().revision()
+                            != pressure_revision;
+                    if pressure || paced {
+                        pacing_hold |= paced;
+                        if control.observation().phase == SourcePausePhase::Running {
+                            finite_hold_only = paced && !pressure;
+                            finite_hold_pressure_revision =
+                                finite_hold_only.then_some(pressure_revision);
+                        } else if pressure {
+                            finite_hold_only = false;
+                            finite_hold_pressure_revision = None;
+                        }
+                        if pressure && control.observation().phase == SourcePausePhase::Running {
+                            source_budget.invalidate_grant();
+                        }
+                        control.request_pause();
+                    }
+                }
+            }
+            if let Some(progress) = progress {
+                progress.stage("probing");
+            }
+        }
+    }
+}
+
+/// The owner has already received its pause RPC acknowledgement. Recheck the
+/// same fence before restoring finite-hold credit after a pressure signal.
+/// The authority RPC and any uncertain interval remain active execution time.
+#[cfg(target_os = "linux")]
+async fn revalidate_finite_source_hold<Live, Revision, Check, CheckFuture>(
+    control: &plurx_core::process::bounded::SourcePauseController,
+    pause_revision: u64,
+    finite_wait_live: Live,
+    pressure_revision: Revision,
+    may_continue: Check,
+) -> Result<Option<u64>, ()>
+where
+    Live: Fn() -> bool,
+    Revision: Fn() -> u64,
+    Check: FnOnce() -> CheckFuture,
+    CheckFuture: std::future::Future<Output = bool>,
+{
+    use plurx_core::process::bounded::SourcePausePhase;
+    control.suspend_pause_credit(pause_revision);
+    let before = pressure_revision();
+    let permitted = may_continue().await;
+    let observation = control.observation();
+    if !permitted
+        || pressure_revision() != before
+        || !finite_wait_live()
+        || control.quota_waiters() == 0
+        || observation.revision != pause_revision
+        || observation.phase != SourcePausePhase::Paused
+    {
+        return Ok(None);
+    }
+    if !control.confirm_pause_slot(pause_revision) {
+        return Err(());
+    }
+    if pressure_revision() != before || !finite_wait_live() || control.quota_waiters() == 0 {
+        control.suspend_pause_credit(pause_revision);
+        return Ok(None);
+    }
+    Ok(Some(before))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn playback_admission_reaps_the_fit_that_owns_its_lane() {
+        let lane = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = Arc::clone(&lane).acquire_owned().await.expect("fit lane");
+        let cancel = CancellationToken::new();
+        let stopped = cancel.clone();
+        let (reaped, observed) = tokio::sync::oneshot::channel();
+        let fit = async move {
+            stopped.cancelled().await;
+            drop(held);
+            reaped.send(()).expect("reap observed");
+            true
+        };
+        let mut refit = Some(refit_work::RefitTask::owned_lane_fixture(
+            Box::pin(fit),
+            cancel,
+        ));
+        let (waiters, mut pressure) = tokio::sync::watch::channel(0usize);
+        let admission = async {
+            waiters.send_replace(1);
+            lane.acquire_owned()
+                .await
+                .expect("qualified successor lane")
+        };
+        let requested = async {
+            pressure.wait_for(|n| *n > 0).await.expect("pressure");
+        };
+        let shutdown = CancellationToken::new();
+        let admitted = tokio::time::timeout(
+            Duration::from_secs(1),
+            drive_playback_admission(admission, requested, &mut refit, &shutdown),
+        )
+        .await
+        .expect("admission cannot wait behind an unpolled fit")
+        .expect("not shut down");
+        observed
+            .await
+            .expect("fit physically completed before successor");
+        assert!(refit.is_none());
+        drop(admitted);
+    }
+
     use plurx_core::store::{SqliteStore, Store};
     use plurx_core::transcode::{EncoderCaps, Pipeline};
 
@@ -521,6 +1073,68 @@ mod tests {
         );
         // No assertion here treats leader reap, Arc count, or the public DTO
         // as a complete native-group absence or finite-accounting proof.
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unrelated_pressure_signal_rechecks_finite_hold_and_charges_rpc_time() {
+        use plurx_core::process::bounded::SourcePauseController;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let control = SourcePauseController::new_slot_gated(Duration::from_secs(5));
+        let quota_wait = control.finite_quota_wait();
+        let revision = control.request_pause();
+        assert!(control.confirm_pause_slot(revision));
+
+        let signal = Arc::new(AtomicU64::new(0));
+        signal.fetch_add(1, Ordering::AcqRel); // unrelated domain projection
+        let signal_for_query = Arc::clone(&signal);
+        let control_for_query = control.clone();
+        let (query_started, query_started_rx) = tokio::sync::oneshot::channel();
+        let query_release = Arc::new(tokio::sync::Notify::new());
+        let release_for_query = Arc::clone(&query_release);
+        let recheck = tokio::spawn(async move {
+            revalidate_finite_source_hold(
+                &control_for_query,
+                revision,
+                || true,
+                || signal_for_query.load(Ordering::Acquire),
+                move || async move {
+                    query_started.send(()).expect("query start observed");
+                    release_for_query.notified().await;
+                    true
+                },
+            )
+            .await
+        });
+        query_started_rx.await.expect("authority query started");
+        // The group remains physically stopped, yet the Store wait spends
+        // active time until the same fence has been checked again.
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            control.wait_active_budget(Duration::from_millis(20)),
+        )
+        .await
+        .expect("uncredited RPC wait spends active budget");
+
+        query_release.notify_one();
+        assert_eq!(recheck.await.expect("recheck task"), Ok(Some(1)));
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                control.wait_active_budget(Duration::from_millis(20)),
+            )
+            .await
+            .is_err(),
+            "same-fence finite hold restores active-time credit"
+        );
+        drop(quota_wait);
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            control.wait_active_budget(Duration::from_millis(20)),
+        )
+        .await
+        .expect("closed quota guard spends active budget");
     }
 
     #[tokio::test]
@@ -652,6 +1266,7 @@ mod tests {
             after: None,
             now_ms: now_ms(),
             limit: 32,
+            admissible_only: false,
         };
         let first = state
             .store

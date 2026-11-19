@@ -9,6 +9,7 @@ async fn selected(root: &Path) -> SelectedStore {
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("fixture store"));
     SelectedStore {
         catalogue: CatalogueReader::authority(Arc::clone(&store)),
+        applied: crate::store::AppliedView::authority(Arc::clone(&store)),
         store,
         identity: super::super::ClusterIdentity {
             node_id: "custody-fixture-node".into(),

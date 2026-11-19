@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "id": "protocol-search-effort-20261112",
+  "status": "Fixed before any output of these arms.",
+  "baseline": "protocol-roi-zeromean-qpm6-20261111.json arm_Z6 (identical_to protocol-roi-zeromean-20261111.json; dark block < 1.0 nit; zero-mean)",
+  "dark_offset": "-6 QP (qoffset -6/63)",
+  "fixtures": [
+    "michael5400",
+    "michael1800"
+  ],
+  "arms": {
+    "V": "preset=veryslow, bf=0 kept",
+    "P": "preset=placebo, bf=0 kept"
+  },
+  "required_log_receipts": {
+    "V": "rd=6 subme=4 ref=5 amp=1 bframes=0",
+    "P": "rd=6 subme=5 ref=5 tskip=1 rskip=0 bframes=0"
+  },
+  "rate_rule": "as protocol-aq-psy-20261112.json",
+  "controls": [
+    "Z6 re-landed (shared with protocol-aq-psy-20261112.json)"
+  ],
+  "source": "x265 e9b8812 source/common/param.cpp preset table; source/encoder/level.cpp L154,L479; FFmpeg n9.0.2 libavcodec/libx265.c L507",
+  "readouts": "as protocol-aq-psy-20261112.json",
+  "accept": "as protocol-aq-psy-20261112.json",
+  "timeout_seconds": 43200,
+  "not_claimed": [
+    "attribution to one tool",
+    "HRD/CPB conformance",
+    "held-out scenes",
+    "playback, packaging or live change"
+  ],
+  "author": "Fable 5.2 (design) for Claude Opus 5.5 session_01BCWLA1yYosvau4xhfH6R4S; verbatim from FABLE-EXPERIMENT-PLAN.md",
+  "landing_implementation": "land_rate.py: secant on b only, <=4 encodes, encoded packet average + measured authoring overhead (0.03 Mb/s on the Michael windows) in [128.5,130.0]; the final encode is then authored and its actual authored average must also fall in the band"
+}

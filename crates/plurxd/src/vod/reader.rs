@@ -4,6 +4,7 @@ use super::*;
 /// cache's key discipline (plan §2.4).
 #[derive(Debug, Clone)]
 pub(super) struct Recipe {
+    pub(super) source_telemetry: bool,
     pub(super) retained_logical: Option<super::retained_manifest::LogicalOutput>,
     pub(super) measured_candidate: Option<RetainedCandidateBinding>,
     pub(super) file: MediaFile,
@@ -11,6 +12,9 @@ pub(super) struct Recipe {
     pub(super) aac: bool,
     pub(super) audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub(super) video: CopyVideoOptions,
+    /// Read with the exact pinned curve table when this recipe was resolved.
+    /// Status only: `rendition_key` and every media identity omit it.
+    pub(super) dv_refit_gain: Option<crate::dv_refit_serving::PinnedRefitGain>,
     /// Exact object version whose complete digest selected the cluster blob.
     /// None on the legacy node-local index path.
     pub(super) source_object_version: Option<String>,
@@ -18,13 +22,48 @@ pub(super) struct Recipe {
     /// of the rendition directory key so weak legacy metadata cannot alias
     /// segments across an in-place source rewrite.
     pub(super) cluster_cache_key: Option<String>,
+    /// The init contract a v3 copy index was sealed with. A generation of
+    /// this recipe serves only when its promoted muxer init has this
+    /// contract. None for every other index.
+    pub(super) copy_index_init_contract: Option<String>,
     /// A frozen encoded strategy; None is the indexed compressed-copy path.
     pub(super) encoding: Option<Arc<crate::vodencode::Encoding>>,
+}
+
+impl Recipe {
+    /// Report only the gain belonging to this attached rendition's actual
+    /// digest. An incoming request may be superseded or share another recipe.
+    pub(super) fn fitted_refit_report(&self) -> Option<crate::transcode::RefitPlaybackReport> {
+        let digest = self.video.dolby_vision_refit()?;
+        let fact = self.dv_refit_gain?;
+        (fact.digest == digest).then(|| crate::transcode::RefitPlaybackReport::fitted(fact.gain))
+    }
+
+    pub(super) fn refit_report(&self) -> Option<crate::transcode::RefitPlaybackReport> {
+        if let Some(report) = self.fitted_refit_report() {
+            return Some(report);
+        }
+        (self.video.converts_dolby_vision() && self.video.dolby_vision_refit().is_none()).then(
+            || {
+                crate::transcode::RefitPlaybackReport::identity(
+                    "No F+ curve table is pinned to this rendition".to_owned(),
+                )
+            },
+        )
+    }
 }
 
 /// One attached reader, in plan indexes.
 #[derive(Debug, Clone)]
 pub(super) struct Reader {
+    /// Exact controlled companion attachment. The source-purpose bridge must
+    /// survive quality selection, supersession and later producer generations.
+    pub(super) companion_bootstrap: bool,
+    /// The exact parent's accepted selection can require a pending companion
+    /// before family metadata exists. Quality settlement has independent
+    /// authority once its accepted ledger names the target.
+    pub(super) control_required: bool,
+    pub(super) quality_required: bool,
     /// Admission purpose belongs to this consumer, not the cached recipe.
     pub(super) admission_priority: crate::admission::Priority,
     /// Voluntary Auto trials must not borrow the incumbent's permit.
@@ -69,6 +108,9 @@ impl Reader {
         admission_priority: crate::admission::Priority,
     ) -> Self {
         Self {
+            companion_bootstrap: false,
+            control_required: false,
+            quality_required: false,
             admission_priority,
             nonpreemptive_trial: false,
             authority_only: false,
@@ -129,6 +171,9 @@ impl Reader {
         Ok((
             stored_key,
             Self {
+                companion_bootstrap: false,
+                control_required: false,
+                quality_required: false,
                 admission_priority,
                 nonpreemptive_trial: false,
                 authority_only: false,

@@ -51,6 +51,7 @@
     "detail/edit.js",
     "player/player.js",
     "player/continuous-media.js",
+    "player/video-frames.js",
     "player/continuous-quality.js",
     "player/session.js",
     "player/prepared-replacement.js",
@@ -110,6 +111,8 @@
     "pages/settings-remote.js",
     "pages/remote.js",
     "pages/diagnostics.js",
+    "pages/activity-starts.js",
+    "curator-login.js",
     "router.js"
   ]
 }

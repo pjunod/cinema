@@ -603,6 +603,7 @@ fn a_dv_title_report_is_not_a_source_change_for_either_reporter_direction() {
         max_l1_pq: Some(3441),
         mastering_luminance: TitleConstant::Unknown,
         mastering_primaries: TitleConstant::Unknown,
+        el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
     };
     let held = current_reporter_probe();
     for different_reporter in [false, true] {
@@ -641,6 +642,63 @@ fn a_dv_title_report_is_not_a_source_change_for_either_reporter_direction() {
     assert!(comparison
         .rendered_differences()
         .contains("/<unknown-field> missing"));
+}
+
+/// The production failure of 2026-11-11 (Avatar: Fire and Ash on a lab node): #1477
+/// grafted pending FEL requests under `plurx_dv_fel_requests_v3`, the
+/// normalizer's list of grafts did not name it, and a same-reporter
+/// comparison refused the unchanged source as "/<unknown-field> missing", so
+/// its processed Dolby Vision upgrade was declined. Grafts are now excluded by
+/// their namespace, including ones nobody has written yet.
+#[test]
+fn every_application_graft_is_excluded_from_the_source_comparison() {
+    let held = current_reporter_probe();
+    let mut stored = held.clone();
+    stored[plurx_core::transcode::dv_fel_qualification::REQUESTS_KEY] =
+        serde_json::json!({"fixture": {"state": "pending"}});
+    stored["plurx_a_graft_not_yet_written"] = serde_json::json!(1);
+    for (left, right) in [(&stored, &held), (&held, &stored)] {
+        let comparison = super::compare_probe_documents(&left.to_string(), &right.to_string())
+            .expect("compare grafted probe");
+        assert!(comparison.same, "{:?}", comparison.differences);
+        assert!(!comparison.admitted_on_reporter_drift);
+    }
+    // The reporter stamp is the one application field kept: it is how a
+    // comparison tells two FFprobe builds apart.
+    let mut other_build = stored.clone();
+    plurx_core::scan::probe::stamp_reporter(&mut other_build, "ffprobe version 5.1.9");
+    let drift = super::compare_probe_documents(&other_build.to_string(), &held.to_string())
+        .expect("compare across builds");
+    assert!(drift.same, "{:?}", drift.differences);
+    assert!(drift.admitted_on_reporter_drift);
+    // A grafted document still refuses a changed source.
+    stored["streams"][0]["width"] = serde_json::json!(1920);
+    let changed = super::compare_probe_documents(&stored.to_string(), &held.to_string())
+        .expect("compare changed media beside grafts");
+    assert!(!changed.same);
+    assert!(changed.rendered_differences().contains("/streams/0/width"));
+}
+
+#[test]
+fn every_graft_the_application_writes_is_in_its_namespace() {
+    use plurx_core::scan::probe::{is_application_graft, REPORTER_FIELD};
+    for key in [
+        plurx_core::transcode::hevc_census::PROBE_KEY,
+        plurx_core::store::CONTENT_ENCODING_PROBE_KEY,
+        plurx_core::scan::dv_title::PROBE_FIELD,
+        plurx_core::transcode::dv_fel_qualification::PROBE_KEY,
+        plurx_core::transcode::dv_fel_qualification::REQUESTS_KEY,
+        plurx_core::transcode::dv_fel_qualification::VARIANTS_KEY,
+    ] {
+        assert!(
+            is_application_graft(key),
+            "{key} is outside the application namespace"
+        );
+    }
+    assert!(!is_application_graft(REPORTER_FIELD));
+    for ffprobe_owned in ["format", "streams", "chapters", "programs", "stream_groups"] {
+        assert!(!is_application_graft(ffprobe_owned));
+    }
 }
 
 /// The production failure this exists to stop: three refusals on `media1`
@@ -2898,4 +2956,29 @@ fn a_failed_main10_decode_probe_is_retried_after_a_bounded_backoff() {
     // Matroska (EBML magic) carrying the two-picture Main10 clip.
     assert!(super::HEVC_MAIN10_PROBE_CLIP.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]));
     assert!(super::HEVC_MAIN10_PROBE_CLIP.len() < 16 * 1024);
+}
+
+#[tokio::test]
+async fn source_capability_diagnostics_redact_quoted_urls_without_mutating_arguments() {
+    let nonce = "0123456789abcdef0123456789ABCDEF";
+    let url = format!("http://127.0.0.1:43210/{nonce}");
+    let diagnostic = format!("Error opening input '{url}': invalid data; retry {url}\n");
+    let redacted = drain_diagnostics(diagnostic.as_bytes()).await;
+    assert!(!redacted.contains(nonce));
+    assert_eq!(redacted,"Error opening input 'http://127.0.0.1:43210/REDACTED': invalid data; retry http://127.0.0.1:43210/REDACTED\n");
+    assert_eq!(url, format!("http://127.0.0.1:43210/{nonce}"));
+    let truncated = format!("{url}{}", "x".repeat(8150));
+    let tail = drain_diagnostics(truncated.as_bytes()).await;
+    assert!(tail.len() <= 8 * 1024);
+    assert!(
+        !tail.contains(nonce),
+        "tail truncation cannot expose a nonce after cutting its URL prefix"
+    );
+    let other =
+        "file /media/movie.mkv; http://127.0.0.1:43210/status; https://example.invalid/video";
+    assert_eq!(crate::scratch_put::redact(other), other);
+    assert_eq!(
+        crate::scratch_put::redact(&format!("({url}), ü {url}/part.m4s")),
+        "(http://127.0.0.1:43210/REDACTED), ü http://127.0.0.1:43210/REDACTED/part.m4s"
+    );
 }

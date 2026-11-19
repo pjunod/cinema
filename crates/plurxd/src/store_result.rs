@@ -107,6 +107,8 @@ operations! {
     ReclaimReceiverIngress => "reclaim_receiver_ingress",
     RevokeUnpublishedRemoteGrant => "revoke_unpublished_remote_grant",
     CancelUnpublishedShareInvitation => "cancel_unpublished_share_invitation",
+    RetryCopyAnalysisAfterAttempt => "retry_copy_analysis_after_attempt",
+    SettleUnpublishedCopyJob => "settle_unpublished_copy_job",
 }
 
 const OUTCOMES: [&str; 2] = ["ok", "error"];
@@ -427,8 +429,9 @@ mod tests {
         // 46 on main #793, plus the quality cancellation settlement, the
         // Jellyfin unbound media-link revocation, and the acknowledged Link
         // negative's measured-Link prior fold (D6), orphan grant revocation,
-        // and cancellation after a failed or undelivered sharing invitation.
-        assert_eq!(Operation::ALL.len(), 52, "one fixed label per audited site");
+        // and cancellation after a failed or undelivered sharing invitation,
+        // and the copy index's attempt retry and unpublished-job settlement.
+        assert_eq!(Operation::ALL.len(), 54, "one fixed label per audited site");
         let metrics = Metrics::default();
         for operation in Operation::ALL {
             for severity in Discard::ALL {

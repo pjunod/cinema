@@ -611,12 +611,16 @@ fn local_source_bootstrap_requires_exact_native_identity_bound_into_closure() {
     }
 }
 #[test]
-fn local_source_route_never_weakens_universal_release_bootstrap() {
+fn local_source_route_never_weakens_arm64_release_bootstrap() {
     use native::BootstrapPackageOrigin::{LocalSource, Release};
     let scratch = Scratch::new();
-    bootstrap_identity_fixture(&scratch.0, Architecture::Universal, None, false);
+    bootstrap_identity_fixture(&scratch.0, Architecture::Arm64, None, false);
     assert!(native::verify_bootstrap_identity(&scratch.0, Release).is_ok());
     assert!(native::verify_bootstrap_identity(&scratch.0, LocalSource).is_err());
+    // Release archives are arm64 only: a universal identity is not a release.
+    let scratch = Scratch::new();
+    bootstrap_identity_fixture(&scratch.0, Architecture::Universal, None, false);
+    assert!(native::verify_bootstrap_identity(&scratch.0, Release).is_err());
     let scratch = Scratch::new();
     let architecture = native_architecture().expect("supported fixture architecture");
     bootstrap_identity_fixture(

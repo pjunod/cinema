@@ -1989,3 +1989,55 @@ async fn first_preparation_output_seal_refuses_lost_ownership_and_legacy_absence
         assert!(store.seal_prepared_output(&stale).await.is_err());
     }
 }
+
+/// Predictive preparation asks which accounts are watching. A sharing session
+/// has no account (`user_id` NULL), so it must not become a viewer demand, and
+/// must not fail the local viewer's demand with it.
+#[tokio::test]
+async fn preparation_demands_ignore_active_sharing_sessions() {
+    use crate::store::background_jobs::BackgroundJobStore;
+    use crate::store::background_jobs_preparation::PreparationDemand;
+    let store = SqliteStore::open_in_memory().expect("in-memory store");
+    store
+        .with_conn(|conn| {
+            conn.execute_batch(include_str!(
+                "../../../../tests/fixtures/session-principal-local.sql"
+            ))?;
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            conn.execute_batch(&crate::store::media_session_principal_rebuild_schema())?;
+            conn.execute_batch("COMMIT")?;
+            conn.execute_batch(include_str!(
+                "../../../../tests/fixtures/session-principal-sharing.sql"
+            ))?;
+            Ok(())
+        })
+        .await
+        .expect("one active local session and two active sharing sessions");
+    let active: (i64, i64) = store
+        .with_conn(|conn| {
+            Ok((
+                conn.query_row(
+                    "SELECT count(*) FROM media_sessions WHERE principal_kind='local' AND state='active' AND lease_expires_at_ms>5000",
+                    [],
+                    |r| r.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT count(*) FROM media_sessions WHERE principal_kind='sharing' AND state='active' AND user_id IS NULL AND lease_expires_at_ms>5000",
+                    [],
+                    |r| r.get(0),
+                )?,
+            ))
+        })
+        .await
+        .expect("fixture shape");
+    assert_eq!(active, (1, 2));
+    let demands = store.preparation_demands(5000).await.expect("demands");
+    let viewers: Vec<_> = demands
+        .into_iter()
+        .filter_map(|demand| match demand {
+            PreparationDemand::Viewer { user_id, .. } => Some(user_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(viewers, vec![1]);
+}

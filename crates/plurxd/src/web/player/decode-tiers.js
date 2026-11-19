@@ -410,7 +410,7 @@ function capsDocument(c, limits){
     video,
     audio:String(c.acodec||"").split(",").filter(Boolean),
     containers:String(c.container||"").split(",").filter(Boolean),
-    transports:["progressive","hls"],
+    transports:["progressive","hls","hls-bounded-range-v1"],
     // No `subtitle_overlays`. This player has no PGS renderer, and absent is
     // never a claim — so the server offers it no PGS default, advertises no
     // `overlay` protocol, and tells it the truth when a viewer picks a bitmap
@@ -1082,10 +1082,10 @@ function preparePlayOutgoing(attempt,decision){
   // A pre-play subtitle is resolved BEFORE the player object exists, because a
   // burn has to ride the first session open — `transcodeOpts()` reads
   // `PLAYER.burnedSub`.
-  const applied=prePlayApplication(decision, selection);
-  const wantSub=applied.subtitle, preBurn=applied.burnedSub;
+  const applied=prePlayApplication(decision, selection, {skipDefaultSub:attempt.skipDefaultSub});
+  const preBurn=applied.burnedSub;
   return {startSec,ladder,priorKbps,autoStartHeight,retireOutgoing,src,book,
-    applied,wantSub,preBurn,outgoing};
+    applied,preBurn,outgoing};
 }
 /** @returns {Player} every field named in the typedef (player/player.js) */
 function buildPlayer(attempt,decided,prepared){
@@ -1111,7 +1111,8 @@ function buildPlayer(attempt,decided,prepared){
     curAudio:(decision.audio||[]).findIndex(a=>a.default), curSub:preBurn!=null?preBurn:-1,
     // This playback's track choice, carried across an internal reopen and kept
     // current by the in-player Audio and Subtitles menus.
-    preplay:selection||null,
+    preplay:prepared.applied.subtitle!=null
+      ? {...selection,subtitle:prepared.applied.subtitle} : selection||null,
     markers:(decision.markers||[]).map(m=>({...m})), source:src, started:false,
     _markerOffers:new Set(),
     _seekPreview:null, _seekPending:null, _lastFocusedControl:playerLastFocused,
@@ -1181,9 +1182,9 @@ function buildPlayer(attempt,decided,prepared){
 }
 function presentPlayerChrome(attempt,decided,prepared,openIsAttached){
   const {decision}=decided;
-  const {requestedAttemptReason,skipDefaultSub,video,meta,libraryChannel,
+  const {requestedAttemptReason,video,meta,libraryChannel,
     playerWasOpen,openAttempt}=attempt;
-  const {startSec,applied,wantSub,book}=prepared;
+  const {startSec,applied,book}=prepared;
   newAttempt(requestedAttemptReason || (startSec>0?"resume":"cold-start"));
   // §3.3 row 17: the picture the viewer is getting is not quite the one they
   // asked for, and that is a notice beside it. Raised here rather than where
@@ -1205,20 +1206,6 @@ function presentPlayerChrome(attempt,decided,prepared,openIsAttached){
   renderSkip(null);
   const sb=document.getElementById("skipbtn"); if(sb){ sb.classList.toggle("on", PLAYER.autoskip); sb.style.display=book?"none":""; }
   const ab=document.getElementById("autonextbtn"); if(ab){ ab.classList.toggle("on", autoNextOn()); ab.style.display=book?"none":""; }
-  // Server-chosen default subtitle (Settings → Playback defaults / anime rule).
-  // Native <track> subs ride direct/remux only; transcode burns them instead.
-  //
-  // A pre-play choice owns this instead. Off (`-1`) means leave it off; a burn
-  // is already in `burnedSub` above and rides the first session open; a text
-  // track is applied below, after the route knows its offset, so it lands
-  // without the 400 ms guess and in every delivery method rather than only the
-  // two the cold-start default is limited to.
-  const defSub=PLAYER.subs.find(s=>s.default);
-  if(defSub && !skipDefaultSub && wantSub==null && decision.method!=='transcode'){
-    setTimeout(()=>{
-      if(openIsAttached()&&PLAYER.curSub<0&&PLAYER.preplay?.subtitle==null&&!(typeof translationSelected==="function"&&translationSelected(PLAYER))) setSub(defSub.index);
-    }, 400);
-  }
   return initialAudio;
 }
 function choosePlayRoute(attempt,decided,prepared,initialAudio){
@@ -1410,7 +1397,7 @@ function finishPlayAttach(attempt,prepared,openedPlayer,openIsAttached){
   preparation.finish();
   if(play.pendingIntent===fullIntent)play.pendingIntent=null;
 
-  // A pre-play TEXT subtitle, applied to the stream that just attached. Here
+  // The initial TEXT subtitle, applied to the stream that just attached. Here
   // rather than before the route, because subtitle attachment shifts cues by
   // `PLAYER.offset` and the route is what sets it. A <track> is not a stream
   // restart, so the choice arrives with the first frames.
@@ -1441,18 +1428,19 @@ function playbackInitialRoute(decision,audio,nativeHls,segmentedRemux,audioOffse
 // Commands arriving while a full open is awaiting a decision/session replace
 // that open with one snapshot of the newest destination and track choices.
 // Otherwise its late response would overwrite in-place mutations of PLAYER.
-function restartPendingPlaybackOpen(p,reason){
+function restartPendingPlaybackOpen(p,reason,reopenPositionSec=null){
   // Controls still describe the outgoing title until the new decision builds
   // its player. They must not reopen that title over the newer destination.
   if(p&&p.retiringOpenAttempt&&p.retiringOpenAttempt!==p.pendingOpenAttempt
      &&PLAY_OPEN_GATE.current(p.retiringOpenAttempt)) return true;
   if(p&&PLAYER===p&&p.pendingMediaChange){
+    if(reopenPositionSec!=null) p.pendingMediaChange={...p.pendingMediaChange,reopenPositionSec};
     executePlaybackMediaChange(p,p.pendingMediaChange);
     return true;
   }
   if(!p||PLAYER!==p||!p.pendingOpenAttempt||!PLAY_OPEN_GATE.current(p.pendingOpenAttempt)) return false;
   PENDING_ATTEMPT_REASON=reason;
-  const position=positionForPlaybackIntent(document.getElementById("video"),p);
+  const position=reopenPositionSec??positionForPlaybackIntent(document.getElementById("video"),p);
   play(p.fileId,p.title||"",Math.round(position*1000),p.knownDur||0,p.meta);
   return true;
 }
@@ -1907,7 +1895,7 @@ function queuePlaybackFrame(v,p,callback,renewingSeek=false){
   let id=null, generation=0, retired=false;
   const cancel=()=>{
     generation++;
-    if(id!=null&&typeof v.cancelVideoFrameCallback==="function") v.cancelVideoFrameCallback(id);
+    if(id!=null) cancelPlaybackVideoFrame(v,id);
     id=null;
   };
   const clear=()=>{
@@ -1923,18 +1911,17 @@ function queuePlaybackFrame(v,p,callback,renewingSeek=false){
   const ready=()=>{
     if(retired) return;
     if(PLAYER!==p){clear();return;}
-    // Safari native HLS can strand a request registered before the initial
-    // load/seek. Subscribe against current data after the seek completes,
-    // and renew it when a source load replaces it. A request already armed
-    // with current data survives ordinary seeks so it can observe the landing
-    // frame, including when playback stays paused.
+    // The multiplexer owns native discontinuity renewal. This subscriber
+    // only owns its presentation identity, including a paused landing frame.
     // Readiness only permits registration; actual callbacks remain the proof
     // of presentation used by the existing progress detector.
-    if(id!=null||v.readyState<2||(v.seeking&&!renewingSeek)) return;
+    if(p.mediaAttachment?.nativePositionPending||id!=null||v.readyState<2||(v.seeking&&!renewingSeek)) return;
     const registration=++generation;
-    id=v.requestVideoFrameCallback((now,meta)=>{
+    id=requestPlaybackVideoFrame(v,(now,meta)=>{
       if(registration!==generation) return;
-      id=null;clear();
+      id=null;
+      if(p.mediaAttachment?.nativePositionPending)return;
+      clear();
       if(PLAYER===p&&p.mediaAttachment===attachment){
         if(typeof playbackCaptionAttachmentPositionReady==="function")playbackCaptionAttachmentPositionReady(v,p,attachment,true);
         callback(now,meta,epoch,{attachment,intent,epoch});

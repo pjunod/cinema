@@ -9,6 +9,10 @@ impl EmptyProducerSlot {
     /// Launch only into this pre-reserved empty slot. No raw child, job or
     /// writer handle leaves the owner. The writer must not detach work or wait
     /// for its OWN reap receipt; completion metadata belongs to a separate task.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the reserved slot takes the exact spawn, resources, source, and writer together"
+    )]
     pub(crate) fn spawn_registered_owned<F, Fut>(
         mut self,
         program: &std::path::Path,
@@ -16,6 +20,7 @@ impl EmptyProducerSlot {
         options: crate::producer_spawn::SpawnOptions<'_>,
         at: u32,
         resources: Option<Box<dyn Send>>,
+        source_input: Option<crate::source_input::SourceInput>,
         writer: F,
     ) -> Result<(ProducerRegistration, Option<u32>), String>
     where
@@ -35,7 +40,7 @@ impl EmptyProducerSlot {
             stderr,
         } = crate::producer_spawn::spawn(program, args, options)?;
         let pid = child.id(); // Diagnostics only, never a process capability.
-        let registration = new_registration(None);
+        let registration = new_registration(None, source_input);
         self.0.child = Some(ProducerChild::Legacy(child));
         self.0.child_job = Some(child_job);
         self.0.resources = resources;

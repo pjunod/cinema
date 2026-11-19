@@ -87,9 +87,9 @@ def main():
         for domain in ("system", f"gui/{uid}"):
             if run(["/bin/launchctl", "print", f"{domain}/com.plurx.plurxd"], check=False).returncode == 0:
                 raise RuntimeError("conflicting existing launchd job; disposable fresh install required")
-        archives = list(a.artifacts.glob("plurxd-*-macos-universal.tar.gz"))
+        archives = list(a.artifacts.glob("plurxd-*-macos-arm64.tar.gz"))
         if len(archives) != 1:
-            raise RuntimeError("exactly one candidate universal runtime archive required")
+            raise RuntimeError("exactly one candidate arm64 runtime archive required")
         archive = archives[0]
         archive_digest = sha256(archive)
         receipt.check("untouched-candidate-archive", {"name": archive.name, "sha256": archive_digest})
@@ -143,7 +143,7 @@ def main():
             receipt.check("native-ui-" + action, smoke(app, action, a.output / f"ui-{action}.json", lifecycle, console))
         lifecycle.stop()
         lifecycle.call("startup", "set", "server", "off")
-        receipt.value["limitations"] = ["This runs the native architecture slice; universal compatibility requires both native runners.",
+        receipt.value["limitations"] = ["This runs the arm64 release on an Apple Silicon runner; Intel Macs are not supported.",
             "SMAppService tray login registration/approval is controlled only by the app; no controller tray-login override was attempted. Actual approval, logout/relogin, reboot, hardware transcode and old legacy adoption are separate.",
             "Local signed fixture staging is not production GitHub discovery/download or Developer ID/notary acceptance."]
 

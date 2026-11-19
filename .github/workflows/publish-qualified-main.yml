@@ -1,0 +1,59 @@
+name: publish qualified main
+on:
+  workflow_dispatch:
+    inputs:
+      qualification_pr:
+        description: Merged effort promotion PR
+        required: true
+        type: string
+      qualification_run:
+        description: Successful full qualification run ID
+        required: true
+        type: string
+      qualification_receipt_sha256:
+        description: SHA-256 of the reviewed qualification-receipt.json
+        required: true
+        type: string
+
+jobs:
+  publish_main:
+    name: publish merged image (Forgejo registry)
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    timeout-minutes: 90
+    concurrency:
+      group: publish-main-image
+      cancel-in-progress: false
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Authenticate the merged main tree and successful qualification artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          QUALIFICATION_PR: ${{ inputs.qualification_pr }}
+          QUALIFICATION_RUN: ${{ inputs.qualification_run }}
+          QUALIFICATION_RECEIPT_SHA256: ${{ inputs.qualification_receipt_sha256 }}
+        run: python3 -m validation.publish_qualified_main
+      - uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          buildkitd-config-inline: |
+            # The fleet registry is deliberately plain HTTP on the private LAN. A
+            # BuildKit container does not inherit Docker daemon insecure-registry
+            # settings, so the builder needs the same trust decision explicitly.
+            # Only requests to this exact address are affected.
+            [registry."${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"]
+              http = true
+      - uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          username: fleet
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+      - name: Build once and publish the verified fleet image
+        env:
+          PLURX_BUILD_REF: ${{ github.sha }}
+          PLURX_BUILD_SHA: ${{ github.sha }}
+          PLURX_REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          PLURX_SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: scripts/registry-push

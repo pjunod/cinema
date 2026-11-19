@@ -380,9 +380,8 @@ private fun PreparedReplacementEnable(
             }
         preparedReplacementRequirements(
             isTelevision = isTelevision,
-            // The successor inherits the incumbent's tunneling, and tunneling
-            // is requested on televisions only.
-            tunnelingEnabled = isTelevision,
+            // A successor is never tunneled (requestsTunneling).
+            tunnelingEnabled = false,
             sessionIsLive = null,
             observedDownloadBps = null,
             throughputKnown = false,

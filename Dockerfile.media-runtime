@@ -1,0 +1,273 @@
+# syntax=docker/dockerfile:1
+
+# Rebuild explicitly; application builds consume the published digests.
+# The DV helper build dependencies are a published image of their own: FFmpeg,
+# libplacebo and libdovi built from pinned sources, with the compiler and
+# headers the helpers need. The helper bundle itself is application source and
+# is compiled by the application Dockerfile, never here, so a helper change
+# ships with the daemon that expects it.
+FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS dv-processing-dependencies
+ARG DEBIAN_SNAPSHOT=20260928T000000Z
+ARG TARGETARCH
+ARG PLURX_DV_BUILD_JOBS=2
+ENV PLURX_DV_BUILD_JOBS=${PLURX_DV_BUILD_JOBS} PLURX_DV_BUILD_INPUTS=/build-inputs
+RUN --mount=type=bind,source=scripts/configure-debian-snapshot,target=/tmp/configure-debian-snapshot \
+    sh /tmp/configure-debian-snapshot "$DEBIAN_SNAPSHOT" \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl build-essential patch pkg-config ninja-build nasm python3-venv \
+      libvulkan-dev glslang-dev libxxhash-dev libva-dev libdrm-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY tools/dv_processing/build-requirements.txt /build-inputs/build-requirements.txt
+RUN python3 -m venv /opt/dv-build-python \
+    && /opt/dv-build-python/bin/pip install --require-hashes --only-binary=:all: -r /build-inputs/build-requirements.txt
+ENV PATH=/opt/dv-build-python/bin:${PATH}
+WORKDIR /build-inputs
+COPY rust-toolchain.toml .
+COPY tools/dv_quality/backends/parsed-rpu/fetch_parser.py tools/dv_quality/backends/parsed-rpu/resolved-Cargo.lock parsed-rpu/
+COPY tools/dv_processing/fetch_renderer_sources.py .
+COPY tools/dv_processing/build-dependencies.sh .
+COPY tools/dv_processing/*.patch .
+RUN --mount=type=cache,id=plurx-dv-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
+    sh /build-inputs/build-dependencies.sh /opt/dv-dependencies
+# Record what this prefix was built from. The application build recomputes the
+# same list from its own tree and refuses a prefix built from other inputs, so
+# a changed decoder patch or source pin cannot ship against stale libraries.
+COPY tools/dv_processing/dependency-inputs.sh .
+RUN sh /build-inputs/dependency-inputs.sh > /opt/dv-dependencies/build-inputs.sha256
+
+# Source-built portable recognizer. Static whisper/ggml and no OpenMP, BLAS or
+# GPU backend keep the service child independent of user PATH/loader settings.
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS subtitle-engine-build
+ARG DEBIAN_SNAPSHOT=20260928T000000Z
+RUN --mount=type=bind,source=scripts/configure-debian-snapshot,target=/tmp/configure-debian-snapshot \
+    sh /tmp/configure-debian-snapshot "$DEBIAN_SNAPSHOT" \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake python3 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY scripts/build-subtitle-engine scripts/subtitle-engine-manifest.json /src/scripts/
+COPY licenses/whisper.cpp.LICENSE.txt licenses/whisper-models.LICENSE.txt /src/licenses/
+COPY crates/plurxd/src/subtitle_models/self-test.wav /src/crates/plurxd/src/subtitle_models/
+RUN python3 /src/scripts/build-subtitle-engine --output /opt/subtitle-engine --jobs 2 \
+    && python3 /src/scripts/build-subtitle-engine --verify /opt/subtitle-engine
+
+# Pinned by digest for the same reason, and with more at stake: this layer
+# is the shipped image's entire userland, and `bookworm-slim` moves under
+# the same tag on every Debian point release.
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime-assets
+ARG TARGETARCH
+ARG DOVI_TOOL_VERSION=2.3.3
+ARG MKVTOOLNIX_VERSION=74.0.0-1
+ARG DEBIAN_SNAPSHOT=20260928T000000Z
+ARG JELLYFIN_FFMPEG_VERSION=8.1.3-1-bookworm
+# The facts collector seals one executable, so Jellyfin's dynamically linked
+# ffprobe cannot be its trusted input. Build a separate static local-file
+# probe; keep the ordinary Jellyfin probe and hardware encoder intact.
+COPY scripts/build-static-ffprobe /usr/local/libexec/build-static-ffprobe
+COPY scripts/sealed-parser-dependency-offers.py scripts/sealed-parser-dependency-sources.json scripts/prepare-linux-dolby-sdk /usr/local/libexec/
+COPY scripts/prepare-linux-dolby-ffmpeg /usr/local/libexec/prepare-linux-dolby-ffmpeg
+COPY scripts/linux-video-ffmpeg-patches/0001-require-current-dolby-state.patch /usr/local/libexec/linux-video-ffmpeg-patches/0001-require-current-dolby-state.patch
+COPY scripts/build-static-vmaf-scorer /usr/local/libexec/build-static-vmaf-scorer
+# plurxd shells out to ffmpeg/ffprobe for scanning, remux, and transcode; TLS
+# roots are for TMDB/AniList.
+#
+# Hardware transcode ships two ways in one image:
+#   * jellyfin-ffmpeg (the DEFAULT engine, via PLURX_FFMPEG below) — bundles a
+#     CURRENT Intel media driver + libva + oneVPL, so recent GPUs (Arc,
+#     Meteor/Arrow Lake on the `xe` driver) that Debian's own driver is years
+#     too old for can still do QSV/VAAPI. It's a full ffmpeg, so it also
+#     handles scanning and software encode.
+#   * the distro ffmpeg + Mesa/Intel VA drivers — the fallback if you override
+#     PLURX_FFMPEG back to plain `ffmpeg` (older, widely-tested GPUs).
+# Startup validation test-encodes each path, so only what actually works is used.
+#
+# `apt-get clean` runs between the two ffmpeg installs, not just at the end.
+# This layer downloads two independent stacks — the distro ffmpeg and its
+# driver set (~150 MB of archives), then jellyfin-ffmpeg — and apt keeps every
+# .deb under /var/cache/apt/archives until told otherwise, so the peak is both
+# stacks' archives PLUS both unpacked. On a builder with a small disk that
+# overflows partway through with an error naming the apt cache rather than the
+# real cause. Cleaning between stages keeps the peak to one stack at a time.
+#
+# The jellyfin-ffmpeg install below pins a reviewed build in major 8, which
+# adds the AC-4 decoder required by clear ATSC 3.0 broadcasts. It is then
+# ASSERTED to carry both that decoder and `dovi_rpu`, the
+# bitstream filter (ffmpeg 7.1+) that removes a Dolby Vision configuration
+# from a remux. That is a capability, not a nicety: without it every DV film
+# is re-encoded for browsers that cannot decode Dolby Vision (Chrome cannot;
+# Safari can), so a 4K disc remux quietly plays at the automatic rung.
+# The assertion turns that into a failed build instead of a mystery on
+# somebody's television. Debian packages come from one immutable snapshot;
+# Jellyfin's separately published deb is verified against its repository's
+# SHA-256 metadata for each architecture before apt resolves its dependencies.
+#
+# The layer is reproducible: two cold builds of one commit on 2026-10-02
+# differed only in build-time state, so the end of this RUN removes it. Apt,
+# dpkg and alternatives logs are timestamped; ldconfig's aux-cache records
+# inode times; fontconfig's caches embed the font directories' build-time
+# mtimes. Removing those caches costs nothing measurable: the image carries six
+# fonts, which rescan instantly, and each child regenerates its cache under its
+# XDG_CACHE_HOME on the writable data volume. (Only an export that rewrites
+# file timestamps also makes the baked caches stale; a plain `docker build`
+# would have kept them valid.) `useradd` stamps the account's last-change day from
+# SOURCE_DATE_EPOCH or the clock, so it is given the Debian snapshot's date,
+# which is already this layer's input; the commit's own time is not, because
+# declaring it here would rebuild this whole layer on every commit.
+# docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md §5.6 has the
+# comparison.
+RUN --mount=type=bind,source=scripts/configure-debian-snapshot,target=/tmp/configure-debian-snapshot \
+    sh /tmp/configure-debian-snapshot "$DEBIAN_SNAPSHOT" \
+    && sed -i 's/Components: main/Components: main non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential pkg-config nasm curl ca-certificates xz-utils meson ninja-build xxd python3 patch \
+        zlib1g-dev libbz2-dev liblzma-dev \
+    && static_provider_inputs="" \
+    && if [ "$TARGETARCH" = amd64 ]; then static_provider_inputs=/tmp/sealed-parser-provider-inputs; fi \
+    && sh /usr/local/libexec/build-static-ffprobe \
+        /usr/local/lib/plurx/ffprobe /usr/share/doc/plurx/ffprobe $static_provider_inputs \
+    && sh /usr/local/libexec/build-static-vmaf-scorer \
+        /usr/local/lib/plurx/vmaf-ffmpeg /usr/share/doc/plurx/vmaf-scorer \
+    && apt-get purge -y build-essential pkg-config nasm xz-utils meson ninja-build xxd python3 patch \
+        zlib1g-dev libbz2-dev liblzma-dev \
+    && apt-get autoremove -y \
+    && rm /usr/local/libexec/build-static-ffprobe /usr/local/libexec/build-static-vmaf-scorer /usr/local/libexec/prepare-linux-dolby-ffmpeg \
+    && rm /usr/local/libexec/sealed-parser-dependency-offers.py /usr/local/libexec/sealed-parser-dependency-sources.json /usr/local/libexec/prepare-linux-dolby-sdk \
+    && rm -rf /usr/local/libexec/linux-video-ffmpeg-patches /tmp/sealed-parser-provider-inputs \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg ca-certificates mesa-va-drivers libvulkan1 mesa-vulkan-drivers liblcms2-2 libstdc++6 curl \
+        "mkvtoolnix=${MKVTOOLNIX_VERSION}" \
+    && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+        apt-get install -y --no-install-recommends \
+            intel-media-va-driver-non-free i965-va-driver; \
+    fi \
+    && apt-get clean \
+    && case "$(dpkg --print-architecture)" in \
+        amd64) jellyfin_sha=4829b34df16843ecf1aca8b1a600874b5c767396e1d1990c889c761fd143d928 ;; \
+        arm64) jellyfin_sha=3497002f1b7a7664875dd0aa71d1916a74cbee6598d8b3b413b83732cd1d8794 ;; \
+        *) echo 'FATAL: jellyfin-ffmpeg8 has no pinned artifact for this architecture' >&2; exit 1 ;; \
+       esac \
+    && jellyfin_deb="jellyfin-ffmpeg8_${JELLYFIN_FFMPEG_VERSION}_$(dpkg --print-architecture).deb" \
+    && curl -fsSL "https://repo.jellyfin.org/debian/pool/main/j/jellyfin-ffmpeg/${jellyfin_deb}" \
+        -o "/tmp/${jellyfin_deb}" \
+    && echo "${jellyfin_sha}  /tmp/${jellyfin_deb}" | sha256sum -c - \
+    && apt-get install -y --no-install-recommends "/tmp/${jellyfin_deb}" \
+    && rm -f "/tmp/${jellyfin_deb}" \
+    && apt-get clean \
+    && ( /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -decoders 2>&1 \
+        | grep -Eq '^[[:space:]]*A[^[:space:]]*[[:space:]]+ac4[[:space:]]' \
+      || ( echo "FATAL: this jellyfin-ffmpeg8 has no AC-4 decoder." >&2; \
+           echo "Clear ATSC 3.0 channels require AC-4 audio decoding." >&2; \
+           exit 1 ) ) \
+    && ( /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -bsfs 2>&1 | grep -qx 'dovi_rpu' \
+      || ( echo "FATAL: this jellyfin-ffmpeg8 has no dovi_rpu bitstream filter." >&2; \
+           echo "Got: $(/usr/lib/jellyfin-ffmpeg/ffmpeg -version 2>&1 | head -1)" >&2; \
+           echo "dovi_rpu needs ffmpeg 7.1+; see the note above this RUN." >&2; \
+           echo "Review and pin a new media runtime artifact before rebuilding." >&2; \
+           exit 1 ) ) \
+    && ( /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -h filter=tonemapx 2>&1 | grep -q '^[[:space:]]*apply_dovi[[:space:]]' \
+      || ( echo "FATAL: this jellyfin-ffmpeg8 has no tonemapx apply_dovi renderer." >&2; \
+           echo "Profile 5 fallback requires tonemapx with Dolby Vision RPU reshaping." >&2; \
+           exit 1 ) ) \
+    && dovi_arch="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && case "$dovi_arch" in \
+        amd64|x86_64) \
+            dovi_target=x86_64-unknown-linux-musl; \
+            dovi_sha=5dae82cb2becd3b9fd726127f936a8d32635e60746d16238fdfded12aa05988c ;; \
+        arm64|aarch64) \
+            dovi_target=aarch64-unknown-linux-musl; \
+            dovi_sha=daf538c275f4e702219ce8eb61db28382193ac9d0126e1ef4185a88303af4485 ;; \
+        *) echo "FATAL: dovi_tool has no pinned asset for architecture $dovi_arch" >&2; exit 1 ;; \
+       esac \
+    && dovi_archive="dovi_tool-${DOVI_TOOL_VERSION}-${dovi_target}.tar.gz" \
+    && curl -fsSL \
+        "https://github.com/quietvoid/dovi_tool/releases/download/${DOVI_TOOL_VERSION}/${dovi_archive}" \
+        -o "/tmp/${dovi_archive}" \
+    && echo "${dovi_sha}  /tmp/${dovi_archive}" | sha256sum -c - \
+    && tar -xzf "/tmp/${dovi_archive}" -C /usr/local/bin ./dovi_tool \
+    && chmod 0755 /usr/local/bin/dovi_tool \
+    && rm -f "/tmp/${dovi_archive}" \
+    && dovi_tool --version | grep -F "${DOVI_TOOL_VERSION}" \
+    && mkvmerge --version | grep -F "mkvmerge v74.0.0" \
+    && apt-get purge -y curl && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /usr/share/doc/plurx \
+    && dpkg-query -W -f='${Package}=${Version}\n' | LC_ALL=C sort \
+        > /usr/share/doc/plurx/media-runtime-packages.txt \
+    && rm -rf /var/log/apt/* /var/log/*.log /var/cache/ldconfig/aux-cache \
+        /var/cache/fontconfig/*.cache-* \
+    && groupadd -r plurx \
+    && snapshot_day=$(printf '%s' "$DEBIAN_SNAPSHOT" | cut -c1-8) \
+    && SOURCE_DATE_EPOCH=$(date -u -d "$snapshot_day" +%s) \
+        useradd -r -g plurx -d /var/lib/plurx plurx \
+    && mkdir -p /var/lib/plurx \
+    && chown plurx:plurx /var/lib/plurx
+
+# The application image installs the DV helper bundle and its private libplacebo.
+# The pinned Jellyfin package also supplies the Intel Vulkan driver that newer
+# GPUs need. Register it with ordinary discovery; do not bake a GPU/ICD override.
+COPY tools/dv_processing/register-vulkan-driver.sh /tmp/register-vulkan-driver.sh
+RUN if [ "$TARGETARCH" = amd64 ]; then \
+      sh /tmp/register-vulkan-driver.sh /usr/lib/jellyfin-ffmpeg /usr/share/vulkan/icd.d; \
+    fi && rm /tmp/register-vulkan-driver.sh
+COPY --from=subtitle-engine-build /opt/subtitle-engine/ /usr/local/bin/subtitle-engine/
+# The recognizer must load as the same non-root service account, with no
+# user-supplied PATH or dynamic-library environment. Model install performs
+# the real fixture transcription before claiming worker readiness.
+USER plurx
+RUN env -i LC_ALL=C /usr/local/bin/subtitle-engine/whisper-cli --version \
+    | grep -Fx 'whisper.cpp version: 1.9.2'
+USER root
+
+
+# Audited amd64 media publication uses this separate maintenance recipe.
+# scripts/media-runtime build --target runtime-assets-dolby-amd64 --package
+# AUDITED_PACKAGE verifies the package before installing its reviewed bytes.
+FROM runtime-assets AS linux-dolby-package-build
+USER root
+ARG TARGETARCH
+RUN test "$TARGETARCH" = amd64 \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        build-essential python3 pkg-config cmake ninja-build nasm patch curl \
+        autoconf automake libtool libtool-bin gettext texinfo git bison flex clang \
+        zlib1g-dev libbz2-dev liblzma-dev libpng-dev=1.6.39-2+deb12u5 \
+    && rm -rf /var/lib/apt/lists/*
+COPY scripts/build-linux-dolby-ffmpeg scripts/prepare-linux-dolby-sdk scripts/prepare-linux-dolby-ffmpeg scripts/build-static-ffprobe scripts/linux-video-ffmpeg-sdk-sources.json /opt/plurx-media/scripts/
+COPY scripts/linux-video-ffmpeg-patches /opt/plurx-media/scripts/linux-video-ffmpeg-patches
+RUN python3 /opt/plurx-media/scripts/build-linux-dolby-ffmpeg --step pipeline \
+    --root /work/linux-dolby --jobs 2 --deadline-seconds 600
+FROM scratch AS linux-dolby-package-export
+COPY --from=linux-dolby-package-build /work/linux-dolby/package /package
+
+FROM runtime-assets AS linux-dolby-install
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY scripts/build-linux-dolby-ffmpeg /usr/local/libexec/build-linux-dolby-ffmpeg
+RUN --mount=from=linux-dolby-package,target=/tmp/linux-dolby-package,ro \
+    python3 /usr/local/libexec/build-linux-dolby-ffmpeg --step install-shipping \
+        --root /usr/lib/jellyfin-ffmpeg --output /tmp/linux-dolby-package \
+    && rm /usr/local/libexec/build-linux-dolby-ffmpeg
+
+FROM runtime-assets AS runtime-assets-dolby-amd64
+USER root
+RUN rm -rf /usr/lib/jellyfin-ffmpeg/lib
+COPY --from=linux-dolby-install /usr/lib/jellyfin-ffmpeg /usr/lib/jellyfin-ffmpeg
+COPY --from=linux-dolby-install /usr/local/lib/plurx/ffprobe /usr/local/lib/plurx/ffprobe
+# Debian ffmpeg pulls in a second Media SDK through libavcodec. Let apt
+# remove its reverse dependents, retaining leaf libraries (no autoremove),
+# then prove every required system provider retains its shipping bytes.
+# The ELF audit supplies the inventory; the shipping base supplies the baseline.
+RUN cut -c67- /usr/lib/jellyfin-ffmpeg/provenance/system-elf-sha256.txt \
+    | while IFS= read -r path; do sha256sum "$path" || exit; done \
+        > /usr/lib/jellyfin-ffmpeg/provenance/shipping-system-elf-sha256.txt \
+    && apt-get purge -y libmfx1 \
+    && ! dpkg-query -W -f='${db:Status-Status}' libmfx1 2>/dev/null | grep -qx installed \
+    && sha256sum -c /usr/lib/jellyfin-ffmpeg/provenance/shipping-system-elf-sha256.txt \
+    && ln -sfn /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/bin/ffmpeg \
+    && ln -sfn /usr/lib/jellyfin-ffmpeg/ffprobe /usr/bin/ffprobe \
+    && dpkg-query -W -f='${Package}=${Version}\n' | LC_ALL=C sort \
+        > /usr/share/doc/plurx/media-runtime-packages.txt \
+    && rm -rf /var/log/apt/* /var/log/*.log /var/cache/ldconfig/aux-cache
+
+
+FROM runtime-assets AS media-runtime

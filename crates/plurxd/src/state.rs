@@ -4,6 +4,7 @@
 mod cache_preparation;
 #[path = "library_work.rs"]
 mod library_work;
+pub use library_work::ScanAdmission;
 #[path = "subtitle_work.rs"]
 mod subtitle_work;
 
@@ -65,6 +66,29 @@ static FRAGMENT_INDEX_GONE: AtomicU64 = AtomicU64::new(0);
 fn fragment_analysis_wake() -> &'static broadcast::Sender<()> {
     static WAKE: OnceLock<broadcast::Sender<()>> = OnceLock::new();
     WAKE.get_or_init(|| broadcast::channel(8).0)
+}
+
+/// `plurx_analysis_completed_total{node}`: fragment-index requests this node
+/// executed that reached their target (settlement marks a request `ready`
+/// only once the target holds the index, so a cross-node execution counts
+/// when delivery has hydrated the requester). Read from the Store's attempt
+/// rows, settled since this process first looked; refreshed by the queue
+/// pass at most every 30 s, so a scrape reads an atomic.
+static ANALYSIS_COMPLETED: AtomicI64 = AtomicI64::new(0);
+static ANALYSIS_COMPLETED_READ_MS: AtomicI64 = AtomicI64::new(0);
+static ANALYSIS_COMPLETED_SINCE_MS: OnceLock<i64> = OnceLock::new();
+
+pub(crate) fn analysis_completed_prometheus(node_id: &str) -> String {
+    format!(
+        "# HELP plurx_analysis_completed_total Fragment-index requests this node executed that reached their target, since this process started.\n\
+         # TYPE plurx_analysis_completed_total counter\n\
+         plurx_analysis_completed_total{{node=\"{}\"}} {}\n",
+        node_id
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n"),
+        ANALYSIS_COMPLETED.load(Ordering::Relaxed)
+    )
 }
 
 pub(crate) fn fragment_index_validation_prometheus() -> String {
@@ -234,6 +258,7 @@ struct StoreMetricsAtomics {
     background_job_counts: [AtomicI64; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
     background_job_oldest_age: [AtomicI64; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
     background_source_io: AtomicI64,
+    background_source_recovery: AtomicI64,
     background_legacy_pending: AtomicI64,
     analysis_queue_depth: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
     analysis_queue_oldest_age_seconds: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
@@ -245,6 +270,10 @@ struct StoreMetricsAtomics {
     analysis_claimable: AtomicI64,
     analysis_running_past_lease: AtomicI64,
     analysis_last_ready_at_ms: AtomicI64,
+    /// `[waiting, incompatible, eligible, oldest_queued_at_ms]` of the
+    /// pre-worker request half of the queue health.
+    analysis_request_health: [AtomicI64; 4],
+    analysis_failed_by_code: [AtomicI64; plurx_core::store::ANALYSIS_FAILURE_CODE_SLOTS],
     /// The cumulative counters as this process first saw them. The store's own
     /// are cumulative since the schema landed, and a queue that built 12,000
     /// artifacts last month and nothing since looks identical to a healthy one
@@ -282,6 +311,7 @@ impl Default for StoreMetricsAtomics {
             background_job_counts: std::array::from_fn(|_| AtomicI64::new(0)),
             background_job_oldest_age: std::array::from_fn(|_| AtomicI64::new(0)),
             background_source_io: AtomicI64::new(0),
+            background_source_recovery: AtomicI64::new(0),
             background_legacy_pending: AtomicI64::new(0),
             analysis_queue_depth: std::array::from_fn(|_| AtomicI64::new(0)),
             analysis_queue_oldest_age_seconds: std::array::from_fn(|_| AtomicI64::new(0)),
@@ -293,6 +323,8 @@ impl Default for StoreMetricsAtomics {
             analysis_claimable: AtomicI64::new(0),
             analysis_running_past_lease: AtomicI64::new(0),
             analysis_last_ready_at_ms: AtomicI64::new(0),
+            analysis_request_health: std::array::from_fn(|_| AtomicI64::new(0)),
+            analysis_failed_by_code: std::array::from_fn(|_| AtomicI64::new(0)),
             analysis_baseline_claims: AtomicI64::new(0),
             analysis_baseline_lease_losses: AtomicI64::new(0),
             analysis_baseline_seen: AtomicBool::new(false),
@@ -438,6 +470,10 @@ impl StoreMetricsCache {
                         self.inner.background_job_oldest_age[slot].load(Ordering::Relaxed)
                     }),
                     source_io_reservations: self.inner.background_source_io.load(Ordering::Relaxed),
+                    source_recovery_pending: self
+                        .inner
+                        .background_source_recovery
+                        .load(Ordering::Relaxed),
                     legacy_pending: self.inner.background_legacy_pending.load(Ordering::Relaxed),
                 },
                 analysis: plurx_core::store::AnalysisStoreMetrics {
@@ -452,6 +488,9 @@ impl StoreMetricsCache {
                     }),
                     marker_counts: std::array::from_fn(|slot| {
                         self.inner.analysis_marker_counts[slot].load(Ordering::Relaxed)
+                    }),
+                    failed_by_code: std::array::from_fn(|slot| {
+                        self.inner.analysis_failed_by_code[slot].load(Ordering::Relaxed)
                     }),
                     health: plurx_core::store::AnalysisQueueHealth {
                         ready_24h: self.inner.analysis_ready_24h.load(Ordering::Relaxed),
@@ -468,6 +507,11 @@ impl StoreMetricsCache {
                         last_ready_at_ms: self
                             .inner
                             .analysis_last_ready_at_ms
+                            .load(Ordering::Relaxed),
+                        waiting: self.inner.analysis_request_health[0].load(Ordering::Relaxed),
+                        incompatible: self.inner.analysis_request_health[1].load(Ordering::Relaxed),
+                        eligible: self.inner.analysis_request_health[2].load(Ordering::Relaxed),
+                        oldest_queued_at_ms: self.inner.analysis_request_health[3]
                             .load(Ordering::Relaxed),
                     },
                 },
@@ -630,6 +674,10 @@ impl StoreMetricsCache {
         {
             target.store(value, Ordering::Relaxed);
         }
+        self.inner.background_source_recovery.store(
+            sample.background_jobs.source_recovery_pending,
+            Ordering::Relaxed,
+        );
         self.inner.background_source_io.store(
             sample.background_jobs.source_io_reservations,
             Ordering::Relaxed,
@@ -656,6 +704,22 @@ impl StoreMetricsCache {
         self.inner
             .analysis_last_ready_at_ms
             .store(health.last_ready_at_ms, Ordering::Relaxed);
+        for (target, value) in self.inner.analysis_request_health.iter().zip([
+            health.waiting,
+            health.incompatible,
+            health.eligible,
+            health.oldest_queued_at_ms,
+        ]) {
+            target.store(value, Ordering::Relaxed);
+        }
+        for (target, value) in self
+            .inner
+            .analysis_failed_by_code
+            .iter()
+            .zip(sample.analysis.failed_by_code)
+        {
+            target.store(value, Ordering::Relaxed);
+        }
         let claims = lifecycle_total(&sample.analysis, "claim");
         let losses = lifecycle_total(&sample.analysis, "lease_loss");
         // Re-anchor when a counter has gone backwards as well as on the first
@@ -739,15 +803,24 @@ pub struct AppState {
     pub(crate) trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
     pub catalogue: CatalogueReader,
+    /// Node-local applied views of settings and media-session routes
+    /// (playback-start E1). E1a builds and observes it; no call site reads
+    /// through it yet.
+    pub applied: plurx_core::store::AppliedView,
     /// Read-only projection of the selected backend's watch-state convergence.
     pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     /// Monotonic, Store-free authority for mutable media and readiness.
     pub(crate) serving: crate::serving_fence::ServingFence,
     /// Join/add/remove lifecycle and privacy-safe per-node health.
     pub membership: plurx_core::cluster::membership::MembershipManager,
+    /// The cluster facade (`crate::cluster`): authority, role and peers.
+    /// Feature code asks it; the three raw handles above stay until slice 7.
+    pub(crate) cluster: crate::cluster::Cluster,
     /// Shared complete observation owner. Pending startup hands this exact
     /// handle to normal HTTP; a second loop cannot claim its receiver.
     pub(crate) clock_observer: crate::clock_offset::ClockObserver,
+    pub(crate) copy_analysis: Arc<crate::copy_analysis::CopyAnalysisRegistry>,
+    pub(crate) copy_observation_dir: Option<PathBuf>,
     /// Bounded authenticated client for node-local activity snapshots.
     #[allow(dead_code)] // aggregation child #326 is the first consumer
     pub peer_activity: crate::http::internal_activity::PeerActivityClient,
@@ -799,8 +872,8 @@ pub struct AppState {
     /// Explicit ffmpeg/cache-bookkeeping root. Kept separately because cache
     /// relocation may make it non-sibling to the finished-transcode root.
     pub(crate) runtime_cache_dir: PathBuf,
-    /// Optional shared-cache mount, admitted only while its all-voter canary
-    /// proof remains current.
+    /// Optional shared-cache mount, admitted only while its voter-majority
+    /// canary proof remains current.
     pub(crate) shared_cache: Arc<crate::shared_cache::SharedCacheCoordinator>,
     pub(crate) playback_cache: Arc<crate::playback_cache::PlaybackCacheBudget>,
     /// Where extracted subtitles are kept, keyed by file identity and source
@@ -1049,6 +1122,7 @@ impl AppState {
                 shared_cache_dir: config.cluster.shared_cache_dir.clone(),
                 shared_cache_id: config.cluster.shared_cache_id.clone(),
                 catalogue: selected.catalogue_reader(),
+                applied: selected.applied_view(),
                 snapshot_recovery_budgets: SnapshotRecoveryBudgets {
                     chunk_secs: config.cluster.snapshot_chunk_timeout_secs,
                     transfer_secs: config.cluster.snapshot_transfer_timeout_secs,
@@ -1115,6 +1189,7 @@ impl AppState {
         logs: Arc<LogBuffer>,
     ) -> Self {
         let catalogue = CatalogueReader::authority(Arc::clone(&store));
+        let applied = plurx_core::store::AppliedView::authority(Arc::clone(&store));
         Self::new_configured(
             AppConfig {
                 sharing_network: Default::default(),
@@ -1134,6 +1209,7 @@ impl AppState {
                 shared_cache_dir: PathBuf::new(),
                 shared_cache_id: String::new(),
                 catalogue,
+                applied,
                 snapshot_recovery_budgets: SnapshotRecoveryBudgets::default(),
                 data_dir: PathBuf::new(),
                 credential_key_path: PathBuf::new(),
@@ -1175,12 +1251,21 @@ impl AppState {
             shared_cache_dir,
             shared_cache_id,
             catalogue,
+            applied,
             snapshot_recovery_budgets,
             data_dir,
             credential_key_path,
             backup_client,
         } = config;
+        crate::source_custody::configure_settlement_journal(&data_dir);
+        let copy_observation_dir = (!data_dir.as_os_str().is_empty())
+            .then(|| data_dir.join("copy-ranges").join("observations"));
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
+        let cluster = crate::cluster::Cluster::new(
+            serving.clone(),
+            membership.clone(),
+            applied.applied_mark(),
+        );
         let Dirs {
             artwork: artwork_dir,
             transcode: transcode_dir,
@@ -1191,8 +1276,8 @@ impl AppState {
         } = dirs;
         // Every regenerable playback namespace shares physical capacity and
         // outstanding write grants. Durable state and artwork are excluded.
-        let playback_cache = crate::playback_cache::PlaybackCacheBudget::new(
-            Arc::clone(&store),
+        let playback_cache = crate::playback_cache::PlaybackCacheBudget::with_applied_settings(
+            applied.clone(),
             vec![
                 cache_dir.clone(),
                 subs_dir.clone(),
@@ -1205,6 +1290,8 @@ impl AppState {
         // registry can distinguish active tuner scratch from restart debris.
         let live_tv_scratch = transcode_dir.join(crate::transcode::LIVE_TV_WORK_DIR_NAME);
         let system = Arc::new(system);
+        let peer_activity =
+            crate::http::internal_activity::PeerActivityClient::new(membership.clone());
         let jobs = Arc::new(
             JobManager::new_with_scan_prune_percent(
                 Arc::clone(&store),
@@ -1213,8 +1300,14 @@ impl AppState {
                 node_id.clone(),
                 Arc::new(membership.clone()),
             )
+            .with_source_checkpoint_dir(
+                (!data_dir.as_os_str().is_empty())
+                    .then(|| data_dir.join("source-attestation-checkpoints")),
+            )
             .with_dv_disk_capabilities(system.dv_disk.clone())
-            .with_membership(membership.clone()),
+            .with_applied_view(applied.clone())
+            .with_membership(membership.clone())
+            .with_peer_activity(peer_activity.clone()),
         );
         let sharing = Arc::new(crate::sharing::SharingManager::new(
             Arc::clone(&credential_key),
@@ -1255,6 +1348,7 @@ impl AppState {
             &cluster_id,
             node_id.clone(),
             membership.clone(),
+            cluster.directory(),
             Arc::clone(&store),
         );
         let transcode = Arc::new(
@@ -1264,6 +1358,7 @@ impl AppState {
                 encoder_caps,
                 system.tone_map.selected(),
             )
+            .with_source_identity(node_id.clone(), sharing.accepted_drivers.boot_id())
             .with_encoder_override(crate::transcoder_optimization::effective_override(&system))
             .with_decoders(system.decoders.clone())
             // Cloned from the policy this process installed, which happens in
@@ -1313,6 +1408,13 @@ impl AppState {
             Arc::clone(&store),
             node_id.clone(),
         );
+        crate::copy_analysis::register_playback_cache(
+            &playback_cache,
+            &runtime_cache,
+            Arc::clone(&store),
+            node_id.clone(),
+        );
+        transcode.attach_copy_analysis(Arc::clone(&jobs.copy_analysis));
         crate::http::chapter_thumbs::register_playback_cache(&playback_cache, &runtime_cache);
         crate::subtitle_source::register_playback_cache(
             &playback_cache,
@@ -1337,10 +1439,12 @@ impl AppState {
             node_id.clone(),
             serving.clone(),
         );
-        let media_pool = crate::media_pool::MediaPool::new(membership.clone());
-        let media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
+        let media_pool = crate::media_pool::MediaPool::new(membership.clone(), cluster.directory());
+        let media_sessions = crate::media_sessions::MediaSessionCoordinator::with_directory(
             membership.clone(),
+            cluster.directory(),
             Arc::clone(&store),
+            Arc::new(applied.clone()),
         );
         let cache_only_admin_proofs =
             crate::http::CacheOnlyAdminProofCache::new(membership.is_replicated());
@@ -1355,6 +1459,9 @@ impl AppState {
             runtime_cache.join("live-tv"),
         );
         live_tv.set_settings_changes(settings_changes.clone());
+        live_tv.set_applied_view(applied.clone());
+        let copy_analysis = Arc::clone(&jobs.copy_analysis);
+
         AppState {
             resource_runtime,
             https: None,
@@ -1368,16 +1475,18 @@ impl AppState {
             jellyfin_standard_port: Default::default(),
             trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
+            applied,
             replication,
-            peer_activity: crate::http::internal_activity::PeerActivityClient::new(
-                membership.clone(),
-            ),
+            peer_activity,
             peer_status_cache: Default::default(),
             membership_status_cache: Default::default(),
             serving,
             clock_observer: crate::clock_offset::ClockObserver::new(membership.clone()),
+            copy_analysis,
+            copy_observation_dir,
             node_hostname: membership.local_hostname(),
             membership,
+            cluster,
             media_pool,
             media_sessions,
             settings_changes,
@@ -1431,6 +1540,21 @@ impl AppState {
         }
     }
 
+    /// Point this state at another membership manager, and the cluster
+    /// facade with it, so a fixture can never leave the two disagreeing.
+    #[cfg(test)]
+    pub(crate) fn replace_membership(
+        &mut self,
+        membership: plurx_core::cluster::membership::MembershipManager,
+    ) {
+        self.cluster = crate::cluster::Cluster::new(
+            self.serving.clone(),
+            membership.clone(),
+            self.applied.applied_mark(),
+        );
+        self.membership = membership;
+    }
+
     /// Refresh all Store-backed Prometheus gauges as one complete sample.
     /// A failure preserves the previous sample and increments its bounded
     /// source counter.
@@ -1440,9 +1564,20 @@ impl AppState {
             .unwrap_or_default()
             .as_secs()
             .min(i64::MAX as u64) as i64;
+        // Due pre-worker requests split into eligible and incompatible
+        // against the engines live workers run now. An empty or unreadable
+        // inventory is unknown, not "nobody can run anything".
+        let live = crate::background_jobs::analysis_reconcile::engines(self)
+            .await
+            .ok()
+            .filter(|engines| !engines.is_empty())
+            .map(|engines| plurx_core::store::LiveAnalysisEngines {
+                engines,
+                members: None,
+            });
         match self
             .store
-            .prometheus_store_snapshot(&self.node_id, now)
+            .prometheus_store_snapshot_with(&self.node_id, now, live.as_ref())
             .await
         {
             Ok(snapshot) => {
@@ -1506,6 +1641,7 @@ impl AppState {
         let base_interval = Duration::from_secs(30 + stagger);
         let mut consecutive_errors = 0_u32;
         let mut warn_state = QueueWarnState::default();
+        let mut custody_warning = QueueWarnState::default();
         loop {
             if let Err(error) = self.refresh_store_metrics().await {
                 consecutive_errors = consecutive_errors.saturating_add(1);
@@ -1513,6 +1649,14 @@ impl AppState {
             } else {
                 consecutive_errors = 0;
                 self.warn_if_the_queue_is_not_producing(&mut warn_state);
+                if let Some(sample) = self.store_metrics.snapshot().sample {
+                    let pending = sample.background_jobs.source_recovery_pending;
+                    if pending == 0 {
+                        custody_warning.record_good_sample();
+                    } else if custody_warning.should_warn(clock_ms()) {
+                        tracing::warn!(pending, "Source owners are still holding capacity long after their leases lapsed; the source custody sweep is not running on any node.");
+                    }
+                }
             }
             let backoff = 1_u32 << consecutive_errors.min(3);
             let interval = base_interval.saturating_mul(backoff);
@@ -1561,6 +1705,7 @@ pub struct AppConfig {
     pub shared_cache_dir: PathBuf,
     pub shared_cache_id: String,
     pub catalogue: CatalogueReader,
+    pub applied: plurx_core::store::AppliedView,
     pub snapshot_recovery_budgets: SnapshotRecoveryBudgets,
     pub data_dir: PathBuf,
     pub credential_key_path: PathBuf,
@@ -1738,7 +1883,15 @@ pub(crate) const TITLE_SCAN_INDEX_WAIT: std::time::Duration =
     std::time::Duration::from_secs(60 * 60);
 
 pub struct JobManager {
+    pub(crate) copy_analysis: Arc<crate::copy_analysis::CopyAnalysisRegistry>,
     store: Arc<dyn Store>,
+    /// This node's applied settings view, for the background lanes' idle
+    /// looks at their switches and tunables (A4). Every read before a claim,
+    /// a cancel or a publication stays on `store`.
+    applied: plurx_core::store::AppliedView,
+    /// Durable source continuation root. Standalone test managers omit it.
+    source_checkpoint_dir: Option<PathBuf>,
+    source_identity: std::sync::RwLock<Option<crate::source_custody::SourceIdentity>>,
     /// Bounded, node-local repair previews. A plan ID is a lookup handle, not
     /// authority; every status/apply request authenticates its original admin.
     pub(crate) identity_repairs: crate::http::scan_identity::IdentityRepairCache,
@@ -1761,6 +1914,10 @@ pub struct JobManager {
     live: Mutex<HashMap<i64, Arc<ScanProgress>>>,
     /// Wake durable library consumers promptly after local admission.
     library_wake: tokio::sync::Notify,
+    /// Per-request completion signals for a `POST /scan` that waits
+    /// (`wait_ms`). Local only: a request finished by another node is found
+    /// by the waiter's own re-read of the durable record.
+    scan_waiters: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     library_readiness: crate::background_jobs::LibraryReadiness,
     /// Shared with TranscodeManager when attached; standalone managers have
     /// no other encoder pool. Foreground subtitles reserve one CPU thread.
@@ -1787,6 +1944,12 @@ pub struct JobManager {
     /// Throttle bounded, replicated analysis-history pruning so an idle queue
     /// does not produce a Raft write on every scheduler tick.
     last_analysis_prune_ms: AtomicI64,
+    /// The peer activity inventory (shared with `AppState`'s client, so one
+    /// fan-out serves both) that carries each worker's engine digest.
+    peer_activity: Option<crate::http::internal_activity::PeerActivityClient>,
+    /// Where the retired-engine reconciler resumes, and when it last ran.
+    analysis_reconcile_cursor: tokio::sync::Mutex<String>,
+    last_analysis_reconcile_ms: AtomicI64,
     /// High-frequency worker progress is deliberately node-local. Replicating
     /// every fragment would turn one long media read into sustained Raft load;
     /// the bounded peer Activity snapshot carries these rows to an ingress.
@@ -1816,6 +1979,13 @@ pub struct JobManager {
     /// Content jobs this node cannot currently read. These exclusions remain
     /// node-local so another voter can claim the row immediately.
     fragment_index_refusals: Mutex<HashMap<String, i64>>,
+    /// Copy-video identities this executor found it cannot emit for another
+    /// node's fragment-index request, with when it found that. The claim
+    /// leaves other nodes' rows naming one of them alone, so an idle node
+    /// does not claim, refuse and requeue the same row on every pass; they
+    /// expire after [`ANALYSIS_EXECUTOR_REFUSAL_TTL_MS`], so a capability
+    /// this node gains (a conversion setting turned on) is noticed.
+    analysis_executor_refusals: std::sync::Mutex<HashMap<String, i64>>,
     /// Logical fragment keys whose identity failed a shared read (§5.6):
     /// until the mark expires that identity is built in a pass of its own,
     /// and so is a lead that carries one. Keyed by the logical key, so a new
@@ -2476,17 +2646,19 @@ fn measured_index_budget_secs(
 }
 
 /// A local whole-file read owes viewers the same preemption as a queued
-/// cluster pass. Dropping the losing build kills its child and removes its
-/// partial subtitle stage; callers must return without recording a refusal
-/// or advancing the cursor so the interrupted file remains due.
+/// cluster pass. Cancellation must join the child and companion and remove
+/// the partial subtitle stage before the admission can be released. Callers
+/// return without recording a refusal or advancing the cursor, so the
+/// interrupted file remains due.
 ///
 /// The read runs under `admission`, its turn on the heavy-background lane,
 /// so the pool is never idle while it runs: what preempts it is foreground
 /// demand beyond that admission's own claim, not the claim itself.
 ///
-/// Known limit: only work that holds an admission is visible here. A
-/// copy-mode or VOD viewer reading the source without one does not preempt
-/// the read, and a preempted read starts over from the beginning next time.
+/// A pending playback qualification also marks maintenance pressure so this
+/// read yields even when native copy playback has no encoder permit. Bare
+/// copy or VOD playback that requests no qualification remains invisible, and
+/// a preempted read starts over from the beginning next time.
 pub(crate) async fn local_index_until_foreground<T>(
     transcode: &TranscodeManager,
     admission: &Arc<crate::transcode::FragmentAdmission>,
@@ -2494,14 +2666,24 @@ pub(crate) async fn local_index_until_foreground<T>(
 ) -> Option<T> {
     let keeper: Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper> = admission.clone();
     let build = plurx_core::process::bounded::with_original_work_keeper(keeper, build);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    // Local builders inherit this token through every probe/child stage. Keep
+    // polling the owner after cancellation: dropping it skips its explicit
+    // child wait, source bridge closure and joined DV companion cleanup.
+    let build = plurx_core::process::bounded::cancellable(cancel.clone(), build);
+    tokio::pin!(build);
     tokio::select! {
         biased;
         () = async {
             while !transcode.fragment_must_yield(admission) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-        } => None,
-        result = build => Some(result),
+        } => {
+            cancel.cancel();
+            let _ = build.await;
+            None
+        },
+        result = &mut build => Some(result),
     }
 }
 
@@ -2568,6 +2750,111 @@ fn ordered_cluster_index_paths(
 
 fn setting_enabled(value: Option<String>) -> bool {
     plurx_core::store::stored_switch(value.as_deref(), false)
+}
+
+/// [`JobManager::cluster_fragment_index_enabled`] from the applied settings
+/// view, for the fragments lane's look between passes (A4). The pass it opens
+/// re-reads the switch from the Store before it builds or publishes.
+async fn lane_cluster_fragment_index_enabled(applied: &plurx_core::store::AppliedView) -> bool {
+    applied
+        .setting(keys::VOD_INDEX_CLUSTER_CACHE)
+        .await
+        .ok()
+        .is_some_and(setting_enabled)
+}
+
+/// The settings [`AnalysisRetryPolicy::from_settings`] reads.
+const ANALYSIS_RETRY_KEYS: [&str; 4] = [
+    keys::ANALYSIS_LEASE_SECS,
+    keys::ANALYSIS_BACKOFF_BASE_SECS,
+    keys::ANALYSIS_BACKOFF_MAX_SECS,
+    keys::ANALYSIS_MAX_ATTEMPTS,
+];
+
+/// [`JobManager::analysis_retry_policy`] from the applied settings view, for
+/// the copy-observation pass the fragments lane starts every tick (A4):
+/// tunables (lease, renewal and backoff lengths), never a guard on a write.
+/// Its own keys only, so a settings write elsewhere costs a keyed local read
+/// and not a reload of the table.
+async fn lane_analysis_retry_policy(
+    applied: &plurx_core::store::AppliedView,
+) -> AnalysisRetryPolicy {
+    let settings = applied
+        .setting_values(&ANALYSIS_RETRY_KEYS)
+        .await
+        .unwrap_or_default();
+    AnalysisRetryPolicy::from_settings(&settings)
+}
+
+/// [`JobManager::subtitle_source_queue_enabled`] from the applied settings
+/// view, for the subtitle lane's look between passes (A4). Both switches in
+/// one read; an unreadable view closes the lane for the tick, as an
+/// unreadable Store did.
+async fn lane_subtitle_source_queue_enabled(applied: &plurx_core::store::AppliedView) -> bool {
+    match applied
+        .setting_pair(
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+        )
+        .await
+    {
+        Ok((index, sources)) => setting_enabled(index) && setting_enabled(sources),
+        Err(_) => false,
+    }
+}
+
+/// The preparation lanes the settings open (the speculative discovery
+/// schedule and the `vod.output_preparation` Developer switch), from the
+/// applied settings view, and whether the output switch was actually read.
+/// A read error is not "off": the output lane stays closed for this tick
+/// (nothing is claimed under a switch nobody read) and the caller must not
+/// drain on it.
+///
+/// Both lanes' settings in one read of the view (A4): which lanes open is
+/// decided again every tick, and nothing is claimed, cancelled or published
+/// on this answer alone (the claim and the drain read the Store). An
+/// unreadable view closes both lanes for the tick, as an unreadable cadence
+/// read did.
+async fn read_preparation_lanes(
+    applied: &plurx_core::store::AppliedView,
+) -> (crate::background_jobs::PreparationLanes, bool) {
+    /// One warning per run of failures, debug for the rest of the run.
+    static OUTPUT_SWITCH_UNREADABLE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    let read = applied
+        .setting_pair(keys::JOB_CACHE_PRODUCE_MINS, keys::VOD_OUTPUT_PREPARATION)
+        .await;
+    let speculative = read.as_ref().is_ok_and(|(minutes, _)| {
+        minutes
+            .as_deref()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(0)
+            > 0
+    });
+    let (output, read) = match read.map(|(_, output)| output) {
+        Ok(value) => {
+            OUTPUT_SWITCH_UNREADABLE.store(false, Ordering::Relaxed);
+            (
+                crate::vodserve::OutputPreparation::parse(value.as_deref()),
+                true,
+            )
+        }
+        Err(error) => {
+            if OUTPUT_SWITCH_UNREADABLE.swap(true, Ordering::Relaxed) {
+                tracing::debug!(%error, "output preparation switch still unreadable; lane and drain skipped");
+            } else {
+                tracing::warn!(%error, "could not read the output preparation switch; its lane and drain are skipped until it reads");
+            }
+            (crate::vodserve::OutputPreparation::Off, false)
+        }
+    };
+    (
+        crate::background_jobs::PreparationLanes {
+            speculative,
+            output,
+        },
+        read,
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2880,6 +3167,22 @@ pub struct ScanRequestRecord {
     pub items: Option<Vec<PlacedFile>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// A machine-readable failure: `path_unreadable` when the library root
+    /// could not be read at scan time, so the caller retries; `cancelled`
+    /// when the request's job was cancelled before it finished.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
+    /// Contract v2: what a queued request is waiting on (`full_scan:<lib>`,
+    /// `root_unreadable:<path>`, `queue_position:<n>`; the contract's
+    /// `heavy_lane:<holder>` is never written for a targeted job), empty when
+    /// nothing is in its way. Present only on v2 requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting_on: Option<String>,
+    /// Contract v2: the per-file report for the request's `expected_files`.
+    /// Present only on v2 requests, so a caller can tell "no file placed"
+    /// from "this plurx does not report files".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<plurx_core::store::scan_request_v2::PlacedReport>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -3236,8 +3539,8 @@ pub(crate) struct PlaybackViewerDemand {
 }
 
 impl PlaybackViewerDemand {
-    /// Shared source admission is not installed. Refuse explicitly rather
-    /// than dropping typed viewer ownership from background or VOD work.
+    /// Local demand uses the Local viewer-interest path. Shared Source demand
+    /// must retain its typed Source grant and use the separate Source join.
     pub(crate) fn require_local_authority(&self) -> Result<(), &'static str> {
         match &self.principal {
             plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id }
@@ -3282,36 +3585,40 @@ pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
         None => base,
     };
     let now = clock_ms();
+    let live = crate::background_jobs::analysis_reconcile::live_engines_snapshot();
     let request = store
-        .enqueue_analysis_request(&NewAnalysisRequest {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            file_id: file.id,
-            source_size: file.size,
-            source_mtime: file.mtime,
-            component: "fragment_index".to_owned(),
-            requested_generation,
-            pipeline_version,
-            video_identity,
-            // A viewer waiting on this preparation makes it foreground work:
-            // the row says so, and the queue's playback headroom admits it
-            // even when background discovery has filled the active ceiling.
-            priority: if viewer.is_some() {
-                "foreground"
-            } else {
-                "normal"
-            }
-            .to_owned(),
-            trigger: if viewer.is_some() {
-                "playback"
-            } else {
-                "background"
-            }
-            .to_owned(),
-            force_rebuild: false,
-            target_node_id: node_id.to_owned(),
-            not_before_ms: now,
-            created_at_ms: now,
-        })
+        .enqueue_analysis_request_with(
+            &NewAnalysisRequest {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                component: "fragment_index".to_owned(),
+                requested_generation,
+                pipeline_version,
+                video_identity,
+                // A viewer waiting on this preparation makes it foreground work:
+                // the row says so, and the queue's playback headroom admits it
+                // even when background discovery has filled the active ceiling.
+                priority: if viewer.is_some() {
+                    "foreground"
+                } else {
+                    "normal"
+                }
+                .to_owned(),
+                trigger: if viewer.is_some() {
+                    "playback"
+                } else {
+                    "background"
+                }
+                .to_owned(),
+                force_rebuild: false,
+                target_node_id: node_id.to_owned(),
+                not_before_ms: now,
+                created_at_ms: now,
+            },
+            live.as_deref(),
+        )
         .await?;
     if let Some(viewer) = viewer {
         store
@@ -3329,6 +3636,11 @@ pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
     }
     let _ = fragment_analysis_wake().send(());
     Ok(request)
+}
+
+/// Wake the Analysis dispatcher: a viewer joined, or a copy range committed.
+pub(crate) fn wake_fragment_analysis() {
+    let _ = fragment_analysis_wake().send(());
 }
 
 pub(crate) fn clock_ms() -> i64 {
@@ -3377,10 +3689,81 @@ fn subtitle_source_covered(
 /// The subtitle worker has no index pipe: the tee's null slave is its sole
 /// stdout destination. A job-owned child and a separate stderr reader ensure
 /// even a noisy decoder cannot deadlock a lease holder.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing extraction inputs and cancellation/progress lifetimes while explicitly plumbing original-source ownership"
+)]
 async fn run_subtitle_source_pass(
     plan: crate::subtitle_ride_along::RideAlongPlan,
     source: &std::fs::File,
     input_args: &[String],
+    original_source: bool,
+    runtime_cache: &Path,
+    lost: &CancellationToken,
+    preempt_when_busy: Option<&TranscodeManager>,
+    progress: &(dyn Fn() + Sync),
+) -> Result<crate::subtitle_ride_along::PendingRideAlong, AnalysisResolutionError> {
+    let input = if original_source {
+        crate::source_input::SourceInput::open_current_held(source, "subtitle-source-pass")
+            .await
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_unavailable",
+                charge_attempt: false,
+            })?
+    } else {
+        None
+    };
+    let result = run_subtitle_source_pass_owned(
+        plan,
+        source,
+        input_args,
+        input.as_ref().map(|input| input.url()),
+        runtime_cache,
+        lost,
+        preempt_when_busy,
+        progress,
+    )
+    .await;
+    if let Some(input) = input {
+        input
+            .close_and_wait()
+            .await
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_read_cleanup_pending",
+                charge_attempt: false,
+            })?;
+    }
+    result
+}
+
+async fn join_subtitle_source_child(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        let _ = crate::source_custody::signal_group(
+            pid,
+            crate::process_control::ProcessSignal::Terminate,
+        );
+    }
+    let _ = child.start_kill();
+    loop {
+        match child.wait().await {
+            Ok(_) => break,
+            Err(error) => {
+                tracing::warn!(%error,"subtitle source child wait failed; retaining owned cleanup");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing extraction inputs and cancellation/progress lifetimes while explicitly plumbing original-source ownership"
+)]
+async fn run_subtitle_source_pass_owned(
+    plan: crate::subtitle_ride_along::RideAlongPlan,
+    source: &std::fs::File,
+    input_args: &[String],
+    input_url: Option<&str>,
     runtime_cache: &Path,
     lost: &CancellationToken,
     preempt_when_busy: Option<&TranscodeManager>,
@@ -3403,49 +3786,57 @@ async fn run_subtitle_source_pass(
         .map_err(|_| AnalysisResolutionError::Terminal("source_unavailable"))?
         .to_string_lossy()
         .into_owned();
+    let input = input_url.map_or(input, ToOwned::to_owned);
     let args = subtitle_source_argv(&input, input_args, &plan);
     let mut command = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
     crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
     #[cfg(unix)]
-    {
+    let descriptors = {
         use std::os::fd::AsRawFd;
-        let source_fd = source.as_raw_fd();
-        unsafe {
-            command.pre_exec(move || {
-                let duplicate = libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, 10);
-                if duplicate == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::dup2(duplicate, 3) == -1 {
-                    libc::close(duplicate);
-                    return Err(std::io::Error::last_os_error());
-                }
-                libc::close(duplicate);
-                let flags = libc::fcntl(3, libc::F_GETFD);
-                if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+        if input_url.is_some() {
+            crate::producer_spawn::Descriptors::default()
+        } else {
+            crate::producer_spawn::Descriptors::from_mappings(&[(source.as_raw_fd(), 3)], None)
         }
-    }
+    };
+    #[cfg(not(unix))]
+    let descriptors = crate::producer_spawn::Descriptors::default();
     #[cfg(windows)]
-    crate::ffmpeg::verify_windows_source_path(source, Path::new(&input))
-        .map_err(|_| AnalysisResolutionError::Terminal("source_unavailable"))?;
+    if input_url.is_none() {
+        crate::ffmpeg::verify_windows_source_path(source, Path::new(&input))
+            .map_err(|_| AnalysisResolutionError::Terminal("source_unavailable"))?;
+    }
     command
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
-        &mut command,
-        crate::process_control::ChildWork::background("subtitle source extraction"),
-    )
-    .map_err(|_| AnalysisResolutionError::Retry {
-        code: "source_process_failed",
-        charge_attempt: true,
-    })?;
+    #[cfg(unix)]
+    command.process_group(0);
+    let stdio = crate::producer_spawn::ChildStdios {
+        stdin: crate::producer_spawn::ChildStdio::Null,
+        stdout: crate::producer_spawn::ChildStdio::Null,
+        stderr: crate::producer_spawn::ChildStdio::Piped,
+    };
+    let manifest =
+        descriptors
+            .prepare(&mut command, stdio)
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_process_failed",
+                charge_attempt: true,
+            })?;
+    let (mut child, _child_job) =
+        crate::producer_spawn::with_manifest(&manifest, &mut command, |command| {
+            crate::process_control::spawn_job_owned(
+                command,
+                crate::process_control::ChildWork::background("subtitle source extraction"),
+            )
+        })
+        .map_err(|_| AnalysisResolutionError::Retry {
+            code: "source_process_failed",
+            charge_attempt: true,
+        })?;
     let mut stderr = child.stderr.take().ok_or(AnalysisResolutionError::Retry {
         code: "source_process_failed",
         charge_attempt: true,
@@ -3468,29 +3859,26 @@ async fn run_subtitle_source_pass(
     let status = loop {
         tokio::select! {
             () = lost.cancelled() => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                join_subtitle_source_child(&mut child).await;
                 stderr_task.abort();
                 return Err(AnalysisResolutionError::ClaimLost);
             }
             () = &mut deadline => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                join_subtitle_source_child(&mut child).await;
                 stderr_task.abort();
                 return Err(AnalysisResolutionError::Retry {
                     code: "source_pass_timeout",
                     charge_attempt: true,
                 });
             }
-            status = child.wait() => break status.map_err(|_| AnalysisResolutionError::Retry {
-                code: "source_process_failed",
-                charge_attempt: true,
-            })?,
+            status = child.wait() => match status {
+                Ok(status)=>break status,
+                Err(error)=>{tracing::warn!(%error,"subtitle source wait failed; retaining claim and retrying");tokio::time::sleep(Duration::from_millis(100)).await;},
+            },
             () = tokio::time::sleep(Duration::from_millis(500)) => {
                 progress();
                 if preempt_when_busy.is_some_and(|manager| !manager.pretranscode_worker_idle()) {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
+                    join_subtitle_source_child(&mut child).await;
                     stderr_task.abort();
                     return Err(AnalysisResolutionError::Retry {
                         code: "foreground_preempted",
@@ -3526,11 +3914,15 @@ async fn fragment_index_video_identities(
     convert: bool,
 ) -> Result<Vec<plurx_core::transcode::CopyVideoOptions>, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
-    Ok(crate::fragindex::video_identities(
+    let refit = crate::dv_refit_serving::index_digest(store, file, convert)
+        .await
+        .map_err(StoreError::Task)?;
+    Ok(crate::fragindex::video_identities_with_refit(
         file,
         probe_json.as_deref(),
         have_dovi,
         convert,
+        refit,
     ))
 }
 
@@ -3558,15 +3950,22 @@ pub(crate) async fn fragment_index_video_identity_options(
     convert: bool,
 ) -> Result<Vec<(plurx_core::transcode::CopyVideoOptions, String)>, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
-    Ok(
-        crate::fragindex::video_identities(file, probe_json.as_deref(), have_dovi, convert)
-            .into_iter()
-            .map(|video| {
-                let fingerprint = crate::fragindex::identity_for(file, video).argv_fingerprint;
-                (video, fingerprint)
-            })
-            .collect(),
+    let refit = crate::dv_refit_serving::index_digest(store, file, convert)
+        .await
+        .map_err(StoreError::Task)?;
+    Ok(crate::fragindex::video_identities_with_refit(
+        file,
+        probe_json.as_deref(),
+        have_dovi,
+        convert,
+        refit,
     )
+    .into_iter()
+    .map(|video| {
+        let fingerprint = crate::fragindex::identity_for(file, video).argv_fingerprint;
+        (video, fingerprint)
+    })
+    .collect())
 }
 
 /// Which identity a request is asking for.
@@ -3614,7 +4013,80 @@ async fn fragment_index_requested_video_options(
         .unwrap_or_else(|| plurx_core::transcode::CopyVideoOptions::new(have_dovi, false)))
 }
 
+/// How long an executor remembers that it cannot emit a copy-video identity
+/// for another node's request (`JobManager::analysis_executor_refusals`):
+/// one re-check per identity per quarter hour, instead of one per pass.
+const ANALYSIS_EXECUTOR_REFUSAL_TTL_MS: i64 = 15 * 60 * 1_000;
+
+struct DiskRefitHelper {
+    #[cfg(target_os = "linux")]
+    original: Arc<crate::vodencode::dv_runtime::ToolSet>,
+}
+
+impl DiskRefitHelper {
+    async fn capture() -> Result<(String, Self), String> {
+        #[cfg(target_os = "linux")]
+        {
+            let original = crate::vodencode::dv_runtime::ToolSet::capture()
+                .await
+                .map_err(|error| format!("waiting for F+ helper: {error}"))?
+                .ok_or("waiting for F+ helper installation")?;
+            Ok((original.refit_helper_identity(), Self { original }))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("waiting for a Linux F+ helper host".into())
+        }
+    }
+
+    fn scanner(&self) -> Option<&Path> {
+        #[cfg(target_os = "linux")]
+        {
+            Some(self.original.scanner.as_path())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    async fn is_current(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.original.is_current().await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+}
+
 impl JobManager {
+    pub(crate) fn configure_source_identity(
+        &self,
+        identity: crate::source_custody::SourceIdentity,
+    ) {
+        if let Ok(mut current) = self.source_identity.write() {
+            *current = Some(identity);
+        }
+    }
+
+    pub(crate) fn foreground_source_request(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        lifetime: &str,
+    ) -> Option<crate::source_custody::SourceRequest> {
+        let identity = self.source_identity.read().ok()?.clone()?;
+        Some(identity.request(
+            Arc::clone(&self.store),
+            file,
+            lifetime,
+            uuid::Uuid::new_v4(),
+            plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer,
+        ))
+    }
+
     /// Revalidate one bounded node-local page every interval. This deliberately
     /// does not take cluster job authority: both SQLite and hiqlite route the
     /// index rows through this process's local database, never through Raft.
@@ -3686,6 +4158,11 @@ impl JobManager {
         ))
     }
 
+    fn with_source_checkpoint_dir(mut self, directory: Option<PathBuf>) -> Self {
+        self.source_checkpoint_dir = directory;
+        self
+    }
+
     fn new_with_scan_prune_percent(
         store: Arc<dyn Store>,
         artwork_dir: PathBuf,
@@ -3695,8 +4172,14 @@ impl JobManager {
     ) -> Self {
         let coordinator = StoreCoordinator::new(Arc::clone(&store), node_id)
             .expect("configured node id is a valid lease owner");
+        // A standalone view over the same store until the daemon hands over
+        // its own (`with_applied_view`): every look then reads the store.
+        let applied = plurx_core::store::AppliedView::authority(Arc::clone(&store));
         JobManager {
             store,
+            applied,
+            source_checkpoint_dir: None,
+            source_identity: std::sync::RwLock::new(None),
             identity_repairs: Default::default(),
             coordinator,
             job_authority,
@@ -3708,6 +4191,7 @@ impl JobManager {
             statuses: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
             library_wake: tokio::sync::Notify::new(),
+            scan_waiters: std::sync::Mutex::new(HashMap::new()),
             library_readiness: Default::default(),
             subtitle_admissions: std::sync::Mutex::new(crate::admission::Admissions::new()),
             metrics: Arc::new(IntegrationMetrics::default()),
@@ -3719,15 +4203,20 @@ impl JobManager {
             dv_disk_working: std::sync::atomic::AtomicBool::new(false),
             dv_disk_capabilities: crate::dv_disk::DvDiskCapabilities::default(),
             last_analysis_prune_ms: AtomicI64::new(0),
+            peer_activity: None,
+            analysis_reconcile_cursor: tokio::sync::Mutex::new(String::new()),
+            last_analysis_reconcile_ms: AtomicI64::new(0),
             analysis_progress: std::sync::Mutex::new(HashMap::new()),
             analysis_progress_epoch: AtomicU64::new(0),
             analysis_metrics: Arc::new(AnalysisRuntimeMetrics::default()),
+            copy_analysis: Arc::new(Default::default()),
             #[cfg(test)]
             finished_analysis_rows: std::sync::Mutex::new(Vec::new()),
             now_producing: Mutex::new(None),
             stop_producing: std::sync::atomic::AtomicBool::new(false),
             pretranscode_refusals: Mutex::new(HashMap::new()),
             fragment_index_refusals: Mutex::new(HashMap::new()),
+            analysis_executor_refusals: std::sync::Mutex::new(HashMap::new()),
             shared_pass_marks: Mutex::new(HashMap::new()),
             last_pretranscode_cache_sweep_ms: AtomicI64::new(0),
             fragment_index_sweep_cursor: Mutex::new(None),
@@ -3744,12 +4233,81 @@ impl JobManager {
         }
     }
 
+    pub(crate) fn with_applied_view(mut self, applied: plurx_core::store::AppliedView) -> Self {
+        self.applied = applied;
+        self
+    }
+
     fn with_membership(
         mut self,
         membership: plurx_core::cluster::membership::MembershipManager,
     ) -> Self {
         self.membership = Some(membership);
         self
+    }
+
+    fn with_peer_activity(
+        mut self,
+        peers: crate::http::internal_activity::PeerActivityClient,
+    ) -> Self {
+        self.peer_activity = Some(peers);
+        self
+    }
+
+    /// One bounded pass of the retired-engine reconciler
+    /// (`background_jobs::analysis_reconcile::reconcile_retired`), at most
+    /// every 30 s — the engine-report freshness window — unless the last
+    /// pass replaced something, in which case the next runs straight away so
+    /// a deploy's stranded cohort clears in minutes. A voter walks every
+    /// row; a learner only the rows that name it.
+    pub(crate) async fn reconcile_retired_analysis_requests(
+        &self,
+        limit: usize,
+        own_targets_only: bool,
+    ) -> crate::background_jobs::analysis_reconcile::ReconcileReport {
+        const RECONCILE_INTERVAL_MS: i64 = 30_000;
+        let now = clock_ms();
+        let last = self.last_analysis_reconcile_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < RECONCILE_INTERVAL_MS {
+            return Default::default();
+        }
+        let Ok(mut cursor) = self.analysis_reconcile_cursor.try_lock() else {
+            return Default::default();
+        };
+        let ctx = crate::background_jobs::analysis_reconcile::ReconcileContext {
+            store: &*self.store,
+            node_id: self.coordinator.node_id(),
+            membership: self.membership.as_ref(),
+            peers: self.peer_activity.as_ref(),
+        };
+        let report = match crate::background_jobs::analysis_reconcile::reconcile_retired(
+            ctx,
+            &mut cursor,
+            limit,
+            own_targets_only,
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                tracing::warn!(?error, "reconciling retired-engine analysis requests");
+                Default::default()
+            }
+        };
+        self.last_analysis_reconcile_ms
+            .store(if report.replaced > 0 { 0 } else { now }, Ordering::Relaxed);
+        if report.retired > 0 || report.skipped_unfresh > 0 {
+            tracing::info!(
+                scanned = report.scanned,
+                retired = report.retired,
+                absent_target = report.absent_target,
+                replaced = report.replaced,
+                skipped_unfresh = report.skipped_unfresh,
+                wrapped = report.wrapped,
+                "analysis reconciliation pass"
+            );
+        }
+        report
     }
 
     fn with_dv_disk_capabilities(
@@ -4486,6 +5044,112 @@ impl JobManager {
         }
     }
 
+    /// Read-only queue explanation from stored title facts and fit rows. The
+    /// status API never captures a helper or probes media on a poll.
+    pub(crate) async fn disk_refit_waiting_reason(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<&'static str>, StoreError> {
+        use plurx_core::scan::dv_title::{DvTitleStats, TitleConstant, TitleElKind};
+        let Some(document) = self.store.get_file_probe_json(file_id).await? else {
+            return Ok(Some("Waiting for complete-title Dolby Vision scan"));
+        };
+        let Some(stats) = DvTitleStats::from_probe_json(&document).filter(|s| s.complete) else {
+            return Ok(Some("Waiting for complete-title Dolby Vision scan"));
+        };
+        match stats.el_kind {
+            TitleConstant::Consistent(TitleElKind::Mel) => Ok(None),
+            TitleConstant::Consistent(TitleElKind::Fel) => {
+                if self.store.dv_refit_curves(file_id).await?.is_some() {
+                    Ok(Some(
+                        "Waiting for conversion slot and current F+ fit verification",
+                    ))
+                } else {
+                    Ok(Some(
+                        "Waiting for F+ fit or recorded content refusal before EL discard",
+                    ))
+                }
+            }
+            _ => Ok(Some(
+                "Waiting for consistent FEL or MEL title classification",
+            )),
+        }
+    }
+
+    // A queued disk request is itself a fitting consumer. The title scanner
+    // must first identify every displayed RPU as FEL or MEL; a legacy recipe
+    // fact cannot authorize deletion of the enhancement layer.
+    async fn disk_refit_ready(
+        &self,
+        file: &MediaFile,
+    ) -> Result<
+        Option<(
+            plurx_core::store::dv_refit_jobs::RefitCurveTable,
+            DiskRefitHelper,
+        )>,
+        String,
+    > {
+        use plurx_core::scan::dv_title::{DvTitleStats, TitleConstant, TitleElKind};
+        use plurx_core::store::dv_refit_jobs::RefitVerdict;
+        let document = self
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .map_err(|e| format!("reading title facts for disk conversion: {e}"))?
+            .ok_or("complete title facts are not yet available")?;
+        let stats = DvTitleStats::from_probe_json(&document)
+            .filter(|stats| stats.complete)
+            .ok_or("complete title facts are not yet available")?;
+        match stats.el_kind {
+            TitleConstant::Consistent(TitleElKind::Mel) => return Ok(None),
+            TitleConstant::Consistent(TitleElKind::Fel) => {}
+            _ => return Err("waiting for a complete, consistent FEL or MEL title scan".into()),
+        }
+        let probe: serde_json::Value =
+            serde_json::from_str(&document).map_err(|_| "invalid title probe document")?;
+        let video_index = probe
+            .get("streams")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|streams| {
+                streams.iter().find(|stream| {
+                    stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+                        && stream
+                            .get("disposition")
+                            .and_then(|value| value.get("attached_pic"))
+                            .and_then(serde_json::Value::as_i64)
+                            .unwrap_or(0)
+                            == 0
+                })
+            })
+            .and_then(|stream| stream.get("index"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|index| i64::try_from(index).ok())
+            .ok_or("waiting for selected FEL video stream")?;
+        let table = self
+            .store
+            .dv_refit_curves(file.id)
+            .await
+            .map_err(|e| format!("reading F+ curves for disk conversion: {e}"))?
+            .ok_or("waiting for a current F+ fit or recorded content refusal")?;
+        let (helper_identity, tools) = DiskRefitHelper::capture().await?;
+        if table.superseded_at_ms.is_some()
+            || table.title.source_size != file.size
+            || table.title.source_mtime != file.mtime
+            || table.title.video_index != video_index
+            || table.title.helper_identity != helper_identity
+            || table.title.fit_version != plurx_core::transcode::dv_refit::FIT_VERSION
+        {
+            return Err("waiting for a current F+ fit for this source, stream and helper".into());
+        }
+        if table.title.verdict == RefitVerdict::Fitted {
+            Ok(Some((table, tools)))
+        } else {
+            // Identity and content refusal are terminal fit outcomes. The
+            // existing dovi_tool conversion stays correct for both.
+            Ok(None)
+        }
+    }
+
     async fn process_dv_candidate(
         &self,
         file_id: i64,
@@ -4609,6 +5273,13 @@ impl JobManager {
                     return;
                 }
             };
+            let fitted = match self.disk_refit_ready(&file).await {
+                Ok(fitted) => fitted,
+                Err(waiting) => {
+                    tracing::info!(file_id, %waiting, "Dolby Vision disk conversion remains queued");
+                    return;
+                }
+            };
             match publisher
                 .mark_dv_conversion_running(file_id, file.size)
                 .await
@@ -4627,6 +5298,9 @@ impl JobManager {
                 self.coordinator.node_id(),
                 loss,
                 keep_original,
+                fitted
+                    .as_ref()
+                    .and_then(|(table, tools)| tools.scanner().map(|scanner| (table, scanner))),
             )
             .await
             {
@@ -4639,6 +5313,30 @@ impl JobManager {
             };
             if loss.is_cancelled() {
                 return;
+            }
+            if let Some((table, tools)) = &fitted {
+                let still_current = tools.is_current().await
+                    && self
+                        .store
+                        .dv_refit_curves(file.id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some_and(|current| {
+                            current.superseded_at_ms.is_none()
+                                && current.title.curve_digest == table.title.curve_digest
+                                && current.title.helper_identity == table.title.helper_identity
+                        });
+                if !still_current {
+                    self.fail_dv_conversion(
+                        &publisher,
+                        &file,
+                        loss,
+                        "F+ fit or helper changed before disk publication",
+                    )
+                    .await;
+                    return;
+                }
             }
             match publisher
                 .mark_dv_conversion_verified(file_id, verified.el_type, verified.bytes_after)
@@ -4951,9 +5649,10 @@ impl JobManager {
                 source_mtime: file.mtime,
                 pipeline_version: subtitle_source_pipeline_version().await,
             };
+            let live = crate::background_jobs::analysis_reconcile::live_engines_snapshot();
             let request = self
                 .store
-                .enqueue_or_promote_subtitle_source(
+                .enqueue_or_promote_subtitle_source_with(
                     &stamp,
                     if trigger == "playback" {
                         "foreground"
@@ -4961,6 +5660,7 @@ impl JobManager {
                         "normal"
                     },
                     clock_ms(),
+                    live.as_deref(),
                 )
                 .await?
                 .ok_or_else(|| {
@@ -4987,28 +5687,32 @@ impl JobManager {
             video_identity,
             force_rebuild,
         );
+        let live = crate::background_jobs::analysis_reconcile::live_engines_snapshot();
         let request = self
             .store
-            .enqueue_analysis_request(&NewAnalysisRequest {
-                request_id: request_id.clone(),
-                file_id: file.id,
-                source_size: file.size,
-                source_mtime: file.mtime,
-                component: component.to_owned(),
-                pipeline_version,
-                video_identity: video_identity.to_owned(),
-                requested_generation,
-                priority: if force_rebuild { "forced" } else { "normal" }.to_owned(),
-                trigger: trigger.to_owned(),
-                force_rebuild,
-                target_node_id: if component == "skip_markers" {
-                    String::new()
-                } else {
-                    self.coordinator.node_id().to_owned()
+            .enqueue_analysis_request_with(
+                &NewAnalysisRequest {
+                    request_id: request_id.clone(),
+                    file_id: file.id,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                    component: component.to_owned(),
+                    pipeline_version,
+                    video_identity: video_identity.to_owned(),
+                    requested_generation,
+                    priority: if force_rebuild { "forced" } else { "normal" }.to_owned(),
+                    trigger: trigger.to_owned(),
+                    force_rebuild,
+                    target_node_id: if component == "skip_markers" {
+                        String::new()
+                    } else {
+                        self.coordinator.node_id().to_owned()
+                    },
+                    not_before_ms: now,
+                    created_at_ms: now,
                 },
-                not_before_ms: now,
-                created_at_ms: now,
-            })
+                live.as_deref(),
+            )
             .await?;
         let joined = request.request_id != request_id;
         Ok((request, joined))
@@ -5390,8 +6094,15 @@ impl JobManager {
     async fn run_targeted(
         &self,
         requests: &[ScanRequest],
+        targeted: &library_work::Targeted<'_>,
         publisher: &PublicationStore<'_>,
-    ) -> Result<TargetedScan, TargetError> {
+    ) -> Result<
+        (
+            TargetedScan,
+            Vec<plurx_core::store::scan_request_v2::PlacedReport>,
+        ),
+        TargetError,
+    > {
         library_work::check_active()?;
         let req = requests.first().ok_or_else(|| {
             TargetError::Store(StoreError::Task(
@@ -5418,7 +6129,83 @@ impl JobManager {
             waiters = requests.len(),
             "targeted scan requested"
         );
-        let mut out = scan::scan_path_with_publication(publisher, &library, &req.path).await?;
+        let expected = targeted.expected;
+        // Removed paths are looked at first: a chain that cannot be read
+        // fails the whole request as `path_unreadable` before anything is
+        // placed or removed, and an absent path is never mistaken for one.
+        // A probe-only group is scoped again here: its folder may have gone
+        // since admission, and every path it names lies under the nearest
+        // folder that still exists.
+        let scope = if targeted.probe_only {
+            let (libraries, path) = (vec![library.clone()], req.path.clone());
+            tokio::task::spawn_blocking(move || {
+                plurx_core::scan::containment::nearest_existing(&libraries, &path)
+            })
+            .await
+            .map_err(|error| {
+                TargetError::Store(StoreError::Task(format!(
+                    "path scoping task failed: {error}"
+                )))
+            })?
+        } else {
+            req.path.clone()
+        };
+        let mut removed =
+            library_work::probe_removed_paths(&library, &scope, targeted.removed, false).await?;
+        removed.extend(
+            library_work::probe_removed_paths(&library, &scope, targeted.offloaded, true).await?,
+        );
+        // Files the caller says it just placed are probed whatever their
+        // size and whole-second mtime say (contract v2 §5.1).
+        let force_probe = library_work::canonical_expected(expected, &library, &scope).await;
+        let canonical: HashSet<PathBuf> = force_probe
+            .values()
+            .filter_map(|path| match path {
+                library_work::ExpectedPath::Canonical(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        let (mut out, detail) = scan::scan_path_targeted(
+            publisher,
+            &library,
+            &scope,
+            &scan::TargetedOptions {
+                only: targeted
+                    .probe_only
+                    .then(|| canonical.iter().cloned().collect()),
+                force_probe: canonical,
+                offload_hints: targeted
+                    .offload_hints
+                    .iter()
+                    .filter_map(|(raw, hint)| match force_probe.get(raw) {
+                        Some(library_work::ExpectedPath::Canonical(path)) => {
+                            Some((path.clone(), hint.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            },
+        )
+        .await?;
+        let mut files = library_work::placed_reports(expected, &force_probe, &out, &detail).await;
+        // After placement: the new copy is indexed before the old one goes,
+        // so the title never reads as missing in between.
+        let expected_not_placed = files.iter().any(|file| {
+            !matches!(
+                file,
+                plurx_core::store::scan_request_v2::PlacedReport::Placed { .. }
+            )
+        });
+        files.extend(
+            library_work::remove_paths(
+                publisher,
+                &library,
+                removed,
+                expected_not_placed,
+                &mut out.report,
+            )
+            .await?,
+        );
         self.note_fresh_index_files(out.items.iter().map(|placed| placed.file_id).collect());
         for request in requests {
             library_work::check_active()?;
@@ -5498,7 +6285,7 @@ impl JobManager {
             "targeted scan enriched what it placed"
         );
         library_work::check_active()?;
-        Ok(out)
+        Ok((out, files))
     }
 
     /// Which item ids a targeted scan should enrich, given what it placed.
@@ -6227,10 +7014,14 @@ impl JobManager {
     /// between a learner that quietly does nothing and one that schedules the
     /// cluster's jobs a second time.
     async fn schedule_tick(self: &Arc<Self>, transcode: &Arc<TranscodeManager>) -> bool {
+        // Local fsynced join evidence must be replayed even if this daemon
+        // restarted as a learner. Replicated no-reader proof is node-agnostic.
+        self.replay_settled_source_custody().await;
         if !self.may_run_cluster_jobs().await {
             tracing::debug!("skipping a scheduler tick: this node is not a committed voter");
             return false;
         }
+        self.apply_storage_domains().await;
         if let Err(error) = self.prepare_predictions().await {
             tracing::warn!(%error, "predictive preparation deferred");
         }
@@ -6310,12 +7101,14 @@ impl JobManager {
                 // every node whether or not anything here can execute them.
                 // An unreadable switch closes the output lane for this tick
                 // and skips the drain: an error is not the operator saying off.
-                let (lanes, output_read) = self.read_preparation_lanes().await;
+                let (lanes, output_read) = read_preparation_lanes(&self.applied).await;
                 if output_read
                     && last_drain.is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
                 {
                     last_drain = Some(std::time::Instant::now());
-                    self.drain_disabled_output_preparation(lanes.output).await;
+                    // The drain cancels queued rows, so it acts on the
+                    // Store's switch, not the view the lanes opened on.
+                    self.drain_output_preparation_from_store().await;
                 }
                 let lanes = self.executable_lanes(lanes).await;
                 if !lanes.is_empty() {
@@ -6336,11 +7129,39 @@ impl JobManager {
             loop {
                 let kinds = [JobKind::FragmentIndexBuild, JobKind::ArtifactHydrate];
                 let before = crate::background_jobs::accepted_claims(&kinds);
+                // Copy-range observations are metadata-owned Analysis work of
+                // their own, independent of the optional cluster cache build.
+                if self
+                    .job_authority
+                    .may_execute_job(JobKind::FragmentIndexPublish)
+                    .await
+                {
+                    let jobs = Arc::clone(&self);
+                    let transcode = Arc::clone(&transcode);
+                    tokio::spawn(async move {
+                        let policy = lane_analysis_retry_policy(&jobs.applied).await;
+                        let context = crate::copy_analysis::CopyAnalysisContext {
+                            store: Arc::clone(&jobs.store),
+                            node_id: jobs.coordinator.node_id().to_owned(),
+                            cache_dir: transcode.runtime_cache_dir().to_path_buf(),
+                            checkpoint_root: jobs.source_checkpoint_dir.clone(),
+                            lease_ms: policy.lease_ms,
+                            renew_every: policy.renew_every(),
+                            retry_ms: policy.backoff_base_ms,
+                            metrics: Arc::clone(&jobs.analysis_metrics),
+                        };
+                        crate::copy_analysis::work_copy_observations(
+                            &jobs.copy_analysis,
+                            Arc::new(context),
+                        )
+                        .await;
+                    });
+                }
                 if self
                     .job_authority
                     .may_execute_job(JobKind::FragmentIndexBuild)
                     .await
-                    && self.cluster_fragment_index_enabled().await
+                    && lane_cluster_fragment_index_enabled(&self.applied).await
                     && (!self.cluster_analysis_working.load(Ordering::Acquire)
                         || !self.cluster_index_working.load(Ordering::Acquire))
                 {
@@ -6362,12 +7183,14 @@ impl JobManager {
             }
         };
         let libraries = async {
-            let mut pacing = crate::background_jobs::IdlePoll::new();
             loop {
-                let progressed = self.work_library_queue(&transcode, None).await;
+                let progressed = self.drive_library_queue(&transcode).await;
+                if progressed {
+                    continue;
+                }
                 tokio::select! {
                     () = self.library_wake.notified() => {},
-                    () = tokio::time::sleep(pacing.delay(progressed)) => {},
+                    () = tokio::time::sleep(self.library_readiness.poll_interval()) => {},
                 }
             }
         };
@@ -6381,6 +7204,39 @@ impl JobManager {
         tokio::join!(preparation, fragments, libraries, subtitles);
     }
 
+    async fn replay_settled_source_custody(&self) {
+        if let Err(error) =
+            crate::source_custody::replay_verified_recovery(&self.store, self.coordinator.node_id())
+                .await
+        {
+            tracing::warn!(%error, "source recovery evidence retained for retry");
+        }
+        if let Err(error) = crate::source_custody::replay_local_settlements(&self.store).await {
+            tracing::warn!(%error,"replaying local source settlement journal");
+        }
+        if let Err(error) = self.store.reap_settled_source_custody(clock_ms()).await {
+            tracing::warn!(%error, "replaying settled source custody");
+        }
+        crate::source_custody::source_pressure_changed().notify_waiters();
+    }
+
+    async fn apply_storage_domains(&self) {
+        use plurx_core::store::background_jobs_resources::StorageDomainApply;
+        match self.store.apply_pending_storage_domains(clock_ms()).await {
+            Ok(StorageDomainApply::Applied { revision }) => {
+                tracing::info!(revision, "saved storage domains are now in effect");
+            }
+            Ok(StorageDomainApply::Superseded { revision }) => {
+                tracing::info!(
+                    revision,
+                    "saved storage domains superseded by another mapping change"
+                );
+            }
+            Ok(StorageDomainApply::Waiting { .. } | StorageDomainApply::NothingPending) => {}
+            Err(error) => tracing::warn!(%error, "storage domain application unavailable"),
+        }
+    }
+
     async fn maintain_background_queue(self: Arc<Self>) {
         if self.background_upkeep_running.swap(true, Ordering::AcqRel) {
             return;
@@ -6392,6 +7248,7 @@ impl JobManager {
         if let Err(error) = self.store.maintain_jobs(clock_ms()).await {
             tracing::warn!(%error, "durable queue upkeep unavailable");
         }
+        self.apply_storage_domains().await;
         if let Err(error) = self.store.import_legacy_jobs(clock_ms()).await {
             tracing::warn!(%error, "durable queue legacy import unavailable");
         }
@@ -6563,7 +7420,7 @@ impl JobManager {
                 // this pass also runs the node's local cachekeep sweep, which
                 // a node owes its own cache whatever rows it may execute.
                 // `claim_pretranscode` still checks authority per kind.
-                let lanes = state.preparation_lanes().await;
+                let lanes = read_preparation_lanes(&state.applied).await.0;
                 if !lanes.is_empty() {
                     Arc::clone(&state)
                         .work_pretranscode_queue(transcode, lanes)
@@ -8645,7 +9502,7 @@ impl JobManager {
             let Some(mut builds) = local_index_until_foreground(
                 &transcode,
                 &admission,
-                crate::fragindex::build_riding_shared(
+                crate::fragindex::build_riding_shared_with_store(
                     &file,
                     &missing
                         .iter()
@@ -8661,6 +9518,7 @@ impl JobManager {
                         .unwrap_or_else(|| index_file_budget(file.duration_ms, file.size, None)),
                     ride_along.as_ref(),
                     Some(reporter),
+                    Some(self.store.as_ref()),
                 ),
             )
             .await
@@ -8700,13 +9558,14 @@ impl JobManager {
                     let Some(build) = local_index_until_foreground(
                         &transcode,
                         &admission,
-                        crate::fragindex::build_riding(
+                        crate::fragindex::build_riding_with_store(
                             &file,
                             *video,
                             &runtime_cache,
                             index_file_budget(file.duration_ms, file.size, previous.as_ref()),
                             None,
                             Some(self.index_pass_reporter(&progress_jobs[slot], &node_id)),
+                            Some(self.store.as_ref()),
                         ),
                     )
                     .await
@@ -8920,7 +9779,13 @@ impl JobManager {
                     };
                     match self
                         .store
-                        .enqueue_or_promote_subtitle_source(&stamp, "normal", clock_ms())
+                        .enqueue_or_promote_subtitle_source_with(
+                            &stamp,
+                            "normal",
+                            clock_ms(),
+                            crate::background_jobs::analysis_reconcile::live_engines_snapshot()
+                                .as_deref(),
+                        )
                         .await
                     {
                         Ok(Some(request)) if request.state == "queued" => {
@@ -9210,7 +10075,7 @@ impl JobManager {
         // Settling, pruning and artifact delivery are cluster-wide duties
         // and stay with the voters. Resolving is not: a learner allowed to
         // execute this job (above) resolves the requests targeted at itself,
-        // which no other node ever claims.
+        // and, while idle, other nodes' fragment-index requests too.
         let may_produce = self.may_run_cluster_jobs().await;
         let analysis = if !self.cluster_analysis_working.swap(true, Ordering::AcqRel) {
             let analysis_state = Arc::clone(&self);
@@ -9264,6 +10129,12 @@ impl JobManager {
                 }
             }
         }
+        if fragment_engine_current {
+            const RECONCILE_ROWS_PER_PASS: usize = 400;
+            self.reconcile_retired_analysis_requests(RECONCILE_ROWS_PER_PASS, !may_produce)
+                .await;
+        }
+        self.refresh_analysis_completed(now).await;
         if !fragment_engine_current {
             drop(_guard);
             if let Some(analysis) = analysis {
@@ -9282,6 +10153,31 @@ impl JobManager {
         drop(_guard);
         if let Some(analysis) = analysis {
             let _ = analysis.await;
+        }
+    }
+
+    /// Refresh [`analysis_completed_prometheus`] from the Store, at most
+    /// every 30 s.
+    async fn refresh_analysis_completed(&self, now: i64) {
+        const EVERY_MS: i64 = 30_000;
+        let since = *ANALYSIS_COMPLETED_SINCE_MS.get_or_init(|| now);
+        let last = ANALYSIS_COMPLETED_READ_MS.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < EVERY_MS
+            || ANALYSIS_COMPLETED_READ_MS
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            return;
+        }
+        match self
+            .store
+            .analysis_completions_executed_by(self.coordinator.node_id(), since)
+            .await
+        {
+            // Monotonic while the rows live; history pruning (30 days) can
+            // only lower it, which a counter reader sees as a reset.
+            Ok(count) => ANALYSIS_COMPLETED.store(count, Ordering::Relaxed),
+            Err(error) => tracing::debug!(%error, "reading analysis completions"),
         }
     }
 
@@ -9313,28 +10209,47 @@ impl JobManager {
         }
     }
 
+    /// Claim and resolve analysis requests while this node has a free source
+    /// reader.
+    ///
+    /// This pass is the node's one analysis reader, so it takes the next
+    /// request as soon as the last one settles; the claim's own capacity
+    /// clause is the free-capacity test (it returns nothing when the
+    /// request's storage domain has no reader slot this request may take),
+    /// and the pass ends when nothing is claimable. Before every claim it
+    /// re-reads what may be claimed: a viewer queuing for this node's
+    /// encoder (`live_is_waiting`) limits the claim to rows with a live
+    /// playback waiter -- an encoder that is merely in use does not, since
+    /// the read holds a source-domain reservation, not an encoder slot --
+    /// and only an idle node (`pretranscode_worker_idle`) that may execute
+    /// fragment-index work takes another node's fragment-index rows.
     async fn resolve_analysis_requests(self: &Arc<Self>, transcode: Arc<TranscodeManager>) {
-        const MAX_REQUESTS_PER_PASS: usize = 2;
-        /// Hard background I/O budget. HEVC copy proof hashes the full source;
-        /// other consumers still sample. Large/slow files may exhaust this
-        /// budget and remain unverified, with bounded charged retries.
-        const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-
         if !self.cluster_fragment_index_enabled().await {
             return;
         }
         let node_id = self.coordinator.node_id().to_owned();
-        let retry_policy = self.analysis_retry_policy().await;
         let engine_sha256 = crate::ffmpeg::fragment_index_engine_digest().await;
-        let have_dovi = transcode.dv_strippable();
-        // A learner takes only what names it; untargeted requests any node
-        // may take stay with the voters.
-        let targeted_only = !self.may_run_cluster_jobs().await;
-        for _ in 0..MAX_REQUESTS_PER_PASS {
-            if !self.cluster_fragment_index_enabled().await {
+        loop {
+            if !self.cluster_fragment_index_enabled().await
+                || !crate::ffmpeg::fragment_index_engine_is_current().await
+                || !self
+                    .job_authority
+                    .may_execute_job(
+                        plurx_core::store::background_jobs::JobKind::FragmentIndexBuild,
+                    )
+                    .await
+            {
                 break;
             }
+            let retry_policy = self.analysis_retry_policy().await;
+            // A learner takes only what names it; untargeted requests any node
+            // may take stay with the voters.
+            let targeted_only = !self.may_run_cluster_jobs().await;
+            // Ruling 4: an idle node takes others' work, a serving node only
+            // its own (the authority check above admits learners too).
+            let cross_node = transcode.pretranscode_worker_idle();
             let now = clock_ms();
+            let excluded = self.analysis_executor_exclusions(now);
             let request = match self
                 .store
                 .claim_analysis_request_for_capacity(
@@ -9342,8 +10257,10 @@ impl JobManager {
                     Some(&engine_sha256),
                     now,
                     now.saturating_add(retry_policy.lease_ms),
-                    !transcode.pretranscode_worker_idle(),
+                    transcode.admissions().live_is_waiting(),
                     targeted_only,
+                    cross_node,
+                    &excluded,
                 )
                 .await
             {
@@ -9354,155 +10271,213 @@ impl JobManager {
                     break;
                 }
             };
-            let _progress = self.start_analysis_progress(
-                (&request.request_id, &request.target_node_id),
-                request.file_id,
-                &request.component,
-                "probing",
-                request.source_size.max(0) as u64,
-                0,
-            );
+            self.work_claimed_analysis_request(
+                &request,
+                &node_id,
+                &engine_sha256,
+                &transcode,
+                retry_policy,
+            )
+            .await;
+        }
+    }
 
-            let stop = tokio_util::sync::CancellationToken::new();
-            let lost = tokio_util::sync::CancellationToken::new();
-            let heartbeat = {
-                let store = Arc::clone(&self.store);
-                let request_id = request.request_id.clone();
-                let node_id = node_id.clone();
-                let metrics = Arc::clone(&self.analysis_metrics);
-                let stop = stop.clone();
-                let lost = lost.clone();
-                let fence = request.fence;
-                let beat = LeaseHeartbeat {
-                    queue: "analysis-request",
-                    row: request.request_id.clone(),
-                    fence: request.fence,
-                    attempts: request.attempts,
-                    known_expiry_ms: request.lease_expires_ms,
-                    lease_ms: retry_policy.lease_ms,
-                    renew_every: retry_policy.renew_every(),
-                    metrics,
-                    stop,
-                    lost,
-                };
-                tokio::spawn(async move {
-                    beat.run(move |now, expires_at| {
-                        let store = Arc::clone(&store);
-                        let request_id = request_id.clone();
-                        let node_id = node_id.clone();
-                        async move {
-                            store
-                                .renew_analysis_request(
-                                    &request_id,
-                                    &node_id,
-                                    fence,
-                                    now,
-                                    expires_at,
-                                )
-                                .await
-                        }
-                    })
-                    .await;
-                })
+    /// The identities this executor cannot emit, as the claim takes them:
+    /// expired entries dropped, at most the Store's bound.
+    fn analysis_executor_exclusions(&self, now: i64) -> Vec<String> {
+        let Ok(mut refusals) = self.analysis_executor_refusals.lock() else {
+            return Vec::new();
+        };
+        refusals.retain(|_, at| now.saturating_sub(*at) < ANALYSIS_EXECUTOR_REFUSAL_TTL_MS);
+        refusals
+            .keys()
+            .take(plurx_core::store::MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES)
+            .cloned()
+            .collect()
+    }
+
+    /// Remember that this executor cannot emit `identity`. Bounded by the
+    /// Store's limit: at the bound the oldest entry gives way.
+    fn remember_analysis_executor_refusal(&self, identity: &str, now: i64) {
+        if identity.is_empty() || identity.len() > 128 {
+            return;
+        }
+        let Ok(mut refusals) = self.analysis_executor_refusals.lock() else {
+            return;
+        };
+        if !refusals.contains_key(identity)
+            && refusals.len() >= plurx_core::store::MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES
+        {
+            if let Some(oldest) = refusals
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(key, _)| key.clone())
+            {
+                refusals.remove(&oldest);
+            }
+        }
+        refusals.insert(identity.to_owned(), now);
+    }
+
+    /// Resolve one claimed request under its renewed lease and settle what
+    /// the attempt decided: an uncharged or charged retry, a terminal
+    /// failure, or nothing when the claim was lost.
+    async fn work_claimed_analysis_request(
+        self: &Arc<Self>,
+        request: &AnalysisRequest,
+        node_id: &str,
+        engine_sha256: &str,
+        transcode: &Arc<TranscodeManager>,
+        retry_policy: AnalysisRetryPolicy,
+    ) {
+        /// Hard background I/O budget. HEVC copy proof hashes the full source;
+        /// other consumers still sample. Large/slow files may exhaust this
+        /// budget and remain unverified, with bounded charged retries.
+        const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+        let have_dovi = transcode.dv_strippable();
+        let node_id = node_id.to_owned();
+        let _progress = self.start_analysis_progress(
+            (&request.request_id, &request.target_node_id),
+            request.file_id,
+            &request.component,
+            "probing",
+            request.source_size.max(0) as u64,
+            0,
+        );
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let lost = tokio_util::sync::CancellationToken::new();
+        let heartbeat = {
+            let store = Arc::clone(&self.store);
+            let request_id = request.request_id.clone();
+            let node_id = node_id.clone();
+            let metrics = Arc::clone(&self.analysis_metrics);
+            let stop = stop.clone();
+            let lost = lost.clone();
+            let fence = request.fence;
+            let beat = LeaseHeartbeat {
+                queue: "analysis-request",
+                row: request.request_id.clone(),
+                fence: request.fence,
+                attempts: request.attempts,
+                known_expiry_ms: request.lease_expires_ms,
+                lease_ms: retry_policy.lease_ms,
+                renew_every: retry_policy.renew_every(),
+                metrics,
+                stop,
+                lost,
             };
-
-            let outcome = self
-                .resolve_analysis_request(
-                    &request,
-                    &node_id,
-                    &engine_sha256,
-                    have_dovi,
-                    transcode.as_ref(),
-                    &stop,
-                    &lost,
-                    ATTEST_TIMEOUT,
-                )
-                .await;
-            // Before the outcome write, for the same reason the job runner
-            // retires first: a tick landing between the write and the cancel
-            // renews a row the write has already settled.
-            stop.cancel();
-            let _ = heartbeat.await;
-            if let Err(resolution_error) = outcome {
-                let now = clock_ms();
-                match resolution_error {
-                    AnalysisResolutionError::ClaimLost => {}
-                    AnalysisResolutionError::Retry {
-                        code,
-                        charge_attempt,
-                    } => {
-                        let delay_ms =
-                            retry_policy.backoff_ms(&request.request_id, request.attempts.max(1));
-                        match self
-                            .store
-                            .retry_analysis_request(
-                                &request,
-                                code,
-                                now,
-                                now.saturating_add(delay_ms),
-                                charge_attempt,
-                            )
+            tokio::spawn(async move {
+                beat.run(move |now, expires_at| {
+                    let store = Arc::clone(&store);
+                    let request_id = request_id.clone();
+                    let node_id = node_id.clone();
+                    async move {
+                        store
+                            .renew_analysis_request(&request_id, &node_id, fence, now, expires_at)
                             .await
-                        {
-                            Ok(true) => {
-                                // Best effort: the retry transition already
-                                // committed; this row is diagnostic history.
-                                crate::store_result::observe(
-                                    crate::store_result::Operation::RecordAnalysisRetryWaitPhase,
-                                    crate::store_result::Discard::BestEffort,
-                                    self.store
-                                        .record_analysis_request_phase(
-                                            &request,
-                                            "retry_wait",
-                                            Some(code),
-                                            now,
-                                        )
-                                        .await,
-                                );
-                            }
-                            Ok(false) => {}
-                            Err(error) => tracing::warn!(
-                                request_id = request.request_id,
-                                %error,
-                                "queueing an analysis request retry"
-                            ),
-                        }
                     }
-                    AnalysisResolutionError::Terminal(code) => {
-                        match self
-                            .store
-                            .fail_analysis_request(
-                                &request.request_id,
-                                &node_id,
-                                request.fence,
-                                code,
-                                now,
-                            )
-                            .await
-                        {
-                            Ok(true) => {
-                                // Best effort: the failed terminal state is
-                                // durable already; this row explains it.
-                                crate::store_result::observe(
-                                    crate::store_result::Operation::RecordAnalysisFailedPhase,
-                                    crate::store_result::Discard::BestEffort,
-                                    self.store
-                                        .record_analysis_request_phase(
-                                            &request,
-                                            "failed",
-                                            Some(code),
-                                            now,
-                                        )
-                                        .await,
-                                );
-                            }
-                            Ok(false) => {}
-                            Err(error) => tracing::warn!(
-                                request_id = request.request_id,
-                                %error,
-                                "failing an analysis request"
-                            ),
+                })
+                .await;
+            })
+        };
+
+        let outcome = self
+            .resolve_analysis_request(
+                request,
+                &node_id,
+                engine_sha256,
+                have_dovi,
+                transcode.as_ref(),
+                &stop,
+                &lost,
+                ATTEST_TIMEOUT,
+            )
+            .await;
+        // Before the outcome write, for the same reason the job runner
+        // retires first: a tick landing between the write and the cancel
+        // renews a row the write has already settled.
+        stop.cancel();
+        let _ = heartbeat.await;
+        if let Err(resolution_error) = outcome {
+            let now = clock_ms();
+            match resolution_error {
+                AnalysisResolutionError::ClaimLost => {}
+                AnalysisResolutionError::Retry {
+                    code,
+                    charge_attempt,
+                } => {
+                    let delay_ms =
+                        retry_policy.backoff_ms(&request.request_id, request.attempts.max(1));
+                    match self
+                        .store
+                        .retry_analysis_request(
+                            request,
+                            code,
+                            now,
+                            now.saturating_add(delay_ms),
+                            charge_attempt,
+                        )
+                        .await
+                    {
+                        Ok(true) => {
+                            // Best effort: the retry transition already
+                            // committed; this row is diagnostic history.
+                            crate::store_result::observe(
+                                crate::store_result::Operation::RecordAnalysisRetryWaitPhase,
+                                crate::store_result::Discard::BestEffort,
+                                self.store
+                                    .record_analysis_request_phase(
+                                        request,
+                                        "retry_wait",
+                                        Some(code),
+                                        now,
+                                    )
+                                    .await,
+                            );
                         }
+                        Ok(false) => {}
+                        Err(error) => tracing::warn!(
+                            request_id = request.request_id,
+                            %error,
+                            "queueing an analysis request retry"
+                        ),
+                    }
+                }
+                AnalysisResolutionError::Terminal(code) => {
+                    match self
+                        .store
+                        .fail_analysis_request(
+                            &request.request_id,
+                            &node_id,
+                            request.fence,
+                            code,
+                            now,
+                        )
+                        .await
+                    {
+                        Ok(true) => {
+                            // Best effort: the failed terminal state is
+                            // durable already; this row explains it.
+                            crate::store_result::observe(
+                                crate::store_result::Operation::RecordAnalysisFailedPhase,
+                                crate::store_result::Discard::BestEffort,
+                                self.store
+                                    .record_analysis_request_phase(
+                                        request,
+                                        "failed",
+                                        Some(code),
+                                        now,
+                                    )
+                                    .await,
+                            );
+                        }
+                        Ok(false) => {}
+                        Err(error) => tracing::warn!(
+                            request_id = request.request_id,
+                            %error,
+                            "failing an analysis request"
+                        ),
                     }
                 }
             }
@@ -9577,21 +10552,21 @@ impl JobManager {
                 0,
             );
         };
+        let hash_cancel = lost.child_token();
+        let hash_pacing = crate::background_jobs::SourcePacingClock::default();
+        let hashing = hash_pacing.scope(plurx_core::process::bounded::cancellable(
+            hash_cancel.clone(),
+            crate::fragment_index_cluster::attest_source(node_id, file, memo.as_ref(), &progress),
+        ));
+        tokio::pin!(hashing);
         let attested = tokio::select! {
-            () = lost.cancelled() => return Err(AnalysisResolutionError::ClaimLost),
-            result = tokio::time::timeout(
-                Duration::from_secs(10 * 60),
-                crate::fragment_index_cluster::attest_source(node_id, file, memo.as_ref(), &progress)
-            ) => match result {
-                Ok(Ok(attested)) => attested,
-                Ok(Err(_)) => return Err(AnalysisResolutionError::Retry {
-                    code: "source_attestation_failed",
-                    charge_attempt: true,
-                }),
-                Err(_) => return Err(AnalysisResolutionError::Retry {
-                    code: "source_attestation_timeout",
-                    charge_attempt: true,
-                }),
+            () = lost.cancelled() => { hash_cancel.cancel(); let _=hashing.await; return Err(AnalysisResolutionError::ClaimLost); },
+            result = &mut hashing => result.map_err(|_| AnalysisResolutionError::Retry {
+                code:"source_attestation_failed", charge_attempt:true,
+            })?,
+            () = hash_pacing.deadline(Duration::from_secs(10*60)) => {
+                hash_cancel.cancel(); let _=hashing.await;
+                return Err(AnalysisResolutionError::Retry {code:"source_attestation_timeout",charge_attempt:true});
             },
         };
         if !crate::fragment_index_cluster::source_still_matches(
@@ -9763,6 +10738,16 @@ impl JobManager {
             crate::process_control::ChildWork::background("subtitle source extraction"),
         )
         .await
+        .map_err(|error| match error {
+            crate::mkv_sparse::SparseError::Cancelled => AnalysisResolutionError::Retry {
+                code: "foreground_preempted",
+                charge_attempt: false,
+            },
+            _ => AnalysisResolutionError::Retry {
+                code: "source_read_failed",
+                charge_attempt: true,
+            },
+        })?
         .filter(|sparse| sparse.blocks > 0);
         tracing::info!(
             file_id = file.id,
@@ -9780,6 +10765,7 @@ impl JobManager {
             sparse
                 .as_ref()
                 .map_or(&[][..], |sparse| sparse.input_args.as_slice()),
+            sparse.is_none(),
             runtime_cache,
             lost,
             if request.priority == "foreground" {
@@ -9973,6 +10959,96 @@ impl JobManager {
         lost: &tokio_util::sync::CancellationToken,
         attest_timeout: Duration,
     ) -> Result<(), AnalysisResolutionError> {
+        let owner = plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Analysis {
+            request_id: request.request_id.clone(),
+            node_id: request.owner_node_id.clone(),
+            fence: request.fence,
+        };
+        let registration = self
+            .store
+            .register_background_source_custody(owner.clone(), clock_ms())
+            .await;
+        let custody = match registration {
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::Registered(receipt)) => receipt,
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::NotRequired
+                | plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::LostOwnership) =>
+                return Err(AnalysisResolutionError::ClaimLost),
+            Err(error) => {
+                tracing::warn!(request_id=%request.request_id,%error,
+                    "resolving ambiguous analysis source registration");
+                self.settle_unstarted_analysis_source(owner).await;
+                return Err(AnalysisResolutionError::Retry {
+                    code: "source_custody_unavailable", charge_attempt: false,
+                });
+            }
+        };
+        if crate::source_custody::activate_background_with_journal(&self.store, custody.clone())
+            .await
+            .is_err()
+        {
+            return Err(AnalysisResolutionError::Retry {
+                code: "source_custody_unavailable",
+                charge_attempt: false,
+            });
+        }
+        let budget = crate::background_jobs::SourceReadBudget::new(
+            Arc::clone(&self.store),
+            owner,
+            lost.clone(),
+        );
+        let result = crate::background_jobs::budgeted(
+            budget,
+            self.resolve_analysis_request_owned(
+                request,
+                node_id,
+                engine_sha256,
+                have_dovi,
+                transcode,
+                stop,
+                lost,
+                attest_timeout,
+            ),
+        )
+        .await;
+        // Every source read/child above is joined even after pressure/loss.
+        // Release the original receipt; successor fences own distinct rows.
+        crate::background_jobs::settle_joined_source_custody(&self.store, custody).await;
+        result
+    }
+
+    /// This attempt never exposed input. A lost insert acknowledgement can
+    /// still have committed an exact no-reader row; resolve and settle it in
+    /// the existing analysis owner before reporting the retry.
+    async fn settle_unstarted_analysis_source(
+        &self,
+        owner: plurx_core::store::background_jobs_resources::BackgroundSourceOwner,
+    ) {
+        loop {
+            match self.store.register_background_source_custody(owner.clone(), clock_ms()).await {
+                Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::Registered(receipt)) => {
+                    crate::background_jobs::settle_no_reader_source_custody(&self.store, receipt).await;
+                    return;
+                }
+                Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::NotRequired
+                    | plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::LostOwnership) => return,
+                Err(error) => tracing::warn!(%error,"analysis no-reader source resolution will retry"),
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_analysis_request_owned(
+        &self,
+        request: &AnalysisRequest,
+        node_id: &str,
+        engine_sha256: &str,
+        have_dovi: bool,
+        transcode: &TranscodeManager,
+        stop: &tokio_util::sync::CancellationToken,
+        lost: &tokio_util::sync::CancellationToken,
+        attest_timeout: Duration,
+    ) -> Result<(), AnalysisResolutionError> {
         if !self
             .store
             .record_analysis_request_phase(request, "source_probe", None, clock_ms())
@@ -10028,6 +11104,7 @@ impl JobManager {
             let chapters = match stored_chapters {
                 Some(chapters) => chapters,
                 None => {
+                    self.admit_background_source(request, lost).await?;
                     let chapters = match crate::http::stream::probe_chapters_until(
                         &file.path,
                         lost,
@@ -10142,6 +11219,18 @@ impl JobManager {
             // A request that names an identity this node no longer emits is
             // superseded, not retryable: the pipeline or the probe facts
             // moved, and no number of retries brings the old identity back.
+            // On another node's request this node is only the executor: an
+            // identity it cannot emit says nothing about the target, so the
+            // row goes back uncharged for a node that can -- and this
+            // executor's claims leave rows naming that identity alone from
+            // now on, rather than taking it back on every pass.
+            Err(StoreError::Task(_)) if request.target_node_id != node_id => {
+                self.remember_analysis_executor_refusal(&request.video_identity, clock_ms());
+                return Err(AnalysisResolutionError::Retry {
+                    code: "pipeline_version_unavailable",
+                    charge_attempt: false,
+                });
+            }
             Err(StoreError::Task(_)) => {
                 return Err(AnalysisResolutionError::Terminal("pipeline_superseded"))
             }
@@ -10166,6 +11255,9 @@ impl JobManager {
                 code: "source_catalog_read_failed",
                 charge_attempt: true,
             })?;
+        // The claim admitted this read; ask the same rule again before the
+        // first source byte, now that the request holds its reservation.
+        self.admit_background_source(request, lost).await?;
         if !self
             .store
             .record_analysis_request_phase(request, "hashing", None, clock_ms())
@@ -10204,19 +11296,31 @@ impl JobManager {
         };
         let attestation_budget = AnalysisAttestationBudget::default();
         attestation_budget.observe_busy(!transcode.pretranscode_worker_idle());
-        let attested = tokio::select! {
-            result = crate::fragment_index_cluster::attest_copy_source(
+        let hash_cancel = lost.child_token();
+        let hash_pacing = crate::background_jobs::SourcePacingClock::default();
+        let hashing = hash_pacing.scope(plurx_core::process::bounded::cancellable(
+            hash_cancel.clone(),
+            crate::fragment_index_cluster::attest_analysis_copy_source_persistent(
                 node_id,
                 &file,
                 memo.as_ref(),
                 &report_progress,
-            ) => {
+                self.source_checkpoint_dir.as_deref(),
+                self.store.as_ref(),
+                request,
+            ),
+        ));
+        tokio::pin!(hashing);
+        let attested = tokio::select! {
+            result = &mut hashing => {
                 result.map_err(|_| AnalysisResolutionError::Retry {
                     code: "source_attestation_failed",
                     charge_attempt: true,
                 })?
             }
             () = self.wait_for_cluster_fragment_index_stop(transcode, Some(request), lost, &attestation_budget) => {
+                hash_cancel.cancel();
+                let _ = hashing.await;
                 if lost.is_cancelled() {
                     return Err(AnalysisResolutionError::ClaimLost);
                 }
@@ -10225,7 +11329,9 @@ impl JobManager {
                     charge_attempt: false,
                 });
             }
-            () = wait_analysis_deadline(attest_timeout) => {
+            () = hash_pacing.deadline(attest_timeout) => {
+                hash_cancel.cancel();
+                let _ = hashing.await;
                 // Playback contention must not turn a formerly deferred request
                 // into terminal attempt_limit. Idle-only reads retain the cap.
                 return Err(attestation_budget.deadline_failure(!transcode.pretranscode_worker_idle()));
@@ -10234,11 +11340,10 @@ impl JobManager {
         if lost.is_cancelled() {
             return Err(AnalysisResolutionError::ClaimLost);
         }
-        if !self
-            .analysis_source_may_continue(transcode, Some(request))
-            .await
-            || !self.cluster_fragment_index_enabled().await
-        {
+        // The read is over; what remains is submission, which the same
+        // admission decision must still cover.
+        self.admit_background_source(request, lost).await?;
+        if !self.cluster_fragment_index_enabled().await {
             return Err(AnalysisResolutionError::Retry {
                 code: "foreground_preempted",
                 charge_attempt: false,
@@ -10605,21 +11710,92 @@ impl JobManager {
         AnalysisRetryPolicy::from_settings(&settings)
     }
 
+    /// The source-capacity decision the claim made, asked again of the
+    /// claimed request (`analysis_source_capacity_clause`, read from the
+    /// Store's ledger rows with the request's own holdings left out). A
+    /// Store that cannot answer refuses: the read retries uncharged.
+    pub(crate) async fn background_source_admission(
+        &self,
+        request: &AnalysisRequest,
+    ) -> plurx_core::store::background_jobs::AnalysisSourceAdmission {
+        match self
+            .store
+            .analysis_source_admission(
+                &request.request_id,
+                &request.owner_node_id,
+                request.fence,
+                clock_ms(),
+            )
+            .await
+        {
+            Ok(admission) => admission,
+            Err(error) => {
+                tracing::warn!(request_id = %request.request_id, %error,
+                    "reading analysis source admission");
+                plurx_core::store::background_jobs::AnalysisSourceAdmission::Yield(
+                    "admission_unavailable",
+                )
+            }
+        }
+    }
+
+    /// [`Self::background_source_admission`] as a resolution step: a yield is
+    /// an uncharged `foreground_preempted` retry, a lost fence is claim loss.
+    async fn admit_background_source(
+        &self,
+        request: &AnalysisRequest,
+        lost: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), AnalysisResolutionError> {
+        use plurx_core::store::background_jobs::AnalysisSourceAdmission;
+        if lost.is_cancelled() {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        match self.background_source_admission(request).await {
+            AnalysisSourceAdmission::Admit => Ok(()),
+            AnalysisSourceAdmission::NotOwned => Err(AnalysisResolutionError::ClaimLost),
+            AnalysisSourceAdmission::Yield(reason) => {
+                tracing::debug!(request_id = %request.request_id, reason,
+                    "analysis source read yields");
+                Err(AnalysisResolutionError::Retry {
+                    code: "foreground_preempted",
+                    charge_attempt: false,
+                })
+            }
+        }
+    }
+
+    /// Whether an attesting read may keep reading: the Store's admission
+    /// still admits it, and no viewer is queuing for this node's encoder --
+    /// unless this request has a live viewer of its own.
     async fn analysis_source_may_continue(
         &self,
         transcode: &TranscodeManager,
         request: Option<&AnalysisRequest>,
     ) -> bool {
-        if transcode.pretranscode_worker_idle() {
-            return true;
-        }
         let Some(request) = request else {
             return false;
         };
-        // Source attestation holds the Store's bounded source-I/O reservation,
-        // not an encoder slot. Any live playback waiter on this request permits
-        // the read while this node is busy. Expired/departed viewers and failed
-        // reads fail closed.
+        if self.background_source_admission(request).await
+            != plurx_core::store::background_jobs::AnalysisSourceAdmission::Admit
+        {
+            return false;
+        }
+        self.analysis_source_local_rule(transcode, request).await
+    }
+
+    /// The node-local half of [`Self::analysis_source_may_continue`]. The
+    /// read holds the Store's bounded source-I/O reservation, not an encoder
+    /// slot, so an encoder merely in use does not stop it; a viewer queuing
+    /// for this node's encoder does, unless this request has a live viewer
+    /// of its own. Expired/departed viewers and failed reads fail closed.
+    async fn analysis_source_local_rule(
+        &self,
+        transcode: &TranscodeManager,
+        request: &AnalysisRequest,
+    ) -> bool {
+        if !transcode.admissions().live_is_waiting() {
+            return true;
+        }
         self.store
             .analysis_preparation_observation(&request.request_id, clock_ms())
             .await
@@ -10638,18 +11814,46 @@ impl JobManager {
         let mut ticks = 0_u8;
         loop {
             attestation_budget.observe_busy(!transcode.pretranscode_worker_idle());
-            if permit_lost.is_cancelled()
-                || !self.analysis_source_may_continue(transcode, request).await
-            {
+            if permit_lost.is_cancelled() {
                 return;
             }
-            if ticks == 0 && !self.cluster_fragment_index_enabled().await {
+            // The Store's admission is a linearizable read: during the read it
+            // is asked every fourth tick (2 s), the node-local rule every tick.
+            // The claim, the check before the first byte and the check before
+            // submission each ask it outright.
+            let may_continue = if ticks == 0 {
+                self.analysis_source_may_continue(transcode, request).await
+                    && self.cluster_fragment_index_enabled().await
+            } else {
+                match request {
+                    Some(request) => self.analysis_source_local_rule(transcode, request).await,
+                    None => false,
+                }
+            };
+            if !may_continue {
                 return;
             }
             ticks = (ticks + 1) % 4;
             tokio::select! {
                 () = permit_lost.cancelled() => return,
                 () = tokio::time::sleep(Duration::from_millis(500)) => {}
+            }
+        }
+    }
+
+    async fn wait_for_background_source_stop(
+        &self,
+        fence: &crate::background_jobs::JobFence,
+        lost: &CancellationToken,
+    ) {
+        loop {
+            if lost.is_cancelled() || !fence.source_may_continue().await.unwrap_or(false) {
+                return;
+            }
+            tokio::select! {
+                ()=lost.cancelled()=>return,
+                ()=crate::source_custody::source_pressure_changed().notified()=>{},
+                ()=tokio::time::sleep(Duration::from_millis(250))=>{},
             }
         }
     }
@@ -10803,7 +12007,7 @@ impl JobManager {
         job: plurx_core::store::ClusterFragmentIndexJob,
         worker: ClusterFragmentIndexWorker,
         fence: crate::background_jobs::JobFence,
-        admission: &crate::transcode::FragmentAdmission,
+        admission: &Arc<crate::transcode::FragmentAdmission>,
     ) -> bool {
         const LOCAL_REFUSAL_MS: i64 = 30_000;
         /// Hard background I/O budget. HEVC copy proof hashes the full source;
@@ -11027,18 +12231,31 @@ impl JobManager {
                 0,
             );
         };
-        let attestation = tokio::select! {
-            result = crate::fragment_index_cluster::attest_copy_source(
+        let hash_cancel = lost.child_token();
+        let hash_pacing = crate::background_jobs::SourcePacingClock::default();
+        let hashing = hash_pacing.scope(plurx_core::process::bounded::cancellable(
+            hash_cancel.clone(),
+            crate::fragment_index_cluster::attest_copy_source_persistent(
                 &node_id,
                 &file,
                 memo.as_ref(),
                 &report_progress,
-            ) => Some(result.map_err(AttestationFailure::Refused)),
+                self.source_checkpoint_dir.as_deref(),
+                &fence,
+            ),
+        ));
+        tokio::pin!(hashing);
+        let attestation = tokio::select! {
+            result = &mut hashing => Some(result.map_err(AttestationFailure::Refused)),
             () = self.wait_for_fragment_worker_stop(
                 transcode.as_ref(), admission,
                 &lost,
-            ) => None,
-            () = tokio::time::sleep(ATTEST_TIMEOUT) => {
+            ) => { hash_cancel.cancel(); let _=hashing.await; None },
+            () = self.wait_for_background_source_stop(&fence, &lost) => {
+                hash_cancel.cancel(); let _=hashing.await; None
+            },
+            () = hash_pacing.deadline(ATTEST_TIMEOUT) => {
+                hash_cancel.cancel(); let _=hashing.await;
                 Some(Err(AttestationFailure::TimedOut))
             }
         };
@@ -11187,20 +12404,42 @@ impl JobManager {
                 None
             }
         };
-        let build = crate::fragindex::build_shared_from_attested_file_with_progress(
-            &file,
-            &attested.handle,
-            &attested.observation.object_version,
-            &pass_videos,
-            transcode.runtime_cache_dir(),
-            index_file_budget(file.duration_ms, file.size, previous.as_ref()),
-            report_progress,
-            ride_along.as_ref(),
+        let build = crate::source_probe::run_source_admitted_probe(
+            transcode.as_ref(),
+            admission,
             &cancel,
+            &lost,
+            None,
+            &fence,
+            || async {
+                crate::fragment_index_cluster::source_still_matches(
+                    &attested.handle,
+                    &attested.observation,
+                )
+                .unwrap_or(false)
+                    && crate::ffmpeg::fragment_index_engine_digest().await == worker.engine_sha256
+            },
+            async {
+                Ok::<_, String>(
+                    crate::fragindex::build_shared_from_attested_file_with_progress_and_store(
+                        &file,
+                        &attested.handle,
+                        &attested.observation.object_version,
+                        &pass_videos,
+                        transcode.runtime_cache_dir(),
+                        index_file_budget(file.duration_ms, file.size, previous.as_ref()),
+                        report_progress,
+                        ride_along.as_ref(),
+                        &cancel,
+                        Some(self.store.as_ref()),
+                    )
+                    .await,
+                )
+            },
         );
         tokio::pin!(build);
         let (builds, preempted) = tokio::select! {
-            built = &mut build => (Some(built), false),
+            built = &mut build => (built.ok(), cancel.is_cancelled() && !lost.is_cancelled()),
             () = self.wait_for_fragment_worker_stop(transcode.as_ref(), admission, &lost) => {
                 cancel.cancel();
                 let _ = build.await;
@@ -11778,44 +13017,32 @@ impl JobManager {
 
     /// The preparation lanes the settings open: the speculative discovery
     /// schedule and the `vod.output_preparation` Developer switch.
+    #[cfg(test)]
     pub(crate) async fn preparation_lanes(&self) -> crate::background_jobs::PreparationLanes {
-        self.read_preparation_lanes().await.0
+        read_preparation_lanes(&self.applied).await.0
     }
 
-    /// [`Self::preparation_lanes`], and whether the output switch was actually
-    /// read. A store error is not "off": the output lane stays closed for this
-    /// tick (nothing is claimed under a switch nobody read) and the caller
-    /// must not drain on it, because draining cancels queued work the
-    /// operator may well have switched on.
-    async fn read_preparation_lanes(&self) -> (crate::background_jobs::PreparationLanes, bool) {
-        /// One warning per run of failures, debug for the rest of the run.
-        static OUTPUT_SWITCH_UNREADABLE: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        let speculative = self.job_interval(keys::JOB_CACHE_PRODUCE_MINS).await > 0;
-        let (output, read) = match self.store.get_setting(keys::VOD_OUTPUT_PREPARATION).await {
-            Ok(value) => {
-                OUTPUT_SWITCH_UNREADABLE.store(false, Ordering::Relaxed);
-                (
-                    crate::vodserve::OutputPreparation::parse(value.as_deref()),
-                    true,
-                )
-            }
+    /// The output switch as the Store holds it, for the drain that cancels
+    /// what it no longer admits; `None` (no drain this time) when unreadable.
+    async fn output_preparation_for_drain(&self) -> Option<crate::vodserve::OutputPreparation> {
+        match self.store.get_setting(keys::VOD_OUTPUT_PREPARATION).await {
+            Ok(value) => Some(crate::vodserve::OutputPreparation::parse(value.as_deref())),
             Err(error) => {
-                if OUTPUT_SWITCH_UNREADABLE.swap(true, Ordering::Relaxed) {
-                    tracing::debug!(%error, "output preparation switch still unreadable; lane and drain skipped");
-                } else {
-                    tracing::warn!(%error, "could not read the output preparation switch; its lane and drain are skipped until it reads");
-                }
-                (crate::vodserve::OutputPreparation::Off, false)
+                tracing::debug!(%error, "output preparation switch unreadable; drain skipped");
+                None
             }
-        };
-        (
-            crate::background_jobs::PreparationLanes {
-                speculative,
-                output,
-            },
-            read,
-        )
+        }
+    }
+
+    /// The preparation lane's minute drain: cancel the queued rows the
+    /// Store's output switch no longer admits. Never the view's switch: the
+    /// drain cancels work, and a view that has not applied an enable yet
+    /// would cancel what the operator just asked for.
+    pub(crate) async fn drain_output_preparation_from_store(&self) -> usize {
+        match self.output_preparation_for_drain().await {
+            Some(mode) => self.drain_disabled_output_preparation(mode).await,
+            None => 0,
+        }
     }
 
     /// `lanes` narrowed to what this node's job authority lets it execute.

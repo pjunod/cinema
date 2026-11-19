@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+use super::fixtures::{build_static_probe, build_static_probe_with_private_path};
 /// Test fixtures that exercise capability-style path walks must start below a
 /// canonical root. Darwin exposes its per-user temporary directory through
 /// `/var`, a system symlink to `/private/var`, which the production no-follow
@@ -395,16 +397,14 @@ fn production_pre_exec_transitive_source_audit_rejects_allocation_and_panic_form
     }
 
     let source = include_str!("../fixed_probe.rs");
-    for item in [
+    let descriptors = include_str!("../source_lifetime/descriptors.rs");
+    let namespace = include_str!("pi_namespace.rs");
+    for (source, item) in [
         "command.pre_exec(move ||",
         "fn is_production(self)",
         "fn bootstrap_interrupts(self)",
         "fn export_socket_fd(self)",
         "fn start_probe_session(",
-        "fn duplicate_child_fd(",
-        "fn assign_child_fd(",
-        "fn install_child_fd(",
-        "fn install_probe_child_fds(",
         "fn consume_linux_bootstrap_interrupt(",
         "fn ensure_linux_probe_deadline(",
         "fn confirm_linux_probe_fork(",
@@ -415,7 +415,14 @@ fn production_pre_exec_transitive_source_audit_rejects_allocation_and_panic_form
         "fn install(&self)",
         "fn install_listener(&self)",
         "fn execute_held_probe(&self)",
-    ] {
+    ]
+    .into_iter()
+    .map(|item| (source, item))
+    .chain([
+        (descriptors, "pub fn inherit(&self)"),
+        (descriptors, "pub fn inherit_target(&self"),
+        (namespace, "command.pre_exec(move ||"),
+    ]) {
         let body = item_body(source, item);
         for allocating in [
             "std::io::Error::new(",
@@ -451,389 +458,6 @@ fn production_pre_exec_transitive_source_audit_rejects_allocation_and_panic_form
 #[cfg(unix)]
 fn executable(path: &std::path::Path, body: &str) {
     write_test_executable(path, body, 0o700);
-}
-
-#[cfg(target_os = "linux")]
-fn build_static_probe(path: &std::path::Path, mode: u8) {
-    build_static_probe_with_private_path(path, mode, Path::new("/unavailable-parent-marker"));
-}
-
-#[cfg(target_os = "linux")]
-fn build_static_probe_with_private_path(path: &Path, mode: u8, private_path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let source = path.with_extension("c");
-    std::fs::write(
-            &source,
-            r#"
-#if !defined(__x86_64__) && !defined(__aarch64__)
-#error unsupported test architecture
-#endif
-
-#define NR_READ 0
-#define NR_WRITE 1
-#define NR_CLOSE 3
-#define NR_LSEEK 8
-#define NR_NANOSLEEP 35
-#define NR_FORK 57
-#define NR_EXECVE 59
-#define NR_FCHMOD 91
-#define NR_FCNTL 72
-#define NR_SETPGID 109
-#define NR_SETSID 112
-#define NR_SENDMSG 46
-#define NR_EXIT 60
-#define NR_MEMFD_CREATE 319
-#define NR_EXECVEAT 322
-#define NR_OPENAT 257
-#define NR_PTRACE 101
-#define NR_PROCESS_VM_READV 310
-#define NR_GETDENTS64 217
-#if defined(__aarch64__)
-#undef NR_READ
-#undef NR_WRITE
-#undef NR_CLOSE
-#undef NR_LSEEK
-#undef NR_NANOSLEEP
-#undef NR_FORK
-#undef NR_EXECVE
-#undef NR_FCHMOD
-#undef NR_FCNTL
-#undef NR_SETPGID
-#undef NR_SETSID
-#undef NR_SENDMSG
-#undef NR_EXIT
-#undef NR_MEMFD_CREATE
-#undef NR_EXECVEAT
-#undef NR_OPENAT
-#undef NR_PTRACE
-#undef NR_PROCESS_VM_READV
-#undef NR_GETDENTS64
-#define NR_OPENAT 56
-#define NR_PTRACE 117
-#define NR_PROCESS_VM_READV 270
-#define NR_GETDENTS64 61
-#define NR_READ 63
-#define NR_WRITE 64
-#define NR_CLOSE 57
-#define NR_LSEEK 62
-#define NR_NANOSLEEP 101
-#define NR_FORK 220
-#define NR_EXECVE 221
-#define NR_FCHMOD 52
-#define NR_FCNTL 25
-#define NR_SETPGID 154
-#define NR_SETSID 157
-#define NR_SENDMSG 211
-#define NR_EXIT 93
-#define NR_MEMFD_CREATE 279
-#define NR_EXECVEAT 281
-#endif
-#define AT_EMPTY_PATH 0x1000
-#define FD_CLOEXEC 1
-#define F_DUPFD 0
-#define F_SETFD 2
-#define SIGCHLD 17
-#define SOL_SOCKET 1
-#define SCM_RIGHTS 1
-
-struct probe_iovec { void *base; unsigned long length; };
-struct probe_msghdr {
-    void *name;
-    unsigned name_length;
-    struct probe_iovec *iov;
-    unsigned long iov_length;
-    void *control;
-    unsigned long control_length;
-    int flags;
-};
-struct probe_cmsghdr { unsigned long length; int level; int type; };
-struct probe_control { struct probe_cmsghdr header; int fd; int padding; };
-
-#if defined(__x86_64__)
-static long syscall6(long number, long a0, long a1, long a2, long a3, long a4, long a5) {
-    long result;
-    register long r10 __asm__("r10") = a3;
-    register long r8 __asm__("r8") = a4;
-    register long r9 __asm__("r9") = a5;
-    __asm__ volatile("syscall" : "=a"(result) : "a"(number), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8), "r"(r9) : "rcx", "r11", "memory");
-    return result;
-}
-__asm__(".global _start\n.type _start,@function\n_start:\n mov %rsp,%rdi\n andq $-16,%rsp\n call probe_main\n");
-#else
-static long syscall6(long number, long a0, long a1, long a2, long a3, long a4, long a5) {
-    register long x0 __asm__("x0") = a0;
-    register long x1 __asm__("x1") = a1;
-    register long x2 __asm__("x2") = a2;
-    register long x3 __asm__("x3") = a3;
-    register long x4 __asm__("x4") = a4;
-    register long x5 __asm__("x5") = a5;
-    register long x8 __asm__("x8") = number;
-    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5), "r"(x8) : "memory");
-    return x0;
-}
-__asm__(".global _start\n.type _start,%function\n_start:\n mov x0,sp\n bl probe_main\n");
-#endif
-
-static unsigned long length(const char *text) {
-    unsigned long count = 0;
-    while (text[count]) count++;
-    return count;
-}
-
-static int same(const char *left, const char *right) {
-    while (*left && *right && *left == *right) { left++; right++; }
-    return *left == *right;
-}
-
-static void write_text(long fd, const char *text) {
-    syscall6(NR_WRITE, fd, (long)text, length(text), 0, 0, 0);
-}
-
-static __attribute__((noreturn)) void finish(long status) {
-    syscall6(NR_EXIT, status, 0, 0, 0, 0, 0);
-    for (;;) {}
-}
-
-static const char facts[] = "{\"streams\":[{\"index\":4,\"codec_type\":\"video\",\"codec_name\":\"h264\",\"profile\":\"High\",\"pix_fmt\":\"yuv420p\",\"width\":1920,\"height\":1080,\"avg_frame_rate\":\"24000/1001\",\"r_frame_rate\":\"24000/1001\",\"disposition\":{\"attached_pic\":0}}]}\n";
-
-void probe_main(unsigned long *stack) {
-    long argc = (long)stack[0];
-    char **argv = (char **)(stack + 1);
-#if PROBE_MODE == 0
-    if (argc > 1 && same(argv[1], "-v")) {
-        char source[64];
-        syscall6(NR_LSEEK, 3, 0, 0, 0, 0, 0);
-        long count = syscall6(NR_READ, 3, (long)source, sizeof(source) - 1, 0, 0, 0);
-        if (count != 23) finish(84);
-        source[count] = 0;
-        if (!same(source, "production-bound source")) finish(85);
-    }
-#elif PROBE_MODE == 1
-    char *next[] = { "/usr/bin/false", 0 };
-    write_text(1, "entered:path\n");
-    syscall6(NR_EXECVE, (long)next[0], (long)next, 0, 0, 0, 0);
-    write_text(1, "blocked:path\n");
-#elif PROBE_MODE == 2
-    if (argc > 1 && same(argv[1], "copied")) finish(92);
-    write_text(1, "entered:memfd\n");
-    long copy = syscall6(NR_MEMFD_CREATE, (long)"copy", 0, 0, 0, 0, 0);
-    if (copy < 0) finish(81);
-    syscall6(NR_LSEEK, 4, 0, 0, 0, 0, 0);
-    char buffer[4096];
-    for (;;) {
-        long count = syscall6(NR_READ, 4, (long)buffer, sizeof(buffer), 0, 0, 0);
-        if (count < 0) finish(82);
-        if (count == 0) break;
-        if (syscall6(NR_WRITE, copy, (long)buffer, count, 0, 0, 0) != count) finish(83);
-    }
-    syscall6(NR_FCHMOD, copy, 0500, 0, 0, 0, 0);
-    syscall6(NR_LSEEK, copy, 0, 0, 0, 0, 0);
-    char *next[] = { "copy", "copied", 0 };
-    syscall6(NR_EXECVEAT, copy, (long)"", (long)next, 0, AT_EMPTY_PATH, 0);
-    syscall6(NR_EXECVEAT, 4, (long)"/proc/self/fd/5", (long)next, 0, AT_EMPTY_PATH, 0);
-    write_text(1, "blocked:memfd\n");
-#elif PROBE_MODE == 3
-    if (argc > 1 && same(argv[1], "reentered")) {
-        long rebound = syscall6(NR_FCNTL, 5, F_DUPFD, 4, 0, 0, 0);
-        char *again[] = { "replacement", "copied", 0 };
-        syscall6(NR_EXECVEAT, rebound, (long)"", (long)again, 0, AT_EMPTY_PATH, 0);
-        finish(93);
-    }
-    long copy = syscall6(NR_MEMFD_CREATE, (long)"replacement", 0, 0, 0, 0, 0);
-    if (copy < 0) finish(86);
-    syscall6(NR_LSEEK, 4, 0, 0, 0, 0, 0);
-    char buffer[4096];
-    for (;;) {
-        long count = syscall6(NR_READ, 4, (long)buffer, sizeof(buffer), 0, 0, 0);
-        if (count < 0) finish(87);
-        if (count == 0) break;
-        if (syscall6(NR_WRITE, copy, (long)buffer, count, 0, 0, 0) != count) finish(88);
-    }
-    syscall6(NR_FCHMOD, copy, 0500, 0, 0, 0, 0);
-    syscall6(NR_LSEEK, copy, 0, 0, 0, 0, 0);
-    long changed = syscall6(NR_FCNTL, 4, F_SETFD, FD_CLOEXEC, 0, 0, 0);
-    char *next[] = { "sealed", "reentered", 0 };
-    if (changed == 0) {
-        syscall6(NR_EXECVEAT, 4, (long)"", (long)next, 0, AT_EMPTY_PATH, 0);
-        finish(94);
-    }
-    write_text(1, "blocked:fd-reuse\n");
-#elif PROBE_MODE == 4
-    if (argc > 1 && same(argv[1], "-version")) {
-        write_text(1, facts);
-        finish(0);
-    }
-    long child;
-#if defined(__x86_64__)
-    child = syscall6(NR_FORK, 0, 0, 0, 0, 0, 0);
-#else
-    child = syscall6(NR_FORK, SIGCHLD, 0, 0, 0, 0, 0);
-#endif
-    if (child < 0) finish(89);
-    if (child == 0) {
-        long escaped_session = syscall6(NR_SETSID, 0, 0, 0, 0, 0, 0);
-        long escaped_group = syscall6(NR_SETPGID, 0, 0, 0, 0, 0, 0);
-        unsigned long delay[2] = { 0, 500000000 };
-        syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
-        if (escaped_session >= 0 || escaped_group >= 0) write_text(1, "escaped-session\n");
-        finish(0);
-    }
-#elif PROBE_MODE == 5
-    if (argc > 1 && same(argv[1], "-version")) {
-        write_text(1, facts);
-        finish(0);
-    }
-    char byte = 'x';
-    struct probe_iovec io = { &byte, 1 };
-    struct probe_control control = {
-        { sizeof(struct probe_cmsghdr) + sizeof(int), SOL_SOCKET, SCM_RIGHTS },
-        3,
-        0
-    };
-    struct probe_msghdr message = { 0, 0, &io, 1, &control, sizeof(control), 0 };
-    if (syscall6(NR_SENDMSG, 5, (long)&message, 0, 0, 0, 0) >= 0) finish(95);
-#elif PROBE_MODE == 6
-    write_text(1, facts);
-    if (!(argc > 1 && same(argv[1], "-version"))) {
-        unsigned long delay[2] = { 5, 0 };
-        syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
-    }
-#elif PROBE_MODE == 7
-    if (syscall6(NR_OPENAT, -100, (long)PROBE_PRIVATE_PATH, 0, 0, 0, 0) >= 0) finish(96);
-    if (syscall6(NR_OPENAT, -100, (long)PROBE_PARENT_ROOT_PATH, 0, 0, 0, 0) >= 0) finish(97);
-    if (syscall6(NR_OPENAT, -100, (long)("/proc/self/root" PROBE_PRIVATE_PATH), 0, 0, 0, 0) >= 0) finish(100);
-    if (syscall6(NR_OPENAT, -100, (long)PROBE_PARENT_PROC_PATH, 0, 0, 0, 0) >= 0) finish(101);
-    if (syscall6(NR_OPENAT, -100, (long)"/proc/1", 0, 0, 0, 0) >= 0) finish(102);
-    // Enumerate all inherited capabilities, not just low-numbered bootstrap
-    // and supervisor FDs. The directory opened for this check is the sole
-    // allowed descriptor above the held source/parser pair.
-    long directory = syscall6(NR_OPENAT, -100, (long)"/proc/self/fd", 0, 0, 0, 0);
-    if (directory < 0) finish(103);
-    char entries[4096];
-    for (;;) {
-        long count = syscall6(NR_GETDENTS64, directory, (long)entries, sizeof(entries), 0, 0, 0);
-        if (count < 0) finish(104);
-        if (count == 0) break;
-        for (long offset = 0; offset < count;) {
-            if (count - offset < 20) finish(105);
-            unsigned short size = *(unsigned short *)(entries + offset + 16);
-            if (size < 20 || size > count - offset) finish(106);
-            const char *name = entries + offset + 19;
-            long fd = 0;
-            long index = 0;
-            while (19 + index < size && name[index] >= '0' && name[index] <= '9') {
-                if (fd > 214748364) finish(107);
-                fd = fd * 10 + name[index++] - '0';
-            }
-            if (index > 0 && (19 + index >= size || name[index] != 0 || (fd > 4 && fd != directory))) finish(108);
-            offset += size;
-        }
-    }
-    syscall6(NR_CLOSE, directory, 0, 0, 0, 0, 0);
-    if (!(argc > 1 && same(argv[1], "-version"))) {
-        long source_fd = syscall6(NR_OPENAT, -100, (long)"/proc/self/fd/3", 0, 0, 0, 0);
-        if (source_fd < 0) finish(109);
-        char source[64];
-        long count = syscall6(NR_READ, source_fd, (long)source, sizeof(source) - 1, 0, 0, 0);
-        if (count != 23) finish(110);
-        source[count] = 0;
-        if (!same(source, "production-bound source")) finish(111);
-        syscall6(NR_CLOSE, source_fd, 0, 0, 0, 0, 0);
-    }
-    if (syscall6(NR_PTRACE, 0, 0, 0, 0, 0, 0) != -1) finish(98);
-    if (syscall6(NR_PROCESS_VM_READV, PROBE_PARENT_PID, 0, 0, 0, 0, 0) != -1) finish(99);
-#elif PROBE_MODE == 8 || PROBE_MODE == 9
-    if (argc > 1 && same(argv[1], "-version")) {
-        write_text(1, facts);
-        finish(0);
-    }
-    long child;
-#if defined(__x86_64__)
-    child = syscall6(NR_FORK, 0, 0, 0, 0, 0, 0);
-#else
-    child = syscall6(NR_FORK, SIGCHLD, 0, 0, 0, 0, 0);
-#endif
-    if (child < 0) finish(89);
-    if (child == 0) {
-#if PROBE_MODE == 9
-        syscall6(NR_LSEEK, 3, 0, 0, 0, 0, 0);
-        write_text(3, "namespace-child-started");
-#endif
-        unsigned long delay[2] = { 60, 0 };
-        syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
-        finish(0);
-    }
-#if PROBE_MODE == 9
-    unsigned long delay[2] = { 60, 0 };
-    syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
-#endif
-#elif PROBE_MODE == 13
-    if (argc > 1 && same(argv[1], "-version")) {
-        write_text(1, "ffprobe version admitted-large-document\n");
-        finish(0);
-    }
-    /* Valid JSON whitespace belongs to the actual document pipe drain even
-       though canonical document serialization removes it afterward. */
-    for (long block = 0; block < 8192; ++block) {
-        write_text(1, "                                ");
-    }
-    write_text(1, facts);
-    finish(0);
-#elif PROBE_MODE == 10 || PROBE_MODE == 11 || PROBE_MODE == 12
-    if (argc > 1 && same(argv[1], "-version")) {
-        write_text(1, "ffprobe version admitted-static\n");
-        finish(0);
-    }
-#if PROBE_MODE == 10
-    write_text(1, "{\"streams\":[{\"index\":4,\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"profile\":\"Main\",\"pix_fmt\":\"yuv420p\",\"width\":1920,\"height\":1080,\"avg_frame_rate\":\"24/1\",\"r_frame_rate\":\"24/1\",\"disposition\":{\"attached_pic\":0}}]}\n");
-#elif PROBE_MODE == 11
-    write_text(1, "{\"streams\":[{\"index\":4,\"codec_type\":\"video\",\"codec_name\":\"h264\",\"profile\":\"High\",\"pix_fmt\":\"yuv420p\",\"width\":1920,\"height\":1080,\"avg_frame_rate\":\"24/1\",\"r_frame_rate\":\"24/1\",\"field_order\":\"tt\",\"disposition\":{\"attached_pic\":0}}]}\n");
-#else
-    write_text(1, "{invalid-json\n");
-#endif
-    finish(0);
-#endif
-    write_text(1, facts);
-    finish(0);
-}
-"#,
-        )
-        .expect("write static probe source");
-    let status = std::process::Command::new("cc")
-        .arg("-nostdlib")
-        .arg("-static")
-        .arg("-fno-stack-protector")
-        .arg("-fno-pie")
-        .arg("-no-pie")
-        .arg("-Wl,--build-id=none")
-        .arg("-Wl,-e,_start")
-        .arg(format!("-DPROBE_MODE={mode}"))
-        .arg(format!(
-            "-DPROBE_PRIVATE_PATH={:?}",
-            private_path.to_str().expect("private marker path")
-        ))
-        .arg(format!(
-            "-DPROBE_PARENT_ROOT_PATH={:?}",
-            format!(
-                "/proc/{}/root{}",
-                std::process::id(),
-                private_path.display()
-            )
-        ))
-        .arg(format!("-DPROBE_PARENT_PID={}", std::process::id()))
-        .arg(format!(
-            "-DPROBE_PARENT_PROC_PATH={:?}",
-            format!("/proc/{}", std::process::id())
-        ))
-        .arg(&source)
-        .arg("-o")
-        .arg(path)
-        .status()
-        .expect("start static probe compiler");
-    assert!(status.success(), "compile static production-path probe");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o500))
-        .expect("make static probe executable");
 }
 
 #[cfg(unix)]
@@ -1474,15 +1098,19 @@ async fn supervisor_stop_bounds_persistent_steady_response_interrupts() {
     // Long enough that a loaded runner's launch cannot reach it: whether
     // the stop signal or the deadline released the loop is read from the
     // loop's own exit counters below, not from how long the call took.
-    probe_version_with_deadline_on(
+    let result = probe_version_with_deadline_on(
         &identity.executable_snapshot,
         identity.executable(),
         ProbeLaunchMode::ProductionSteadyResponseInterruptedUntilStop,
         Duration::from_secs(20),
         Arc::clone(&ownership),
     )
-    .await
-    .expect("the supervisor stop signal releases the response loop before deadline");
+    .await;
+    assert!(
+        matches!(result, Err(DecodeFactError::ProbeIdentity(ref message))
+            if message == "bounded version probe failed"),
+        "the injected stop denies the child's second exec without reaching the deadline"
+    );
     assert!(
         STEADY_RESPONSE_STOP_INTERRUPT_HITS.load(Ordering::Acquire) >= 1,
         "the stop-path proof must first consume a steady response interruption"
@@ -1763,18 +1391,25 @@ async fn pidfd_read_failure_retains_source_ownership_until_reap() {
         .await
         .expect("detached pidfd-read cleanup finishes")
         .expect("source ownership returns after reap");
+    // The caller's deadline cancels its detached collection. That collection
+    // reports cancellation only after its physical owner finishes cleanup.
     tokio::time::timeout(Duration::from_millis(250), async {
-            loop {
-                if cache.metrics().prometheus().contains(
-                    "plurx_decode_facts_phase_seconds_count{phase=\"collection\",outcome=\"deadline\"} 1"
-                ) {
-                    break;
-                }
-                tokio::task::yield_now().await;
+        loop {
+            if cache.metrics().prometheus().contains(
+                "plurx_decode_facts_phase_seconds_count{phase=\"collection\",outcome=\"cancelled\"} 1",
+            ) {
+                break;
             }
-        })
-        .await
-        .expect("the collection sample appears after the detached owner finishes cleanup");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "the collection sample appears after the detached owner finishes cleanup: {}",
+            cache.metrics().prometheus()
+        )
+    });
     assert_eq!(PIDFD_READ_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
     assert_eq!(
         source
@@ -1947,8 +1582,8 @@ if test "$1" = "-version"; then
 fi
 test ! -e "$PLURX_TEST_PROBE_PATH.used" || exit 93
 touch "$PLURX_TEST_PROBE_PATH.used"
-test "$8" = "/dev/fd/3" || exit 91
-test "$(cat "$8")" = "bound source" || exit 92
+test "$8" = "-blocksize" && test "$9" = "1048576" && test "${10}" = "/dev/fd/3" || exit 91
+test "$(cat "${10}")" = "bound source" || exit 92
 printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24000/1001","r_frame_rate":"24000/1001","disposition":{"attached_pic":0}}]}'
 "###,
     );
@@ -2011,8 +1646,8 @@ if test "$1" = "-hide_banner"; then
   printf '%s\n' '[Parsed_idet_2] Multi frame detection: TFF: 0 BFF: 0 Progressive: 91 Undetermined: 9' >&2
   exit 0
 fi
-test "$8" = "/dev/fd/3" || exit 91
-cat "$8" >/dev/null || exit 92
+test "$8" = "-blocksize" && test "$9" = "1048576" && test "${10}" = "/dev/fd/3" || exit 91
+cat "${10}" >/dev/null || exit 92
 printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"30000/1001","r_frame_rate":"30000/1001","field_order":"tt","disposition":{"attached_pic":0}}]}'
 "###,
     );
@@ -2060,8 +1695,8 @@ if test "$1" = "-hide_banner"; then
   printf '%s\n' '[Parsed_idet_2] Multi frame detection: TFF: 0 BFF: 0 Progressive: 91 Undetermined: 9' >&2
   exit 0
 fi
-test "$8" = "/dev/fd/3" || exit 91
-cat "$8" >/dev/null || exit 92
+test "$8" = "-blocksize" && test "$9" = "1048576" && test "${{10}}" = "/dev/fd/3" || exit 91
+cat "${{10}}" >/dev/null || exit 92
 echo probe >> "$PLURX_TEST_PROBE_PATH.calls"
 printf '%s\n' '{document}'
 "###
@@ -3265,28 +2900,23 @@ fn crossed_source_and_executable_fds_are_duplicated_before_assignment() {
     let executable = std::fs::File::open(executable_path).expect("executable");
     let source_fd = source.as_raw_fd();
     let executable_fd = executable.as_raw_fd();
+    // Cross the actual open descriptor numbers so either sequential dup2
+    // destroys the other input unless the shared builder pins both first.
+    let descriptors = prepare_probe_descriptors(
+        &[(source_fd, executable_fd), (executable_fd, source_fd)],
+        crate::process::source_lifetime::StdioFacts::NULL,
+    )
+    .expect("prepare crossed descriptors");
     let mut command = std::process::Command::new("/bin/sh");
-    command.args([
-        "-c",
-        "test \"$(cat <&3)\" = bound-source && test \"$(cat <&4)\" = held-probe",
-    ]);
+    command.arg("-c").arg(format!(
+        "test \"$(cat /dev/fd/{executable_fd})\" = bound-source && test \"$(cat /dev/fd/{source_fd})\" = held-probe"
+    ));
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     unsafe {
-        command.pre_exec(move || {
-            let source_cross = duplicate_child_fd(source_fd)?;
-            let executable_cross = match duplicate_child_fd(executable_fd) {
-                Ok(duplicate) => duplicate,
-                Err(error) => {
-                    libc::close(source_cross);
-                    return Err(error);
-                }
-            };
-            let crossed = assign_child_fd(executable_cross, 3)
-                .and_then(|()| assign_child_fd(source_cross, HELD_PROBE_FD));
-            libc::close(source_cross);
-            libc::close(executable_cross);
-            crossed?;
-            install_probe_child_fds(HELD_PROBE_FD, 3)
-        });
+        command.pre_exec(move || descriptors.inherit());
     }
     assert!(command.status().expect("run descriptor check").success());
     drop((source, executable));
@@ -3491,4 +3121,24 @@ async fn admitted_large_document_close_uses_its_original_projection_bound() {
     assert!(document.drained_stdout_bytes <= MAX_SOURCE_DOCUMENT_BYTES);
     assert!(document.original_native_close_verified());
     assert!(completion.output.is_ok());
+}
+
+/// The strict supervisor refuses any single read() above one service quantum,
+/// and FFmpeg's file protocol otherwise reads a whole large packet at once.
+#[cfg(target_os = "linux")]
+#[test]
+fn strict_parser_reads_are_capped_to_one_service_quantum() {
+    let input = strict_source_input();
+    assert_eq!(input[0], "-blocksize");
+    assert_eq!(
+        input[1]
+            .to_str()
+            .and_then(|value| value.parse::<usize>().ok()),
+        Some(1_048_576)
+    );
+    assert_eq!(input[2], "/dev/fd/3", "the cap precedes the held input");
+    assert!(idet_filter(0).starts_with(&format!(
+        "movie=/dev/fd/3:format_opts=blocksize={}:",
+        1_048_576
+    )));
 }

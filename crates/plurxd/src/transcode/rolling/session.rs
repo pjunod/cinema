@@ -10,6 +10,10 @@ pub(super) enum CopyReaderTask {
 }
 
 pub(super) struct Session {
+    pub(super) fallback_analysis_interest: std::sync::Mutex<
+        Option<plurx_core::store::background_jobs_resources::PlaybackAnalysisSuspension>,
+    >,
+    pub(super) source_request: Option<crate::source_custody::SourceRequest>,
     pub(super) dir: PathBuf,
     /// Process-local response incarnation. The bearer session id can be reused
     /// by a durable reattachment, while segment names and lengths can repeat
@@ -1068,8 +1072,13 @@ impl Session {
                 clock.staged_end_ms =
                     Some(clock.staged_end_ms.map_or(end_ms, |old| old.max(end_ms)));
             }
-            let mut budget =
-                clock.publication_budget_at(now, producer_attempt, lease.as_ref(), media_origin_ms);
+            let mut budget = clock.publication_budget_at(
+                now,
+                producer_attempt,
+                lease.as_ref(),
+                media_origin_ms,
+                (self.start_seconds * 1_000.0).round() as i64,
+            );
             clock.update_reserve_phase(lease.as_ref(), &budget);
             if clock.served.is_none() {
                 // Keep steady production/allowance intact. Only first snapshot
@@ -1085,7 +1094,15 @@ impl Session {
                     true
                 }
                 Some(served) => {
-                    clock.next_publish_at.is_some_and(|target| now >= target)
+                    (clock.startup_policy.uses_small_bootstrap()
+                        && clock.reserve_phase != RollingReservePhase::Steady
+                        && last_segment > served.last_segment
+                        && now
+                            >= served.available_at
+                                + Duration::from_secs(u64::from(
+                                    plurx_core::transcode::SEGMENT_SECONDS,
+                                )))
+                        || clock.next_publish_at.is_some_and(|target| now >= target)
                         || (wants_early_publication
                             && now >= served.available_at + ROLLING_PUBLICATION_EARLIEST)
                 }
@@ -1104,10 +1121,7 @@ impl Session {
                     // Capacity becomes measurable at the fixed initial runway,
                     // independently of the publication frontier advancing with
                     // elapsed time. Clearing a hold must not defer rejection.
-                    None => {
-                        !held_for_scratch
-                            && end_ms >= clock.startup_policy.bootstrap_ms(playback_rate)
-                    }
+                    None => !held_for_scratch && end_ms >= rolling_initial_runway_ms(playback_rate),
                     Some(served) => {
                         clock.hard_deadline.is_some_and(|deadline| now >= deadline)
                             && end_ms <= served.end_ms
@@ -1141,9 +1155,12 @@ impl Session {
         let first_new_segment = previous_served
             .as_ref()
             .map_or(i64::MIN, |served| served.last_segment.saturating_add(1));
+        let native_first_snapshot = previous_served.is_none()
+            && self.publication.lock().await.startup_policy
+                == RollingStartupPolicy::NativePresentationWindow;
         let selected_last = if end_list {
             last_segment
-        } else if budget.demand_sequence.is_none() {
+        } else if budget.demand_sequence.is_none() && !native_first_snapshot {
             // A legacy viewer has no accepted playback position with which to
             // authorize a rounded-up segment.  Its fixed wall/download clock
             // therefore exposes only the last complete endpoint *inside* the
@@ -1157,8 +1174,10 @@ impl Session {
             };
             selected.index
         } else {
-            // The producer retains its steady allowance plus a complete-cut
-            // envelope. An isolated candidate may use less of that paid allowance:
+            // Explicit demand and the frozen native bootstrap position can
+            // authorize the first complete cut beyond the admission floor.
+            // The producer retains its steady allowance plus that bounded
+            // complete-cut envelope. A short candidate may use less of it:
             // keep its first advertised endpoint within the policy ceiling.
             let first_web_snapshot = previous_served.is_none()
                 && self
@@ -1187,6 +1206,16 @@ impl Session {
                     && clock.reserve_phase != RollingReservePhase::Steady
             };
             let floor = earned.or_else(|| {
+                // Bootstrap replenishment serves every completed bounded cut,
+                // including legacy fetch-driven owners without film telemetry.
+                if low_reserve && previous_served.is_some() {
+                    return index.segs.iter().rev().find(|segment| {
+                        segment.index >= first_new_segment
+                            && segment.end_ms <= budget.allowed_end_ms
+                            && segment.end_ms.saturating_sub(budget.consumed_end_ms)
+                                <= ROLLING_RESERVE_MAX_MS
+                    });
+                }
                 budget.demand_sequence.and_then(|_| {
                     if first_web_snapshot {
                         // At the 124s bootstrap ceiling the next complete cut
@@ -1197,17 +1226,6 @@ impl Session {
                             segment.end_ms <= selection_allowed_end_ms
                                 && segment.end_ms
                                     >= budget.desired_end_ms.saturating_sub(ROLLING_SEGMENT_MAX_MS)
-                        });
-                    }
-                    // While reserve grows, include every completed eligible
-                    // object. One segment per 16 s cycle can lose to 1x even
-                    // when sustained production is 1.05x.
-                    if low_reserve && previous_served.is_some() {
-                        return index.segs.iter().rev().find(|segment| {
-                            segment.index >= first_new_segment
-                                && segment.end_ms <= budget.allowed_end_ms
-                                && segment.end_ms.saturating_sub(budget.consumed_end_ms)
-                                    <= ROLLING_RESERVE_MAX_MS
                         });
                     }
                     index.segs.iter().find(|segment| {
@@ -1362,8 +1380,8 @@ impl Session {
                 .as_ref()
                 .is_some_and(|served| first_segment > served.first_segment)
         {
-            // Short bootstrap is permitted; removing a prefix must still leave
-            // three target durations. Retain the old prefix until it can.
+            // The audited hls.js bootstrap may be short. Native admission and
+            // every prefix removal retain three fixed target durations.
             let old_first = previous_served
                 .as_ref()
                 .expect("previous snapshot checked")
@@ -1506,6 +1524,10 @@ impl Session {
                 startup_policy = ?clock.startup_policy,
                 bootstrap_ms = clock.startup_policy.bootstrap_ms(playback_rate),
                 consumed_end_ms = budget.consumed_end_ms,
+                demand_sequence = ?budget.demand_sequence,
+                lease_mode = ?lease.as_ref().map(|lease| lease.mode),
+                presentation_phase = ?lease.as_ref().map(|lease| lease.startup.phase),
+                media_committed = lease.as_ref().is_some_and(|lease| lease.delivery.first_media_committed_at.is_some()),
                 served_end_ms,
                 requested_position_ms = (self.start_seconds * 1_000.0).round() as i64,
                 media_origin_ms,
@@ -1885,6 +1907,24 @@ impl Session {
         &self,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<crate::playback_control::RollingTerminalCause, String> {
+        if let Some(release) = self.control.projected_release() {
+            // A release or operator stop already committed this generation's
+            // terminal synchronously. Observe the cause the actor committed
+            // first instead of racing it with an End that can only lose. Any
+            // command imports the projection, so the snapshot carries it; an
+            // unavailable actor (or a passed deadline) leaves the projected
+            // release as the first retirement.
+            let snapshot = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, self.control.snapshot())
+                    .await
+                    .ok()
+                    .flatten(),
+                None => self.control.snapshot().await,
+            };
+            return Ok(snapshot
+                .and_then(|snapshot| snapshot.terminal)
+                .unwrap_or(release));
+        }
         let outcome = match deadline {
             Some(deadline) => match self.control.end_before(deadline.into_std()).await {
                 Ok(outcome) => Ok(outcome),
@@ -1920,6 +1960,23 @@ impl Session {
         // actor response admission. The actor imports the shared retirement
         // bit as typed AuthorityFence before applying its next queued command.
         self.control.fence_unavailable();
+    }
+
+    /// Retire this generation because its viewer released it or an operator
+    /// stopped it. Same synchronous producer transition as the authority
+    /// fence, with its own typed cause; the first retirement keeps its cause.
+    pub(super) fn project_release(&self, cause: crate::playback_control::RollingTerminalCause) {
+        self.control.release_unavailable(cause);
+    }
+
+    /// Project a durable terminal intent onto this generation: a client
+    /// release or operator stop with its own cause, anything else as the
+    /// authority fence it is.
+    pub(super) fn project_terminal_intent(&self, terminal: crate::vodserve::Terminal) {
+        match crate::playback_control::RollingTerminalCause::release_for(terminal) {
+            Some(cause) => self.project_release(cause),
+            None => self.project_authority_fence(),
+        }
     }
 
     pub(super) async fn settle_authority_fence(&self) {
@@ -2195,7 +2252,7 @@ impl Session {
         spawn: F,
     ) -> Result<(), String>
     where
-        F: FnOnce() -> Result<ObservedFfmpeg, String>,
+        F: FnOnce(Option<&str>) -> Result<ObservedFfmpeg, String>,
     {
         let mut slot = self.child.lock().await;
         if let Some(child) = slot.as_ref() {
@@ -2204,13 +2261,21 @@ impl Session {
                 child.producer_attempt
             ));
         }
-        let (candidate, child_job, diagnostics) = spawn()?.into_parts();
-        *slot = Some(AttemptChild::new_with_job(
+        let custody = match &self.source_request {
+            Some(request) => Some(
+                crate::source_input::SourceInput::open(request.clone(), producer_attempt).await?,
+            ),
+            None => None,
+        };
+        let (candidate, child_job, diagnostics) =
+            spawn(custody.as_ref().map(|input| input.url()))?.into_parts();
+        *slot = Some(AttemptChild::new_with_source_job(
             producer_attempt,
             candidate,
             Some(child_job),
             self.control.clone(),
             Some(diagnostics),
+            custody,
         ));
         drop(slot);
 
@@ -2265,7 +2330,7 @@ impl Session {
         spawn: F,
     ) -> Result<tokio::process::ChildStdout, String>
     where
-        F: FnOnce() -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String>,
+        F: FnOnce(Option<&str>) -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String>,
     {
         let mut slot = self.child.lock().await;
         if let Some(child) = slot.as_ref() {
@@ -2274,14 +2339,21 @@ impl Session {
                 child.producer_attempt
             ));
         }
-        let (observed, stdout) = spawn()?;
+        let custody = match &self.source_request {
+            Some(request) => Some(
+                crate::source_input::SourceInput::open(request.clone(), producer_attempt).await?,
+            ),
+            None => None,
+        };
+        let (observed, stdout) = spawn(custody.as_ref().map(|input| input.url()))?;
         let (candidate, child_job, diagnostics) = observed.into_parts();
-        *slot = Some(AttemptChild::new_with_job(
+        *slot = Some(AttemptChild::new_with_source_job(
             producer_attempt,
             candidate,
             Some(child_job),
             self.control.clone(),
             Some(diagnostics),
+            custody,
         ));
         drop(slot);
 
@@ -3104,6 +3176,14 @@ pub(super) async fn session_info_owned(
     } else {
         "waiting"
     };
+    let dv_refit_identity_reason = matches!(
+        &s.kind,
+        SessionKind::Copy {
+            convert_dolby_vision: true,
+            ..
+        }
+    )
+    .then(|| "Live copy uses the v1 identity converter".to_owned());
     #[cfg(target_os = "linux")]
     if let Some(allocation) = allocation.as_ref() {
         let bytes = std::mem::size_of::<SessionInfo>()
@@ -3122,7 +3202,12 @@ pub(super) async fn session_info_owned(
             .expect("accepted snapshot status exceeded pre-adoption consumer credit");
     }
     let status = SessionInfo {
+        dolby_vision_refit: dv_refit_identity_reason
+            .clone()
+            .map(crate::transcode::RefitPlaybackReport::identity),
         vod_observation: None,
+        dv_refit_digest: None,
+        dv_refit_identity_reason,
         id: id.to_owned(),
         presentation: "live-recovery",
         file_id: s.file_id,
@@ -3264,7 +3349,10 @@ pub(super) async fn session_info_owned(
 pub(super) fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionInfo {
     let observation = info.observation.as_ref();
     SessionInfo {
+        dolby_vision_refit: info.dolby_vision_refit,
         vod_observation: info.observation.clone(),
+        dv_refit_digest: info.dv_refit_digest,
+        dv_refit_identity_reason: info.dv_refit_identity_reason,
         id: info.id,
         presentation: "vod",
         file_id: info.file_id,
@@ -3367,6 +3455,9 @@ mod activity_vod_tests {
     #[test]
     fn vod_activity_projects_real_control_without_rolling_measurements() {
         let info = crate::vodserve::VodDeliveryInfo {
+            dolby_vision_refit: None,
+            dv_refit_digest: None,
+            dv_refit_identity_reason: None,
             observation: Some(crate::vodserve::VodActivityObservation {
                 processing: None,
                 display_target: None,

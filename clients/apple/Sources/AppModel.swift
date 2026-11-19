@@ -960,9 +960,9 @@ final class AppModel: ObservableObject {
         return candidates.first(where: { $0.id == id })?.name
     }
 
-    func libraryPage(_ libraryId: Int, sort: LibrarySort, offset: Int) async throws -> Page {
+    func libraryPage(_ libraryId: Int, sort: LibrarySort, offset: Int, presence: LibraryPresence = .disk) async throws -> Page {
         do {
-            return try await requireAPI().libraryItems(libraryId, sort: sort, offset: offset, limit: 200)
+            return try await requireAPI().libraryItems(libraryId, sort: sort, offset: offset, limit: 200, presence: presence)
         } catch {
             noteAuthFailure(error)
             throw error
@@ -978,6 +978,7 @@ final class AppModel: ObservableObject {
     func libraryItems(
         _ collection: LibraryCollection,
         sort: LibrarySort,
+        presence: LibraryPresence = .disk,
         publish: ([Item]) -> Void
     ) async throws {
         var merged: [Item] = []
@@ -990,7 +991,8 @@ final class AppModel: ObservableObject {
                         library.id,
                         sort: sort,
                         offset: offset,
-                        limit: limit
+                        limit: limit,
+                        presence: presence
                     )
                     let batch = page.items ?? []
                     merged.append(contentsOf: batch)

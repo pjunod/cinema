@@ -4623,3 +4623,133 @@ fn merging_nothing_is_an_error_not_an_empty_segment() {
     let (init, _, _) = read_all(&feed);
     assert!(merge(&[], &init, 1).is_err());
 }
+
+#[test]
+fn copy_avcc_declared_depth_chroma_never_defaults_high_profiles() {
+    // One bounded SPS/PPS array. These synthetic SPS prefixes establish only
+    // the profile triplet: this test does not pretend to prove SPS geometry.
+    let mut record = vec![
+        1, 244, 0, 40, 0xff, 0xe1, 0, 4, 0x67, 244, 0, 40, 1, 0, 1, 0x68,
+    ];
+    assert!(matches!(
+        copy_avcc_facts(&record, 4),
+        Err(Fmp4Error::Unsupported(_))
+    ));
+    record.extend_from_slice(&[0xff, 0xfa, 0xfa, 0]);
+    assert_eq!(
+        copy_avcc_facts(&record, 4).expect("explicit High 4:4:4 10-bit declaration"),
+        (244, 40, 10, 3)
+    );
+    record[18] = 0xf8;
+    assert!(matches!(
+        copy_avcc_facts(&record, 4),
+        Err(Fmp4Error::Unsupported(_))
+    ));
+    record[18] = 0xfa;
+    record[9] = 100;
+    assert!(matches!(
+        copy_avcc_facts(&record, 4),
+        Err(Fmp4Error::Malformed(_))
+    ));
+    let baseline = [
+        1, 66, 0, 30, 0xff, 0xe1, 0, 4, 0x67, 66, 0, 30, 1, 0, 1, 0x68,
+    ];
+    assert_eq!(
+        copy_avcc_facts(&baseline, 4).expect("baseline has normative 8-bit 420 defaults"),
+        (66, 30, 8, 1)
+    );
+    assert!(copy_avcc_facts(&baseline, 2).is_err());
+    assert!(copy_avcc_facts(&baseline[..15], 4).is_err());
+}
+
+#[test]
+fn copy_hevc_facts_allow_general_profiles_and_optional_color() {
+    let (mut init, _, _) = read_all(&pipe("open-gop"));
+    declare_hevc_parameter_sets_in_band(&mut init).expect("in-band entry");
+    strip_hvcc_arrays(&mut init);
+    let location = locate_hvcc(&init.bytes)
+        .expect("locate hvcC")
+        .expect("hvcC");
+    let at = location.payload.start;
+    init.bytes[at + 1] = (init.bytes[at + 1] & 0xe0) | 1;
+    init.bytes[at + 16] = 0xfd;
+    init.bytes[at + 17] = 0xf8;
+    init.bytes[at + 18] = 0xf8;
+    let entry = location.ancestors[1];
+    let extra = entry.start + entry.header_len + 78..location.sample_entry_end;
+    let colors = find_children(&init.bytes, extra, b"colr").expect("color children");
+    for (color, _) in &colors {
+        init.bytes[color.start + 4..color.start + 8].copy_from_slice(b"free");
+    }
+    let facts = copy_video_sample_entry_facts(&init).expect("generic HEVC Main, no color");
+    assert_eq!(facts.codec, VideoCodec::Hevc);
+    assert_eq!(facts.sample_entry, *b"hev1");
+    assert_eq!(
+        (facts.profile_idc, facts.bit_depth, facts.chroma_format_idc),
+        (1, 8, 1)
+    );
+    assert_eq!(facts.color, None);
+    assert!(facts.width > 0 && facts.height > 0);
+    init.bytes[at + 17] = 0xfa;
+    init.bytes[at + 18] = 0xfa;
+    init.bytes[at + 16] = 0xff;
+    init.bytes[at + 1] = (init.bytes[at + 1] & 0xe0) | 4;
+    let facts = copy_video_sample_entry_facts(&init).expect("declared range-extension profile");
+    assert_eq!(
+        (facts.profile_idc, facts.bit_depth, facts.chroma_format_idc),
+        (4, 10, 3)
+    );
+    if let Some((color, hdr)) = colors.first() {
+        init.bytes[color.start + 4..color.start + 8].copy_from_slice(b"colr");
+        let p = color.start + hdr.header_len;
+        init.bytes[p..p + 11].copy_from_slice(&[b'n', b'c', b'l', b'x', 0, 1, 0, 1, 0, 1, 0x80]);
+        assert_eq!(
+            copy_video_sample_entry_facts(&init)
+                .expect("optional full-range color")
+                .color,
+            Some((1, 1, 1, true))
+        );
+        init.bytes[p + 10] |= 1;
+        assert!(copy_video_sample_entry_facts(&init).is_err());
+        init.bytes[p + 10] &= 0x80;
+    }
+    init.bytes[at + 18] = 0xf8;
+    assert!(matches!(
+        copy_video_sample_entry_facts(&init),
+        Err(Fmp4Error::Unsupported(_))
+    ));
+}
+
+#[test]
+fn guarded_reinitialization_has_a_typed_unsupported_kind() {
+    let mut input = FragmentReader::new();
+    input.push(include_bytes!(
+        "../../tests/fixtures/dv-runtime/authored.mp4"
+    ));
+    let Some(Unit::Init(init)) = input.next_unit().expect("authored init parses") else {
+        panic!("authored init");
+    };
+    let mut reader = FragmentReader::new();
+    reader.reject_reinitialization();
+    reader.push(&init.bytes);
+    assert!(matches!(
+        reader.next_unit().expect("first init"),
+        Some(Unit::Init(_))
+    ));
+    reader.push(&init.bytes);
+    let error = reader
+        .next_unit()
+        .expect_err("guarded replacement rejected");
+    assert_eq!(
+        error.unsupported_kind(),
+        Some(Fmp4UnsupportedKind::InitContractChanged)
+    );
+    assert_eq!(
+        Fmp4Error::Unsupported("other shape".into()).unsupported_kind(),
+        None
+    );
+    assert_eq!(
+        Fmp4Error::Malformed(INIT_CONTRACT_CHANGED.into()).unsupported_kind(),
+        None
+    );
+}

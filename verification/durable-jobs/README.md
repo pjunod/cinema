@@ -1,10 +1,14 @@
 # Durable jobs — check bounded publication authority with TLC
 
-**Status:** implemented and independently reviewed; all 16 bounded configurations
-and 11 focused runtime tests qualified. Delivery and CI are tracked in the status page. This package checks a finite model of bound
-`library_scan` / `metadata_refresh` workers publishing through
-`insert_item_fenced`. It is a bounded protocol check and a source mapping,
-not a refinement theorem or a result about the entire cluster.
+**Status:** the original 16 configurations and 11 focused runtime tests have
+historical qualification. On 2026-11-03 all 18 registered configurations
+returned their expected outcomes in individual local runs on the updated
+model. Exact input identities, bounds and receipts are recorded in
+[CONTRACT.md](CONTRACT.md); CI and promotion qualification remain separate.
+This package checks a finite model of bound `library_scan` /
+`metadata_refresh` workers publishing through `insert_item_fenced`. It is a
+bounded protocol check and a source mapping, not a refinement theorem or a
+result about the entire cluster.
 
 Read [CONTRACT.md](CONTRACT.md) for source guards, transaction boundaries,
 caller classifications and backend examples. The
@@ -13,7 +17,8 @@ owns acceptance; the
 [status page](../../docs/cluster/FORMAL-VERIFICATION-PILOT-STATUS.md)
 records review and qualification. `mapping.json` binds the selected source,
 model, configurations, properties and expected outputs; changed inputs require
-a deliberate mapping review.
+a deliberate mapping review. A source row pins the item its anchor selects,
+not its file: see [Source pins cover the anchored item](#source-pins-cover-the-anchored-item).
 
 ## Run the pinned package
 
@@ -39,6 +44,82 @@ options in each receipt identify the checked candidate. Peak process RSS is
 separate from the4GiB heap cap. Final qualification is recorded after review,
 not inferred from these development checks.
 
+## Source pins cover the anchored item
+
+Each source row in a package's `mapping.json`, and in worker-refinement's
+`correspondence.json`, pins **the item its anchor selects**, not the file
+that holds it. An edit elsewhere in the file is not drift. An edit inside the
+item fails `check-mapping` with
+`authority source drift requires review: <file> :: <item> (<row>)`, and the
+reviewer reads that item.
+
+Paul ruled this on 2026-11-15. Until then every row pinned its whole file by
+SHA-256, so any edit to a pinned file failed main's preflight until someone
+re-pinned by hand, whether or not it touched mapped code: 23 of the previous
+32 mapping edits were such re-pins. A check that fires on every edit stops
+being read as a review. The earlier position, that whole-file pins were
+intentional, is retired with it.
+
+| Row field | Meaning |
+|---|---|
+| `anchor` | Exact text that must occur once in the file. |
+| `scope` | `item` pins the innermost named item that holds the anchor. `arm` (Rust only, for an anchor ending in a match arm's `=> {`) pins the function around the arm with the bodies of the other block arms left out; the scrutinee, every arm's pattern and guard in order, and the code around the match stay in. |
+| `item` | Path of the selected item, such as `impl JobFence > fn renew`, `fn spawn_writer > arm`, `#[cfg(test)] mod tests > fn probe`, `trigger job_completed` or `[[package]] tokio 1.53.1`. A different path means the item was renamed or moved. |
+| `item_sha256` | SHA-256 of the item's canonical text. |
+
+| Source | The item is |
+|---|---|
+| Rust | A `fn`, `impl`, `struct`, `enum`, `union`, `trait`, `mod`, `type`, `const`, `static` or `macro_rules!`, with its attributes and the comments directly above it. A `cfg` or `cfg_attr` on any item around it, or on the file, is part of the path and the hash. |
+| SQL | One statement; a trigger runs to the `END` that closes its body. Every other statement in the file that creates, drops or alters the same object is hashed with it, so a later `DROP` or second `CREATE` is drift. |
+| `Cargo.toml`, `Cargo.lock` | In a table, the key that holds the anchor. In an array of tables, the whole entry: a lockfile `[[package]]` with its version, checksum and direct dependencies, however little of it the anchor quotes. |
+| Python | A `def` or `class`, with its decorators. |
+
+**Canonical text.** In Rust and SQL a run of whitespace between tokens counts
+as one space, so re-indenting an item or re-wrapping a line at an existing
+space is not drift. A reflow that puts a break where there was no space
+(`a.b()` onto two lines, an argument list split one per line, an added
+trailing comma) does change the hash: it fails loudly and needs a re-pin,
+never a silent pass. String literals and comments are kept byte for byte,
+and a line comment keeps its line end, so code joined onto a comment line
+changes the hash. TOML and Python keep their layout; only line ends and
+trailing blanks are normalised.
+
+**Same-file dependencies.** A pin covers the item, not what the item calls.
+Where part of a row's claim lives in a function or constant the item reads
+from its own file (a retry count, a lease TTL, the function a thin wrapper
+delegates to, a fixture a conformance test stands on), that function or
+constant has its own row: `same-file dependency of <reader>: …` in a
+`mapping.json`, and the `dependencies` list in worker-refinement's
+`correspondence.json`. When a reviewed change makes a pinned item read
+something new that bears on its claim, add the row in the same re-pin.
+
+**An anchor never passes silently.** Each of these is an error, not a pass:
+the anchor is absent or occurs twice; it sits outside every named item; the
+item it selects has another path than the row records; the file does not lex
+(an unclosed delimiter, string or comment); the file type has no extractor;
+the row still carries a whole-file `sha256`; the mapping lacks
+`"pin_scheme": "item-v1"`.
+
+**Re-pinning.** `scripts/check-formal item-pins --package <name>` lists each
+row whose pin is stale; `--write` records the current pins. The command only
+does the arithmetic. The review is reading the items `check-mapping` named
+and recording the conclusion in the mapping's review basis.
+
+**What did not change.** `input_sha256` in the `check-mapping` output and in
+every receipt still records the whole-file SHA-256 of each source read, so a
+receipt identifies exact bytes. `affected` is still true when a mapped file
+changes, so its smoke still runs.
+
+**Limits.** The Rust extractor is a lexer, not a compiler; rust-analyzer is
+not available to the lane. It skips comments, strings, raw strings and
+character literals, and accepts an item keyword only where an item can start.
+It does not see items a macro generates: an anchor in one resolves to the
+written item around it. A const-generic brace in a signature
+(`-> Foo<{ N }>`) is taken for the body, which yields an error or a coarser
+pin, never a narrower one. Dependency rows are chosen by review, one call
+deep and within the file: a callee in another file, or a callee's callee,
+is pinned only if someone gave it a row.
+
 ## Seeds share one safety transition relation
 
 `Fragment` selects **initial seeds only** for authority operations. It does
@@ -60,7 +141,8 @@ samples, transaction application and facade delivery are separate actions.
 Bind refusal, domain release and queue settlement are separate actions too.
 
 Each execution explores one queue heartbeat, one domain acquire/renew/release
-operation, one selected environment displacement (cancellation, removal,
+operation, at most one source pause/reacquisition pair, one selected
+environment displacement (cancellation, removal,
 resource loss, takeover, outage or restart), and **one facade publication
 call** with up to four identity-conflict submissions. Each worker can issue
 one initial claim and one replay/resolution. Finite claim identities never
@@ -69,19 +151,47 @@ workers and sufficient remaining job-attempt budget for their bounded claims.
 
 This excludes arbitrary repeated fault combinations, repeated publication
 calls, a full daemon lifecycle, general queue admission fairness and
-cross-seed lifecycle composition. Local deadline/revocation mechanisms are
+cross-seed lifecycle composition. Arbitrary repeated source pressure and
+physical stop/read/join correctness are excluded; the pause pair is a finite
+protocol bound, not a progress guarantee. Local deadline/revocation mechanisms are
 represented only through lost local authority, reboot and post-commit facade
 outcomes, not every runtime timer. Old pending publication samples remain
 unchanged while other authority changes occur; they are never clamped away
 or automatically failed for age.
 
+## A paused source owner retains identity, not a reservation
+
+One nondeterministically selected `sourceKey` identifies the represented
+source-reader key; the remaining resource keys still need actual covering
+reservations. `PauseSource` removes only that source reservation and records
+job/node/boot/claim/fence. `RenewCover` accepts that exact paused identity for
+queue renewal, replay and resolution. Its stable identity survives ordinary
+renewal revisions. `ResumeSource` needs the same live running owner and a
+free source slot, then installs a real reservation at the current expiry.
+`BindAttempt`, `LiveBound` and publication `Authority` continue to use `Cover`.
+S8 checks that a current paused identity has no source reservation. Pausing
+therefore never supplies binding or publication authority.
+
+The ten-step witness starts from the existing bound publication shape plus
+a retained successful claim request, then uses real shared actions. Its
+action filter is reachability evidence only; `source-pause.cfg` uses the
+unfiltered safety relation. Both `sourceKey` and the complete pause record
+remain in `ModelView`; their values can affect future guards. Initial key
+selection preserves resource-key symmetry. No pressure, byte service or
+physical-read permission is inferred from this model. Extra foreground and
+custody admission checks may veto claim/resume transitions; their physical
+and scheduling state is outside this finite model. No fairness premise says
+a paused worker eventually receives a slot.
+
 ## Finite bounds are part of the result
 
 | Configuration | Jobs / workers / boots per worker / claims / domains / resource keys | Event horizon | Properties / intended outcome |
 |---|---|---|---|
-| `smoke.cfg` | 1 / 2 / 2 / 2 / 1 / 2 | 6 | S0–S7; complete without violation |
-| `baseline.cfg` | 2 / 2 / 2 / 3 / 1 / 2 | 8 | S0–S7; complete without violation |
-| `lifecycle.cfg` | 1 / 2 / 2 / 3 / 1 / 2 | 11 | S0–S7 from claim seeds through commit and facade delivery |
+| `smoke.cfg` | 1 / 2 / 2 / 2 / 1 / 2 | 6 | S0–S8; complete without violation |
+| `baseline.cfg` | 2 / 2 / 2 / 3 / 1 / 2 | 8 | S0–S8; complete without violation |
+| `lifecycle.cfg` | 1 / 2 / 2 / 3 / 1 / 2 | 11 | S0–S8 from claim seeds through commit and facade delivery |
+| `source-pause.cfg` | 1 / 2 / 2 / 2 / 1 / 2 | 6 | S0–S8 from a bound seed retaining its successful claim record; shared `SafetyNext` |
+| `witness-source-pause.cfg` | Same small domains | 10 | S0–S4/S8 plus named witness for pause→renew→replay→reacquire→publication commit; explicit ten-step subset of shared `Next` |
 | `control-binding-ignored.cfg` | 1 / 2 / 2 / 2 / 1 / 2 | 6 | S2 violation after removing the backend binding guard |
 | `control-replay-fresh-fence.cfg` | Same small domains | 6 | S4 violation after replay manufactures a new fence for the same identity |
 | `control-renewal-revives-cancel.cfg` | Same small domains | 6 | S5 action-property violation after relaxing both state and exact revision guards |

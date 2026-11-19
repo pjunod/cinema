@@ -49,6 +49,7 @@ impl CoordinationStore for HiqliteAuthStore {
         let acquired = self
             .client()
             .execute_returning_map::<_, LeaseRow>(
+                "acquire_lease",
                 ACQUIRE_SQL,
                 params!(
                     resource,
@@ -69,6 +70,7 @@ impl CoordinationStore for HiqliteAuthStore {
         let removed = self
             .client()
             .query_consistent_map::<CountRow, _>(
+                "acquire_lease",
                 "SELECT COUNT(*) AS count FROM settings WHERE key = $1",
                 params!(owner_fence_key),
             )
@@ -82,6 +84,7 @@ impl CoordinationStore for HiqliteAuthStore {
         let rows = self
             .client()
             .query_consistent_map::<LeaseRow, _>(
+                "acquire_lease",
                 "SELECT resource, owner_node_id, fence, revision, expires_at_ms
                  FROM job_leases WHERE resource = $1",
                 params!(resource),
@@ -132,6 +135,7 @@ impl CoordinationStore for HiqliteAuthStore {
         let rows = self
             .client()
             .execute_returning_map::<_, LeaseRow>(
+                "renew_lease",
                 sql,
                 params!(
                     expires_at_unix_ms,
@@ -158,6 +162,7 @@ impl CoordinationStore for HiqliteAuthStore {
         Ok(self
             .client()
             .execute(
+                "release_lease",
                 "UPDATE job_leases
                  SET expires_at_ms = CASE
                          WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
@@ -185,6 +190,7 @@ impl CoordinationStore for HiqliteAuthStore {
         let rows = self
             .client()
             .query_map::<ExpiryRow, _>(
+                "lease_expiry_hint",
                 "SELECT expires_at_ms FROM job_leases WHERE resource = $1",
                 params!(resource),
             )

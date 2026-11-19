@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+"""Prepare exact source-custody recovery evidence before a Linux host reboot.
+
+This helper never changes SQLite, stops a process, or reboots a machine.
+`prepare` snapshots unresolved ownership for one node and fsyncs a private
+challenge. After a real reboot, `validate` verifies the same machine and a
+different kernel boot UUID; `apply` publishes the challenge to the daemon's
+separate v1 recovery namespace. The daemon must independently verify that
+evidence and settle the exact owners through its authoritative Store.
+
+    source-custody-recovery prepare --data-dir DATA --database ACTIVE_DB --node-id NODE
+    source-custody-recovery validate --data-dir DATA --node-id NODE --challenge UUID
+    source-custody-recovery apply --data-dir DATA --node-id NODE --challenge UUID
+
+Run on the actual owner host using the identity source shared with its daemon.
+An ordinary daemon/container restart is not a host reboot and is refused.
+Challenges must be retained outside disposable compiler/cache directories.
+"""
+
+from __future__ import annotations
+
+import argparse
+from contextlib import closing, contextmanager
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import stat
+import sys
+import time
+import uuid
+
+
+MAX_RECORDS = 128
+MAX_BYTES = 1024 * 1024
+MAX_TOKEN_BYTES = 16 * 1024
+MAX_I64 = 2**63 - 1
+ENVELOPE_KEYS = {"version", "machine_id", "boot_id", "node_id", "records"}
+NODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}\Z")
+MACHINE = re.compile(r"[0-9a-f]{32}\Z")
+DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+class RecoveryError(ValueError):
+    """An unproved recovery condition; the caller must retain ownership."""
+
+
+def strict_json(raw: bytes | str):
+    def object_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise RecoveryError("duplicate JSON field")
+            result[key] = value
+        return result
+
+    def invalid_constant(_value):
+        raise RecoveryError("non-finite JSON number")
+
+    try:
+        return json.loads(raw, object_pairs_hook=object_pairs, parse_constant=invalid_constant)
+    except (ValueError, UnicodeError, RecursionError) as error:
+        raise RecoveryError(f"invalid recovery JSON: {error}") from error
+
+
+def exact_object(value, keys: set[str], label: str):
+    if not isinstance(value, dict) or set(value) != keys:
+        raise RecoveryError(f"invalid {label} fields")
+    return value
+
+
+def text(value, label: str, maximum: int = 128):
+    if (not isinstance(value, str) or not value or len(value.encode()) > maximum
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)):
+        raise RecoveryError(f"invalid {label}")
+    return value
+
+
+def integer(value, label: str, minimum: int = 0):
+    if type(value) is not int or not minimum <= value <= MAX_I64:
+        raise RecoveryError(f"invalid {label}")
+    return value
+
+
+def canonical_uuid(value, label: str):
+    text(value, label, 36)
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError as error:
+        raise RecoveryError(f"invalid {label}") from error
+    if str(parsed) != value:
+        raise RecoveryError(f"noncanonical {label}")
+    return value
+
+
+def node_id(value):
+    if not isinstance(value, str) or not NODE.fullmatch(value):
+        raise RecoveryError("invalid node identity")
+    return value
+
+
+def foreground_token(token, expected_node: str):
+    exact_object(token, {"owner", "fence", "lease_expires_at_ms"}, "foreground token")
+    owner = exact_object(token["owner"], {
+        "owner_id", "lifetime_id", "session_incarnation", "producer_attempt", "node_id",
+        "boot_id", "file_id", "source_size", "source_mtime", "source_generation", "policy",
+    }, "foreground owner")
+    for field in ("owner_id", "session_incarnation", "boot_id"):
+        canonical_uuid(owner[field], field)
+    for field in ("lifetime_id", "producer_attempt", "source_generation"):
+        text(owner[field], field)
+    integer(owner["file_id"], "file identity", 1)
+    integer(owner["source_size"], "source size")
+    integer(owner["source_mtime"], "source mtime")
+    if owner["policy"] not in ("rolling", "transfer", "rolling_or_transfer", "companion"):
+        raise RecoveryError("unknown foreground policy")
+    if node_id(owner["node_id"]) != expected_node:
+        raise RecoveryError("foreground owner belongs to another node")
+    integer(token["fence"], "foreground fence", 1)
+    integer(token["lease_expires_at_ms"], "foreground authority expiry")
+
+
+def background_token(token, expected_node: str):
+    exact_object(token, {"custody_id", "owner"}, "background token")
+    canonical_uuid(token["custody_id"], "custody identity")
+    owner = token["owner"]
+    if not isinstance(owner, dict):
+        raise RecoveryError("invalid background owner")
+    kind = owner.get("kind")
+    if kind == "job":
+        exact_object(owner, {"kind", "token"}, "job owner")
+        job = exact_object(owner["token"], {
+            "job_id", "node_id", "boot_id", "claim_id", "fence", "revision", "lease_expires_ms",
+        }, "job token")
+        for field in ("job_id", "boot_id", "claim_id"):
+            canonical_uuid(job[field], field)
+        for field in ("fence", "revision", "lease_expires_ms"):
+            integer(job[field], field, 1)
+        actual_node = job["node_id"]
+    elif kind == "analysis":
+        exact_object(owner, {"kind", "request_id", "node_id", "fence"}, "analysis owner")
+        canonical_uuid(owner["request_id"], "analysis request")
+        integer(owner["fence"], "analysis fence", 1)
+        actual_node = owner["node_id"]
+    elif kind == "read_attestation":
+        exact_object(owner, {
+            "kind", "lease", "file_id", "source_size", "source_mtime",
+        }, "read attestation owner")
+        lease = exact_object(owner["lease"], {
+            "resource", "owner_node_id", "fence", "revision", "expires_at_unix_ms",
+        }, "read attestation lease")
+        text(lease["resource"], "lease resource", 1024)
+        slot = lease["resource"].removeprefix(f"subtitle-read-attest:{expected_node}:")
+        if not re.fullmatch(r"[0-9]{1,2}", slot) or int(slot) >= 64:
+            raise RecoveryError("invalid source read-preparation lease resource")
+        for field in ("fence", "revision", "expires_at_unix_ms"):
+            integer(lease[field], field, 1)
+        integer(owner["file_id"], "file identity", 1)
+        integer(owner["source_size"], "source size")
+        integer(owner["source_mtime"], "source mtime")
+        actual_node = lease["owner_node_id"]
+    elif kind == "offline":
+        exact_object(owner, {"kind", "package_id", "node_id", "claim_generation"}, "offline owner")
+        canonical_uuid(owner["package_id"], "offline package")
+        integer(owner["claim_generation"], "offline claim generation", 1)
+        actual_node = owner["node_id"]
+    else:
+        raise RecoveryError("unsupported background owner; companion custody is foreground-owned")
+    if node_id(actual_node) != expected_node:
+        raise RecoveryError("background owner belongs to another node")
+
+
+def validate_envelope(value, expected_node: str):
+    exact_object(value, ENVELOPE_KEYS, "recovery envelope")
+    if type(value["version"]) is not int or value["version"] != 1:
+        raise RecoveryError("unsupported recovery version")
+    machine = value["machine_id"]
+    if not isinstance(machine, str) or not MACHINE.fullmatch(machine) or machine == "0" * 32:
+        raise RecoveryError("invalid machine identity")
+    canonical_uuid(value["boot_id"], "kernel boot identity")
+    if node_id(value["node_id"]) != node_id(expected_node):
+        raise RecoveryError("challenge belongs to another node")
+    records = value["records"]
+    if not isinstance(records, list) or not 1 <= len(records) <= MAX_RECORDS:
+        raise RecoveryError("recovery needs 1..128 exact owner records")
+    seen = set()
+    for record in records:
+        exact_object(record, {"kind", "token"}, "recovery record")
+        if record["kind"] == "foreground":
+            foreground_token(record["token"], expected_node)
+            identity = ("foreground", record["token"]["owner"]["owner_id"])
+        elif record["kind"] == "background":
+            background_token(record["token"], expected_node)
+            identity = ("background", record["token"]["custody_id"])
+        else:
+            raise RecoveryError("unknown recovery owner family")
+        if identity in seen:
+            raise RecoveryError("duplicate recovery owner")
+        seen.add(identity)
+    return value
+
+
+def read_nofollow_file(parent_fd: int, name: str, maximum: int, private: bool = False):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > maximum:
+            raise RecoveryError("recovery input must be a bounded regular file")
+        directory = os.fstat(parent_fd)
+        if private and ((info.st_uid, info.st_gid) != (directory.st_uid, directory.st_gid)
+                        or stat.S_IMODE(info.st_mode) != 0o600
+                        or info.st_nlink != 1):
+            raise RecoveryError("challenge must be owner-only, mode 0600, and unlinked elsewhere")
+        raw = os.read(fd, maximum + 1)
+        if len(raw) > maximum:
+            raise RecoveryError("recovery input exceeds its byte bound")
+        return raw
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def open_directory(path: Path):
+    """Walk directories through held no-follow descriptors, including ancestors."""
+    absolute = path.absolute()
+    if ".." in absolute.parts:
+        raise RecoveryError("directory traversal is not accepted")
+    fd = os.open(absolute.anchor, DIRECTORY_FLAGS)
+    try:
+        for component in absolute.parts[1:]:
+            next_fd = os.open(component, DIRECTORY_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def private_directory(parent_fd: int, name: str, create: bool, owner: tuple[int, int]):
+    created = False
+    if create:
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+            created = True
+        except FileExistsError:
+            pass
+    fd = os.open(name, DIRECTORY_FLAGS, dir_fd=parent_fd)
+    if created:
+        try:
+            retain_owner(fd, owner)
+            os.fsync(fd)
+            os.fsync(parent_fd)
+        except BaseException:
+            os.close(fd)
+            raise
+    info = os.fstat(fd)
+    if (info.st_uid, info.st_gid) != owner or stat.S_IMODE(info.st_mode) != 0o700:
+        os.close(fd)
+        raise RecoveryError("recovery directories must preserve data-directory ownership and mode 0700")
+    return fd
+
+
+def retain_owner(fd: int, owner: tuple[int, int]):
+    info = os.fstat(fd)
+    if (info.st_uid, info.st_gid) != owner:
+        if os.geteuid() != 0 and info.st_uid != owner[0]:
+            raise RecoveryError("only the data owner or root may create recovery evidence")
+        os.fchown(fd, *owner)
+
+
+@contextmanager
+def recovery_directory(data_dir: Path, name: str, create: bool):
+    with open_directory(data_dir) as data_fd:
+        data_info = os.fstat(data_fd)
+        owner = (data_info.st_uid, data_info.st_gid)
+        if os.geteuid() not in (0, owner[0]):
+            raise RecoveryError("only the data owner or root may access recovery evidence")
+        recovery_fd = private_directory(data_fd, "source-custody-recovery", create, owner)
+        try:
+            target_fd = private_directory(recovery_fd, name, create, owner)
+            try:
+                yield target_fd
+            finally:
+                os.close(target_fd)
+        finally:
+            os.close(recovery_fd)
+
+
+def local_identity():
+    if sys.platform != "linux":
+        raise RecoveryError("automatic host-reboot evidence is supported only on Linux")
+    with open_directory(Path("/etc")) as etc_fd:
+        machine = read_nofollow_file(etc_fd, "machine-id", 128).decode("ascii").strip()
+    with open_directory(Path("/proc/sys/kernel/random")) as boot_fd:
+        boot = read_nofollow_file(boot_fd, "boot_id", 128).decode("ascii").strip()
+    if not MACHINE.fullmatch(machine) or machine == "0" * 32:
+        raise RecoveryError("Linux machine identity is missing or invalid")
+    canonical_uuid(boot, "kernel boot identity")
+    return {"machine_id": machine, "boot_id": boot}
+
+
+def snapshot_records(database: Path, expected_node: str):
+    node_id(expected_node)
+    # Reject symlinks and retain the selected database identity while SQLite
+    # opens its normal read-only WAL-aware path. Recovery evidence never writes
+    # SQLite and immutable=1 would incorrectly omit uncheckpointed custody.
+    with open_directory(database.absolute().parent) as parent_fd:
+        db_fd = os.open(database.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(db_fd).st_mode):
+                raise RecoveryError("database must be a regular file")
+            # SQLite resolves its WAL beside this pathname; compare its file
+            # identity again while the descriptor is retained rather than use
+            # immutable=1, which would incorrectly ignore the live WAL.
+            uri = database.absolute().as_uri() + "?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True, timeout=5)) as connection:
+                deadline = time.monotonic() + 10
+                connection.set_progress_handler(lambda: time.monotonic() > deadline, 1000)
+                connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_BYTES)
+                connection.execute("PRAGMA query_only=ON")
+                connection.execute("PRAGMA trusted_schema=OFF")
+                connection.execute("BEGIN")
+                before = os.stat(database.name, dir_fd=parent_fd, follow_symlinks=False)
+                held = os.fstat(db_fd)
+                if (before.st_dev, before.st_ino) != (held.st_dev, held.st_ino):
+                    raise RecoveryError("database identity changed while opening snapshot")
+                foreground = connection.execute("""
+                    SELECT length(CAST(identity_json AS BLOB)), substr(identity_json, 1, ?), fence,
+                           lease_expires_at_ms
+                    FROM foreground_source_owners
+                    WHERE settlement_proof IS NULL
+                      AND json_extract(identity_json, '$.node_id') = ?
+                    ORDER BY owner_id LIMIT ?
+                """, (MAX_TOKEN_BYTES + 1, expected_node, MAX_RECORDS + 1)).fetchall()
+                background = connection.execute("""
+                    SELECT length(CAST(owner_json AS BLOB)), substr(owner_json, 1, ?), custody_id
+                    FROM background_source_custody
+                    WHERE settlement_proof IS NULL AND CASE json_extract(owner_json, '$.kind')
+                      WHEN 'job' THEN json_extract(owner_json, '$.token.node_id')
+                      WHEN 'analysis' THEN json_extract(owner_json, '$.node_id')
+                      WHEN 'read_attestation' THEN json_extract(owner_json, '$.lease.owner_node_id')
+                      WHEN 'offline' THEN json_extract(owner_json, '$.node_id')
+                      ELSE COALESCE(json_extract(owner_json, '$.node_id'),
+                        json_extract(owner_json, '$.token.node_id'),
+                        json_extract(owner_json, '$.token.owner.node_id'),
+                        json_extract(owner_json, '$.lease.owner_node_id')) END = ?
+                    ORDER BY custody_id LIMIT ?
+                """, (MAX_TOKEN_BYTES + 1, expected_node, MAX_RECORDS + 1)).fetchall()
+                if len(foreground) + len(background) > MAX_RECORDS:
+                    raise RecoveryError("more than 128 unresolved owners; narrow recovery before preparing")
+                records = []
+                for size, owner, fence, expiry in foreground:
+                    if size > MAX_TOKEN_BYTES:
+                        raise RecoveryError("foreground identity exceeds 16 KiB")
+                    records.append({"kind": "foreground", "token": {
+                        "owner": strict_json(owner), "fence": fence, "lease_expires_at_ms": expiry,
+                    }})
+                for size, owner, custody_id in background:
+                    if size > MAX_TOKEN_BYTES:
+                        raise RecoveryError("background identity exceeds 16 KiB")
+                    records.append({"kind": "background", "token": {
+                        "custody_id": custody_id, "owner": strict_json(owner),
+                    }})
+                return records
+        finally:
+            os.close(db_fd)
+
+
+def encoded_envelope(envelope):
+    raw = (json.dumps(envelope, ensure_ascii=True, separators=(",", ":")) + "\n").encode()
+    if len(raw) > MAX_BYTES:
+        raise RecoveryError("recovery envelope exceeds 1 MiB")
+    return raw
+
+
+@contextmanager
+def publication_lock(directory_fd: int):
+    """Serialize cooperating helper publishers within the trusted private directory.
+
+    Retain the lock inode: unlinking it would allow two publishers to lock
+    different files. Process death releases flock without changing evidence.
+    Rust uses distinct active-record names and never publishes these helper
+    challenge/legacy names. Mode 0700 and trusted data ownership remain the
+    security boundary against arbitrary same-UID filesystem mutation.
+    """
+    import fcntl
+
+    name = ".publisher.lock"
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+    created = False
+    try:
+        fd = os.open(name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd)
+        created = True
+    except FileExistsError:
+        fd = os.open(name, flags, dir_fd=directory_fd)
+    try:
+        directory = os.fstat(directory_fd)
+        owner = (directory.st_uid, directory.st_gid)
+        if created:
+            retain_owner(fd, owner)
+            os.fsync(fd)
+            os.fsync(directory_fd)
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or (info.st_uid, info.st_gid) != owner
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            raise RecoveryError("publication lock must preserve private data ownership")
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as error:
+                if time.monotonic() >= deadline:
+                    raise RecoveryError("another recovery publisher still holds the lock") from error
+                time.sleep(0.02)
+        yield
+    finally:
+        os.close(fd)
+
+
+def publish_new(directory_fd: int, name: str, raw: bytes):
+    with publication_lock(directory_fd):
+        try:
+            existing = read_nofollow_file(directory_fd, name, MAX_BYTES, private=True)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if existing != raw:
+                raise RecoveryError("existing recovery file conflicts; nothing was overwritten")
+            os.fsync(directory_fd)
+            return
+        temporary = f".publisher-{uuid.uuid4()}.tmp"
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=directory_fd)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                directory = os.fstat(directory_fd)
+                retain_owner(stream.fileno(), (directory.st_uid, directory.st_gid))
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            # The directory lock makes the preceding existence/content check
+            # atomic with respect to every cooperating helper publisher. Rename
+            # keeps one link at all times, including a crash before directory
+            # fsync; a retry verifies the exact bytes and fsyncs again.
+            os.rename(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+
+
+def prepare(data_dir: Path, database: Path, expected_node: str):
+    identity = local_identity()
+    envelope = {"version": 1, **identity, "node_id": expected_node,
+                "records": snapshot_records(database, expected_node)}
+    validate_envelope(envelope, expected_node)
+    raw = encoded_envelope(envelope)
+    challenge = str(uuid.uuid4())
+    with recovery_directory(data_dir, "challenges", create=True) as directory_fd:
+        publish_new(directory_fd, f"{challenge}.json", raw)
+    return challenge, len(envelope["records"])
+
+
+def validated_challenge(data_dir: Path, expected_node: str, challenge: str):
+    canonical_uuid(challenge, "challenge identity")
+    identity = local_identity()
+    with recovery_directory(data_dir, "challenges", create=False) as directory_fd:
+        raw = read_nofollow_file(directory_fd, f"{challenge}.json", MAX_BYTES, private=True)
+    envelope = validate_envelope(strict_json(raw), expected_node)
+    if envelope["machine_id"] != identity["machine_id"]:
+        raise RecoveryError("challenge was prepared on a different machine")
+    if envelope["boot_id"] == identity["boot_id"]:
+        raise RecoveryError("kernel boot is unchanged; no physical stop proof exists")
+    return envelope
+
+
+def apply(data_dir: Path, expected_node: str, challenge: str):
+    envelope = validated_challenge(data_dir, expected_node, challenge)
+    with recovery_directory(data_dir, "v1", create=True) as directory_fd:
+        publish_new(directory_fd, f"legacy-{challenge}.json", encoded_envelope(envelope))
+    return len(envelope["records"])
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+    for command in ("prepare", "validate", "apply"):
+        child = commands.add_parser(command)
+        child.add_argument("--data-dir", required=True, type=Path)
+        child.add_argument("--node-id", required=True)
+        if command == "prepare":
+            child.add_argument("--database", required=True, type=Path)
+        else:
+            child.add_argument("--challenge", required=True)
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "prepare":
+            challenge, count = prepare(args.data_dir, args.database, args.node_id)
+            print(f"Prepared {challenge}: {count} unresolved owner(s); no database changes.")
+            print("Retain this challenge, then perform a separately controlled host reboot.")
+        elif args.command == "validate":
+            envelope = validated_challenge(args.data_dir, args.node_id, args.challenge)
+            print(f"Verified changed kernel boot: {len(envelope['records'])} exact owner(s).")
+        else:
+            count = apply(args.data_dir, args.node_id, args.challenge)
+            print(f"Published {count} exact owner(s) for authoritative daemon recovery replay.")
+            print("Publication is not settlement; verify the daemon's recovery and library progress.")
+        return 0
+    except (RecoveryError, OSError, sqlite3.Error, UnicodeError) as error:
+        print(f"source-custody-recovery: refused: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,10 +1,11 @@
 //! Process-local read proof, deliberately separate from inference readiness.
 //!
 //! A persisted inode/boot receipt cannot prove bytes after a process/OS restart.
-//! Authorized readers may trigger this full held-file hash, without creating a
-//! job, demand, model receipt, or principal. One global I/O lane and one normal
-//! speculative CPU slot bound work. No timer or daemon resumes it: when live
-//! playback needs capacity, the next authorized read resumes the held prefix.
+//! Authorized readers may trigger this full held-file hash. Its bounded,
+//! exact read-preparation lease participates in the existing source arbiter;
+//! it creates no media session, fake analysis job, or foreground exemption.
+//! The existing task owns custody through every blocking join. Playback source
+//! pressure pauses it; the next authorized read resumes the held prefix.
 use super::runtime::SourceHash;
 use crate::{
     fragment_index_cluster::{open_source_playback_fence, SourceFence},
@@ -49,6 +50,7 @@ enum Status {
     Failed { changed: bool, retry_at: Instant },
 }
 struct Entry {
+    slot: u8,
     key: Key,
     status: Status,
 }
@@ -137,7 +139,11 @@ impl ReadAttestations {
                 .ok_or_else(pending)?;
             entries.remove(idle);
         }
+        let slot = (0..MAX_ENTRIES as u8)
+            .find(|slot| !entries.iter().any(|entry| entry.slot == *slot))
+            .ok_or_else(pending)?;
         entries.push_back(Entry {
+            slot,
             key: key.clone(),
             status: Status::Running,
         });
@@ -191,6 +197,13 @@ impl ReadAttestations {
             fence: opened,
         };
         let work = self.start(&key, fresh)?;
+        let slot = self
+            .entries()
+            .iter()
+            .find(|entry| entry.key == key)
+            .map(|entry| entry.slot)
+            .ok_or_else(pending)?;
+        let node_id = state.node_id.clone();
         let owner = Arc::downgrade(self);
         let cancel = self.cancel.child_token();
         let shutdown = state.shutdown.clone();
@@ -199,75 +212,202 @@ impl ReadAttestations {
         // The owned task survives request cancellation. It holds no AppState or
         // strong cache owner; dropping Runtime cancels it without an Arc cycle.
         tokio::spawn(async move {
+            use plurx_core::cluster::coordination::{LeaseClaim, StoreCoordinator};
+            use plurx_core::store::background_jobs_resources::{
+                BackgroundSourceOwner, BackgroundSourceRegistration,
+            };
             let mut work = work;
             let mut lane = lane;
             let mut permit = permit;
-            loop {
-                let chunk_cancel = cancel.clone();
+            let coordinator = match StoreCoordinator::new(Arc::clone(&store), node_id.clone()) {
+                Ok(value) => value,
+                Err(_) => {
+                    finish(&owner, &key, Status::Paused(work));
+                    return;
+                }
+            };
+            // Slots are process-cache slots, not source keys. Reuse keeps lease
+            // metadata bounded; the coordinator's monotone fence owns each run.
+            let resource = format!("subtitle-read-attest:{node_id}:{slot}");
+            let mut lease = match coordinator
+                .acquire(&resource, Duration::from_secs(30))
+                .await
+            {
+                Ok(LeaseClaim::Acquired(lease)) => lease,
+                _ => {
+                    finish(&owner, &key, Status::Paused(work));
+                    return;
+                }
+            };
+            let source_owner = BackgroundSourceOwner::ReadAttestation {
+                lease: lease.clone(),
+                file_id: key.file_id,
+                source_size: key.size,
+                source_mtime: key.mtime,
+            };
+            let custody = match store
+                .register_background_source_custody(source_owner.clone(), crate::state::clock_ms())
+                .await
+            {
+                Ok(BackgroundSourceRegistration::Registered(receipt)) => receipt,
+                _ => {
+                    settle_read_owner(&store, &source_owner, None, false).await;
+                    finish(&owner, &key, Status::Paused(work));
+                    return;
+                }
+            };
+            if crate::source_custody::activate_background_with_journal(&store, custody.clone())
+                .await
+                .is_err()
+            {
+                settle_read_owner(&store, &source_owner, Some(custody), false).await;
+                finish(&owner, &key, Status::Paused(work));
+                return;
+            }
+            if cancel.is_cancelled()
+                || shutdown.is_cancelled()
+                || crate::state::clock_ms() >= lease.expires_at_unix_ms
+            {
+                // Activation succeeded, but no hash worker or source read was
+                // started. The exact armed custody is physically settled here.
+                settle_activated_without_reader(&store, &source_owner, custody).await;
+                finish(&owner, &key, Status::Paused(work));
+                return;
+            }
+            let budget = crate::background_jobs::SourceReadBudget::from_existing_custody(
+                Arc::clone(&store),
+                &custody,
+                cancel.clone(),
+            );
+            let pressure = budget.wait_pressure();
+            tokio::pin!(pressure);
+            let mut renewal = tokio::time::interval(Duration::from_secs(5));
+            renewal.tick().await;
+            let status = loop {
+                let chunk_cancel = cancel.child_token();
+                let read_cancel = chunk_cancel.clone();
+                let read_budget = Arc::clone(&budget);
                 let mut chunk = tokio::task::spawn_blocking(move || {
-                    // Both guards live in this closure until the actual read
-                    // ends, even when shutdown cancels the outer future.
                     let _cpu = permit;
-                    let result = work.hash.step(&chunk_cancel);
+                    let result = work.hash.step_budgeted(&read_cancel, &read_budget);
                     (work, result, lane)
                 });
-                let joined = tokio::select! {
-                    result = &mut chunk => result,
-                    () = shutdown.cancelled() => { cancel.cancel(); chunk.await },
-                    () = cancel.cancelled() => chunk.await,
+                let mut pause = false;
+                let joined = loop {
+                    tokio::select! {
+                        biased;
+                        ()=shutdown.cancelled()=>{chunk_cancel.cancel();break chunk.await;},
+                        ()=cancel.cancelled()=>{chunk_cancel.cancel();break chunk.await;},
+                        ()=&mut pressure=>{pause=true;chunk_cancel.cancel();break chunk.await;},
+                        _=renewal.tick()=>{
+                            match coordinator.renew(&lease,Duration::from_secs(30)).await {
+                                Ok(Some(next))=>lease=next,
+                                _=>{pause=true;chunk_cancel.cancel();break chunk.await;}
+                            }
+                        },
+                        result=&mut chunk=>break result,
+                    }
                 };
                 let (next, result, io) = match joined {
                     Ok(value) => value,
-                    Err(_) => {
-                        finish(&owner, &key, failed(false));
-                        return;
-                    }
+                    Err(_) => break failed(false),
                 };
                 work = next;
                 lane = io;
                 if cancel.is_cancelled() || shutdown.is_cancelled() {
-                    finish(&owner, &key, failed(false));
-                    return;
+                    break failed(false);
                 }
                 match result {
-                    Err(error) => {
-                        finish(
-                            &owner,
-                            &key,
-                            failed(error.to_string().contains("source_changed")),
-                        );
-                        return;
+                    Err(error) if pause && error.to_string().contains("worker_interrupted") => {
+                        break Status::Paused(work)
                     }
+                    Err(error) => break failed(error.to_string().contains("source_changed")),
+                    Ok(_) if pause => break Status::Paused(work),
                     Ok(Some(digest)) => {
-                        // Re-read the canonical record and named object after
-                        // hashing, before retaining any process-local proof.
                         let valid = digest == key.sha256
                             && work.fence.unchanged()
                             && final_source(&*store, &key).await;
-                        finish(
-                            &owner,
-                            &key,
-                            if valid {
-                                Status::Ready(work.fence)
-                            } else {
-                                failed(true)
-                            },
-                        );
-                        return;
+                        break if valid {
+                            Status::Ready(work.fence)
+                        } else {
+                            failed(true)
+                        };
                     }
                     Ok(None) => {}
                 }
                 tokio::task::yield_now().await;
                 let Some(next) = transcode.admit_read_attestation(limits) else {
-                    finish(&owner, &key, Status::Paused(work));
-                    return;
+                    break Status::Paused(work);
                 };
                 permit = next;
-            }
+            };
+            // Every hash/read future has physically joined before either its
+            // exact coordinator fence or its source custody can be returned.
+            settle_read_owner(&store, &source_owner, Some(custody), true).await;
+            finish(&owner, &key, status);
         });
         Err(pending())
     }
 }
+async fn settle_activated_without_reader(
+    store: &Arc<dyn plurx_core::store::Store>,
+    owner: &plurx_core::store::background_jobs_resources::BackgroundSourceOwner,
+    receipt: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+) {
+    // This scope activated successfully and started no reader. Its physical
+    // join proof must be recorded before the armed receipt can be deleted.
+    settle_read_owner(store, owner, Some(receipt), true).await;
+}
+
+/// This runs inside the pre-existing read owner, never in Drop or a new actor.
+/// Close-before-resolve fences delayed registration/renewal acknowledgements.
+async fn settle_read_owner(
+    store: &Arc<dyn plurx_core::store::Store>,
+    owner: &plurx_core::store::background_jobs_resources::BackgroundSourceOwner,
+    mut receipt: Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken>,
+    physical_joined: bool,
+) {
+    loop {
+        match store
+            .close_read_attestation_source_lease(owner.clone(), crate::state::clock_ms())
+            .await
+        {
+            Ok(_) => break,
+            Err(error) => {
+                tracing::warn!(%error,"read attestation lease settlement pending");
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
+    loop {
+        if let Some(held) = receipt.take() {
+            if physical_joined {
+                crate::background_jobs::settle_joined_source_custody(store, held).await;
+            } else {
+                crate::background_jobs::settle_no_reader_source_custody(store, held).await;
+            }
+            return;
+        } else {
+            use plurx_core::store::background_jobs_resources::BackgroundSourceRegistration;
+            match store
+                .register_background_source_custody(owner.clone(), crate::state::clock_ms())
+                .await
+            {
+                Ok(BackgroundSourceRegistration::Registered(held)) => {
+                    receipt = Some(held);
+                    continue;
+                }
+                Ok(
+                    BackgroundSourceRegistration::LostOwnership
+                    | BackgroundSourceRegistration::NotRequired,
+                ) => return,
+                Err(error) => tracing::warn!(%error,"resolving read attestation source receipt"),
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 fn failed(changed: bool) -> Status {
     Status::Failed {
         changed,
@@ -439,6 +579,7 @@ mod tests {
             let mut other = key.clone();
             other.file_id += index as i64;
             cache.entries().push_back(Entry {
+                slot: index as u8,
                 key: other,
                 status: Status::Running,
             });
@@ -466,6 +607,92 @@ mod tests {
             Some("source_changed")
         );
     }
+    #[tokio::test]
+    async fn activated_cancelled_read_scope_settles_exact_armed_receipt() {
+        use plurx_core::cluster::coordination::{LeaseClaim, StoreCoordinator};
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+        use plurx_core::store::background_jobs_resources::{
+            BackgroundSourceOwner, BackgroundSourceRegistration,
+        };
+        use plurx_core::store::{SqliteStore, Store};
+
+        let directory = crate::test_tempdir().expect("database directory");
+        let database = directory.path().join("read-attestation.db");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&database).expect("real store"));
+        let library = store
+            .create_library(&NewLibrary {
+                name: "read attestation cancellation".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/attest".into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "source".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let file_id = store
+            .upsert_file(item, "/attest/source.mkv", 100, 1, &Default::default())
+            .await
+            .expect("file");
+        let coordinator = StoreCoordinator::new(Arc::clone(&store), "worker").expect("owner");
+        let lease = match coordinator
+            .acquire("subtitle-read-attest:worker:0", Duration::from_secs(30))
+            .await
+            .expect("lease")
+        {
+            LeaseClaim::Acquired(lease) => lease,
+            other => panic!("expected acquired lease, got {other:?}"),
+        };
+        let owner = BackgroundSourceOwner::ReadAttestation {
+            lease,
+            file_id,
+            source_size: 100,
+            source_mtime: 1,
+        };
+        let receipt = match store
+            .register_background_source_custody(owner.clone(), crate::state::clock_ms())
+            .await
+            .expect("custody registration")
+        {
+            BackgroundSourceRegistration::Registered(receipt) => receipt,
+            other => panic!("expected custody receipt, got {other:?}"),
+        };
+        assert!(store
+            .activate_background_source_custody(receipt.clone(), uuid::Uuid::new_v4().to_string())
+            .await
+            .expect("activation"));
+        assert!(!store
+            .release_background_source_custody(receipt.clone(), crate::state::clock_ms())
+            .await
+            .expect("armed receipt must stay charged"));
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert!(cancelled.is_cancelled(), "cancel before any read starts");
+        settle_activated_without_reader(&store, &owner, receipt.clone()).await;
+        let connection = rusqlite::Connection::open(&database).expect("inspect store");
+        let remaining: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM background_source_custody WHERE custody_id=?1",
+                [&receipt.custody_id],
+                |row| row.get(0),
+            )
+            .expect("exact custody count");
+        assert_eq!(
+            remaining, 0,
+            "activated cancelled scope must settle its exact receipt"
+        );
+    }
+
     #[test]
     fn dropping_runtime_cancels_owned_read_work_without_strong_owner_cycle() {
         let cache = ReadAttestations::new();

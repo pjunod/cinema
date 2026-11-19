@@ -11,8 +11,11 @@ class Authoring(unittest.TestCase):
     def test_reordered_packet_metadata_and_base(self):
         helper=os.environ['P81_HELPER']; source=Path(os.environ['P81_ENCODED'])
         timing=Path(os.environ['P81_TIMING']); rpus=Path(os.environ['P81_RPUS'])
+        envelope=os.environ['P81_ENVELOPE'].split()
+        self.assertEqual(len(envelope),5, 'target peak CPB HEVC_level_idc DV_level')
+        def author_args(*args): return [helper,*map(str,args),*envelope]
         def run(*args):
-            return subprocess.check_output(args,stderr=subprocess.DEVNULL,timeout=40)
+            return subprocess.check_output([*args,*envelope] if args[0]==helper else args,stderr=subprocess.DEVNULL,timeout=40)
         def probe(path):
             return json.loads(run('ffprobe','-v','error','-show_streams','-show_packets','-show_data','-of','json',str(path)))
         def payload(packet):
@@ -22,6 +25,7 @@ class Authoring(unittest.TestCase):
             receipt=[json.loads(s) for s in run(helper,str(source),str(timing),str(rpus),str(out)).splitlines()]
             before=probe(source); after=probe(out)
             cfg=[d for d in after['streams'][0]['side_data_list'] if d['side_data_type']=='DOVI configuration record'][0]
+            self.assertEqual(cfg['dv_level'],int(envelope[4]))
             self.assertEqual((cfg['dv_profile'],cfg['el_present_flag'],cfg['dv_bl_signal_compatibility_id']),(8,0,1))
             if len(receipt)>1:
                 self.assertNotEqual([r['renderer_frame'] for r in receipt],list(range(len(receipt))))
@@ -44,10 +48,14 @@ class Authoring(unittest.TestCase):
             self.assertEqual(decoded(source),decoded(out))
             # Reuse the exact authored result as an invalid already-DV input.
             def refused(arguments, reason):
-                result=subprocess.run([helper,*map(str,arguments)],capture_output=True,timeout=40)
+                result=subprocess.run(author_args(*arguments),capture_output=True,timeout=40)
                 self.assertEqual(result.returncode,1,result.stderr.decode())
                 self.assertIn(reason,result.stderr.decode())
             refused([out,timing,rpus,Path(tmp)/'bad.mkv'],'no existing DV config')
+            bad_budget=envelope.copy(); bad_budget[1]=str(int(envelope[0])-1)
+            rejected=subprocess.run([helper,str(source),str(timing),str(rpus),str(Path(tmp)/'bad-budget.mkv'),*bad_budget],capture_output=True,timeout=40)
+            self.assertEqual(rejected.returncode,1)
+            self.assertIn('peak never lowers selected video target',rejected.stderr.decode())
             bad=Path(tmp)/'bad.tsv'; lines=timing.read_text().splitlines(True)
             bad.write_text(lines[0]+lines[0]+''.join(lines[2:]))
             refused([source,bad,rpus,Path(tmp)/'bad2.mkv'],'strict presentation order')
@@ -58,7 +66,7 @@ class Authoring(unittest.TestCase):
             try:
                 # Python ignores SIGPIPE. Preserve that disposition to exercise
                 # checked fflush(EPIPE), rather than a signal killing the helper.
-                failed=subprocess.run([helper,str(source),str(timing),str(rpus),str(Path(tmp)/'closed-receipt.mkv')],
+                failed=subprocess.run(author_args(source,timing,rpus,Path(tmp)/'closed-receipt.mkv'),
                     stdout=write_fd,stderr=subprocess.PIPE,restore_signals=False,timeout=40)
             finally:
                 os.close(write_fd)

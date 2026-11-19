@@ -1,6 +1,19 @@
 use super::*;
 
 impl VodServe {
+    /// An accepted control snapshot, never the diagnostic capability string.
+    pub(crate) async fn client_platform_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::playback_control::ClientPlatform> {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        let platform = session.control.lock().ok()?.client_platform();
+        platform
+    }
+}
+
+impl VodServe {
     #[cfg(test)]
     pub(crate) async fn source_control_observation_for_test(
         &self,
@@ -13,6 +26,86 @@ impl VodServe {
         let session = sessions.get(session_id)?;
         let touched = *session.last_touch.lock().expect("touch lock");
         Some((session.last_control_snapshot.clone(), touched))
+    }
+
+    /// Ask `session_id`'s own incumbent encoded rendition to give its encoder
+    /// permit to this viewer's processed upgrade trial, through the same
+    /// predecessor-yield handoff a staged successor uses.
+    ///
+    /// `None`, and nothing changed, unless every guard holds: the session is
+    /// live here, its rendition is encoded and holds a permit, only that
+    /// viewer's playback reads it, the trial's `wanted` would fit once that
+    /// permit returned, and the published runway already covers `reserve_ms`.
+    /// Another viewer's work is never asked: their renditions are not this
+    /// session's.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn claim_incumbent_permit(
+        &self,
+        session_id: &str,
+        incarnation: &str,
+        wanted: crate::admission::TranscodeResourceEstimate,
+        hardware_limit: usize,
+        software_budget: usize,
+        reserve_ms: i64,
+    ) -> Option<IncumbentPermitClaim> {
+        let (rendition, playback_id) = {
+            let sessions = self.shared.sessions.lock().await;
+            let session = sessions.get(session_id)?;
+            (
+                Arc::clone(session.live_rendition()?),
+                session.playback_id.clone(),
+            )
+        };
+        let encoding = rendition.recipe.encoding.as_ref()?;
+        if rendition.closed.load(Relaxed)
+            || !crate::prodexec::holds_permit(rendition.slot.belief().await, true)
+            || !encoding.admissions.live_fits_after_release(
+                hardware_limit,
+                software_budget,
+                &wanted,
+                &encoding.resources(),
+            )
+        {
+            return None;
+        }
+        let claim = Arc::new(TrialClaim {
+            playback_id,
+            incarnation: incarnation.to_owned(),
+            reserve_ms,
+            admitted: Arc::new(AtomicBool::new(false)),
+            token: StdMutex::new(None),
+            ready: Notify::new(),
+            closed: AtomicBool::new(false),
+            staged: AtomicBool::new(false),
+        });
+        if !trial_claim_bound(&self.shared, &rendition, &claim).await
+            || !rendition.request_trial_handoff(&claim, wanted)
+        {
+            return None;
+        }
+        rendition.kick();
+        Some(IncumbentPermitClaim {
+            claim,
+            incumbent: Arc::downgrade(&rendition),
+            admissions: encoding.admissions.clone(),
+        })
+    }
+
+    /// Where the viewer of `session_id` is now on the source timeline: the
+    /// latest newly accepted control demand, advanced by that observation's
+    /// age the way the delivery driver reads it
+    /// ([`crate::playback_control::rolling_estimated_position_ms`]). `None`
+    /// before any exchange was accepted, or for a session this engine does
+    /// not hold.
+    pub(crate) async fn accepted_playhead_estimate_ms(&self, session_id: &str) -> Option<i64> {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        let demand = session.last_control_snapshot.as_ref()?;
+        let observed = session.control_observed_at?;
+        Some(crate::playback_control::rolling_estimated_position_ms(
+            demand,
+            observed.elapsed(),
+        ))
     }
 
     /// Apply one fenced control exchange without conflating a replay or stale
@@ -244,6 +337,7 @@ impl VodServe {
                 finite_client_slot: Option<
                     Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>,
                 >,
+                pending_companion: Option<Box<(String, u64)>>,
             },
         }
         let outcome = {
@@ -480,9 +574,69 @@ impl VodServe {
                     Ok(outcome) => outcome,
                     Err(error) => return Some(Err(error)),
                 };
+            let mut pending_companion = None;
             if disposition == crate::playback_control::ControlDisposition::Accepted
                 && control.snapshot.demand != crate::playback_control::PlaybackDemand::End
             {
+                // The parent's accepted selection can direct its immutable
+                // companion before that child's init exists in the family.
+                // A height-only selection is usable only if exactly one of
+                // this parent's candidate-bound video children names it.
+                let selected_companion = session
+                    .children
+                    .iter()
+                    .find(|child| {
+                        if !child.controlled || child.candidate_id.is_none() {
+                            return false;
+                        }
+                        let height = child
+                            .rendition
+                            .recipe
+                            .encoding
+                            .as_ref()
+                            .map(|encoding| encoding.options.target_height);
+                        match control.snapshot.selection.quality {
+                            crate::playback_control::QualitySelection::Auto {
+                                candidate_id: Some(id),
+                                height: named,
+                            } => {
+                                child.candidate_id == Some(id)
+                                    && named.is_none_or(|named| Some(named) == height)
+                            }
+                            crate::playback_control::QualitySelection::Manual { height: named }
+                            | crate::playback_control::QualitySelection::Auto {
+                                height: Some(named),
+                                candidate_id: None,
+                            } => {
+                                height == Some(named)
+                                    && session
+                                        .children
+                                        .iter()
+                                        .filter(|peer| {
+                                            peer.controlled
+                                                && peer.candidate_id.is_some()
+                                                && peer
+                                                    .rendition
+                                                    .recipe
+                                                    .encoding
+                                                    .as_ref()
+                                                    .is_some_and(|encoding| {
+                                                        encoding.options.target_height == named
+                                                    })
+                                        })
+                                        .count()
+                                        == 1
+                            }
+                            _ => false,
+                        }
+                    })
+                    .map(|child| {
+                        (
+                            child.reader_id.as_str(),
+                            &child.rendition,
+                            child._reservation.is_none(),
+                        )
+                    });
                 if let Some(reader) = readers.get_mut(control.session_id) {
                     reader.accept_control(
                         control.sequence,
@@ -514,10 +668,28 @@ impl VodServe {
                 {
                     let index = media_entry_containing_ms(&rendition.plan, anchor_ms);
                     for id in ids {
-                        child_readers
-                            .get_mut(id)
-                            .expect("locked private reader")
-                            .accept_control(control.sequence, index);
+                        let reader = child_readers.get_mut(id).expect("locked private reader");
+                        reader.accept_control(control.sequence, index);
+                        if reader.companion_bootstrap {
+                            reader.control_required = selected_companion.is_some_and(
+                                |(selected_id, selected_rendition, _)| {
+                                    selected_id == id.as_str()
+                                        && Arc::ptr_eq(selected_rendition, rendition)
+                                },
+                            );
+                            if reader.control_required
+                                && selected_companion
+                                    .is_some_and(|(_, _, missing)| missing || reader.authority_only)
+                            {
+                                pending_companion = Some((rendition.key.clone(), control.sequence));
+                            }
+                            reader.admission_priority =
+                                if reader.control_required || reader.quality_required {
+                                    crate::admission::Priority::Live
+                                } else {
+                                    crate::admission::Priority::Speculative
+                                };
+                        }
                     }
                     rendition.kick();
                 }
@@ -685,6 +857,7 @@ impl VodServe {
                         .finite_control_slot
                         .as_ref()
                         .map(|slot| Arc::clone(&slot.0)),
+                    pending_companion: pending_companion.map(Box::new),
                 })
             }
         };
@@ -704,6 +877,7 @@ impl VodServe {
             lease_expires_at_unix_ms,
             marker_prewarm,
             _finite_client_slot,
+            pending_companion,
         ) = match outcome {
             AppliedControl::End {
                 result,
@@ -741,6 +915,7 @@ impl VodServe {
                 marker_prewarm,
                 #[cfg(target_os = "linux")]
                 finite_client_slot,
+                pending_companion,
             } => (
                 disposition,
                 accepted_sequence,
@@ -761,6 +936,7 @@ impl VodServe {
                         None::<Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>>
                     }
                 },
+                pending_companion.map(|pending| *pending),
             ),
         };
         if let Some(marker_prewarm) = marker_prewarm {
@@ -782,6 +958,28 @@ impl VodServe {
             }
         }
         drop(lifecycle_guard);
+        if let Some((rendition_id, sequence)) = pending_companion {
+            let remaining = deadline_unix_ms
+                .saturating_sub(crate::media_sessions::unix_ms())
+                .max(0);
+            if let Some(deadline) =
+                Instant::now().checked_add(Duration::from_millis(remaining.min(12_000) as u64))
+            {
+                if let Err(error) = self
+                    .admit_controlled_video_for_control_before(
+                        control.session_id,
+                        &rendition_id,
+                        control.snapshot.buffer_anchor_ms(),
+                        deadline,
+                        Some(sequence),
+                    )
+                    .await
+                {
+                    tracing::debug!(target: "plurxd::vodserve", session_id = control.session_id, rendition = %rendition_id,
+                        %error, "accepted pending companion could not acquire its original source credit");
+                }
+            }
+        }
         let status = self.status(control.session_id).await?;
         Some(Ok(crate::playback_control::LocalControlResult {
             disposition,

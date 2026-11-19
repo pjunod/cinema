@@ -7,8 +7,8 @@ const base=`/api/v1/shared/imports/${ref.import_id}/files/${"L".repeat(236)}`,re
 function detail(id="9007199254740993",life="9223372036854775807"){return `{"item":{"source":"shared","reference":${JSON.stringify(ref)}},"lifecycle_generation":${life},"files":[{"file_id":"${id}","revision":"${revision}","file_base":"${base}","reference":{"item":${JSON.stringify(ref)},"file_id":"${id}","revision":"${revision}","lifecycle_generation":${life}}}]}`;}
 function wire(id="9007199254740993",life="9223372036854775807"){return `{"file_id":"${id}","reference":{"item":${JSON.stringify(ref)},"file_id":"${id}","revision":"${revision}","lifecycle_generation":${life}},"method":"remux","play_url":"${base}/stream.mp4?audio=4095","delivery":{"mode":"remux","url":"${base}/stream.mp4?audio=4095","sessions_url":"${base}/hls/sessions"},"audio_tracks":[{"index":3,"codec":"aac","channels":6}],"subtitle_tracks":[{"index":1,"protocol":"vtt","format":"subrip"}],"quality_ladder":[{"height":1080,"bitrate":8000000}],"timeline_origin_ms":1234,"delivered_dynamic_range":"sdr","future_exact":9223372036854775807}`;}
 function response(text,url,status=200,options={}){const r=new Response(text,{status,headers:options.headers||{}});Object.defineProperty(r,"url",{value:options.url||url});Object.defineProperty(r,"redirected",{value:!!options.redirected});return r;}
-function harness(handler=null,diagnosticConsole=console,cryptoApi=undefined,pageOrigin="https://b.test"){const requests=[],ctx=vm.createContext({console:diagnosticConsole,crypto:cryptoApi,URL,URLSearchParams,Uint8Array,TextEncoder,TextDecoder,AbortController,setTimeout,clearTimeout,fetch:async(url,options)=>{requests.push({url,options});return handler?handler(url,options,requests.length):response(options.method==="GET"?detail():wire(),url);},location:{href:pageOrigin+"/#/shared",hash:"#/shared"},navigator:{userAgent:"actual-browser-fixture"}});
- const functions=[['pages/sharing-management.js',['sharingJSON','sharingInteger']],['pages/shared-libraries.js',['sharedCatalogueId','sharedCatalogueUuid','sharedCatalogueLibraryReference','sharedCatalogueReference']],['player/decode-tiers.js',['browserOutputChannels','browserOutputChannelsCached','browserAudioSinks','capsDocument','hdrDisplayPeakCaps','currentCapsDocument']]].flatMap(([file,names])=>names.map(n=>fn(file,n))).join('\n');
+function harness(handler=null,diagnosticConsole=console,cryptoApi=undefined,pageOrigin="https://b.test"){const requests=[],ctx=vm.createContext({PlaybackPolicy:require("../../"+WEB+"playback-policy.js"),console:diagnosticConsole,crypto:cryptoApi,URL,URLSearchParams,Uint8Array,TextEncoder,TextDecoder,AbortController,setTimeout,clearTimeout,fetch:async(url,options)=>{requests.push({url,options});return handler?handler(url,options,requests.length):response(options.method==="GET"?detail():wire(),url);},location:{href:pageOrigin+"/#/shared",hash:"#/shared"},navigator:{userAgent:"actual-browser-fixture"}});
+ const functions=[['pages/sharing-management.js',['sharingJSON','sharingInteger']],['pages/shared-libraries.js',['sharedCatalogueId','sharedCatalogueUuid','sharedCatalogueLibraryReference','sharedCatalogueReference']],['player/decode-tiers.js',['browserOutputChannels','browserOutputChannelsCached','browserAudioSinks','capsDocument','hdrDisplayPeakCaps','currentCapsDocument']],['core/api.js',['startupRemainingHeaders']]].flatMap(([file,names])=>names.map(n=>fn(file,n))).join('\n');
  vm.runInContext(`let TOKEN="first",API="/api/v1",AUTH_GENERATION=2,PAGE_RENDER_GENERATION=7;
  const SERVER={build:"test",playback_display_aware_auto:false},PLAY_CAPS={vcodec:"h264,hevc,hevc10",acodec:"aac",container:"mp4",maxheight:1080,progressiveHevcSampleEntries:["hvc1"]};
  let BROWSER_OUTPUT_CHANNELS=null;
@@ -304,6 +304,27 @@ test("Shared Start keeps a bounded typed refusal instead of reporting a decision
 });
 
 
+test("Shared Start sends the viewer start clock and a typed not-yet reaches the create ladder",async()=>{
+ const P=require("../../"+WEB+"playback-policy.js");
+ const h=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(startReply()),u)),c=(await h.details(ref)).files[0].context;
+ await h.start(c,startBody(h),null,7300.9);
+ assert.equal(h.requests.at(-1).options.headers["x-plurx-startup-remaining-ms"],"7300","the same header a Local create sends");
+ const plain=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(startReply()),u)),pc=(await plain.details(ref)).files[0].context;
+ await plain.start(pc,startBody(plain));
+ assert.equal(plain.requests.at(-1).options.headers["x-plurx-startup-remaining-ms"],undefined,"no clock, no header");
+ for(const code of ["startup_timeout","media_session_overloaded"]){
+  const x=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify({code,message:"untrusted peer detail"}),u,o.method==='GET'?200:503,o.method==='GET'?{}:{headers:{"retry-after":"1"}}),{warn(){}});
+  const xc=(await x.details(ref)).files[0].context;
+  await assert.rejects(x.start(xc,startBody(x),null,9000),e=>{
+   assert.equal(e.code,code);assert.equal(e.streamFailure.code,code);assert.equal(e.streamFailure.status,503);
+   assert.ok(!e.streamFailure.message.includes("untrusted"));
+   assert.equal(P.classifyStreamFailure({status:e.streamFailure.status,code:e.streamFailure.code,context:"start"}),"create_503_not_yet");
+   assert.equal(P.createRetryStep({attempt:0,elapsedMs:0,source:"create_503_not_yet"}).action,"retry");
+   return true;});
+ }
+ const t=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify({code:"sharing_start_unresolved",message:"x"}),u,o.method==='GET'?200:503),{warn(){}}),tc=(await t.details(ref)).files[0].context;
+ await assert.rejects(t.start(tc,startBody(t),null,9000),e=>e.code==="sharing_start_unresolved"&&e.streamFailure===undefined);
+});
 test("a streamed Shared authorization refusal retires context without draining its body",async()=>{
  for(const status of [401,403]){
   let cancelled=false;
@@ -356,4 +377,71 @@ test("shared client refusal logs only its fixed validation phase and HTTP status
  const c=(await refused.details(ref)).files[0].context;await assert.rejects(refused.decision(c));
  assert.deepEqual(diagnostics,[{message:"Shared playback request refused",status:502,mode:"page",code:"unrecognized_refusal"}]);
  assert.equal(JSON.stringify(diagnostics).includes("must-not-be-logged"),false);
+});
+
+test("bounded shared attachment maps ninety-minute film time into its item and keeps full-title fallback",()=>{
+ const attached=[];const player={fileId:7,method:'remux'};
+ const c=vm.createContext({PLAYER:player,clearEffectiveProcessing(){},stopPlaybackControl(){},
+  playbackEnhancementFromWire:()=>null,attachHls:(video,url,at)=>attached.push({url,at}),
+  startPlaybackControl(){},effectiveHdrProcessing:()=>null,renderPlayerInfo(){},markPlaybackControlSeekExecuted(){}});
+ vm.runInContext(fn('player/directed-change.js','attachSession'),c);
+ const range={session_id:'range',playlist_url:'/range.m3u8',vod:false,media_origin_ms:5398000,start_seconds:5398};
+ assert.equal(c.attachSession({},player,range,5400),5400);
+ assert.equal(attached[0].at,2);assert.equal(player.offset,5398);assert.equal(player.vod,false);
+ assert.equal(player.controlPositionHintSec,5400);
+ c.attachSession({},player,{...range,vod:true},5400);
+ assert.equal(player.vod,false,'completed nonzero range still has its explicit origin');
+ c.attachSession({},player,{...range,vod:true,media_origin_ms:0,start_seconds:0},5400);
+ assert.equal(attached.at(-1).at,5400);assert.equal(player.vod,true);
+});
+
+test("bounded seek reopens outside advertised coverage and prepared clock keeps source origin",()=>{
+ const policy=require('../../crates/plurxd/src/web/playback-policy.js');
+ const c=vm.createContext({});
+ for(const name of ['sessionMediaOriginMs','realMediaPositionMs','preparedLocalPositionMs'])
+  vm.runInContext(fn('player/prepared-replacement.js',name),c);
+ const origin=c.sessionMediaOriginMs({vod:false,media_origin_ms:5398000});
+ assert.equal(c.preparedLocalPositionMs(5402000,origin),4000);
+ assert.equal(c.realMediaPositionMs(4000,origin,false),5402000);
+ assert.equal(c.sessionMediaOriginMs({vod:true,media_origin_ms:5398000}),5398000);
+ const window={method:'remux',vod:false,copyHls:true,bufferedMs:[{from:5398000,through:5428000}],
+  seekableMs:[{from:5398000,through:5428000}]};
+ assert.equal(policy.seekRoute({...window,targetMs:5405000}).route,'local');
+ assert.equal(policy.seekRoute({...window,targetMs:6000000}).route,'reopen');
+});
+
+test("a bounded EVENT ending without title duration never marks the title watched",async()=>{
+ const reports=[];let finished=0;
+ const player={rangePresentation:true};
+ const c=vm.createContext({PLAYER:player,playbackOwnsAttachedMedia:()=>true,
+  playbackContinuation:()=>()=>true,pbTotalSec:()=>0,pbPosSec:()=>5400,
+  reportProgress:async(id,watched)=>reports.push({id,watched}),finishPlayback:()=>++finished});
+ vm.runInContext(fn('player/autoplay-next.js','handleEnded'),c);
+ await c.handleEnded(7);
+ assert.deepEqual(reports,[{id:7,watched:false}]);assert.equal(finished,0);
+});
+
+
+test("signed bounded origins preserve preroll and prepared replacement title clocks",()=>{
+ const attached=[],player={fileId:7,method:'remux'};
+ const c=vm.createContext({PLAYER:player,clearEffectiveProcessing(){},stopPlaybackControl(){},
+  playbackEnhancementFromWire:()=>null,attachHls:(video,url,at)=>attached.push(at),
+  startPlaybackControl(){},effectiveHdrProcessing:()=>null,renderPlayerInfo(){},markPlaybackControlSeekExecuted(){}});
+ for(const name of ['sessionMediaOriginMs','realMediaPositionMs','preparedLocalPositionMs'])
+  vm.runInContext(fn('player/prepared-replacement.js',name),c);
+ vm.runInContext(fn('player/directed-change.js','attachSession'),c);
+ const origin=c.sessionMediaOriginMs({vod:false,media_origin_ms:-83});
+ assert.equal(origin,-83);
+ c.attachSession({},player,{session_id:'range',playlist_url:'/range.m3u8',vod:false,media_origin_ms:-83},0);
+ assert.equal(attached[0],0.083);assert.equal(player.offset,-0.083);
+ assert.equal(c.preparedLocalPositionMs(0,origin),83);
+ assert.equal(c.realMediaPositionMs(83,origin,false),0);
+ assert.equal(c.realMediaPositionMs(0,origin,false),0);
+ const film=c.realMediaPositionMs(1083,origin,false),nextOrigin=-41;
+ assert.equal(c.preparedLocalPositionMs(film,nextOrigin),1041);
+ assert.equal(c.realMediaPositionMs(1041,nextOrigin,false),film);
+ const policy=require('../../crates/plurxd/src/web/playback-policy.js');
+ const window={method:'remux',vod:false,copyHls:true,bufferedMs:[{from:0,through:4917}],seekableMs:[{from:0,through:4917}]};
+ assert.equal(policy.seekRoute({...window,targetMs:0}).route,'local');
+ assert.equal(policy.seekRoute({...window,targetMs:6000}).route,'reopen');
 });

@@ -105,6 +105,93 @@ test('same-target forced repair retains the dispatched command measurement',asyn
   h.c.markPlaybackControlSeekExecuted(h.p,30,h.video);h.present();
   assert.equal(h.posts.filter(x=>x.event==='seek_resumed').length,1);
 });
+function nativeRetryHarness(){
+  const h=harness(),{c,p,video,clock}=h,reopens=[],recoveries=[];
+  const localSeekRoute=c.PlaybackPolicy.seekRoute;
+  c.PlaybackPolicy={...require('../../crates/plurxd/src/web/playback-policy.js'),
+    seekRoute:args=>args.forceReopen?{route:'reopen'}:localSeekRoute(args)};
+  Object.assign(c,{play:()=>{},raisePlaybackSurface:()=>{},pbPosSec:()=>video.currentTime,
+    PLAYBACK_SAMPLING_PERIOD_MS:500,PERSISTENT_STALL_MS:8000,
+    samplePreparedSwitchFrames:()=>{},streamHasVideo:()=>true,reportTtff:()=>{},
+    playbackSurfaceGeneration:()=>p.mediaAttachment.id,
+    playbackCaptionAttachmentPositionReady:()=>{},clearStall:()=>{},finishStallRecovery:()=>{},
+    bufferRunway:()=>12,persistentWait:(...args)=>{recoveries.push(args);return Promise.resolve();},
+    requestPlaybackMediaChange:(owner,change)=>{
+      owner.pendingMediaChange=change;
+      reopens.push({change,position:c.positionForPlaybackIntent(video,owner)});
+    }});
+  for(const name of ['retryPlayback','positionForPlaybackIntent','applyPlaybackAttachmentPosition',
+    'playbackProgressTick','completeHlsStartup']) vm.runInContext(source(name),c);
+  p.controlIntentGeneration=0;
+  p.copyHls=true;p.stallFrom=0;p.hlsStartup={transport:'native',state:'exhausted'};
+  const predecessor=p.mediaAttachment;
+  function attach(){
+    const {position}=reopens.at(-1);
+    const token={id:2,nativePositionPending:true};
+    const attachment={token,current:()=>p.mediaAttachment===token};
+    p.mediaAttachment=token;p.pendingMediaChange=null;
+    p.hlsStartup={transport:'native',state:'active',attachment,native:{},retry:{},startedAt:clock.ms};
+    c.markPlaybackControlSeekExecuted(p,position,video);
+    c.applyPlaybackAttachmentPosition(video,p,attachment,position);
+  }
+  function tick(at,seconds,frames){
+    clock.ms=at;video.currentTime=seconds;p.controlPresentedFrames=frames;
+    c.playbackProgressTick(video,p);
+  }
+  async function finishCoalescing(promise){
+    const at=h.timers.findIndex(timer=>timer.ms===100);
+    if(at>=0) h.timers.splice(at,1)[0].fn();
+    await promise;
+  }
+  return {...h,predecessor,reopens,recoveries,attach,tick,finishCoalescing};
+}
+
+test('native startup retry requests the file origin and does not restart advancing playback',async()=>{
+  for(const automatic of [false,true]){
+    const h=nativeRetryHarness(),{c,p,video}=h;
+    video.currentTime=17;
+    p.transportPresentation={attachment:h.predecessor,element:video};
+    p.progressWatch={attachment:h.predecessor,element:video,clock:17,frames:100,at:0};
+    if(automatic){
+      p.recoveringStall={kind:'supply'};
+      await h.finishCoalescing(c.seekTo(0.000001,true,720,false,p.recoveringStall));
+      assert.equal(h.reopens[0].change.height,720);
+      assert.equal(h.reopens[0].change.recoveryCause,'network');
+      assert.equal(p.recoveringStall.kind,'supply');
+    }else await h.finishCoalescing(c.retryPlayback());
+    assert.equal(h.reopens.length,1);
+    assert.equal(h.reopens[0].position,0,'the old media clock cannot move the origin create');
+    assert.equal(p.controlSeek,undefined);
+    h.attach();
+    assert.equal(video.currentTime,0,'the replacement explicitly positions at its file opening');
+    h.tick(100,4.004,1);
+    assert.equal(p.hlsStartup.state,'active','old attachment proof cannot satisfy the new startup');
+    h.tick(600,4.50,13);
+    assert.equal(p.hlsStartup.state,'presenting');
+    for(let t=1100;t<=20_100;t+=500) h.tick(t,4.50+(t-600)/1000,13+(t-600)*.024);
+    assert.equal(h.recoveries.length,0,'the old synthetic seek deadline cannot interrupt moving frames');
+    assert.equal(h.posts.filter(x=>x.event==='hls_startup_presenting').length,1);
+    h.tick(28_101,video.currentTime,p.controlPresentedFrames);
+    assert.equal(h.recoveries.length,1,'a physically frozen successor still reaches stall recovery');
+  }
+});
+
+test('native retry preserves a viewer seek to zero and requires its target frame',async()=>{
+  const h=nativeRetryHarness(),{c,p,video}=h;
+  const pending=await h.dispatch(0);
+  p.stallFrom=45;
+  await h.finishCoalescing(c.retryPlayback());
+  assert.equal(h.reopens[0].position,0,'retry the requested seek, even with a stale stall position');
+  assert.equal(p.controlSeek.seekTelemetry,pending.seekTelemetry);
+  h.attach();
+  const observation={attachment:p.mediaAttachment,epoch:p.controlPresentationEpoch,intent:p.controlSeek.sequence};
+  assert.equal(c.settlePlaybackControlSeek(video,p,0,1,{...observation,attachment:h.predecessor}),false);
+  assert.equal(c.settlePlaybackControlSeek(video,p,4.004,1,observation),false);
+  assert.equal(c.completeHlsStartup(p),false,'playing elsewhere cannot settle the viewer seek');
+  assert.equal(c.settlePlaybackControlSeek(video,p,0,2,observation),true);
+  assert.equal(h.posts.filter(x=>x.event==='seek_resumed').length,1);
+});
+
 test('a cloned successor shares the one-shot outcome with its predecessor',async()=>{
   const h=harness();const pending=await h.dispatch(30);
   const successor=Object.assign({},h.p,{controlSeek:Object.assign({},pending),mediaAttachment:{id:2}});
@@ -324,4 +411,130 @@ test('paused VOD seek coverage without a target frame still invokes bounded reco
   assert.deepEqual(h.reopen,{target:30,force:true},'bytes alone cannot terminate target-frame recovery');
   assert.deepEqual(h.loads.at(-1),['stop']);
   assert.equal(h.posts.filter(x=>x.event==='seek_resumed').length,0);
+});
+
+// The real waiting producer, surface owner and reducer together. Assignment,
+// frame proof and fault retirement must agree on one destination identity.
+function waitSurfaceHarness(options={}){
+  const h=harness(options),c=h.c,events=[],inputs=[];
+  c.PlaybackPolicy={...require('../../crates/plurxd/src/web/playback-policy.js'),
+    seekRoute:c.PlaybackPolicy.seekRoute};
+  h.p.attemptId='a1';
+  c.recordPlaybackSurfaceLog=entry=>events.push(entry);
+  c.renderPlaybackSurface=()=>{};
+  c.bufferRunway=()=>3;
+  c.playbackWaitCopy=()=>({title:'Buffering…',detail:'3s loaded'});
+  c.PERSISTENT_STALL_MS=8000;
+  vm.runInContext('const PLAYBACK_SURFACE={state:PlaybackPolicy.initialSurfaceState(),surface:null,history:[]};',c);
+  for(const name of ['playbackSurfaceGeneration','playbackSurfaceIntent',
+    'playbackSurfaceObservationOwner','playbackSurfaceContext','playbackSurfacePromptUp',
+    'playbackSurfaceHasLiveFault','playbackSurfaceStep','raisePlaybackSurface','beginWait'])
+    vm.runInContext(source(name),c);
+  const surfaceStep=c.playbackSurfaceStep;
+  c.playbackSurfaceStep=event=>{inputs.push(event);return surfaceStep(event);};
+  c.playbackSurfaceStep({attach:h.p.attemptId});
+  const wait=source('wirePlayerMedia').match(/v\.addEventListener\("waiting",\(\)=>\{([\s\S]*?)\n  \}\);/);
+  assert.ok(wait,'the shipped element waiting listener is present');
+  c.waitVideo=h.video;
+  vm.runInContext(`function waiting(v=waitVideo){${wait[1]}
+}`,c);
+  return {...h,events,inputs,
+    faults:()=>vm.runInContext('PLAYBACK_SURFACE.state.faults',c),
+    surface:()=>vm.runInContext('PLAYBACK_SURFACE.surface',c),
+    wait:video=>c.waiting(video),
+    step:event=>c.playbackSurfaceStep(event)};
+}
+
+test('destination wait raised after execution survives predecessor movement until target frame proof',async()=>{
+  const h=waitSurfaceHarness();await h.dispatch(30);
+  const pending=h.p.controlSeek;
+  assert.equal(h.inputs.filter(e=>Object.hasOwn(e,'intent_settled')).length,0,
+    'the execution edge cannot emit early settlement');
+  h.wait();h.wait();
+  assert.equal(h.faults().length,1,'repeated waiting keeps one destination fault');
+  assert.equal(h.faults()[0].intent,pending.sequence);
+  h.step({presenting:true,attached:'a0'});
+  assert.equal(h.faults().length,1,'retired attachment evidence cannot clear the destination');
+  h.step({presenting:true,attached:'a1'});
+  assert.equal(h.faults().length,1,'even current attachment movement cannot forgive an unproven target');
+  const identity={epoch:h.p.controlPresentationEpoch,attachment:h.p.mediaAttachment,intent:pending.sequence};
+  for(const observation of [{...identity,epoch:identity.epoch-1},
+    {...identity,attachment:{}},{...identity,intent:identity.intent+1}])
+    assert.equal(h.c.settlePlaybackControlSeek(h.video,h.p,30,1,observation),false);
+  assert.equal(h.c.settlePlaybackControlSeek(h.video,h.p,10,1,identity),false,
+    'a timestamped predecessor frame is still outside the destination');
+  h.step({raise:'media_waiting',context:'attached',attached:'a1',intent:pending.sequence+1});
+  assert.equal(h.c.settlePlaybackControlSeek(h.video,h.p,30,1,identity),true);
+  assert.deepEqual(Array.from(h.faults(),f=>f.intent),[pending.sequence+1],
+    'target proof retires only its own intent');
+  assert.equal(h.events.filter(e=>e.by==='intent_settled').length,1);
+});
+
+test('wait raised after an early settlement event still ends on the actual destination proof',async()=>{
+  const h=waitSurfaceHarness();await h.dispatch(30);
+  // Replay the old production ordering: settlement was reported at assignment,
+  // and the element raised waiting afterwards while the target was unproven.
+  h.step({intent_settled:h.p.controlSeek.sequence});
+  h.wait();assert.equal(h.faults().length,1);
+  assert.equal(h.present(),true);assert.equal(h.faults().length,0);
+  h.clock.ms+=500;h.step({tick:true});assert.equal(h.surface().kind,'none');
+});
+
+test('attached wait after destination settlement has no inherited intent and retires on presentation',async()=>{
+  const h=waitSurfaceHarness();await h.dispatch(30);assert.equal(h.present(),true);
+  h.wait();assert.equal(h.faults()[0].intent,null);
+  assert.equal(h.faults()[0].observationOwner,'playback-observation:a1');
+  h.step({presenting:true,attached:'a1'});
+  assert.equal(h.faults().length,0);
+  h.step({presenting:false,attached:'a1'});
+  await h.dispatch(60);
+  h.c.raisePlaybackSurface('media_waiting',{context:'attached'},{once:true});
+  assert.equal(h.faults()[0].intent,null,'observation ownership alone never supplies wait intent');
+  h.wait();assert.deepEqual(Array.from(h.faults(),f=>f.intent),[null,h.p.controlSeek.sequence],
+    'an attached wait cannot deduplicate a new destination wait');
+});
+
+test('supersession retires the old wait and only new destination proof retires its replacement',async()=>{
+  const h=waitSurfaceHarness();await h.dispatch(30);h.wait();
+  const old={epoch:h.p.controlPresentationEpoch,attachment:h.p.mediaAttachment,intent:h.p.controlSeek.sequence};
+  await h.dispatch(60);
+  assert.equal(h.faults().length,0);
+  assert.ok(h.events.some(e=>e.by==='intent_superseded'));
+  h.wait();assert.equal(h.faults()[0].intent,h.p.controlSeek.sequence);
+  assert.equal(h.c.settlePlaybackControlSeek(h.video,h.p,30,1,old),false);
+  assert.equal(h.faults().length,1);
+  assert.equal(h.present(),true);assert.equal(h.faults().length,0);
+});
+
+test('paused and retired-element waiting cannot cover a paused pending destination',async()=>{
+  const h=waitSurfaceHarness();h.video.paused=true;h.p.wantsPlayback=false;
+  await h.dispatch(30);
+  h.wait();assert.equal(h.faults().length,0);assert.equal(h.p.waitAt,undefined);
+  h.video.paused=false;h.p.wantsPlayback=true;
+  h.wait({...h.video});assert.equal(h.faults().length,0,'retired element is not the current video');
+  h.wait();assert.equal(h.faults().length,1);
+  h.p.wantsPlayback=false;h.video.paused=true;h.step({playback_requested:false});
+  h.wait();assert.equal(h.faults().length,0,'pause retires the wait and delayed waiting cannot recreate it');
+});
+
+test('expired-session Play reopens at the saved destination and its later wait ends at target proof',()=>{
+  const h=waitSurfaceHarness(),calls=[];
+  h.p.sessionId='expired';h.p.pausedRetirement={sessionId:'expired'};
+  h.p.wantsPlayback=false;h.video.paused=true;h.video.currentTime=42;
+  Object.assign(h.c,{queuePlaybackTransportCommand(){},rememberPlaybackTransportIntent(){},
+    playerWantsPlayback:()=>false,pbPosSec:()=>42,
+    seekTo:(...args)=>{calls.push(args);h.c.beginPlaybackControlSeek(h.p,args[0],false);}});
+  vm.runInContext(source('togglePlay'),h.c);
+  h.c.togglePlay();assert.equal(calls.length,1);assert.equal(calls[0][0],42);
+  assert.equal(calls[0][1],true,'expired session requires a reopen');
+  assert.equal(h.p.wantsPlayback,true);assert.equal(h.p.pausedRetirement,null);
+  // The network/session seam hands the saved intent to the new attachment.
+  h.p.attemptId='a2';h.p.mediaAttachment={id:2};h.step({attach:'a2'});
+  h.video.paused=false;h.c.markPlaybackControlSeekExecuted(h.p,42,h.video);
+  h.wait();assert.equal(h.faults()[0].attached,'a2');
+  assert.equal(h.faults()[0].intent,h.p.controlSeek.sequence);
+  h.clock.ms+=400;h.step({tick:true});assert.equal(h.surface().kind,'blocking');
+  assert.equal(h.present(),true);assert.equal(h.faults().length,0);
+  h.step({presenting:false,attached:'a2'});h.video.paused=true;h.p.wantsPlayback=false;
+  h.wait();assert.equal(h.surface().kind,'none','a later pause has no surviving buffering overlay');
 });

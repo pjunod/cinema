@@ -48,9 +48,9 @@ use crate::config::{
 use crate::secrets::{self, CredentialKey, SealedRowCensus};
 #[cfg(feature = "hiqlite-store")]
 use crate::store::{
-    CatalogueReader, HiqliteAuthStore, SettingsStore, SharingStore, SqliteImportReport,
-    SqliteImportTableDigest, SqliteStore, Store, TraktStore, AUTH_SCHEMA_BASELINE_VERSION,
-    AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
+    AppliedView, CatalogueReader, HiqliteAuthStore, SettingsStore, SharingStore,
+    SqliteImportReport, SqliteImportTableDigest, SqliteStore, Store, TraktStore,
+    AUTH_SCHEMA_BASELINE_VERSION, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "hiqlite-store")]
 use hiqlite::tls::ServerTlsConfig;
@@ -283,6 +283,7 @@ pub struct SelectedStore {
     membership: MembershipManager,
     replication: status::ReplicationMonitor,
     catalogue: CatalogueReader,
+    applied: AppliedView,
     local_client: Option<Client>,
     source_schema_startup_consumed: bool,
     resource_custody_startup_consumed: bool,
@@ -344,6 +345,13 @@ impl SelectedStore {
     #[must_use]
     pub fn catalogue_reader(&self) -> CatalogueReader {
         self.catalogue.clone()
+    }
+
+    /// Node-local applied views of settings and media-session routes
+    /// (playback-start E1).
+    #[must_use]
+    pub fn applied_view(&self) -> AppliedView {
+        self.applied.clone()
     }
 
     /// Membership lifecycle and privacy-safe node health for the daemon API.
@@ -672,6 +680,7 @@ pub async fn select_daemon_store_observing(
         remove_activation_attempt(&config.storage.data_dir)?;
         let legacy = super::open_store(config).await?;
         let catalogue = CatalogueReader::authority(Arc::clone(&legacy.store));
+        let applied = AppliedView::authority(Arc::clone(&legacy.store));
         return Ok(SelectedStore {
             store: legacy.store,
             identity: legacy.identity,
@@ -680,6 +689,7 @@ pub async fn select_daemon_store_observing(
             membership: MembershipManager::unavailable(),
             replication: status::ReplicationMonitor::sqlite(),
             catalogue,
+            applied,
             local_client: None,
             source_schema_startup_consumed: false,
             resource_custody_startup_consumed: false,
@@ -896,10 +906,19 @@ async fn join_fresh_store(
         let credential_key = open_active_credential_key(config, &store, &identity).await?;
         let concrete_store = Arc::new(store);
         let store: Arc<dyn Store> = concrete_store.clone();
+        // Membership writes `settings` through its own client; it raises the
+        // same floor as the store (E1b, read-your-write).
+        let settings_floor = concrete_store.settings_write_floor();
         let replication = status::ReplicationMonitor::replicated(
             client.clone(),
             active.clone(),
             HIQLITE_DATABASE_FILENAME,
+        );
+        let applied = AppliedView::replicated(
+            Arc::clone(&store),
+            Arc::clone(&concrete_store),
+            replication.metrics_handle(),
+            &client,
         );
         let catalogue = CatalogueReader::replicated(
             Arc::clone(&store),
@@ -912,6 +931,7 @@ async fn join_fresh_store(
             client.clone(),
             replication.clone(),
             Arc::clone(&store),
+            settings_floor,
             identity.clone(),
             local,
             configured_join_url(config)?,
@@ -970,6 +990,7 @@ async fn join_fresh_store(
             membership: membership_manager,
             replication,
             catalogue,
+            applied,
             local_client: Some(client),
             source_schema_startup_consumed: false,
             resource_custody_startup_consumed: false,
@@ -2991,6 +3012,10 @@ async fn open_active_store_with_key(
         }
         identity.raft_id = membership.raft_id;
     }
+    // Before hiqlite starts: its static `nodes` come from this list.
+    if let Some(membership) = local_membership.as_mut() {
+        refresh_bootstrap_from_committed(&config.storage.data_dir, &active, membership)?;
+    }
     let secrets = read_existing_secrets(&config.storage.data_dir)?;
     let force_loopback = should_force_loopback(config, local_membership.as_ref());
     let cleanup_lock = daemon_lock
@@ -3035,6 +3060,9 @@ async fn open_active_store_with_key(
         let activation_master = credential_key;
         let concrete_store = Arc::new(store);
         let store: Arc<dyn Store> = concrete_store.clone();
+        // Membership writes `settings` through its own client; it raises the
+        // same floor as the store (E1b, read-your-write).
+        let settings_floor = concrete_store.settings_write_floor();
         let replication = status::ReplicationMonitor::replicated(
             client.clone(),
             active.clone(),
@@ -3046,6 +3074,12 @@ async fn open_active_store_with_key(
             replication.metrics_handle(),
             config.cluster.bounded_replica_reads,
             config.cluster.bounded_replica_max_lag_entries,
+        );
+        let applied = AppliedView::replicated(
+            Arc::clone(&store),
+            concrete_store.clone(),
+            replication.metrics_handle(),
+            &client,
         );
         let membership_file = match local_membership.take() {
             Some(mut membership) => {
@@ -3094,6 +3128,7 @@ async fn open_active_store_with_key(
             client.clone(),
             replication.clone(),
             Arc::clone(&store),
+            settings_floor,
             identity.clone(),
             membership_file.local,
             configured_join_url(config)?,
@@ -3179,14 +3214,15 @@ async fn open_active_store_with_key(
         if read_readdress_record(&config.storage.data_dir)?.is_some() {
             materialize_join_snapshot(&client, &active, &identity.node_id, "sole-voter readdress")
                 .await?;
-        } else if super::membership::restored_image_lacks_join_snapshot(&client)
-            .await
-            .map_err(|error| {
-                StoreError::Database(format!(
-                    "checking whether the restored image can seed a joining node: {error}"
-                ))
-            })?
-        {
+        } else if super::membership::restored_image_lacks_join_snapshot(
+            &crate::store::CountedClient::membership(client.clone()),
+        )
+        .await
+        .map_err(|error| {
+            StoreError::Database(format!(
+                "checking whether the restored image can seed a joining node: {error}"
+            ))
+        })? {
             // `restore` installs the archive's image beneath a brand-new,
             // empty Raft log, exactly as readdress does, so that log cannot
             // reconstruct the restored rows for a later joiner either. The
@@ -3223,6 +3259,7 @@ async fn open_active_store_with_key(
             membership,
             replication,
             catalogue,
+            applied,
             local_client: Some(client),
             source_schema_startup_consumed: false,
             resource_custody_startup_consumed: false,
@@ -3378,8 +3415,11 @@ async fn materialize_join_snapshot(
 /// that would hold a voter's image.
 #[cfg(feature = "hiqlite-store")]
 const JOIN_SNAPSHOT_MIN_COPY_BYTES_PER_SECOND: u64 = 8 * 1024 * 1024;
-/// How long the snapshot builder waits for storage before it fails the build
-/// (Hiqlite's `snapshot_storage_deferral`, which Plurx leaves at its default).
+/// The longest the snapshot builder waits for storage that can fit the build
+/// or cannot be measured before attempting it (Hiqlite's
+/// `snapshot_storage_deferral`, which Plurx leaves at its default). Storage
+/// that cannot fit the build at all (patch 33) defers with no bound, so such
+/// a join's build outlives this budget and the backstop below ends the join.
 #[cfg(feature = "hiqlite-store")]
 const JOIN_SNAPSHOT_STORAGE_DEFERRAL: Duration = Duration::from_secs(600);
 
@@ -3821,14 +3861,10 @@ async fn start_voter(
         },
         None => configured_local_peer(config, identity.raft_id)?,
     };
-    let mut nodes = local_membership
-        .map(|membership| membership.bootstrap.clone())
-        .unwrap_or_default();
-    nodes.retain(|peer| peer.raft_id != local.raft_id);
-    nodes.push(local.clone());
-    nodes.sort_by_key(|peer| peer.raft_id);
-    nodes.dedup_by_key(|peer| peer.raft_id);
-    let nodes = hiqlite_nodes_for_voter(&nodes, local.raft_id)?;
+    let nodes = hiqlite_roster(
+        local_membership.map_or(&[][..], |membership| membership.bootstrap.as_slice()),
+        &local,
+    )?;
 
     // The daemon lock guards one data directory, but these ports are host-wide
     // and default to fixed values, so two data directories on one host collide.
@@ -3921,10 +3957,20 @@ async fn start_voter(
     let admission_started = tokio::time::Instant::now();
     let admission_deadline = admission_started + MEMBERSHIP_ADMISSION_TIMEOUT;
     loop {
-        let metrics = client
+        let watch = client
             .local_db_raft_metrics()
-            .map_err(|error| StoreError::Database(format!("reading voter membership: {error}")))?
-            .membership_snapshot();
+            .map_err(|error| StoreError::Database(format!("reading voter membership: {error}")))?;
+        if let Some(error) = watch.core_fatal() {
+            return Err(startup_core_died(
+                &client,
+                active_transport,
+                pending_client.is_none(),
+                &identity.node_id,
+                &error,
+            )
+            .await);
+        }
+        let metrics = watch.membership_snapshot();
         let is_voter = metrics.voters.contains(&identity.raft_id);
         let is_member = metrics.members.contains(&identity.raft_id);
         let admitted = match role {
@@ -4001,6 +4047,16 @@ async fn start_voter(
                 biased;
                 result = &mut watermark => break result,
                 () = tokio::time::sleep_until(next_wait_log) => {
+                    if let Some(error) = local_metrics.core_fatal() {
+                        return Err(startup_core_died(
+                            &client,
+                            active_transport,
+                            pending_client.is_none(),
+                            &identity.node_id,
+                            &error,
+                        )
+                        .await);
+                    }
                     if startup_wait_log_is_due(&mut next_wait_log) {
                         log_startup_transport_wait(
                             &identity.node_id,
@@ -4013,6 +4069,16 @@ async fn start_voter(
                 }
             }
         };
+        if let Some(error) = local_metrics.core_fatal() {
+            return Err(startup_core_died(
+                &client,
+                active_transport,
+                pending_client.is_none(),
+                &identity.node_id,
+                &error,
+            )
+            .await);
+        }
         match watermark {
             Ok(Ok(watermark)) => break watermark.committed_index,
             Ok(Err(error)) if tokio::time::Instant::now() < catchup_deadline => {
@@ -4048,6 +4114,16 @@ async fn start_voter(
             .unwrap_or_default();
         if applied >= catchup_target {
             break;
+        }
+        if let Some(error) = local_metrics.core_fatal() {
+            return Err(startup_core_died(
+                &client,
+                active_transport,
+                pending_client.is_none(),
+                &identity.node_id,
+                &error,
+            )
+            .await);
         }
         if tokio::time::Instant::now() >= catchup_deadline {
             if pending_client.is_none() {
@@ -4102,6 +4178,26 @@ async fn start_voter(
 #[cfg(feature = "hiqlite-store")]
 fn startup_admission_remaining(phase: Duration, admission_spent: Duration) -> Duration {
     phase.saturating_sub(admission_spent)
+}
+
+/// Audit C7: a database Raft core that quit while startup waits for
+/// admission or catch-up never serves again in this process, so startup ends
+/// at once with the core's own error, and the supervisor restarts it, rather
+/// than waiting out the catch-up deadline behind the fence.
+#[cfg(feature = "hiqlite-store")]
+async fn startup_core_died(
+    client: &Client,
+    active_transport: bool,
+    owns_shutdown: bool,
+    node_id: &str,
+    error: &str,
+) -> StoreError {
+    if owns_shutdown {
+        let _ = shutdown_voter(client, active_transport).await;
+    }
+    StoreError::Database(format!(
+        "node {node_id}'s database Raft core stopped during startup: {error}"
+    ))
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -4188,6 +4284,15 @@ pub fn production_hiqlite_defaults_with_read_pool(read_pool_size: usize) -> Node
         snapshot_transfer_timeout: snapshot_timeout_duration(
             DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
         ),
+        // Vendor patch 27: one applied-mark revision per applied-view table
+        // and per table a sharing monitor waits on.
+        applied_mark_tables: crate::store::applied_mark_tables()
+            .map(Cow::Borrowed)
+            .collect(),
+        applied_mark_deletes_only: crate::store::APPLIED_MARK_DELETES_ONLY
+            .iter()
+            .map(|table| Cow::Borrowed(*table))
+            .collect(),
         // Snapshot frequency, disaster-recovery retention, and WAL sync retain
         // Hiqlite's established values. The heartbeat/election window above
         // admits measured durable recovery responses; the snapshot transfer
@@ -4242,6 +4347,116 @@ fn production_hiqlite_defaults(config: &Config) -> NodeConfig {
     defaults.snapshot_transfer_timeout =
         snapshot_timeout_duration(config.cluster.snapshot_transfer_timeout_secs);
     defaults
+}
+
+/// Hiqlite's static `nodes` for this boot: the recorded bootstrap list with the
+/// local peer replaced by its current address.
+#[cfg(feature = "hiqlite-store")]
+fn hiqlite_roster(bootstrap: &[ClusterPeer], local: &ClusterPeer) -> Result<Vec<Node>, StoreError> {
+    let mut nodes = bootstrap.to_vec();
+    nodes.retain(|peer| peer.raft_id != local.raft_id);
+    nodes.push(local.clone());
+    nodes.sort_by_key(|peer| peer.raft_id);
+    nodes.dedup_by_key(|peer| peer.raft_id);
+    hiqlite_nodes_for_voter(&nodes, local.raft_id)
+}
+
+/// Live peers (voters and learners) in the closed state machine's
+/// `cluster_nodes`, read the way [`admitted_peer_count`] reads it: read-only,
+/// before hiqlite starts. `None` means the committed membership cannot be
+/// consulted (no state machine, no table, unreadable, or it does not list
+/// `raft_id` as live), and the caller keeps the recorded bootstrap list.
+#[cfg(feature = "hiqlite-store")]
+fn committed_live_peers(active: &Path, raft_id: u64) -> Option<Vec<ClusterPeer>> {
+    let database = active
+        .join("state_machine")
+        .join("db")
+        .join(HIQLITE_DATABASE_FILENAME);
+    if !database.is_file() {
+        return None;
+    }
+    let read = || -> Result<Vec<ClusterPeer>, rusqlite::Error> {
+        let connection = Connection::open_with_flags(
+            &database,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let table_exists = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cluster_nodes'",
+            (),
+            |row| row.get::<_, i64>(0),
+        )?;
+        if table_exists == 0 {
+            return Ok(Vec::new());
+        }
+        let mut statement = connection.prepare(
+            "SELECT raft_id, raft_address, api_address FROM cluster_nodes \
+             WHERE removed_at IS NULL ORDER BY raft_id",
+        )?;
+        let rows = statement.query_map((), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut peers = Vec::new();
+        for row in rows {
+            let (id, raft_address, api_address) = row?;
+            if id > 0 {
+                peers.push(ClusterPeer {
+                    raft_id: id as u64,
+                    raft_address,
+                    api_address,
+                });
+            }
+        }
+        Ok(peers)
+    };
+    match read() {
+        Ok(peers) if peers.iter().any(|peer| peer.raft_id == raft_id) => Some(peers),
+        Ok(_) => None,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "cannot read committed membership before start; keeping recorded bootstrap peers"
+            );
+            None
+        }
+    }
+}
+
+/// Replace `membership.bootstrap` with the committed live peer set and
+/// persist it when it changed. Hiqlite copies `nodes` into its split-brain
+/// check at start, so this must run before the node starts; `membership.json`
+/// records the join-time list and is never otherwise refreshed, so ids removed
+/// since then would warn forever. Returns whether the file was rewritten.
+#[cfg(feature = "hiqlite-store")]
+fn refresh_bootstrap_from_committed(
+    data_dir: &Path,
+    active: &Path,
+    membership: &mut LocalMembership,
+) -> Result<bool, StoreError> {
+    let Some(committed) = committed_live_peers(active, membership.raft_id) else {
+        return Ok(false);
+    };
+    let own = membership
+        .bootstrap
+        .iter()
+        .find(|peer| peer.raft_id == membership.raft_id)
+        .cloned()
+        .unwrap_or_else(|| membership.local.clone());
+    let mut bootstrap: Vec<ClusterPeer> = committed
+        .into_iter()
+        .filter(|peer| peer.raft_id != membership.raft_id)
+        .collect();
+    bootstrap.push(own);
+    bootstrap.sort_by_key(|peer| peer.raft_id);
+    if bootstrap == membership.bootstrap {
+        return Ok(false);
+    }
+    membership.bootstrap = bootstrap;
+    write_local_membership(data_dir, membership)?;
+    Ok(true)
 }
 
 /// Build Hiqlite's connection roster without treating durable Raft ids as
@@ -5507,7 +5722,13 @@ pub mod status {
     const PASSIVE_METRICS_FRESHNESS_SECS: u64 = 15;
     const QUORUM_WATERMARK_REFRESH: Duration = Duration::from_millis(500);
     const QUORUM_WATERMARK_TIMEOUT: Duration = Duration::from_millis(750);
-    const QUORUM_WATERMARK_LEASE: Duration = Duration::from_secs(1);
+    /// How long one quorum confirmation proves this node's authority to serve
+    /// from its replica. The route cache of playback-start E1c holds a fact it
+    /// observed directly (a row it committed, or a quorum read) for the same
+    /// lease and no longer, so a node without a serving proof costs one quorum
+    /// read per session per lease (`docs/streaming/PLAYBACK-START-E1-BUILD.md`
+    /// §4.4): one time bound, the proof's own.
+    pub const QUORUM_WATERMARK_LEASE: Duration = Duration::from_secs(1);
     /// How many quorum confirmations of the current generation a node keeps,
     /// so a confirmation it catches up to after a newer one has landed still
     /// proves authority until its own lease ends (C1 of
@@ -5966,6 +6187,39 @@ pub mod status {
             metrics
         }
 
+        /// Publish a quorum confirmation of `committed_index` whose attempt
+        /// starts now, with this node's sampled apply caught up to it — the
+        /// generation [`Self::validation_bounded_ready`] uses. An applied-view
+        /// contract uses it to meet (or, above the real replica, to miss) a
+        /// floor recorded earlier.
+        #[cfg(feature = "cluster-read-cost-validation")]
+        #[doc(hidden)]
+        pub fn validation_confirm_now(&self, committed_index: u64) {
+            let elapsed = self.started_at.elapsed();
+            assert!(self.publish_at(
+                &LocalDbRaftSnapshot {
+                    running: true,
+                    node_id: 1,
+                    current_term: 7,
+                    current_leader: Some(1),
+                    last_applied_term: Some(7),
+                    last_applied_index: Some(committed_index),
+                },
+                elapsed.as_secs(),
+            ));
+            let started = duration_nanos(elapsed);
+            assert!(self.publish_watermark_at(
+                DbQuorumWatermark {
+                    term: 7,
+                    leader_id: 1,
+                    committed_index,
+                    local_read_protocol_version: hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION,
+                },
+                started,
+                started,
+            ));
+        }
+
         /// Revoke the current proof inside a validation-only local operation,
         /// exercising production's post-query discard and Authority fallback.
         #[cfg(feature = "cluster-read-cost-validation")]
@@ -6264,6 +6518,46 @@ pub mod status {
             }
         }
 
+        /// The floor behind an applied view (playback-start E1 §4.2): the
+        /// lowest committed index among the kept quorum confirmations whose
+        /// attempt started strictly after `at`, on this process's monotonic
+        /// clock — the clock the sampler stamps attempts with.
+        ///
+        /// A confirmation started after `at` carries a read index at least the
+        /// leader's commit index at `at`. So once this node has applied it, its
+        /// replica holds every write this process had acknowledged by `at` and
+        /// every committed row a quorum read returned by then. The lowest such
+        /// index is the easiest to satisfy and proves exactly as much.
+        ///
+        /// `None` until such a confirmation exists, and always on a process
+        /// that is not locally bound (a remote-authority client has no replica
+        /// to apply it to). This answers the floor only; serving still needs
+        /// [`Self::eligible_serving_proof`].
+        #[must_use]
+        pub fn confirmed_since(&self, at: Instant) -> Option<u64> {
+            self.confirmed_since_nanos(duration_nanos(
+                at.saturating_duration_since(self.started_at),
+            ))
+        }
+
+        fn confirmed_since_nanos(&self, at_nanos: u64) -> Option<u64> {
+            let view = self.read_watermark_view()?;
+            if !view.watermark_published || view.watermark_invalidated {
+                return None;
+            }
+            let count = usize::try_from(view.confirmation_count)
+                .unwrap_or(QUORUM_CONFIRMATIONS)
+                .min(QUORUM_CONFIRMATIONS);
+            let next = usize::try_from(view.confirmation_next).unwrap_or(0) % QUORUM_CONFIRMATIONS;
+            (1..=count)
+                .map(|back| {
+                    view.confirmations[(next + QUORUM_CONFIRMATIONS - back) % QUORUM_CONFIRMATIONS]
+                })
+                .filter(|(_, started_nanos)| *started_nanos > at_nanos)
+                .map(|(committed_index, _)| committed_index)
+                .min()
+        }
+
         /// Whether a captured proof may still be served under.
         ///
         /// Deliberately shaped after `BoundedReplicaPermit::remains_valid_at`,
@@ -6273,7 +6567,13 @@ pub mod status {
         /// - the apply-lag budget is not consulted, which is the entire point:
         ///   this proof is being retained *because* apply is behind, and the
         ///   bounded-replica read path — which does need freshness — is
-        ///   untouched and still refuses on lag;
+        ///   untouched and still refuses on lag. The applied views of
+        ///   playback-start E1 (`store/applied_view.rs`: settings and
+        ///   media-session routes, beside `CatalogueReader`) do read under
+        ///   this proof: their answer is as new as a commit index a quorum
+        ///   confirmed within one lease, the lag behind the newest watermark
+        ///   is not bounded, and a fact this process already holds is
+        ///   protected by the view's floor (`confirmed_since`), not by lag;
         /// - the committed index may have advanced past the captured one,
         ///   since a newer watermark arriving is the ordinary cause of this
         ///   path, but it may never have gone backwards.
@@ -6844,10 +7144,14 @@ pub mod status {
         async fn sample(&self) -> Result<DbQuorumWatermark, hiqlite::Error>;
     }
 
+    /// The serving fence's 2 Hz quorum read, counted like every other
+    /// replicated operation (`authority_read`, background, label
+    /// `quorum_watermark_sampler`). The counted call only times and delegates:
+    /// the sampler's period, timeout and error handling are its own.
     #[async_trait::async_trait]
-    impl QuorumWatermarkSource for Client {
+    impl QuorumWatermarkSource for crate::store::CountedClient {
         async fn sample(&self) -> Result<DbQuorumWatermark, hiqlite::Error> {
-            self.db_quorum_watermark().await
+            self.db_quorum_watermark("quorum_watermark_sampler").await
         }
     }
 
@@ -7166,7 +7470,7 @@ pub mod status {
                 }
             };
             let watermark_loop = run_quorum_watermark_loop(
-                client,
+                crate::store::CountedClient::outside_membership(client),
                 watermark_passive,
                 std::future::pending(),
                 node_stagger,
@@ -8154,6 +8458,47 @@ pub mod status {
             );
         }
 
+        /// E1 floor: only a confirmation whose attempt started after the fact
+        /// counts, the lowest such index answers, and nothing answers before
+        /// one exists, after the ring is cleared, or without a local binding.
+        #[test]
+        fn confirmed_since_answers_only_confirmations_started_after_the_fact() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(100), Some(1)), 10));
+            assert_eq!(metrics.confirmed_since_nanos(0), None, "no watermark yet");
+            for (step, committed) in [(0_u64, 101_u64), (1, 104), (2, 109)] {
+                let started = 10_000_000_000 + step * 500_000_000;
+                assert!(metrics.publish_watermark_at(
+                    watermark(7, 1, committed),
+                    started,
+                    started + 40_000_000,
+                ));
+            }
+            assert_eq!(metrics.confirmed_since_nanos(9_999_999_999), Some(101));
+            assert_eq!(
+                metrics.confirmed_since_nanos(10_000_000_000),
+                Some(104),
+                "an attempt that started at the fact's instant does not count"
+            );
+            assert_eq!(metrics.confirmed_since_nanos(10_700_000_000), Some(109));
+            assert_eq!(metrics.confirmed_since_nanos(11_000_000_000), None);
+
+            // A successor generation clears the ring: nothing from the old
+            // generation answers, and the floor waits for the new one.
+            let sequence = metrics.begin_write();
+            metrics.clear_confirmations();
+            metrics.end_write(sequence);
+            assert_eq!(metrics.confirmed_since_nanos(0), None);
+
+            let remote = PassiveRaftMetrics::remote_authority();
+            assert!(remote.publish_watermark_at(watermark(7, 1, 101), 10, 20));
+            assert_eq!(
+                remote.confirmed_since_nanos(0),
+                None,
+                "no replica to apply it to"
+            );
+        }
+
         /// C1 (d): at both the 500 ms and the 250 ms cadence a full ring only
         /// ever drops a confirmation that has already expired, and the newest
         /// applied one stays usable throughout.
@@ -8796,6 +9141,43 @@ pub mod status {
             async fn wait_for_change(&mut self) -> bool {
                 self.receiver.changed().await.is_ok()
             }
+        }
+
+        /// The serving fence's sampler is counted: one `authority_read`,
+        /// outside a request, under `quorum_watermark_sampler`, and not as a
+        /// membership operation. The client points at no node, so the call
+        /// ends in an error or is dropped by the bound; both are counted.
+        #[tokio::test]
+        async fn the_quorum_watermark_sampler_is_counted_under_its_label() {
+            let counted = |table: Vec<(&'static str, [u64; 3])>| {
+                table
+                    .into_iter()
+                    .find(|(method, _)| *method == "quorum_watermark_sampler")
+                    .map_or(0, |(_, counts)| counts[1])
+            };
+            let before = counted(crate::store::background_store_operations_by_method());
+            let source = crate::store::CountedClient::outside_membership(
+                Client::remote(
+                    vec!["127.0.0.1:1".to_owned()],
+                    false,
+                    false,
+                    "unused".to_owned(),
+                    true,
+                    None,
+                )
+                .await
+                .expect("construct a remote client"),
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(200), source.sample()).await;
+            assert!(
+                counted(crate::store::background_store_operations_by_method()) > before,
+                "the sampler's quorum read reaches the background family"
+            );
+            assert_eq!(
+                counted(crate::store::cluster_membership_operations_by_method()),
+                0,
+                "the sampler is not the membership manager"
+            );
         }
 
         #[tokio::test]

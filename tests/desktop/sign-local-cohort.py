@@ -16,7 +16,7 @@ def main():
     p.add_argument("--assets", type=Path, required=True)
     p.add_argument("--signing-key", type=Path, required=True)
     p.add_argument("--platform", choices=["linux", "macos"], required=True)
-    p.add_argument("--arch", choices=["amd64", "arm64", "universal"], required=True)
+    p.add_argument("--arch", choices=["amd64", "arm64"], required=True)
     p.add_argument("--openssl", default="openssl")
     a = p.parse_args()
     hosted_guard(a.candidate)
@@ -38,8 +38,6 @@ def main():
     version = target["version"]
     artifacts = []
     if a.platform == "linux":
-        if a.arch == "universal":
-            raise RuntimeError("Linux requires a concrete native architecture")
         for component, package in (("server", "plurxd"), ("desktop", "plurx-desktop")):
             name = f"{package}_{version}-1_{a.arch}.deb"
             path = a.assets / name
@@ -52,17 +50,17 @@ def main():
                 "component": component, "package_name": package, "package_version": f"{version}-1",
                 "size": path.stat().st_size, "sha256": sha256(path)})
     else:
-        if a.arch != "universal":
-            raise RuntimeError("native macOS layout uses the canonical universal package identity")
-        name = f"plurxd-{version}-macos-universal.tar.gz"
+        if a.arch != "arm64":
+            raise RuntimeError("macOS releases are Apple Silicon (arm64) only")
+        name = f"plurxd-{version}-macos-arm64.tar.gz"
         path = a.assets / name
         wrapper = name.removesuffix(".tar.gz")
         with tarfile.open(path) as stream:
             release = json.load(stream.extractfile(wrapper + "/release.json"))
             if release != {"schema_version": 1, "repository": "pjunod/cinema", "version": version,
-                           "source_commit": target["committed_overlay_sha"], "architecture": "universal"}:
+                           "source_commit": target["committed_overlay_sha"], "architecture": "arm64"}:
                 raise RuntimeError("fixture native archive release identity differs from committed overlay")
-        artifacts.append({"name": name, "platform": "macos", "architecture": "universal", "format": "tar_gz",
+        artifacts.append({"name": name, "platform": "macos", "architecture": "arm64", "format": "tar_gz",
             "component": "native_runtime", "package_name": "plurx-native", "package_version": version,
             "size": path.stat().st_size, "sha256": sha256(path)})
     now = int(time.time())

@@ -21,6 +21,33 @@ pub struct LibraryInput {
     /// Flag a shows library as anime (absolute numbering + AniList).
     #[serde(default)]
     pub anime: bool,
+    /// Minutes between automatic scans for a NEW library; absent means
+    /// [`DEFAULT_SCAN_INTERVAL_MINS`]. Ignored on update, which keeps the
+    /// library's own schedule (`PUT …/schedule` changes it).
+    #[serde(default)]
+    pub scan_interval_mins: Option<i64>,
+}
+
+/// New libraries reconcile every six hours, so a Curator notification that
+/// never arrived is found by the next sweep rather than never (contract v2
+/// §5.2). Existing libraries keep what they have — `0` stays `0` — and
+/// Settings offers each a one-click opt-in.
+pub use plurx_core::domain::DEFAULT_SCAN_INTERVAL_MINS;
+/// A floor rather than a free-for-all: scanning a real library every minute
+/// is a NAS denial-of-service with a schedule attached, and the loop only
+/// ticks once a minute anyway. 0 (off) stays exactly 0.
+const MIN_INTERVAL_MINS: i64 = 15;
+
+fn check_interval(label: &str, value: i64) -> Result<(), ApiError> {
+    if value < 0 {
+        return Err(ApiError::BadRequest(format!("{label} cannot be negative")));
+    }
+    if value > 0 && value < MIN_INTERVAL_MINS {
+        return Err(ApiError::BadRequest(format!(
+            "{label} must be 0 (off) or at least {MIN_INTERVAL_MINS} minutes"
+        )));
+    }
+    Ok(())
 }
 
 impl LibraryInput {
@@ -71,15 +98,24 @@ pub async fn create(
     State(state): State<AppState>,
     Json(input): Json<LibraryInput>,
 ) -> Result<Json<LibraryDto>, ApiError> {
+    let scan_interval_mins = input
+        .scan_interval_mins
+        .unwrap_or(DEFAULT_SCAN_INTERVAL_MINS);
+    check_interval("scan_interval_mins", scan_interval_mins)?;
     let new = input.validate()?;
-    let library = state.store.create_library(&new).await.map_err(|e| {
-        // A duplicate name is the common user error worth surfacing clearly.
-        if e.to_string().contains("UNIQUE") {
-            ApiError::Conflict(format!("a library named `{}` already exists", new.name))
-        } else {
-            ApiError::from(e)
-        }
-    })?;
+    // One write: the library and its schedule, on both backends.
+    let library = state
+        .store
+        .create_library_with_scan_interval(&new, scan_interval_mins)
+        .await
+        .map_err(|e| {
+            // A duplicate name is the common user error worth surfacing clearly.
+            if e.to_string().contains("UNIQUE") {
+                ApiError::Conflict(format!("a library named `{}` already exists", new.name))
+            } else {
+                ApiError::from(e)
+            }
+        })?;
     state.jobs.trigger_scan(library.id).await;
     Ok(Json(library.into()))
 }
@@ -121,22 +157,11 @@ pub async fn set_schedule(
     Path(id): Path<i64>,
     Json(input): Json<ScheduleInput>,
 ) -> Result<Json<LibraryDto>, ApiError> {
-    // A floor rather than a free-for-all: scanning a real library every minute
-    // is a NAS denial-of-service with a schedule attached, and the loop only
-    // ticks once a minute anyway. 0 (off) stays exactly 0.
-    const MIN_INTERVAL_MINS: i64 = 15;
     for (label, value) in [
         ("scan_interval_mins", input.scan_interval_mins),
         ("refresh_interval_mins", input.refresh_interval_mins),
     ] {
-        if value < 0 {
-            return Err(ApiError::BadRequest(format!("{label} cannot be negative")));
-        }
-        if value > 0 && value < MIN_INTERVAL_MINS {
-            return Err(ApiError::BadRequest(format!(
-                "{label} must be 0 (off) or at least {MIN_INTERVAL_MINS} minutes"
-            )));
-        }
+        check_interval(label, value)?;
     }
     let library = state
         .store

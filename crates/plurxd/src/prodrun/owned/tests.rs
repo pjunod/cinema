@@ -42,6 +42,7 @@ where
             },
             0,
             Some(Box::new(Capacity(Arc::clone(releases)))),
+            None,
             writer,
         )
         .expect("real launch")
@@ -165,6 +166,7 @@ async fn failed_launch_releases_unacquired_slot_without_invoking_writer() {
             },
             0,
             Some(Box::new(Capacity(Arc::clone(&releases)))),
+            None,
             |_, _, _| async { panic!("no task may run after failed launch") },
         );
     assert!(result.is_err());

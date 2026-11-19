@@ -37,7 +37,7 @@ impl BoundPlanCaller {
         handle: Arc<std::fs::File>,
         offset_gate: Arc<tokio::sync::Semaphore>,
     ) -> crate::decode_facts::DecodeFactSource {
-        crate::decode_facts::DecodeFactSource::new(handle, offset_gate, self.decode_fact_work())
+        crate::decode_facts::new_source(handle, offset_gate, self.decode_fact_work())
     }
 
     pub(super) fn finish(

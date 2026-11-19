@@ -22,9 +22,26 @@ pub(super) async fn relay_if_remote(
             .route_resolution_before(session_id, &state.node_id, request_deadline)
             .await?
     };
+    // The cached lookup reads this node's applied view (E1c, §4.4), which
+    // may trail a peer's activation, release or takeover by up to its proof's
+    // bound. Only an active answer admits; every other verdict is confirmed
+    // by a quorum read before it decides the request, `Absent` included, so a
+    // session activated elsewhere a moment ago is relayed, not answered from
+    // the local path.
     let mut route = match resolution {
-        DurableRouteResolution::Absent | DurableRouteResolution::ActiveLocal(_) => return Ok(None),
-        DurableRouteResolution::OwnerTransition(_) | DurableRouteResolution::Terminal(_) => {
+        DurableRouteResolution::ActiveLocal(_) => return Ok(None),
+        DurableRouteResolution::ActiveRemote(route) => route,
+        // An absence the cache holds as a fact (this node's quorum read or
+        // its own release, within the fact's lease) is already confirmed.
+        DurableRouteResolution::Absent
+            if state
+                .media_sessions
+                .cached_route_is_a_fact(session_id)
+                .await =>
+        {
+            return Ok(None)
+        }
+        cached => {
             let resolution = if media_resource {
                 state
                     .media_sessions
@@ -44,7 +61,17 @@ pub(super) async fn relay_if_remote(
                     )
                     .await?
             };
+            state
+                .media_sessions
+                .adopt_authoritative_route(session_id, durable_route(&resolution))
+                .await;
             match resolution {
+                // Confirmed absent: the local path answers, as before E1c.
+                DurableRouteResolution::Absent
+                    if matches!(cached, DurableRouteResolution::Absent) =>
+                {
+                    return Ok(None)
+                }
                 DurableRouteResolution::Absent => return Err(ApiError::NotFound("hls session")),
                 DurableRouteResolution::ActiveLocal(_) => return Ok(None),
                 DurableRouteResolution::ActiveRemote(route) => route,
@@ -54,7 +81,6 @@ pub(super) async fn relay_if_remote(
                 DurableRouteResolution::Terminal(_) => return Err(media_session_ended()),
             }
         }
-        DurableRouteResolution::ActiveRemote(route) => route,
     };
     for attempt in 0..2 {
         let deadline_unix_ms =
@@ -122,6 +148,10 @@ pub(super) async fn relay_if_remote(
                 .authoritative_route_resolution_before(session_id, &state.node_id, request_deadline)
                 .await?
         };
+        state
+            .media_sessions
+            .adopt_authoritative_route(session_id, durable_route(&resolution))
+            .await;
         match resolution {
             DurableRouteResolution::Absent if peer_status == StatusCode::NOT_FOUND => {
                 return Ok(Some(response));
@@ -143,6 +173,17 @@ pub(super) async fn relay_if_remote(
         }
     }
     unreachable!("bounded relay reclassification returns on every branch")
+}
+
+/// The durable row a resolution was classified from (`None` for absence).
+pub(super) fn durable_route(resolution: &DurableRouteResolution) -> Option<MediaSessionRoute> {
+    match resolution {
+        DurableRouteResolution::Absent => None,
+        DurableRouteResolution::ActiveLocal(route)
+        | DurableRouteResolution::ActiveRemote(route)
+        | DurableRouteResolution::OwnerTransition(route)
+        | DurableRouteResolution::Terminal(route) => Some(route.clone()),
+    }
 }
 
 /// Renew one exact passive grant on the session's owner. `true` only when the

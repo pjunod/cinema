@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "protocol-chroma-asym-20261112",
+  "status": "Fixed before any output.",
+  "baseline": "protocol-roi-zeromean-qpm6-20261111.json arm_Z6 (identical_to protocol-roi-zeromean-20261111.json; dark block < 1.0 nit; zero-mean)",
+  "dark_offset": "-6 QP (qoffset -6/63)",
+  "arms": {
+    "C912": "x265-params: cbqpoffs=-9:crqpoffs=-12",
+    "C1212": "x265-params: cbqpoffs=-12:crqpoffs=-12"
+  },
+  "prediction": "ModelB one-code sensitivity Y/Cb/Cr 0.82/1.12/1.70 and 4 pixels per chroma sample give optimal offsets about -8.7/-12.3",
+  "receipts": "coded PPS cb/cr offsets, slice offsets zero",
+  "rate_rule": "as protocol-aq-psy-20261112.json",
+  "readouts": "as protocol-aq-psy-20261112.json plus shadow-mask Y/Cb/Cr code RMS",
+  "accept": "as protocol-aq-psy-20261112.json",
+  "author": "Fable 5.2 (design) for Claude Opus 5.5 session_01BCWLA1yYosvau4xhfH6R4S; verbatim from FABLE-EXPERIMENT-PLAN.md",
+  "landing_implementation": "land_rate.py: secant on b only, <=4 encodes, encoded packet average + measured authoring overhead (0.03 Mb/s on the Michael windows) in [128.5,130.0]; the final encode is then authored and its actual authored average must also fall in the band"
+}

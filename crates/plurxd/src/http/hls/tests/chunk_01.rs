@@ -159,14 +159,22 @@ fn a_new_play_mints_a_budget_and_every_continuation_inherits_one() {
 /// added to `http/hls/` without being listed here fails each scan instead
 /// of going unread by it. Test children (`tests.rs`, `tests/`) quote
 /// production code as literals and are not product sources.
-const HLS_PRODUCT_SOURCES: [(&str, &str); 22] = [
+const HLS_PRODUCT_SOURCES: [(&str, &str); 27] = [
     ("../hls.rs", include_str!("../../hls.rs")),
     ("hooks.rs", include_str!("../hooks.rs")),
     ("session_guard.rs", include_str!("../session_guard.rs")),
     ("create.rs", include_str!("../create.rs")),
+    (
+        "create/adaptive_retry.rs",
+        include_str!("../create/adaptive_retry.rs"),
+    ),
     ("relay.rs", include_str!("../relay.rs")),
     ("release.rs", include_str!("../release.rs")),
     ("control.rs", include_str!("../control.rs")),
+    (
+        "control/terminal_memory.rs",
+        include_str!("../control/terminal_memory.rs"),
+    ),
     ("preparation.rs", include_str!("../preparation.rs")),
     ("status.rs", include_str!("../status.rs")),
     ("response.rs", include_str!("../response.rs")),
@@ -190,7 +198,16 @@ const HLS_PRODUCT_SOURCES: [(&str, &str); 22] = [
     ),
     ("link_receipts.rs", include_str!("../link_receipts.rs")),
     ("prepared_link.rs", include_str!("../prepared_link.rs")),
+    (
+        "processed_upgrade.rs",
+        include_str!("../processed_upgrade.rs"),
+    ),
+    (
+        "processed_upgrade_qualification.rs",
+        include_str!("../processed_upgrade_qualification.rs"),
+    ),
     ("fence.rs", include_str!("../fence.rs")),
+    ("start_plan.rs", include_str!("../start_plan.rs")),
 ];
 
 mod source_inventory {
@@ -275,20 +292,9 @@ fn one_start_mints_one_recovery_epoch_for_both_the_session_and_the_row() {
         after_mint
             .matches("recovery_epoch: recovery_epoch.clone(),")
             .count(),
-        3,
-        "processed qualification, worker identity and activation share the one epoch"
-    );
-    let qualification = after_mint
-        .split_once("let recovery = crate::transcode::SessionRecoveryIdentity {")
-        .expect("processed qualification identity")
-        .1
-        .split_once(".prepare_processed_hdr10(")
-        .expect("processed qualification call")
-        .0;
-    assert!(qualification.contains("recovery_epoch: recovery_epoch.clone(),"));
-    assert!(
-        !qualification.contains("recovery_epoch_for("),
-        "processed qualification borrows the existing epoch and cannot remint"
+        2,
+        "worker identity and activation share the one epoch; the create mints no \
+             processed-qualification identity (plan ruling 3)"
     );
     // And the mint precedes placement, because the session that carries it
     // is built by the task the placement loop spawns.
@@ -304,48 +310,70 @@ fn one_start_mints_one_recovery_epoch_for_both_the_session_and_the_row() {
     );
 }
 
-/// A processed Auto candidate enhances an ordinary start the create has
-/// already resolved. Nothing that happens to the enhancement afterwards —
-/// not being admitted by the playback's evidence, the catalog refusing its
-/// row, or the worker finding its prepared graph gone — may turn that
-/// start into a refusal: each leaves the ordinary start in place and its
-/// reason on the plan notes, where the other Dolby Vision decisions are.
-///
-/// A control-flow property of the same `async fn` as the two above, pinned
-/// where it lives for the same reason.
+/// Processed Dolby Vision / HDR10-E is an upgrade after the first frame,
+/// never work before it (plan ruling 3). The create resolves the ordinary
+/// plan only: no processed trial, no `processed_qualification` phase in its
+/// ledger, and an applicable upgrade only *registered* for the session's
+/// first frame, after activation. The request-only gates the create does
+/// run can decline with a reason on the plan notes, never refuse the start.
+/// A dispatch that degrades a processed request (none should reach one now)
+/// still answers the ordinary request it carries.
 #[test]
-fn a_processed_candidate_that_cannot_be_adopted_or_consumed_degrades_with_its_reason() {
+fn the_create_runs_no_processed_work_before_the_first_frame() {
     let source = hls_product_source();
-    let qualification = source
-        .split_once(".prepare_processed_hdr10(")
-        .expect("processed qualification call")
+    assert!(
+        !source.contains("mark_create_phase(\"processed_qualification\")"),
+        "the create phase ledger has no processed_qualification phase"
+    );
+    // The trial runs only in processed_upgrade.rs, after a first frame.
+    let create = include_str!("../create.rs");
+    assert!(
+        !create.contains(".prepare_processed_upgrade(")
+            && !source.contains(".prepare_processed_hdr10("),
+        "the create never runs the processed trial"
+    );
+    assert!(include_str!("../processed_upgrade.rs").contains(".prepare_processed_upgrade("));
+    let gates = create
+        .split_once("let processed_upgrade_applies = if pinned_owner")
+        .expect("the create's processed gates")
         .1
-        .split_once("crate::media_pool::mark_create_phase(\"processed_qualification\");")
-        .expect("the qualification phase mark")
+        .split_once("let advertise_control")
+        .expect("the gates end before control advertisement")
         .0;
     assert!(
-        !qualification.contains("ApiError::"),
-        "no outcome of the enhancement may abort the ordinary start: {qualification}"
+        !gates.contains("ApiError::") && !gates.contains(".await"),
+        "the gates are synchronous and cannot refuse the ordinary start: {gates}"
     );
     assert_eq!(
-        qualification
+        gates
             .matches("plan_notes.push(processing_declined_note(")
             .count(),
-        2,
-        "a candidate not adopted and a qualification refused each leave their reason"
+        1,
+        "a declined upgrade leaves its reason on the start it answers"
     );
+    let registration = create
+        .split_once("if published_route.owner_node_id == state.node_id {")
+        .expect("the owner-local activation tail")
+        .1;
     assert!(
-        qualification.contains("ordinary_link_source_binding = link_source_binding.take();"),
-        "the ordinary candidate's link binding is kept for a dispatch that degrades"
+        registration
+            .split_once("Ok(Json(response))")
+            .expect("the answer")
+            .0
+            .contains("super::processed_upgrade::register("),
+        "an applicable upgrade waits for the first frame on the owning node"
     );
     let degraded = source
-            .split_once("crate::media_pool::mark_create_phase(\"dispatch\");")
-            .expect("the completed dispatch phase")
-            .1
-            .split_once("    if owner_node_id == state.node_id {")
-            .expect("the activation that follows dispatch")
-            .0;
-    assert!(degraded.contains("(degraded_processing, processing_note)"), "the worker result carries its degrade reason and processing note");
+        .split_once("crate::media_pool::mark_create_phase(\"dispatch\");")
+        .expect("the completed dispatch phase")
+        .1
+        .split_once("    if owner_node_id == state.node_id {")
+        .expect("the activation that follows dispatch")
+        .0;
+    assert!(
+        degraded.contains("(degraded_processing, processing_note)"),
+        "the worker result carries its degrade reason and processing note"
+    );
     assert!(degraded.contains("if let Some(reason) = degraded_processing {"));
     for restored in [
         "plan_notes.push(processing_declined_note(&reason));",
@@ -360,6 +388,55 @@ fn a_processed_candidate_that_cannot_be_adopted_or_consumed_degrades_with_its_re
             "a degraded dispatch answers and records the ordinary request: {restored}"
         );
     }
+    assert_eq!(
+        super::create::processing_declined_note("the graph expired"),
+        "Dolby Vision processing declined: the graph expired"
+    );
+}
+
+/// A declined enhancement leaves ordinary playback in place. The trial now
+/// runs after the first frame; its decline and staging outcomes carry their
+/// reasons on the upgrade run instead of the original HTTP start.
+#[test]
+fn a_processed_candidate_that_cannot_be_adopted_or_consumed_degrades_with_its_reason() {
+    let source = include_str!("../processed_upgrade.rs");
+    let trial = source
+        .split_once("let trial = match trial {")
+        .expect("processed trial result")
+        .1
+        .split_once("let crate::transcode::ProcessedUpgradeTrial")
+        .expect("only a successful trial supplies the prepared output")
+        .0;
+    assert!(trial.contains("run.skipped(&reason);"));
+    assert!(trial.contains("return \"declined\";"));
+    assert!(trial.contains("the ordinary session keeps playing"));
+
+    let catalog = source
+        .split_once("let Some(context) = processed.candidate_context.as_deref().cloned() else {")
+        .expect("processed candidate context must still be current")
+        .1
+        .split_once("state.transcode.remember_processed_candidate(&processed);")
+        .expect("retain only a candidate with current context and catalogue adoption")
+        .0;
+    assert!(catalog.contains(
+        "run.skipped(\"the verified processing recipe has no current candidate context\");"
+    ));
+    assert!(catalog.contains("if let Err(reason) = upserted {"));
+    assert!(catalog.contains("run.skipped(reason);"));
+    assert!(catalog.contains("return \"admission_refused\";"));
+
+    let staging = source
+        .split_once("pub(super) fn finish_staging(")
+        .expect("staging outcome reports the upgrade result")
+        .1
+        .split_once("fn wait_again(")
+        .expect("staging outcome is separate from retry")
+        .0;
+    assert!(staging.contains("PreparationStageOutcome::Refused(_)"));
+    assert!(staging
+        .contains("the verified reconstruction could not be staged for the current playback"));
+    assert!(staging.contains("\"not_staged\""));
+    assert!(source.contains("run.finish_staging(staged)"));
     assert_eq!(
         super::create::processing_declined_note("the graph expired"),
         "Dolby Vision processing declined: the graph expired"
@@ -1020,8 +1097,10 @@ async fn active_durable_route_without_local_worker_maps_to_owner_transition() {
         typeless_playlist: true,
         library_channel: None,
         request: crate::transcode::SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -1736,7 +1815,12 @@ async fn cancelling_public_delete_does_not_cancel_its_admitted_cleanup_owner() {
         }
     })
     .await
-    .expect("detached DELETE cleanup survives caller cancellation");
+    .unwrap_or_else(|_| {
+        panic!(
+            "detached DELETE cleanup survives caller cancellation: {}",
+            fixture.worker_retirement_debug(&session_id)
+        )
+    });
 }
 
 #[tokio::test]
@@ -2216,8 +2300,10 @@ async fn terminal_control_cancellation_and_reaper_preserve_one_durable_reply() {
         typeless_playlist: true,
         library_channel: None,
         request: crate::transcode::SessionRequest {
+            source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -2501,8 +2587,10 @@ async fn settled_rolling_and_vod_routes_replay_the_durable_terminal_ack() {
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                source_telemetry: None,
                 dv_processing_destination: None,
                 sdr_master_codecs: None,
+                dv_refit_digest: None,
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,

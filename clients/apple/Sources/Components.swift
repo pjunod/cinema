@@ -102,6 +102,17 @@ struct PosterCard: View {
 
                 cardBadges
 
+                if item.hasOffloadedLeaves {
+                    Text(item.isOffloaded ? "Offloaded" : "\(item.rollup?.offloaded ?? 0) offloaded")
+                        .font(.system(.caption2, design: .rounded).weight(.bold))
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Palette.surfaceHi))
+                        .foregroundColor(Palette.muted)
+                        .padding(6)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .accessibilityLabel("Offloaded")
+                }
+
                 let fraction = progressFraction(item.watch, runtimeMs: item.runtimeMs)
                 if fraction > 0, fraction < 0.98 {
                     GeometryReader { geometry in
@@ -118,19 +129,29 @@ struct PosterCard: View {
                 }
             }
             .aspectRatio(2 / 3, contentMode: .fit)
+            // Offloaded: the files are gone, the title stays — dimmed, not hidden.
+            .opacity(item.isOffloaded ? 0.5 : 1)
 
+            #if os(tvOS)
+            // One title line and one quiet line: a medium row is short
+            // enough that two rows fit on the screen.
             Text(item.title)
-                #if os(tvOS)
-                .font(.callout.weight(.semibold))
-                #else
-                .font(.callout.weight(.semibold))
-                #endif
+                .font(.system(size: 22, weight: .semibold))
                 .foregroundColor(Palette.onBg)
-                #if os(tvOS)
-                .lineLimit(2, reservesSpace: true)
-                #else
                 .lineLimit(1)
-                #endif
+            let quiet = [cardShelfMetadata(item), resolutionLabel(item.resolution) ?? ""]
+                .filter { !$0.isEmpty }.joined(separator: " · ")
+            if !quiet.isEmpty {
+                Text(quiet)
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundColor(Palette.muted)
+                    .lineLimit(1)
+            }
+            #else
+            Text(item.title)
+                .font(.callout.weight(.semibold))
+                .foregroundColor(Palette.onBg)
+                .lineLimit(1)
             let metadata = cardShelfMetadata(item)
             if let episodeBadges = posterCardEpisodeSummaryBadges(item) {
                 if !metadata.isEmpty {
@@ -165,12 +186,9 @@ struct PosterCard: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .foregroundColor(Palette.muted)
-                #if os(tvOS)
-                .lineLimit(2)
-                #else
                 .lineLimit(1)
-                #endif
             }
+            #endif
         }
         .frame(width: width, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
@@ -255,12 +273,16 @@ struct LandscapeCard: View {
     private var continueWatchingCopy: some View {
         Text(landscapeCardShowTitle(item) ?? item.title)
             #if os(tvOS)
-            .font(.callout.weight(.semibold))
+            .font(.system(size: 22, weight: .semibold))
             #else
             .font(.headline.weight(.semibold))
             #endif
             .foregroundColor(Palette.onBg)
+            #if os(tvOS)
+            .lineLimit(1)
+            #else
             .lineLimit(2)
+            #endif
 
         VStack(alignment: .leading, spacing: 5) {
             let detail = continueWatchingDetail(item)
@@ -275,12 +297,30 @@ struct LandscapeCard: View {
                     .multilineTextAlignment(.trailing)
             }
         }
+        #if os(tvOS)
+        .font(.system(size: 22, weight: .medium))
+        #else
         .font(.system(.caption, design: .rounded).weight(.medium))
+        #endif
         .foregroundColor(Palette.muted)
     }
 
     @ViewBuilder
     private var standardLandscapeCopy: some View {
+        #if os(tvOS)
+        Text(landscapeCardShowTitle(item) ?? item.title)
+            .font(.system(size: 22, weight: .semibold))
+            .foregroundColor(Palette.onBg)
+            .lineLimit(1)
+        let quiet = [landscapeCardShowTitle(item) != nil ? item.title : "", cardShelfMetadata(item)]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
+        // Always one quiet line, so landscape rows keep a single height.
+        Text(quiet.isEmpty ? " " : quiet)
+            .font(.system(size: 22, weight: .medium))
+            .foregroundColor(Palette.muted)
+            .lineLimit(1)
+            .accessibilityHidden(quiet.isEmpty)
+        #else
         Text(landscapeCardShowTitle(item) ?? item.title)
             #if os(tvOS)
             .font(.callout.weight(.semibold))
@@ -316,10 +356,14 @@ struct LandscapeCard: View {
                 .hidden()
                 .accessibilityHidden(true)
         }
+        #endif
     }
 }
 
 struct EpisodeCard: View {
+    #if os(tvOS)
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    #endif
     let item: Item
     var width: CGFloat = shelfLandscapeWidth
     var isStarting = false
@@ -338,16 +382,32 @@ struct EpisodeCard: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(episodeCardPlayAccessibilityLabel(item))
             .accessibilityValue(tvEpisodeCardAccessibilityValue(item, isStarting: isStarting))
+            .accessibilityIdentifier("episode-card:\(item.id)")
             .modifier(RemoteEpisodePlayModifier(shelf: remoteShelf, item: item, onPlay: onPlay))
-            NavigationLink(value: Route.item(item.id)) {
-                Label("Episode details", systemImage: "info.circle")
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            // Select plays; a long press offers the details page. One focus
+            // stop per episode instead of a second button under every card.
+            .contextMenu {
+                Button {
+                    navigation.navigate(to: .item(item.id))
+                } label: {
+                    Label("Episode details", systemImage: "info.circle")
+                }
+                .accessibilityLabel(episodeCardDetailsAccessibilityLabel(item))
+                .accessibilityIdentifier("episode-details:\(item.id)")
             }
-            .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
-            .accessibilityLabel(episodeCardDetailsAccessibilityLabel(item))
-            .accessibilityIdentifier("episode-details:\(item.id)")
-            .modifier(RemoteEpisodeDetailsModifier(shelf: remoteShelf, item: item))
-        }.frame(width: width, alignment: .leading)
+        }
+        .frame(width: width, alignment: .leading)
+        // The phone remote's details key stays registered and still
+        // navigates. It hangs off the card's (unfocusable) stack rather than
+        // the button: a registration inside the button would observe the
+        // button's focus and report its details key as focused, racing the
+        // play key. Zero size, so it is never a spatial or native stop.
+        .background(alignment: .topLeading) {
+            Color.clear
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+                .modifier(RemoteEpisodeDetailsModifier(shelf: remoteShelf, item: item, managesFocus: false))
+        }
         #else
         VStack(alignment: .leading, spacing: 8) {
             Button {
@@ -442,12 +502,29 @@ struct EpisodeCard: View {
     private var copy: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(episodeCardTitle(item))
+                #if os(tvOS)
+                .font(.system(size: 22, weight: .semibold))
+                #else
                 .font(.callout.weight(.semibold))
+                #endif
                 .foregroundColor(Palette.onBg)
                 .lineLimit(1)
+            #if os(tvOS)
+            if let overview = item.overview, !overview.isEmpty {
+                Text(overview)
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundColor(Palette.muted)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            #endif
 
             Text(episodeCardMeta(item))
+                #if os(tvOS)
+                .font(.system(size: 22, weight: .medium))
+                #else
                 .font(.system(.caption, design: .monospaced))
+                #endif
                 .foregroundColor(Palette.muted)
                 .lineLimit(1)
 
@@ -470,9 +547,10 @@ private struct RemoteEpisodeDetailsModifier: ViewModifier {
     @EnvironmentObject private var navigation: RemoteNavigationCoordinator
     let shelf: String?
     let item: Item
+    var managesFocus = true
     func body(content: Content) -> some View {
         if let shelf {
-            content.remoteControl(shelf + ":details:\(item.id)", label: "Details for " + item.title) {
+            content.remoteControl(shelf + ":details:\(item.id)", label: "Details for " + item.title, managesFocus: managesFocus) {
                 navigation.navigate(to: .item(item.id))
             }
         } else { content }
@@ -681,7 +759,7 @@ struct MediaRow: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text(title)
                         #if os(tvOS)
-                        .font(.title3.weight(.semibold))
+                        .font(.system(size: 30, weight: .semibold))
                         #else
                         .font(.headline.weight(.semibold))
                         #endif

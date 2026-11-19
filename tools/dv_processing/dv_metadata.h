@@ -133,7 +133,8 @@ static inline bool dv_map_metadata(const AVDOVIMetadata *data, size_t size,
     if (!isfinite(result.dovi.nonlinear_offset[comp]) ||
         (fel && (!isfinite(result.dovi.nlq[comp].offset) ||
                  !isfinite(result.dovi.nlq[comp].deadzone_slope) ||
-                 !isfinite(result.dovi.nlq[comp].deadzone_threshold))))
+                 !isfinite(result.dovi.nlq[comp].deadzone_threshold) ||
+                 !isfinite(result.dovi.nlq[comp].hdr_in_max))))
       return false;
     const AVDOVIReshapingCurve *curve = &m->curves[comp];
     for (int i = 0; i < curve->num_pivots; i++)
@@ -170,5 +171,35 @@ static inline bool dv_map_decoded_metadata(const AVFrame *frame, int profile,
   const AVFrameSideData *side =
       av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
   return side && dv_map_metadata((const void *)side->data, side->size, profile, fel, out);
+}
+
+// Reconstruction composes the master; it is not a colour conversion. Both
+// renderers give libplacebo ONE description for the composed picture and for
+// the texture it lands in: BT.2020 PQ, 0.005-10000 nits, nothing else, the
+// description the native player reconstructs with
+// (plurx_dv_reconstruction_color). With equal descriptions
+// pl_shader_color_map_ex returns before its tone map, so every composed code,
+// true black included, reaches the master unchanged.
+//
+// The description is never the stream's. pl_map_avframe_ex fills a frame's
+// colour from the RPU and the HDR10 side data (L1, mastering display,
+// MaxCLL); any of it makes the two sides unequal and runs the colour map.
+// Under PL_HDR_METADATA_NONE that map reads the source black as zero,
+// whatever min_luma the source states, and always honours the destination's:
+// the difference is compensated as flare. Black rises to the destination
+// minimum, and every channel below a pixel's largest is pulled up toward it.
+// Black-level adaptation belongs to display mapping (dv_target_render), at
+// the target minimum.
+//
+// The two sides are equal because one value is assigned to both, here and
+// nowhere else; the luminance range is then a label no shader reads. Nothing
+// at run time checks the outcome: controls/test_base_master_black.c does, on
+// the pixels, in every image build.
+static inline void dv_master_frames(struct pl_frame *source,
+                                    struct pl_frame *destination) {
+  struct pl_color_space master = pl_color_space_hdr10;
+  master.hdr.max_luma = 10000;
+  master.hdr.min_luma = 0.005;
+  source->color = destination->color = master;
 }
 #endif

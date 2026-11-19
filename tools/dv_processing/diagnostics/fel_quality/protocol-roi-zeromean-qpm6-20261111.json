@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "written_utc": "2026-11-11T17:50:00Z",
+  "author": "Claude Opus 5.5, session_01BCWLA1yYosvau4xhfH6R4S",
+  "status": "Fixed after arm Z's all-48 lattice and component-swap readouts, before any output of this arm. One arm; the last arm in this series whatever its outcome.",
+  "motivation": "Arm Z passes the selected-frame bar but its Michael5400 all-48 sampled shadow p99 beats F in only 38/48 ModelB frames. On the residual frames, exact UV with Z's Y, or exact Y with Z's UV, each beats F in 48/48 frames, so the remaining loss is joint Y+UV coding error in dark blocks with no new mechanism: the dose is too small.",
+  "hypothesis": "Doubling the dark-block reduction to -6 QP (half the quantizer step), still zero-mean, removes the residual frames without failing the rate screen.",
+  "arm_Z6": {
+    "identical_to": "protocol-roi-zeromean-20261111.json arm_Z except dark_offset",
+    "dark_offset": "-6 QP (qoffset -6/63)",
+    "other_offset": "+min(6, 6*c/(1-c)) QP",
+    "prefix": "<fixture>-roi-dark1nit-zeromean-qpm6"
+  },
+  "readouts": {
+    "admission": "Unchanged selected-frame strict bar plus 130 Mb/s authored screen, both fixtures.",
+    "declared_generalization_readout": "Michael5400 all-48 sampled lattice (protocol-lattice-michael5400-20261111.json): count of frames whose sampled reference<0.1-nit p99 and mean and full mean are all below F, per model. Reported beside arm Z and the baseline; descriptive, not an admission change."
+  },
+  "not_claimed": ["perceptual metric", "HRD/CPB conformance", "held-out scenes", "playback, packaging or live change"]
+}

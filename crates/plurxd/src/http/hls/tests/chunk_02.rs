@@ -544,7 +544,10 @@ async fn subtitles_cold_segment_is_empty_nonblocking_then_serves_one_window_flig
             .await
             .expect("empty VTT body")
             .to_bytes();
-        assert_eq!(body.as_ref(), b"WEBVTT\n\n");
+        assert_eq!(
+            body.as_ref(),
+            b"WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n"
+        );
     }
 
     let missing = subtitle_vtt_local_before_with_source(
@@ -1781,8 +1784,8 @@ mod seek_coalescing {
             .to_bytes();
         assert_eq!(
             body.as_ref(),
-            b"WEBVTT\n\n",
-            "the unchanged empty fallback still answers"
+            b"WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:5400000,LOCAL:00:00:00.000\n\n",
+            "the empty fallback maps to the requested segment on the video timeline"
         );
         assert_eq!(
             source.window_runs(),
@@ -1827,13 +1830,17 @@ mod seek_coalescing {
         let cold = subtitle_segment(&fixture.state, wait_session, 1, source.as_ref()).await;
         assert_eq!(cold.status(), StatusCode::OK);
         assert_eq!(
+            cold.headers().get(header::CACHE_CONTROL),
+            Some(&axum::http::HeaderValue::from_static("no-store"))
+        );
+        assert_eq!(
             cold.into_body()
                 .collect()
                 .await
                 .expect("cold body")
                 .to_bytes()
                 .as_ref(),
-            b"WEBVTT\n\n",
+            b"WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:5400000,LOCAL:00:00:00.000\n\n",
             "a request that finds no live flight does not stand still for one"
         );
         producer_started(source.as_ref()).await;
@@ -1901,7 +1908,7 @@ mod seek_coalescing {
                 .expect("empty body")
                 .to_bytes()
                 .as_ref(),
-            b"WEBVTT\n\n"
+            b"WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:5400000,LOCAL:00:00:00.000\n\n"
         );
         // Both bounds. The ceiling alone passes with the wait deleted,
         // and "it did not wait at all" is precisely what this test is
@@ -1953,7 +1960,7 @@ mod seek_coalescing {
                 .expect("empty body")
                 .to_bytes()
                 .as_ref(),
-            b"WEBVTT\n\n"
+            b"WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:5400000,LOCAL:00:00:00.000\n\n"
         );
         assert_eq!(
             crate::subtitles::sidecar_state(&fixture.state.subs_dir, &file, 0).await,
@@ -2496,8 +2503,10 @@ async fn staging_route_with_incumbent_on(
         .expect("staging user");
     let incarnation_id = uuid::Uuid::new_v4().to_string();
     let predecessor_request = crate::transcode::SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,

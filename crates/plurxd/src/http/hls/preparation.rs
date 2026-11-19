@@ -187,6 +187,12 @@ impl PendingCandidateGuard {
         }
     }
 
+    /// Set once the successor this candidate planned is registered; see
+    /// [`AcceptedAsk::planning_registration`].
+    pub(super) fn registration(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.registered)
+    }
+
     pub(super) fn cancellation_token(&self) -> tokio_util::sync::CancellationToken {
         self.cancelled.clone()
     }
@@ -242,6 +248,87 @@ impl Drop for PendingCandidateGuard {
             pending.remove(&self.playback_id);
         }
     }
+}
+
+/// The ask a processed upgrade claims the playback's pending slot under. No
+/// exchange's desired digest ever equals it, so an upgrade never makes the
+/// emit rule answer `staging` about work the viewer did not ask for.
+pub(super) const PROCESSED_UPGRADE_ASK: &str = "processed-upgrade";
+
+/// Claim the playback's one pending-candidate slot for a processed upgrade,
+/// only if nothing holds it: a viewer's own change in flight, or a successor
+/// already registered for the playback, keeps it. Checked and claimed under
+/// the one lock, so an upgrade never cancels a viewer's ask; a viewer's ask
+/// arriving later overwrites (and so cancels) the upgrade's claim, exactly as
+/// it would an older ask of its own.
+///
+/// The claim's token is a child of `run`, the upgrade's own cancellation: a
+/// release or a newer session for the playback cancels the run, and with it
+/// this claim, which is the token the trial races and the staged successor
+/// registers under. Cancellation therefore reaches every phase through the
+/// phase's own exit path, and the upgrade's future is never dropped while
+/// staging holds a half-registered successor.
+/// Whether the playback's one pending-candidate slot is held: by a viewer's
+/// own change in flight or by a registered successor. A processed upgrade
+/// waits rather than being spent against a held slot.
+pub(super) fn preparation_slot_held(playback_id: &str) -> bool {
+    active_prepared_successors()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .any(|active| active.preparation.playback_id == playback_id)
+        || pending_preparation_candidates()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(playback_id)
+            .is_some_and(|entry| !entry.cancelled.is_cancelled())
+}
+
+pub(super) fn begin_processed_upgrade(
+    playback_id: &str,
+    run: &tokio_util::sync::CancellationToken,
+) -> Option<PendingCandidateGuard> {
+    let successor_registered = active_prepared_successors()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .any(|active| active.preparation.playback_id == playback_id);
+    if successor_registered {
+        return None;
+    }
+    let claim = NEXT_PENDING_CANDIDATE_CLAIM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let cancelled = run.child_token();
+    let registered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut pending = pending_preparation_candidates()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if run.is_cancelled()
+            || pending
+                .get(playback_id)
+                .is_some_and(|entry| !entry.cancelled.is_cancelled())
+        {
+            return None;
+        }
+        pending.insert(
+            playback_id.to_owned(),
+            PendingPreparationCandidate {
+                claim,
+                registered: Arc::clone(&registered),
+                desired_digest: PROCESSED_UPGRADE_ASK.to_owned(),
+                quality_intent: None,
+                cancelled: cancelled.clone(),
+            },
+        );
+    }
+    Some(PendingCandidateGuard {
+        playback_id: playback_id.to_owned(),
+        claim,
+        quality_intent: None,
+        registered,
+        settlement: None,
+        cancelled,
+    })
 }
 
 /// The desired digest a pending candidate is being built for, if one is.
@@ -563,6 +650,8 @@ pub(super) async fn settle_cancelled_preparation(
 
 fn spawn_cancelled_preparation(active: ActivePreparedSuccessor, reason: &'static str) {
     active.cancelled.cancel();
+    // A successor that will never present has no upgrade to wait for.
+    super::processed_upgrade::cancel_for_session(&active.preparation.session_id);
     tokio::spawn(settle_cancelled_preparation(active, reason));
 }
 
@@ -868,6 +957,7 @@ pub(super) fn cancel_preparations_for_superseded_predecessor(
     playback_id: &str,
     keep: Option<&str>,
 ) {
+    super::processed_upgrade::cancel_for_playback(playback_id, keep);
     cancel_pending_candidate(playback_id);
     for active in take_active_preparations_for_playback(playback_id) {
         if keep.is_some_and(|keep| keep == active.preparation.incarnation_id) {
@@ -937,47 +1027,83 @@ impl Drop for ReservedPreparationGuard {
     }
 }
 
+/// How a reservation that did not produce a guard ended.
+enum ReservationEnd {
+    Refused(PreparationStageRefusal),
+    /// The reservation answered `false` because an outside cancellation (a
+    /// foreground watch, a newer claim) had already landed: not a refusal.
+    Cancelled,
+}
+
 async fn reserve_preparation_before(
     active: ActivePreparedSuccessor,
-) -> Option<ReservedPreparationGuard> {
+) -> Result<ReservedPreparationGuard, ReservationEnd> {
     let (send, receive) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        if active
-            .executor
-            .reserve(&active.preparation)
-            .await
-            .is_ok_and(|reserved| reserved)
-        {
-            let _ = send.send(ReservedPreparationGuard::new(active));
-        } else {
-            settle_cancelled_preparation(active, "prepared successor reservation refused").await;
+        let result = active.executor.reserve(&active.preparation).await;
+        match result {
+            Ok(true) => {
+                let _ = send.send(Ok(ReservedPreparationGuard::new(active)));
+            }
+            refused => {
+                // Read before the settlement below, which cancels this same
+                // token itself and would make every refusal look cancelled.
+                let cancelled = matches!(refused, Ok(false)) && active.cancelled.is_cancelled();
+                let end = if cancelled {
+                    ReservationEnd::Cancelled
+                } else if refused.is_err() {
+                    ReservationEnd::Refused(PreparationStageRefusal::ReservationError)
+                } else {
+                    ReservationEnd::Refused(PreparationStageRefusal::ReservationRefused)
+                };
+                // Keep the original cleanup-before-return ordering. The outer
+                // budget covers reservation and this exact owner's settlement.
+                settle_cancelled_preparation(active, "prepared successor reservation refused")
+                    .await;
+                let _ = send.send(Err(end));
+            }
         }
     });
-    tokio::time::timeout(PREPARATION_STORE_BUDGET, receive)
-        .await
-        .ok()
-        .and_then(Result::ok)
+    match tokio::time::timeout(PREPARATION_STORE_BUDGET, receive).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(ReservationEnd::Refused(
+            PreparationStageRefusal::ReservationTaskClosed,
+        )),
+        Err(_) => Err(ReservationEnd::Refused(
+            PreparationStageRefusal::ReservationSettlementDeadline,
+        )),
+    }
 }
 
 async fn activate_preparation_before(
     guard: ReservedPreparationGuard,
-) -> Option<ReservedPreparationGuard> {
+) -> Result<ReservedPreparationGuard, PreparationStageRefusal> {
     let (send, receive) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let active = guard.active();
-        if active
-            .executor
-            .activate_reserved(&active.preparation)
-            .await
-            .is_ok_and(|activated| activated)
-        {
-            let _ = send.send(guard);
+        let result = active.executor.activate_reserved(&active.preparation).await;
+        match result {
+            Ok(true) => {
+                let _ = send.send(Ok(guard));
+            }
+            refused => {
+                let reason = if refused.is_err() {
+                    PreparationStageRefusal::ActivationError
+                } else {
+                    PreparationStageRefusal::ActivationRefused
+                };
+                // Publish the observed failure before this guard's own cleanup
+                // cancels the child. A closed receiver still drops the same guard.
+                let _ = send.send(Err(reason));
+                drop(guard);
+            }
         }
     });
-    tokio::time::timeout(PREPARATION_STORE_BUDGET, receive)
-        .await
-        .ok()
-        .and_then(Result::ok)
+    match tokio::time::timeout(PREPARATION_STORE_BUDGET, receive).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(PreparationStageRefusal::ActivationTaskClosed),
+        Err(_) => Err(PreparationStageRefusal::ActivationDeadline),
+    }
 }
 
 /// Last delivered selection of each *playback*, so a session that replaces
@@ -1240,6 +1366,109 @@ pub(super) fn preserve_prepared_audio(
         *aac = matches!(audio.action, AudioAction::Encode { .. });
     }
     Ok(())
+}
+
+/// Preserve the actual user quality mode. A delayed enhancement can pin an
+/// Auto representation, but cannot manufacture Manual or Original intent.
+pub(super) fn qualified_upgrade_selection(
+    selection: &crate::playback_control::ClientSelection,
+    height: u32,
+) -> crate::playback_control::ClientSelection {
+    let mut selection = selection.clone();
+    if matches!(
+        selection.quality,
+        crate::playback_control::QualitySelection::Auto { .. }
+    ) {
+        selection.quality = crate::playback_control::QualitySelection::Auto {
+            height: Some(i64::from(height)),
+            candidate_id: None,
+        };
+    }
+    selection
+}
+
+/// Re-resolve a completed FEL qualification against the current authority and
+/// this exchange's actual user selection. The old binding is never patched:
+/// qualification changes probe_json, so every candidate/recipe identity must
+/// come from the normal planner again.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn replan_qualified_upgrade(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    predecessor: &RemoteStartRequest,
+    selection: &crate::playback_control::ClientSelection,
+    delivered: &crate::playback_control::EffectiveSelection,
+    capabilities: Option<&crate::playback_control::DynamicCapabilities>,
+    source: &MediaFile,
+    previous_target_height: u32,
+) -> Result<crate::transcode::SessionRequest, String> {
+    let mut recipe = predecessor.clone();
+    if let Ok(start) = serde_json::from_str::<StartResponse>(&route.response_json) {
+        if let Some(audio) = start.delivered_audio {
+            recipe.request.audio_delivery = Some(audio);
+        }
+    }
+    let selection = qualified_upgrade_selection(selection, previous_target_height);
+    let mut caps = recipe
+        .request
+        .candidate_context
+        .as_ref()
+        .and_then(|context| context.canonical_caps.clone());
+    // The durable route retained the full audio/sink claims. Runtime decoder
+    // snapshots update video/display only, exactly as ordinary preparation.
+    if caps.is_none() {
+        caps = retained_planning_caps(&route.response_json);
+    }
+    if let Some(runtime) = capabilities {
+        recipe.presentation_target = runtime.presentation_target;
+        if let Some(snapshot) = runtime.decoder_caps.as_ref() {
+            if !snapshot.video.iter().any(|entry| entry.available) {
+                return Err("this display no longer reports an available decoder".into());
+            }
+            recipe.decoder_caps = Some(snapshot.clone());
+            if let Some(caps) = caps.as_mut() {
+                caps.video = snapshot.device_caps().video;
+            }
+        }
+        if let Some(display) = caps.as_mut().and_then(|caps| caps.display.as_mut()) {
+            display.presentation_target = runtime.presentation_target;
+        }
+    }
+    if caps.is_none() {
+        return Err("the accepted playback capabilities cannot be reconstructed".into());
+    }
+    let overrides = retained_planning_overrides(&route.response_json);
+    let (fresh, _) = plan_preparation_with_candidate(
+        state,
+        &recipe,
+        caps.as_ref(),
+        overrides.as_ref(),
+        &selection,
+        source,
+        delivered.height,
+    )
+    .await
+    .map_err(|_| "the current playback representation could not be freshly planned")?;
+    let target = fresh
+        .candidate_context
+        .as_ref()
+        .map(|context| context.selected_candidate.target_height);
+    if fresh.file_id != recipe.request.file_id
+        || fresh.playback_id != recipe.request.playback_id
+        || fresh.presentation != recipe.request.presentation
+        || fresh.kind.copy_contract() != recipe.request.kind.copy_contract()
+        || fresh.audio_index != recipe.request.audio_index
+        || fresh.audio_offset_ms != recipe.request.audio_offset_ms
+        || fresh.audio_delivery != recipe.request.audio_delivery
+        || fresh.subtitle_burn != recipe.request.subtitle_burn
+        || fresh.hdr10 != recipe.request.hdr10
+        || target != Some(previous_target_height)
+    {
+        return Err(
+            "fresh planning would change the current representation or selected tracks".into(),
+        );
+    }
+    Ok(fresh)
 }
 
 #[cfg(test)]
@@ -1572,6 +1801,7 @@ async fn plan_preparation_with_candidate(
     .then_some(selection.subtitle.track)
     .flatten();
     let body = CreateSession {
+        source_telemetry: Some(crate::transcode::SourceTelemetry::FilmV1),
         playback_id: predecessor.request.playback_id.clone(),
         request_id: None,
         control_sequence: None,
@@ -1648,6 +1878,10 @@ async fn plan_preparation_with_candidate(
         Some(review),
         body,
         bootstrap.then_some(delivered_height),
+        predecessor
+            .candidate_catalog
+            .as_ref()
+            .is_some_and(|catalog| catalog.candidate.processed_dv),
     )
     .await?;
     if bootstrap
@@ -1687,7 +1921,7 @@ async fn plan_preparation_with_candidate(
     let plan_height = plan.height;
     let selected_candidate = plan.selected_candidate;
     let mut resolved = plan.request;
-    validate_hevc_copy_transport(state, source, caps, &resolved).await?;
+    validate_hevc_copy_transport(state, source, caps, &resolved, None).await?;
     // The same guard ordinary create runs, on the same function. This path
     // reaches `resolve_plan` directly and therefore skipped it entirely: a
     // successor prepared for an HDR delivery could be staged as a burn that
@@ -2289,6 +2523,24 @@ pub(super) async fn stage_prepared_successor(
     .await;
 }
 
+/// The public and coordination identities a prepared successor is staged
+/// under. Minted here for every ordinary preparation; a processed upgrade
+/// mints them before its trial, because the trial's request and its held root
+/// already name the successor they were verified for.
+pub(super) struct StagedSuccessorIds {
+    pub(super) incarnation_id: String,
+    pub(super) session_id: String,
+}
+
+impl StagedSuccessorIds {
+    pub(super) fn mint() -> Self {
+        Self {
+            incarnation_id: uuid::Uuid::new_v4().to_string(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn stage_prepared_successor_with_prime(
     state: &AppState,
@@ -2302,22 +2554,169 @@ pub(super) async fn stage_prepared_successor_with_prime(
     accepted: AcceptedAsk,
     prime_worker: bool,
 ) {
+    stage_prepared_successor_as(
+        state,
+        session_id,
+        route,
+        predecessor,
+        candidate,
+        source,
+        successor_owner,
+        purpose,
+        accepted,
+        prime_worker,
+        StagedSuccessorIds::mint(),
+    )
+    .await;
+}
+
+/// The staging result is a lifecycle decision, not just a success bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreparationStageOutcome {
+    Staged,
+    Cancelled,
+    Refused(PreparationStageRefusal),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreparationStageRefusal {
+    SettingUnavailable,
+    Disabled,
+    QualityIntentUnavailable,
+    RelocationSuperseded,
+    NoLocalWorkerGate,
+    SourceUnavailable,
+    PrincipalUnsupported,
+    RecipeSerialization,
+    ResponseSerialization,
+    PlanningCapsSerialization,
+    PlanningOverridesSerialization,
+    ReservationRefused,
+    ReservationError,
+    ReservationTaskClosed,
+    ReservationSettlementDeadline,
+    PrimeFailed,
+    PrimeNotReady,
+    ActivationRefused,
+    ActivationError,
+    ActivationTaskClosed,
+    ActivationDeadline,
+    UnprimedRefused,
+    UnprimedError,
+    UnprimedDeadline,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PreparationStageCancellation {
+    QualityIntent,
+    BeforeReservation,
+    Reservation,
+    Prime,
+    PrimeReadiness,
+    Activation,
+}
+
+impl PreparationStageOutcome {
+    fn refused(session_id: &str, reason: PreparationStageRefusal) -> Self {
+        tracing::info!(target: "plurxd::http::hls",
+            session = %crate::transcode::session_log_id(session_id),
+            outcome = "refused", ?reason, "prepared successor staging ended");
+        crate::playback_control::record_preparation_staged(false);
+        Self::Refused(reason)
+    }
+
+    fn cancelled(session_id: &str, reason: PreparationStageCancellation) -> Self {
+        tracing::info!(target: "plurxd::http::hls",
+            session = %crate::transcode::session_log_id(session_id),
+            outcome = "cancelled", ?reason, "prepared successor staging ended");
+        crate::playback_control::record_preparation_staged(false);
+        Self::Cancelled
+    }
+}
+
+/// Delivery truth captured from the exact verified processing root before it
+/// is handed to the staged incarnation. A requested destination or descriptive
+/// candidate never supplies these facts.
+#[derive(Clone, Copy)]
+pub(super) struct StagedProcessingDelivery {
+    pub(super) dolby_vision_profile: Option<u8>,
+    pub(super) fel: Option<bool>,
+}
+
+/// [`stage_prepared_successor_with_prime`] under identities the caller minted.
+/// Preserve cancellation separately from a refused preparation: a live processed
+/// upgrade displaced by incumbent demand waits for its next rendering exchange.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn stage_prepared_successor_as(
+    state: &AppState,
+    session_id: &str,
+    route: &MediaSessionRoute,
+    predecessor: &RemoteStartRequest,
+    candidate: &crate::transcode::SessionRequest,
+    source: Option<&plurx_core::domain::MediaFile>,
+    successor_owner: &str,
+    purpose: PreparationPurpose,
+    accepted: AcceptedAsk,
+    prime_worker: bool,
+    ids: StagedSuccessorIds,
+) -> PreparationStageOutcome {
+    stage_prepared_successor_with_delivery_as(
+        state,
+        session_id,
+        route,
+        predecessor,
+        candidate,
+        source,
+        successor_owner,
+        purpose,
+        accepted,
+        prime_worker,
+        ids,
+        None,
+    )
+    .await
+}
+
+/// The verified processed-upgrade root supplies delivery metadata for these
+/// same minted identities; ordinary staging passes no processing authority.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn stage_prepared_successor_with_delivery_as(
+    state: &AppState,
+    session_id: &str,
+    route: &MediaSessionRoute,
+    predecessor: &RemoteStartRequest,
+    candidate: &crate::transcode::SessionRequest,
+    source: Option<&plurx_core::domain::MediaFile>,
+    successor_owner: &str,
+    purpose: PreparationPurpose,
+    accepted: AcceptedAsk,
+    prime_worker: bool,
+    ids: StagedSuccessorIds,
+    processing: Option<StagedProcessingDelivery>,
+) -> PreparationStageOutcome {
     // Saving the switch off takes the write side, persists the choice, and
     // settles every registered successor before releasing it. Holding this
     // read side through the final setting read and stage closes the race where
     // an older detached candidate reserved after the administrator disabled
     // preparation.
     let _handoff_transition = prepared_handoff_transition().read_owned().await;
-    let enabled = state
+    let setting = match state
         .store
         .get_setting(plurx_core::store::keys::PREPARED_QUALITY_HANDOFF)
         .await
-        .ok()
-        .is_some_and(|value| plurx_core::store::stored_switch(value.as_deref(), true));
+    {
+        Ok(value) => value,
+        Err(_) => {
+            return PreparationStageOutcome::refused(
+                session_id,
+                PreparationStageRefusal::SettingUnavailable,
+            )
+        }
+    };
+    let enabled = plurx_core::store::stored_switch(setting.as_deref(), true);
     if !enabled {
         trace_auto_preparation_stage(candidate, "disabled");
-        crate::playback_control::record_preparation_staged(false);
-        return;
+        return PreparationStageOutcome::refused(session_id, PreparationStageRefusal::Disabled);
     }
     let AcceptedAsk {
         prepared_proof,
@@ -2328,7 +2727,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
         quality_intent,
     } = accepted;
     if let Some(identity) = quality_intent.as_ref() {
-        let cancelled = state
+        let cancelled = match state
             .store
             .quality_intent_cancelled(
                 &identity.generation,
@@ -2337,20 +2736,32 @@ pub(super) async fn stage_prepared_successor_with_prime(
                 i64::try_from(identity.recipe_revision).unwrap_or(i64::MAX),
             )
             .await
-            .unwrap_or(true);
+        {
+            Ok(cancelled) => cancelled,
+            Err(_) => {
+                return PreparationStageOutcome::refused(
+                    session_id,
+                    PreparationStageRefusal::QualityIntentUnavailable,
+                )
+            }
+        };
         if cancelled {
             trace_auto_preparation_stage(candidate, "intent_cancelled");
             if let Some(token) = planning_cancellation.as_ref() {
                 token.cancel();
             }
-            crate::playback_control::record_preparation_staged(false);
-            return;
+            return PreparationStageOutcome::cancelled(
+                session_id,
+                PreparationStageCancellation::QualityIntent,
+            );
         }
     }
     if let PreparationPurpose::PlannedRelocation(fence) = purpose {
         if !state.serving.planned_outage_is_current(fence).await {
-            crate::playback_control::record_preparation_staged(false);
-            return;
+            return PreparationStageOutcome::refused(
+                session_id,
+                PreparationStageRefusal::RelocationSuperseded,
+            );
         }
     }
     // The actor owns the slot. No live local worker means no slot to take, and
@@ -2361,19 +2772,26 @@ pub(super) async fn stage_prepared_successor_with_prime(
         // exactly what the first version of this did on every production
         // session, and an uncounted return made that indistinguishable from
         // "nothing was admitted".
-        crate::playback_control::record_preparation_staged(false);
-        return;
+        return PreparationStageOutcome::refused(
+            session_id,
+            PreparationStageRefusal::NoLocalWorkerGate,
+        );
     };
     // The source snapshot has to be the file's real one. `0/0` is this
     // codebase's documented "this placement never read the file" sentinel, and
     // `takeover_source_matches` refuses a takeover on it forever — so writing
     // it as a placeholder would poison the successor the moment it committed.
     let Some(source) = source else {
-        return;
+        return PreparationStageOutcome::refused(
+            session_id,
+            PreparationStageRefusal::SourceUnavailable,
+        );
     };
     let now_ms = crate::media_sessions::unix_ms();
-    let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
-    let staged_session_id = uuid::Uuid::new_v4().to_string();
+    let StagedSuccessorIds {
+        incarnation_id: staged_incarnation_id,
+        session_id: staged_session_id,
+    } = ids;
     // Where the successor actually begins: **where the viewer is**, not where
     // the predecessor was created and not how far it has fetched.
     //
@@ -2400,6 +2818,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
     let staged_request = crate::transcode::SessionRequest {
         dv_processing_destination: candidate.dv_processing_destination,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         candidate_context: candidate.candidate_context.clone(),
         request_id: Some(staged_incarnation_id.clone()),
@@ -2413,7 +2832,10 @@ pub(super) async fn stage_prepared_successor_with_prime(
         ..candidate.clone()
     };
     let Some(local_user_id) = route.principal.local_user_id() else {
-        return;
+        return PreparationStageOutcome::refused(
+            session_id,
+            PreparationStageRefusal::PrincipalUnsupported,
+        );
     };
     let staged_recipe = RemoteStartRequest {
         retained_output: None,
@@ -2423,6 +2845,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
                 caps: context.canonical_caps.clone()?,
                 candidate: context.selected_candidate.clone(),
                 binding: context.planning_binding.clone()?,
+                catalog_query: context.catalog_query.clone(),
             })
         }),
         candidate_id: candidate
@@ -2445,7 +2868,10 @@ pub(super) async fn stage_prepared_successor_with_prime(
         request: staged_request.clone(),
     };
     let Ok(recipe_json) = serde_json::to_string(&staged_recipe) else {
-        return;
+        return PreparationStageOutcome::refused(
+            session_id,
+            PreparationStageRefusal::RecipeSerialization,
+        );
     };
     // A real `StartResponse`, because every reader of a route's
     // `response_json` parses it as one — and `control_start_response` filters
@@ -2465,23 +2891,43 @@ pub(super) async fn stage_prepared_successor_with_prime(
         }
         (crate::transcode::SessionKind::Transcode { .. }, None) => None,
     };
-    let enhancement = grade.and_then(|grade| {
+    let processed_profile = processing.and_then(|delivery| delivery.dolby_vision_profile);
+    let processed_fel = processing.and_then(|delivery| delivery.fel);
+    let (delivered_dynamic_range, delivered_dolby_vision_profile) = grade
+        .map(|grade| {
+            super::create::session_delivered_processing_shape(
+                Some(source),
+                &staged_request.kind,
+                grade,
+                processed_profile,
+            )
+        })
+        .unwrap_or((None, None));
+    let mut enhancement = grade.and_then(|grade| {
         super::create::session_enhancement(
             Some(source),
             &staged_request.kind,
             grade,
-            None,
-            selected
-                .filter(|candidate| candidate.processed_dv)
-                .map(|_| {
-                    source.dolby_vision.profile == Some(7)
-                        && source.dolby_vision.el_present != Some(false)
-                }),
+            processed_profile,
+            processed_fel,
             None,
             None,
             None,
         )
     });
+    // Ordinary prepared selections can attach a processed output without
+    // carrying the upgrade trial's root here. Await current execution evidence
+    // rather than inventing FEL from source tags or suppressing a later receipt.
+    if processing.is_none() && selected.is_some_and(|candidate| candidate.processed_dv) {
+        if let Some(enhancement) = enhancement.as_mut() {
+            // Older native clients gate this snapshot but do not reconstruct
+            // it from the receipt. Keep it neutral, without base-only reasons
+            // that could contradict the eventual processed picture.
+            enhancement.active.clear();
+            enhancement.details.clear();
+            enhancement.requires_effective_processing = true;
+        }
+    }
     let response = StartResponse {
         enhancement,
         effective_processing: None,
@@ -2541,8 +2987,8 @@ pub(super) async fn stage_prepared_successor_with_prime(
         vod: staged_request.presentation == crate::transcode::Presentation::Vod,
         ladder: Vec::new(),
         prior_kbps: None,
-        delivered_dynamic_range: None,
-        delivered_dolby_vision_profile: None,
+        delivered_dynamic_range: delivered_dynamic_range.map(str::to_owned),
+        delivered_dolby_vision_profile,
         control: crate::playback_control::ControlBootstrap::new(
             &staged_session_id,
             &staged_incarnation_id,
@@ -2557,7 +3003,12 @@ pub(super) async fn stage_prepared_successor_with_prime(
     };
     let mut response_value = match serde_json::to_value(response) {
         Ok(value) => value,
-        Err(_) => return,
+        Err(_) => {
+            return PreparationStageOutcome::refused(
+                session_id,
+                PreparationStageRefusal::ResponseSerialization,
+            )
+        }
     };
     let captures_output = successor_owner_captures_output(
         state,
@@ -2583,7 +3034,12 @@ pub(super) async fn stage_prepared_successor_with_prime(
                 PLANNING_CAPS_RESPONSE_FIELD.to_owned(),
                 match serde_json::to_value(caps) {
                     Ok(value) => value,
-                    Err(_) => return,
+                    Err(_) => {
+                        return PreparationStageOutcome::refused(
+                            session_id,
+                            PreparationStageRefusal::PlanningCapsSerialization,
+                        )
+                    }
                 },
             );
     }
@@ -2595,7 +3051,12 @@ pub(super) async fn stage_prepared_successor_with_prime(
                 PLANNING_OVERRIDES_RESPONSE_FIELD.to_owned(),
                 match serde_json::to_value(overrides) {
                     Ok(value) => value,
-                    Err(_) => return,
+                    Err(_) => {
+                        return PreparationStageOutcome::refused(
+                            session_id,
+                            PreparationStageRefusal::PlanningOverridesSerialization,
+                        )
+                    }
                 },
             );
     }
@@ -2609,7 +3070,10 @@ pub(super) async fn stage_prepared_successor_with_prime(
             );
     }
     let Ok(response_json) = serde_json::to_string(&response_value) else {
-        return;
+        return PreparationStageOutcome::refused(
+            session_id,
+            PreparationStageRefusal::ResponseSerialization,
+        );
     };
     let executor = crate::playback_control::PreparationExecutor::new(
         Arc::clone(&state.store),
@@ -2671,8 +3135,10 @@ pub(super) async fn stage_prepared_successor_with_prime(
     if prime_worker {
         if let PreparationPurpose::PlannedRelocation(fence) = purpose {
             if !state.serving.planned_outage_is_current(fence).await {
-                crate::playback_control::record_preparation_staged(false);
-                return;
+                return PreparationStageOutcome::refused(
+                    session_id,
+                    PreparationStageRefusal::RelocationSuperseded,
+                );
             }
         }
         let active = ActivePreparedSuccessor {
@@ -2714,19 +3180,30 @@ pub(super) async fn stage_prepared_successor_with_prime(
             if let Some(active) = take_active_preparation(&preparation.incarnation_id) {
                 spawn_cancelled_preparation(active, "predecessor superseded by a new session");
             }
-            crate::playback_control::record_preparation_staged(false);
-            return;
+            return PreparationStageOutcome::cancelled(
+                session_id,
+                PreparationStageCancellation::BeforeReservation,
+            );
         }
         arm_preparation_foreground_watch(active.clone());
-        let Some(reservation) = reserve_preparation_before(active.clone()).await else {
-            trace_auto_preparation_stage(candidate, "reservation_refused");
-            crate::playback_control::record_preparation_staged(false);
-            return;
+        let reservation = match reserve_preparation_before(active.clone()).await {
+            Ok(reservation) => reservation,
+            Err(ReservationEnd::Refused(reason)) => {
+                return PreparationStageOutcome::refused(session_id, reason)
+            }
+            Err(ReservationEnd::Cancelled) => {
+                return PreparationStageOutcome::cancelled(
+                    session_id,
+                    PreparationStageCancellation::Reservation,
+                )
+            }
         };
         if let PreparationPurpose::PlannedRelocation(fence) = purpose {
             if !state.serving.planned_outage_is_current(fence).await {
-                crate::playback_control::record_preparation_staged(false);
-                return;
+                return PreparationStageOutcome::refused(
+                    session_id,
+                    PreparationStageRefusal::RelocationSuperseded,
+                );
             }
         }
         let prime_deadline = Instant::now() + PREPARATION_PRIME_BUDGET;
@@ -2786,23 +3263,42 @@ pub(super) async fn stage_prepared_successor_with_prime(
                     .is_ok()
             }
         };
+        // This frame still owns the reservation guard through prime/readiness.
+        // Neither inner bool operation cancels this token on failure, so a
+        // ready cancellation is outside displacement, even if it also caused
+        // the worker or seal check to answer false. Activation differs: its
+        // detached guard can cancel the token while cleaning up its own refusal.
         let primed = tokio::select! {
-            () = active.cancelled.cancelled() => false,
+            biased;
+            () = active.cancelled.cancelled() => return PreparationStageOutcome::cancelled(session_id, PreparationStageCancellation::Prime),
             primed = prime => primed,
         };
-        if !state
-            .transcode
-            .prepared_prime_is_ready(&preparation, primed)
-            .await
-        {
+        // A completed prime refusal is terminal. Do not let a later cleanup
+        // cancellation relabel that known failure as displacement.
+        if !primed {
+            return PreparationStageOutcome::refused(
+                session_id,
+                PreparationStageRefusal::PrimeFailed,
+            );
+        }
+        let prime_ready = tokio::select! {
+            biased;
+            () = active.cancelled.cancelled() => return PreparationStageOutcome::cancelled(session_id, PreparationStageCancellation::PrimeReadiness),
+            ready = state.transcode.prepared_prime_is_ready(&preparation, primed) => ready,
+        };
+        if !prime_ready {
             trace_auto_preparation_stage(candidate, "prime_not_ready");
-            crate::playback_control::record_preparation_staged(false);
-            return;
+            return PreparationStageOutcome::refused(
+                session_id,
+                PreparationStageRefusal::PrimeNotReady,
+            );
         }
         if let PreparationPurpose::PlannedRelocation(fence) = purpose {
             if !state.serving.planned_outage_is_current(fence).await {
-                crate::playback_control::record_preparation_staged(false);
-                return;
+                return PreparationStageOutcome::refused(
+                    session_id,
+                    PreparationStageRefusal::RelocationSuperseded,
+                );
             }
         }
         let cached_recovery_owner = if successor_owner == state.node_id
@@ -2820,11 +3316,35 @@ pub(super) async fn stage_prepared_successor_with_prime(
         } else {
             None
         };
+        if active.cancelled.is_cancelled() {
+            return PreparationStageOutcome::cancelled(
+                session_id,
+                PreparationStageCancellation::Activation,
+            );
+        }
+        // A completed Store refusal keeps its classification even when its
+        // own guard cleanup also makes the cancellation branch ready. Without
+        // a completed answer, the live cancellation branch still wins.
         let activated = tokio::select! {
-            () = active.cancelled.cancelled() => None,
+            biased;
             activated = activate_preparation_before(reservation) => activated,
+            () = active.cancelled.cancelled() => return PreparationStageOutcome::cancelled(session_id, PreparationStageCancellation::Activation),
         };
-        if let Some(guard) = activated {
+        let guard = match activated {
+            // A success answered in the same poll as an outside cancellation
+            // is a successor the watcher is tearing down: dropping the guard
+            // settles it, and the cancellation keeps its retry. Refusals keep
+            // their classification (no recheck on the failure arm).
+            Ok(_guard) if active.cancelled.is_cancelled() => {
+                return PreparationStageOutcome::cancelled(
+                    session_id,
+                    PreparationStageCancellation::Activation,
+                )
+            }
+            Ok(guard) => guard,
+            Err(reason) => return PreparationStageOutcome::refused(session_id, reason),
+        };
+        return {
             let active = guard.disarm();
             // Arm cleanup before publishing the optional proof or observations.
             arm_preparation_deadline(active.clone());
@@ -2848,22 +3368,78 @@ pub(super) async fn stage_prepared_successor_with_prime(
                     .await;
                 }
             }
+            // A locally owned ordinary successor gets the processed upgrade a
+            // create would have left it (review 3 S3): it waits for the
+            // successor's own first presented frame, which its commit proves
+            // ([`super::processed_upgrade::note_presented`]). The processed
+            // upgrade's own successor, and any processed successor, is already
+            // the upgrade.
+            let processed = staged_request.dv_processing_destination.is_some()
+                || staged_request
+                    .candidate_context
+                    .as_ref()
+                    .is_some_and(|context| context.selected_candidate.processed_dv);
+            // The upgrade's own request-only gates, as the create runs them,
+            // where this successor's planning snapshot is in hand; a source
+            // with no Dolby Vision metadata a processed destination could use
+            // is never one. Without a snapshot the trial's own gates decide.
+            let applies = matches!(source.dolby_vision.profile, Some(5 | 7 | 8))
+                && staged_request
+                    .candidate_context
+                    .as_ref()
+                    .and_then(|context| context.planning_snapshot.as_deref())
+                    .is_none_or(|snapshot| {
+                        matches!(
+                            crate::transcode::TranscodeManager::processed_upgrade_gates(
+                                &staged_request,
+                                snapshot,
+                                staged_request.hdr10,
+                            ),
+                            Ok(Some(_))
+                        )
+                    });
+            if successor_owner == state.node_id
+                && !processed
+                && applies
+                && staged_request.presentation == crate::transcode::Presentation::Vod
+            {
+                super::processed_upgrade::register(super::processed_upgrade::UpgradeIntent {
+                    user_id: local_user_id,
+                    playback_id: active.preparation.playback_id.clone(),
+                    session_id: active.preparation.session_id.clone(),
+                    incarnation_id: active.preparation.incarnation_id.clone(),
+                    request: staged_request.clone(),
+                    hdr10_intent: staged_request.hdr10,
+                    auto_policy: staged_request.automatic,
+                    // The control exchange that asked for this successor
+                    // carries no network identity or link receipt; recovery
+                    // and link admission read none, as for a start without
+                    // them.
+                    network: None,
+                    network_prior: None,
+                    incumbent_receipt: None,
+                });
+            }
             trace_auto_preparation_stage(candidate, "activated");
             crate::playback_control::record_preparation_staged(true);
-        } else {
-            trace_auto_preparation_stage(candidate, "activation_refused");
-            crate::playback_control::record_preparation_staged(false);
-        }
-        return;
+            PreparationStageOutcome::Staged
+        };
     }
 
     let staged = tokio::time::timeout(PREPARATION_STORE_BUDGET, executor.stage(&preparation)).await;
     match staged {
         Ok(Ok(true)) => {
             crate::playback_control::record_preparation_staged(true);
+            PreparationStageOutcome::Staged
         }
-        Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {
-            crate::playback_control::record_preparation_staged(false);
+        Ok(Ok(false)) => {
+            PreparationStageOutcome::refused(session_id, PreparationStageRefusal::UnprimedRefused)
+        }
+        Ok(Err(_)) => {
+            PreparationStageOutcome::refused(session_id, PreparationStageRefusal::UnprimedError)
+        }
+        Err(_) => {
+            PreparationStageOutcome::refused(session_id, PreparationStageRefusal::UnprimedDeadline)
         }
     }
 }

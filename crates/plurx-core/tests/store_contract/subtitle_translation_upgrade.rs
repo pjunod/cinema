@@ -30,7 +30,16 @@ async fn replicated_progressive_retarget_upgrade_preserves_owned_data_and_refuse
                 .starts_with("CREATE TRIGGER subtitle_translation_mutate ")
         })
         .expect("published trigger");
-    client.txn([
+    // The v124 dispatch views refer to both the continuity table and its demand
+    // column. The historical translation fixture predates that extension.
+    assert_unactivated_contract_baseline(&client).await;
+    let mut statements: Vec<_> =
+        replicated_source_tail_drops(&client, |name| name.starts_with("dispatch_turn_"))
+            .await
+            .into_iter()
+            .map(|sql| (sql, hiqlite::params!()))
+            .collect();
+    statements.extend([
         ("DROP TRIGGER subtitle_translation_mutate".to_owned(),hiqlite::params!()),
         ("DROP TRIGGER subtitle_translation_capture_continuity".to_owned(),hiqlite::params!()),
         ("DROP TRIGGER subtitle_translation_retire_continuity".to_owned(),hiqlite::params!()),
@@ -39,7 +48,14 @@ async fn replicated_progressive_retarget_upgrade_preserves_owned_data_and_refuse
         ("ALTER TABLE subtitle_translation_demands DROP COLUMN continuity_id".to_owned(),hiqlite::params!()),
         (legacy.to_owned(),hiqlite::params!()),
         ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{\"preserve\":true}')".to_owned(),hiqlite::params!()),
-    ]).await.expect("published shape fixture").into_iter().collect::<Result<Vec<_>,_>>().expect("atomic legacy fixture");
+    ]);
+    client
+        .txn(statements)
+        .await
+        .expect("published shape fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("atomic legacy fixture");
     let marker = replicated_schema_marker(&client).await;
     HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &path)
         .await

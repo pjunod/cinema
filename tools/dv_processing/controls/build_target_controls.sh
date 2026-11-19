@@ -12,5 +12,12 @@ placebo_flags=$(PKG_CONFIG_PATH="$2" pkg-config --cflags --libs libplacebo)
     "$source_dir/dm_shader_control.c" -o "$4/dm_shader_control" $placebo_flags -lm
 "$CC" $CFLAGS -std=c11 -Wall -Wextra -Werror -I"$3/include" \
     "$source_dir/test_dv_dm.c" "$3/lib/libdovi.a" -o "$4/test_dv_dm" $placebo_flags -lm -lpthread -ldl
+"$CC" $CFLAGS -std=c11 -Wall -Wextra -Werror -I"$3/include" \
+    "$source_dir/test_dm_active_area.c" -o "$4/test_dm_active_area" $placebo_flags -lm
 "$CC" $CFLAGS -std=c11 -Wall -Wextra -Werror \
     "$source_dir/make_movie.c" -o "$4/make_movie" $ffmpeg_flags -lm -lpthread -ldl
+# Drives the production base renderer: the helper's own flags, and its
+# unused entry points allowed.
+"$CC" $CFLAGS -frounding-math -ffp-contract=off -std=c11 -Wall -Wextra -Werror -Wno-unused-function \
+    -I"$3/include" "$source_dir/test_base_master_black.c" "$3/lib/libdovi.a" \
+    -o "$4/test_base_master_black" $ffmpeg_flags $placebo_flags -lm -lpthread -ldl

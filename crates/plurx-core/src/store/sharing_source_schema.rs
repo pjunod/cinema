@@ -31,18 +31,23 @@ impl From<&mut hiqlite::Row<'_>> for DispatchGuardRow {
 /// Provision only at Store construction, never from serving session I/O.
 /// Competing initializers may adopt an exact winner; fragments are never repaired.
 pub(crate) async fn provision_dispatch_guard(
-    client: &hiqlite::Client,
+    client: &super::CountedClient,
 ) -> Result<(), crate::error::StoreError> {
     use crate::error::StoreError;
-    let rows=client.query_consistent_map::<DispatchGuardRow,_>("SELECT count(*) AS count FROM sqlite_master WHERE name='sharing_source_dispatch_guard'",hiqlite::params!()).await.map_err(|error|StoreError::Database(error.to_string()))?;
+    let rows=client.query_consistent_map::<DispatchGuardRow,_>("provision_dispatch_guard","SELECT count(*) AS count FROM sqlite_master WHERE name='sharing_source_dispatch_guard'",hiqlite::params!()).await.map_err(|error|StoreError::Database(error.to_string()))?;
     if matches!(rows.as_slice(),[row] if row.0==0) {
         let creation = client
-            .execute(DISPATCH_GUARD_SCHEMA, hiqlite::params!())
+            .execute(
+                "provision_dispatch_guard",
+                DISPATCH_GUARD_SCHEMA,
+                hiqlite::params!(),
+            )
             .await;
         // Do not interpret an uncertain creation response as absence. Verify the
         // actual committed complete shape; no mutation is replayed here.
         let rows = client
             .query_consistent_map::<DispatchGuardRow, _>(
+                "provision_dispatch_guard",
                 format!(
                     "SELECT CASE WHEN ({}) THEN 1 ELSE 0 END AS count",
                     dispatch_guard_shape()
@@ -64,6 +69,7 @@ pub(crate) async fn provision_dispatch_guard(
     }
     let rows = client
         .query_consistent_map::<DispatchGuardRow, _>(
+            "provision_dispatch_guard",
             format!(
                 "SELECT CASE WHEN ({}) THEN 1 ELSE 0 END AS count",
                 dispatch_guard_shape()
@@ -121,7 +127,7 @@ pub(crate) fn boot_authority_guard(parameter: usize) -> String {
 fn installed_shape_guard_at(version: i64) -> String {
     format!(
         "({}) AND ({}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_meta WHERE singleton=1 AND schema_version={version}) AND EXISTS(SELECT 1 FROM sharing_source_schema_installation WHERE singleton=1 AND schema_version={SOURCE_LAYOUT_VERSION}) AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0)) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN('sharing_source_schema_installation','sharing_source_schema_transaction_guard'))",
-        super::jellyfin_watch::session_dependency_guard(),
+        super::session_dependency_guard(),
         boot_shape_guard(),
         exact_object(INSTALLATION_SCHEMA),
         exact_object(TRANSACTION_SCHEMA),
@@ -269,7 +275,7 @@ pub(crate) fn predecessor_layout_guard_for(
         guards.push(format!("(SELECT count(*) FROM pragma_table_info('{table}'))={} AND NOT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE NOT ({expected})) AND EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='user_id' AND \"notnull\"=1) AND EXISTS(SELECT 1 FROM pragma_table_list WHERE schema='main' AND name='{table}' AND strict=1)",columns.len()));
     }
     guards.push(legacy_object_guard(outage));
-    guards.push(super::jellyfin_watch::session_dependency_guard());
+    guards.push(super::session_dependency_guard());
     format!("({})", guards.join(") AND ("))
 }
 pub(crate) fn predecessor_guard(now_parameter: usize) -> String {

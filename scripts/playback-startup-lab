@@ -51,6 +51,10 @@ MEDIA_MANIFEST = 'lab-media.json'
 
 # Arms named by the handoff. Any other valid pair is accepted and named t<T>-b<B>.
 NAMED_ARMS = {'control': (16, 48), 'a': (8, 24), 'b': (8, 32), 'c': (6, 18), 'd': (4, 12)}
+# Explicit reviewed experiments, never production qualification by admission.
+SHORT_ARMS = {'one-complete': (2, 2), 'four-four': (4, 4),
+              'four-eight': (4, 8), 'reload-window': (16, 16)}
+NAMED_ARMS.update(SHORT_ARMS)
 DECISION_ARMS = ('a', 'b')
 DECISION_RATES = (1.05, 1.0, 2.0)
 DECISION_PLAYERS = ('safari-native', 'hlsjs')
@@ -61,7 +65,8 @@ DECISION_TEXT = {
 }
 
 # Bounds. A target shorter than the segment cannot carry it; a bootstrap under
-# two targets is below Safari's observed start rule; 124 s is the rolling
+# two targets is below Safari's observed start rule except the explicit
+# reviewed short controls on the generated2s closed-GOP fixture; 124s is the rolling
 # reserve maximum, so no first snapshot can exceed it.
 TARGET_MAX_S = 20
 BOOTSTRAP_MAX_S = 124
@@ -131,7 +136,8 @@ def validate_arm(target, bootstrap, rate, segment=2):
         raise ArmError(f'target {target} s is shorter than the {segment} s segment')
     if target > TARGET_MAX_S:
         raise ArmError(f'target {target} s is above the {TARGET_MAX_S} s bound')
-    if bootstrap < 2 * target:
+    short_control = segment == 2 and (target, bootstrap) in SHORT_ARMS.values()
+    if bootstrap < 2 * target and not short_control:
         raise ArmError(f'bootstrap {bootstrap} s is under 2 x target ({2 * target} s)')
     if bootstrap > BOOTSTRAP_MAX_S:
         raise ArmError(f'bootstrap {bootstrap} s is above the {BOOTSTRAP_MAX_S} s reserve maximum')

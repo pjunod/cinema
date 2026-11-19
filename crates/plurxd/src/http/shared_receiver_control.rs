@@ -869,6 +869,7 @@ mod tests {
                     spki_sha256: "b".repeat(64),
                 },
                 incarnation: source_incarnation,
+                receiver_presentation_affirmed: false,
                 start: super::ReceivedStart::Hls(Box::new(response)),
             },
             source_session,

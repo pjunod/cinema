@@ -630,6 +630,7 @@ async fn pass(
             after: cursor.clone(),
             now_ms: now_ms(),
             limit: 128,
+            admissible_only: false,
         })
         .await?;
     page.jobs.retain(|job| match job.supported_payload() {
@@ -715,7 +716,8 @@ async fn pass(
                 .ok_or_else(|| StoreError::Task("artwork claim missing token".into()))?,
             deadline,
             kind,
-        )?;
+        )
+        .await?;
         let fence = active.fence();
         let cancel = fence.loss_token().child_token();
         let result = {

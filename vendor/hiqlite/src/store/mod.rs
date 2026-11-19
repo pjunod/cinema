@@ -59,6 +59,10 @@ pub(crate) async fn start_raft_db(
     .await?;
     startup_owner.protect_wal(log_store.shutdown_handle());
     let wal_status = log_store.status_handle();
+    let applied_mark = crate::applied_mark::AppliedMark::with_deletes_only(
+        &node_config.applied_mark_tables,
+        &node_config.applied_mark_deletes_only,
+    );
     let state_machine_store = if staged_startup {
         let data_dir = node_config.data_dir.clone();
         let filename = node_config.filename_db.clone();
@@ -71,6 +75,7 @@ pub(crate) async fn start_raft_db(
         let s3_config = node_config.s3_config.clone();
         #[cfg(feature = "backup")]
         let backup_keep_days = node_config.backup_keep_days_local;
+        let constructor_mark = std::sync::Arc::clone(&applied_mark);
         crate::startup_cleanup::construct_sqlite(async move {
             StateMachineSqlite::new(
                 &data_dir,
@@ -86,6 +91,7 @@ pub(crate) async fn start_raft_db(
                 #[cfg(feature = "backup")]
                 backup_keep_days,
                 true,
+                constructor_mark,
             )
             .await
             .map_err(|error| Error::Error(format!("SQLite startup constructor: {error}").into()))
@@ -106,6 +112,7 @@ pub(crate) async fn start_raft_db(
             #[cfg(feature = "backup")]
             node_config.backup_keep_days_local,
             false,
+            std::sync::Arc::clone(&applied_mark),
         )
         .await
         .unwrap()
@@ -128,6 +135,7 @@ pub(crate) async fn start_raft_db(
             node_config,
         ),
         snapshot_transport: snapshot_transport.clone(),
+        idle_connections: Default::default(),
     };
 
     let shutdown_handle = log_store.shutdown_handle();
@@ -157,9 +165,11 @@ pub(crate) async fn start_raft_db(
         wal_status,
         sql_writer,
         read_pool,
+        applied_mark,
         log_statements: node_config.log_statements,
         is_raft_stopped,
         is_startup_finished,
+        proposals: Default::default(),
     };
     startup_owner.handoff();
     startup_owner.protect_db(&state);
@@ -221,6 +231,7 @@ where
             node_config,
         ),
         snapshot_transport: snapshot_transport.clone(),
+        idle_connections: Default::default(),
     };
 
     let tx_caches = state_machine_store.tx_caches.clone();

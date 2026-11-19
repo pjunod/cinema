@@ -427,6 +427,8 @@ async fn run_copy_pipe_with<R: AsyncRead + Unpin, S: CopyPublicationSink>(
                             ));
                         }
                     }
+                    // Legacy live copy has no exact source row clock. Keep
+                    // identity conversion even when a title has an F+ table.
                     if video.converts_dolby_vision() {
                         match crate::vod_generation::conversion::Converter::for_init(&init) {
                             Ok(ready) => converter = Some(ready),

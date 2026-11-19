@@ -1,0 +1,25 @@
+{
+  "schema": "plurx.safari-startup-case.v1",
+  "source": "Gran Turismo (2023), original-quality Dolby Vision Profile 5 / EC3, unindexed native HLS",
+  "incident_build": "8ab61a77989c8200af8db6f060328192e47ee16f",
+  "segment_durations_ms": [
+    4380,
+    8758,
+    8759,
+    8759,
+    7132,
+    6131,
+    9301,
+    8842,
+    8926
+  ],
+  "target_duration_seconds": 16,
+  "failed_first_segment_count": 3,
+  "observed_retry_segment_count": 5,
+  "native_minimum_target_intervals": 3,
+  "candidate_first_segment_count": 7,
+  "first_frame_budget_ms": 5000,
+  "negative_control_observation_ms": 8000,
+  "failed_first_playlist": "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXT-X-TARGETDURATION:16\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-START:TIME-OFFSET=0\n#EXTINF:4.380000,\nseg00000.m4s\n#EXTINF:8.758000,\nseg00001.m4s\n#EXTINF:8.759000,\nseg00002.m4s\n",
+  "candidate_first_playlist": "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXT-X-TARGETDURATION:16\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-START:TIME-OFFSET=0\n#EXTINF:4.380000,\nseg00000.m4s\n#EXTINF:8.758000,\nseg00001.m4s\n#EXTINF:8.759000,\nseg00002.m4s\n#EXTINF:8.759000,\nseg00003.m4s\n#EXTINF:7.132000,\nseg00004.m4s\n#EXTINF:6.131000,\nseg00005.m4s\n#EXTINF:9.301000,\nseg00006.m4s\n"
+}

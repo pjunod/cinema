@@ -469,6 +469,8 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 except re.error as error:
                     self.fail(f"invalid structural pattern for {row['id']}: {error}")
                 actual = len(pattern.findall(self.module_structural_source))
+                if row["id"] == "low-level-process-start":
+                    actual -= self.containment_fixture_starts(pattern)
                 self.assertEqual(
                     actual,
                     row["expected_occurrences"],
@@ -477,6 +479,28 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                     "new task, timer, process, or alias shapes require an explicit "
                     "ownership review and allowlist update",
                 )
+
+    def containment_fixture_starts(self, pattern: re.Pattern) -> int:
+        path = ROOT / "crates/plurx-core/src/process/contained_launch.rs"
+        header = (
+            '    #[test]\n'
+            '    #[ignore = "private child executable entry; invoked only by delegated cgroup test"]\n'
+            '    fn private_contained_child_entry() {\n'
+        )
+        source = path.read_text(encoding="utf-8")
+        self.assertIn(path, self.module_paths)
+        self.assertEqual(source.count(header), 1)
+        fixture = source.split(header, 1)[1].split("\n    #[test]", 1)[0]
+        limit = fixture.split('} else if mode == "fork-limit" {', 1)[1].split(
+            '} else if mode == "memory-limit" {', 1
+        )[0]
+        orphan = fixture.split('} else if mode == "orphan" {', 1)[1]
+        self.assertIn("let pid = unsafe { libc::fork() };", limit)
+        self.assertIn("let result = unsafe { libc::fork() };", orphan)
+        for branch in (limit, orphan):
+            self.assertEqual(pattern.findall(rust_structural_source(branch)), ["libc::fork("])
+        self.assertEqual(len(pattern.findall(rust_structural_source(fixture))), 2)
+        return 2
 
     def test_promised_syntax_forms_hit_structural_sentinels(self) -> None:
         patterns = {

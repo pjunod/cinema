@@ -1,0 +1,1 @@
+zscale=matrixin=2020_ncl:matrix=gbr:rangein=limited:range=full:primariesin=2020:primaries=2020:transferin=smpte2084:transfer=smpte2084:chromalin=left:filter=bicubic:dither=none,format=gbrp16le,format=rgb48le

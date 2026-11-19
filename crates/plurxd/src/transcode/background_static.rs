@@ -891,6 +891,7 @@ impl TranscodeManager {
                 return Err(PreparationError::Stop("encoded_delivery_changed"));
             }
             let mut recipe = crate::vodserve::VodRecipeRequest {
+                admission_priority: crate::admission::Priority::Background,
                 root_admission: None,
                 soundtrack: None,
                 companion: None,

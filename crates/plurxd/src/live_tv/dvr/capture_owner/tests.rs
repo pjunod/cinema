@@ -559,7 +559,12 @@ async fn disabled_recording_finalization_waits_for_original_native_close() {
     use plurx_core::dvr::DvrState;
     let (manager, live, _dvr, row, gate, _dir) = recording_with_pending_original_close().await;
     let (events, _queue) = super::super::super::webhook::channel();
-    manager.finish_disabled_recordings(&live, &events).await;
+    manager
+        .store
+        .put_settings(&[(plurx_core::store::keys::DVR_ENABLED, "0")])
+        .await
+        .expect("disable recording while the original close is pending");
+    manager.finish_disabled_recordings(&events).await;
     let current = manager
         .store
         .get_dvr_recording(&row.id)
@@ -596,7 +601,7 @@ async fn disabled_recording_finalization_waits_for_original_native_close() {
     );
     gate.release();
     drained(&manager.capture_owners).await;
-    manager.finish_disabled_recordings(&live, &events).await;
+    manager.finish_disabled_recordings(&events).await;
     let published = manager
         .store
         .get_dvr_recording(&row.id)

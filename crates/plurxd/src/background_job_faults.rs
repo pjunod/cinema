@@ -11,6 +11,8 @@ pub(crate) const PUBLISH: u8 = 4;
 pub(crate) const COMPLETE: u8 = 8;
 // Generic settlement and completion discard the same final Store reply.
 pub(super) const SETTLE: u8 = COMPLETE;
+pub(crate) const SOURCE_REGISTER: u8 = 16;
+pub(crate) const SOURCE_RELEASE: u8 = 32;
 struct Replies {
     pending: AtomicU8,
     dropped: AtomicU8,
@@ -69,6 +71,9 @@ pub(crate) mod worker {
         Pressure,
         WorkJoined,
         BeforeCompletion,
+        CompletionCommitted,
+        SourcePermissionCheck,
+        SourcePermissionDenied,
         CompletionReconciled,
         ReleaseStarted,
         ReleaseFinished,

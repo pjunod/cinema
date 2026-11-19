@@ -276,6 +276,21 @@ pub(super) fn rolling_initial_runway_ms(rate: f64) -> i64 {
         .clamp(ROLLING_INITIAL_RUNWAY_MS, ROLLING_RESERVE_MAX_MS)
 }
 
+/// Physical bank for source sharing. This is producer budget only: the
+/// publication clock's advertised endpoints and steady reserve are unchanged.
+pub(super) fn rolling_source_watermarks(rate: f64) -> (u64, u64) {
+    let low = rolling_initial_runway_ms(rate).max(1) as u64;
+    let high =
+        low.saturating_add((rolling_publication_batch_ms(rate).max(1) as u64).saturating_mul(2));
+    (low, high)
+}
+pub(super) fn rolling_source_bank_target_ms(rate: f64, held: bool) -> i64 {
+    let (low, high) = rolling_source_watermarks(rate);
+    // At rates whose steady reserve already reaches the global bound, no
+    // fictitious sharing watermark is claimed. Capacity remains observable.
+    (if held { low } else { high }).min(ROLLING_RESERVE_MAX_MS as u64) as i64
+}
+
 pub(super) fn rolling_insufficient_capacity(rate: f64, recent_speed: Option<f64>) -> bool {
     rate > 0.0 && recent_speed.is_some_and(|speed| speed + 0.05 < rate)
 }
@@ -489,9 +504,18 @@ pub(super) fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
         let guard_ms =
             ((ROLLING_PUBLICATION_GUARD_MS as f64) * rolling_playback_rate(Some(demand))).ceil();
         let target_ms = ends
-            .desired_end_ms
-            .saturating_add(guard_ms.min(i64::MAX as f64) as i64)
-            .min(ends.allowed_end_ms);
+            .consumed_end_ms
+            .saturating_add(rolling_source_bank_target_ms(
+                rolling_playback_rate(Some(demand)),
+                currently_suspended,
+            ));
+        let target_ms = if currently_suspended {
+            target_ms
+        } else {
+            target_ms
+                .saturating_add(guard_ms.min(i64::MAX as f64) as i64)
+                .min(ends.consumed_end_ms.saturating_add(ROLLING_RESERVE_MAX_MS))
+        };
         produced_end_ms >= target_ms
     });
     let hold = hard_hold.or_else(|| {

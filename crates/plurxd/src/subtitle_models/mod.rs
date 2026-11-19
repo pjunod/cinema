@@ -1080,6 +1080,7 @@ async fn next_candidates(
             after: cursor.clone(),
             now_ms: crate::state::clock_ms(),
             limit: 32,
+            admissible_only: false,
         })
         .await?;
     *cursor = page.next.clone();
@@ -1175,7 +1176,7 @@ pub(crate) async fn worker_pass(
     refresh_local(state).await?;
     use plurx_core::store::background_jobs::{ClaimJob, JobKind, JobSettlement};
     let authority = state.jobs.execution_authority();
-    let settings = config::read(state.store.as_ref()).await?;
+    let settings = config::read_applied(&state.applied).await?;
     if settings.mode == config::Mode::Managed
         && settings.effective_enabled
         && settings.interval_mins > 0
@@ -1404,7 +1405,8 @@ pub(crate) async fn worker_pass(
                 .ok_or_else(|| StoreError::Task("subtitle claim token missing".into()))?,
             deadline,
             kind,
-        )?;
+        )
+        .await?;
         let fence = active.fence();
         let cancel = fence.loss_token().child_token();
         let operation = async {
@@ -1566,6 +1568,13 @@ pub(crate) async fn worker_pass(
         };
         let operation = admitted_work::scope(admission.as_ref(), operation);
         let operation = plurx_core::process::bounded::cancellable(cancel.clone(), operation);
+        let operation = async {
+            if generation {
+                crate::background_jobs::budgeted(fence.source_budget(), operation).await
+            } else {
+                operation.await
+            }
+        };
         tokio::pin!(operation);
         let result = loop {
             tokio::select! {
@@ -2024,6 +2033,7 @@ mod tests {
                 after: None,
                 now_ms: crate::state::clock_ms() + 10,
                 limit: 32,
+                admissible_only: false,
             })
             .await
             .expect("automatic Verify");
@@ -2346,6 +2356,7 @@ mod tests {
                 after: None,
                 now_ms: crate::state::clock_ms(),
                 limit: 32,
+                admissible_only: false,
             })
             .await
             .expect("candidates");
@@ -2805,6 +2816,7 @@ mod tests {
             after: None,
             now_ms: crate::state::clock_ms(),
             limit: 32,
+            admissible_only: false,
         };
         assert_eq!(
             state

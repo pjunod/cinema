@@ -956,6 +956,21 @@ impl DirectSourceOwner {
         permit: OwnedSemaphorePermit,
         deadline: Instant,
     ) -> Result<FiniteResponseBuffer, DirectSourceError> {
+        self.read_at_with_guard(body, offset, len, permit, deadline, ())
+            .await
+    }
+
+    /// Retain the caller's exact source-service guard inside the registered
+    /// blocking read, even when its HTTP waiter disappears.
+    pub async fn read_at_with_guard(
+        &self,
+        body: &DirectSourceBody,
+        offset: u64,
+        len: usize,
+        permit: OwnedSemaphorePermit,
+        deadline: Instant,
+        read_guard: impl Send + 'static,
+    ) -> Result<FiniteResponseBuffer, DirectSourceError> {
         if !Arc::ptr_eq(&self.inner, &body.inner)
             || len == 0
             || len > self.inner.chunk_bytes
@@ -1007,6 +1022,7 @@ impl DirectSourceOwner {
             // cancelled or times out.
             let _permit = permit;
             let _domain_permit = domain_permit;
+            let _read_guard = read_guard;
             if registered.blocking_recv().is_err() {
                 return Err(invalid());
             }

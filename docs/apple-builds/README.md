@@ -7,6 +7,11 @@ concurrent Apple branches conflicted on all three and re-conflicted every time
 [`history-through-build-78.md`](history-through-build-78.md) holds everything
 those documents said through build 78, verbatim.
 
+[Keep the offload banner current on Apple devices](1-offload-client-refresh.md) records the follow-up client build.
+
+[F+ fitting controls and playback mapping](1565-fel-refit-controls.md) records
+the Developer section and attached-generation playback information.
+
 ## Add a fragment
 
 Name the file after the **issue**, never the build:

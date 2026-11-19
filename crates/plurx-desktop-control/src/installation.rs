@@ -28,6 +28,8 @@ pub enum InstallMethod {
 pub enum Architecture {
     Amd64,
     Arm64,
+    /// Written by macOS releases before they became arm64-only; still read so
+    /// those installations can adopt the arm64 release.
     Universal,
 }
 /// The only thin architecture admitted by local source bootstrap on this host.

@@ -314,6 +314,7 @@ features = [
     "column_decltype",
     "csvtab",
     "functions",
+    "hooks",
     "load_extension",
     "serde_json",
     "series",

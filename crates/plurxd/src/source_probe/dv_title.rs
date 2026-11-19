@@ -18,26 +18,55 @@ pub(super) async fn scan(
     if !tools.is_current().await {
         return Err("DV scanner identity changed".into());
     }
+    let input = match crate::background_jobs::source_budget() {
+        Some(budget) => Some(
+            crate::source_input::SourceInput::open_background_held(
+                crate::fragment_index_cluster::SourceFence::clone_held(
+                    &source.handle,
+                    source.object_version(),
+                )?,
+                crate::http::stream::file_content_type(&file.path),
+                budget,
+            )
+            .await?,
+        ),
+        None => None,
+    };
     let mut command = tokio::process::Command::new(&tools.scanner);
     let descriptor = if cfg!(target_os = "linux") {
         "/proc/self/fd/3"
     } else {
         "/dev/fd/3"
     };
-    command.args([descriptor, &index.to_string()]);
-    crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
-        &mut command,
-        &[(source.handle.as_raw_fd(), 3)],
-        None,
-    );
+    command.args([
+        input.as_ref().map_or(descriptor, |input| input.url()),
+        &index.to_string(),
+    ]);
+    if input.is_none() {
+        crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
+            &mut command,
+            &[(source.handle.as_raw_fd(), 3)],
+            None,
+        );
+    }
     let output = plurx_core::process::bounded::output_command_clean_env(
         &mut command,
         Duration::from_secs(6 * 60 * 60),
         64 * 1024,
         plurx_core::process::ChildWork::background("complete-title Dolby Vision scan"),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    );
+    let output = if input.is_some() {
+        plurx_core::process::source_lifetime::mediated(output).await
+    } else {
+        output.await
+    };
+    if let Some(input) = input {
+        input
+            .close_and_wait()
+            .await
+            .map_err(|error| format!("joining title source input: {error}"))?;
+    }
+    let output = output.map_err(|error| error.to_string())?;
     if !output.status.success() {
         return Err("complete-title DV scan failed".into());
     }
@@ -90,14 +119,14 @@ pub(crate) async fn publish_title_with_tools_for_control(
 
     let admission = Arc::new(
         transcode
-            .admit_dv_title()
+            .admit_dv_title(false)
             .await
             .ok_or("title probe admission unavailable")?,
     );
     let scanner = tools.title_scanner_digest();
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None).await?;
     let mut demand = store
-        .dv_title_demands(&scanner, 0)
+        .dv_title_demands(&scanner, 0, crate::source_probe::now_ms())
         .await
         .map_err(|e| e.to_string())?
         .into_iter()
@@ -188,15 +217,28 @@ pub(crate) async fn publish_title_with_tools_for_control(
         deadline,
         JobKind::DvTitleScan,
     )
+    .await
     .map_err(|e| e.to_string())?;
     let fence = active.fence();
     let result = async {
-        let stats = super::run_admitted_probe(
+        let source_version = crate::fragment_index_cluster::inspect_source(file)
+            .await
+            .ok();
+        let stats = super::run_source_admitted_probe(
             transcode,
             &admission,
             &fence.loss_token(),
             &CancellationToken::new(),
             None,
+            &fence,
+            || async {
+                source_version.is_some()
+                    && tools.is_current().await
+                    && crate::fragment_index_cluster::inspect_source(file)
+                        .await
+                        .ok()
+                        == source_version
+            },
             scan(file, &demand.probe_json, &tools),
         )
         .await?;

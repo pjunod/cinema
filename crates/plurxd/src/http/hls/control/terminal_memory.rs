@@ -242,6 +242,7 @@ fn session_request(v: &crate::transcode::SessionRequest) -> Option<usize> {
         quality_catalog: _,
         candidate_context: _,
         sdr_master_codecs: _,
+        dv_refit_digest: _,
         vod_only: _,
         passive_vod: _,
         finite_bitrate_limit_bps: _,
@@ -264,6 +265,7 @@ fn session_request(v: &crate::transcode::SessionRequest) -> Option<usize> {
         presentation: _,
         block_budget_secs: _,
         transport: _,
+        source_telemetry: _,
     } = v;
     // The fixed ordinary finite profile excludes continuous families. The
     // route's durable decode also has no skipped process-local candidates.
@@ -273,7 +275,12 @@ fn session_request(v: &crate::transcode::SessionRequest) -> Option<usize> {
     }
     let mut n = 0usize;
     n = add(n, v.playback_id.capacity())?;
-    for value in [&v.request_id, &v.previous_session_id, &v.transport] {
+    for value in [
+        &v.request_id,
+        &v.previous_session_id,
+        &v.transport,
+        &v.dv_refit_digest,
+    ] {
         n = add(n, opt_string(value))?;
     }
     if let Some(audio) = &v.audio_delivery {
@@ -317,6 +324,7 @@ fn recipe(v: &RemoteStartRequest) -> Option<usize> {
     if let Some(catalog) = &v.candidate_catalog {
         // Exhaustive inventory: an added field must force accounting review.
         let crate::media_sessions::CandidateCatalogContext {
+            catalog_query,
             caps: _,
             candidate: _,
             binding: _,
@@ -324,6 +332,9 @@ fn recipe(v: &RemoteStartRequest) -> Option<usize> {
         n = add(n, device_caps(&catalog.caps)?)?;
         n = add(n, quality_candidate(&catalog.candidate))?;
         n = add(n, catalog.binding.source_digest.capacity())?;
+        if let Some(query) = catalog_query {
+            n = add(n, query.requested_heap_bytes()?)?;
+        }
     }
     if let Some(decoder) = &v.decoder_caps {
         n = add(n, decoder.requested_heap_bytes()?)?;

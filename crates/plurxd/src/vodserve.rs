@@ -58,10 +58,9 @@ use crate::copyseg::sanitize_stale_dolby_brand;
 use crate::ffmpeg::ffmpeg_bin;
 use crate::prodexec::{next_step, yield_step, Contention, Producer, Step, Termination};
 use crate::prodrun::{Performed, ProducerSlot};
-#[path = "vod/source_lifetime.rs"]
-mod source_lifetime;
 use crate::prodsched::{decide, Action, Demand, Position, WorkingSet, AHEAD_HORIZON_SECONDS};
 use crate::renditiondir::{InitIdentity, InitRefused, RenditionDir, INIT_NAME};
+use crate::source_generation as source_lifetime;
 use crate::titlestore::{Budgets, Manifest, ReaderWindow, SegState};
 use crate::transcode::{session_log_id, SessionKind, SessionRequest};
 use crate::vodgen::{self, Failure, Generation, Outcome};
@@ -102,8 +101,178 @@ struct HandoffRequest {
     deadline_ms: i64,
     admitted: Arc<std::sync::atomic::AtomicBool>,
     incarnation: String,
-    successor: Weak<Rendition>,
+    claimant: HandoffClaimant,
     wanted: crate::admission::TranscodeResourceEstimate,
+}
+
+/// Who a predecessor's permit is being handed to.
+#[derive(Clone)]
+enum HandoffClaimant {
+    /// The staged prepared successor rendition (bound through the
+    /// predecessor's preparation slot).
+    Rendition(Weak<Rendition>),
+    /// This viewer's own processed-upgrade trial. Before staging it is bound
+    /// through the claim and the viewer's playback and runway, never the
+    /// slot; once its successor is staged it is bound by the slot like any
+    /// staged successor's handoff.
+    Trial(Arc<TrialClaim>),
+}
+
+/// A processed upgrade trial's claim on its own viewer's incumbent encoder
+/// permit. Held by [`IncumbentPermitClaim`]; the request lapses when it is
+/// dropped or closed, and the incumbent re-admits through the existing expiry.
+pub(crate) struct TrialClaim {
+    playback_id: String,
+    incarnation: String,
+    /// Published runway the incumbent must keep past the viewer while it is
+    /// parked: what a failed trial needs to give the permit back and let the
+    /// incumbent re-admit (`PROCESSED_UPGRADE_TRIAL_BUDGET + QUEUE_WAIT`).
+    reserve_ms: i64,
+    admitted: Arc<std::sync::atomic::AtomicBool>,
+    token: StdMutex<Option<u64>>,
+    ready: tokio::sync::Notify,
+    closed: std::sync::atomic::AtomicBool,
+    /// The trial's successor was staged under this incarnation: from now the
+    /// preparation slot binds the handoff, until commit, abort or rejection.
+    staged: std::sync::atomic::AtomicBool,
+}
+
+impl TrialClaim {
+    #[cfg(test)]
+    pub(crate) fn reserved_for_test(token: u64) -> Arc<Self> {
+        Arc::new(Self {
+            playback_id: "test-playback".into(),
+            incarnation: "test-incarnation".into(),
+            reserve_ms: 0,
+            admitted: Arc::new(AtomicBool::new(false)),
+            token: StdMutex::new(Some(token)),
+            ready: Notify::new(),
+            closed: AtomicBool::new(false),
+            staged: AtomicBool::new(false),
+        })
+    }
+
+    fn is_staged(&self) -> bool {
+        self.staged.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The capacity reservation the incumbent left for this trial, once it yielded.
+    pub(crate) fn token(&self) -> Option<u64> {
+        *self.token.lock().expect("trial claim token")
+    }
+
+    /// The incumbent stopped being bound (runway, readers, seek, session end).
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The trial took its bundle with the reservation: the request is then
+    /// kept to its deadline rather than its short refresh lifetime.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn mark_admitted(&self) {
+        self.admitted
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn close(&self) {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.ready.notify_waiters();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn close_for_test(&self) {
+        self.close();
+    }
+
+    /// Resolves once the claim is closed.
+    pub(crate) async fn closed(&self) {
+        loop {
+            let notified = self.ready.notified();
+            if self.is_closed() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Wait until the incumbent yielded (a token is present), the claim
+    /// closed, or `deadline` passed.
+    pub(crate) async fn wait_ready(&self, deadline: tokio::time::Instant) -> Option<u64> {
+        loop {
+            let notified = self.ready.notified();
+            if let Some(token) = self.token() {
+                return Some(token);
+            }
+            if self.is_closed() {
+                return None;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return self.token();
+            }
+        }
+    }
+}
+
+/// Owner of a [`TrialClaim`]. Dropping it releases the incumbent from the
+/// trial (unless a staged successor has taken over the same incarnation's
+/// handoff) and returns any reservation nobody admitted with.
+pub(crate) struct IncumbentPermitClaim {
+    claim: Arc<TrialClaim>,
+    incumbent: Weak<Rendition>,
+    admissions: crate::admission::Admissions,
+}
+
+impl IncumbentPermitClaim {
+    pub(crate) fn claim(&self) -> &Arc<TrialClaim> {
+        &self.claim
+    }
+
+    /// A claim with no incumbent rendition, for the upgrade's own tests.
+    #[cfg(test)]
+    pub(crate) fn detached_for_test(
+        claim: Arc<TrialClaim>,
+        admissions: crate::admission::Admissions,
+    ) -> Self {
+        Self {
+            claim,
+            incumbent: Weak::new(),
+            admissions,
+        }
+    }
+
+    /// The successor was staged under the claim's incarnation: the incumbent
+    /// stays parked under the preparation slot's binding, which commit, abort
+    /// and rejection already settle.
+    pub(crate) fn hand_to_staging(self) {
+        self.claim
+            .staged
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Drop for IncumbentPermitClaim {
+    fn drop(&mut self) {
+        if self.claim.is_staged() {
+            return;
+        }
+        self.claim.close();
+        // After `close`, under the same lock `reserve_for_successor` reserves
+        // under: no reservation can appear after this read.
+        let token = *self.claim.token.lock().expect("trial claim token");
+        if !self
+            .claim
+            .admitted
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            if let Some(token) = token {
+                self.admissions.release_reservation(token);
+            }
+        }
+        if let Some(incumbent) = self.incumbent.upgrade() {
+            incumbent.release_trial_claim(&self.claim);
+        }
+    }
 }
 
 /// How long a rendition with no attached sessions is kept warm before an
@@ -536,6 +705,12 @@ pub struct VodSessionInfo {
     /// separate from production. This diagnostic grants no admission.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_service: Option<plurx_core::resource_observation::ServiceObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dolby_vision_refit: Option<crate::transcode::RefitPlaybackReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_refit_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_refit_identity_reason: Option<String>,
     /// Optional facts from this attached rendition's immutable recipe.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_format: Option<StreamFormat>,
@@ -747,6 +922,9 @@ impl VodActivityObservation {
 /// lock for every open activity page.
 #[derive(Debug, Clone)]
 pub struct VodDeliveryInfo {
+    pub dolby_vision_refit: Option<crate::transcode::RefitPlaybackReport>,
+    pub dv_refit_digest: Option<String>,
+    pub dv_refit_identity_reason: Option<String>,
     pub observation: Option<VodActivityObservation>,
     pub id: String,
     pub method: crate::delivery::Method,
@@ -779,6 +957,7 @@ pub struct VodStart {
 
 /// Actual init-verified media and exact catalog provenance for one parent.
 pub(crate) struct VerifiedContinuousFamily {
+    pub versioned: bool,
     pub controlled: bool,
     pub family: plurx_core::transcode::VodPresentationFamily,
     pub video_budgets: Vec<plurx_core::transcode::VodRenditionBandwidth>,
@@ -787,9 +966,9 @@ pub(crate) struct VerifiedContinuousFamily {
 }
 
 impl VerifiedContinuousFamily {
-    /// The durable descriptor bound to the session. Its bytes are compared
-    /// exactly on every re-bind and parsed by older nodes during a rolling
-    /// deploy, so it never carries the link rates.
+    /// The durable descriptor bound to the session. V1 is immutable; negotiated
+    /// V2 may add the original companion under the same primary/audio anchor.
+    /// Link rates remain recomputed client metadata, outside durable identity.
     pub(crate) fn description(&self) -> Result<Vec<u8>, VodError> {
         self.description_with(false)
     }
@@ -847,11 +1026,15 @@ impl VerifiedContinuousFamily {
             );
             row
         });
-        let bytes = serde_json::to_vec(&serde_json::json!({
-            "version": 1, "family_id": self.family.id(),
+        let mut description = serde_json::json!({
+            "version": if self.versioned { 2 } else { 1 }, "family_id": self.family.id(),
             "mode": if self.controlled { "controlled" } else { "autonomous_reserved" }, "master": "master.m3u8", "video": video, "audio": audio,
-        }))
-        .map_err(|error| VodError::ProducerFailed(error.to_string()))?;
+        });
+        if self.versioned {
+            description["family_revision"] = self.family.video().rungs().len().into();
+        }
+        let bytes = serde_json::to_vec(&description)
+            .map_err(|error| VodError::ProducerFailed(error.to_string()))?;
         if bytes.len() > 32 * 1024 {
             return Err(VodError::ProducerFailed(
                 "family description exceeds its bound".into(),
@@ -864,6 +1047,9 @@ impl VerifiedContinuousFamily {
 /// The durable request plus already resolved encoder recipes. Plain copy
 /// callers need no encoder preparation and convert from their request alone.
 pub(crate) struct VodRecipeRequest<'a> {
+    /// This attachment's server-owned purpose, independent of Auto selection
+    /// and the cached encoder recipe. Prepared work must name Speculative.
+    pub(crate) admission_priority: crate::admission::Priority,
     /// One admitted preparation transferred to its exact executable recipe.
     /// The attached parent owns this credit; the cached Encoding never does.
     pub(crate) root_admission: Option<PreparedRootAdmission>,
@@ -881,6 +1067,7 @@ pub(crate) struct VodRecipeRequest<'a> {
 impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
     fn from(request: &'a SessionRequest) -> Self {
         Self {
+            admission_priority: crate::admission::Priority::Live,
             root_admission: None,
             measured_candidate: None,
             request,
@@ -1213,6 +1400,7 @@ pub(crate) mod adaptive_runway;
 /// Everything the tasks share. `VodServe` is a thin handle over this so the
 /// per-rendition driver and generation tasks can be `'static`.
 struct Shared {
+    source_identity: StdMutex<Option<crate::source_custody::SourceIdentity>>,
     base: PathBuf,
     runtime_cache: PathBuf,
     store: Arc<dyn Store>,
@@ -1242,6 +1430,13 @@ struct Shared {
     cluster_node_id: Option<String>,
     cluster_index_root: Option<PathBuf>,
     cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    /// The cluster's catalogue identity (`instance.id`), read once: it never
+    /// changes, and v3 copy-index source keys are derived from it per start.
+    catalog_namespace: tokio::sync::OnceCell<String>,
+    /// The Analysis worker's inbox, attached once the job manager exists. A
+    /// defective healthy v3 head is reported there; this serving path never
+    /// claims or quarantines anything itself.
+    copy_analysis: std::sync::OnceLock<Arc<crate::copy_analysis::CopyAnalysisRegistry>>,
     sessions: Mutex<HashMap<String, Session>>,
     /// Bounded by in-flight VOD request admission and cleaned by exact RAII.
     /// This closes lease loss against a slow resurrection before attachment.

@@ -1,0 +1,670 @@
+# FEL RPU re-fit (F+) — build plan
+
+**Status:** built — milestones 1–6 merged in PR #1565 (`8630ee431`,
+2026-11-19); not deployed. The Q23 MMR candidate failed native equivalence.
+The replacement method, `dv-refit-safe-v2-mmr12`, publishes and scores a
+common Q12 chroma grid; its production-written candidate passes all 48 native
+points and controls. Landing evidence and its one recorded gap: below.
+Milestone 7 follows served F+ scores · **Updated:** 2026-11-19 · **Written:** 2026-11-12 ·
+**Owner:** Claude (landing; from Codex 2026-11-18) · **Decision:** Paul approved building F+
+and per-title re-encode trials against it, 2026-11-12
+
+Companion to the offline result,
+[RPU-REFIT.md](../../tools/dv_processing/diagnostics/fel_quality/RPU-REFIT.md),
+and the investigation ledger,
+[FEL-PICTURE-QUALITY-INVESTIGATION.md](FEL-PICTURE-QUALITY-INVESTIGATION.md).
+This file says how F+ gets into the product. Work milestone by milestone
+(§6). If a step seems to need a change to the processed FEL→8.1 route or to
+a decoder or client protocol signal, stop and flag it: F+ changes RPU bytes
+on the server. Developer controls and playback-info presentation are part of
+§4 and §6, without changing how clients decode or identify their platform.
+
+The candidate merges main `59022fd2a` and then `40cc6460d` into the reviewed F+
+integration (`846225459`, then main `6b891f63a` at `0d501cae6`). Main took
+SQLite v133 for scoped application login, so the F+ curve extension is v134;
+the fixture rewind removes the empty F+ tail before main's delegation rewind.
+Worker protocol 11: the strict media-worker `SessionRequest` envelope carries
+the server-selected F+ curve digest beside protocol 10's catalog provenance.
+Workers on different protocols form separate placement cohorts, so rollout
+follows the cohort/drain sequence in [OPERATIONS.md](../OPERATIONS.md#rolling-upgrades)
+with a rebuilt processing bundle; clients send no new platform signal. No
+deployment is implied.
+
+A SQLite database written by a pre-merge F+ candidate, where v133 was the F+
+curve extension, does not open on this build: the v134 step is a no-op on the
+existing F+ tables, then `open` refuses at `delegation::verify_sqlite`
+("playback delegation schema missing"). This is read from the code, not run.
+Such a database must be recreated; none is known to exist. No candidate build
+was deployed, the F+ work area on the learner build node holds no SQLite
+database outside build targets, and that node's running plurxd is an unrelated
+image. The earlier store check did not inspect the M3; its F+ work was render
+diagnostics. The 2026-11-16 capture work does not qualify an existing store.
+
+Earlier source-scoped qualification remains in the PR history and in
+`historical_source_qualification_notes` of the
+[historical receipt](FEL-RPU-REFIT-M6-2026-11-16.json): core/store/daemon
+cases, whole/seek RPU and AAC readback, zero-origin disk authoring, and helper
+controls. Those older results do not qualify a later source tree. Three daemon
+failures reproduced on their matching main baseline: analysis gap-fill and two
+physical-stop reader checks. The latter read a deployed-host proof from
+`/run/plurx-physical-stop/legacy-dv-title-v1.json`; final tests must use the
+isolated lane. Disk conversion's nonzero-origin refusal remains explicit (§3.6).
+
+The 2026-11-16 [native receipt](FEL-RPU-REFIT-M6-2026-11-16.json) records
+completed six-point capture on an M3 Max with macOS 27.2.1. Constant, identity,
+repeat and spatial-uniformity controls pass. Five points overlap the exact-Q23
+constant oracle in every RGB channel. Point 06 (`[371,521,544]`) differs by
+8 FP16 steps in red and 2 in green; blue matches. That original candidate failed M6; its remaining 42 points were not run. The historical 48-patch improvement
+measurement remains separate evidence.
+
+Two independently reviewed component-isolation epochs reproduce the difference.
+Actual luma with constant chroma matches the oracle, as does eight-piece
+constant luma. Constant luma/Cb with actual Cr MMR exactly reproduces the
+actual output. This localizes the observation to Cr MMR at point 06; its
+first isolation did not identify a repair. Subsequent equivalent-value
+programs demonstrated representation-dependent native results. Perturbing the
+constant oracle by ±1 Q23 LSB, and using a closer fractional reference, did not
+reproduce the actual output; the original round12-only float32 comparison was
+insufficient to test that question directly.
+
+The decisive counterfactual explicitly truncates each signed MMR coefficient
+toward zero to Q12 while retaining denominator 23, orders, pivots and luma.
+Native captures remain identical to the original at all six inputs. Rounding
+MMR coefficients to nearest Q12 instead then matches independently calculated
+constant references in all RGB channels at all six inputs. This establishes a
+usable coefficient compatibility boundary, not the location or precision of
+Apple's internal arithmetic. The design error was qualifying the fine-grid
+software curve independently of the effective native mapping.
+
+The repair makes the served coefficient grid explicit before qualification:
+nearest Q12 MMR after Q23 wire normalization, with Q23 luma unchanged. Held-out
+errors and stored-curve guards evaluate the exact coefficients publication
+writes. The method version changes so reusable statistics are solved again;
+new selections exclude obsolete methods while existing digest pins retain
+their exact coefficients. No threshold, acceptance tolerance or enable gate
+changes. The actual production exporter parsed the retained real helper statistics,
+solved and qualified the current method, and wrote a 435-byte RPU with SHA-256
+`7d2b4d39312767afd1e957a6572c8c7e47c3a3c2007cf85ad28897a6137eb9fb`.
+The existing six nearest-Q12 captures contain exactly those bytes. Independent
+exact-composition reference verification binds them to this production candidate.
+The remaining 42 points ran once in three 14-point native epochs; every point
+passes the unchanged RGB mean-bin overlap criterion, with constant, identity,
+repeat and spatial-uniformity controls passing in every epoch.
+
+The [production-bound M6 receipt](FEL-RPU-REFIT-M6-Q12-2026-11-16.json)
+records the full 48-point union, source and RPU identities, unmodified frozen
+kernels, and released resources. Native render phases took under 180 seconds
+each. Every phase reaped its children and released the Mac before offline
+scoring. Python AST-dump and host-dictionary version differences initially
+stopped admission before capture; explicit metadata-only receipt migrations
+preserve the completed writer and lossless encoding work. No native capture,
+writer output or successful encode was repeated. This is an empirical native
+instrument qualification, not proof of Apple's internal coefficient precision
+or a formal opaque-pipeline error bound.
+
+The initial mux failure was a diagnostic comparison of wall-clock stream
+creation tags. A reviewed harness correction excludes only that tag, as the
+existing protocol specifies; all raw proofs and original failed-run evidence
+remain intact. Payload, timing, decoder, colour and other metadata differences
+still refuse adoption. The receipt binds the revised runner and all three
+native results by SHA-256.
+
+Earlier source-scoped compile, store, daemon, formal-mapping and native results
+remain in the historical receipts and PR history. They do not qualify later
+source automatically. The source-lease/schema-v136 prototype stays separate.
+
+**Landing, 2026-11-19.** #1565 landed through `scripts/land` with the merge
+train off, as `8630ee431`, with all 50 `Regression-Test:` lines. Every fast-lane
+job, the Main promotion gate included, passed on `f8a7f5ab3` (run 8114). That
+run re-ran only the seven unit tests that failed in run 8334. Five of them
+passed at the merge base; two fail on `main` too. Two fixes came first. `58628fe3c` repinned the
+durable-jobs sources that a test-only change had left stale. `d2236539d` merged
+main (#1676 item pins, #1646) and recorded five item pins for already-reviewed
+F+ items. That landed head ran preflight only. Paul ordered that passed jobs
+not re-run after a main merge, so it carries `Landed-Untested:`. He then
+declined a run on `main`, so the combined tree has no lane run as one tree.
+`transcode/dv_refit` and `tools/dv_processing` are byte-identical from
+`802c0e5cc`, which the 48-point receipt's independent review covered, to the
+landing. No native capture was repeated.
+
+## 1. Objective
+
+A Profile 7 FEL title converted to 8.1 today plays the disc's base layer
+with identity mapping curves. F+ keeps those bits and writes per-scene
+mapping curves fitted to the FEL composition into each 8.1 RPU instead.
+
+- **What it buys:** offline, F+ removed 54–59% of the identity serve's
+  pooled ΔITP on two Michael windows and 34% on Beekeeper. Every frame got
+  better.
+- **Which clients see it:** clients that apply the 8.1 mapping see it
+  (measured on macOS). Clients that ignore the mapping show exactly what
+  they show today (measured on the Lenovo TB322FC).
+- **What it doesn't do:** it does not replace re-encoding where EL detail
+  matters. The best encodes still win Michael frame 0, so per-title trials
+  against F+ are part of this plan (§5).
+
+## 2. How it fits together
+
+```
+ P7 FEL title (BL + EL + RPU)
+        │
+        ▼
+ DvRefit job (per title, any node)          §3.1–3.3
+   helper --refit-stats: decode BL+EL, compose at a stride-8 lattice,
+   accumulate per scene (scene_refresh_flag) ──▶ stats per scene (JSON)
+        │
+        ▼
+ plurx-core dv_refit: solve per scene, guard rails, composer domain  §3.4
+        │
+        ▼
+ store: dv_refit_curves (source identity, fit version, scenes, digest)
+        │
+        ├──▶ copy-path converter (fragindex, copyseg, vodgen,
+        │    copy_normalization): To81, then apply_to_rpu(scene curves)   §3.5
+        ├──▶ dv_disk permanent conversion: curves written before the
+        │    EL is discarded                                             §3.6
+        └──▶ Developer tab + Activity: what was fitted, gain, clients  §4
+```
+
+The processed FEL→8.1 route (`dv_author_profile81_window`) is untouched.
+Its picture already contains the EL, so identity mapping is correct there.
+
+## 3. Design
+
+### 3.1 Scenes come from the RPU
+
+Curves change only at an RPU `scene_refresh_flag`. The colourist's scene
+cuts are where the DM metadata already changes, so a mapping change there
+can't flicker inside a shot. Scenes shorter than 24 frames are pooled:
+offline, one fit per 48-frame window cost nothing against per-frame fits,
+and short scenes give thin statistics. The pooling is bounded:
+- a scene of 24 or more frames is a group of its own;
+- consecutive shorter scenes collect into a run, which becomes a group of
+  its own once it reaches 24 frames;
+- a run still short when a long scene follows joins the group before it, or,
+  at the very start, the group after it;
+- a run still short at the end joins the last group.
+
+Every group is at least 24 frames unless the whole title is shorter, and
+short scenes never chain into one long group. A title whose RPUs flag every
+frame (the summary's `degenerate`) gets 24-frame groups, not one scene.
+
+Scenes are keyed by presentation time, never by frame count. Each scene
+carries `first_pts` and `end_pts` (its last frame's pts plus duration) in the
+source's time base, and serving finds a sample's scene by its pts: scene *i*
+covers [first_ptsᵢ, first_ptsᵢ₊₁), and the last one runs to its `end_pts`.
+`end_pts` need not equal the next scene's `first_pts` exactly (container
+durations are rounded), so the next scene's start is the boundary.
+
+### 3.2 Composition in the helper, on the CPU
+
+`segment_decode_render.c` already decodes both layers. It gets a
+`--refit-stats` mode that:
+- reads the host planes it already builds (`native[2]`);
+- composes each stride-8 lattice pixel on the CPU from the frame's RPU, as
+  mapped BL plus the NLQ-dequantised EL residual, in float (the model A
+  family, which libplacebo-style decoders implement);
+- rounds the result to 12-bit;
+- pairs chroma the way the frozen tools pair it;
+- accumulates `RefitStats` per scene and prints one JSON object per scene.
+
+The mode needs no GPU, so any node can fit. The NLQ arithmetic is ported from
+`fel_renderer.h`'s shader, and the port is checked against the frozen tools
+(acceptance in §6).
+
+As built (milestone 2; `tools/dv_processing/refit_mode.h`, arithmetic in
+`refit_compose.h`):
+
+```sh
+segment_decode_render --refit-stats SOURCE VIDEO_INDEX [--frames FIRST LAST]
+segment_decode_render --dump-composed SOURCE VIDEO_INDEX FIRST LAST
+```
+
+- **Output:** `--refit-stats` prints one `refit_scene` JSON line per pooled
+  scene (`first_frame`, `frames`, `first_pts` and `end_pts` in `time_base`
+  ticks, and `fit` and `held_out` in `RefitStats`' serde layout, whose
+  `xtx_upper` is XᵀX's upper triangle), then a `refit_summary` line
+  (`frames`, `scenes`, `rpu_scenes`, `median_scene_frames` of the RPU's own
+  scenes before pooling, `degenerate` when that median is under 24,
+  `fit_samples`, `held_out_samples`, `first_pts`, `end_pts`, `time_base`).
+  Diagnostics go to stderr; exit 0 only after a complete read; any refusal is
+  exit 1 and the output is void. plurx-core reads the lines as `RefitScene`
+  and `RefitSummary` (each checked, 512 KB per line at most) and
+  `check_refit_run` cross-checks a whole run.
+  `--dump-composed` writes the lattice samples as binary records (format in
+  `refit_mode.h`), which
+  `diagnostics/fel_quality/compare_composed.py` checks against the frozen
+  tools.
+- **Composition:** each frame's own mapping plus the LINEAR_DZ residual
+  sign(d)·((|d| − ½)·S + T)/2²³, rounded as floor(v·4096 + ½) and clipped,
+  the way the helper's GPU renderer (libplacebo v7.387.0) composes the
+  master: input code/2¹⁰ (UNORM16 of code ≪ 6 rescaled,
+  `src/shaders/colorspace.c:349-352`); pivots code/2¹⁰
+  (`utils/libav_internal.h:985`), so a piece is chosen by code ≥ pivot;
+  every component clamped to its own pivot range before any piece runs,
+  including where another component's MMR reads it (`colorspace.c:178`);
+  each mapped value clamped to [0, 1] before the residual
+  (`colorspace.c:326`) and the sum clamped again (`colorspace.c:147-150`).
+  FFmpeg parses the mapping but does not reshape. Our code already matched
+  this, so the frozen-tool checks are unchanged. The renderer evaluates in
+  binary32; the helper in binary64 with fused multiply-adds off. RPUs go
+  through the playback path's own admission (`map_fel_rpu`), FFmpeg's parse
+  must agree with libdovi's on every pivot and coefficient, and the
+  scene_refresh_flag comes from the frame's own DM data. Only a
+  half-resolution EL is admitted (the frozen pairing covers no other).
+- **Lattices:** stride 8 over the RPU's L5 active area (else the full
+  frame); fit at phase 0, held out at phase 4 in x and y. The diagnostic
+  `--area LEFT RIGHT TOP BOTTOM` replaces L5 to reproduce an offline region.
+  The offline Michael5400 and Beekeeper fixtures used regions that are not
+  their L5 areas (32 vs 42 rows; 272/275 vs 276/276), so their production
+  statistics differ from the fixtures' by design; with `--area` they are the
+  same samples.
+- **Decoding:** software only, four frame threads per layer (the window
+  path's reservation); at the end of the title both decoders are flushed and
+  drained one frame each in turn. The source is read whole, as `scan_title`
+  reads it, within four times its length plus 64 MiB, and at most 10⁶
+  frames.
+- **Media checks:** `diagnostics/fel_quality/compare_composed.py` (exact
+  against the frozen tools) and `controls/test_refit_title_edits.py`, which
+  edits a real title's RPUs with dovi_tool (an L5 change inside a scene, a
+  scene cut on a reordered frame, an invalid RPU mid-title) and checks scene
+  boundaries, lattice counts and the mid-title refusal.
+  The playback window path is unchanged: the modes are dispatched before its
+  arguments are parsed, and a window rendered before and after the change is
+  byte-identical.
+
+### 3.3 The job
+
+`JobKind::DvRefit` copies `DvTitleScan`'s shape (`source_probe/title_work.rs`):
+- `may_execute_job` and admission;
+- a demand query of P7 FEL titles without current curves;
+- a claim with lease, heartbeat and cancellation;
+- `ChildWork::background("Dolby Vision F+ curve fit")` as the Activity
+  label;
+- a publish step.
+
+It yields to media probes like the title scan does. It is attributable and
+stoppable from the background-jobs page, because it decodes a whole title
+on the CPU (Paul's rule: hardware use has to be visible and stoppable from
+inside the product). Request identity hashes the source, the selected
+video stream, the helper's refit identity and `dv_refit::FIT_VERSION` (the
+probe revision was dropped from it in review; see below).
+
+As built (milestone 3, `source_probe/{refit_work,dv_refit}.rs`,
+`store/dv_refit_jobs.{rs,sql}`, `transcode/dv_refit_title.rs`; reworked after
+review of PR #1565):
+- **Switches.** Four Developer switches, one per
+  `playback_control::ClientPlatform`: `playback.dolby_vision_refit_web`,
+  `_apple`, `_android`, `_linux`, default off. Demand runs only while one is
+  on; copy-path serving (milestone 4) reads each. The card's rows are
+  advisory: whether this node's helper supports `--refit-stats`, N of M
+  Profile 7 FEL titles fitted, the spool's size, and the measured clients
+  line ("Apple app on macOS applies the 8.1 mapping (AVPlayerLayer); Lenovo
+  TB322FC (Android) ignores it; iOS, tvOS, Google TV, web unobservable").
+- **FEL, not MEL.** No catalogue fact separates them: the title scan's
+  aggregate does not record the EL type. Demand takes a Profile 7 title with
+  an EL and a published complete title aggregate only when its probe
+  document holds a FEL fact for the current source (a FEL recipe request, a
+  recipe verdict or a legacy verdict). Only the FEL route writes those, so a
+  FEL title the FEL route never planned for is not fitted. That coverage gap
+  is a follow-up: milestone 5 records the EL kind with the title facts.
+- **Identity** (the job's dedupe key) is the source (file, size, mtime), the
+  selected video stream, the helper's refit identity and `FIT_VERSION`. The
+  refit identity is `REFIT_MODE_VERSION` (bumped when `refit_mode.h` or
+  `refit_compose.h` change what a run prints; a test pins their sha256) and
+  the decoder ABI (the bundle's avcodec/avformat/avutil majors), not the
+  whole backend digest, so rebuilding the bundle for an unrelated change does
+  not decode every FEL title again. The complete title aggregate is a demand
+  precondition, not part of the identity. The title-scan generation
+  (`dv_title_jobs_demand.revision`) is recorded; when a newer generation
+  selects the same stream of the same source, the stored table (or terminal
+  outcome) is rebound to it instead of fitted again.
+- **Storage (one replicated write).** Statistics are never replicated.
+  `background_dv_refit_titles` (keyed by file and curve digest) holds the
+  title row; `background_dv_refit_scenes` each scene's first frame, frames,
+  `first_pts`/`end_pts`/time base, the served coefficients as the numerators
+  over 2^23 `apply_to_rpu` writes (identity: NULL), why a scene keeps
+  identity, and its held-out identity error, fitted error and gain. Error
+  numbers and the title's gain are stored as Rust's shortest round-trip
+  decimal text (`{:e}`), so they read back bit for bit; serde_json's
+  `float_roundtrip` is no longer used anywhere. A scene is about 1.2 KB with
+  curves; a publication is bounded at 12 MiB (some 10,000 fitted scenes), and
+  a title over it fails rather than splitting. The publication checks its
+  own rows (contiguity, the digest, every served table loading back through
+  `ServableCurves::from_quantised`, finite numbers, the bound) before it is
+  sent; a failure there settles Fail.
+- **Tables by digest.** Publication makes the new table current and the
+  file's previous one superseded, in the same transaction; a superseded table
+  stays addressable by `dv_refit_curves_by_digest(file_id, digest)` for seven
+  days after supersession, then publication or the idle pass's prune drops
+  it. `dv_refit_curves(file_id)` reads the current one. Both read with the
+  authority's consistency (a follower's local copy may still hold a table
+  publication has superseded) and require the catalogue row to still name the
+  table's source. A changed source (size or mtime) drops every table and
+  outcome of the file and supersedes its jobs (`background_dv_refit_source_change`).
+- **The spool.** The helper's stdout is written into a node-local spool
+  (`<runtime cache>/dv-refit`), keyed by the source, the stream and the refit
+  identity: `<key>.jsonl.gz` once a run completed, `<key>.partial` for the
+  whole scene lines of interrupted runs. A `FIT_VERSION` bump re-solves from
+  a complete spool without decoding; without one it decodes again. The
+  Developer card lists it (`GET /api/v1/developer/dv-refit/spool`) and deletes
+  it (`DELETE` on the same path).
+- **Resume and coexistence.** The helper resumes at a pooled scene's start
+  (`--resume FIRST FIRST_PTS`: it seeks to the key frame before it and
+  composes from there, its summary covering only that run). The job resumes
+  at the start of the last whole scene line the spool kept and joins the
+  resumed scenes to the ones before them; `dv_refit::summarise` rebuilds the
+  whole title's summary from the scenes' `rpu_scene_frames`. The helper's own
+  control (`controls/test_refit_resume.py`) shows the resumed scenes equal an
+  uninterrupted run's at every boundary of the real clip (resuming at frame
+  286 of 311 takes 1.1 s against 13.1 s). The helper runs with `--threads 2`
+  and the job reserves exactly 3 CPU threads (measured on lab3: 1 thread 39 s
+  at 1.0 core, 2 threads 21.9 s at 2.2 cores, 3 threads 16 s at 3.2 cores, 4
+  threads no faster). It is admitted beside live sessions when that fits the
+  software budget and no viewer waits, and yields only when a viewer or an
+  offline download waits for capacity, to a media probe, or to exact playback
+  qualification demand. The scheduler keeps polling the current fit while
+  qualification awaits its lane, then cancels and reaps the fit before the
+  successor acquires it. A yield keeps the
+  spool and requeues the same identity; a yield that kept no new scene counts
+  toward a bound of 8 in a row, after which it settles as a retry.
+- **Classification.** The helper exits 3 for a content refusal (not FEL, a
+  full-resolution or half-resolution EL that is not FEL-composable, the active
+  area, the stream) and 1 for any other refusal (I/O, allocation, decoder,
+  arguments); libav logging is quiet. The job reads only the exit status:
+  exit 3 stores a `refused` title with the last stderr line as its reason;
+  any other exit, a signal or a spawn error retries, resuming from the spool.
+- **Terminal outcomes.** A failed (after its retries) or cancelled identity
+  is recorded in `background_dv_refit_outcomes`, which outlives the job row,
+  so retention pruning job history does not demand the title again. A new
+  job for the identity (Retry on the jobs page) lifts it. Deterministic
+  failures (malformed output, a solve failure, rows that fail their check)
+  settle Fail; publication store errors retry with backoff while the lease
+  holds; a fenced publication settles nothing.
+- **Parsing and solving** run off the async runtime. The title verdict is as
+  before: held-out squared error pooled over the scenes, counting identity for
+  a refused scene; gain 1 − served/identity; under 5% the title serves
+  identity; a degenerate summary is identity for the whole title. The curve
+  digest is sha256 over each scene's span and served integers.
+- **Acceptance.** The two retained real helper runs over the Michael5400
+  window agree byte for byte. The old Q23 method produced digest
+  `2a8d78f7cf05fff325afe70c4f5ce2d1972317027cd0bdb045202d16310cb75b`.
+  Re-solving the recorded statistics with the Q12 publication method produces
+  `3a4a130ecd156bed7846b908972a3d695ceacd4d141d12194bab4265772f420a`,
+  now the `dv_refit_title` fixture expectation; the helper was not rerun.
+
+### 3.4 Solving and guard rails
+
+The job solves each scene with `RefitStats::solve` (PR 1). The optimizer
+retains its fine-grid reference result. `servable` normalizes luma to Q23 and
+chroma MMR coefficients to nearest Q12 on the Q23 wire grid. The stored
+integers, held-out error and shape/departure checks use that published program,
+not the finer optimizer coefficients. The RPU denominator remains 23; new MMR
+numerators have eleven zero low bits. A scene's curves are served only when
+all of these hold; otherwise that scene keeps identity curves:
+- the luma curve rises;
+- every coefficient is writable, in [−64, 63);
+- the luma curve departs from identity by ≤ 256 12-bit codes;
+- the chroma MMR departs by ≤ 512 codes on the 17³ grid.
+
+Offline, the worst departures were 33 (luma) and 80 (chroma) codes. The
+limits are 8× and 6× that: wide enough not to bite on real content, tight
+enough to stop a pathological scene.
+
+The job also records each scene's held-out squared code-error reduction
+for F+ relative to identity on its lattice, and the title total is shown
+in the UI. A title whose total gain is below 5% keeps identity curves
+everywhere, because a negligible gain is not worth new bytes in every cache.
+
+### 3.5 Serving: the copy-path converter
+
+- `dvconvert::convert_length_prefixed` gains a curve argument. After `To81`
+  it calls `apply_to_rpu`.
+- `dvpipe::Converter` resolves each sample's scene from its presentation
+  time (the fragment's `tfdt` and `trun` cts) against the stored scene table,
+  which keys scenes by their first presentation time. It never uses a
+  running count, because a seek starts mid-title.
+- A fitted output uses `dv-p7-to-p81-rpu-v4` and its curve digest in the
+  fragment-index identity. The v1 output stays alongside it for disabled
+  platforms and titles without a fit. Live `copyseg` stays on v1 until it
+  shares the indexed copy engine; no fitted scene is selected from a live
+  session's floating-point clock.
+- The indexed copy path (`fragindex.rs`, `vodgen.rs`) carries the fitted table.
+  Its source packet DTS/PTS and stream time base anchor the index clock.
+  Matroska may omit the first DTS. In that case a bounded, held-source
+  first-packet SHA-256 probe uses the selected output's exact parameter-set
+  retention filter. The first emitted sample must match those bytes and the
+  independently measured PTS/time base. Its composition offset then resolves
+  the decode origin with exact integer arithmetic; a mismatch or nonintegral
+  clock refuses the fitted index. PTS is never substituted for DTS.
+  A seek probe measures packet PTS relative to the first source packet.
+  Canonical first composition offsets place that presentation measurement
+  against index rows; inferred post-seek DTS never establishes the landing.
+  A unique coded-picture sequence and candidate-specific converted byte
+  counts are required.
+
+Fitted v4 indexes persist a 72-byte proof per video row: separate ordered
+coded-picture and cadence SHA-256 values plus the signed first composition
+offset. Count, clock, every coded NAL payload, duration and composition offset
+remain bound. The local promotion JSON and both cluster headers retain the
+source clock and proofs. Older fitted namespaces cannot bypass this contract;
+v1/native indexes retain their existing encoding.
+
+Real acceptance found that the first four pictures after a Matroska seek had
+inferred DTS/CTO different from the complete-source index. The next RAP fully
+recovered. The bounded repair may discard at most two whole preroll fragments,
+only after proving their coded identities and only strictly before the requested
+entry. The bound is the existing three-fragment landing evidence window minus
+one fully proven row, not a universal demuxer recovery claim; longer damage
+refuses. It never rewrites timing, discards a target row, or converts discarded
+preroll. Every retained/served row still requires full cadence/CTO proof and
+one fixed DTS translation before conversion/publication; later rows and complete
+EOF coverage remain checked. Damage reaching the target, an unidentified
+prefix, excess preroll or an ambiguous landing refuses the generation.
+
+This proves that the producer agrees with the canonical video-only index;
+real clock qualification separately compares all source PTS and every
+available DTS. It is not a claim of an independent full-source PTS census in
+production. Combined AAC muxing can change initial video cadence to absorb
+priming. Affected layouts must be refused before fitted media publication,
+even when distinct curves encode to the same byte count. AAC support
+is qualified only for measured layouts. A controlled zero-origin FEL plus
+stereo-PCM fixture passed the real AAC producer for whole and seek output:
+310/139 RPU readbacks and602/272 AAC samples. Its media facts come from the
+actual scanner; the fixture initially omitted profile7 compatibility facts,
+which incorrectly selected the profile5 no-filter path and retained EL NALs.
+The corrected fixture asserts the production video command matches canonical
+filtering. The nonzero-origin timing-disagreeing AAC case still refuses before
+publication. These two results establish a positive and negative boundary,
+not universal AAC-layout support. Developer readiness explains unsupported
+layouts without disabling the saved platform choices. The current
+hvc1 muxer also removes in-band parameter sets after the conversion filter;
+F+ retaining outputs therefore explicitly refuse even with known DTS. This
+does not change v1 behavior or claim existing retaining-copy paths qualified.
+The boundary follows [FFmpeg's hvc1 muxer choice](https://github.com/FFmpeg/FFmpeg/blob/n8.0.1/libavformat/movenc.c#L6378-L6396)
+and its [parameter-set filtering](https://github.com/FFmpeg/FFmpeg/blob/n8.0.1/libavformat/hevc.c#L1124-L1134).
+
+Decisions (2026-11-12; timing proof strengthened 2026-11-13):
+- **Pinned per session.** The digest in the server-owned copy intent is fixed
+  at a session boundary. Its producers load the table by file ID and digest.
+  If retention has removed the table, a new rendition generation may pin the
+  current digest under a new identity before publishing. A refit published
+  mid-generation cannot change that generation's bytes.
+- **v4 only for fitted titles.** A title without a fitted table keeps
+  `dv-p7-to-p81-rpu-v1`, so its indexes and caches stay valid. A fitted
+  title's identity is `dv-p7-to-p81-rpu-v4` plus the curve digest. Identity
+  and bytes always agree: if curves cannot be applied, the conversion is
+  refused, never served as identity bytes under v4.
+- **Enable, not gate.** Per-platform settings
+  `playback.dolby_vision_refit_{apple,web,android,linux}`, default off, are
+  read against the accepted control snapshot's typed `ClientPlatform`.
+  Initial playback has no accepted control snapshot yet and serves v1; the
+  next session boundary can pin a fit. The diagnostic `client.kind` never
+  selects curves. Off ⇒ v1 bytes and identity.
+
+As built (milestone 4; acceptance remains open):
+- `fmp4::rewrite_timed_video_samples` hands the closure each sample's decode
+  time (`tfdt` plus earlier durations) and composition offset.
+- `transcode::dv_refit_serve`: `ServedCurveTable` (scenes by `first_pts`,
+  servable re-check, identity outside every scene) and `SourceClock`
+  (track ticks to source pts, exact or refused).
+- `dvconvert::convert_length_prefixed` takes the sample's curves and writes
+  them after `To81`; `dvpipe::Converter::with_refit` holds the pinned table
+  and clock and resolves each sample's scene.
+- The index pass records a source packet clock origin and converts every
+  fragment under the digest-named output. VOD generation loads the pinned
+  table and converts its candidate landing before comparing video byte
+  counts. Its resolved digest is reported in session and start information.
+- Real-source validation of a nonzero start with B frames, seek-window
+  readback, and the full milestone 4 acceptance checks remain open.
+
+### 3.6 Serving: permanent on-disk conversion
+
+`dv_disk::build_and_verify` strips the EL first (`filter_units=remove_types=63`)
+and converts with `dovi_tool -m 2`. With `keep_original` false, the source
+and its EL are then deleted.
+
+- **Ordering:** for a P7 FEL title, the disk conversion waits until the
+  title has a current fit, or has a recorded refusal. Otherwise the EL would
+  be gone before anything could fit it.
+- **Writing the curves:** when curves exist, plurx writes the converted RPUs
+  itself (`To81` + `apply_to_rpu`, ordered by presentation time) and injects
+  them with `dovi_tool inject-rpu` instead of `convert`. The replacement's
+  verification also reads the curves back.
+
+The complete-title scanner now records a source-fenced `el_kind` aggregate:
+consistent FEL · consistent MEL · unknown · inconsistent. An old schema-1
+probe without this optional field reads as unknown, and the changed scanner
+binary causes a fresh title-scan generation. Only a complete, consistent FEL
+fact enters F+ demand; a legacy recipe verdict cannot infer FEL. The fit's
+identity remains source size/mtime, selected video stream, helper mode/ABI and
+`FIT_VERSION`. A pending disk conversion requests fitting even while all
+client F+ switches are off, because the operator's conversion request requires
+that prerequisite. The disk worker leaves the conversion queued with a visible
+waiting reason until a current `Fitted`, `Identity` or content `Refused` outcome
+exists; it does not occupy a conversion slot for the duration of the fit.
+
+For a fitted title the existing scanner makes an optional sidecar from the same
+held source: selected-stream time base, then each displayed RPU's exact packet
+PTS and SHA-256 in decode order. The raw HEVC extraction has no presentation
+clock. dovi_tool 2.3.3 extracts presentation-ordered RPU payloads without
+HEVC NAL headers. The converter sorts sidecar rows by unique PTS, restores
+headers for parsing/hash comparison, and matches every extracted RPU to its
+sidecar hash and the stored title frame count. It selects each stored scene by
+PTS, converts that RPU with `To81`, applies its stored curve when present, and
+injects the resulting RPU stream. After remuxing, it extracts RPUs from the
+replacement and compares every one to the authored bytes. Any mismatch or
+incomplete mapping refuses the candidate while the original source remains.
+MEL and recorded identity/refusal outcomes retain the existing `-m 2 convert`
+path. The source and replacement still pass the held-inode binding, content
+hash, owned-scratch and recovery-guard checks of `dv_disk`.
+
+**Qualification boundary:** the original 311-packet Michael window has an
+84 ms uncovered tail interval and is correctly refused by the complete-title
+scanner. Acceptance preserves it as a negative control and uses its contiguous
+310-packet prefix. Disk authoring/readback uses a timestamp-normalized copy of
+that prefix; indexed-copy acceptance keeps the nonzero-origin prefix.
+
+The existing raw-HEVC disk remux does not preserve a positive video start
+offset. The nonzero-origin prefix is safely refused by the unchanged duration
+guard (124 ms drift versus one 41.708 ms frame), with the original retained.
+Preserving that origin is a separate open disk-conversion finding, not covered
+or repaired by F+. Zero-origin acceptance must not be presented as nonzero
+origin disk qualification.
+
+## 4. Developer tab and visibility
+
+Developer gets an enable section, "F+ curves for converted Dolby Vision"
+(settings `playback.dolby_vision_refit_{apple,web,android,linux}`). Its
+requirements are advisory, per the house rule, and never block the enable:
+- the helper supports `--refit-stats` on this node;
+- *N of M* P7 FEL titles have been fitted;
+- clients measured to apply 8.1 mapping: macOS yes, Lenovo TB322FC no, the
+  others unobservable.
+
+Playback info for a converted P7 title gains a line: "F+ curves: fitted,
+−N%" or "identity (why)". The percentage is held-out squared code error
+removed versus identity mapping, not measured display improvement. It is
+captured with the resolved digest and read from the attached rendition;
+status polls perform no curve-store query.
+
+## 5. Per-title re-encode trials against F+
+
+Paul's decision (2026-11-12): a re-encode is worth trying per title, now
+that the cluster can carry the work.
+
+- **Recipe:** NP1 (psy on), decided over P1 because P1's ΔITP edge is
+  0.02–0.03 and it costs about 1.5 points of grain.
+- **Trial:** encode NP1 on sample windows across the cluster, score them
+  against F+ (not F) in the four models with the helper's master as
+  reference, and promote a full-title replacement only when the trial beats
+  F+ by a margin.
+- **Where it plugs in:** `dv_fel_qualification` already renders sample
+  windows three ways for the processed route. The trial adds F+ as the
+  comparison arm there.
+- The design and the margin get their own plan once F+ serves, because they
+  need F+ scores per title to set the bar.
+
+## 6. Milestones
+
+Milestones 1–2 landed separately. At Paul's request, milestones 3–6 were
+batched in PR #1565 with proper commits and one final adversarial review, and
+landed on 2026-11-19 (`8630ee431`).
+
+1. **The arithmetic** (`plurx-core/src/transcode/dv_refit.rs`):
+   - **Contents:** stats, safe solve, diagnostics, composer domain,
+     `reshape`, and `apply_to_rpu`.
+   - **Acceptance:** `cargo test -p plurx-core --lib dv_refit` passes, which
+     includes:
+     - coefficients within 2·2⁻²³ of `rpu_refit_eval.py` on all three
+       fixtures;
+     - the composer domain within 1e-6;
+     - a real P7 RPU round trip exact to 2⁻²³.
+2. **Helper `--refit-stats`:** merged (#1542).
+   - **Contents:** CPU composition, the lattice, and per-scene JSON.
+   - **Acceptance:**
+     - on the Michael5400 window, curves solved from the helper's stats
+       score within 0.01 pooled ΔITP of offline Fp_safe in all four models,
+       through `rpu_refit_eval.py --readback`;
+     - per-scene sample counts equal the lattice size × frames.
+3. **`DvRefit` job and store:**
+   - **Contents:** table, demand, claim, publish, Activity label and cancel.
+   - **Acceptance:** a job on Michael5400's source writes curves whose
+     digest is stable across two runs. Cancelling it mid-run leaves no rows.
+4. **Copy-path serving:**
+   - **Contents:** pts → scene, fitted revision v4, and the identity digest.
+   - **Acceptance:**
+     - a fragment index built for a fitted title carries RPUs whose curves
+       parse back equal to the stored ones;
+     - a seek window's first RPU has its scene's curves;
+     - an unfitted title's bytes are unchanged from v1.
+5. **dv_disk:**
+   - **Contents:** the ordering and the injection.
+   - **Acceptance:** a disk conversion of a fitted title reads back the
+     stored curves frame by frame, and an unfitted FEL title waits.
+6. **Developer section and playback info:** built; native acceptance passes.
+   - The report comes from the attached rendition's pinned digest and
+     captured gain. Status polls do not read the curve store. Identity is
+     reported only for actual To81 conversion, with the generation's reason.
+   - **Acceptance:** each state renders on the web and Apple Settings, and
+     a dv_patch_clips run on macOS against a served fragment shows A == B.
+     The historical Q23 candidate failed point 06; that failure stays recorded.
+     The production-written nearest-Q12 replacement passes all 48 native
+     points and controls under the exact overlap criterion, including after
+     current-main byte-identity verification. UI state checks run in the fast
+     lane. Physical playback on every platform remains the Developer card's
+     graduation requirement; this M3 qualification does not claim it.
+7. **Re-encode trials (§5):** plan first, then build.
+
+## 7. Non-goals
+
+- **No decoder or client protocol change.** Clients that ignore the mapping
+  keep their current picture. The Apple Developer and playback-info UI in
+  milestones 3 and 6 reports existing server facts; it adds no platform
+  signal or decoder behaviour.
+- **No change to the processed route.** It already composes the EL.
+- **No per-frame curves.** They gained under 0.002 offline and would invite
+  flicker.
+- **No MEL titles.** A MEL carries no picture detail, and `To81` already
+  keeps its mapping.
+- **No gating.** The Developer section reports readiness; it does not block.

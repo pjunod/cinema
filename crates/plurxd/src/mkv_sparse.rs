@@ -35,6 +35,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio_util::sync::CancellationToken;
 
 const HEAD_BYTES: usize = 64 * 1024;
 const MAX_METADATA: u64 = 32 * 1024 * 1024;
@@ -47,11 +48,10 @@ const MAX_TOP_LEVEL_WALK: usize = 64;
 const ELEMENT_HEADER_READ: usize = 16;
 const CLUSTER_HEADER_READ: usize = 64;
 const BLOCK_READ: usize = 4096;
-/// Concurrent positioned reads. A spinning-disk NAS under load answers one
-/// random read in ~20 ms, so a serial walk over a thousand cues spends a
-/// minute waiting; a handful of outstanding reads keeps the array busy
-/// without competing with playback for more than a sliver of its bandwidth.
-const READERS: usize = 8;
+/// One physical read per charged source reservation. A future domain grant
+/// may explicitly permit more; blind per-track fan-out defeats storage-domain
+/// admission on a cold rotational source and delays cooperative preemption.
+const READERS: usize = 1;
 
 const EBML: u32 = 0x1A45_DFA3;
 const DOC_TYPE: u32 = 0x4282;
@@ -128,6 +128,8 @@ pub(crate) enum SparseError {
     /// The file disagrees with its own index; the full demux decides.
     Malformed(&'static str),
     Io(io::Error),
+    /// Cooperative preemption is terminal for this attempt, never a demux hint.
+    Cancelled,
 }
 
 impl fmt::Display for SparseError {
@@ -136,6 +138,7 @@ impl fmt::Display for SparseError {
             Self::NotIndexed(why) => write!(f, "subtitle track is not cue-indexed: {why}"),
             Self::Malformed(why) => write!(f, "matroska subtitle index is inconsistent: {why}"),
             Self::Io(error) => write!(f, "reading the matroska subtitle index: {error}"),
+            Self::Cancelled => write!(f, "subtitle sparse read cancelled"),
         }
     }
 }
@@ -233,35 +236,58 @@ fn children(body: &[u8]) -> Result<Vec<Child<'_>>> {
 
 struct Source<'a, R: ReadAt + ?Sized> {
     reader: &'a R,
+    cancellation: &'a CancellationToken,
+    deadline: std::time::Instant,
     reads: AtomicUsize,
     bytes: AtomicUsize,
 }
 
 impl<'a, R: ReadAt + ?Sized> Source<'a, R> {
-    fn new(reader: &'a R) -> Self {
+    fn new(
+        reader: &'a R,
+        cancellation: &'a CancellationToken,
+        deadline: std::time::Instant,
+    ) -> Self {
         Self {
             reader,
+            cancellation,
+            deadline,
             reads: AtomicUsize::new(0),
             bytes: AtomicUsize::new(0),
         }
     }
 
+    fn check_active(&self) -> Result<()> {
+        if self.cancellation.is_cancelled() {
+            return Err(SparseError::Cancelled);
+        }
+        if std::time::Instant::now() >= self.deadline {
+            return Err(SparseError::NotIndexed("cue walk outran its deadline"));
+        }
+        Ok(())
+    }
+
     /// Up to `len` bytes; short only at end of file.
-    fn read_up_to(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+    fn read_up_to(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
+        self.check_active()?;
         let mut buf = vec![0; len];
         let mut filled = 0;
         while filled < len {
+            self.check_active()?;
+            // One cancellation boundary per bounded syscall, including metadata.
+            let end = len.min(filled + 256 * 1024);
+            self.reads.fetch_add(1, Ordering::Relaxed);
             let n = self
                 .reader
-                .read_at(&mut buf[filled..], offset + filled as u64)?;
+                .read_at(&mut buf[filled..end], offset + filled as u64)?;
+            self.bytes.fetch_add(n, Ordering::Relaxed);
+            self.check_active()?;
             if n == 0 {
                 break;
             }
             filled += n;
         }
         buf.truncate(filled);
-        self.reads.fetch_add(1, Ordering::Relaxed);
-        self.bytes.fetch_add(filled, Ordering::Relaxed);
         Ok(buf)
     }
 
@@ -338,8 +364,21 @@ pub(crate) struct CueIndex {
 
 /// Read the header, seek heads, info, tracks, tags and cues. `Ok(None)` is a
 /// file that is not Matroska at all.
-pub(crate) fn read_index<R: ReadAt + ?Sized>(reader: &R) -> Result<Option<CueIndex>> {
-    let source = Source::new(reader);
+#[cfg(test)]
+fn read_index<R: ReadAt + ?Sized>(reader: &R) -> Result<Option<CueIndex>> {
+    read_index_cancellable(
+        reader,
+        &CancellationToken::new(),
+        std::time::Instant::now() + std::time::Duration::from_secs(120),
+    )
+}
+
+pub(crate) fn read_index_cancellable<R: ReadAt + ?Sized>(
+    reader: &R,
+    cancellation: &CancellationToken,
+    deadline: std::time::Instant,
+) -> Result<Option<CueIndex>> {
+    let source = Source::new(reader, cancellation, deadline);
     let head = source.read_up_to(0, HEAD_BYTES)?;
     let Some(ebml) = header(&head, 0).filter(|parsed| parsed.id == EBML) else {
         return Ok(None);
@@ -616,13 +655,35 @@ pub(crate) struct Subset {
 /// keeps only blocks whose cue time lies inside it, in nanoseconds of the
 /// file's own timeline. Past `deadline` the reads stop and the caller keeps
 /// its demux: a fast path that has stopped being fast is not one.
-pub(crate) fn subset<R: ReadAt + ?Sized>(
+#[cfg(test)]
+fn subset<R: ReadAt + ?Sized>(
     reader: &R,
     index: &CueIndex,
     ordinals: &[usize],
     span: Option<(i128, i128)>,
     deadline: std::time::Instant,
 ) -> Result<Subset> {
+    subset_cancellable(
+        reader,
+        index,
+        ordinals,
+        span,
+        deadline,
+        &CancellationToken::new(),
+    )
+}
+
+pub(crate) fn subset_cancellable<R: ReadAt + ?Sized>(
+    reader: &R,
+    index: &CueIndex,
+    ordinals: &[usize],
+    span: Option<(i128, i128)>,
+    deadline: std::time::Instant,
+    cancellation: &CancellationToken,
+) -> Result<Subset> {
+    if cancellation.is_cancelled() {
+        return Err(SparseError::Cancelled);
+    }
     let mut wanted = Vec::new();
     for &ordinal in ordinals {
         let track = index
@@ -645,7 +706,7 @@ pub(crate) fn subset<R: ReadAt + ?Sized>(
     wanted.sort();
     wanted.dedup_by(|a, b| a.0.cluster == b.0.cluster && a.0.relative == b.0.relative);
 
-    let source = Source::new(reader);
+    let source = Source::new(reader, cancellation, deadline);
     let mut clusters: Vec<u64> = wanted
         .iter()
         .map(|(reference, _)| reference.cluster)
@@ -1088,6 +1149,100 @@ mod tests {
 
     fn index(file: &[u8]) -> CueIndex {
         read_index(file).expect("index").expect("matroska")
+    }
+
+    struct CancelOnRead<'a> {
+        bytes: &'a [u8],
+        cancellation: &'a CancellationToken,
+        reads: AtomicUsize,
+    }
+    impl ReadAt for CancelOnRead<'_> {
+        fn read_at(&self, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let count = self.bytes.read_at(buffer, offset)?;
+            self.cancellation.cancel();
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn header_and_block_cancellation_are_typed_and_start_no_further_reads() {
+        let file = Fixture::default().build();
+        let index = index(&file);
+        for header in [true, false] {
+            let cancellation = CancellationToken::new();
+            let reader = CancelOnRead {
+                bytes: &file,
+                cancellation: &cancellation,
+                reads: AtomicUsize::new(0),
+            };
+            let canceled = if header {
+                matches!(
+                    read_index_cancellable(&reader, &cancellation, later()),
+                    Err(SparseError::Cancelled)
+                )
+            } else {
+                matches!(
+                    subset_cancellable(&reader, &index, &[0], None, later(), &cancellation),
+                    Err(SparseError::Cancelled)
+                )
+            };
+            assert!(
+                canceled,
+                "cancellation must not become NotIndexed/demux fallback"
+            );
+            assert_eq!(reader.reads.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn cancellation_waits_for_the_outstanding_sparse_read_to_settle() {
+        struct HeldRead {
+            started: std::sync::Barrier,
+            release: std::sync::Barrier,
+            finished: std::sync::atomic::AtomicBool,
+        }
+        impl ReadAt for HeldRead {
+            fn read_at(&self, _: &mut [u8], _: u64) -> io::Result<usize> {
+                self.started.wait();
+                self.release.wait();
+                self.finished.store(true, Ordering::SeqCst);
+                Ok(0)
+            }
+        }
+        let reader = HeldRead {
+            started: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+            finished: false.into(),
+        };
+        let cancellation = CancellationToken::new();
+        std::thread::scope(|scope| {
+            let work = scope.spawn(|| read_index_cancellable(&reader, &cancellation, later()));
+            reader.started.wait();
+            cancellation.cancel();
+            assert!(!reader.finished.load(Ordering::SeqCst));
+            reader.release.wait();
+            assert!(matches!(
+                work.join().expect("read thread"),
+                Err(SparseError::Cancelled)
+            ));
+            assert!(reader.finished.load(Ordering::SeqCst));
+        });
+    }
+
+    #[test]
+    fn sparse_metadata_deadline_stops_before_issuing_source_io() {
+        let cancellation = CancellationToken::new();
+        let reader = CancelOnRead {
+            bytes: &[],
+            cancellation: &cancellation,
+            reads: AtomicUsize::new(0),
+        };
+        assert!(matches!(
+            read_index_cancellable(&reader, &cancellation, std::time::Instant::now()),
+            Err(SparseError::NotIndexed(_))
+        ));
+        assert_eq!(reader.reads.load(Ordering::SeqCst), 0);
     }
 
     /// Every block of `track` in a parsed subset, as (absolute ms, payload).

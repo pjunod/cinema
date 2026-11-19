@@ -104,6 +104,7 @@ mod tests {
             start_entry: 1,
             policy: CutPolicy::new(2, 2, 48_000_000, 15, 24),
             convert_dolby_vision: false,
+            dv_refit: None,
             retain_hevc_parameter_sets: true,
         };
         let sink = MemSink::default();
@@ -244,6 +245,7 @@ mod tests {
             start_entry: 0,
             policy: CutPolicy::new(2, 2, 48_000_000, 15, 24000),
             convert_dolby_vision: false,
+            dv_refit: None,
             retain_hevc_parameter_sets: false,
         };
         let sink = MemSink::default();
@@ -433,6 +435,248 @@ mod tests {
         }
     }
 
+    /// Build a fitted index from the same RPU-bearing video-only pipe that
+    /// `converting_film` used. An identity scene and a fitted scene straddle
+    /// row one, so the two candidate clocks rewrite the first RPU with
+    /// different lengths.
+    async fn fitted_film() -> (
+        Film,
+        std::sync::Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>,
+    ) {
+        use plurx_core::transcode::dv_refit::{servable, RefitCurves};
+        use plurx_core::transcode::dv_refit_serve::{ServedCurveTable, SourceClock};
+        let mut film = converting_film().await;
+        let mut right = RefitCurves::identity();
+        for piece in &mut right.luma {
+            piece[0] += 90.0 / 4095.0;
+        }
+        let right = servable(&right).expect("second fitted scene");
+        let split =
+            i64::try_from(film.index.rows[1].dts - film.index.rows[0].dts).expect("scene boundary");
+        let last = film.index.rows.last().expect("index rows");
+        let end =
+            i64::try_from(last.dts + last.duration - film.index.rows[0].dts).expect("scene end");
+        let base = format!("1/{}", film.index.timescale);
+        let table = std::sync::Arc::new(
+            ServedCurveTable::from_servable(
+                "d".repeat(64),
+                [
+                    (0, split, base.as_str(), None),
+                    (split, end, base.as_str(), Some(&right)),
+                ],
+            )
+            .expect("servable fitted table"),
+        );
+
+        let indexed = testfixtures::with_dolby_vision_rpus(&index_pipe_bytes("clean-cra"));
+        // This regression isolates candidate-specific RPU byte matching. The
+        // cached A/V fixture's AAC muxer repairs its first video duration,
+        // so that fixture is not the exact source clock indexed above. Use
+        // the actual video-only indexed pipe for both sides of this proof.
+        film.feed = indexed.clone();
+        let mut reader = FragmentReader::new();
+        reader.push(&indexed);
+        let Some(Unit::Init(init)) = reader.next_unit().expect("index init") else {
+            panic!("index init missing");
+        };
+        let video = init.video().expect("index video");
+        film.video_id = video.id;
+        let mut muxer = init.clone();
+        sanitize_stale_dolby_brand(&mut muxer);
+        film.identity = InitIdentity::establish(&muxer, film.index.promotion.clone())
+            .expect("video-only fitted identity");
+        film.plan = plurx_core::segplan::plan_copy(
+            &film.index,
+            &film.policy,
+            &TrackDurations {
+                video_ms: 12_000,
+                audio_ms: 0,
+                audio_bits_per_second: 0,
+            },
+        );
+        let mut converter = None;
+        let mut row = 0;
+        let mut first_cto = None;
+        let mut proofs = Vec::new();
+        while let Some(unit) = reader.next_unit().expect("index fragment") {
+            if let Unit::Fragment(mut fragment) = unit {
+                proofs.push(
+                    plurx_core::segplan::refit_proof::FittedFragmentProof::observe(
+                        &fragment, &init,
+                    )
+                    .expect("raw fitted fixture proof"),
+                );
+                if converter.is_none() {
+                    let track = fragment.track(video.id).expect("video track");
+                    first_cto = track.samples().next().map(|sample| sample.cto);
+                    let clock = SourceClock {
+                        track_timescale: video.timescale,
+                        track_ticks: i128::from(track.base_decode_time),
+                        source_pts: 0,
+                        source_time_base: (1, video.timescale),
+                    };
+                    converter = Some(
+                        crate::dvpipe::Converter::for_init(&init)
+                            .and_then(|ready| {
+                                ready.with_refit(std::sync::Arc::clone(&table), clock)
+                            })
+                            .expect("fitted index converter"),
+                    );
+                }
+                converter
+                    .as_mut()
+                    .expect("converter")
+                    .convert(&mut fragment)
+                    .expect("fitted index fragment");
+                let measured = plurx_core::segplan::IndexRow::from_fragment(&fragment, &init)
+                    .expect("fitted row");
+                film.index.rows[row].video_bytes = measured.video_bytes;
+                row += 1;
+            }
+        }
+        assert_eq!(row, film.index.rows.len());
+        film.index.dv_refit_proofs = Some(proofs);
+        film.index.dv_refit_origin = Some(plurx_core::segplan::DvRefitOrigin {
+            first_dts: 0,
+            first_pts: first_cto.expect("first composition offset"),
+            time_base_num: 1,
+            time_base_den: video.timescale,
+        });
+        (film, table)
+    }
+
+    /// The nearest measured row may use a different scene and therefore a
+    /// different RPU length. Matching raw bytes (or converting only that
+    /// nearest row) refuses the valid landing; every clock-permitted row must
+    /// be converted against its own scene before the byte comparison.
+    #[tokio::test]
+    async fn fitted_landing_checks_converted_bytes_for_each_clock_candidate() {
+        use plurx_core::transcode::dv_refit_serve::SourceClock;
+        let (mut film, table) = fitted_film().await;
+        assert!(film.index.rows.len() > LANDING_WINDOW);
+        let step = film.index.rows[1].dts - film.index.rows[0].dts;
+        assert!(step > 3);
+        let near_second = film.index.rows[1].dts - step / 3;
+        // A long first row makes both starts plausible under the clock's
+        // half-duration rule. Its real fitted bytes still identify row zero.
+        film.index.rows[0].duration = step * 4;
+        let start_entry = film
+            .plan
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == PlanEntryKind::Video)
+            .find(|entry| entry_row(&film.index, entry).is_some_and(|row| row > 1))
+            .map(|entry| entry.index)
+            .expect("later video entry");
+        let mut reader = FragmentReader::new();
+        reader.push(&film.feed);
+        let Some(Unit::Init(init)) = reader.next_unit().expect("production init") else {
+            panic!("production init missing");
+        };
+        let first = loop {
+            match reader.next_unit().expect("production fragment") {
+                Some(Unit::Fragment(fragment)) if fragment.track(film.video_id).is_some() => {
+                    break fragment
+                }
+                Some(_) => continue,
+                None => panic!("first video fragment missing"),
+            }
+        };
+        let first_dts = first.track(film.video_id).expect("video").base_decode_time;
+        let converted_size = |row| {
+            let clock = SourceClock::for_index_landing(&film.index, row, first_dts)
+                .expect("candidate clock");
+            let mut converter = crate::dvpipe::Converter::for_init(&init)
+                .and_then(|ready| ready.with_refit(std::sync::Arc::clone(&table), clock))
+                .expect("candidate converter");
+            let mut fragment = first.clone();
+            converter
+                .convert(&mut fragment)
+                .expect("candidate conversion");
+            fragment
+                .track(film.video_id)
+                .expect("video")
+                .samples()
+                .map(|sample| sample.size)
+                .sum::<u32>()
+        };
+        assert_eq!(converted_size(0), film.index.rows[0].video_bytes);
+        assert_ne!(
+            converted_size(0),
+            converted_size(1),
+            "the wrong scene must change the RPU size in this regression"
+        );
+        let mut generation = generation(&film, start_entry);
+        generation.convert_dolby_vision = true;
+        generation.dv_refit = Some(table);
+        generation.landing_clock = clock(Ok(LandingTime {
+            ticks: near_second,
+            frame_ticks: step * 2,
+        }));
+        let sink = MemSink::default();
+        let outcome = run(&film.feed[..], generation, &sink, "fitted-candidates").await;
+        assert!(matches!(outcome, Outcome::Ran { .. }), "{outcome:?}");
+        assert_eq!(
+            sink.taken().first().map(|(entry, _)| *entry),
+            Some(start_entry)
+        );
+    }
+
+    /// The A/V fixture really has the AAC-induced initial video clock repair
+    /// that exposed this defect. Its coded pictures still weigh the same,
+    /// but a fitted generation must refuse before rewriting/publishing them.
+    #[tokio::test]
+    async fn fitted_copy_refuses_the_aac_muxer_clock_repair_before_publication() {
+        let (film, table) = fitted_film().await;
+        let warped = testfixtures::with_dolby_vision_rpus(&pipe("clean-cra"));
+        let mut muxer = muxer_init(&warped);
+        sanitize_stale_dolby_brand(&mut muxer);
+        let identity =
+            InitIdentity::establish(&muxer, film.index.promotion.clone()).expect("actual A/V init");
+        let mut request = generation(&film, 0);
+        request.identity = identity;
+        request.convert_dolby_vision = true;
+        request.dv_refit = Some(table);
+        let sink = MemSink::default();
+        let outcome = run(&warped[..], request, &sink, "aac-clock-repair").await;
+        assert!(
+            matches!(outcome, Outcome::Failed(Failure::Landing(_))),
+            "{outcome:?}"
+        );
+        assert!(
+            sink.taken().is_empty(),
+            "warped cadence cannot publish even its first fitted segment"
+        );
+    }
+
+    #[tokio::test]
+    async fn fitted_copy_rejects_a_complete_trailer_that_omits_a_later_indexed_row() {
+        let (film, table) = fitted_film().await;
+        assert!(film.index.rows.len() > LANDING_WINDOW);
+        let cutoff = fragment_boundary_cut(&film.feed, film.index.rows.len() - 1);
+        let mut omitted = film.feed[..cutoff].to_vec();
+        box_walk(&film.feed, |name, body| {
+            if name == b"mfra" {
+                omitted.extend_from_slice(
+                    &u32::try_from(body.len() + 8)
+                        .expect("small trailer")
+                        .to_be_bytes(),
+                );
+                omitted.extend_from_slice(name);
+                omitted.extend_from_slice(body);
+            }
+        });
+        let mut request = generation(&film, 0);
+        request.convert_dolby_vision = true;
+        request.dv_refit = Some(table);
+        let sink = MemSink::default();
+        let outcome = run(&omitted[..], request, &sink, "missing-fitted-row").await;
+        assert!(
+            matches!(outcome, Outcome::Failed(Failure::Landing(ref reason)) if reason.contains("every indexed row")),
+            "{outcome:?}"
+        );
+    }
+
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|at| at == needle)
     }
@@ -601,6 +845,7 @@ mod tests {
     fn generation(film: &Film, start_entry: u32) -> Generation {
         Generation {
             convert_dolby_vision: false,
+            dv_refit: None,
             retain_hevc_parameter_sets: false,
             plan: film.plan.clone(),
             index: Some(film.index.clone()),
@@ -1089,6 +1334,7 @@ mod tests {
             .expect("establishing identity");
         let generation = Generation {
             convert_dolby_vision: false,
+            dv_refit: None,
             retain_hevc_parameter_sets: false,
             plan: film.plan.clone(),
             index: Some(film.index.clone()),
@@ -1166,6 +1412,32 @@ mod tests {
             "a stale index must be a typed landing failure, got {outcome:?}"
         );
         assert!(sink.taken().is_empty());
+    }
+
+    /// A good prefix does not attest the rest of a candidate index. A late
+    /// mismatch must leave the already published prefix usable but keep the
+    /// contradicted segment out of the sink.
+    #[tokio::test]
+    async fn a_late_index_mismatch_stops_before_publishing_its_segment() {
+        let mut film = film().await;
+        assert!(film.index.rows.len() > LANDING_WINDOW + 1);
+        let row = film.index.rows.last_mut().expect("fixture rows");
+        row.video_bytes = row.video_bytes.wrapping_add(1);
+        let sink = MemSink::default();
+        let outcome = run(&film.feed[..], generation(&film, 0), &sink, "late-mismatch").await;
+        assert!(
+            matches!(outcome, Outcome::Failed(Failure::Landing(_))),
+            "{outcome:?}"
+        );
+        let writes = sink.taken();
+        assert!(
+            !writes.is_empty(),
+            "a verified prefix must have been published"
+        );
+        assert!(
+            writes.len() < film.plan.len(),
+            "the contradicted tail must stay unpublished"
+        );
     }
 
     /// The fixture film behind four extra index rows whose first three

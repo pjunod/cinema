@@ -131,6 +131,40 @@ impl Daemon {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+
+    /// SIGTERM: what a supervisor sends for a planned stop. The daemon keeps
+    /// running through its drain; `exited` reports when it is gone.
+    fn terminate(&mut self) {
+        let pid = libc::pid_t::try_from(self.child.id()).expect("daemon pid fits pid_t");
+        // SAFETY: `pid` is this test's own live child, and SIGTERM is a fixed
+        // POSIX constant.
+        let sent = unsafe { libc::kill(pid, libc::SIGTERM) };
+        assert_eq!(sent, 0, "send SIGTERM: {}", std::io::Error::last_os_error());
+    }
+
+    /// The exit status once the process is gone, without waiting for it.
+    fn exited(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().expect("daemon status")
+    }
+
+    /// The instant the process exits, from a dedicated thread blocked in
+    /// `waitid(WNOWAIT)`: it observes the exit without reaping, so `exited`
+    /// still reads the status afterwards.
+    fn exit_watch(&self) -> std::sync::mpsc::Receiver<Instant> {
+        let pid = libc::id_t::from(self.child.id());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // SAFETY: an all-zero `siginfo_t` is a valid out-parameter, and
+            // `pid` is this test's own child.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let waited =
+                unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT) };
+            if waited == 0 {
+                let _ = sender.send(Instant::now());
+            }
+        });
+        receiver
+    }
 }
 
 impl Drop for Daemon {
@@ -1597,6 +1631,10 @@ struct ThreeVoters {
     target: String,
     /// Which of node A, B and C (0, 1, 2) the target is.
     target_index: usize,
+    /// Which of node A, B and C the leader was when the cluster formed.
+    leader_index: usize,
+    /// Node A, B and C's HTTP bases, in that order.
+    bases: [String; 3],
 }
 
 impl ThreeVoters {
@@ -1639,17 +1677,27 @@ impl ThreeVoters {
             .iter()
             .position(|(node_id, _)| *node_id != leader)
             .expect("a follower");
+        let leader_index = bases
+            .iter()
+            .position(|(node_id, _)| *node_id == leader)
+            .expect("the leader's index");
         Self {
             voters,
             node_c,
             leader_base,
             target: bases[target_index].0.clone(),
             target_index,
+            leader_index,
+            bases: std::array::from_fn(|index| bases[index].1.clone()),
         }
     }
 
     fn target_daemon(&mut self) -> &mut Daemon {
-        match self.target_index {
+        self.daemon(self.target_index)
+    }
+
+    fn daemon(&mut self, index: usize) -> &mut Daemon {
+        match index {
             0 => &mut self.voters.node_a,
             1 => &mut self.voters.node_b,
             _ => &mut self.node_c,
@@ -1716,6 +1764,449 @@ impl ThreeVoters {
     }
 }
 
+/// One voter's own Raft view, read from its store-free `/metrics`: its term,
+/// whether it knows a leader, and whether it is that leader. `None` when the
+/// process does not answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RaftView {
+    term: u64,
+    leader_known: bool,
+    is_leader: bool,
+}
+
+async fn raft_view(client: &reqwest::Client, base: &str) -> Option<RaftView> {
+    let body = client
+        .get(format!("{base}/metrics"))
+        .timeout(Duration::from_millis(500))
+        .send()
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    let value = |name: &str| {
+        body.lines().find_map(|line| {
+            let (metric, value) = line.split_once(' ')?;
+            (metric == name)
+                .then(|| value.parse::<u64>().ok())
+                .flatten()
+        })
+    };
+    Some(RaftView {
+        term: value("plurx_raft_current_term")?,
+        leader_known: value("plurx_raft_leader_known")? == 1,
+        is_leader: value("plurx_raft_is_leader")? == 1,
+    })
+}
+
+/// The survivors' common leader: both know a leader in the same term and one
+/// of them is it. Raft has one leader per term, so that names who both follow.
+fn surviving_leader(views: &[(usize, Option<RaftView>)]) -> Option<(usize, u64)> {
+    let term = views.first()?.1?.term;
+    if views
+        .iter()
+        .any(|(_, view)| view.is_none_or(|view| !view.leader_known || view.term != term))
+    {
+        return None;
+    }
+    views
+        .iter()
+        .find(|(_, view)| view.is_some_and(|view| view.is_leader))
+        .map(|(index, _)| (*index, term))
+}
+
+/// Wait until the leader's roster shows both followers as handoff candidates:
+/// reachable, out of maintenance, with zero apply lag. A stopping leader's
+/// handoff chooses from exactly this roster.
+async fn wait_for_handoff_candidates(client: &reqwest::Client, cluster: &mut ThreeVoters) {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let leader_base = cluster.leader_base.clone();
+    let token = cluster.voters.token.clone();
+    loop {
+        let leader_index = cluster.leader_index;
+        cluster
+            .daemon(leader_index)
+            .assert_running("waiting for handoff candidates");
+        if let Ok(response) = client
+            .get(format!("{leader_base}/api/v1/cluster/nodes"))
+            .bearer_auth(&token)
+            .send()
+            .await
+        {
+            if let Ok(body) = response.json::<Value>().await {
+                if body["nodes"].as_array().is_some_and(|nodes| {
+                    nodes.len() == 3
+                        && nodes.iter().all(|node| {
+                            node["is_voter"] == true
+                                && node["reachable"] == true
+                                && node["maintenance"] == false
+                                && (node["is_leader"] == true
+                                    || node["apply_lag_entries"].as_u64() == Some(0))
+                        })
+                }) {
+                    return;
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the followers never became handoff candidates\n{}",
+            cluster.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Audit C2: SIGTERM to the leader's plurxd moves leadership to a survivor
+/// while the old process is still draining, and that leader holds after the
+/// old process exits. Before, the leader led through its whole drain and
+/// stopped Raft cold, and the survivors waited out a timeout election.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sigterm_on_the_leader_moves_leadership_before_its_raft_stops() {
+    let root = canonical_tempdir();
+    let client = two_voter_client();
+    let mut cluster = ThreeVoters::start(&client, root.path()).await;
+    wait_for_handoff_candidates(&client, &mut cluster).await;
+    // Older than its 4 s leader lease, as any leader a deploy stops is.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let leader = cluster.leader_index;
+    let before = raft_view(&client, &cluster.bases[leader])
+        .await
+        .expect("the leader answers metrics");
+    assert!(before.is_leader, "node {leader} leads: {before:?}");
+    let survivors = (0..3).filter(|index| *index != leader).collect::<Vec<_>>();
+
+    let survivor_count = survivors.len();
+    let exit = cluster.daemon(leader).exit_watch();
+    cluster.daemon(leader).terminate();
+    let signalled = Instant::now();
+    // Evidence only from answered samples: a sample a busy survivor does not
+    // answer in time proves nothing either way.
+    let mut first_named = vec![None::<(Instant, u64)>; 3];
+    let mut successor = None::<(usize, u64)>;
+    let mut answered = 0_u32;
+    let mut exited_at = None::<Instant>;
+    loop {
+        for index in survivors.iter().copied() {
+            let Some(view) = raft_view(&client, &cluster.bases[index]).await else {
+                continue;
+            };
+            answered += 1;
+            if view.term > before.term && view.is_leader {
+                match successor {
+                    None => successor = Some((index, view.term)),
+                    Some(known) => assert_eq!(
+                        known,
+                        (index, view.term),
+                        "two survivors led after the handoff\n{}",
+                        cluster.diagnostics()
+                    ),
+                }
+            }
+            if let Some((at, named_term)) = first_named[index] {
+                // Once a survivor follows the successor it must keep doing so.
+                assert!(
+                    view.leader_known && view.term == named_term,
+                    "survivor {index} stopped following the successor {:?} after SIGTERM \
+                     (named at {:?}): {view:?}\n{}",
+                    signalled.elapsed(),
+                    at - signalled,
+                    cluster.diagnostics()
+                );
+            } else if view.leader_known && view.term > before.term {
+                first_named[index] = Some((Instant::now(), view.term));
+            }
+        }
+        if exited_at.is_none() {
+            exited_at = exit.try_recv().ok();
+        }
+        let named = survivors
+            .iter()
+            .filter(|index| first_named[**index].is_some())
+            .count();
+        assert!(
+            named == survivor_count || signalled.elapsed() < Duration::from_secs(3),
+            "no surviving leader named by both survivors within 3 s of SIGTERM: \
+             {first_named:?}\n{}",
+            cluster.diagnostics()
+        );
+        assert!(
+            signalled.elapsed() < Duration::from_secs(120),
+            "the old leader never finished its drain\n{}",
+            cluster.diagnostics()
+        );
+        if exited_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(10)) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let exited_at = exited_at.expect("the loop ends after the exit");
+    let status = cluster
+        .daemon(leader)
+        .exited()
+        .expect("the dedicated wait saw the old leader exit");
+    assert!(
+        status.success(),
+        "the old leader's drain ended {status}\n{}",
+        cluster.diagnostics()
+    );
+    let (successor, term) = successor.expect("a survivor led after the handoff");
+    for index in survivors.iter().copied() {
+        let (named, named_term) = first_named[index].expect("both survivors named the successor");
+        assert_eq!(
+            named_term, term,
+            "survivor {index} named a leader in another term"
+        );
+        assert!(
+            named < exited_at,
+            "survivor {index} first named the successor {:?} after SIGTERM, but the old \
+             process exited at {:?}\n{}",
+            named - signalled,
+            exited_at - signalled,
+            cluster.diagnostics()
+        );
+    }
+    // At least half the 100 ms rounds over the whole window were answered by
+    // each survivor on average: enough samples that "held" means something.
+    let rounds = (exited_at - signalled + Duration::from_secs(10)).as_millis() / 100;
+    assert!(
+        u128::from(answered) >= rounds,
+        "only {answered} survivor samples answered over {rounds} rounds"
+    );
+    println!(
+        "sigterm on the leader: node {leader} -> node {successor}, term {} -> {term}, \
+         named {:?} after SIGTERM, old process exited {:?} after it, {answered} answered samples",
+        before.term,
+        survivors
+            .iter()
+            .filter_map(|index| first_named[*index].map(|(at, _)| at))
+            .max()
+            .map(|at| at - signalled)
+            .unwrap_or_default(),
+        exited_at - signalled
+    );
+}
+
+/// Audit C7: a follower whose database Raft core dies on a storage error
+/// ends its process with a non-zero status instead of serving fenced for
+/// hours; the other two keep a leader; once storage is back, a restart
+/// rejoins. The storage error is real: the follower's snapshots directory is
+/// replaced by a file, so the backup's snapshot build cannot write, and
+/// OpenRaft 0.9 makes a failed build fatal to its core.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_follower_whose_raft_core_dies_exits_non_zero_and_rejoins_after_restart() {
+    let root = canonical_tempdir();
+    let client = two_voter_client();
+    let mut cluster = ThreeVoters::start(&client, root.path()).await;
+    wait_for_handoff_candidates(&client, &mut cluster).await;
+    let follower = cluster.target_index;
+    let name = ["node-a", "node-b", "node-c"][follower];
+    let snapshots = state_machine_snapshots(&root.path().join(name));
+    let parked = snapshots.with_file_name("snapshots.parked");
+    std::fs::rename(&snapshots, &parked).expect("park the snapshots directory");
+    std::fs::write(&snapshots, b"not a directory").expect("block the snapshots path");
+
+    let destination = root.path().join("backups");
+    std::fs::create_dir_all(&destination).expect("backup destination");
+    // The answer does not matter: the build this asks for is what kills the
+    // core.
+    let _ = client
+        .post(format!(
+            "{}/api/v1/cluster/backups",
+            cluster.bases[follower]
+        ))
+        .bearer_auth(&cluster.voters.token)
+        .json(&json!({"output": destination.to_string_lossy()}))
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await;
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let status = loop {
+        if let Some(status) = cluster.daemon(follower).exited() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the follower kept running with a dead Raft core\n{}",
+            cluster.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert!(
+        !status.success(),
+        "a dead core must exit non-zero for its supervisor: {status}\n{}",
+        cluster.diagnostics()
+    );
+    let log = cluster.daemon(follower).diagnostics();
+    assert!(
+        log.contains("the database Raft core stopped with a fatal error"),
+        "the exit names the dead core:\n{log}"
+    );
+    // The drained store closed its SQL writer, which removes the lock file;
+    // a lock left behind would make auto-heal rebuild the state machine on
+    // the restart below, and the rejoin would still pass.
+    let lock = snapshots.with_file_name("lock");
+    assert!(
+        !lock.exists(),
+        "a dead core's drain releases the state machine lock {}",
+        lock.display()
+    );
+    let others = (0..3)
+        .filter(|index| *index != follower)
+        .collect::<Vec<_>>();
+    let mut views = Vec::new();
+    for index in others.iter().copied() {
+        views.push((index, raft_view(&client, &cluster.bases[index]).await));
+    }
+    assert!(
+        surviving_leader(&views).is_some(),
+        "the other two keep a leader: {views:?}\n{}",
+        cluster.diagnostics()
+    );
+
+    std::fs::remove_file(&snapshots).expect("unblock the snapshots path");
+    std::fs::rename(&parked, &snapshots).expect("restore the snapshots directory");
+    let config = root.path().join(format!("{name}.toml"));
+    *cluster.daemon(follower) = Daemon::spawn(
+        &config,
+        root.path().join(format!("{name}-restarted.log")),
+        &format!("plurx-{name}"),
+    );
+    let port = cluster.bases[follower]
+        .rsplit(':')
+        .next()
+        .and_then(|port| port.parse::<u16>().ok())
+        .expect("follower port");
+    wait_ready(&client, cluster.daemon(follower), port).await;
+    let token = cluster.voters.token.clone();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let rejoined = raft_view(&client, &cluster.bases[follower])
+            .await
+            .is_some_and(|view| view.leader_known && !view.is_leader);
+        // Whoever leads now: leadership may have moved since the fault.
+        let mut leader_base = None;
+        for base in &cluster.bases {
+            if raft_view(&client, base)
+                .await
+                .is_some_and(|view| view.is_leader)
+            {
+                leader_base = Some(base.clone());
+                break;
+            }
+        }
+        let reachable = match &leader_base {
+            Some(leader_base) => client
+                .get(format!("{leader_base}/api/v1/cluster/nodes"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .ok(),
+            None => None,
+        };
+        let roster_ok = match reachable {
+            Some(response) => response.json::<Value>().await.is_ok_and(|body| {
+                body["nodes"].as_array().is_some_and(|nodes| {
+                    nodes.len() == 3
+                        && nodes
+                            .iter()
+                            .all(|node| node["is_voter"] == true && node["reachable"] == true)
+                })
+            }),
+            None => false,
+        };
+        if rejoined && roster_ok {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the restarted follower did not rejoin\n{}",
+            cluster.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// The voter's one `state_machine/snapshots` directory under its data root.
+fn state_machine_snapshots(data: &Path) -> PathBuf {
+    let mut stack = vec![data.to_path_buf()];
+    let mut found = Vec::new();
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory).expect("readable data dir") {
+            let path = entry.expect("data entry").path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "snapshots")
+                    && path
+                        .parent()
+                        .is_some_and(|parent| parent.ends_with("state_machine"))
+                {
+                    found.push(path.clone());
+                }
+                stack.push(path);
+            }
+        }
+    }
+    assert_eq!(
+        found.len(),
+        1,
+        "exactly one live state machine under {}: {found:?}",
+        data.display()
+    );
+    found.remove(0)
+}
+
+/// A follower's SIGTERM moves nothing: the leader and its term hold through
+/// the follower's whole drain and after it exits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sigterm_on_a_follower_changes_no_leader() {
+    let root = canonical_tempdir();
+    let client = two_voter_client();
+    let mut cluster = ThreeVoters::start(&client, root.path()).await;
+    wait_for_handoff_candidates(&client, &mut cluster).await;
+    let leader = cluster.leader_index;
+    let follower = cluster.target_index;
+    let others = (0..3)
+        .filter(|index| *index != follower)
+        .collect::<Vec<_>>();
+    let before = raft_view(&client, &cluster.bases[leader])
+        .await
+        .expect("the leader answers metrics");
+    assert!(before.is_leader, "node {leader} leads: {before:?}");
+
+    cluster.daemon(follower).terminate();
+    let signalled = Instant::now();
+    let mut exited_at = None;
+    loop {
+        let mut views = Vec::new();
+        for index in others.iter().copied() {
+            views.push((index, raft_view(&client, &cluster.bases[index]).await));
+        }
+        assert_eq!(
+            surviving_leader(&views),
+            Some((leader, before.term)),
+            "a follower's stop changed leadership ({:?} after SIGTERM): {views:?}\n{}",
+            signalled.elapsed(),
+            cluster.diagnostics()
+        );
+        if exited_at.is_none() {
+            if let Some(status) = cluster.daemon(follower).exited() {
+                assert!(status.success(), "the follower's drain ended {status}");
+                exited_at = Some(Instant::now());
+            } else {
+                assert!(
+                    signalled.elapsed() < Duration::from_secs(120),
+                    "the follower never finished its drain\n{}",
+                    cluster.diagnostics()
+                );
+            }
+        }
+        if exited_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(10)) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// A cluster this young may not have published every member's removal
 /// capability and clock observation yet; those answers name themselves.
 const YOUNG_CLUSTER_REFUSALS: [&str; 2] =
@@ -1772,6 +2263,38 @@ struct CreateBudgetLine {
     store_ms: u64,
     elapsed_ms: u64,
     phases: String,
+    /// `(method, (authority, local, writes))`, sorted by method: the same
+    /// operations by the Store method that issued them (D3a).
+    methods: Vec<(String, (u64, u64, u64))>,
+}
+
+/// Parse the budget line's `methods=a=1/0/0,b=0/0/2` field.
+fn parse_methods(text: &str) -> Vec<(String, (u64, u64, u64))> {
+    let mut methods = text
+        .split(',')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (name, counts) = entry
+                .split_once('=')
+                .unwrap_or_else(|| panic!("method entry without counts: {entry}"));
+            let mut parts = counts.split('/').map(|part| {
+                part.parse::<u64>()
+                    .unwrap_or_else(|_| panic!("method counts are numbers: {entry}"))
+            });
+            let counts = (
+                parts.next().expect("authority"),
+                parts.next().expect("local"),
+                parts.next().expect("writes"),
+            );
+            assert!(
+                parts.next().is_none(),
+                "method counts have three parts: {entry}"
+            );
+            (name.to_owned(), counts)
+        })
+        .collect::<Vec<_>>();
+    methods.sort();
+    methods
 }
 
 fn log_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
@@ -1797,6 +2320,7 @@ fn create_budget_lines(log: &str) -> Vec<CreateBudgetLine> {
                 store_ms: number("store_ms"),
                 elapsed_ms: number("elapsed_ms"),
                 phases: log_field(&line, "phases").unwrap_or_default().to_owned(),
+                methods: parse_methods(log_field(&line, "methods").unwrap_or_default()),
             }
         })
         .collect()
@@ -1807,7 +2331,9 @@ fn create_budget_line_parser_reads_the_corrected_fields() {
     let log = "2026-10-04T00:00:00Z  INFO plurxd::http::hls: create startup read budget \
                finished \x1b[3mfile_id\x1b[0m=7 catalog_calls=0 authority_reads=21 \
                local_reads=2 mutations=6 store_ms=48 elapsed_ms=90 \
-               phases=lookup:3ms/1a/0l/0w,tail:0ms/0a/0l/0w\nunrelated line\n";
+               phases=lookup:3ms/1a/0l/0w,tail:0ms/0a/0l/0w \
+               methods=get_user=1/0/0,claim_media_session_request=0/0/1,get_file=1/1/0\n\
+               unrelated line\n";
     let lines = create_budget_lines(log);
     assert_eq!(lines.len(), 1);
     let line = &lines[0];
@@ -1817,6 +2343,15 @@ fn create_budget_line_parser_reads_the_corrected_fields() {
     );
     assert_eq!((line.store_ms, line.elapsed_ms), (48, 90));
     assert_eq!(line.phases, "lookup:3ms/1a/0l/0w,tail:0ms/0a/0l/0w");
+    assert_eq!(
+        line.methods,
+        vec![
+            ("claim_media_session_request".to_owned(), (0, 0, 1)),
+            ("get_file".to_owned(), (1, 1, 0)),
+            ("get_user".to_owned(), (1, 0, 0)),
+        ]
+    );
+    assert!(parse_methods("").is_empty());
 }
 
 /// Post one create to `base` and return the budget line of the create that
@@ -2204,6 +2739,49 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         "the index-miss create did not take the rolling fallback: {line:?}"
     );
     measured.push(("index miss, rolling copy", line));
+    // The fifth shape is the one a current client sends: capabilities (v2)
+    // and an intent envelope. The intent adds the selection write, which
+    // since D3c rides in the claim's transaction (no write of its own). The catalog read is NOT
+    // exercised: this fixture runs with the media pool off, so no
+    // `playback_planning_snapshot` per offer reads the catalog here. D3d
+    // measures that read, and owes its own pin.
+    let (with_intent, line) = create_and_measure(
+        &client,
+        &mut node_b,
+        &b_base,
+        &token,
+        encode_file,
+        json!({
+            "playback_id":"create-path-caps-intent",
+            "caps":{
+                "v":2,
+                "video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],
+                "audio":["aac"],
+                "containers":["mp4"],
+                "transports":["hls"]
+            },
+            "intent":{
+                "lifetime_id":"create-path-lifetime",
+                "recipe_revision":1,
+                "destination_revision":1,
+                "transport_revision":1,
+                "selection":{
+                    "quality":{"mode":"auto"},
+                    "codec":"auto",
+                    "dynamic_range":"auto",
+                    "audio_track":null,
+                    "audio_offset_ms":0,
+                    "subtitles":{"mode":"off"}
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(
+        with_intent["vod"], true,
+        "a caps-v2 Auto create is a VOD session: {with_intent}"
+    );
+    measured.push(("caps-v2 Auto, intent", line));
 
     let table = measured
         .iter()
@@ -2221,17 +2799,38 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         .collect::<Vec<_>>()
         .join("\n");
     eprintln!("create-path store operations:\n{table}");
-    // (authority reads, local reads, writes) per shape on main fb4397c44
-    // with every reduction of handoff §5.2 (B-M1 measured 36, 46, 41 and 33
-    // there). The window is the create handler's own, plus the activation
-    // task it awaits; the bearer-token read happens before it. Every shape
-    // takes six writes (the reopen two more, to project and hand off its
-    // predecessor); the reductions remove reads only.
-    let expected: [(&str, (u64, u64, u64)); 4] = [
-        ("first play, VOD index", (26, 0, 6)),
-        ("reopen, new position", (34, 0, 8)),
-        ("Auto encode, VOD", (31, 0, 6)),
-        ("index miss, rolling copy", (25, 0, 6)),
+    // (authority reads, local reads, writes) for the create handler and the
+    // activation task it awaits. Bearer-token lookup precedes this window.
+    // Reopen also projects and hands off its predecessor. Auto encode and
+    // rolling copy each register and activate foreground source custody.
+    // Rolling fallback also reads the current source fingerprint and suspends
+    // the viewer's competing analysis demand for that source.
+    // E1a (#1503) reads PLAYBACK_DISPLAY_AWARE_AUTO from the node's applied
+    // view instead of the Store, so each shape's planning settings read is
+    // one Local read rather than one Authority read.
+    // Main's #1531 (A1/B1 gap filling and the v3 copy-index consumer) adds
+    // one `fragment_index_source` read and two `queue_sql` reads to every
+    // shape that serves from the copy index (first play, reopen, rolling),
+    // and first play reads one more `get_setting`; pinned on the E1c + D3a
+    // build (2026-11-12) so later D3 lanes measure against what runs now.
+    // D3b reads the create's planning inputs once, as one plan from node B's
+    // applied view (`local_playback_planning_snapshot`, the one new local
+    // read), and hands it down every chain: the planning snapshot re-reads,
+    // the typeless, placement and VOD settings reads, the encode's HWACCEL,
+    // software-budget and two stored-probe reads, and the rolling fallback's
+    // file read are gone (29/36/30/28/32 -> 23/30/19/20/21; writes
+    // unchanged). `docs/streaming/PLAYBACK-START-D3-RECORD.md` §9 has each
+    // delta.
+    // D3c folds the selection upsert into the claim's transaction: the
+    // intent shape's separate `record_desired_selection` write is gone (9 ->
+    // 8), and the claim answers the recorded row by one authority read that
+    // replaces the `desired_row` read-back that write made (21 stays 21).
+    let expected: [(&str, (u64, u64, u64)); 5] = [
+        ("first play, VOD index", (23, 2, 6)),
+        ("reopen, new position", (30, 2, 8)),
+        ("Auto encode, VOD", (19, 2, 8)),
+        ("index miss, rolling copy", (20, 2, 9)),
+        ("caps-v2 Auto, intent", (21, 2, 8)),
     ];
     let observed = measured
         .iter()
@@ -2261,7 +2860,198 @@ async fn create_path_store_operations_are_pinned_per_shape() {
             )
         })
         .collect::<Vec<_>>();
+    // Each shape's counts by the Store method that makes them, as
+    // (authority reads, local reads, writes). Measured on D3b's build;
+    // `docs/streaming/PLAYBACK-START-D3-RECORD.md` explains each row. Every
+    // later D3 lane changes these by exactly what it removes.
+    // The queue bridge now carries the Store method its create-path callers
+    // name (D3b, D3a review S5): the copy-index consumer's two reads are
+    // `copy_index_v3_variant` and `copy_index_source_attestation`, and the
+    // writes `queue_sql` used to hide are `register_foreground_source`,
+    // `activate_foreground_source_custody` and, on the rolling fallback,
+    // `suspend_playback_analysis_interest`. Any other queue statement keeps
+    // the label `queue_sql`, and none is on this path.
+    // Layout reads: `session_layout` is its own label. Its reads (the
+    // `cluster_meta` marker and guard reads) are paid only by a store whose
+    // cached session layout is still Legacy, as this fresh fixture is; a store
+    // that has installed the permanent v82 layout makes none, so a fleet
+    // reading shows these rows without the `session_layout` line.
+    #[allow(clippy::type_complexity)]
+    let expected_methods: [(&str, &[(&str, (u64, u64, u64))]); 5] = [
+        (
+            "first play, VOD index",
+            &[
+                ("activate_media_session", (2, 0, 1)),
+                ("assign_media_session_request_owner", (0, 0, 1)),
+                ("claim_media_session_request", (1, 0, 1)),
+                ("copy_index_source_attestation", (1, 0, 0)),
+                ("copy_index_v3_variant", (1, 0, 0)),
+                ("fragment_index_source", (1, 0, 0)),
+                ("get_file_probe_json", (1, 0, 0)),
+                ("get_setting", (1, 0, 0)),
+                ("local_get_settings", (0, 1, 0)),
+                ("local_playback_planning_snapshot", (0, 1, 0)),
+                ("maintain_media_sessions", (1, 0, 0)),
+                ("media_session_route_for_playback", (1, 0, 0)),
+                ("publish_media_session_activation", (2, 0, 1)),
+                ("session_layout", (8, 0, 0)),
+                // Two timed writes, one physical UPDATE: Confirm is double-timed
+                // (`source_layout_idempotent` times its retry loop and the inner
+                // `txn_source_layout_attempt` times the statement). Left as is
+                // for Paul; a Confirm retry makes it 4.
+                ("settle_media_session_activation", (1, 0, 2)),
+                ("timeline_annotation_set", (2, 0, 0)),
+            ],
+        ),
+        (
+            "reopen, new position",
+            &[
+                ("activate_media_session", (3, 0, 1)),
+                ("assign_media_session_request_owner", (0, 0, 1)),
+                ("claim_media_session_request", (1, 0, 1)),
+                ("complete_media_session_handoff", (1, 0, 1)),
+                ("complete_media_session_terminal_projection", (1, 0, 1)),
+                ("copy_index_source_attestation", (1, 0, 0)),
+                ("copy_index_v3_variant", (1, 0, 0)),
+                ("fragment_index_source", (1, 0, 0)),
+                ("get_file_probe_json", (1, 0, 0)),
+                ("local_get_settings", (0, 1, 0)),
+                ("local_playback_planning_snapshot", (0, 1, 0)),
+                ("maintain_media_sessions", (1, 0, 0)),
+                ("media_session_route_by_incarnation", (1, 0, 0)),
+                ("media_session_route_for_playback", (1, 0, 0)),
+                ("publish_media_session_activation", (2, 0, 1)),
+                ("session_layout", (12, 0, 0)),
+                ("settle_media_session_activation", (1, 0, 2)),
+                ("timeline_annotation_set", (2, 0, 0)),
+            ],
+        ),
+        (
+            "Auto encode, VOD",
+            &[
+                ("activate_foreground_source_custody", (0, 0, 1)),
+                ("activate_media_session", (2, 0, 1)),
+                ("assign_media_session_request_owner", (0, 0, 1)),
+                ("claim_media_session_request", (1, 0, 1)),
+                ("get_file_probe_json", (1, 0, 0)),
+                ("local_get_settings", (0, 1, 0)),
+                ("local_playback_planning_snapshot", (0, 1, 0)),
+                ("maintain_media_sessions", (1, 0, 0)),
+                ("media_session_route_for_playback", (1, 0, 0)),
+                ("publish_media_session_activation", (2, 0, 1)),
+                ("register_foreground_source", (0, 0, 1)),
+                ("session_layout", (8, 0, 0)),
+                ("settle_media_session_activation", (1, 0, 2)),
+                ("timeline_annotation_set", (2, 0, 0)),
+            ],
+        ),
+        (
+            "index miss, rolling copy",
+            &[
+                ("activate_foreground_source_custody", (0, 0, 1)),
+                ("activate_media_session", (2, 0, 1)),
+                ("assign_media_session_request_owner", (0, 0, 1)),
+                ("claim_media_session_request", (1, 0, 1)),
+                ("copy_index_source_attestation", (1, 0, 0)),
+                ("copy_index_v3_variant", (1, 0, 0)),
+                ("fragment_index_source", (1, 0, 0)),
+                ("get_file_probe_json", (1, 0, 0)),
+                ("local_get_settings", (0, 1, 0)),
+                ("local_playback_planning_snapshot", (0, 1, 0)),
+                ("maintain_media_sessions", (1, 0, 0)),
+                ("media_session_route_for_playback", (1, 0, 0)),
+                ("publish_media_session_activation", (2, 0, 1)),
+                ("register_foreground_source", (0, 0, 1)),
+                ("session_layout", (8, 0, 0)),
+                ("settle_media_session_activation", (1, 0, 2)),
+                ("suspend_playback_analysis_interest", (0, 0, 1)),
+            ],
+        ),
+        (
+            "caps-v2 Auto, intent",
+            &[
+                ("activate_foreground_source_custody", (0, 0, 1)),
+                ("activate_media_session", (2, 0, 1)),
+                ("assign_media_session_request_owner", (0, 0, 1)),
+                // The claim's one transaction carries the ask (D3c); its
+                // second authority read is the recorded row.
+                ("claim_media_session_request", (2, 0, 1)),
+                ("get_file_probe_json", (1, 0, 0)),
+                ("local_get_settings", (0, 1, 0)),
+                ("local_playback_planning_snapshot", (0, 1, 0)),
+                ("maintain_media_sessions", (1, 0, 0)),
+                ("media_session_route_for_playback", (1, 0, 0)),
+                ("publish_media_session_activation", (2, 0, 1)),
+                ("register_foreground_source", (0, 0, 1)),
+                ("session_layout", (9, 0, 0)),
+                ("settle_media_session_activation", (1, 0, 2)),
+                ("timeline_annotation_set", (2, 0, 0)),
+            ],
+        ),
+    ];
+    // The same counts by the Store method that makes them. `methods_table`
+    // prints the observed split in the shape below so a deliberate change is
+    // a paste, and the assertion keeps each method's count, not just the
+    // total, from drifting.
+    let methods_table = measured
+        .iter()
+        .map(|(shape, line)| {
+            format!(
+                "(\"{shape}\", &[{}]),",
+                line.methods
+                    .iter()
+                    .map(|(method, (a, l, w))| format!("(\"{method}\", ({a}, {l}, {w}))"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    eprintln!("create-path store operations by method:\n{methods_table}");
     assert_eq!(observed, expected, "create-path counts changed:\n{table}");
+    // The rolling start's refreshed scratch bounds are `get_setting` reads
+    // (`ahead_limits` -> `num_setting`), so they are subtracted from that
+    // method, not from the total alone.
+    for ((shape, line), (pinned_shape, pinned)) in measured.iter().zip(&expected_methods) {
+        assert_eq!(shape, pinned_shape);
+        let mut observed = line.methods.clone();
+        let reads = line.authority_reads;
+        let total_pinned = expected
+            .iter()
+            .find(|(name, _)| name == shape)
+            .map_or(0, |(_, (authority, _, _))| *authority);
+        if shape.contains("rolling") && reads == total_pinned + AHEAD_LIMITS_REFRESH_READS {
+            let entry = observed
+                .iter_mut()
+                .find(|(method, _)| method == "get_setting")
+                .expect("the refreshed bounds are get_setting reads");
+            entry.1 .0 -= AHEAD_LIMITS_REFRESH_READS;
+            // Since D3b the rolling shape makes no other `get_setting` read.
+            observed.retain(|(_, counts)| *counts != (0, 0, 0));
+        }
+        let pinned = pinned
+            .iter()
+            .map(|(method, counts)| ((*method).to_owned(), *counts))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed, pinned,
+            "{shape}: operations by Store method changed:\n{methods_table}"
+        );
+        // The split is the total, not a sample of it.
+        let sum = |pick: fn(&(u64, u64, u64)) -> u64| {
+            observed.iter().map(|(_, counts)| pick(counts)).sum::<u64>()
+        };
+        let (authority, local, writes) = (sum(|c| c.0), sum(|c| c.1), sum(|c| c.2));
+        assert_eq!(
+            (authority, local, writes),
+            (
+                line.authority_reads - (reads - total_pinned).min(AHEAD_LIMITS_REFRESH_READS),
+                line.local_reads,
+                line.mutations
+            ),
+            "{shape}: the method split does not add up to the totals"
+        );
+    }
 
     drop(node_b);
     drop(node_a);

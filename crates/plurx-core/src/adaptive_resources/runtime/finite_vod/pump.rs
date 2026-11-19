@@ -284,7 +284,9 @@ impl PumpFinished {
             Outcome::Ran { produced_through } => (FiniteWriterOutcome::Ran, *produced_through),
             Outcome::Failed(failure) => {
                 let kind = match failure {
-                    Failure::InitDrift(_) => FiniteWriterFailureKind::InitDrift,
+                    Failure::InitDrift(_) | Failure::SealedInit(_) => {
+                        FiniteWriterFailureKind::InitDrift
+                    }
                     Failure::Landing(_) => FiniteWriterFailureKind::Landing,
                     Failure::Unplaced { .. } => FiniteWriterFailureKind::Unplaced,
                     Failure::Stream(_) => FiniteWriterFailureKind::Stream,
@@ -480,6 +482,7 @@ impl SoftwarePump {
             encoded_video_origin: self.plan.video_origin,
             identity,
             convert_dolby_vision: false,
+            dv_refit: None,
             retain_hevc_parameter_sets: false,
             start_entry: self.plan.start_entry,
             policy: self.plan.policy,

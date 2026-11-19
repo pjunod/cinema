@@ -45,6 +45,7 @@ fn prepared_bootstrap_purpose_refuses_voluntary_upward_foreign_and_missing_decod
             generation: 1,
             source_digest: "0".repeat(64),
         },
+        catalog_query: None,
     });
     assert!(
         prepared_manual_auto_bootstrap(&manual, &automatic),
@@ -155,6 +156,7 @@ fn cached_recovery_purpose_requires_downward_auto_identity_grade_and_decoder() {
             generation: 1,
             source_digest: "0".repeat(64),
         },
+        catalog_query: None,
     });
     let mut incumbent = automatic.clone();
     incumbent.request.kind = SessionKind::Transcode { height: 1080 };
@@ -266,8 +268,10 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
         sustainable: true,
     };
     let mut request = SessionRequest {
+        source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: Some(Box::new(TranscodeManager::candidate_context(&candidate))),

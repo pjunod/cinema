@@ -279,6 +279,7 @@ pub(in crate::adaptive_resources::runtime) const fn direct_source_frame_bytes() 
         + std::mem::size_of::<Option<crate::cluster::clock::ContinuousDeadline>>()
 }
 impl SourceCell {
+    #[cfg(target_os = "linux")]
     pub(super) fn retain_continuous_entry_deadline(
         &mut self,
         limit: crate::cluster::clock::ContinuousDeadline,

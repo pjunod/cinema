@@ -1,0 +1,270 @@
+{
+  "schema_version": 1,
+  "status": "causal_source_io_investigation_complete_proposal_review_pending",
+  "date": "2026-11-02",
+  "runtime_revision": "ed708eda6b1df140626e9851bed6afbf06391f3f",
+  "media": {
+    "file_id": 6964,
+    "source_size_bytes": 68343839444,
+    "video": "HEVC 2160p SDR",
+    "default_audio": "DTS",
+    "selected_resume_s": 400.344,
+    "source_mtime_unix_s": 1793577092,
+    "complete_source_digest_available": false
+  },
+  "original_attempt": {
+    "first_complete_segment_ms": 3358,
+    "first_segment_media_s": 2.002,
+    "writer_gate_ms": 15859,
+    "writer_gate_media_s": 14.014,
+    "client_startup_deadline_ms": 40000,
+    "production_bootstrap_media_s": 48,
+    "final_constrained_production_rate": 0.818,
+    "outcome": "no_first_frame_startup_timeout_then_capacity_refusal"
+  },
+  "prepared_720p_trial": {
+    "vod_create_ms": 673,
+    "attachment_to_presentation_ms": 1741,
+    "retry_to_first_frame_ms": 3855,
+    "continuity_qualified": false
+  },
+  "ffmpeg_controls": [
+    {
+      "binary": "Jellyfin FFmpeg 8.1.3",
+      "input_pacing": "initial burst 90 s, readrate 2x",
+      "source_position_s": 400.344,
+      "requested_window_s": 20,
+      "output_media_s": 19.842667,
+      "output_bytes": 279361724,
+      "speed_x": 90.3,
+      "destination": "/dev/null",
+      "cache_state": "likely_client_warm",
+      "run_id": "ffmpeg-control-01"
+    },
+    {
+      "binary": "Jellyfin FFmpeg 8.1.3",
+      "input_pacing": "initial burst 90 s, readrate 2x",
+      "source_position_s": 2400.344,
+      "requested_window_s": 20,
+      "output_media_s": 19.180333,
+      "output_bytes": 248131295,
+      "speed_x": 0.987,
+      "destination": "/dev/null",
+      "cache_state": "previously_unused_client_window_not_forced_cold",
+      "run_id": "ffmpeg-control-02"
+    }
+  ],
+  "raw_read": {
+    "offset_bytes": 34359738368,
+    "bytes": 268435456,
+    "elapsed_s": 19.966082382015884,
+    "MiB_per_s": 12.821744151000185
+  },
+  "read_ahead_ABA": [
+    {
+      "read_ahead_KiB": 128,
+      "offset_bytes": 42949672960,
+      "bytes": 67108864,
+      "elapsed_s": 5.999923187308013,
+      "MiB_per_s": 10.666803224311758,
+      "nfs_rtt_ms_per_op": 99.66153846153846,
+      "run_id": "read-ahead-A"
+    },
+    {
+      "read_ahead_KiB": 8192,
+      "offset_bytes": 43016781824,
+      "bytes": 67108864,
+      "elapsed_s": 3.1352148931473494,
+      "MiB_per_s": 20.413273788627706,
+      "nfs_rtt_ms_per_op": 354.47058823529414,
+      "run_id": "read-ahead-B"
+    },
+    {
+      "read_ahead_KiB": 128,
+      "offset_bytes": 43083890688,
+      "bytes": 67108864,
+      "elapsed_s": 4.941069859080017,
+      "MiB_per_s": 12.952660420777017,
+      "nfs_rtt_ms_per_op": 112.84745762711864,
+      "run_id": "read-ahead-C"
+    }
+  ],
+  "read_ahead_restored_KiB": 128,
+  "fresh_transport_control": {
+    "protocol": "NFS 4.0",
+    "mount_read_only": true,
+    "connections_verified_storage_source": true,
+    "read_bytes": 67108864,
+    "offset_bytes": 51539607552,
+    "elapsed_s": 8.084790325723588,
+    "MiB_per_s": 7.916098924219411,
+    "mount_removed": true,
+    "limit": "minor-version and source-region differ from production; does not identify underlying NAS disk/service cause"
+  },
+  "cross_client_AB_BA": [
+    {
+      "client": "lab4",
+      "order": 1,
+      "offset_bytes": 55834574848,
+      "bytes": 67108864,
+      "elapsed_s": 5.047953867004253,
+      "MiB_per_s": 12.678404297300224,
+      "run_id": "cross-client-01"
+    },
+    {
+      "client": "media1",
+      "order": 2,
+      "offset_bytes": 55834574848,
+      "bytes": 67108864,
+      "elapsed_s": 0.5160420900210738,
+      "MiB_per_s": 124.02089139160414,
+      "run_id": "cross-client-02"
+    },
+    {
+      "client": "media1",
+      "order": 1,
+      "offset_bytes": 57982058496,
+      "bytes": 67108864,
+      "elapsed_s": 5.566844679415226,
+      "MiB_per_s": 11.496638344636361,
+      "run_id": "cross-client-03"
+    },
+    {
+      "client": "lab4",
+      "order": 2,
+      "offset_bytes": 57982058496,
+      "bytes": 67108864,
+      "elapsed_s": 0.23515214999497402,
+      "MiB_per_s": 272.16421368619376,
+      "run_id": "cross-client-04"
+    }
+  ],
+  "interpretation": "cold source reads reproduce low supply without daemon; NAS-local reads and cross-client controls localize cache-miss cost to shared backing storage; scan_title pause/resume causally halves/doubles the remaining cold-read rate; source admission checks omit copy playback; original per-cause percentage unmeasured",
+  "sanitization": "neutral host labels; no source filesystem paths, credentials, session capabilities or real infrastructure addresses",
+  "provenance": "manually retained tool observations, not a signed CI qualification receipt",
+  "nas_storage": {
+    "type": "single external WD Elements 20 TB disk",
+    "filesystem": "ext4",
+    "used_percent": 98,
+    "usb_Mbps": 5000,
+    "transport": "usb-storage",
+    "command_queue_depth": 1,
+    "nas_local_reads": [
+      {
+        "bytes": 67108864,
+        "elapsed_s": 2.239313,
+        "MiB_per_s": 28.580194014860805
+      },
+      {
+        "bytes": 134217728,
+        "elapsed_s": 4.342366,
+        "MiB_per_s": 29.477017828529423
+      }
+    ],
+    "during_second_local_read": {
+      "busy_percent_range": [
+        99,
+        100
+      ],
+      "read_KiB_per_s_range": [
+        58961,
+        74799
+      ],
+      "average_queue_about": 2
+    },
+    "limit": "other readers remained active; fullness is not proof of fragmentation or drive failure"
+  },
+  "scanner_observation": {
+    "kind": "plurxd child scan_title, background title probe",
+    "same_backing_volume": true,
+    "other_media_title": true,
+    "nice": 15,
+    "active_fd_advance_bytes": 113348217,
+    "sample_elapsed_s_about": 3.13,
+    "held_capability_fd_stationary": true
+  },
+  "scanner_ABA": [
+    {
+      "state": "running",
+      "bytes": 67108864,
+      "offset_bytes": 64424509440,
+      "elapsed_s": 5.0633484330028296,
+      "MiB_per_s": 12.639856973470156,
+      "run_id": "scanner-A"
+    },
+    {
+      "state": "temporarily_stopped",
+      "bytes": 67108864,
+      "offset_bytes": 64491618304,
+      "elapsed_s": 2.630197200924158,
+      "MiB_per_s": 24.332776256287044,
+      "run_id": "scanner-B"
+    },
+    {
+      "state": "resumed",
+      "bytes": 67108864,
+      "offset_bytes": 64558727168,
+      "elapsed_s": 4.857873055152595,
+      "MiB_per_s": 13.17449000280425,
+      "run_id": "scanner-C"
+    }
+  ],
+  "scanner_ABA_safety": {
+    "pidfd_identity_bound": true,
+    "automatic_resume_guard_s": 15,
+    "finally_resumed": true,
+    "running_state_verified": true,
+    "limit": "different adjacent fresh windows; did not remove all other NAS workload or capture the original attempt process trace"
+  },
+  "operator_transfer_context": {
+    "human_report": "large movies being moved to NAS external disks",
+    "human_timing_clarification": "started about 30 seconds before the report, after all retained throughput experiments; not active at original failure",
+    "further_throughput_experiments_after_notice": false,
+    "limit": "implementation qualification must record concurrent operator workloads"
+  },
+  "reproduction": {
+    "timestamp_limit": "Exact start UTC timestamps were not retained for most storage experiments; date, run order, offsets, byte counts and monotonic elapsed results are retained. No fabricated timestamps or signed execution credit.",
+    "source_variable": "SOURCE is the local path to the exact investigated source generation; use the appropriate NAS-local or NFS-mounted path. Host aliases are neutral.",
+    "ffmpeg_recipe": "/usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -loglevel error -noaccurate_seek -ss \"$POSITION\" -readrate_initial_burst 90.0 -readrate 2.00 -i \"$SOURCE\" -t 20 -map_chapters -1 -map 0:v:0? -map 0:a:0? -sn -c:v copy -tag:v hvc1 -bsf:v null -c:a eac3 -ac 6 -channel_layout:a 5.1 -b:a 640k -ar 48000 -avoid_negative_ts make_zero -movflags frag_keyframe+empty_moov+default_base_moof+delay_moov -use_editlist 0 -progress pipe:1 -nostats -f mp4 -y /dev/null",
+    "ffmpeg_positions_s": [
+      400.344,
+      2400.344
+    ],
+    "raw_read_primitive": "fd=os.open(SOURCE,os.O_RDONLY); os.lseek(fd,OFFSET,os.SEEK_SET); t=time.monotonic(); repeat os.read(fd,min(1048576,BYTES-read_total)) until BYTES or EOF; elapsed=time.monotonic()-t; os.close(fd). No fadvise or global cache drop.",
+    "cross_client_order": "lab4 then media1 at 52 GiB; media1 then lab4 at 54 GiB, 64 MiB each, sequential, no simultaneous source benchmark. Different clients did not previously read these windows in this experiment.",
+    "nas_local_recipes": [
+      "time dd if=\"$SOURCE\" of=/dev/null bs=1048576 skip=57344 count=64",
+      "time dd if=\"$SOURCE\" of=/dev/null bs=1048576 skip=59392 count=128"
+    ],
+    "read_ahead_recipe": "Read original sysfs read_ahead_kb for the production NFS backing-device identity; set 128,8192,128 for the three distinct offsets retained; use raw_read_primitive; collect /proc/self/mountstats READ deltas; finally restore original and read back. This diagnostic configuration is not a shipping setting.",
+    "scanner_recipe": "Bind pidfd to identified scan_title and verify comm/start time; raw-read A while running; arm 15-second SIGCONT timer; SIGSTOP via pidfd and verify state T; raw-read B; finally SIGCONT and cancel timer; verify resumed; raw-read C. Use the exact fresh adjacent offsets retained; protect against PID reuse. No service suspension or queue reset.",
+    "fresh_transport_recipe": "Temporary read-only nosharecache NFS4.0 mount with nconnect=8,rsize=1048576,soft,timeo=20,retrans=1, nosuid/nodev/noexec; verify new storage-source socket addresses; raw-read 64 MiB at 48 GiB; finally unmount and remove. Production mount unchanged. Diagnostic soft mount options are not proposed production configuration."
+  },
+  "review_followup": {
+    "production_domain_snapshot": {
+      "observed_unix_s": 1793634557,
+      "background_storage_domains_count": 0,
+      "meaning": "existing shared global source_io fallback active; historical reservations not captured",
+      "read_only": true,
+      "media_io": false
+    },
+    "original_hash_lead_ms": 664,
+    "illustrative_model": {
+      "input_demand_MiB_per_s": 10.728836059570312,
+      "later_control_MiB_per_s": 12.639856973470156,
+      "not_original_attempt_measurement": true,
+      "threshold_media_s": 48,
+      "threshold_over_54_13s_not_exact_observed_rate": true
+    },
+    "supplied_reviewers": [
+      "Claude Opus 5.5",
+      "Claude Fable 5.1 independent pass"
+    ],
+    "supplied_review_runtime_tests": false,
+    "corrections": [
+      "SourceReadJobGate is test-only",
+      "48/54.13 is threshold arithmetic, not logged average production rate"
+    ],
+    "new_performance_benchmarks": false
+  }
+}

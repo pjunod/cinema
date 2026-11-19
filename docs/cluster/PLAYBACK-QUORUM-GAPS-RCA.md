@@ -1,7 +1,6 @@
 # Playback dies on brief quorum gaps — root cause and proposed fix
 
-**Status:** **open** — approved for implementation (v3.1), in progress
-on `effort/playback-quorum-gaps`. Fable design review 2,
+**Status:** **open** — approved for implementation (v3.1); merged as #1341 and deployed 2026-11-07 (media1/lab6 build `4ddbf1229`, lab4 `edf6d08fa`; #1341 is in both). Built on `effort/playback-quorum-gaps`. Fable design review 2,
 re-check: "approved with conditions"; both conditions are folded into
 §4.5 row 1 and §4.2 (1). Fable reviewed in place of Astra, at Paul's
 direction. · **Reviews so far:** Fable 5.1 adversarial review (9 findings) ·

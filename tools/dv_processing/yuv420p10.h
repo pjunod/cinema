@@ -95,11 +95,14 @@ static bool dv_yuv10_init(pl_log log, pl_gpu gpu, int width, int height) {
 // The texture the reconstruction renders into ahead of this export. 16-bit
 // UNORM rather than 32-bit float halves the memory traffic of writing it and
 // of the export reading it back, at 1/65535 steps against the export's
-// 1/876 luma code. NULL when the device lacks the format; the caller then
-// keeps its float texture.
-static pl_tex dv_yuv10_source_texture(pl_gpu gpu, int width, int height) {
+// 1/876 luma code. NULL when the device lacks the format. `linear` requires
+// linear filtering: a texture that display management or a scaled export
+// samples between texels must have it, never a format that would be sampled
+// nearest instead.
+static pl_tex dv_yuv10_source_texture(pl_gpu gpu, int width, int height, bool linear) {
   pl_fmt u16 = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16,
-                           PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE);
+                           PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE |
+                               (linear ? PL_FMT_CAP_LINEAR : 0));
   return u16 ? pl_tex_create(gpu, pl_tex_params(.w = width, .h = height, .format = u16,
                                                  .renderable = true, .sampleable = true))
              : NULL;

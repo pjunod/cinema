@@ -1674,6 +1674,7 @@ pub struct ClockAcquisitionTicket<'guard> {
 /// rate defects. Unknown samples and known continuity changes fail closed.
 #[derive(Clone)]
 pub struct ContinuousClockCapture {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     identity: u64,
     monotonic_before: Instant,
     guard: Arc<ClusterClockGuard>,
@@ -1782,6 +1783,7 @@ impl ContinuousClockCapture {
 impl ContinuousDeadline {
     /// Internal replay identity only. Equal public counters alone cannot
     /// substitute another guard, original anchor or fixed cutoff.
+    #[cfg(target_os = "linux")]
     pub(crate) fn same_original(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.capture.guard, &other.capture.guard)
             && self.capture.identity == other.capture.identity

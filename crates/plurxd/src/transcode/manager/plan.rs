@@ -1,4 +1,5 @@
 use super::*;
+use crate::decode_facts::WithSourceScope as _;
 
 impl TranscodeManager {
     /// The representative comparison uses the same resolved movie plan as
@@ -130,6 +131,7 @@ impl TranscodeManager {
             encoder,
             restrictions,
             None,
+            None,
         )
         .await
     }
@@ -147,6 +149,7 @@ impl TranscodeManager {
             encoder,
             &AttemptRestrictions::none(),
             Some(failed_pipeline),
+            None,
         )
         .await
     }
@@ -158,12 +161,17 @@ impl TranscodeManager {
         encoder: Encoder,
         restrictions: &AttemptRestrictions,
         excluded_pipeline: Option<Pipeline>,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<ResolvedTranscode, String> {
-        let stored_probe = self
-            .store
-            .get_file_probe_json(file.id)
-            .await
-            .map_err(|error| format!("reading decoder planning facts: {error}"))?;
+        // The create's plan read this revision's probe with the file (D3b).
+        let stored_probe = match plan.and_then(|plan| plan.probe_for(file)) {
+            Some(probe) => probe.map(str::to_owned),
+            None => self
+                .store
+                .get_file_probe_json(file.id)
+                .await
+                .map_err(|error| format!("reading decoder planning facts: {error}"))?,
+        };
         let facts = Self::planning_facts(file, stored_probe.as_deref())?;
         let context = self
             .macos_video_report()
@@ -493,7 +501,11 @@ impl TranscodeManager {
             .map_err(|error| vod_refusal_error("vod_source_rescan_required", error.to_string()))?;
         let source = self.hooks.get().decode_fact_source(
             BoundPlanCaller::Vod
-                .decode_fact_source(handle, Arc::new(tokio::sync::Semaphore::new(1))),
+                .decode_fact_source(handle, Arc::new(tokio::sync::Semaphore::new(1)))
+                .with_source_scope(
+                    self.planning_source_request(file),
+                    crate::background_jobs::source_budget(),
+                ),
         );
         self.decode_facts
             .probe_source_document(
@@ -528,10 +540,14 @@ impl TranscodeManager {
         };
         let catalog =
             DecodeCatalogMetadata::from_media_file(file).map_err(|error| error.to_string())?;
-        let source = self
-            .hooks
-            .get()
-            .decode_fact_source(BoundPlanCaller::Vod.decode_fact_source(handle, offsets));
+        let source = self.hooks.get().decode_fact_source(
+            BoundPlanCaller::Vod
+                .decode_fact_source(handle, offsets)
+                .with_source_scope(
+                    self.planning_source_request(file),
+                    crate::background_jobs::source_budget(),
+                ),
+        );
         self.decode_facts
             .source_frame_probe(probe, source, Some(catalog), prepared, absolute_stream)
             .map(Some)
@@ -651,7 +667,11 @@ impl TranscodeManager {
             .map_err(|error| vod_refusal_error("vod_decoder_plan_refused", error.to_string()))?;
         let source = self.hooks.get().decode_fact_source(
             BoundPlanCaller::Vod
-                .decode_fact_source(handle, Arc::new(tokio::sync::Semaphore::new(1))),
+                .decode_fact_source(handle, Arc::new(tokio::sync::Semaphore::new(1)))
+                .with_source_scope(
+                    self.planning_source_request(file),
+                    crate::background_jobs::source_budget(),
+                ),
         );
         let facts = self
             .decode_facts
@@ -709,7 +729,7 @@ impl TranscodeManager {
         encoder: Encoder,
         held_plan_handle: Arc<std::fs::File>,
     ) -> Result<ResolvedTranscode, String> {
-        self.resolve_vod_movie_plan_with_fonts(file, options, encoder, held_plan_handle, None)
+        self.resolve_vod_movie_plan_with_fonts(file, options, encoder, held_plan_handle, None, None)
             .await
     }
 
@@ -720,6 +740,7 @@ impl TranscodeManager {
         encoder: Encoder,
         held_plan_handle: Arc<std::fs::File>,
         font_digest: Option<&str>,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<ResolvedTranscode, String> {
         BoundPlanCaller::Vod.finish(
             self.resolve_held_movie_plan_with_fonts(
@@ -727,10 +748,15 @@ impl TranscodeManager {
                 options,
                 encoder,
                 BoundPlanCaller::Vod
-                    .decode_fact_source(held_plan_handle, Arc::new(tokio::sync::Semaphore::new(1))),
+                    .decode_fact_source(held_plan_handle, Arc::new(tokio::sync::Semaphore::new(1)))
+                    .with_source_scope(
+                        self.planning_source_request(file),
+                        crate::background_jobs::source_budget(),
+                    ),
                 Instant::now() + DECODE_PLAN_PROBE_BUDGET,
                 None,
                 font_digest,
+                plan,
             )
             .await,
         )
@@ -757,6 +783,7 @@ impl TranscodeManager {
             deadline,
             cancelled,
             None,
+            None,
         )
         .await
     }
@@ -771,12 +798,22 @@ impl TranscodeManager {
         deadline: Instant,
         cancelled: Option<&tokio_util::sync::CancellationToken>,
         font_digest: Option<&str>,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<ResolvedTranscode, String> {
         let Some(probe) = self.decode_probe_identity.as_ref() else {
             if options.normalized_geometry {
                 return Err("candidate_geometry_unavailable: no bound FFprobe identity".to_owned());
             }
-            return self.resolve_movie_plan(file, options, encoder).await;
+            return self
+                .resolve_movie_plan_with_processing_exclusion(
+                    file,
+                    options,
+                    encoder,
+                    &AttemptRestrictions::none(),
+                    None,
+                    plan,
+                )
+                .await;
         };
         let catalog = DecodeCatalogMetadata::from_media_file(file)
             .map_err(|error| format!("decoder catalog facts are invalid: {error}"))?;
@@ -1124,6 +1161,16 @@ impl TranscodeManager {
         file: &plurx_core::domain::MediaFile,
         class: crate::process_control::ChildClass,
     ) -> Result<bool, String> {
+        self.require_dovi_renderer_with_offline(file, class, None)
+            .await
+    }
+
+    async fn require_dovi_renderer_with_offline(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        class: crate::process_control::ChildClass,
+        offline: Option<(String, i64, tokio_util::sync::CancellationToken)>,
+    ) -> Result<bool, String> {
         let required = Self::needs_dovi_reshape(file)?;
         if required && !self.dovi_reshape {
             return Err(unsupported_build_error(
@@ -1136,11 +1183,48 @@ impl TranscodeManager {
                 .prove(Self::dovi_proof_key(file), class, || {
                     let scripted = self.hooks.get().scripted_dovi_pixel_proof(file);
                     let file = file.clone();
+                    // The proof is single-flight in an existing independent
+                    // supervisor. Task-local read ownership is captured here,
+                    // then explicitly restored in that actual operation.
+                    let background = crate::background_jobs::source_budget();
+                    let foreground = crate::source_custody::current_request().or_else(|| {
+                        (class == crate::process_control::ChildClass::Realtime).then(||
+                            self.planning_source_request(&file)).flatten()
+                    });
+                    let store = Arc::clone(&self.store);
+                    let node_id = self.cache.as_ref().map_or_else(String::new,|cache|cache.node_id.clone());
                     async move {
-                        match scripted {
-                            Some(proof) => proof,
-                            None => crate::ffmpeg::dovi_reshape_changes_pixels(&file, class).await,
+                        if let Some(proof) = scripted { return proof; }
+                        let mut custody = None;
+                        let background = match (background, offline) {
+                            (Some(budget), _) => Some(budget),
+                            (None, Some((package_id, claim_generation, cancel))) => {
+                                use plurx_core::store::background_jobs_resources::{BackgroundSourceOwner,BackgroundSourceRegistration};
+                                let owner=BackgroundSourceOwner::Offline{package_id,node_id,claim_generation};
+                                match store.register_background_source_custody(owner,crate::state::clock_ms()).await {
+                                    Ok(BackgroundSourceRegistration::Registered(token)) => {
+                                        if crate::source_custody::activate_background_with_journal(&store, token.clone()).await.is_err() {
+                                            return crate::ffmpeg::DoviPixelProof::Inconclusive("offline source proof activation unavailable".into());
+                                        }
+                                        let budget=crate::background_jobs::SourceReadBudget::from_existing_custody(Arc::clone(&store),&token,cancel);
+                                        custody=Some(token);Some(budget)
+                                    }
+                                    Ok(_) => return crate::ffmpeg::DoviPixelProof::Inconclusive("offline source proof admission deferred".into()),
+                                    Err(error) => return crate::ffmpeg::DoviPixelProof::Inconclusive(format!("offline source proof admission: {error}")),
+                                }
+                            }
+                            (None,None)=>None,
+                        };
+                        let proof=if let Some(budget)=background {
+                            crate::background_jobs::budgeted(budget,crate::ffmpeg::dovi_reshape_changes_pixels(&file,class)).await
+                        } else {
+                            crate::source_custody::with_request(foreground,crate::ffmpeg::dovi_reshape_changes_pixels(&file,class)).await
+                        };
+                        if let Some(custody)=custody {
+                            // The proof's child and source bridge have joined.
+                            crate::background_jobs::settle_joined_source_custody(&store, custody).await;
                         }
+                        proof
                     }
                 })
                 .await;
@@ -1560,6 +1644,48 @@ impl TranscodeManager {
         }
     }
 
+    pub(super) fn planning_source_request(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+    ) -> Option<crate::source_custody::SourceRequest> {
+        crate::source_custody::current_request().or_else(|| {
+            self.foreground_source_request(
+                file,
+                "source-planning",
+                uuid::Uuid::new_v4(),
+                plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer,
+            )
+        })
+    }
+
+    pub(super) async fn encoder_for_offline_package(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        package: &OfflinePackage,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Encoder, String> {
+        let requested = self
+            .store
+            .get_setting(keys::HWACCEL)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if self
+            .require_dovi_renderer_with_offline(
+                file,
+                crate::process_control::ChildClass::Background,
+                Some((package.id.clone(), package.claim_generation, cancel.clone())),
+            )
+            .await?
+        {
+            Ok(self.dovi_reshape_encoder(&requested).await)
+        } else {
+            Ok(self.encoder_for_preference(&requested))
+        }
+    }
+
+    #[cfg(test)]
     pub(super) async fn encoder_for_file(
         &self,
         file: &plurx_core::domain::MediaFile,

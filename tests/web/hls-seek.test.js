@@ -97,15 +97,24 @@ test('forward and backward execution reset progress and reject assigned clocks a
     v.seeking=false;assert.equal(c.settlePlaybackControlSeek(v,p),true);assert.equal(p.controlSeek,null);
   }
 });
-test('paused superseding seek renews one observer even while seeking and fences cancelled delivery',()=>{
-  const p={controlPresentationEpoch:0,mediaAttachment:{id:1},controlSeek:{sequence:1}},v=media(),callbacks=[],delivered=[];
-  v.requestVideoFrameCallback=fn=>{callbacks.push(fn);return callbacks.length;};v.cancelVideoFrameCallback=()=>{};
-  const c=vm.createContext({PLAYER:p});vm.runInContext(source('queuePlaybackFrame'),c);
+test('paused native seek preserves pre-seeked landing proof and fences canceled intent',()=>{
+  const p={controlPresentationEpoch:0,mediaAttachment:{id:1},controlSeek:{sequence:1}},v=media(),callbacks=[],cancelled=[],delivered=[];
+  v.paused=true;v.readyState=2;
+  v.requestVideoFrameCallback=fn=>{callbacks.push(fn);return callbacks.length;};
+  v.cancelVideoFrameCallback=id=>cancelled.push(id);
+  const c=vm.createContext({PLAYER:p});
+  vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/video-frames.js','utf8'),c);
+  vm.runInContext(source('queuePlaybackFrame'),c);
   c.queuePlaybackFrame(v,p,(_now,meta,epoch,identity)=>delivered.push({time:meta.mediaTime,epoch,identity}));
-  v.seeking=true;p.controlPresentationEpoch=1;p.controlSeek={sequence:2};p.controlFrameRearm();
-  assert.equal(callbacks.length,2,'current attached data can register during a superseding paused seek');
-  callbacks[0](1,{mediaTime:10});assert.equal(delivered.length,0);
-  callbacks[1](2,{mediaTime:60});assert.equal(delivered.length,1);assert.equal(delivered[0].epoch,1);assert.equal(delivered[0].identity.intent,2);
+  p.controlPresentationEpoch=1;p.controlSeek={sequence:2};p.controlFrameRearm();
+  v.seeking=true;v.emit('seeking');v.emit('loadeddata');
+  assert.equal(callbacks.length,3,'current paused data can observe its one landing before seeked');
+  callbacks[0](1,{mediaTime:10});callbacks[1](1,{mediaTime:10});
+  assert.equal(delivered.length,0,'old registration cannot prove the successor seek');
+  callbacks[2](2,{mediaTime:60});
+  assert.equal(delivered.length,1);assert.equal(delivered[0].epoch,1);assert.equal(delivered[0].identity.intent,2);
+  v.seeking=false;v.emit('seeked');
+  assert.equal(callbacks.length,3,'a delivered one-shot landing does not register another native request');
 });
 test('two presented frames after playback starts are the first presentation proof, without waiting for the timer',()=>{
   const v={currentTime:0,seeking:false,paused:false,ended:false,readyState:4,playbackRate:1};
@@ -150,3 +159,30 @@ test('the tick\'s sampling period is the interval the sampling timers run at',()
   assert.ok(timers.length>=2,'both sampling timers are present');
   assert.ok(timers.every(interval=>interval===period),'a timer that moves must move the period with it');
 });
+
+test('silent native callbacks with independent progress are unavailable observations, not proof or a freeze',()=>{
+  let decoded=0,recoveries=0;const logs=[],surfaces=[];
+  const v={currentTime:0,seeking:false,paused:false,ended:false,readyState:4,playbackRate:1,
+    getVideoPlaybackQuality:()=>({totalVideoFrames:decoded})};
+  const p={source:{video_codec:"h264"},started:true,wantsPlayback:true,controlSeek:null,
+    hlsStartup:{transport:"native",state:"presenting"},controlHasFrameCallbacks:true,
+    controlPresentedFrames:0,mediaAttachment:{id:1},waitAt:null};
+  const c=vm.createContext({PLAYER:p,performance:{now:()=>c.now},now:0,document:{hidden:false,getElementById:()=>v},
+    PlaybackPolicy:require("../../crates/plurxd/src/web/playback-policy.js"),PERSISTENT_STALL_MS:8000,
+    PLAYBACK_SAMPLING_PERIOD_MS:500,playbackSurfaceStep:event=>surfaces.push(event),playbackSurfaceGeneration:()=>1,
+    playbackOwnsAttachedMedia:()=>true,samplePreparedSwitchFrames(){},streamHasVideo:()=>true,
+    completeHlsStartup(){throw Error('counters cannot complete startup');},clientLog:row=>logs.push(row),playbackContext:()=>({}),
+    endWait(){p.waitAt=null;},clearStall(){},finishStallRecovery(){},bufferRunway:()=>50,
+    persistentWait(){recoveries++;return Promise.resolve();},notifyPlaybackControl(){}});
+  for(const name of ['samplePlaybackPresentationClock','settlePlaybackControlSeek','playbackProgressTick'])vm.runInContext(source(name),c);
+  for(let i=0;i<=22;i++){c.now=i*500;v.currentTime=i*.5;decoded=i*12;c.playbackProgressTick(v,p);}
+  assert.equal(p.controlFrameObservation.unavailable,true);
+  assert.equal(logs.filter(row=>row.detail==='observation_unavailable').length,1);
+  assert.equal(recoveries,0,'moving independent counters do not authorize destructive freeze recovery');
+  assert.equal(surfaces.filter(row=>row.presenting===true).length,0,'independent counters are never presentation proof');
+  // A real subsequent freeze remains bounded from the last independent advance.
+  for(let i=23;i<=40;i++){c.now=i*500;c.playbackProgressTick(v,p);}
+  assert.equal(recoveries,1);
+});
+
+require('./video-frames.test.js');

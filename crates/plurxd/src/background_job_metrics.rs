@@ -4,7 +4,7 @@ use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use plurx_core::store::background_jobs::{JobKind, JOB_METRIC_KINDS};
+use plurx_core::store::background_jobs::{ClaimBlock, JobKind, JOB_METRIC_KINDS};
 
 #[derive(Clone, Copy)]
 pub(super) enum Event {
@@ -60,6 +60,8 @@ fn kind_slot(kind: JobKind) -> usize {
         JobKind::SubtitleTextTranslate => 18,
         JobKind::SubtitleTextModelOperation => 19,
         JobKind::SubtitleTextTranslateArtifact => 20,
+        JobKind::FragmentIndexPublish => 21,
+        JobKind::DvRefit => 22,
     }
 }
 
@@ -107,6 +109,10 @@ impl Histogram {
 
 static COUNTERS: [[AtomicU64; 11]; JOB_METRIC_KINDS.len()] =
     [const { [const { AtomicU64::new(0) }; 11] }; JOB_METRIC_KINDS.len()];
+/// Claims never proposed because this node's replica showed the claim
+/// statement refusing them, by kind and by the predicate group that failed.
+static SKIPPED: [[AtomicU64; ClaimBlock::ALL.len()]; JOB_METRIC_KINDS.len()] =
+    [const { [const { AtomicU64::new(0) }; ClaimBlock::ALL.len()] }; JOB_METRIC_KINDS.len()];
 static CLAIM_LATENCY: [Histogram; JOB_METRIC_KINDS.len()] =
     [const { Histogram::new() }; JOB_METRIC_KINDS.len()];
 static QUEUE_WAIT: [Histogram; JOB_METRIC_KINDS.len()] =
@@ -116,6 +122,9 @@ static EXECUTION: [Histogram; JOB_METRIC_KINDS.len()] =
 
 pub(super) fn event(kind: JobKind, event: Event) {
     COUNTERS[kind_slot(kind)][event as usize].fetch_add(1, Ordering::Relaxed);
+}
+pub(crate) fn claim_skipped(kind: JobKind, block: ClaimBlock) {
+    SKIPPED[kind_slot(kind)][block as usize].fetch_add(1, Ordering::Relaxed);
 }
 pub(super) fn claim_latency(kind: JobKind, elapsed: Duration) {
     CLAIM_LATENCY[kind_slot(kind)].observe(elapsed);
@@ -142,6 +151,17 @@ pub(crate) fn prometheus() -> String {
             let _ = writeln!(
                 out,
                 "plurx_background_worker_events_total{{kind=\"{kind}\",outcome=\"{event}\"}} {}",
+                counter.load(Ordering::Relaxed)
+            );
+        }
+    }
+    out.push_str("# HELP plurx_background_claim_skipped_total Claims not proposed because this node's applied replica showed the claim statement refusing them, by the predicate group that failed.\n# TYPE plurx_background_claim_skipped_total counter\n");
+    for (kind, counters) in JOB_METRIC_KINDS.iter().zip(SKIPPED.iter()) {
+        for (block, counter) in ClaimBlock::ALL.iter().zip(counters.iter()) {
+            let _ = writeln!(
+                out,
+                "plurx_background_claim_skipped_total{{kind=\"{kind}\",reason=\"{}\"}} {}",
+                block.as_str(),
                 counter.load(Ordering::Relaxed)
             );
         }
@@ -174,6 +194,22 @@ pub(crate) fn prometheus() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn skipped_claims_render_per_kind_and_reason() {
+        // `ALL` is the counter layout: each block indexes its own slot.
+        for (index, block) in ClaimBlock::ALL.iter().enumerate() {
+            assert_eq!(*block as usize, index);
+        }
+        claim_skipped(JobKind::SubtitleExtract, ClaimBlock::MaintenanceReader);
+        let out = prometheus();
+        assert!(out.contains(
+            "plurx_background_claim_skipped_total{kind=\"subtitle_extract\",reason=\"maintenance_reader\"} 1"
+        ), "{out}");
+        assert!(out.contains(
+            "plurx_background_claim_skipped_total{kind=\"subtitle_extract\",reason=\"source_holders\"} 0"
+        ), "{out}");
+    }
+
     #[test]
     fn histogram_boundaries_are_cumulative_and_include_infinity() {
         let histogram = Histogram::new();

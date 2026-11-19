@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "written_utc": "2026-11-11T17:20:00Z",
+  "author": "Claude Opus 5.5, session_01BCWLA1yYosvau4xhfH6R4S",
+  "status": "Fixed after arm S (protocol-roi-20261111.json) and before any zero-mean output. One arm; no refit after outcomes.",
+  "motivation": "Arm S passed all 16 quality rows but its offsets are all negative (mean about -1 QP), which raised authored rate to 127.4/130.4 Mb/s and failed the 130 screen on Michael1800. x265 AQ is itself zero-mean per frame (strength*(qp_adj - avg_adj)); a luminance term that is also zero-mean redistributes bits from bright to dark blocks instead of adding them.",
+  "hypothesis": "The same dark-block offset, balanced by a uniform positive offset on the remaining blocks, keeps the shadow-tail repair while holding the rate near the retained baseline.",
+  "baseline": "Identical to protocol-roi-20261111.json (retained single-pass115 qg32 CLI options, translated verbatim; gates E0/E1 already passed with the same harness logic).",
+  "arm_Z": {
+    "map_input": "The encoder's own input frame, every frame independently. No reference, F or C error enters the map.",
+    "geometry": "16x16 grid as arm S.",
+    "dark_selection": "As arm S: block mean Y' -> ST 2084 nits < 1.0 nit.",
+    "dark_offset": "-3 QP (qoffset -3/63)",
+    "other_offset": "+min(3, 3*c/(1-c)) QP on every non-dark block, c = that frame's dark-block fraction; zero frame mean whenever c <= 0.5",
+    "encoding": "Dark runs listed first, then one full-frame region with the positive offset; libx265.c applies the first listed region on overlap. Positive qoffset is round(offset*1e6)/63e6.",
+    "fixtures": ["michael5400", "michael1800"],
+    "prefix": "<fixture>-roi-dark1nit-zeromean"
+  },
+  "qualification": "Same as arm S (qualify_spatial_control.py --qg-size 32 with AQ and QP-group receipts, frozen author, quality pipeline).",
+  "bar": "Unchanged strict quality bar and unchanged 130 Mb/s authored-average screen.",
+  "not_claimed": ["rate neutrality guarantee", "perceptual metric", "HRD/CPB conformance", "held-out scenes", "playback, packaging or live change"]
+}

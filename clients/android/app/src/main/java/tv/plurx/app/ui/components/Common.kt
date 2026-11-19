@@ -34,6 +34,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
@@ -111,6 +112,8 @@ internal fun PosterCard(
             .remoteAction(LocalRemoteItemPrefix.current + ":" + item.id, item.title, enabled = remoteEnabled) { remoteActivate?.invoke() ?: run { onClick(); RemoteOutcome.Applied } }
             .width(width)
             .scale(scale)
+            // Offloaded: the files are gone, the title stays — dimmed, not hidden.
+            .then(if (item.offloaded) Modifier.alpha(0.5f) else Modifier)
             .onFocusChanged { focused = it.isFocused }
             // One focus target, not two. `clickable` already delegates a
             // focusable node, so the trailing `focusable()` was a second focus
@@ -148,6 +151,19 @@ internal fun PosterCard(
                         .padding(5.dp)
                         .background(Color(0xB3000000), MaterialTheme.shapes.small)
                         .padding(horizontal = 6.dp, vertical = 3.dp),
+                )
+            }
+            if (item.hasOffloadedLeaves) {
+                Text(
+                    if (item.offloaded) "Offloaded" else "${item.rollup?.offloaded ?: 0} offloaded",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .testTag("poster-offloaded")
+                        .align(Alignment.BottomStart)
+                        .padding(5.dp)
+                        .background(Color(0xB3000000), MaterialTheme.shapes.small)
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
                 )
             }
             if (item.watch?.watched == true) {

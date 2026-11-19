@@ -99,6 +99,16 @@ data class Watch(
 data class Rollup(
     val leaves: Long = 0,
     val watched: Long = 0,
+    /** Leaves whose files Curator removed to free disk (absent before Offload). */
+    val offloaded: Long = 0,
+)
+
+/** `POST items/{id}/get-it-back` and `GET items/{id}/offload-status`. */
+@Serializable
+data class OffloadAnswer(
+    val matched: Boolean = false,
+    val state: String = "",
+    val message: String = "",
 )
 
 @Serializable
@@ -134,7 +144,14 @@ data class Item(
     val added_at: Long? = null,
     val watch: Watch? = null,
     val rollup: Rollup? = null,
+    /**
+     * Curator removed this title's files to free disk; the item, its metadata
+     * and its watch history stay. For a show or season, true only when every
+     * leaf is (`rollup.offloaded` counts a partial offload).
+     */
+    val offloaded: Boolean = false,
 ) {
+    val hasOffloadedLeaves get() = offloaded || (rollup?.offloaded ?: 0L) > 0L
     val isPlayableVideo get() = kind == "movie" || kind == "episode" || kind == "video"
     val isPlayable get() = isPlayableVideo || kind == "audiobook"
     val isBook get() = kind == "book"
@@ -733,6 +750,8 @@ data class Decision(
      * field that answers "is this Dolby Vision".
      */
     val delivered_dolby_vision_profile: Int? = null,
+    /** Enhancement carried by this direct delivery; session responses replace it. */
+    val enhancement: kotlinx.serialization.json.JsonElement? = null,
 )
 
 /**
@@ -812,6 +831,21 @@ data class EnhancementDetail(
     val text: String,
 )
 
+/** The owner-authored explanation for a skipped optional enhancement upgrade. */
+data class ProcessingSkip(val generation: String, val reason: String) {
+    fun matches(current: String?): Boolean = generation == current && generation.isNotEmpty() &&
+        reason.isNotBlank() && reason.codePointCount(0, reason.length) <= 512 && reason.none { it.isISOControl() }
+
+    companion object {
+        fun fromJson(value: kotlinx.serialization.json.JsonElement?): ProcessingSkip? {
+            val obj = value as? kotlinx.serialization.json.JsonObject ?: return null
+            fun text(key: String) = (obj[key] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
+            return ProcessingSkip(text("generation") ?: return null, text("reason") ?: return null)
+                .takeIf { it.matches(it.generation) }
+        }
+    }
+}
+
 /**
  * The HLS create response's `enhancement`: what Dolby Vision enhancement the
  * delivered picture carries, computed once by the server
@@ -831,13 +865,53 @@ data class PlaybackEnhancement(
      */
     val requiresEffectiveProcessing: Boolean = false,
 ) {
+    fun explainingSkip(skip: ProcessingSkip?, generation: String?): PlaybackEnhancement {
+        if (skip?.matches(generation) != true) return this
+        return copy(details = details.map { detail ->
+            if (!detail.active && detail.badge in listOf(EnhancementBadge.FEL, EnhancementBadge.RPU) &&
+                detail.text.startsWith("${detail.badge}: not used"))
+                detail.copy(text = "${detail.badge}: not used for this play — ${skip.reason}") else detail
+        })
+    }
+
     /**
      * This enhancement as it may be shown right now, or null when it must not
      * be: a processed delivery whose report is missing, stale or for another
-     * generation shows neither pills nor the info row.
+     * generation shows neither pills nor the info row. Native DYN also needs
+     * a configured Dolby Vision codec and a Dolby Vision display verdict;
+     * server-applied dynamic mapping remains governed by its processing report.
      */
-    fun shown(report: EffectiveProcessingReport?, activeGeneration: String?, delivered: String?): PlaybackEnhancement? =
-        takeIf { !requiresEffectiveProcessing || report?.matches(activeGeneration, delivered) == true }
+    fun shown(
+        report: EffectiveProcessingReport?,
+        activeGeneration: String?,
+        delivered: String?,
+        rendered: String? = null,
+        selectedCodecMime: String? = null,
+    ): PlaybackEnhancement? {
+        if (requiresEffectiveProcessing) {
+            return takeIf { report?.matches(activeGeneration, delivered) == true }
+        }
+        // A server reports the bytes it sent. Do not award native dynamic
+        // metadata before Media3 initializes a Dolby Vision codec, or after
+        // it chooses an HEVC alternate for the same Dolby Vision input Format.
+        // The two vendor aliases are Media3's configured Dolby Vision MIME types.
+        val nativeCodec = selectedCodecMime?.lowercase() in setOf(
+            "video/dolby-vision", "video/hevcdv", "video/dv_hevc",
+        )
+        if (EnhancementBadge.DYN !in active ||
+            (rendered == DynamicRange.DOLBY_VISION && nativeCodec)) return this
+        val reason = if (selectedCodecMime == null) {
+            "Dynamic metadata is carried by the stream; waiting for the player to initialize a Dolby Vision decoder."
+        } else {
+            "Dynamic metadata is carried by the stream but is not active in the player's current output."
+        }
+        return copy(
+            active = active.filterNot { it == EnhancementBadge.DYN },
+            details = details.map { detail ->
+                if (detail.badge == EnhancementBadge.DYN) detail.copy(active = false, text = reason) else detail
+            },
+        )
+    }
 
     companion object {
         fun fromJson(value: kotlinx.serialization.json.JsonElement?): PlaybackEnhancement? {

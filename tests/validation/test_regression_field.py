@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 
 from validation.regression_field import (
     check_field,
@@ -33,7 +34,8 @@ class RegressionFieldCase(unittest.TestCase):
 
     def run_main(self, *argv: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        # These fixtures describe their own commit range, not the live CI PR.
+        with patch.dict("os.environ", {"PR_TITLE": "", "PR_BODY": "", "GITHUB_EVENT_PATH": ""}), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = main(list(argv))
         return code, out.getvalue(), err.getvalue()
 
@@ -90,6 +92,9 @@ class RegressionFieldCase(unittest.TestCase):
         self.assertIn("warning:", out)
         self.assertIn("does not execute", out)
 
+    # This fixture judges its own commit range, not the enclosing CI pull
+    # request. Clear both title sources for this test and restore them after.
+    @patch.dict("os.environ", {"PR_TITLE": "", "GITHUB_EVENT_PATH": ""})
     def test_a_corrective_commit_with_no_field_fails_naming_the_subject(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
@@ -340,7 +345,8 @@ class PrDescriptionTransportCase(unittest.TestCase):
         body = "λ" * 150_000 + "\n" + field + "\n" + field + "\n"
         with tempfile.TemporaryDirectory() as directory:
             event = Path(directory) / "event.json"
-            event.write_text(json.dumps({"pull_request": {"body": body}}), encoding="utf-8")
+            event.write_text(json.dumps({"pull_request": {"body": body, "title": "fix(ci): event title"}}),
+                             encoding="utf-8")
             env = {k: v for k, v in os.environ.items() if k not in {"PR_BODY", "PR_BASE_SHA", "PR_HEAD_SHA", "PR_TITLE"}}
             env.update(PR_BODY_FROM_EVENT="1", GITHUB_EVENT_PATH=str(event))
             with mock.patch.dict(os.environ, env, clear=True):
@@ -350,6 +356,10 @@ class PrDescriptionTransportCase(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, field + "\n" + field + "\n")
             self.assertNotIn("PR_BODY", env)
+            validation = subprocess.run([sys.executable, "-m", "validation.regression_field"],
+                cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=False)
+            self.assertEqual(validation.returncode, 0, validation.stderr)
+            self.assertIn("pull request subject prefix: 'fix(ci)'", validation.stdout)
 
     def test_selected_event_body_fails_closed_for_missing_or_malformed_payload(self):
         from validation.regression_field import description_from_environment
@@ -375,10 +385,17 @@ class PrDescriptionTransportCase(unittest.TestCase):
             self.assertEqual(description_from_environment(), "")
 
     def test_all_pr_description_consumers_select_event_file_instead_of_large_environment_value(self):
-        for name, count in [("paperwork.yml", 1), ("main-fast-lane.yml", 2)]:
-            source = (REPO_ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
-            self.assertNotIn("PR_BODY: ${{ github.event.pull_request.body }}", source)
-            self.assertEqual(source.count('PR_BODY_FROM_EVENT: "1"'), count)
+        for name in ("paperwork.yml", "main-fast-lane.yml"):
+            with self.subTest(workflow=name):
+                source = (REPO_ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+                self.assertNotIn("github.event.pull_request.body", source)
+                self.assertNotIn("PR_TITLE:", source)
+                step = source.split("- name: Check index rows, release counters, names and Regression-Test fields", 1)[1]
+                step = step.split("\n      - ", 1)[0]
+                self.assertIn('PR_BODY_FROM_EVENT: "1"', step)
+                self.assertIn("scripts/paperwork", step)
+                self.assertIn("--body-env", step)
+
 
 
 if __name__ == "__main__":

@@ -105,6 +105,7 @@ mod storage_evidence;
 mod topology;
 mod transport_recovery;
 mod transport_recovery_diagnostics;
+mod write_load;
 pub use failure_drills::{
     validate_failure_drill_artifact, ClusterFailureDrillArtifact,
     FAILURE_DRILL_ARTIFACT_SCHEMA_VERSION,
@@ -163,6 +164,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 /// response stream first; ordinary requests retain [`REQUEST_TIMEOUT`].
 const WRITE_WITHOUT_QUORUM_RESPONSE_TIMEOUT: Duration = Duration::from_secs(17);
 const COMPACTION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(75);
+/// The stop-time handoff waits at most 10 s on its own; leave the voter room
+/// to report that outcome before the protocol stream gives up.
+const SHUTDOWN_HANDOFF_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 /// The interface every harness listener binds. hiqlite composes each listener
 /// from this and the port half of the node's own `addr_raft`/`addr_api`
 /// (`hiqlite-0.14.0/src/start.rs:318`), which is why the two must agree.
@@ -343,6 +347,18 @@ pub async fn run(args: Vec<String>) -> Result<()> {
             }
             run_leader_self_leave_case().await?;
             run_degraded_four_voter_leader_self_leave_case().await
+        }
+        Some("leader-shutdown") => {
+            if args.get(2).is_some() {
+                bail!("leader-shutdown accepts no arguments");
+            }
+            run_leader_shutdown_cases().await
+        }
+        Some("leader-shutdown-load") => {
+            if args.get(2).is_some() {
+                bail!("leader-shutdown-load accepts no arguments");
+            }
+            run_leader_shutdown_under_write_load_case().await
         }
         Some("learner") => run_learner_membership_case().await.map(|_| ()),
         Some("proxy-fixture") => failure_drills::run_proxy_fixture_command().await,
@@ -890,6 +906,7 @@ async fn controller() -> Result<()> {
     run_leader_self_leave_case().await?;
     println!("cluster-check: four-voter leader self-leave with one survivor down");
     run_degraded_four_voter_leader_self_leave_case().await?;
+    run_leader_shutdown_cases().await?;
     println!("cluster-check: rolling quorum-watermark stream compatibility");
     run_quorum_watermark_rolling_compatibility_case().await?;
     println!("cluster-check: P3a three-column watermark compatibility");
@@ -5427,6 +5444,484 @@ async fn run_degraded_four_voter_leader_self_leave_case() -> Result<()> {
     Ok(())
 }
 
+/// The four stop-time handoff cases, in the order `controller()` and the
+/// `leader-shutdown` mode run them.
+async fn run_leader_shutdown_cases() -> Result<()> {
+    println!("cluster-check: a stopping leader hands off before it stops");
+    run_leader_shutdown_handoff_case().await?;
+    println!("cluster-check: a stopping leader hands off under write load");
+    run_leader_shutdown_under_write_load_case().await?;
+    println!("cluster-check: a stopping follower moves nothing");
+    run_follower_shutdown_noop_case().await?;
+    println!("cluster-check: a stopping leader with no live follower stops in order");
+    run_shutdown_without_successor_case().await?;
+    println!("cluster-check: a stopping voter never campaigns again");
+    run_departing_voter_never_campaigns_case().await
+}
+
+/// How often the leader-shutdown cases sample the survivors' Raft view.
+const LEADER_SHUTDOWN_SAMPLE_EVERY: Duration = Duration::from_millis(100);
+/// A leader must be older than its 4 s leader lease before the handoff, or it
+/// refuses the triggered candidate's vote on lease grounds.
+const LEADER_SHUTDOWN_LEADER_AGE: Duration = Duration::from_secs(5);
+/// The shortest election timeout the harness runs (production timing,
+/// 2.4–4.0 s). A survivor that went this long without naming a leader may
+/// have run a timeout election; a handoff must stay well inside it.
+const LEADER_SHUTDOWN_GAP_CEILING: Duration = Duration::from_millis(2_400);
+/// Longer than a follower's lease plus its longest election timeout (4.0 s
+/// + 4.0 s): a node that can still campaign does so inside this window.
+const LEADER_SHUTDOWN_QUIET_WINDOW: Duration = Duration::from_secs(10);
+/// The stop-time handoff's own bound (10 s) plus one second of process
+/// scheduling.
+const LEADER_SHUTDOWN_BOUND: Duration = Duration::from_secs(11);
+
+/// One voter's Raft view at one moment of a leader-shutdown case.
+#[derive(Clone, Copy, Debug)]
+struct LeaderSample {
+    at: Duration,
+    node_id: u64,
+    leader: Option<u64>,
+    term: u64,
+}
+
+fn shutdown_handoff_response(response: Response) -> Result<(String, Option<u64>, u64)> {
+    match response {
+        Response::ShutdownHandoff {
+            outcome,
+            successor,
+            elapsed_ms,
+        } => Ok((outcome, successor, elapsed_ms)),
+        other => bail!("expected a shutdown handoff outcome, got {other:?}"),
+    }
+}
+
+async fn leader_sample(node: &mut NodeProcess, started: Instant) -> Result<LeaderSample> {
+    match node.request(&Request::Metrics).await? {
+        Response::Metrics {
+            leader,
+            current_term,
+            ..
+        } => Ok(LeaderSample {
+            at: started.elapsed(),
+            node_id: node.id,
+            leader,
+            term: current_term,
+        }),
+        other => bail!("voter {} answered metrics with {other:?}", node.id),
+    }
+}
+
+/// The longest stretch each observer went without naming any leader,
+/// measured from its last sample that named one to its next. A run still
+/// open at the last sample counts to that sample.
+fn longest_leaderless_gap(samples: &[LeaderSample]) -> Duration {
+    let mut longest = Duration::ZERO;
+    let observers = samples
+        .iter()
+        .map(|sample| sample.node_id)
+        .collect::<BTreeSet<_>>();
+    for observer in observers {
+        let mut last_led = None::<Duration>;
+        let mut open = false;
+        for sample in samples.iter().filter(|sample| sample.node_id == observer) {
+            match (sample.leader, last_led) {
+                (Some(_), Some(since)) if open => {
+                    longest = longest.max(sample.at.saturating_sub(since));
+                    open = false;
+                    last_led = Some(sample.at);
+                }
+                (Some(_), _) => last_led = Some(sample.at),
+                (None, Some(since)) => {
+                    open = true;
+                    longest = longest.max(sample.at.saturating_sub(since));
+                }
+                (None, None) => {}
+            }
+        }
+    }
+    longest
+}
+
+/// The longest any observer took to move from naming `old` to naming
+/// `successor`: from its last sample naming the old leader to its first
+/// naming the new one. Zero when an observer was never seen naming `old`.
+fn longest_handover(samples: &[LeaderSample], old: u64, successor: u64) -> Duration {
+    let observers = samples
+        .iter()
+        .map(|sample| sample.node_id)
+        .collect::<BTreeSet<_>>();
+    let mut longest = Duration::ZERO;
+    for observer in observers {
+        let mine = samples
+            .iter()
+            .filter(|sample| sample.node_id == observer)
+            .collect::<Vec<_>>();
+        let Some(first_new) = mine
+            .iter()
+            .position(|sample| sample.leader == Some(successor))
+        else {
+            continue;
+        };
+        if let Some(last_old) = mine[..first_new]
+            .iter()
+            .rev()
+            .find(|sample| sample.leader == Some(old))
+        {
+            longest = longest.max(mine[first_new].at.saturating_sub(last_old.at));
+        }
+    }
+    longest
+}
+
+/// Wait until `observer`'s membership status shows every other voter as a
+/// handoff candidate: reachable, not in maintenance, zero apply lag. The
+/// stop-time handoff reads exactly this status.
+async fn wait_for_handoff_candidates(cluster: &mut ClusterProcesses, observer: u64) -> Result<()> {
+    let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    loop {
+        if let Response::MembershipStatus { status } =
+            cluster.request(observer, Request::MembershipStatus).await?
+        {
+            let ready = status
+                .nodes
+                .iter()
+                .filter(|node| node.raft_id != observer)
+                .all(|node| {
+                    node.is_voter
+                        && node.reachable
+                        && !node.maintenance
+                        && !node.removal_pending
+                        && node.apply_lag_entries == Some(0)
+                });
+            if ready && status.nodes.len() == 3 {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                bail!("the followers never became handoff candidates: {status:?}");
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Three voters with every heartbeat loop running and both followers
+/// caught up, so the leader's status names real candidates. Returns the
+/// cluster, its data root and its leader.
+async fn start_leader_shutdown_cluster(
+    label: &str,
+) -> Result<(ClusterProcesses, tempfile::TempDir, u64)> {
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().with_context(|| format!("{label} data root"))?;
+    let (mut cluster, _) = start_cluster_with_port_retry(&executable, root.path(), 3).await?;
+    cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+    for node_id in 2..=3 {
+        cluster
+            .request(node_id, Request::Open)
+            .await?
+            .require_ok()?;
+    }
+    cluster.wait_for_voters(&[1, 2, 3]).await?;
+    for node_id in 1..=3 {
+        cluster
+            .request(node_id, Request::StartHeartbeatLoop)
+            .await?
+            .require_ok()?;
+    }
+    let leader = cluster.leader().await?;
+    wait_for_handoff_candidates(&mut cluster, leader).await?;
+    tokio::time::sleep(LEADER_SHUTDOWN_LEADER_AGE).await;
+    let confirmed = cluster.leader().await?;
+    if confirmed != leader {
+        bail!("{label}: leadership moved from {leader} to {confirmed} before the case began");
+    }
+    Ok((cluster, root, leader))
+}
+
+/// A stopping leader hands off while it is fully up: the survivors elect the
+/// triggered candidate without a timeout election, and that leader holds when
+/// the old process dies.
+async fn run_leader_shutdown_handoff_case() -> Result<()> {
+    let (mut cluster, _root, leader) = start_leader_shutdown_cluster("leader shutdown").await?;
+    let survivors = (1..=3)
+        .filter(|node_id| *node_id != leader)
+        .collect::<Vec<_>>();
+    let term_before = match cluster.request(leader, Request::Metrics).await? {
+        Response::Metrics { current_term, .. } => current_term,
+        other => bail!("leader metrics: {other:?}"),
+    };
+    let (response, took, mut samples) = cluster
+        .request_while_sampling(
+            leader,
+            Request::ShutdownHandoff,
+            &survivors,
+            LEADER_SHUTDOWN_SAMPLE_EVERY,
+        )
+        .await?;
+    let (outcome, successor, elapsed_ms) = shutdown_handoff_response(response)?;
+    let successor = match (outcome.as_str(), successor) {
+        ("handed_off", Some(successor)) if survivors.contains(&successor) => successor,
+        _ => bail!("the stopping leader did not hand off: {outcome} {successor:?}"),
+    };
+    let started = Instant::now() - took;
+    for survivor in survivors.iter().copied() {
+        let sample = leader_sample(cluster.node_mut(survivor)?, started).await?;
+        if sample.leader != Some(successor) {
+            bail!("survivor {survivor} does not name successor {successor}: {sample:?}");
+        }
+        samples.push(sample);
+    }
+    let gap = longest_leaderless_gap(&samples);
+    if gap >= LEADER_SHUTDOWN_GAP_CEILING {
+        bail!("a survivor went {gap:?} without a leader during the handoff: {samples:?}");
+    }
+    let term_after = samples.last().map_or(0, |sample| sample.term);
+    let handover = longest_handover(&samples, leader, successor);
+    cluster.kill(leader).await?;
+    let quiet = cluster
+        .sample_leaders(
+            &survivors,
+            LEADER_SHUTDOWN_QUIET_WINDOW,
+            LEADER_SHUTDOWN_SAMPLE_EVERY,
+        )
+        .await?;
+    if let Some(moved) = quiet
+        .iter()
+        .find(|sample| sample.leader != Some(successor) || sample.term != term_after)
+    {
+        bail!(
+            "leadership changed after the old leader exited: successor={successor} \
+             term={term_after}, observed {moved:?}"
+        );
+    }
+    println!(
+        "cluster-check: leader-shutdown handoff leader={leader} successor={successor} \
+         term={term_before}->{term_after} handoff_ms={elapsed_ms} request_ms={} \
+         longest_leaderless_gap_ms={} longest_handover_ms={} samples={}",
+        took.as_millis(),
+        gap.as_millis(),
+        handover.as_millis(),
+        samples.len()
+    );
+    cluster.shutdown_all().await?;
+    Ok(())
+}
+
+/// The stop-time handoff while both the leader and a follower write back to
+/// back. Before the proposal hold this lost its vote race: the triggered
+/// candidate was behind an append in flight from the leader, the old leader
+/// refused it, and the survivors went one election without a leader. Now the
+/// candidate wins at once, no writer sees a failure, and every acknowledged
+/// row is committed.
+async fn run_leader_shutdown_under_write_load_case() -> Result<()> {
+    let (mut cluster, _root, leader) = start_leader_shutdown_cluster("write load").await?;
+    let survivors = (1..=3)
+        .filter(|node_id| *node_id != leader)
+        .collect::<Vec<_>>();
+    let follower = survivors[0];
+    let term_before = match cluster.request(leader, Request::Metrics).await? {
+        Response::Metrics { current_term, .. } => current_term,
+        other => bail!("leader metrics: {other:?}"),
+    };
+    for writer in [leader, follower] {
+        cluster
+            .request(writer, Request::StartWriteLoad { writer })
+            .await?
+            .require_ok()?;
+    }
+    // Let both writers reach their steady rate before the handoff.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let (response, took, mut samples) = cluster
+        .request_while_sampling(
+            leader,
+            Request::ShutdownHandoff,
+            &survivors,
+            LEADER_SHUTDOWN_SAMPLE_EVERY,
+        )
+        .await?;
+    let (outcome, successor, elapsed_ms) = shutdown_handoff_response(response)?;
+    let started = Instant::now() - took;
+    for survivor in survivors.iter().copied() {
+        samples.push(leader_sample(cluster.node_mut(survivor)?, started).await?);
+    }
+    // Writers keep going through the change and past it.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let mut reports = Vec::new();
+    for writer in [leader, follower] {
+        match cluster.request(writer, Request::StopWriteLoad).await? {
+            Response::WriteLoad {
+                acknowledged,
+                failed,
+                first_error,
+                slowest_ms,
+            } => reports.push((writer, acknowledged, failed, first_error, slowest_ms)),
+            other => bail!("writer {writer} report: {other:?}"),
+        }
+    }
+    let gap = longest_leaderless_gap(&samples);
+    let term_after = samples.last().map_or(0, |sample| sample.term);
+    let handover = successor.map_or(Duration::MAX, |successor| {
+        longest_handover(&samples, leader, successor)
+    });
+    let won = outcome == "handed_off"
+        && term_after == term_before + 1
+        && gap < LEADER_SHUTDOWN_GAP_CEILING
+        && took < LEADER_SHUTDOWN_GAP_CEILING;
+    let mut committed = Vec::new();
+    let observer = successor.unwrap_or(follower);
+    for (writer, ..) in &reports {
+        match cluster
+            .request(observer, Request::CountWriteLoad { writer: *writer })
+            .await?
+        {
+            Response::Count { count } => committed.push(count),
+            other => bail!("count for writer {writer}: {other:?}"),
+        }
+    }
+    println!(
+        "cluster-check: leader-shutdown under load won={won} outcome={outcome} \
+         leader={leader} successor={successor:?} term={term_before}->{term_after} \
+         handoff_ms={elapsed_ms} request_ms={} longest_leaderless_gap_ms={} \
+         longest_handover_ms={} writers={reports:?} committed={committed:?}",
+        took.as_millis(),
+        gap.as_millis(),
+        handover.as_millis(),
+    );
+    if !won {
+        bail!("the handoff under write load lost its vote race: {samples:?}");
+    }
+    for ((writer, acknowledged, failed, first_error, _), committed) in
+        reports.iter().zip(&committed)
+    {
+        if *failed != 0 {
+            bail!("writer {writer} saw {failed} failed writes, first: {first_error:?}");
+        }
+        if committed != acknowledged {
+            bail!("writer {writer}: {acknowledged} acknowledged but {committed} committed");
+        }
+        if *acknowledged == 0 {
+            bail!("writer {writer} wrote nothing, so the case proved nothing");
+        }
+    }
+    cluster.shutdown_all().await?;
+    Ok(())
+}
+
+/// A follower's stop moves nothing and touches no network.
+async fn run_follower_shutdown_noop_case() -> Result<()> {
+    let (mut cluster, _root, leader) = start_leader_shutdown_cluster("follower shutdown").await?;
+    let follower = (1..=3)
+        .find(|node_id| *node_id != leader)
+        .context("choose a follower")?;
+    let started = Instant::now();
+    let mut before = Vec::new();
+    for node_id in 1..=3 {
+        before.push(leader_sample(cluster.node_mut(node_id)?, started).await?);
+    }
+    let call = Instant::now();
+    let (outcome, successor, elapsed_ms) =
+        shutdown_handoff_response(cluster.request(follower, Request::ShutdownHandoff).await?)?;
+    let took = call.elapsed();
+    if outcome != "not_leader" || successor.is_some() {
+        bail!("a follower's stop reported {outcome} {successor:?}");
+    }
+    // No network is touched on this path; the bound only allows for a
+    // descheduled runner.
+    if elapsed_ms >= 1_000 {
+        bail!("a follower's stop waited {elapsed_ms} ms");
+    }
+    for previous in before {
+        let now = leader_sample(cluster.node_mut(previous.node_id)?, started).await?;
+        if now.leader != Some(leader) || now.term != previous.term {
+            bail!("a follower's stop changed leadership: before {previous:?}, after {now:?}");
+        }
+    }
+    println!(
+        "cluster-check: leader-shutdown follower noop handoff_ms={elapsed_ms} request_ms={}",
+        took.as_millis()
+    );
+    cluster.shutdown_all().await?;
+    Ok(())
+}
+
+/// With both followers stopped nothing can take over: the handoff gives up
+/// inside its one bound and the old leader still stops in order.
+async fn run_shutdown_without_successor_case() -> Result<()> {
+    let (mut cluster, _root, leader) = start_leader_shutdown_cluster("no successor").await?;
+    let followers = (1..=3)
+        .filter(|node_id| *node_id != leader)
+        .collect::<Vec<_>>();
+    let mut paused = Vec::new();
+    for follower in followers.iter().copied() {
+        paused.push(cluster.pause(follower)?);
+    }
+    let call = Instant::now();
+    let (outcome, successor, elapsed_ms) =
+        shutdown_handoff_response(cluster.request(leader, Request::ShutdownHandoff).await?)?;
+    let took = call.elapsed();
+    if !matches!(outcome.as_str(), "failed" | "timed_out" | "no_candidate") || successor.is_some() {
+        bail!("a leader with no live follower reported {outcome} {successor:?}");
+    }
+    if took >= LEADER_SHUTDOWN_BOUND {
+        bail!("a leader with no live follower waited {took:?}");
+    }
+    let still_leads = match cluster.request(leader, Request::Metrics).await? {
+        Response::Metrics { leader: named, .. } => named == Some(leader),
+        other => bail!("leader metrics: {other:?}"),
+    };
+    let exit = Instant::now();
+    cluster.shutdown_node(leader).await?;
+    println!(
+        "cluster-check: leader-shutdown without successor outcome={outcome} handoff_ms={elapsed_ms} \
+         request_ms={} still_reports_leader={still_leads} orderly_exit_ms={}",
+        took.as_millis(),
+        exit.elapsed().as_millis()
+    );
+    for guard in paused {
+        guard.resume()?;
+    }
+    cluster.kill_all().await;
+    Ok(())
+}
+
+/// A stopping node never campaigns again: with the leader gone and the third
+/// voter stopped, its term stays where it was.
+async fn run_departing_voter_never_campaigns_case() -> Result<()> {
+    let (mut cluster, _root, leader) = start_leader_shutdown_cluster("departing voter").await?;
+    let mut others = (1..=3).filter(|node_id| *node_id != leader);
+    let departing = others.next().context("choose the departing voter")?;
+    let third = others.next().context("choose the third voter")?;
+    let (outcome, _, _) =
+        shutdown_handoff_response(cluster.request(departing, Request::ShutdownHandoff).await?)?;
+    if outcome != "not_leader" {
+        bail!("the departing follower reported {outcome}");
+    }
+    let started = Instant::now();
+    let before = leader_sample(cluster.node_mut(departing)?, started).await?;
+    let paused = cluster.pause(third)?;
+    cluster.kill(leader).await?;
+    let window = cluster
+        .sample_leaders(
+            &[departing],
+            LEADER_SHUTDOWN_QUIET_WINDOW,
+            LEADER_SHUTDOWN_SAMPLE_EVERY,
+        )
+        .await?;
+    if let Some(moved) = window.iter().find(|sample| sample.term != before.term) {
+        bail!(
+            "the stopping voter campaigned: term {} became {moved:?}",
+            before.term
+        );
+    }
+    println!(
+        "cluster-check: leader-shutdown departing voter term={} held for {} samples",
+        before.term,
+        window.len()
+    );
+    paused.resume()?;
+    cluster.kill_all().await;
+    Ok(())
+}
+
 /// M3d: real voter processes must converge on one logical name while exposing
 /// distinct node records through both LAN discovery projections.
 async fn prove_cluster_discovery(cluster: &mut ClusterProcesses) -> Result<()> {
@@ -5808,6 +6303,15 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     cluster
         .wait_for_members(1, &[1, 2, 3], &[1, 2, 3, LEARNER])
         .await?;
+    let learner_schema_index = cluster.applied_index(leader).await?;
+    cluster
+        .wait_for_local_applied_index(
+            LEARNER,
+            leader,
+            learner_schema_index,
+            "the newly admitted learner never applied the membership schema",
+        )
+        .await?;
     cluster
         .request(LEARNER, Request::Open)
         .await?
@@ -5968,13 +6472,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     cluster
         .wait_for_members(1, &[1, 2, 3], &[1, 2, 3, LEARNER])
         .await?;
-    let catchup_index = match cluster.request(leader, Request::Metrics).await? {
-        Response::Metrics {
-            applied_index: Some(index),
-            ..
-        } => index,
-        response => bail!("leader did not publish a catch-up index: {response:?}"),
-    };
+    let catchup_index = cluster.applied_index(leader).await?;
     cluster
         .spawn_node(
             &executable,
@@ -5985,29 +6483,14 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     // state machine during restore can legitimately hold the harness request
     // longer than its protocol deadline; the applied-index watch is the
     // production catch-up source and stays responsive throughout the restore.
-    let catchup_deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        match cluster.request(LEARNER, Request::Metrics).await? {
-            Response::Metrics {
-                applied_index: Some(index),
-                ..
-            } if index >= catchup_index => break,
-            Response::Metrics { .. } => {}
-            response => bail!("unexpected learner catch-up metrics: {response:?}"),
-        }
-        if Instant::now() >= catchup_deadline {
-            let learner_metrics = cluster.request(LEARNER, Request::Metrics).await?;
-            let leader_metrics = cluster.request(leader, Request::Metrics).await?;
-            let learner_raft = cluster.request(LEARNER, Request::RaftDebug).await?;
-            let leader_raft = cluster.request(leader, Request::RaftDebug).await?;
-            bail!(
-                "the restarted learner never applied the write it missed; learner metrics: \
-                 {learner_metrics:?}; leader metrics: {leader_metrics:?}; learner raft: \
-                 {learner_raft:?}; leader raft: {leader_raft:?}"
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    cluster
+        .wait_for_local_applied_index(
+            LEARNER,
+            leader,
+            catchup_index,
+            "the restarted learner never applied the write it missed",
+        )
+        .await?;
     cluster
         .request(LEARNER, Request::Open)
         .await?
@@ -8059,6 +8542,22 @@ pub enum Request {
         fence: ArtworkRepairFence,
     },
     TriggerElection,
+    /// Run plurxd's stop-time leadership handoff on this voter: switch its
+    /// own elections off and, if it leads, hand leadership to a caught-up
+    /// survivor under the one bound. The process keeps serving afterwards.
+    ShutdownHandoff,
+    /// Start one writer on this voter that inserts `(writer, seq)` rows into
+    /// `c2_handoff_load` back to back through the ordinary client write path,
+    /// forwarding to the leader when this voter follows.
+    StartWriteLoad {
+        writer: u64,
+    },
+    /// Stop this voter's writer and report what it observed.
+    StopWriteLoad,
+    /// Count one writer's committed rows with a quorum read.
+    CountWriteLoad {
+        writer: u64,
+    },
     RemoveVoter {
         node_id: String,
     },
@@ -8190,6 +8689,7 @@ impl Request {
             Self::SeedRecoveryImage { .. } => Duration::from_secs(900),
             Self::ForceCompaction { .. } => COMPACTION_RESPONSE_TIMEOUT,
             Self::WriteWithoutQuorum => WRITE_WITHOUT_QUORUM_RESPONSE_TIMEOUT,
+            Self::ShutdownHandoff => SHUTDOWN_HANDOFF_RESPONSE_TIMEOUT,
             Self::RemoveVoter { .. }
             | Self::RemoveNode { .. }
             | Self::PromoteLearner { .. }
@@ -8276,6 +8776,25 @@ pub enum Response {
         members: Vec<u64>,
         applied_index: Option<u64>,
         quorum_acknowledged: bool,
+    },
+    /// What [`Request::ShutdownHandoff`] did: the outcome's stable word,
+    /// the confirmed successor when leadership moved, and how long the call
+    /// took inside the voter.
+    ShutdownHandoff {
+        outcome: String,
+        successor: Option<u64>,
+        elapsed_ms: u64,
+    },
+    /// What one writer saw: writes acknowledged, writes that returned an
+    /// error (with the first error), and the slowest acknowledged write.
+    WriteLoad {
+        acknowledged: u64,
+        failed: u64,
+        first_error: Option<String>,
+        slowest_ms: u64,
+    },
+    Count {
+        count: u64,
     },
     RaftDebug {
         summary: String,
@@ -9143,6 +9662,79 @@ impl ClusterProcesses {
             .with_context(|| format!("voter {node_id} is not running"))
     }
 
+    /// Send `request` to `target` and, until it answers, sample each
+    /// observer's Raft view every `every`. Returns the answer, how long it
+    /// took and the samples, timed from when the request was sent.
+    async fn request_while_sampling(
+        &mut self,
+        target: u64,
+        request: Request,
+        observers: &[u64],
+        every: Duration,
+    ) -> Result<(Response, Duration, Vec<LeaderSample>)> {
+        let mut called = None;
+        let mut watching = Vec::new();
+        for (index, slot) in self.nodes.iter_mut().enumerate() {
+            let node_id = u64::try_from(index)? + 1;
+            if node_id == target {
+                called = slot.as_mut();
+            } else if observers.contains(&node_id) {
+                watching.push(
+                    slot.as_mut()
+                        .with_context(|| format!("observer {node_id} is not running"))?,
+                );
+            }
+        }
+        let called = called.with_context(|| format!("voter {target} is not running"))?;
+        let started = Instant::now();
+        let call = called.request(&request);
+        tokio::pin!(call);
+        let mut samples = Vec::new();
+        let mut next = TokioInstant::now();
+        let response = loop {
+            tokio::select! {
+                response = &mut call => break response?,
+                () = tokio::time::sleep_until(next) => {
+                    for observer in &mut watching {
+                        samples.push(leader_sample(observer, started).await?);
+                    }
+                    next += every;
+                }
+            }
+        };
+        Ok((response, started.elapsed(), samples))
+    }
+
+    /// Sample each observer's Raft view every `every` for `window`.
+    async fn sample_leaders(
+        &mut self,
+        observers: &[u64],
+        window: Duration,
+        every: Duration,
+    ) -> Result<Vec<LeaderSample>> {
+        let started = Instant::now();
+        let mut samples = Vec::new();
+        let mut next = TokioInstant::now();
+        while started.elapsed() < window {
+            for observer in observers.iter().copied() {
+                samples.push(leader_sample(self.node_mut(observer)?, started).await?);
+            }
+            next += every;
+            tokio::time::sleep_until(next).await;
+        }
+        Ok(samples)
+    }
+
+    /// Stop one voter in an orderly way; see [`NodeProcess::shutdown`].
+    async fn shutdown_node(&mut self, node_id: u64) -> Result<()> {
+        let node = self
+            .nodes
+            .get_mut((node_id - 1) as usize)
+            .and_then(Option::take)
+            .with_context(|| format!("voter {node_id} is not running"))?;
+        node.shutdown().await
+    }
+
     /// The voters still running, in ascending id order.
     pub fn node_ids(&self) -> Vec<u64> {
         self.nodes
@@ -9430,6 +10022,55 @@ impl ClusterProcesses {
                 bail!(
                     "voter {observer} did not converge on voters {voters:?} and members \
                      {members:?}: {last:?}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn applied_index(&mut self, node_id: u64) -> Result<u64> {
+        match self.request(node_id, Request::Metrics).await? {
+            Response::Metrics {
+                applied_index: Some(index),
+                ..
+            } => Ok(index),
+            response => bail!("node {node_id} did not publish an applied index: {response:?}"),
+        }
+    }
+
+    /// Wait for a target process's local state machine to apply a watermark
+    /// captured from the leader after membership convergence. Membership
+    /// configuration alone does not establish that a learner has replayed the
+    /// schema commands it will read when its application store opens.
+    async fn wait_for_local_applied_index(
+        &mut self,
+        node_id: u64,
+        leader_id: u64,
+        target_index: u64,
+        failure: &str,
+    ) -> Result<()> {
+        // Query the target-local applied-index watch while SQLite is restoring.
+        // State-machine reads can legitimately block longer than a harness
+        // request deadline during restore; Raft metrics remain responsive.
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            match self.request(node_id, Request::Metrics).await? {
+                Response::Metrics {
+                    applied_index: Some(index),
+                    ..
+                } if index >= target_index => return Ok(()),
+                Response::Metrics { .. } => {}
+                response => bail!("unexpected learner catch-up metrics: {response:?}"),
+            }
+            if Instant::now() >= deadline {
+                let learner_metrics = self.request(node_id, Request::Metrics).await?;
+                let leader_metrics = self.request(leader_id, Request::Metrics).await?;
+                let learner_raft = self.request(node_id, Request::RaftDebug).await?;
+                let leader_raft = self.request(leader_id, Request::RaftDebug).await?;
+                bail!(
+                    "{failure} through leader applied index {target_index}; learner metrics: \
+                     {learner_metrics:?}; leader metrics: {leader_metrics:?}; learner raft: \
+                     {learner_raft:?}; leader raft: {leader_raft:?}"
                 );
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -10911,6 +11552,31 @@ async fn handle_request(
             membership_ref(membership)?.trigger_local_election().await?;
             Ok(Response::Ok)
         }
+        Request::StartWriteLoad { writer } => {
+            write_load::start(client.clone(), writer).await?;
+            Ok(Response::Ok)
+        }
+        Request::StopWriteLoad => {
+            let report = write_load::stop().await?;
+            Ok(Response::WriteLoad {
+                acknowledged: report.acknowledged,
+                failed: report.failed,
+                first_error: report.first_error,
+                slowest_ms: report.slowest_ms,
+            })
+        }
+        Request::CountWriteLoad { writer } => Ok(Response::Count {
+            count: write_load::count(client, writer).await?,
+        }),
+        Request::ShutdownHandoff => {
+            let started = Instant::now();
+            let outcome = membership_ref(membership)?.handoff_for_shutdown().await;
+            Ok(Response::ShutdownHandoff {
+                outcome: outcome.as_str().to_owned(),
+                successor: outcome.successor(),
+                elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            })
+        }
         Request::RemoveVoter { node_id } => membership_ref(membership)?
             .remove_voter(&node_id)
             .await
@@ -11928,6 +12594,8 @@ async fn membership_manager_with_identity_artwork_url(
         client.clone(),
         replication.clone(),
         store,
+        // The checker has no applied view: nothing reads this floor.
+        plurx_core::store::SettingsWriteFloor::detached(),
         ClusterIdentity {
             cluster_id: INSTANCE_ID.to_owned(),
             node_id: node_id.clone(),
@@ -12523,7 +13191,7 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
     }
     if !matches!(
         store
-            .reconcile_library(library.id, "stale-root", &[file], 1)
+            .reconcile_library(library.id, "stale-root", &[file], 1, &[], 0)
             .await?,
         ReconcileOutcome::RefusedRoot { .. }
     ) || store.get_file(file).await?.is_none()
@@ -12531,7 +13199,7 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
         bail!("stale-root reconciliation committed a prune");
     }
     if store
-        .reconcile_library(library.id, &fingerprint, &[file], 0)
+        .reconcile_library(library.id, &fingerprint, &[file], 0, &[], 0)
         .await?
         != (ReconcileOutcome::RefusedPrune {
             requested: 1,
@@ -12563,7 +13231,7 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
         .await?;
     if !matches!(
         store
-            .reconcile_library(library.id, &fingerprint, &[disposable_file], 1)
+            .reconcile_library(library.id, &fingerprint, &[disposable_file], 1, &[], 0)
             .await?,
         ReconcileOutcome::Applied {
             deleted_files: 1,

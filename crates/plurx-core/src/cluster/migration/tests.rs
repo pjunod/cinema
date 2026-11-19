@@ -1555,9 +1555,11 @@ async fn restored_voter_join_fixture() {
         metrics.purged
     );
     assert!(
-        !super::super::membership::restored_image_lacks_join_snapshot(&restored_client)
-            .await
-            .expect("restored admission check")
+        !super::super::membership::restored_image_lacks_join_snapshot(
+            &crate::store::CountedClient::membership(restored_client.clone()),
+        )
+        .await
+        .expect("restored admission check")
     );
     let (restored_tables, restored_marker) = local_tables_and_marker(&restored_client).await;
     assert_eq!(restored_marker.as_deref(), Some("restored"));
@@ -2696,6 +2698,135 @@ fn admitted_peer_count_ignores_tombstones_and_missing_schema() {
 
     assert_eq!(admitted_peer_count(&active, 1).expect("tombstoned peer"), 0);
     assert_eq!(admitted_peer_count(&active, 2).expect("live peer"), 1);
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn stale_bootstrap_fixture(rows: Option<&str>) -> (tempfile::TempDir, PathBuf, LocalMembership) {
+    let peer = |id: u64| ClusterPeer {
+        raft_id: id,
+        raft_address: format!("n{id}:1"),
+        api_address: format!("n{id}:2"),
+    };
+    let dir = tempfile::tempdir().expect("data dir");
+    let active = dir.path().join(HIQLITE_ACTIVE_DIRNAME);
+    let database = active
+        .join("state_machine")
+        .join("db")
+        .join(HIQLITE_DATABASE_FILENAME);
+    std::fs::create_dir_all(database.parent().expect("db dir")).expect("db dir");
+    if let Some(rows) = rows {
+        Connection::open(&database)
+            .expect("state machine")
+            .execute_batch(&format!(
+                "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER NOT NULL, \
+                 raft_address TEXT NOT NULL, api_address TEXT NOT NULL, \
+                 last_seen_at INTEGER NOT NULL, removed_at INTEGER, role TEXT);{rows}"
+            ))
+            .expect("rows");
+    }
+    // Joined as 5 when 3 and 4 were its peers; they were removed since.
+    let membership = LocalMembership {
+        version: 1,
+        cluster_id: "cluster-a".to_owned(),
+        node_id: "node-5".to_owned(),
+        raft_id: 5,
+        local: peer(5),
+        bootstrap: vec![peer(1), peer(3), peer(4), peer(5)],
+        join_token_digest: None,
+        role: ClusterRole::Voter,
+    };
+    write_local_membership(dir.path(), &membership).expect("membership.json");
+    (dir, active, membership)
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn roster_ids(membership: &LocalMembership) -> Vec<u64> {
+    hiqlite_roster(&membership.bootstrap, &membership.local)
+        .expect("roster")
+        .iter()
+        .map(|node| node.id)
+        .collect()
+}
+
+/// Removed Raft ids must not reach hiqlite's static `nodes` (which it copies
+/// into the split-brain check) nor the lost-volume bootstrap in membership.json.
+#[cfg(feature = "hiqlite-store")]
+#[test]
+fn committed_membership_replaces_stale_bootstrap_peers() {
+    let (dir, active, mut membership) = stale_bootstrap_fixture(Some(
+        "INSERT INTO cluster_nodes VALUES \
+           ('node-1', 1, 'n1:1', 'n1:2', 1, NULL, 'voter'),\
+           ('node-3', 3, 'n3:1', 'n3:2', 1, 99, 'voter'),\
+           ('node-4', 4, 'n4:1', 'n4:2', 1, 99, 'voter'),\
+           ('node-5', 5, 'n5:1', 'n5:2', 1, NULL, 'voter'),\
+           ('node-6', 6, 'n6:1', 'n6:2', 1, NULL, 'learner');",
+    ));
+    assert_eq!(roster_ids(&membership), vec![1, 3, 4, 5]);
+
+    assert!(
+        refresh_bootstrap_from_committed(dir.path(), &active, &mut membership).expect("refresh")
+    );
+    assert_eq!(roster_ids(&membership), vec![1, 5, 6]);
+    let on_disk = read_local_membership(dir.path())
+        .expect("read")
+        .expect("file");
+    assert_eq!(on_disk, membership);
+    assert_eq!(
+        on_disk
+            .bootstrap
+            .iter()
+            .map(|p| p.raft_id)
+            .collect::<Vec<_>>(),
+        vec![1, 5, 6]
+    );
+    // Already current: no rewrite.
+    assert!(
+        !refresh_bootstrap_from_committed(dir.path(), &active, &mut membership).expect("again")
+    );
+}
+
+/// Without a readable committed membership (fresh node, lost volume, first
+/// boot) the recorded list is used exactly as before.
+#[cfg(feature = "hiqlite-store")]
+#[test]
+fn unreadable_committed_membership_keeps_recorded_bootstrap() {
+    // No state machine file, no table, a table that does not list this node,
+    // and a file that is not a database.
+    let cases: [(&str, Option<&str>); 4] = [
+        ("absent", None),
+        ("no live rows", Some("")),
+        (
+            "local not live",
+            Some(
+                "INSERT INTO cluster_nodes VALUES ('node-1', 1, 'n1:1', 'n1:2', 1, NULL, 'voter');",
+            ),
+        ),
+        ("garbage", Some("")),
+    ];
+    for (name, rows) in cases {
+        let (dir, active, mut membership) = stale_bootstrap_fixture(rows);
+        if name == "garbage" {
+            let database = active
+                .join("state_machine")
+                .join("db")
+                .join(HIQLITE_DATABASE_FILENAME);
+            std::fs::write(&database, b"not a sqlite database at all, just bytes")
+                .expect("garbage");
+        }
+        let before = membership.clone();
+        assert!(
+            !refresh_bootstrap_from_committed(dir.path(), &active, &mut membership)
+                .unwrap_or_else(|e| panic!("{name}: {e}")),
+            "{name}"
+        );
+        assert_eq!(membership, before, "{name}");
+        assert_eq!(roster_ids(&membership), vec![1, 3, 4, 5], "{name}");
+        assert_eq!(
+            read_local_membership(dir.path()).expect("read"),
+            Some(before),
+            "{name}"
+        );
+    }
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -5669,6 +5800,149 @@ async fn capability_observation_fixture() {
             crate::store::AUTH_PROTOCOL_MIN,
             crate::store::AUTH_PROTOCOL_MIN
         )
+    );
+
+    selected.shutdown().await.expect("stop the voter");
+}
+
+/// Authority reads `future` issued, by the method that issued them.
+#[cfg(feature = "hiqlite-store")]
+async fn authority_reads_of<T>(
+    future: impl std::future::Future<Output = T>,
+) -> (T, Vec<(&'static str, u64)>) {
+    let counts = crate::store::HttpStoreOperationCounts::default();
+    let output = crate::store::scope_http_store_operations(counts.clone(), future).await;
+    let authority = counts
+        .method_snapshot()
+        .into_iter()
+        .filter(|(_, [_, authority, _])| *authority > 0)
+        .map(|(method, [_, authority, _])| (method, authority))
+        .collect();
+    (output, authority)
+}
+
+/// A4: the offline probe loop runs every 500 ms on every node. An idle pass
+/// reads this replica only; a probe addressed here is still answered.
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_offline_probe_pass_asks_the_authority_nothing() {
+    install_default_crypto_provider();
+    let directory = tempfile::tempdir().expect("probe loop data");
+    let config = membership_test_config(directory.path());
+    drop(SqliteStore::open(&directory.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+    let selected = startup_observer::select_applied_singleton(&config)
+        .await
+        .expect("actual one voter selection");
+    let membership = selected.membership_manager();
+
+    let (answered, authority) = authority_reads_of(membership.answer_offline_source_probes()).await;
+    assert_eq!(answered.expect("idle pass"), 0);
+    assert_eq!(
+        authority,
+        Vec::new(),
+        "an idle pass must not read the authority"
+    );
+
+    let owner = selected
+        .store
+        .create_user("probe-owner", "hash", false)
+        .await
+        .expect("package owner");
+    let client = selected.local_client().expect("actual voter");
+    client
+        .execute(
+            "INSERT INTO offline_packages(id,request_id,user_id,file_id,node_id,source_path,\
+             source_size,source_mtime,target_height,audio_offset_ms,subtitle_mode,state,phase,\
+             progress_millis,estimated_bytes,reserved_bytes,created_at,updated_at,\
+             last_access_at,expires_at) VALUES('probe-package','probe-request',$1,1,\
+             'departing-node','/synthetic/source.mkv',4096,123,720,0,'none','queued','queued',\
+             0,4096,4096,1,1,1,10000)",
+            hiqlite::params!(owner.id),
+        )
+        .await
+        .expect("package on the departing node");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64;
+    assert_eq!(
+        selected
+            .store
+            .request_offline_source_probes(
+                &["probe-package".to_owned()],
+                std::slice::from_ref(&selected.identity.node_id),
+                now,
+            )
+            .await
+            .expect("ask this node"),
+        1
+    );
+
+    let (answered, authority) = authority_reads_of(membership.answer_offline_source_probes()).await;
+    assert_eq!(
+        answered.expect("pass with a probe"),
+        1,
+        "the probe is answered"
+    );
+    assert_eq!(
+        authority,
+        vec![("pending_offline_source_probes", 1)],
+        "work present still takes today's authoritative read"
+    );
+    assert_eq!(
+        selected
+            .store
+            .outstanding_offline_source_probes(now)
+            .await
+            .expect("outstanding"),
+        0
+    );
+
+    selected.shutdown().await.expect("stop the voter");
+}
+
+/// A4: the heartbeat's sharing purpose factory runs every ten seconds on
+/// every node. With sharing off it asks the authority nothing; with sharing
+/// on it still takes the factory's authoritative read of the switch.
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_heartbeat_purpose_factory_reads_no_authority_while_sharing_is_off() {
+    install_default_crypto_provider();
+    let directory = tempfile::tempdir().expect("heartbeat factory data");
+    let config = membership_test_config(directory.path());
+    drop(SqliteStore::open(&directory.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+    let selected = startup_observer::select_applied_singleton(&config)
+        .await
+        .expect("actual one voter selection");
+    let membership = selected.membership_manager();
+
+    for saved in [None, Some("false")] {
+        if let Some(value) = saved {
+            selected
+                .store
+                .put_setting("sharing_enabled", value)
+                .await
+                .expect("saved choice");
+        }
+        let (result, authority) = authority_reads_of(membership.heartbeat_purpose_keys()).await;
+        result.expect("sharing off");
+        assert_eq!(
+            authority,
+            Vec::new(),
+            "sharing {saved:?}: the heartbeat must not read the authority"
+        );
+    }
+
+    selected
+        .store
+        .put_setting("sharing_enabled", "1")
+        .await
+        .expect("sharing on");
+    let (result, authority) = authority_reads_of(membership.heartbeat_purpose_keys()).await;
+    result.expect("no master yet: the factory waits");
+    assert!(
+        authority.iter().any(|(method, _)| *method == "get_setting"),
+        "sharing on takes the factory's authoritative read: {authority:?}"
     );
 
     selected.shutdown().await.expect("stop the voter");

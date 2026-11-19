@@ -434,6 +434,7 @@ function beginPlaybackMediaAttachment(p){
   p._mediaAttachmentOrdinal=token.id;
   if(p.mediaAttachment?.captionReadyCleanup)p.mediaAttachment.captionReadyCleanup();
   p.mediaAttachment=token;
+  if(p.controlFrameRearm)p.controlFrameRearm();
   const video=typeof document!=="undefined"?document.getElementById("video"):null;
   const positionReady=()=>playbackCaptionAttachmentPositionReady(video,p,token);
   if(video&&typeof video.addEventListener==="function"){
@@ -464,11 +465,15 @@ function applyPlaybackAttachmentPosition(v,p,attachment,startAt){
   if(Number.isFinite(position)&&position>=0){
     try{v.currentTime=position;}catch(e){return;}
     const token=attachment.token||p.mediaAttachment;
-    if(token){token.captionPositionApplied=true;playbackCaptionAttachmentPositionReady(v,p,token);}
+    if(token){
+      token.nativePositionPending=false;
+      token.captionPositionApplied=true;playbackCaptionAttachmentPositionReady(v,p,token);
+      if(p.controlFrameRearm)p.controlFrameRearm();
+    }
   }
 }
 function playbackCaptionAttachmentPositionReady(v,p,token,frameOwned=false){
-  if(!v||PLAYER!==p||p.mediaAttachment!==token||token?.captionPositionReady||!Number.isFinite(v.readyState)||v.readyState<2||v.seeking||!Number.isFinite(p.offset))return;
+  if(!v||PLAYER!==p||p.mediaAttachment!==token||token?.nativePositionPending||token?.captionPositionReady||!Number.isFinite(v.readyState)||v.readyState<2||v.seeking||!Number.isFinite(p.offset))return;
   if(!token.captionPositionApplied){
     const episode=p.hlsStartup;
     // hls.js executes its startPosition itself. Its accepted startup episode

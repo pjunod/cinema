@@ -1,0 +1,11 @@
+{"schema":1,"id":"protocol-map-fix-20261112","status":"Fixed before any output. Follows the PR #1518 adversarial review: harness v8 coded every dark block whose FEL-weighted offset clamped to 0 at the positive balance instead of 0 QP, and still counted it as selected in the balance.",
+ "baseline":"protocol-roi-zeromean-qpm6-20261111.json arm_Z6 (identical_to protocol-roi-zeromean-20261111.json; dark block < 1.0 nit; zero-mean)",
+ "dark_offset":"-6 QP (qoffset -6/63)",
+ "harness":"roi_encode.c v9: lumazf/lumazfn/lumazfs emit an explicit 0 QP region for those blocks; lumazfsp keeps v8's executed behaviour under its own name. Gates none/zero pass on every fixture before any arm; lumazfsp must reproduce the v8 Zfn1 michael5400 landing's elementary stream bit for bit.",
+ "arms":{"Zfn1x":"the v8 arm as executed (lumazfsp): -6*clamp(1-2*log2(d/d0),0,1) on dark blocks, and dark blocks where that is 0 take the positive balance",
+  "Zfn1d":"the map protocol-map-family-20261112.json declared (lumazfs, v9): those blocks get 0 QP"},
+ "harness_modes":{"Zfn1x":{"mode":"lumazfsp","threshold_nits":1.0,"qp_offset":-6},"Zfn1d":{"mode":"lumazfs","threshold_nits":1.0,"qp_offset":-6}},
+ "fixtures":["michael5400","michael1800"],
+ "rate_rule":"as protocol-aq-psy-20261112.json",
+ "readouts":"as protocol-aq-psy-20261112.json plus per-frame count of dark blocks whose weighted offset is 0",
+ "accept":"as protocol-aq-psy-20261112.json against landed Z6. Zfn1x's existing v8 landing is the executed arm (relabelled, not rerun). Zfn1d replaces it in the stacks only if it passes and its pooled mean is at most Zfn1x's in all four models on both fixtures"}

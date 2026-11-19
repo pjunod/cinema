@@ -14,7 +14,7 @@ function pbTotalSec(){ const v=document.getElementById("video");
   // none: pbTick draws an indeterminate bar and seekTo refuses fraction seeks.
   if(PLAYER&&PLAYER.method&&PLAYER.method!=='direct_play') return 0;
   return (v&&isFinite(v.duration)&&v.duration>0)?((PLAYER&&PLAYER.offset)||0)+v.duration:0; }
-function pbPosSec(){ const v=document.getElementById("video"); return ((PLAYER&&PLAYER.bookOffset)||0)/1000+((PLAYER&&PLAYER.offset)||0)+((v&&v.currentTime)||0); }
+function pbPosSec(){ const v=document.getElementById("video"); if(PLAYER?.mediaAttachment?.nativePositionPending)return ((PLAYER.bookOffset||0)/1000)+(PLAYER.controlPositionHintSec||0); return Math.max(0,((PLAYER&&PLAYER.bookOffset)||0)/1000+((PLAYER&&PLAYER.offset)||0)+((v&&v.currentTime)||0)); }
 // A stream-changing command issued while a seek is still landing belongs at
 // the seek destination, not at the predecessor element's last observed clock.
 // The committed target is the playback intent; currentTime is only evidence
@@ -22,6 +22,13 @@ function pbPosSec(){ const v=document.getElementById("video"); return ((PLAYER&&
 function positionForPlaybackIntent(v,p){
   const target=p&&p.controlSeek&&Number(p.controlSeek.targetMs);
   if(Number.isFinite(target)) return Math.max(0,target/1000);
+  const reopen=p?.pendingMediaChange?.reopenPositionSec;
+  if(Number.isFinite(reopen)) return reopen;
+  if(p?.mediaAttachment?.nativePositionPending){
+    const hint=p.controlPositionHintSec;
+    if(hint!=null&&Number.isFinite(Number(hint))) return Math.max(0,Number(hint));
+    return Math.max(0,(Number(p.offset)||0)+(Number(p.hlsStartup?.startAt)||0));
+  }
   return Math.max(0,((p&&p.offset)||0)+((v&&v.currentTime)||0));
 }
 // A committed destination no attachment has executed yet, on the scrubber's
@@ -31,7 +38,7 @@ function positionForPlaybackIntent(v,p){
 // and the picture on screen is still the predecessor's.
 function unexecutedPlaybackDestinationSec(p){
   const pending=p&&p.controlSeek;
-  if(!pending||pending.executed) return null;
+  if(pending?.executed) return null;
   // ONLY while a replacement is actually pending or retained after a refusal.
   // `controlSeek` outlives the element by design and `play()` carries it into
   // the successor with `executed:false`, so a destination can survive into a
@@ -40,15 +47,15 @@ function unexecutedPlaybackDestinationSec(p){
   // at 2:54 and every +10 would count from there. `pendingMediaChange` is the
   // retained route: set before the create, kept on refusal for Try again,
   // cleared when a successor attaches.
-  if(!p.pendingMediaChange) return null;
+  if(!p?.pendingMediaChange) return null;
   // Multipart audiobooks address the scrubber globally and the element
   // locally, and `controlSeek` is in the part-local timeline, so the two
   // numbers are not comparable. `bookOffset` is that delta, but a book that
   // needed a replacement would need it applied in three places; the honest
   // answer for now is to leave their arithmetic exactly as it was.
   if(p.bookParts&&p.bookParts.length) return null;
-  const target=Number(pending.targetMs);
-  return Number.isFinite(target)?Math.max(0,target/1000):null;
+  const target=pending?.targetMs;
+  return Number.isFinite(target)?Math.max(0,target/1000):(p.pendingMediaChange.reopenPositionSec??null);
 }
 // Where a relative seek counts from. Not the attached element's clock: while
 // a replacement is pending the incumbent is still showing 100 seconds, so
@@ -249,10 +256,8 @@ function markPlaybackControlSeekExecuted(p,targetSec,v){
   const pending=p&&p.controlSeek;
   const targetMs=Math.max(0,Math.round(Number(targetSec||0)*1000));
   if(!pending||pending.targetMs!==targetMs) return false;
-  // The destination landed. A fault that was about it is retired by this and
-  // by nothing else — evidence about the picture never speaks for a pending
-  // request (contract §3.4).
-  playbackSurfaceStep({intent_settled:pending.sequence});
+  // Assignment starts destination observation. It is not settlement: waiting
+  // can arrive after this edge, before the destination has presented a frame.
   pending.executed=true;
   if(pending.captionViewerSeek&&typeof translationPlaybackSeek==="function")translationPlaybackSeek(p,pending);
   pending.executedAt=performance.now();
@@ -355,10 +360,47 @@ function playbackProgressTick(v,p,frameSample=false){
       if(Number.isFinite(q?.totalVideoFrames)){frames=q.totalVideoFrames; frameSource="quality";}
     }catch(e){}
   }
+  // Independent progress diagnoses the observation channel, never proves a
+  // displayed frame or repairs a request. Renewal belongs to native events.
+  // Use the existing sampler and preserve the original startup/seek deadline.
+  if(p.hlsStartup?.transport==="native"&&frameSource==="callbacks"&&!v.seeking){
+    let decoded=null;
+    try{const q=v.getVideoPlaybackQuality?.();if(Number.isFinite(q?.totalVideoFrames))decoded=q.totalVideoFrames;}catch(e){}
+    let observer=p.controlFrameObservation;
+    if(!observer||observer.attachment!==p.mediaAttachment||observer.element!==v
+      ||observer.epoch!==(p.controlPresentationEpoch||0)||observer.intent!==(pending?.sequence||0)
+      ||observer.intentGeneration!==(p.controlIntentGeneration||0)){
+      observer=p.controlFrameObservation={attachment:p.mediaAttachment,element:v,
+        epoch:p.controlPresentationEpoch||0,intent:pending?.sequence||0,
+        intentGeneration:p.controlIntentGeneration||0,clock,decoded,frames,since:now,lastAdvanceAt:null,unavailable:false};
+    }else{
+      if(frames!==observer.frames){observer.since=now;observer.unavailable=false;observer.lastAdvanceAt=null;}
+      else if(decoded!=null&&observer.decoded!=null&&decoded>observer.decoded&&clock>observer.clock+0.01){
+        observer.lastAdvanceAt=now;
+        if(now-observer.since>=PERSISTENT_STALL_MS&&!observer.unavailable){
+          observer.unavailable=true;
+          clientLog(Object.assign({level:"warn",event:"native_frame_observation",detail:"observation_unavailable",
+            message:"Native clock and decode progressed without frame callbacks; presentation remains unproven."},playbackContext()));
+        }
+      }
+      observer.clock=clock;observer.decoded=decoded;observer.frames=frames;
+    }
+  }else p.controlFrameObservation=null;
   const key=`${p._seekToken||0}:${p.controlIntentGeneration||0}:${pending?.sequence||0}:${frameSource}`;
   let watch=p.progressWatch;
   if(!watch||watch.key!==key||watch.attachment!==p.mediaAttachment||watch.element!==v){
     watch=p.progressWatch={key,attachment:p.mediaAttachment,element:v,clock,frames,at:now,startedAt:now,fired:false};
+  }
+  const observer=p.controlFrameObservation;
+  if(observer?.unavailable&&observer.lastAdvanceAt!=null){
+    // Missing observations with independent progress cannot authorize a
+    // destructive freeze recovery. A real freeze still ages from the last
+    // independent advance and takes the normal existing bounded path.
+    watch.at=Math.max(watch.at,observer.lastAdvanceAt);
+    if(now-observer.lastAdvanceAt<PLAYBACK_SAMPLING_PERIOD_MS*3){
+      if(p.waitAt!=null)endWait(false);
+      return;
+    }
   }
   const moved=clock>watch.clock+0.01 && (frames==null||frames>watch.frames);
   if(frameSample){
@@ -494,6 +536,9 @@ function settlePlaybackControlSeek(v,p,presentedMediaTime,presentedFrameSequence
   pending.localVodSeekCleanup?.();
   finishPlaybackSeekTelemetry(p,pending,provenance==="positioned"?"seek_positioned":"seek_resumed");
   p.controlSeek=null;
+  // Only the proven destination (or explicit paused positioning above) ends
+  // this intent. Predecessor movement and currentTime assignment cannot.
+  playbackSurfaceStep({intent_settled:pending.sequence});
   pending.pausedStartupCleanup?.(provenance!=="positioned",false,provenance==="positioned");
   notifyPlaybackControl();
   return true;
@@ -570,14 +615,20 @@ function playerWantsPlayback(v){
 // a change it started meanwhile owns the media and the boundary stands down.
 async function resumeQualityBoundary(p){
   if(!p||qualityForce()!=='auto') return false;
-  const intent=p.controlSeek, attachment=p.mediaAttachment;
+  const intent=p.controlSeek, attachment=p.mediaAttachment, selected=p.qualityCandidateId, generation=p.controlIntentGeneration;
   const candidate=await naturalBoundaryQualityCandidate(p,intent);
   if(!candidate||PLAYER!==p||p.controlSeek!==intent||p.mediaAttachment!==attachment
+    ||p.qualityCandidateId!==selected||p.controlIntentGeneration!==generation
     ||p.wantsPlayback===false||qualityForce()!=='auto'||hasPendingPlaybackOpen(p)
     ||p.pendingMediaChange||p.autoFallbackInFlight||(p.abr&&p.abr.switching)
     ||(p.directedChange&&!p.directedChange.settled)) return false;
-  await seekTo(pbPosSec(),false,null,false,null,true,candidate);
-  return true;
+  // An optional quality trial must acquire the retained-incumbent owner
+  // before creating any synthetic seek. Failure leaves Resume playing the
+  // existing route; real viewer seeks keep their separate execution path.
+  const current=(p.qualityCandidates||[]).find(row=>row.id===p.qualityCandidateId);
+  const video=document.getElementById("video");
+  if(!current||!video)return false;
+  return switchAutoCandidate(p,video,current,{candidate,reason:"resume_quality_boundary",transition:"upgrade"});
 }
 // Desired state shares the viewer transport owner, including pending opens.
 function setPlayerPlaying(playing){
@@ -627,7 +678,7 @@ function togglePlay(origin="viewer_control"){
         ? (PLAYER.controlSeek.targetMs+(PLAYER.bookOffset||0))/1000 : pbPosSec();
       clientLog(Object.assign({level:"info",event:"paused_retirement",detail:"reopen",
         message:`reopening the retired paused session at ${at.toFixed(1)}s`},playbackContext()));
-      seekTo(at,true,null,false,null,qualityBoundary);
+      seekTo(at,true,null,false,null,{qualityBoundary});
     }else{
       if(PLAYER.wantsPlayback) resumeHlsStartup(v,PLAYER);
       else pauseHlsStartup(PLAYER);
@@ -867,17 +918,25 @@ function wirePlayerMedia(v){
   // decided when playback resumes, because that is the first moment its
   // duration is known. See beginWait/endWait.
   v.addEventListener("waiting",()=>{
-    if(!playbackOwnsAttachedMedia(PLAYER)) return;
+    const p=PLAYER;
+    if(!playbackOwnsAttachedMedia(p)||document.getElementById("video")!==v
+      ||v.paused||p.wantsPlayback===false) return;
     const action=PlaybackPolicy.waitingOverlayAction({
-      started:PLAYER.started, promptUp:playbackSurfacePromptUp()
+      started:p.started, promptUp:playbackSurfacePromptUp()
     });
     if(action!=='buffer') return;
     beginWait(v);
-    const copy=playbackWaitCopy(bufferRunway(v),PLAYER.health&&PLAYER.health.http_wait_count);
+    const copy=playbackWaitCopy(bufferRunway(v),p.health&&p.health.http_wait_count);
+    // A wait for an executed, still-unproven target belongs to that exact
+    // destination. Otherwise this is attached media, regardless of whether
+    // another viewer intent exists. Observation ownership does not imply it.
+    const pending=p.controlSeek;
+    const intent=pending?.executed&&pending.element===v&&pending.attachment===p.mediaAttachment
+      ?pending.sequence:null;
     // Raised the moment the wait begins and DRAWN only once it has lasted
     // `buffering_min_ms`: Safari fires `waiting` at every fMP4 boundary on
     // healthy 4K, and the undebounced repaint was §2.1's fifth defect.
-    raisePlaybackSurface("media_waiting",{context:"attached",
+    raisePlaybackSurface("media_waiting",{context:"attached",intent,
       title:copy.title,detail:copy.detail},{once:true});
     notifyPlaybackControl();
   });
@@ -902,19 +961,21 @@ function wirePlayerMedia(v){
   // And a remux/direct stream the browser rejects gets one automatic rescue:
   // restart as a transcode session (the server re-encodes to plain H.264/AAC).
   v.addEventListener("error",async()=>{
-    if(!playbackOwnsAttachedMedia(PLAYER)) return;
+    const nativePlayer=PLAYER,episode=nativePlayer?.hlsStartup;
+    const sourceOwner=episode?.transport==='native'
+      ?nativeHlsSourceOwner(v,nativePlayer,episode,episode.native.execution,true):null;
+    if(sourceOwner?!sourceOwner.current():!playbackOwnsAttachedMedia(nativePlayer)) return;
     // Detaching the source on purpose (the reset a remux seek does before
     // handing over the next stream) can raise an error event with no source
     // attached. That is us, not a broken file — never rescue-transcode on it.
     if(!v.getAttribute("src")&&!v.currentSrc) return;
     const err=v.error, code=err?err.code:0, msg=(err&&err.message)||"";
-    const nativePlayer=PLAYER;
     if(nativePlayer?.hlsStartup?.transport==='native'&&nativePlayer.hlsStartup.native.video!==v) return;
     // Authority retirement owns the reopen, before native decoder diagnosis.
-    if(nativePlayer.sessionTerminal&&recoverServingFencedAttachment(v,nativePlayer)) return;
+    if(nativePlayer.sessionTerminal&&recoverServingFencedAttachment(v,nativePlayer,sourceOwner)) return;
     if(nativePlayer?.hlsStartup?.transport==='native'&&!playbackIsReal()
-      &&await classifyNativeHlsError(v,nativePlayer,code,msg)) return;
-    if(PLAYER!==nativePlayer) return;
+      &&await classifyNativeHlsError(v,nativePlayer,code,msg,sourceOwner)) return;
+    if(PLAYER!==nativePlayer||(sourceOwner&&!sourceOwner.current())||!playbackOwnsAttachedMedia(nativePlayer)) return;
     const controlTrigger=notifyPlaybackControl("failed");
     clearStall();
     const src=(v.currentSrc||"").split("?")[0];
@@ -1133,7 +1194,7 @@ function playbackSeekBufferCovers(v,p,targetMs){
 // Seek that works for every method: direct/VOD and safe rolling/progressive
 // destinations seek the attached element; everything else reopens at film time.
 async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, viewerInitiated=true,
-  recoveryEpisode=null,qualityBoundary=false,boundaryCandidate=null){
+  recoveryEpisode=null,{qualityBoundary=false,boundaryCandidate=null,stallRetry=false}={}){
   // The element at the press. Only the synchronous routes below use it; the
   // media route re-reads #video once the awaits are behind it.
   const pressed=document.getElementById("video"); if(!pressed||!PLAYER) return;
@@ -1199,6 +1260,24 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   // A same-target recovery continues the viewer's seek measurement. It is
   // another attachment attempt, not another seek command in the denominator.
   const prior=PLAYER.controlSeek;
+  const reason=forceReopen?"stall-restart":"seek";
+  const mediaChange=p=>({method:p.method,copyHls:!!p.copyHls,reason,height:autoHeightOverride,
+    forceReopen,previousSessionId:p.sessionId,
+    // Only an independently selected lower rung turns supply pressure into a
+    // capacity verdict. MEDIA_ERR_NETWORK alone keeps the same recipe.
+    recoveryCause:recoveryEpisode&&recoveryEpisode.kind==="supply"&&autoHeightOverride>0
+      ?"network":"unknown"});
+  if(forceReopen&&(stallRetry||recoveryEpisode)&&!prior&&Math.round(targetSec*1000)===0
+    &&PLAYER.hlsStartup?.transport==="native"){
+    // Starting at the file origin has no viewer seek to land. Keep zero on
+    // the create even if the retired element has a nonzero clock. The
+    // successor uses its own startup presentation and freeze detection.
+    const p=PLAYER;
+    if(viewerInitiated) supersedePlaybackControlIntent(p);
+    endWait(false);
+    if(restartPendingPlaybackOpen(p,reason,0)) return;
+    return requestPlaybackMediaChange(p,{...mediaChange(p),reopenPositionSec:0});
+  }
   const seekTelemetry=forceReopen&&prior?.targetMs===Math.round(targetSec*1000)
     &&!prior.seekTelemetry?.outcome ? prior.seekTelemetry
     : viewerInitiated&&!forceReopen ? {startedAt:null,outcome:null,context:null,cleanup:null} : null;
@@ -1206,7 +1285,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
     {preserveContinuousManualQuality:!forceReopen&&!!PLAYER.vod
       &&!!PLAYER.continuousQuality&&!PLAYER.pendingMediaChange});
   endWait(false);
-  if(restartPendingPlaybackOpen(PLAYER,forceReopen?"stall-restart":"seek")){
+  if(restartPendingPlaybackOpen(PLAYER,reason)){
     recordPlaybackSeekRoute(PLAYER,seekIntent,pressed,{route:"reopen"},null,null,null,"pending_open");
     dispatchPlaybackSeekTelemetry(PLAYER,seekIntent);
     return;
@@ -1368,14 +1447,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   // and re-attach hls.js twice. Token the call and bail any superseded one after
   // its await, so only the last seek attaches.
   dispatchPlaybackSeekTelemetry(PLAYER,seekIntent);
-  return requestPlaybackMediaChange(PLAYER,{method:PLAYER.method,copyHls:!!PLAYER.copyHls,
-    reason:forceReopen?"stall-restart":"seek",height:autoHeightOverride,
-    forceReopen,previousSessionId:PLAYER.sessionId,
-    // Only an independently selected lower rung turns supply pressure into a
-    // capacity verdict. MEDIA_ERR_NETWORK alone is a failed transfer and keeps
-    // this create on the same recipe without the legacy rung-lowering ticket.
-    recoveryCause:recoveryEpisode&&recoveryEpisode.kind==="supply"&&autoHeightOverride>0
-      ?"network":"unknown"});
+  return requestPlaybackMediaChange(PLAYER,mediaChange(PLAYER));
 }
 function autoskipOn(){ try{ return localStorage.getItem("plurx_autoskip")==="1"; }catch(e){ return false; } }
 function setAutoskip(on){ try{ localStorage.setItem("plurx_autoskip", on?"1":"0"); }catch(e){}

@@ -286,6 +286,8 @@ private struct PlaybackSurfaceContractFixture: Decodable {
         let intentSettled: String?
         let intentSuperseded: String?
         let ownerSuccess: String?
+        let observationUnavailable: String?
+        let observationOwner: String?
         let userAction: String?
         let playbackRequested: Bool?
         let systemPaused: Bool?
@@ -300,6 +302,8 @@ private struct PlaybackSurfaceContractFixture: Decodable {
             case intentSettled = "intent_settled"
             case intentSuperseded = "intent_superseded"
             case ownerSuccess = "owner_success"
+            case observationUnavailable = "observation_unavailable"
+            case observationOwner = "observation_owner"
             case userAction = "user_action"
             case playbackRequested = "playback_requested"
             case systemPaused = "system_paused"
@@ -3076,6 +3080,10 @@ final class AppleClientTests: XCTestCase {
         if let presenting = raw.presenting {
             return .presenting(presenting, attached: ids.id(raw.attached))
         }
+        if let owner = raw.observationUnavailable {
+            return .observationUnavailable(owner: owner, attached: ids.id(raw.attached),
+                                           intent: raw.intent == nil ? nil : ids.id(raw.intent))
+        }
         if let source = raw.raise {
             return PlaybackSurfaceModel.raise(
                 source: source,
@@ -3086,7 +3094,8 @@ final class AppleClientTests: XCTestCase {
                 actions: (raw.actions ?? []).compactMap { PlaybackFault.Action(rawValue: $0) },
                 positionMs: raw.positionMs,
                 title: raw.title,
-                detail: raw.detail
+                detail: raw.detail,
+                observationOwner: raw.observationOwner
             )
         }
         if let settled = raw.intentSettled { return .intentSettled(ids.id(settled)) }
@@ -8249,7 +8258,8 @@ final class AppleClientTests: XCTestCase {
                     XCTAssertTrue(document.video.allSatisfy { $0.present == expectedPresent })
                     XCTAssertEqual(document.display.hdr, displayHDR)
                     XCTAssertEqual(document.dvTransport, "hls")
-                    XCTAssertEqual(document.transports, ["progressive", "hls"])
+                    XCTAssertEqual(document.transports, ["progressive", "hls", SharedPlaybackTimeline.capability])
+                    XCTAssertFalse(document.transports.contains { $0.hasPrefix("plurx-internal-relay-") })
                     XCTAssertEqual(document.progressiveHevcSampleEntries, hevc ? ["hvc1"] : nil)
                     XCTAssertEqual(document.learnedLimits, [])
 
@@ -8639,6 +8649,32 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(context.overview, "A precise description.")
     }
 
+    func testToneMappingPillRequiresActiveProcessingEvidence() {
+        let generation = "11111111-1111-4111-8111-111111111111"
+        let report = EffectiveProcessingReport(generation: generation, hdr10Enhanced: true,
+            felContributed: false, appliedOperations: ["DisplayTargetMapping:600"])
+        func pills(_ peak: Int? = nil, _ source: String? = nil,
+                   _ processing: EffectiveProcessingReport? = nil, _ active: String? = nil) -> [PlayerMetadataBadge] {
+            PlayerView.playbackBadges(source: nil, audio: nil, delivered: "hdr10",
+                effectiveProcessing: processing, activeGeneration: active,
+                toneMapPeakNits: peak, toneMapPeakSource: source).filter { $0.kind == .toneMapping }
+        }
+        XCTAssertTrue(pills().isEmpty)
+        XCTAssertTrue(pills(0, "cll").isEmpty)
+        XCTAssertTrue(pills(1000, "unknown").isEmpty)
+        XCTAssertEqual(pills(1000, "cll").map(\.mark), ["Tone mapping"])
+        XCTAssertEqual(pills(nil, nil, report, generation).map(\.accessibilityLabel), ["Cinema tone mapping active"])
+        XCTAssertTrue(pills(nil, nil, report, "22222222-2222-4222-8222-222222222222").isEmpty)
+        let enhancementOnly = EffectiveProcessingReport(generation: generation, hdr10Enhanced: true,
+            felContributed: true, appliedOperations: ["PolynomialReshape"])
+        XCTAssertTrue(pills(nil, nil, enhancementOnly, generation).isEmpty)
+        XCTAssertEqual(pills(1000, "default", report, generation).count, 1)
+        let sdr = EffectiveProcessingReport(generation: generation, hdr10Enhanced: false,
+            felContributed: false, appliedOperations: ["Bt709Gamma24Conversion", "DisplayTargetMapping:100"], sdrProcessed: true)
+        XCTAssertTrue(PlayerView.toneMappingActive(peakNits: nil, peakSource: nil,
+            effectiveProcessing: sdr, activeGeneration: generation, delivered: "sdr"))
+    }
+
     func testPlayerFactsSurfaceUsefulSourceInformation() {
         let source = SourceSummary(
             container: nil,
@@ -8677,9 +8713,20 @@ final class AppleClientTests: XCTestCase {
             PlayerView.playbackBadges(source: source, audio: audio).map(\.tone),
             [.resolution, .dolbyVision, .audio]
         )
+        #if os(tvOS)
+        // The pills stay on the TV player, at a ten-foot size (Paul's ruling:
+        // the information they carry must remain).
+        XCTAssertEqual(PlayerMetadataBadgeMetrics.rowSpacing, 10)
+        XCTAssertEqual(PlayerMetadataBadgeMetrics.horizontalPadding, 16)
+        XCTAssertEqual(PlayerMetadataBadgeMetrics.verticalPadding, 9)
+        XCTAssertEqual(PlayerMetadataBadgeMetrics.fontSize, 22)
+        XCTAssertEqual(PlayerMetadataBadgeMetrics.iconSize, 24)
+        XCTAssertEqual(PlayerMetadataBadgeMetrics.fontDesign, .default)
+        #else
         XCTAssertLessThanOrEqual(PlayerMetadataBadgeMetrics.rowSpacing, 6)
         XCTAssertLessThanOrEqual(PlayerMetadataBadgeMetrics.horizontalPadding, 6)
         XCTAssertLessThanOrEqual(PlayerMetadataBadgeMetrics.verticalPadding, 2)
+        #endif
 
         // Resolution tiers use both edges, so orientation ordering cannot turn
         // 1080p into 1920p and cropped scope masters retain their 4K tier.
@@ -8884,6 +8931,20 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNil(PlayerView.dynamicRangeSummary(
             source: nil, delivered: nil, displayHDR: true, reasons: nil
         ))
+    }
+
+    func testRefitPlaybackReportKeepsFittedGainAndIdentityReasonDistinct() throws {
+        XCTAssertEqual(playbackInfoExplanation("dv_refit"),
+            "Held-out squared code error removed by the served mapping, relative to identity curves. A display may ignore this mapping.")
+        let decoder = JSONDecoder()
+        let fitted = try decoder.decode(DolbyVisionRefitPlaybackReport.self,
+            from: Data(#"{"state":"fitted","gain":0.542}"#.utf8))
+        XCTAssertEqual(fitted.label, "fitted, −54.2%")
+        let identity = try decoder.decode(DolbyVisionRefitPlaybackReport.self,
+            from: Data(#"{"state":"identity","reason":"platform choice is off"}"#.utf8))
+        XCTAssertEqual(identity.label, "identity (platform choice is off)")
+        XCTAssertNil(DolbyVisionRefitPlaybackReport(state: "future", gain: nil, reason: nil).label)
+        XCTAssertEqual(DolbyVisionRefitPlaybackReport(state: "fitted", gain: .infinity, reason: nil).label, "fitted")
     }
 
     func testToneMapPeakSummaryKeepsPolicyDistinctFromSourceTruth() throws {
@@ -9116,7 +9177,7 @@ final class AppleClientTests: XCTestCase {
         """#.utf8))
         XCTAssertEqual(
             PlayerController.sessionMediaOriginMs(invalid, requestedStartMs: 10_500),
-            0
+            -1
         )
     }
 
@@ -10650,6 +10711,46 @@ final class AppleClientTests: XCTestCase {
         ])
     }
 
+    /// The capsule row became one quiet line carrying exactly the same facts,
+    /// and a resumable title says how much is left in plain words.
+    func testTVPlayableFactLineKeepsEveryBadgeFactOnOneLine() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let item = try decoder.decode(
+            Item.self,
+            from: Data(#"{"id":7,"kind":"episode","title":"Fray","year":2026,"season_number":4,"episode_number":2,"runtime_ms":3245000}"#.utf8)
+        )
+        let file = try decoder.decode(
+            MediaFile.self,
+            from: Data(#"{"id":11,"duration_ms":3245000,"container":"mkv","video_codec":"hevc","height":2160}"#.utf8)
+        )
+        let badges = DetailView.tvPlayableBadges(item, file: file, durationMs: file.durationMs)
+        XCTAssertEqual(
+            DetailView.tvPlayableFactLine(item, file: file, durationMs: file.durationMs),
+            badges.map(\.accessibilityLabel).joined(separator: " · ")
+        )
+        XCTAssertEqual(
+            DetailView.tvPlayableFactLine(item, file: file, durationMs: file.durationMs),
+            "Season 4, Episode 2 · 54 min · 4K · HEVC"
+        )
+        XCTAssertEqual(
+            DetailView.tvTimeLeftLabel(positionMs: 3_720_000, durationMs: 8_040_000),
+            "1 hr 12 min left"
+        )
+
+        // A single-track, single-file title has no Audio button, so its
+        // audio format must still be on the page: the fact line carries it.
+        var oneTrack = file
+        oneTrack.audioStreams = [
+            AudioTrack(index: 0, codec: "eac3", channels: 6, language: "eng", title: nil, default: true)
+        ]
+        XCTAssertTrue(
+            DetailView.tvPlayableFactLine(item, file: oneTrack, durationMs: oneTrack.durationMs)
+                .contains("Dolby Digital Plus"),
+            DetailView.tvPlayableFactLine(item, file: oneTrack, durationMs: oneTrack.durationMs)
+        )
+    }
+
     func testTVActionButtonsRemainReadableWithAndWithoutFocus() {
         for prominent in [false, true] {
             for focused in [false, true] {
@@ -10663,12 +10764,24 @@ final class AppleClientTests: XCTestCase {
                 )
 
                 XCTAssertGreaterThanOrEqual(
-                    contrastRatio(foreground, background),
+                    contrastRatio(foreground, composited(background, over: Palette.bg)),
                     4.5,
                     "prominent=\(prominent), focused=\(focused)"
                 )
             }
         }
+        // White means focus: a focused button is solid `onBg` with `bg` ink,
+        // and the accent never fills a button.
+        XCTAssertEqual(
+            contrastRatio(TVReadableButtonStyle.backgroundColor(prominent: true, focused: true), Palette.onBg),
+            1,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            contrastRatio(TVReadableButtonStyle.foregroundColor(prominent: true, focused: true), Palette.bg),
+            1,
+            accuracy: 0.001
+        )
     }
 
     func testTVShelfActionsRemainReadableWithAndWithoutFocus() {
@@ -10676,7 +10789,7 @@ final class AppleClientTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(
                 contrastRatio(
                     TVShelfActionButtonStyle.foregroundColor(focused: focused),
-                    TVShelfActionButtonStyle.backgroundColor(focused: focused)
+                    composited(TVShelfActionButtonStyle.backgroundColor(focused: focused), over: Palette.bg)
                 ),
                 4.5,
                 "focused=\(focused)"
@@ -10684,51 +10797,26 @@ final class AppleClientTests: XCTestCase {
         }
     }
 
-    func testTVMediaCardFocusSurroundIsThinAndFadesAtBothEdges() {
-        XCTAssertLessThanOrEqual(
-            TVMediaCardButtonStyle.outerStrokeWidth,
-            6,
-            "the complete focus surround should remain a thin ring"
-        )
-        XCTAssertGreaterThan(
-            TVMediaCardButtonStyle.outerStrokeWidth,
-            TVMediaCardButtonStyle.fadeStrokeWidth
-        )
-        XCTAssertGreaterThan(
-            TVMediaCardButtonStyle.fadeStrokeWidth,
-            TVMediaCardButtonStyle.accentStrokeWidth
-        )
-        XCTAssertGreaterThan(
-            TVMediaCardButtonStyle.contentClearance,
-            TVMediaCardButtonStyle.outerStrokeWidth / 2,
-            "the curved ring must stay outside card text"
-        )
-        XCTAssertEqual(
-            TVMediaCardButtonStyle.outerStrokeWidth - TVMediaCardButtonStyle.fadeStrokeWidth,
-            TVMediaCardButtonStyle.fadeStrokeWidth - TVMediaCardButtonStyle.accentStrokeWidth,
-            "the red core should taper evenly toward both black edges"
-        )
+    func testTVMediaCardFocusIsAWhiteRingOutsideTheCard() {
+        XCTAssertEqual(TVMediaCardButtonStyle.ringWidth, 4)
+        XCTAssertEqual(TVMediaCardButtonStyle.contentClearance, 6)
+        XCTAssertEqual(TVMediaCardButtonStyle.focusScale, 1.06, accuracy: 0.001)
     }
 
-    func testTVPlayerChromeStaysCompactWithAHairlineProgressFocusRing() {
-        XCTAssertLessThanOrEqual(TVPlayerControlButtonStyle.width, 54)
-        XCTAssertLessThanOrEqual(TVPlayerControlButtonStyle.height, 46)
-        XCTAssertLessThanOrEqual(TVPlayerChromeMetrics.headerHorizontalInset, 8)
-        XCTAssertLessThanOrEqual(TVPlayerChromeMetrics.headerVerticalInset, 5)
-        XCTAssertLessThanOrEqual(TVPlayerChromeMetrics.timeHorizontalInset, 6)
-        XCTAssertLessThanOrEqual(TVPlayerChromeMetrics.timeVerticalInset, 3)
-        XCTAssertGreaterThanOrEqual(TVPlayerChromeMetrics.infoBodyFontSize, 18)
-        XCTAssertLessThanOrEqual(TVPlayerChromeMetrics.infoBodyFontSize, 20)
-        XCTAssertGreaterThanOrEqual(TVPlayerChromeMetrics.infoLineLimit, 6)
-        XCTAssertLessThanOrEqual(TVPlayerProgressFocusRing.outerStrokeWidth, 1.5)
-        XCTAssertGreaterThan(
-            TVPlayerProgressFocusRing.outerStrokeWidth,
-            TVPlayerProgressFocusRing.fadeStrokeWidth
-        )
-        XCTAssertGreaterThan(
-            TVPlayerProgressFocusRing.fadeStrokeWidth,
-            TVPlayerProgressFocusRing.accentStrokeWidth
-        )
+    func testTVPlayerChromeIsLabelledPillsAndAnObviousTimelineFocus() {
+        XCTAssertEqual(TVPlayerControlButtonStyle.height, 64)
+        XCTAssertEqual(TVPlayerControlButtonStyle.minWidth, 64)
+        XCTAssertEqual(TVPlayerControlButtonStyle.fontSize, 24)
+        XCTAssertEqual(TVPlayerControlButtonStyle.iconSize, 26)
+        XCTAssertEqual(TVPlayerChromeMetrics.titleFontSize, 48)
+        XCTAssertEqual(TVPlayerChromeMetrics.subtitleFontSize, 27)
+        XCTAssertEqual(TVPlayerChromeMetrics.timeFontSize, 27)
+        XCTAssertEqual(TVPlayerChromeMetrics.timelineHeight, 8)
+        XCTAssertEqual(TVPlayerChromeMetrics.focusedTimelineHeight, 14)
+        XCTAssertEqual(TVPlayerChromeMetrics.knobSize, 30)
+        XCTAssertGreaterThan(TVPlayerChromeMetrics.knobHaloSize, TVPlayerChromeMetrics.knobSize)
+        XCTAssertEqual(PlayerView.tvShortValue("English 5.1"), "English 5.1")
+        XCTAssertEqual(PlayerView.tvShortValue("A very long commentary track title").count, 12)
     }
 
     func testTVPlaybackInfoFitsTheSafeCanvasAtCompactTenFootScale() {
@@ -10821,6 +10909,20 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(continueWatchingTimeRemaining(episode), "44m left")
         XCTAssertEqual(continueWatchingDetail(movie), "2025")
         XCTAssertEqual(continueWatchingTimeRemaining(movie), "115m left")
+    }
+
+    /// Flattens a translucent fill over the surface it sits on, so contrast
+    /// is measured against what the viewer actually sees.
+    private func composited(_ color: Color, over base: Color) -> Color {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        var br: CGFloat = 0, bg: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0
+        XCTAssertTrue(UIColor(color).getRed(&r, green: &g, blue: &b, alpha: &a))
+        XCTAssertTrue(UIColor(base).getRed(&br, green: &bg, blue: &bb, alpha: &ba))
+        return Color(
+            red: Double(r * a + br * (1 - a)),
+            green: Double(g * a + bg * (1 - a)),
+            blue: Double(b * a + bb * (1 - a))
+        )
     }
 
     private func contrastRatio(_ foreground: Color, _ background: Color) -> CGFloat {
@@ -12446,6 +12548,33 @@ final class AppleClientTests: XCTestCase {
         )
         XCTAssertEqual(TrackFacts.subtitleSummary(offByDefault, chosen: nil), "Off")
         XCTAssertEqual(TrackFacts.subtitleSummary(offByDefault, chosen: 0), "French · SubRip")
+    }
+
+    /// The Audio and Subtitles buttons say their current value on one short
+    /// line; the full row stays in the panel and in VoiceOver.
+    func testTrackButtonValuesAreShortAndFollowTheChoice() {
+        let file = Self.trackFactsFile(
+            audio: [
+                AudioTrack(index: 0, codec: "eac3", channels: 6, language: "jpn", title: nil, default: true),
+                AudioTrack(index: 1, codec: "aac", channels: nil, language: "eng", title: nil, default: false),
+            ],
+            subtitles: [
+                SubtitleStream(
+                    index: 0, codec: "subrip", language: "eng", title: nil,
+                    default: true, forced: false, hearingImpaired: true
+                ),
+            ],
+            audioDefaultIndex: 0,
+            subtitleDefaultIndex: 0
+        )
+        XCTAssertEqual(TrackFacts.audioButtonValue(file, chosen: nil), "Japanese 5.1")
+        XCTAssertEqual(TrackFacts.audioButtonValue(file, chosen: 1), "English AAC")
+        XCTAssertEqual(TrackFacts.subtitleButtonValue(file, chosen: nil), "English SDH")
+        XCTAssertEqual(TrackFacts.subtitleButtonValue(file, chosen: PrePlaySelection.subtitleOff), "Off")
+        XCTAssertEqual(TrackFacts.buttonValue("Short"), "Short")
+        let long = TrackFacts.buttonValue("Untagged Dolby Digital Plus Commentary")
+        XCTAssertLessThanOrEqual(long.count, 22)
+        XCTAssertTrue(long.hasSuffix("…"))
     }
 
     /// The shared fixture's track facts decode through the production models,

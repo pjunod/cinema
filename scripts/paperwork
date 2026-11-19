@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 # (unittest module under tests/operations, what it guards, how to fix it)
 TEST_RULES: tuple[tuple[str, str, str], ...] = (
@@ -87,6 +88,22 @@ TEST_RULES: tuple[tuple[str, str, str], ...] = (
         "test_script_syntax",
         "every Python script under scripts/ parses",
         "fix the syntax error the failure names",
+    ),
+    (
+        "test_media_pool_wire",
+        "the media-pool wire changes only with a protocol bump and a rollout note",
+        "a strict (deny_unknown_fields) envelope change, an enum variant added/removed (no "
+        "#[serde(other)]), a changed tag/rename_all, or a removed/retyped lenient field — on an "
+        "envelope or any in-repo type its fields name — needs a PROTOCOL_VERSION bump in "
+        "crates/plurxd/src/media_pool.rs and a dated `protocol <N>` line under \"Rolling upgrades\" "
+        "in docs/OPERATIONS.md; a new lenient field needs #[serde(default)]",
+    ),
+    (
+        "test_cluster_facade_ratchet",
+        "the cluster-facade census only tightens against the merge base",
+        "ask `state.cluster` instead of reaching around it; never raise CEILING or a pin, add a "
+        "(file, class) pin, grow EXEMPT or NOT_CLUSTER, or drop a name from TYPES/ROLE/ROSTER in "
+        "crates/plurxd/src/cluster/census.rs",
     ),
     (
         "test_doc_size_budget",
@@ -183,7 +200,9 @@ def check_regression_fields(base: str, body: str | None, title: str) -> Result:
     hint = (
         "put one `Regression-Test: <path>::<test name>` line per fixed behavior in the pull "
         "request description; whoever merges copies them into the landing commit "
-        "(`python3 -m validation.regression_field --body-file <description> --landing-lines`)"
+        "(`python3 -m validation.regression_field --body-file <description> --landing-lines`). "
+        "Check it with `scripts/paperwork --body-file <description>`. Editing the description "
+        "does not start the lane: push afterwards (`git commit --allow-empty -m 'chore: rerun lane'`)"
     )
     name = "Regression-Test fields for fix(/perf( commits"
     if body is None:
@@ -247,12 +266,17 @@ def check_mobile_versions(base: str, merge_target: str) -> Result:
     )
 
 
-def check_tests() -> list[Result]:
+def check_tests(base: str, merge_target: str) -> list[Result]:
     start = time.monotonic()
     names = [module for module, _, _ in TEST_RULES]
     code, out = run(
         [sys.executable, "-m", "unittest", "-q", *names],
-        env={"PYTHONPATH": os.pathsep.join(filter(None, [str(ROOT / "tests" / "operations"), str(ROOT), os.environ.get("PYTHONPATH", "")]))},
+        env={
+            "PYTHONPATH": os.pathsep.join(filter(None, [str(ROOT / "tests" / "operations"), str(ROOT), os.environ.get("PYTHONPATH", "")])),
+            # Rules that compare against the merge base read it from here.
+            "PLURX_VALIDATION_BASE": base,
+            "PLURX_VALIDATION_MERGE_TARGET": merge_target,
+        },
     )
     elapsed = time.monotonic() - start
     if code == 0:
@@ -317,7 +341,11 @@ def main(argv: list[str] | None = None) -> int:
         help="branch whose release counters a client change must exceed (default: --merge-target)",
     )
     parser.add_argument("--body-file", type=Path, help="pull request description to check")
-    parser.add_argument("--body-env", action="store_true", help="read PR_BODY or the explicitly selected PR event file")
+    parser.add_argument(
+        "--body-env",
+        action="store_true",
+        help="read the description from $PR_BODY, else from the CI event payload ($GITHUB_EVENT_PATH)",
+    )
     parser.add_argument("--hook", action="store_true", help="pre-push mode: environment problems warn instead of failing")
     parser.add_argument("--list", action="store_true", help="list the checks and their fixes")
     args = parser.parse_args(argv)
@@ -342,19 +370,21 @@ def main(argv: list[str] | None = None) -> int:
         print(message, file=sys.stderr)
         return 2
 
-    body: str | None = None
-    if args.body_file:
-        body = args.body_file.read_text(encoding="utf-8")
-    elif args.body_env:
-        sys.path.insert(0, str(ROOT))
-        from validation.regression_field import description_from_environment
+    from validation import pr_event  # noqa: PLC0415
+    from validation.regression_field import description_from_environment  # noqa: PLC0415
 
-        try:
-            body = description_from_environment()
-        except (OSError, ValueError) as error:
-            print(f"paperwork: cannot read PR description: {error}", file=sys.stderr)
-            return 2
-    title = os.environ.get("PR_TITLE", "")
+    body: str | None = None
+    title = ""
+    try:
+        if args.body_file:
+            body = args.body_file.read_text(encoding="utf-8")
+        elif args.body_env:
+            body = description_from_environment(event_fallback=True)
+        if body is not None:
+            title = pr_event.title() or ""
+    except (OSError, ValueError) as error:
+        print(f"paperwork: cannot read PR description or title: {error}", file=sys.stderr)
+        return 2
 
     started = time.monotonic()
     paths = changed_paths(base)
@@ -362,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
         check_catalog(),
         check_regression_fields(base, body, title),
         check_mobile_versions(base, args.counter_target or args.merge_target),
-        *check_tests(),
+        *check_tests(base, args.merge_target),
     ]
     web = check_web(paths)
     if web is not None:

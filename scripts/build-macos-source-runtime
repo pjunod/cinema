@@ -40,16 +40,11 @@ def find_tool(name, candidates):
     return next((str(path) for path in candidates if path.is_file() and os.access(path, os.X_OK)), None)
 
 
-def ensure_rustup():
-    cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
+def ensure_homebrew():
     prefixes = [Path("/opt/homebrew"), Path("/usr/local")]
-    rustup = find_tool("rustup", [cargo_home / "bin/rustup", *(
-        prefix / "opt/rustup/bin/rustup" for prefix in prefixes)])
-    if rustup:
-        return rustup
     brew = find_tool("brew", [prefix / "bin/brew" for prefix in prefixes])
     if not brew:
-        print("source runtime: installing Homebrew for rustup (may request your administrator password)", flush=True)
+        print("source runtime: installing Homebrew (may request your administrator password)", flush=True)
         with tempfile.TemporaryDirectory(prefix="plurx-homebrew-") as work:
             installer = Path(work) / "install.sh"
             run(["/usr/bin/curl", "--fail", "--show-error", "--silent", "--location", "--proto", "=https",
@@ -58,7 +53,18 @@ def ensure_rustup():
             run(["/bin/bash", installer])
         brew = find_tool("brew", [prefix / "bin/brew" for prefix in prefixes])
         if not brew:
-            raise ValueError("Homebrew installation finished but brew cannot be found; follow its shellenv instructions and retry")
+            raise ValueError("Homebrew installation finished but its executable cannot be found")
+    return brew
+
+
+def ensure_rustup():
+    cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
+    prefixes = [Path("/opt/homebrew"), Path("/usr/local")]
+    rustup = find_tool("rustup", [cargo_home / "bin/rustup", *(
+        prefix / "opt/rustup/bin/rustup" for prefix in prefixes)])
+    if rustup:
+        return rustup
+    brew = ensure_homebrew()
     print("source runtime: installing rustup through Homebrew", flush=True)
     run([brew, "install", "rustup"])
     rustup = Path(output([brew, "--prefix", "rustup"])) / "bin/rustup"

@@ -29,6 +29,14 @@ use tokio::io::AsyncReadExt;
 mod macos_wasm;
 #[cfg(target_os = "linux")]
 mod pi_namespace;
+mod source_service;
+#[cfg(windows)]
+pub use source_service::with_probe_input_url;
+#[cfg(target_os = "macos")]
+pub use source_service::{with_probe_range_reader, ProbeRangeReader};
+#[cfg(target_os = "linux")]
+pub use source_service::{with_probe_read_permission, ProbeReadPermission, RawProbeRetirement};
+pub use source_service::{DecodeFactSourceService, ProbeCollection};
 
 /// Internal synchronous launcher dispatch; normal daemon startup stays unchanged.
 pub fn dispatch_probe_bootstrap() -> Option<std::io::Result<()>> {
@@ -148,6 +156,27 @@ const IDENTITY_DEADLINE: Duration = Duration::from_secs(10);
 const PROBE_REVALIDATION_INTERVAL: Duration = Duration::from_secs(30);
 const VERSION_DEADLINE: Duration = Duration::from_secs(5);
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
+/// Every strict parser read is metered in whole source-service quanta and a
+/// single `read()` above one quantum is refused (`E2BIG`). FFmpeg's file
+/// protocol otherwise issues one direct read per large packet (a 2160p remux
+/// keyframe exceeds 1 MiB), so cap its block size at exactly one quantum.
+const STRICT_BLOCKSIZE: &str = "1048576";
+#[cfg(target_os = "linux")]
+const _: () = assert!(source_service::MAX_READ == 1_048_576);
+
+/// The strict parser's source input: one-quantum reads, then the held fd.
+#[cfg(unix)]
+fn strict_source_input() -> [OsString; 3] {
+    [
+        OsString::from("-blocksize"),
+        OsString::from(STRICT_BLOCKSIZE),
+        OsString::from("/dev/fd/3"),
+    ]
+}
+
+fn idet_filter(input_video_stream: impl std::fmt::Display) -> String {
+    format!("movie=/dev/fd/3:format_opts=blocksize={STRICT_BLOCKSIZE}:si={input_video_stream},trim=duration={IDET_MEDIA_SECONDS},idet")
+}
 const IDET_MEDIA_SECONDS: u8 = 10;
 const MAX_CACHE_ENTRIES: usize = 256;
 const DECODE_FACT_PHASE_BUCKETS: &[(u64, &str)] = &[
@@ -571,6 +600,8 @@ enum ProbeLaunchMode {
     #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
     ProductionSupervisorDelay,
     #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+    ProductionCompletionWorkerHeld,
+    #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
     ProductionSupervisorReceiveFailure,
     #[cfg(all(test, target_os = "linux"))]
     ProductionBootstrapInterrupted,
@@ -623,6 +654,7 @@ impl ProbeLaunchMode {
             | Self::ProductionPidfdOpenFailure
             | Self::ProductionPidfdReadFailure
             | Self::ProductionSupervisorDelay
+            | Self::ProductionCompletionWorkerHeld
             | Self::ProductionSupervisorReceiveFailure
             | Self::ProductionSteadyResponseInterruptedUntilDeadline => true,
             #[cfg(all(test, target_os = "linux"))]
@@ -851,6 +883,9 @@ pub struct DecodeFactSource {
     projection: ProbeProjection,
     seed: Option<FreshFactSeed>,
     expected_frame_key: Option<CacheKey>,
+    // Collection and lazy frame tasks do not inherit Tokio task locals.
+    // Keep the actual caller's source class explicitly with this capability.
+    source_service: Option<Arc<dyn DecodeFactSourceService>>,
     /// The observation delays; see [`DecodeFactSourceHooks`]. Shared by
     /// clones, since a clone is the same source.
     hooks: Arc<dyn DecodeFactSourceHooks>,
@@ -869,8 +904,17 @@ impl DecodeFactSource {
             projection: ProbeProjection::Decoder,
             seed: None,
             expected_frame_key: None,
+            source_service: None,
             hooks: Arc::new(NoopDecodeFactSourceHooks),
         }
+    }
+
+    pub fn with_source_service(
+        mut self,
+        service: Option<Arc<dyn DecodeFactSourceService>>,
+    ) -> Self {
+        self.source_service = service;
+        self
     }
 
     #[cfg(test)]
@@ -973,13 +1017,6 @@ pub struct DecodeProbeIdentity {
     /// Content verifications `validate_current` has run (discovery's own
     /// hashes are not counted).
     content_verifications: Arc<AtomicU64>,
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "Original planning close state remains retained, but only the Linux admitted collector consumes it."
-        )
-    )]
     admitted_custody: Option<Arc<std::sync::Mutex<ProbeAdmittedCustody>>>,
 }
 
@@ -2491,62 +2528,6 @@ fn resolve_executable(bin: &str) -> Result<PathBuf, DecodeFactError> {
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))
 }
 
-#[cfg(unix)]
-fn duplicate_child_fd(source: std::os::fd::RawFd) -> std::io::Result<std::os::fd::RawFd> {
-    let duplicate = unsafe { libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 10) };
-    if duplicate == -1 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(duplicate)
-    }
-}
-
-#[cfg(unix)]
-fn assign_child_fd(
-    duplicate: std::os::fd::RawFd,
-    target: std::os::fd::RawFd,
-) -> std::io::Result<()> {
-    if unsafe { libc::dup2(duplicate, target) } == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let flags = unsafe { libc::fcntl(target, libc::F_GETFD) };
-    if flags == -1 || unsafe { libc::fcntl(target, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } == -1
-    {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn install_child_fd(source: std::os::fd::RawFd, target: std::os::fd::RawFd) -> std::io::Result<()> {
-    let duplicate = duplicate_child_fd(source)?;
-    let result = assign_child_fd(duplicate, target);
-    unsafe { libc::close(duplicate) };
-    result
-}
-
-#[cfg(unix)]
-fn install_probe_child_fds(
-    source: std::os::fd::RawFd,
-    executable: std::os::fd::RawFd,
-) -> std::io::Result<()> {
-    let source_duplicate = duplicate_child_fd(source)?;
-    let executable_duplicate = match duplicate_child_fd(executable) {
-        Ok(duplicate) => duplicate,
-        Err(error) => {
-            unsafe { libc::close(source_duplicate) };
-            return Err(error);
-        }
-    };
-    let result = assign_child_fd(source_duplicate, 3)
-        .and_then(|()| assign_child_fd(executable_duplicate, HELD_PROBE_FD));
-    unsafe {
-        libc::close(source_duplicate);
-        libc::close(executable_duplicate);
-    }
-    result
-}
-
 #[cfg(target_os = "linux")]
 const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
 #[cfg(target_os = "linux")]
@@ -2632,6 +2613,15 @@ const LINUX_AUDIT_ARCH: u32 = 0xc000_00b7;
     not(any(target_arch = "x86_64", target_arch = "aarch64"))
 ))]
 const LINUX_AUDIT_ARCH: u32 = 0;
+
+// libc 0.2.189 omits this symbol. Linux UAPI asm/unistd_64.h defines
+// x86-64 333; arm64's UAPI selects asm-generic/unistd.h, which defines 292.
+// Only these 64-bit ABIs can install the strict filter. Other architectures
+// already return Unsupported before source execution; no fallback number exists.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const LINUX_NR_IO_PGETEVENTS: libc::c_long = 333;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const LINUX_NR_IO_PGETEVENTS: libc::c_long = 292;
 
 #[cfg(target_os = "linux")]
 fn seccomp_statement(code: u16, value: u32) -> libc::sock_filter {
@@ -2740,14 +2730,50 @@ fn build_linux_probe_seccomp() -> std::io::Result<LinuxProbeSeccomp> {
         libc::SYS_recvmmsg,
         libc::SYS_sendmmsg,
         libc::SYS_pidfd_getfd,
-        libc::SYS_io_uring_setup,
-        libc::SYS_io_uring_enter,
-        libc::SYS_io_uring_register,
         libc::SYS_setsid,
         libc::SYS_setpgid,
     ] {
         filter.push(seccomp_jump(JUMP_EQUAL, syscall as u32, 0, 1));
         filter.push(seccomp_statement(RETURN_CONSTANT, DENIED));
+    }
+    for syscall in [
+        libc::SYS_readv,
+        libc::SYS_preadv,
+        libc::SYS_preadv2,
+        libc::SYS_sendfile,
+        libc::SYS_splice,
+        libc::SYS_copy_file_range,
+        libc::SYS_readahead,
+        libc::SYS_io_setup,
+        libc::SYS_io_destroy,
+        libc::SYS_io_submit,
+        libc::SYS_io_cancel,
+        libc::SYS_io_getevents,
+        LINUX_NR_IO_PGETEVENTS,
+        libc::SYS_io_uring_setup,
+        libc::SYS_io_uring_enter,
+        libc::SYS_io_uring_register,
+    ] {
+        filter.push(seccomp_jump(JUMP_EQUAL, syscall as u32, 0, 1));
+        filter.push(seccomp_statement(RETURN_CONSTANT, SECCOMP_RET_USER_NOTIF));
+    }
+    filter.extend([
+        seccomp_jump(JUMP_EQUAL, libc::SYS_mmap as u32, 0, 4),
+        seccomp_statement(LOAD_WORD_ABSOLUTE, SECCOMP_DATA_ARGS_OFFSET + 3 * 8),
+        seccomp_jump(0x45, libc::MAP_ANONYMOUS as u32, 1, 0),
+        seccomp_statement(RETURN_CONSTANT, SECCOMP_RET_USER_NOTIF),
+        seccomp_statement(LOAD_WORD_ABSOLUTE, 0),
+    ]);
+    filter.extend([
+        seccomp_jump(JUMP_EQUAL, libc::SYS_fadvise64 as u32, 0, 4),
+        seccomp_statement(LOAD_WORD_ABSOLUTE, SECCOMP_DATA_ARGS_OFFSET + 3 * 8),
+        seccomp_jump(JUMP_EQUAL, libc::POSIX_FADV_WILLNEED as u32, 0, 1),
+        seccomp_statement(RETURN_CONSTANT, SECCOMP_RET_USER_NOTIF),
+        seccomp_statement(LOAD_WORD_ABSOLUTE, 0),
+    ]);
+    for syscall in [libc::SYS_read, libc::SYS_pread64] {
+        filter.push(seccomp_jump(JUMP_EQUAL, syscall as u32, 0, 1));
+        filter.push(seccomp_statement(RETURN_CONSTANT, SECCOMP_RET_USER_NOTIF));
     }
     let descriptor_mutations = [
         (libc::SYS_close, 0_u32),
@@ -3374,12 +3400,26 @@ fn confirm_linux_probe_fork(
 }
 
 #[cfg(target_os = "linux")]
+// Keep the independently fenced exec barrier and source-service lifetime inputs
+// explicit at the existing supervisor boundary.
+#[allow(clippy::too_many_arguments)]
 fn supervise_linux_probe_execs(
     receiver: Arc<LinuxProbeReceiver>,
     stop: Arc<AtomicBool>,
     launch_mode: ProbeLaunchMode,
     launch_deadline: std::time::Instant,
+    read_permission: Option<Arc<dyn ProbeReadPermission>>,
+    read_cancel: tokio_util::sync::CancellationToken,
+    source_failure: Arc<std::sync::Mutex<Option<DecodeFactError>>>,
+    pause: Option<crate::process::bounded::SourcePauseController>,
+    paused_before: Duration,
 ) -> std::io::Result<()> {
+    let service_deadline = || {
+        launch_deadline
+            + pause.as_ref().map_or(Duration::ZERO, |control| {
+                control.paused_duration().saturating_sub(paused_before)
+            })
+    };
     let mut interrupts = launch_mode.bootstrap_interrupts();
 
     struct ReceiverCleanup {
@@ -3460,7 +3500,8 @@ fn supervise_linux_probe_execs(
     // The first notification can only originate in the single-threaded
     // post-fork pre-exec closure: parser code has not run yet and cannot race
     // its arguments. Continuing it is therefore the one safe use of the
-    // notification API; every request after the image starts is denied.
+    // notification API for execution; every later exec request is denied.
+    // Only immutable scalar read counts have a separate service decision.
     let mut allowed = LinuxSeccompResponse {
         id: first.id,
         flags: SECCOMP_USER_NOTIF_FLAG_CONTINUE,
@@ -3475,6 +3516,21 @@ fn supervise_linux_probe_execs(
         LinuxNotificationInterruptionHooks::default(),
     )?;
 
+    #[cfg(any(test, feature = "fixtures"))]
+    if launch_mode == ProbeLaunchMode::ProductionCompletionWorkerHeld {
+        COMPLETION_WORKER_STARTED.store(true, Ordering::Release);
+        let released = COMPLETION_WORKER_RELEASE
+            .0
+            .lock()
+            .expect("completion worker gate");
+        let (released, _) = COMPLETION_WORKER_RELEASE
+            .1
+            .wait_timeout_while(released, Duration::from_secs(10), |released| !*released)
+            .expect("completion worker release");
+        if !*released {
+            return Err(std::io::Error::other("completion test worker timed out"));
+        }
+    }
     while !stop.load(Ordering::Acquire) {
         let mut descriptor = libc::pollfd {
             fd: listener.as_raw_fd(),
@@ -3518,10 +3574,86 @@ fn supervise_linux_probe_execs(
             error: -libc::EPERM,
             ..LinuxSeccompResponse::default()
         };
+        if request.flags == 0 && request.data.arch == LINUX_AUDIT_ARCH {
+            let scalar = matches!(
+                request.data.nr as libc::c_long,
+                libc::SYS_read | libc::SYS_pread64
+            );
+            let unsupported_read = matches!(
+                request.data.nr as libc::c_long,
+                libc::SYS_readv
+                    | libc::SYS_preadv
+                    | libc::SYS_preadv2
+                    | libc::SYS_sendfile
+                    | libc::SYS_splice
+                    | libc::SYS_copy_file_range
+                    | libc::SYS_mmap
+                    | libc::SYS_readahead
+                    | libc::SYS_fadvise64
+                    | libc::SYS_io_setup
+                    | libc::SYS_io_destroy
+                    | libc::SYS_io_submit
+                    | libc::SYS_io_cancel
+                    | libc::SYS_io_getevents
+                    | libc::SYS_io_uring_setup
+                    | libc::SYS_io_uring_enter
+                    | libc::SYS_io_uring_register
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            let unsupported_read =
+                unsupported_read || request.data.nr as libc::c_long == LINUX_NR_IO_PGETEVENTS;
+            if scalar || unsupported_read {
+                let reserved = if unsupported_read {
+                    Err(DecodeFactError::SourceService("strict parser requested unsupported vector, file mapping or copy source access".into()))
+                } else {
+                    match &read_permission {
+                        Some(permission) => usize::try_from(request.data.args[2])
+                            .map_err(|_| {
+                                DecodeFactError::SourceService(
+                                    "strict source read count overflow".into(),
+                                )
+                            })
+                            .and_then(|count| permission.reserve(count, &read_cancel)),
+                        None => Ok(()),
+                    }
+                };
+                match reserved {
+                    Ok(())
+                        if !read_cancel.is_cancelled()
+                            && !stop.load(Ordering::Acquire)
+                            && std::time::Instant::now() < service_deadline() =>
+                    {
+                        denied.error = 0;
+                        denied.flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+                    }
+                    Ok(()) => {
+                        denied.error = -libc::ECANCELED;
+                        source_failure
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .get_or_insert(DecodeFactError::Cancelled);
+                    }
+                    Err(error) => {
+                        denied.error =
+                            if scalar && request.data.args[2] > source_service::MAX_READ as u64 {
+                                -libc::E2BIG
+                            } else if matches!(error, DecodeFactError::Cancelled) {
+                                -libc::ECANCELED
+                            } else {
+                                -libc::EPERM
+                            };
+                        source_failure
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .get_or_insert(error);
+                    }
+                }
+            }
+        }
         match answer_linux_seccomp_notification_until(
             listener.as_raw_fd(),
             &mut denied,
-            Some(launch_deadline),
+            Some(service_deadline()),
             Some(stop.as_ref()),
             &mut interrupts.steady_notification_response,
             LinuxNotificationInterruptionHooks {
@@ -3546,6 +3678,8 @@ struct LinuxProbeExecSupervisor {
     child_sender_fd: std::os::fd::RawFd,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+    read_cancel: tokio_util::sync::CancellationToken,
+    source_failure: Arc<std::sync::Mutex<Option<DecodeFactError>>>,
     #[cfg(any(test, feature = "fixtures"))]
     test_counter: Option<&'static std::sync::atomic::AtomicUsize>,
 }
@@ -3595,6 +3729,15 @@ impl LinuxProbeExecSupervisor {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let worker_receiver = Arc::clone(&receiver);
+        let read_cancel = tokio_util::sync::CancellationToken::new();
+        let worker_read_cancel = read_cancel.clone();
+        let read_permission = source_service::read_permission();
+        let source_failure = Arc::new(std::sync::Mutex::new(None));
+        let worker_source_failure = Arc::clone(&source_failure);
+        let pause = crate::process::bounded::source_pause_controller();
+        let paused_before = pause
+            .as_ref()
+            .map_or(Duration::ZERO, |control| control.paused_duration());
         let worker = std::thread::Builder::new()
             .name("plurx-probe-exec".to_owned())
             .spawn(move || {
@@ -3603,6 +3746,11 @@ impl LinuxProbeExecSupervisor {
                     worker_stop,
                     launch_mode,
                     launch_deadline,
+                    read_permission,
+                    worker_read_cancel,
+                    worker_source_failure,
+                    pause,
+                    paused_before,
                 )
             })?;
         #[cfg(any(test, feature = "fixtures"))]
@@ -3617,6 +3765,8 @@ impl LinuxProbeExecSupervisor {
             child_sender_fd,
             stop,
             worker: Some(worker),
+            read_cancel,
+            source_failure,
             #[cfg(any(test, feature = "fixtures"))]
             test_counter,
         })
@@ -3642,6 +3792,7 @@ impl LinuxProbeExecSupervisor {
     fn finish(&mut self) -> std::io::Result<()> {
         self.parent_after_spawn();
         self.stop.store(true, Ordering::Release);
+        self.read_cancel.cancel();
         let Some(worker) = self.worker.take() else {
             return Ok(());
         };
@@ -3656,6 +3807,7 @@ impl Drop for LinuxProbeExecSupervisor {
     fn drop(&mut self) {
         self.parent_after_spawn();
         self.stop.store(true, Ordering::Release);
+        self.read_cancel.cancel();
         #[cfg(any(test, feature = "fixtures"))]
         if let Some(counter) = self.test_counter.take() {
             counter.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
@@ -3704,6 +3856,16 @@ static STEADY_RESPONSE_DEADLINE_EXITS: std::sync::atomic::AtomicUsize =
 static STEADY_RESPONSE_STOP_DEADLINE_EXITS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+#[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+static COMPLETION_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+#[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+static COMPLETION_CLEANUP_STARTED: AtomicBool = AtomicBool::new(false);
+#[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+static COMPLETION_WORKER_RELEASE: std::sync::LazyLock<(
+    std::sync::Mutex<bool>,
+    std::sync::Condvar,
+)> = std::sync::LazyLock::new(|| (std::sync::Mutex::new(false), std::sync::Condvar::new()));
+
 /// The detached reap of the steady-response deadline proof waits for one
 /// permit here, so the test can observe it still holding version ownership
 /// for as long as it likes — the slow reap it stands for is unbounded — and
@@ -3717,6 +3879,9 @@ static STEADY_RESPONSE_STOP_EXITS: std::sync::atomic::AtomicUsize =
 
 #[cfg(unix)]
 struct ProbeExecutionSupervisor {
+    descriptors: Option<Arc<crate::process::source_lifetime::DescriptorManifest>>,
+    #[cfg(target_os = "linux")]
+    retirement: Option<Box<dyn RawProbeRetirement>>,
     #[cfg(target_os = "linux")]
     linux: Option<LinuxProbeExecSupervisor>,
 }
@@ -3725,6 +3890,9 @@ struct ProbeExecutionSupervisor {
 impl ProbeExecutionSupervisor {
     fn none() -> Self {
         Self {
+            descriptors: None,
+            #[cfg(target_os = "linux")]
+            retirement: None,
             #[cfg(target_os = "linux")]
             linux: None,
         }
@@ -3733,6 +3901,9 @@ impl ProbeExecutionSupervisor {
     #[cfg(target_os = "linux")]
     fn linux(supervisor: LinuxProbeExecSupervisor) -> Self {
         Self {
+            descriptors: None,
+            #[cfg(target_os = "linux")]
+            retirement: None,
             linux: Some(supervisor),
         }
     }
@@ -3744,12 +3915,32 @@ impl ProbeExecutionSupervisor {
         }
     }
 
+    // Only call after the child/namespace exit route has reaped. A supervisor
+    // Drop or an exec error cannot assert that physical reader completion.
+    fn finish_joined(&mut self) -> Result<(), DecodeFactError> {
+        // `finish` joins the worker before reporting its read/service outcome.
+        // That semantic error does not undo this caller's physical reap/join.
+        let result = self.finish();
+        #[cfg(target_os = "linux")]
+        if let Some(retirement) = self.retirement.take() {
+            retirement.joined();
+        }
+        result
+    }
+
     fn finish(&mut self) -> Result<(), DecodeFactError> {
         #[cfg(target_os = "linux")]
         if let Some(supervisor) = self.linux.as_mut() {
-            supervisor
-                .finish()
-                .map_err(|error| DecodeFactError::Read(error.to_string()))?;
+            let finished = supervisor.finish();
+            if let Some(cause) = supervisor
+                .source_failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                return Err(cause);
+            }
+            finished.map_err(|error| DecodeFactError::Read(error.to_string()))?;
         }
         Ok(())
     }
@@ -3789,16 +3980,18 @@ async fn spawn_configured_probe(
     mut command: tokio::process::Command,
     mut supervisor: ProbeExecutionSupervisor,
     work: crate::process::ChildWork,
+    pause: Option<crate::process::bounded::ChildPauseGuard>,
     #[cfg(target_os = "linux")] command_slot: Option<Arc<std::sync::Mutex<ProbeOriginalOwners>>>,
 ) -> Result<
     (
         tokio::process::Child,
         crate::process::ChildJob,
         ProbeExecutionSupervisor,
+        Option<crate::process::bounded::ChildPauseGuard>,
     ),
     DecodeFactError,
 > {
-    tokio::task::spawn_blocking(move || {
+    let (child, job, supervisor) = tokio::task::spawn_blocking(move || {
         // `configure_probe_execution` already registered the priority ahead
         // of its own exec-from-`pre_exec`; the launcher's second registration
         // lands after that closure and never runs.
@@ -3822,7 +4015,31 @@ async fn spawn_configured_probe(
                 return Err(DecodeFactError::Deadline);
             }
         }
-        let spawned = crate::process::spawn_job_custodied(&mut command, work);
+        let launch = |command: &mut tokio::process::Command| {
+            #[cfg(target_os = "linux")]
+            if let Some(retirement) = supervisor.retirement.as_ref() {
+                let mut result = None;
+                retirement.declare_spawn(&mut || {
+                    result = Some(crate::process::spawn_job_custodied(command, work));
+                });
+                return result.ok_or(DecodeFactError::CacheInvariant);
+            }
+            Ok(crate::process::spawn_job_custodied(command, work))
+        };
+        let spawned = if let Some(manifest) = supervisor.descriptors.as_ref() {
+            manifest
+                .bind(command.as_std())
+                .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
+            crate::process::source_lifetime::with_descriptors(Arc::clone(manifest), || {
+                launch(&mut command)
+            })
+        } else {
+            launch(&mut command)
+        }?;
+        // The child has its own copies. Release the parent's descriptor pins
+        // before waiting for control-socket EOF and the original worker.
+        drop(command);
+        supervisor.descriptors.take();
         supervisor.parent_after_spawn();
         match spawned {
             Ok((child, job)) => Ok((child, job, supervisor)),
@@ -3846,7 +4063,56 @@ async fn spawn_configured_probe(
         }
     })
     .await
-    .map_err(|error| DecodeFactError::Spawn(error.to_string()))?
+    .map_err(|error| DecodeFactError::Spawn(error.to_string()))??;
+    Ok((child, job, supervisor, pause))
+}
+
+#[cfg(unix)]
+async fn enlist_probe_source(
+    cancelled: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<Option<crate::process::bounded::ChildPauseGuard>, DecodeFactError> {
+    match crate::process::bounded::source_pause_controller() {
+        Some(controller) => controller
+            .enlist(&cancelled.cloned().unwrap_or_default())
+            .await
+            .map(Some)
+            .map_err(|_| DecodeFactError::Cancelled),
+        None => Ok(None),
+    }
+}
+
+fn probe_source_deadline(original: std::time::Instant) -> std::time::Instant {
+    #[cfg(target_os = "linux")]
+    {
+        source_service::deadline(original)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        original
+    }
+}
+
+#[cfg(unix)]
+async fn run_probe_process<T>(
+    pause: Option<&crate::process::bounded::ChildPauseGuard>,
+    group: Option<libc::pid_t>,
+    active_budget: Duration,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T, ()> {
+    match pause {
+        Some(pause) => {
+            let group = group
+                .and_then(|group| u32::try_from(group).ok())
+                .ok_or(())?;
+            pause
+                .run_group(group, active_budget, async { Ok(work.await) })
+                .await
+                .map_err(|_| ())
+        }
+        None => tokio::time::timeout(active_budget, work)
+            .await
+            .map_err(|_| ()),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -3955,6 +4221,45 @@ fn configure_probe_execution(
     arg0: &Path,
     arguments: &[OsString],
     class: crate::process::ChildClass,
+    stdio: crate::process::source_lifetime::StdioFacts,
+) -> Result<ProbeExecutionSupervisor, DecodeFactError> {
+    #[cfg(target_os = "linux")]
+    let retirement = if source_fd.is_some() && launch_mode.is_production() {
+        source_service::raw_retirement()?
+    } else {
+        None
+    };
+    #[allow(unused_mut)] // Linux attaches the exact retirement receipt.
+    let mut supervisor = configure_probe_execution_untracked(
+        command,
+        launch_mode,
+        launch_deadline,
+        executable_fd,
+        source_fd,
+        arg0,
+        arguments,
+        class,
+        stdio,
+    )?;
+    #[cfg(target_os = "linux")]
+    {
+        supervisor.retirement = retirement;
+    }
+    Ok(supervisor)
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn configure_probe_execution_untracked(
+    command: &mut tokio::process::Command,
+    launch_mode: ProbeLaunchMode,
+    launch_deadline: std::time::Instant,
+    executable_fd: std::os::fd::RawFd,
+    source_fd: Option<std::os::fd::RawFd>,
+    arg0: &Path,
+    arguments: &[OsString],
+    class: crate::process::ChildClass,
+    stdio: crate::process::source_lifetime::StdioFacts,
 ) -> Result<ProbeExecutionSupervisor, DecodeFactError> {
     #[cfg(target_os = "linux")]
     if command.as_std().get_program() == OsStr::new("/usr/bin/bwrap") {
@@ -3967,6 +4272,7 @@ fn configure_probe_execution(
             arguments,
             class,
             launch_deadline,
+            stdio,
         );
     }
     command.args(arguments);
@@ -4018,15 +4324,26 @@ fn configure_probe_execution(
     let supervisor_receiver_fd = production_supervisor
         .as_ref()
         .map(LinuxProbeExecSupervisor::child_receiver_fd);
+    let mut mappings = vec![(executable_fd, HELD_PROBE_FD)];
+    if let Some(source_fd) = source_fd {
+        mappings.push((source_fd, 3));
+    }
+    #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+    if let Some(export_socket) = launch_mode.export_socket_fd() {
+        mappings.push((export_socket, 5));
+    }
+    let descriptors = prepare_probe_descriptors(&mappings, stdio)?;
+    let child_descriptors = Arc::clone(&descriptors);
     // Before the closure below: it execs the probe from inside itself, so a
     // `pre_exec` registered after it (the launcher's) never runs.
     crate::process::priority::apply(command, class);
     unsafe {
         command.pre_exec(move || {
             start_probe_session()?;
-            match source_fd {
-                Some(source_fd) => install_probe_child_fds(source_fd, executable_fd)?,
-                None => install_child_fd(executable_fd, HELD_PROBE_FD)?,
+            // Inline: a later pre_exec hook cannot run after our custom exec.
+            child_descriptors.inherit_target(HELD_PROBE_FD)?;
+            if source_fd.is_some() {
+                child_descriptors.inherit_target(3)?;
             }
             if !launch_mode.is_production() {
                 return Ok(());
@@ -4044,8 +4361,8 @@ fn configure_probe_execution(
                 libc::close(receiver_fd);
                 mark_unrelated_fds_close_on_exec()?;
                 #[cfg(any(test, feature = "fixtures"))]
-                if let Some(export_socket) = launch_mode.export_socket_fd() {
-                    install_child_fd(export_socket, 5)?;
+                if launch_mode.export_socket_fd().is_some() {
+                    child_descriptors.inherit_target(5)?;
                 }
                 install_linux_filesystem_execute_denial()?;
                 let Some(seccomp) = production_seccomp.as_ref() else {
@@ -4072,9 +4389,29 @@ fn configure_probe_execution(
     }
     #[cfg(target_os = "linux")]
     if let Some(supervisor) = production_supervisor {
-        return Ok(ProbeExecutionSupervisor::linux(supervisor));
+        let mut supervisor = ProbeExecutionSupervisor::linux(supervisor);
+        supervisor.descriptors = Some(descriptors);
+        return Ok(supervisor);
     }
-    Ok(ProbeExecutionSupervisor::none())
+    let mut supervisor = ProbeExecutionSupervisor::none();
+    supervisor.descriptors = Some(descriptors);
+    Ok(supervisor)
+}
+
+#[cfg(unix)]
+fn prepare_probe_descriptors(
+    mappings: &[(std::os::fd::RawFd, i32)],
+    stdio: crate::process::source_lifetime::StdioFacts,
+) -> Result<Arc<crate::process::source_lifetime::DescriptorManifest>, DecodeFactError> {
+    use crate::process::source_lifetime::{DescriptorManifest, InheritedFd};
+    let inherited = mappings
+        .iter()
+        .map(|&(source, target)| InheritedFd::duplicate_raw(source, target))
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
+    DescriptorManifest::new(inherited, stdio, None)
+        .map(Arc::new)
+        .map_err(|error| DecodeFactError::Spawn(error.to_string()))
 }
 
 #[cfg(unix)]
@@ -4096,9 +4433,17 @@ async fn terminate_probe_session(
     // This potentially unbounded reap runs only inside an owned task. The
     // caller-facing deadline detaches that task while it retains every source
     // and admission guard needed for safe cleanup.
+    #[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+    if _launch_mode == ProbeLaunchMode::ProductionCompletionWorkerHeld {
+        COMPLETION_CLEANUP_STARTED.store(true, Ordering::Release);
+    }
     session.kill_once();
-    let _ = wait_for_probe_reap(child, _launch_mode).await;
-    let _ = supervisor.finish();
+    if wait_for_probe_reap(child, _launch_mode).await.is_ok() {
+        let _ = supervisor.finish_joined();
+    } else {
+        // An attempted wait is not a physical exit proof.
+        let _ = supervisor.finish();
+    }
 }
 
 #[cfg(unix)]
@@ -5007,13 +5352,19 @@ async fn probe_version_with_deadline_on_recording(
             &configured_path,
             &arguments,
             DECODE_FACT_VERSION_PROBE.class,
+            crate::process::source_lifetime::StdioFacts {
+                stdin: crate::process::source_lifetime::StdioMode::Null,
+                stdout: crate::process::source_lifetime::StdioMode::Piped,
+                stderr: crate::process::source_lifetime::StdioMode::Null,
+            },
         )?;
         #[cfg(target_os = "linux")]
         let command_slot = register_probe_command_slot(_admitted_custody.as_ref())?;
-        let (child, child_job, supervisor) = spawn_configured_probe(
+        let (child, child_job, supervisor, pause_guard) = spawn_configured_probe(
             command,
             supervisor,
             DECODE_FACT_VERSION_PROBE,
+            None,
             #[cfg(target_os = "linux")]
             command_slot.as_ref().map(Arc::clone),
         )
@@ -5086,12 +5437,13 @@ async fn probe_version_with_deadline_on_recording(
             command_slot.as_ref().map(Arc::clone),
             |owners, pipe| owners.stdout = Some(pipe),
         );
-        let remaining = launch_deadline.saturating_duration_since(std::time::Instant::now());
+        let remaining = probe_source_deadline(launch_deadline)
+            .saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
             terminate_probe_session(&mut child, &session, &mut supervisor, launch_mode).await;
             return Err(DecodeFactError::Deadline);
         }
-        let outcome = tokio::time::timeout(remaining, async {
+        let outcome = run_probe_process(pause_guard.as_ref(), process_group, remaining, async {
             #[cfg(target_os = "linux")]
             let (stdout, exited) = tokio::join!(
                 read_bounded(&mut stdout_owner.reader, MAX_VERSION_BYTES),
@@ -5137,7 +5489,11 @@ async fn probe_version_with_deadline_on_recording(
                 return Err(DecodeFactError::Deadline);
             }
         };
-        let supervisor_result = supervisor.finish();
+        let supervisor_result = if status.is_ok() && exit_error.is_none() {
+            supervisor.finish_joined()
+        } else {
+            supervisor.finish()
+        };
         if let Some(error) = exit_error {
             return Err(error);
         }
@@ -5750,10 +6106,39 @@ impl DecodeFactCache {
         admitted_original_collector: bool,
         admitted_document_close_operation_id: Option<uuid::Uuid>,
     ) -> Result<(CollectedProbe, DecodeFactLookupResult), DecodeFactError> {
+        // Capture every held source Arc before identity/blocking/collector
+        // work can detach. The live owner holds the final original capability.
+        if let Some(service) = &source.source_service {
+            service.register_source(Arc::clone(&source.handle))?;
+        }
         let started = std::time::Instant::now();
+        #[cfg(target_os = "linux")]
+        let inherited_control = crate::process::bounded::source_pause_controller();
+        #[cfg(target_os = "linux")]
+        let session_inherited = inherited_control.is_some();
+        #[cfg(target_os = "linux")]
+        let session_control = inherited_control.or_else(|| {
+            source.source_service.is_some().then(|| {
+                crate::process::bounded::SourcePauseController::new(Duration::from_secs(
+                    18 * 60 * 60,
+                ))
+            })
+        });
+        #[cfg(not(target_os = "linux"))]
+        let session_control: Option<crate::process::bounded::SourcePauseController> = None;
+        let paused_before = session_control
+            .as_ref()
+            .map_or(Duration::ZERO, |control| control.paused_duration());
+        let active_elapsed = || {
+            started.elapsed().saturating_sub(
+                session_control.as_ref().map_or(Duration::ZERO, |control| {
+                    control.paused_duration().saturating_sub(paused_before)
+                }),
+            )
+        };
         let remaining = budget
             .min(probe.launch_mode.probe_deadline())
-            .saturating_sub(started.elapsed());
+            .saturating_sub(active_elapsed());
         if remaining.is_zero() {
             return Err(DecodeFactError::Deadline);
         }
@@ -5778,7 +6163,7 @@ impl DecodeFactCache {
         let gate = gate_result?;
         let remaining = budget
             .min(probe.launch_mode.probe_deadline())
-            .saturating_sub(started.elapsed());
+            .saturating_sub(active_elapsed());
         let phase_started = std::time::Instant::now();
         let validation = probe.validate_current(remaining, cancelled).await;
         let identity_elapsed = phase_started.elapsed();
@@ -5790,7 +6175,7 @@ impl DecodeFactCache {
         validation?;
         let remaining = budget
             .min(probe.launch_mode.probe_deadline())
-            .saturating_sub(started.elapsed());
+            .saturating_sub(active_elapsed());
         let phase_started = std::time::Instant::now();
         let observation = source_observation_with_probe_gate(
             Arc::clone(&source.handle),
@@ -5864,7 +6249,7 @@ impl DecodeFactCache {
         }
         let remaining = budget
             .min(probe.launch_mode.probe_deadline())
-            .saturating_sub(started.elapsed());
+            .saturating_sub(active_elapsed());
         if remaining.is_zero() {
             return Err(DecodeFactError::Deadline);
         }
@@ -5882,20 +6267,29 @@ impl DecodeFactCache {
         };
         let remaining = budget
             .min(probe.launch_mode.probe_deadline())
-            .saturating_sub(started.elapsed());
+            .saturating_sub(active_elapsed());
         if remaining.is_zero() {
             return Err(DecodeFactError::Deadline);
         }
         let owned_probe = probe.clone();
         let owned_catalog = catalog.cloned();
-        let owned_cancelled = cancelled.cloned();
+        let operation_cancel = cancelled
+            .map(tokio_util::sync::CancellationToken::child_token)
+            .unwrap_or_default();
+        let owned_cancelled = Some(operation_cancel.clone());
+        #[cfg(target_os = "linux")]
+        let owned_control = session_control.clone();
         let owned_metrics = Arc::clone(&self.metrics);
+        let must_join_source = source
+            .source_service
+            .as_ref()
+            .is_some_and(|service| service.must_join());
         // The task owns both the source descriptor and the singleflight
         // permit. Dropping or aborting this waiter cannot abandon a live child
         // or restore the shared source offset before kill/reap completes.
         let collector = async move {
             let phase_started = std::time::Instant::now();
-            let result = collect(
+            let collecting = collect(
                 &owned_probe,
                 DecodeFactCollectionSource {
                     handle: Arc::clone(&source.handle),
@@ -5911,25 +6305,84 @@ impl DecodeFactCache {
                 owned_cancelled.as_ref(),
                 admitted_original_collector,
                 admitted_document_close_operation_id,
-            )
-            .await;
-            owned_metrics.record_phase(
-                DecodeFactPhase::Collection,
-                &result.as_ref().map(|_| ()).map_err(Clone::clone),
-                phase_started.elapsed(),
             );
+            let result = if let Some(service) = &source.source_service {
+                let mut output = None;
+                let collecting = Box::pin(collecting);
+                let work = Box::pin(async {
+                    output = Some(collecting.await?);
+                    Ok(())
+                });
+                let service_collect = service.collect(
+                    Arc::clone(&source.handle),
+                    #[cfg(target_os = "linux")]
+                    owned_control
+                        .clone()
+                        .map(|control| (control, session_inherited)),
+                    owned_cancelled.clone().unwrap_or_default(),
+                    work,
+                );
+                #[cfg(target_os = "linux")]
+                let result =
+                    source_service::with_deadline_clock(owned_control.as_ref(), service_collect)
+                        .await;
+                #[cfg(not(target_os = "linux"))]
+                let result = service_collect.await;
+                result.and_then(|()| output.ok_or(DecodeFactError::CacheInvariant))
+            } else {
+                #[cfg(target_os = "linux")]
+                if let Some(control) = owned_control.as_ref() {
+                    source_service::with_deadline_clock(
+                        Some(control),
+                        crate::process::bounded::pausable(control.clone(), collecting),
+                    )
+                    .await
+                } else {
+                    collecting.await
+                }
+                #[cfg(not(target_os = "linux"))]
+                collecting.await
+            };
+            #[cfg(target_os = "linux")]
+            let paced = owned_control.as_ref().map_or(Duration::ZERO, |control| {
+                control.paused_duration().saturating_sub(paused_before)
+            });
+            #[cfg(not(target_os = "linux"))]
+            let paced = Duration::ZERO;
+            if !paced.is_zero() {
+                tracing::debug!(
+                    timing_class = "source_paced",
+                    source_requested_accounting = true,
+                    verified_pause_ms = paced.as_millis(),
+                    "strict probe collection timing excluded from unconstrained supply evidence"
+                );
+            } else {
+                owned_metrics.record_phase(
+                    DecodeFactPhase::Collection,
+                    &result.as_ref().map(|_| ()).map_err(Clone::clone),
+                    phase_started.elapsed(),
+                );
+            }
             (result, gate, source)
         };
         let collection_result = if admitted_original_collector {
             Ok(collector.await)
         } else {
-            await_owned_collection(tokio::spawn(collector), remaining, cancelled).await
+            await_source_collection(
+                tokio::spawn(Box::pin(collector)),
+                remaining,
+                cancelled,
+                &operation_cancel,
+                session_control.as_ref(),
+                must_join_source,
+            )
+            .await
         };
         let (collected, gate, source) = collection_result?;
         let mut collected = collected?;
         let remaining = budget
             .min(probe.launch_mode.probe_deadline())
-            .saturating_sub(started.elapsed());
+            .saturating_sub(active_elapsed());
         let phase_started = std::time::Instant::now();
         let validation = probe.validate_current(remaining, cancelled).await;
         self.metrics.record_phase(
@@ -5940,7 +6393,7 @@ impl DecodeFactCache {
         validation?;
         let remaining = budget
             .min(probe.launch_mode.probe_deadline())
-            .saturating_sub(started.elapsed());
+            .saturating_sub(active_elapsed());
         let phase_started = std::time::Instant::now();
         let observation = source_observation_with_probe_gate(
             Arc::clone(&source.handle),
@@ -6022,6 +6475,7 @@ impl DecodeFactCache {
 /// Wait for caller-visible completion without abandoning cleanup ownership.
 /// Dropping a timed-out join handle detaches the task; the task continues to
 /// own the child, source descriptor, offset restoration, and both permits.
+#[cfg(test)]
 async fn await_owned_collection<T>(
     mut collection: tokio::task::JoinHandle<T>,
     budget: Duration,
@@ -6043,6 +6497,36 @@ where
     }
 }
 
+async fn await_source_collection<T>(
+    mut collection: tokio::task::JoinHandle<T>,
+    budget: Duration,
+    cancelled: Option<&tokio_util::sync::CancellationToken>,
+    operation_cancel: &tokio_util::sync::CancellationToken,
+    control: Option<&crate::process::bounded::SourcePauseController>,
+    must_join: bool,
+) -> Result<T, DecodeFactError>
+where
+    T: Send + 'static,
+{
+    let deadline = async {
+        match control {
+            Some(control) => control.wait_active_budget(budget).await,
+            None => tokio::time::sleep(budget).await,
+        }
+    };
+    let interrupted = tokio::select! {
+        biased;
+        _ = wait_for_cancellation(cancelled) => DecodeFactError::Cancelled,
+        _ = deadline => DecodeFactError::Deadline,
+        result = &mut collection => return result.map_err(|error| DecodeFactError::Read(error.to_string())),
+    };
+    operation_cancel.cancel();
+    if must_join {
+        let _ = collection.await;
+    }
+    Err(interrupted)
+}
+
 async fn wait_for_cancellation(cancelled: Option<&tokio_util::sync::CancellationToken>) {
     match cancelled {
         Some(cancelled) => cancelled.cancelled().await,
@@ -6056,6 +6540,7 @@ pub enum DecodeFactError {
     ProbeChanged,
     SourceMetadata(String),
     SourceChanged,
+    SourceService(String),
     Spawn(String),
     MissingPipe,
     Deadline,
@@ -6084,7 +6569,7 @@ impl DecodeFactError {
             | Self::Failed(_, _)
             | Self::InvalidJson(_)
             | Self::InvalidFacts(_) => DecodePlanFallbackReason::ProbeFailed,
-            Self::ProbeIdentity(_) | Self::SourceMetadata(_) => {
+            Self::ProbeIdentity(_) | Self::SourceMetadata(_) | Self::SourceService(_) => {
                 DecodePlanFallbackReason::IdentityIo
             }
             Self::CacheInvariant => DecodePlanFallbackReason::Invariant,
@@ -6104,6 +6589,9 @@ impl std::fmt::Display for DecodeFactError {
             }
             Self::SourceChanged => {
                 formatter.write_str("bound source changed during decoder probing")
+            }
+            Self::SourceService(reason) => {
+                write!(formatter, "bound source read service unavailable: {reason}")
             }
             Self::Spawn(error) => write!(formatter, "starting bound FFprobe: {error}"),
             Self::MissingPipe => formatter.write_str("bound FFprobe pipe was unavailable"),
@@ -6290,7 +6778,9 @@ where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut retained = Vec::with_capacity(limit.min(8 * 1024));
-    let mut scratch = [0_u8; 8 * 1024];
+    // Both pipe readers remain live across awaits in the probe and idet
+    // supervisors. Keep their buffers out of those nested futures.
+    let mut scratch = vec![0_u8; 8 * 1024];
     let mut overflow = false;
     loop {
         let count = reader
@@ -6366,30 +6856,42 @@ async fn run_macos_parser(
     let parser = snapshot.parser.as_ref().cloned().ok_or_else(|| {
         DecodeFactError::ProbeIdentity("packaged source parser was not compiled".into())
     })?;
+    let read_cancel = tokio_util::sync::CancellationToken::new();
+    let range_reader = if source.is_some() {
+        source_service::range_reader().map(|reader| (reader, read_cancel.clone()))
+    } else {
+        None
+    };
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker_stop = Arc::clone(&stop);
     let mut worker = tokio::task::spawn_blocking(move || {
-        parser.run(
+        parser.run_with_reader(
             source,
             args,
             (stdout_limit, MAX_PROBE_STDERR_BYTES),
             deadline,
             worker_stop,
+            range_reader,
         )
     });
     let result = tokio::select! {
         biased;
         _ = wait_for_cancellation(cancelled) => Err(DecodeFactError::Cancelled),
         _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => Err(DecodeFactError::Deadline),
-        result = &mut worker => return result.map_err(|e| DecodeFactError::Read(e.to_string()))?
-            .map_err(|reason| if reason == "parser deadline" { DecodeFactError::Deadline }
-                else if reason == "parser cancelled" { DecodeFactError::Cancelled }
-                else if reason == "parser output exceeds bound" { DecodeFactError::OversizedOutput }
-                else { DecodeFactError::Read(reason) }),
+        result = &mut worker => {
+            let result = result.map_err(|e| DecodeFactError::Read(e.to_string())).and_then(|result| result
+                .map_err(|reason| if reason == "parser deadline" { DecodeFactError::Deadline }
+                    else if reason == "parser cancelled" { DecodeFactError::Cancelled }
+                    else if reason == "parser output exceeds bound" { DecodeFactError::OversizedOutput }
+                    else if reason.starts_with("source service:") { DecodeFactError::SourceService(reason) }
+                    else { DecodeFactError::Read(reason) }));
+            return result;
+        },
     };
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    // A filesystem syscall can settle after the caller's deadline. The owned
-    // collection task still holds source/admission guards until this join.
+    read_cancel.cancel();
+    // A filesystem syscall can settle after the caller's deadline. Retain
+    // the actual source bridge and admission until host read and parser join.
     let _ = worker.await;
     result
 }
@@ -6403,8 +6905,7 @@ async fn collect_idet_verdict(
     cancelled: Option<&tokio_util::sync::CancellationToken>,
     work: crate::process::ChildWork,
 ) -> Result<InterlaceVerdict, DecodeFactError> {
-    let filter =
-        format!("movie=/dev/fd/3:si={input_video_stream},trim=duration={IDET_MEDIA_SECONDS},idet");
+    let filter = idet_filter(input_video_stream);
     let arguments = vec![
         OsString::from("-hide_banner"),
         OsString::from("-v"),
@@ -6483,20 +6984,23 @@ async fn collect_refinement_output(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     check_admitted_continuous_deadline(probe.admitted_custody.as_ref())?;
+    let pause_guard = enlist_probe_source(cancelled).await?;
     let supervisor = configure_probe_execution(
         &mut command,
         probe.launch_mode,
-        launch_deadline,
+        probe_source_deadline(launch_deadline),
         executable_fd,
         Some(source_fd),
         probe.executable(),
         &arguments,
         work.class,
+        crate::process::source_lifetime::StdioFacts::CAPTURED,
     )?;
-    let (mut child, _child_job, mut supervisor) = spawn_configured_probe(
+    let (mut child, _child_job, mut supervisor, pause_guard) = spawn_configured_probe(
         command,
         supervisor,
         work,
+        pause_guard,
         #[cfg(target_os = "linux")]
         None,
     )
@@ -6529,7 +7033,8 @@ async fn collect_refinement_output(
             return Err(DecodeFactError::MissingPipe);
         }
     };
-    let remaining = launch_deadline.saturating_duration_since(std::time::Instant::now());
+    let remaining =
+        probe_source_deadline(launch_deadline).saturating_duration_since(std::time::Instant::now());
     if remaining.is_zero() {
         terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
         return Err(DecodeFactError::Deadline);
@@ -6540,7 +7045,7 @@ async fn collect_refinement_output(
             terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
             return Err(DecodeFactError::Cancelled);
         }
-        outcome = tokio::time::timeout(remaining, async {
+        outcome = run_probe_process(pause_guard.as_ref(), process_group, remaining, async {
             #[cfg(target_os = "linux")]
             let (stdout, stderr, exited) = tokio::join!(
                 read_bounded(stdout, MAX_PROBE_STDOUT_BYTES),
@@ -6577,7 +7082,11 @@ async fn collect_refinement_output(
             return Err(DecodeFactError::Deadline);
         }
     };
-    let supervisor_result = supervisor.finish();
+    let supervisor_result = if status.is_ok() && exit_error.is_none() {
+        supervisor.finish_joined()
+    } else {
+        supervisor.finish()
+    };
     if let Some(error) = exit_error {
         return Err(error);
     }
@@ -6617,10 +7126,10 @@ async fn refine_scan_type(
             "-show_data",
             "-of",
             "json",
-            "/dev/fd/3",
         ]
         .into_iter()
         .map(OsString::from)
+        .chain(strict_source_input())
         .collect();
         match collect_refinement_output(probe, source_fd, arguments, deadline, cancelled, work)
             .await
@@ -6655,12 +7164,55 @@ async fn refine_scan_type(
     Ok(facts)
 }
 
-#[cfg(unix)]
 #[expect(
     clippy::too_many_arguments,
     reason = "The original source and admitted close binding stay in the same measured collector frame; do not add an uncharged request allocation."
 )]
 async fn collect(
+    probe: &DecodeProbeIdentity,
+    source: DecodeFactCollectionSource,
+    catalog: Option<&DecodeCatalogMetadata>,
+    selected_stream: ProbeStreamSelection,
+    budget: Duration,
+    cancelled: Option<&tokio_util::sync::CancellationToken>,
+    admitted_original_collector: bool,
+    admitted_document_close_operation_id: Option<uuid::Uuid>,
+) -> Result<CollectedProbe, DecodeFactError> {
+    #[cfg(unix)]
+    {
+        collect_platform(
+            probe,
+            source,
+            catalog,
+            selected_stream,
+            budget,
+            cancelled,
+            admitted_original_collector,
+            admitted_document_close_operation_id,
+        )
+        .await
+    }
+    #[cfg(windows)]
+    {
+        let input_url = source_service::windows_input_url();
+        collect_platform(
+            probe,
+            source,
+            catalog,
+            selected_stream,
+            budget,
+            cancelled,
+            admitted_original_collector,
+            admitted_document_close_operation_id,
+            input_url.as_deref(),
+        )
+        .await
+    }
+}
+
+#[cfg(unix)]
+#[expect(clippy::too_many_arguments)]
+async fn collect_platform(
     probe: &DecodeProbeIdentity,
     source: DecodeFactCollectionSource,
     catalog: Option<&DecodeCatalogMetadata>,
@@ -6742,7 +7294,7 @@ async fn collect(
     #[cfg(target_os = "macos")]
     if probe.launch_mode.is_production() {
         let mut args = projection.arguments();
-        args.push("/dev/fd/3".into());
+        args.extend(strict_source_input().map(|arg| arg.into_string().expect("ASCII argument")));
         let output = run_macos_parser(
             &probe.executable_snapshot,
             Some(duplicate_macos_source(source_fd)?),
@@ -6785,7 +7337,7 @@ async fn collect(
         .into_iter()
         .map(OsString::from)
         .collect::<Vec<_>>();
-    arguments.push(OsString::from("/dev/fd/3"));
+    arguments.extend(strict_source_input());
     let mut command = tokio::process::Command::new(probe_launch_path(
         &probe.executable_snapshot,
         probe.launch_mode,
@@ -6799,22 +7351,25 @@ async fn collect(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     check_admitted_continuous_deadline(probe.admitted_custody.as_ref())?;
+    let pause_guard = enlist_probe_source(cancelled).await?;
     let supervisor = configure_probe_execution(
         &mut command,
         probe.launch_mode,
-        launch_deadline,
+        probe_source_deadline(launch_deadline),
         executable_fd,
         Some(source_fd),
         probe.executable(),
         &arguments,
         work.class,
+        crate::process::source_lifetime::StdioFacts::CAPTURED,
     )?;
     #[cfg(target_os = "linux")]
     let command_slot = register_probe_command_slot(probe.admitted_custody.as_ref())?;
-    let (child, child_job, supervisor) = spawn_configured_probe(
+    let (child, child_job, supervisor, pause_guard) = spawn_configured_probe(
         command,
         supervisor,
         work,
+        pause_guard,
         #[cfg(target_os = "linux")]
         command_slot.as_ref().map(Arc::clone),
     )
@@ -6900,7 +7455,8 @@ async fn collect(
         command_slot.as_ref().map(Arc::clone),
         |owners, pipe| owners.stderr = Some(pipe),
     );
-    let remaining = launch_deadline.saturating_duration_since(std::time::Instant::now());
+    let remaining =
+        probe_source_deadline(launch_deadline).saturating_duration_since(std::time::Instant::now());
     if remaining.is_zero() {
         terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
         return Err(DecodeFactError::Deadline);
@@ -6916,7 +7472,7 @@ async fn collect(
             ).await;
             return Err(DecodeFactError::Cancelled);
         }
-        outcome = tokio::time::timeout(remaining, async {
+        outcome = run_probe_process(pause_guard.as_ref(), process_group, remaining, async {
             #[cfg(target_os = "linux")]
             let (stdout, stderr, exited) = tokio::join!(
                 read_bounded(&mut stdout_owner.reader, projection.output_limit()),
@@ -6966,7 +7522,11 @@ async fn collect(
     };
     #[cfg(not(target_os = "linux"))]
     let _ = session_closed;
-    let supervisor_result = supervisor.finish();
+    let supervisor_result = if status.is_ok() && exit_error.is_none() {
+        supervisor.finish_joined()
+    } else {
+        supervisor.finish()
+    };
     if let Some(error) = exit_error {
         return Err(error);
     }
@@ -7182,7 +7742,7 @@ pub fn first_playable_video_index(json: &serde_json::Value) -> Option<u32> {
 }
 
 #[cfg(windows)]
-async fn collect(
+async fn collect_platform(
     probe: &DecodeProbeIdentity,
     source: DecodeFactCollectionSource,
     catalog: Option<&DecodeCatalogMetadata>,
@@ -7191,6 +7751,7 @@ async fn collect(
     cancelled: Option<&tokio_util::sync::CancellationToken>,
     _admitted_original_collector: bool,
     _admitted_document_close_operation_id: Option<uuid::Uuid>,
+    input_url: Option<&str>,
 ) -> Result<CollectedProbe, DecodeFactError> {
     let DecodeFactCollectionSource {
         handle,
@@ -7222,7 +7783,11 @@ async fn collect(
         tokio::process::Command::new(snapshot_execution_path(&probe.executable_snapshot));
     command
         .args(arguments)
-        .arg(&source_path)
+        .arg(
+            input_url
+                .map(std::ffi::OsStr::new)
+                .unwrap_or(source_path.as_os_str()),
+        )
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -7231,7 +7796,8 @@ async fn collect(
         .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
     let stdout = child.stdout.take().ok_or(DecodeFactError::MissingPipe)?;
     let stderr = child.stderr.take().ok_or(DecodeFactError::MissingPipe)?;
-    let remaining = launch_deadline.saturating_duration_since(std::time::Instant::now());
+    let remaining =
+        probe_source_deadline(launch_deadline).saturating_duration_since(std::time::Instant::now());
     if remaining.is_zero() {
         terminate_windows_probe(&mut child).await;
         return Err(DecodeFactError::Deadline);
@@ -7258,14 +7824,30 @@ async fn collect(
         }
     };
     drop(offset_permit);
-    let stdout = stdout?;
+    let mut stdout = stdout?;
     let stderr = stderr?;
+    if input_url.is_some() {
+        if let Ok(mut document) = serde_json::from_slice::<serde_json::Value>(&stdout.0) {
+            if let Some(format) = document
+                .get_mut("format")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                format.insert(
+                    "filename".into(),
+                    serde_json::Value::String(source_path.to_string_lossy().into_owned()),
+                );
+            }
+            stdout.0 = serde_json::to_vec(&document)
+                .map_err(|error| DecodeFactError::InvalidJson(error.to_string()))?;
+        }
+    }
     let status = status.map_err(|error| DecodeFactError::Read(error.to_string()))?;
     if stdout.1 || stderr.1 {
         return Err(DecodeFactError::OversizedOutput);
     }
     if !status.success() {
-        let reason = String::from_utf8_lossy(&stderr.0)
+        let safe_stderr = crate::scratch_put::redact(&String::from_utf8_lossy(&stderr.0));
+        let reason = safe_stderr
             .lines()
             .map(str::trim)
             .find(|line| !line.is_empty())
@@ -7299,6 +7881,10 @@ async fn terminate_windows_probe(child: &mut tokio::process::Child) {
     }
     let _ = child.wait().await;
 }
+
+#[cfg(all(any(test, feature = "fixtures"), target_os = "linux"))]
+#[doc(hidden)]
+pub mod fixtures;
 
 #[cfg(test)]
 mod tests;

@@ -707,6 +707,9 @@ impl RollingControlOutcome {
 impl crate::transcode::SessionInfo {
     pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
         let crate::transcode::SessionInfo {
+            dolby_vision_refit,
+            dv_refit_digest,
+            dv_refit_identity_reason,
             vod_observation,
             id,
             presentation: _,
@@ -804,6 +807,20 @@ impl crate::transcode::SessionInfo {
         }
         let mut bytes = add(id.capacity(), item_title.capacity())?;
         bytes = add(bytes, user_name.capacity())?;
+        bytes = add(
+            bytes,
+            dolby_vision_refit
+                .as_ref()
+                .and_then(|report| report.reason.as_ref())
+                .map_or(0, String::capacity),
+        )?;
+        bytes = add(bytes, dv_refit_digest.as_ref().map_or(0, String::capacity))?;
+        bytes = add(
+            bytes,
+            dv_refit_identity_reason
+                .as_ref()
+                .map_or(0, String::capacity),
+        )?;
         add(
             bytes,
             producer_control.as_ref().map_or(

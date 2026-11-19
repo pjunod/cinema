@@ -374,6 +374,17 @@ class OriginalScopeEvidenceCase(unittest.TestCase):
 
 
 class NativeAppleEvidenceCase(unittest.TestCase):
+
+    def test_invocation_cannot_borrow_another_simulators_success(self):
+        from validation import retained_apple_job as apple
+
+        text = ("Command line invocation:\n    xcodebuild phone\n** TEST EXECUTE FAILED **\n"
+                "Command line invocation:\n    xcodebuild tablet\n** TEST EXECUTE SUCCEEDED **\n")
+        self.assertIn('SUCCEEDED', apple.invocation_block(text, 'xcodebuild tablet'))
+        for command in ('xcodebuild phone', 'xcodebuild -only-testing:a'):
+            with self.subTest(command=command), self.assertRaises(receipts.ReceiptError):
+                apple.invocation_block(text, command)
+
     def test_native_namespaces_preserve_methods_and_refuse_collisions_and_other_lanes(self):
         template = "Test Case '-[{}.ExampleTests testA]' passed (0.1 seconds).\n"
         for module in ('ReceiptTests', 'plurx_iOSTests', 'plurx_tvOSTests'):

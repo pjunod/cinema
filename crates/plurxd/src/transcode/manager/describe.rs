@@ -1,6 +1,27 @@
 use super::*;
 
 impl TranscodeManager {
+    /// Facts from the exact primed attachment, fenced for their caller's
+    /// synchronous projection. A durable response is not fresh processing
+    /// authority; the guard keeps these owner-local facts bound to the
+    /// requested preparation until that projection finishes.
+    /// No release-transition lock may be held by the caller.
+    pub(crate) async fn prepared_hls_facts(
+        &self,
+        session_id: &str,
+        incarnation_id: &str,
+    ) -> Option<(
+        crate::vodserve::VodHlsFacts,
+        tokio::sync::OwnedMutexGuard<()>,
+    )> {
+        let facts = self.vod.hls_facts(session_id).await?;
+        let guard = self
+            .vod
+            .lock_preparation_owner(session_id, &facts.response_owner, incarnation_id)
+            .await?;
+        Some((facts, guard))
+    }
+
     pub(crate) async fn dv_effective_report(
         &self,
         session_id: &str,
@@ -134,7 +155,17 @@ impl TranscodeManager {
     /// The two switches are read in one statement: the `||` they replace read
     /// the second only when the first was off, which is the common case, so
     /// one read is never more than it cost and usually one fewer.
-    pub(crate) async fn cluster_playlist_is_typeless(&self) -> bool {
+    ///
+    /// The create answers it from its plan (D3b), which carries both keys.
+    pub(crate) async fn cluster_playlist_is_typeless(
+        &self,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
+    ) -> bool {
+        let on = |value: Option<&str>| value.is_some_and(|value| value.trim() == "1");
+        if let Some(plan) = plan {
+            return on(plan.setting(keys::HLS_TYPELESS_SLIDING))
+                || on(plan.setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED));
+        }
         let settings = self
             .store
             .get_settings(&[
@@ -143,8 +174,8 @@ impl TranscodeManager {
             ])
             .await
             .unwrap_or_default();
-        let on = |key: &str| settings.get(key).is_some_and(|value| value.trim() == "1");
-        on(keys::HLS_TYPELESS_SLIDING) || on(keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
+        let get = |key: &str| settings.get(key).map(String::as_str);
+        on(get(keys::HLS_TYPELESS_SLIDING)) || on(get(keys::CLUSTER_SESSION_TAKEOVER_ENABLED))
     }
 
     /// Hardware slots in use, and the cap. The pair is the diagnostic: "2"
@@ -175,6 +206,22 @@ impl TranscodeManager {
     pub async fn software_budget(&self) -> usize {
         self.num_setting(keys::SW_POOL_THREADS, crate::admission::software_budget())
             .await
+    }
+
+    /// [`Self::software_budget`] from the create's plan (D3b), which carries
+    /// [`keys::SW_POOL_THREADS`]; `None` reads it, as before.
+    pub(crate) async fn software_budget_planned(
+        &self,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
+    ) -> usize {
+        match plan {
+            Some(plan) => Self::num_from(
+                &plan.snapshot.settings,
+                keys::SW_POOL_THREADS,
+                crate::admission::software_budget(),
+            ),
+            None => self.software_budget().await,
+        }
     }
 
     /// The encoder this node's capabilities resolve `prefer` (the stored
@@ -610,9 +657,22 @@ impl TranscodeManager {
         target_height: i64,
         subtitle_burn: bool,
     ) -> Result<EffectiveRateControl, String> {
-        let encoder = self
-            .encoder_for_file(file, crate::process_control::ChildClass::Background)
-            .await?;
+        // This captures queued package configuration; it is not an actual
+        // source-reading operation. The durable package owner proves pixels
+        // when its cache-miss worker starts.
+        let preference = self
+            .store
+            .get_setting(keys::HWACCEL)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let encoder = if Self::needs_dovi_reshape(file)? {
+            self.dovi_reshape_encoder_advisory_with_preference(file, &preference)
+                .await
+        } else {
+            self.encoder_for_preference(&preference)
+        };
         let baseline = self.effective_rate_control(encoder);
         if subtitle_burn {
             return Ok(baseline);

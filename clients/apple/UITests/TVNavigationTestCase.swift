@@ -105,7 +105,14 @@ class TVNavigationTestCase: XCTestCase {
     /// would defeat a later user choice, so setup uses the ordinary menu.
     func establishPresentation(_ presentation: String, in app: XCUIApplication) {
         let view = app.buttons["library:view"]
-        reachForSetup(view, in: app, limit: 8)
+        let focusedResult = app.scrollViews["library-results"].descendants(matching: .any)
+            .matching(NSPredicate(format: "hasFocus == true")).firstMatch
+        if focusedResult.exists {
+            // Library Back returns from a focused result to the toolbar.
+            remote.press(.menu)
+        } else {
+            reachForSetup(view, in: app, limit: 8)
+        }
         assertFocus(view, in: app, context: "Presentation setup opener")
         remote.press(.select)
         let desired = app.buttons["choice:" + presentation]
@@ -149,6 +156,7 @@ class TVNavigationTestCase: XCTestCase {
         let targetIsTab = app.tabBars.buttons.matching(
             NSPredicate(format: "identifier == %@ AND label == %@", target.identifier, target.label)
         ).firstMatch.exists
+        var lastSideways: CGRect?
         for _ in 0..<limit {
             guard target.exists else { break }
             if hasNativeFocus(target, in: app) { return }
@@ -171,13 +179,22 @@ class TVNavigationTestCase: XCTestCase {
             if targetIsRail && !sourceIsRail && source.minX >= destination.maxX {
                 remote.press(.left); continue
             }
+            // A sideways press that left focus where it was (the end of a
+            // row under a right-aligned header) falls back to the vertical move.
+            if let stalled = lastSideways, stalled == source,
+               destination.maxY <= source.minY || destination.minY >= source.maxY {
+                lastSideways = nil
+                remote.press(destination.midY > source.midY ? .down : .up)
+                continue
+            }
+            lastSideways = nil
             if abs(destination.midX - source.midX) < min(destination.width, source.width) / 2
                 && abs(destination.midY - source.midY) > min(destination.height, source.height) / 2 {
                 remote.press(destination.midY > source.midY ? .down : .up)
             }
             else if destination.minY >= source.maxY { remote.press(.down) }
-            else if destination.maxX <= source.minX { remote.press(.left) }
-            else if destination.minX >= source.maxX { remote.press(.right) }
+            else if destination.maxX <= source.minX { lastSideways = source; remote.press(.left) }
+            else if destination.minX >= source.maxX { lastSideways = source; remote.press(.right) }
             else if destination.maxY <= source.minY { remote.press(.up) }
             else { remote.press(destination.midX > source.midX ? .right : .left) }
         }

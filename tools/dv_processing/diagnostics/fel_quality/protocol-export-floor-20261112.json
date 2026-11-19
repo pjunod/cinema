@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "protocol-export-floor-20261112",
+  "status": "Fixed before any output. No encode.",
+  "fixtures": [
+    "michael5400",
+    "michael1800"
+  ],
+  "hypothesis": "R->PRE shadow tail is export-path loss above the 10-bit rounding floor.",
+  "candidates": {
+    "PRE": "retained calibrated point export",
+    "Q": "(composition12+2)>>2 per luma sample; chroma = rounded mean of composition12 chroma over the luma positions sample_codes maps to each BL chroma sample",
+    "T": "composition12>>2, same chroma rule",
+    "PREY_QUV": "PRE luma, Q chroma",
+    "QY_PREUV": "Q luma, PRE chroma"
+  },
+  "operators": "frozen four_model_audit.sample_codes/composition12/model_rgb, vector_metrics.delta; lattice per protocol-lattice-*",
+  "readouts": [
+    "pooled and per-band mean/p95/p99 per model",
+    "signed mean and RMS of PRE-Q per plane, all and <0.1 nit",
+    "x/y parity split"
+  ],
+  "decision": "Q shadow p99 < 0.7*PRE shadow p99 on michael5400 in all four models => export rework justified; else export loss declared at floor",
+  "not_claimed": [
+    "normative Dolby composition",
+    "any encoded or authored result",
+    "playback, packaging or live change"
+  ],
+  "author": "Fable 5.2 (design) for Claude Opus 5.5 session_01BCWLA1yYosvau4xhfH6R4S; verbatim from FABLE-EXPERIMENT-PLAN.md",
+  "landing_implementation": "land_rate.py: secant on b only, <=4 encodes, encoded packet average + measured authoring overhead (0.03 Mb/s on the Michael windows) in [128.5,130.0]; the final encode is then authored and its actual authored average must also fall in the band"
+}

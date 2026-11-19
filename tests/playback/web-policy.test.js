@@ -422,30 +422,38 @@ test("the sampling tick resamples the wait sentence before the presenter paints"
 test("the health poll runs for a live media wait as well as for the panel", async () => {
   const build = (waitLive) => {
     const calls = [];
+    const player = { fileId: 1, sessionId: "s1", streamId: null, mediaAttachment: 1 };
     // The slice carries the module's own 2 s `setInterval` beside the
     // function; a real timer there would keep this process alive forever.
     const poll = new PlaybackContextFunction(
       "PLAYER", "playbackOwnsAttachedMedia", "document", "playbackWaitSurfaceLive", "api",
-      "updateStats", "performance", "setInterval",
+      "updateStats", "performance", "setInterval", "statsStreamFormat", "playerToneMapping",
       `${shippedSource("pollSessionHealth")}\nreturn pollSessionHealth;`,
     )(
-      { sessionId: "s1", streamId: null, mediaAttachment: 1 },
+      player,
       () => true,
       { getElementById: () => ({ classList: { contains: () => false } }) },
       () => waitLive,
-      async (url) => { calls.push(url); return { http_wait_count: 1 }; },
+      async (url) => { calls.push(url); return { id: "s1", http_wait_count: 1 }; },
       () => {},
       { now: () => 0 },
       () => 0,
+      () => null,
+      () => false,
     );
-    return { poll, calls };
+    return { poll, calls, player };
   };
   const waiting = build(true);
+  waiting.player.health = { id: "s1" };
   await waiting.poll();
   assert.deepEqual(waiting.calls, ["/hls/s1/status"]);
+  assert.equal(waiting.player.health.http_wait_count, 1, "the wait poll consumed fresh session facts");
   const idle = build(false);
+  // Cold sessions sample once for processing pills; this checks the idle
+  // steady state after that session-bound sample is already available.
+  idle.player.health = { id: "s1" };
   await idle.poll();
-  assert.deepEqual(idle.calls, [], "with the panel closed and no wait, nothing polls");
+  assert.deepEqual(idle.calls, [], "with known session facts, the panel closed and no wait, nothing polls");
 });
 
 test("a media wait renders the live detail; every other fault renders its own", () => {
@@ -845,9 +853,7 @@ test("the rejection report carries the join, whatever the path built it", () => 
 
   // And both call sites go through it, so neither can drift back to spelling
   // the fields out — which is what made the old test a grep in the first place.
-  const wire = SHIPPED_UI.slice(
-    SHIPPED_UI.indexOf('v.addEventListener("error"'),
-  ).slice(0, 4000);
+  const wire = shippedSource("wirePlayerMedia");
   for (const [name, source] of [
     ["hls.js", shippedSource("onHlsError")],
     ["<video>", wire],
@@ -4054,9 +4060,10 @@ test("the waiting listener raises one fault per wait, not one per boundary", () 
   const handler = new PlaybackContextFunction(
     "PLAYER", "PlaybackPolicy", "playbackOwnsAttachedMedia", "playbackSurfacePromptUp",
     "beginWait", "bufferRunway", "playbackWaitCopy", "raisePlaybackSurface",
-    "notifyPlaybackControl", "v",
+    "notifyPlaybackControl", "v", "document",
     match[1],
   );
+  const video = {};
   const call = () => handler(
     { started: true, health: null }, policy, () => true, () => false, () => {}, () => 3,
     () => ({ title: "Buffering…", detail: "3.0 s client loaded" }),
@@ -4066,7 +4073,7 @@ test("the waiting listener raises one fault per wait, not one per boundary", () 
       raised.push({ source, options });
       return null;
     },
-    () => {}, {},
+    () => {}, video, {getElementById:()=>video},
   );
   call();
   call();
@@ -4152,6 +4159,7 @@ function attachedOutputTelemetry(player){
     ${shippedSource("statsHttpWait")}
     ${shippedSource("statsToneMapPeak")}
     ${shippedSourceIfPresent("statsStreamFormat")}
+    ${shippedSource("statsRefitCurves")}
     ${shippedSource("playbackStatsTelemetry")}
     return playbackStatsTelemetry();
   `)(player,policy);
@@ -4264,6 +4272,21 @@ test("range badges use the attached frozen output without asserting display outp
   assert.match(badge(p).full,/display output unverified/);
   p.sessionId="b";
   assert.equal(badge(p).arrow,null,"stale status cannot relabel a different attachment");
+});
+
+test("F+ playback info follows the attached generation and preserves identity reasons", () => {
+  const summarize=new PlaybackContextFunction(`${shippedSource("statsRefitCurves")}\nreturn statsRefitCurves;`)();
+  const p={sessionId:"active",health:{id:"active",dolby_vision_refit:{state:"fitted",gain:0.542}}};
+  assert.equal(summarize(p),"fitted, −54.2%");
+  p.health.dolby_vision_refit={state:"identity",reason:"platform choice is off"};
+  assert.equal(summarize(p),"identity (platform choice is off)");
+  p.health.id="retired";
+  assert.equal(summarize(p),null,"a previous attachment cannot claim fitted bytes");
+  p.health.id="active";
+  p.health.dolby_vision_refit={state:"fitted",gain:Infinity};
+  assert.equal(summarize(p),"fitted","unknown gain makes no numeric claim");
+  p.health.dolby_vision_refit={state:"future_state"};
+  assert.equal(summarize(p),null);
 });
 
 test("playback info labels tone-map peak provenance without calling policy source truth", () => {
@@ -5195,7 +5218,7 @@ test("a pre-play burn rides the first session open rather than a restart", () =>
   });
 });
 
-test("a default subtitle in a transcode decision rides the first session recipe", () => {
+test("a default subtitle rides the first session recipe on every route", () => {
   const decision={...PGS_DECISION,
     subtitles:PGS_DECISION.subtitles.map(s=>({...s,default:s.index===2}))};
   const h=detailHarness();
@@ -5206,8 +5229,25 @@ test("a default subtitle in a transcode decision rides the first session recipe"
   }
   assert.equal(h.prePlayApplication(decision,{subtitle:-1}).burnedSub,null,
     "explicit Off overrides the server default");
-  assert.equal(h.prePlayApplication({...decision,method:'remux'},null).burnedSub,null,
-    "a default must not force a copy decision into transcode");
+  assert.equal(h.prePlayApplication({...decision,method:'remux'},null).burnedSub,2,
+    "a selected bitmap default belongs to the first burn recipe, not a late restart");
+  assert.equal(h.prePlayApplication(decision,null,{skipDefaultSub:true}).subtitle,-1,
+    "leaving a burned subtitle must not restore its default");
+  assert.equal(h.prePlayApplication(decision,{subtitle:2},{skipDefaultSub:true}).subtitle,2,
+    "an explicit choice still owns the recipe");
+});
+
+test("Gran Turismo's default forced text subtitle is admitted before a cold create", () => {
+  const h=detailHarness();
+  for(const method of ["direct_play","remux","transcode"]){
+    const decision={method,delivered_dynamic_range:"dolby_vision",
+      subtitles:[{index:0,codec:"subrip",text:true,default:true}],
+      selection:{subtitle_index:0,subtitle_requires_burn_in:false}};
+    assert.deepEqual(h.prePlayApplication(decision,null),{
+      subtitle:0,blockedByHdr:false,burnedSub:null,textSub:0});
+    assert.equal(h.prePlayApplication(decision,{subtitle:-1}).textSub,null);
+    assert.equal(h.prePlayApplication({...decision,subtitles:[]},null).textSub,null);
+  }
 });
 
 test("a pre-play text subtitle is a <track>, not a second session", () => {

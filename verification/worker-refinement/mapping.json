@@ -4,7 +4,7 @@
   "model_sha256": "abe9667c462b6275445f5c488456c208885e143e10bb0d017c20870cee63b3b0",
   "correspondence": {
     "path": "verification/worker-refinement/correspondence.json",
-    "sha256": "4bac19ec4f94dd8cf6fa4e8b7555748d16167c6f35cfb3a7fc533e54b27b843a"
+    "sha256": "142211ed6a4a897cae0b9dd055f21a5259efa23b72b8cb06a57bb2e303e918da"
   },
   "configs": {
     "progress.cfg": {
@@ -666,5 +666,6 @@
       },
       "minimum_trace_states": 2
     }
-  }
+  },
+  "review_basis": "Codex source-only correspondence reconciliation (2026-11-09) for the reviewed pipeline-v2 security corrections. Refreshed 14 library_work.rs action pins after verifying every mapped anchor remains present. The worker correspondence continues to cover queue admission/claim, scan start/finish, completion, acknowledgement timeout, detached drain, reconciliation, wake, and arrival; their selected claim/domain/settlement transitions are unchanged. Credential ownership now uses a keyed hash and expected-file resolution scopes/no-follows probes; those identity and file-selection details are outside the modeled claim/domain protocol. This is source correspondence only and does not claim Rust test or model-check execution. Pin migration on 2026-11-15 (Paul's ruling; Claude, claude-fable-5-2): every source row now pins the item its anchor selects (pin_scheme item-v1: scope, item, item_sha256) instead of its whole file. Migrated at main 40cc6460d, where every whole-file pin matched, so each item pin records source already reviewed under the previous pins. Rows pin a named item; a match-arm anchor pins its function without the other arms' bodies. After the single adversarial review of PR #1676, same-file functions and constants that carry part of a row's claim have their own rows (the correspondence dependencies list), and the package contract lists what is covered and what is accepted loss. No original anchor, model or configuration changes; this changes the drift check and is not review or execution evidence. The heartbeat.queue.deadline row's symbol is corrected from ActiveBackgroundJob::claim, which does not exist, to ActiveBackgroundJob::start, which holds its anchor. The adaptive correspondence retains the retained-heartbeat and token-mutex boundaries reviewed on 2026-11-04. Item pins cover heartbeat registration, the core retained waiter, the daemon stop/join selector, and the bounded retirement outcome. The worker finish wrapper retains the distinct physical source settlement path. The current-main dependencies and seven schedule identities remain. Positive heartbeat join, ambiguous retirement, physical settlement and eventual alias or native release retain their unchecked status."
 }

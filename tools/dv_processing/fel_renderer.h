@@ -51,6 +51,16 @@ static void require(bool condition, const char *message) {
   }
 }
 
+// Metadata admission is a content refusal in the CPU F+ job. Allocation
+// and other runtime failures continue to use require() and exit 1.
+static int dv_content_refusal_exit = EXIT_FAILURE;
+static void require_content(bool condition, const char *message) {
+  if (!condition) {
+    fprintf(stderr, "Probe failed: %s\n", message);
+    dv_exit(dv_content_refusal_exit);
+  }
+}
+
 #include "display_target.h"
 
 // Resample only the already reconstructed and master-clipped native RGB/PQ
@@ -94,7 +104,7 @@ static void probe_log(void *priv, enum pl_log_level level,
 static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
                            struct pl_dovi_metadata *out, bool observations,
                            int picture_width, int picture_height) {
-  require(bytes && size > 0 && size <= 65536,
+  require_content(bytes && size > 0 && size <= 65536,
           "bounded fresh decoder-attached RPU bytes");
   DoviRpuOpaque *rpu = dovi_parse_unspec62_nalu(bytes, size);
   require(rpu != NULL, "RPU parser allocation");
@@ -102,14 +112,14 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
   if (error) {
     fprintf(stderr, "RPU parser rejected input: %s\n", error);
     dovi_rpu_free(rpu);
-    dv_exit(EXIT_FAILURE);
+    dv_exit(dv_content_refusal_exit);
   }
   const DoviRpuDataHeader *header = dovi_rpu_get_header(rpu);
-  require(header != NULL, "parsed RPU header");
-  require(header->guessed_profile == 7 && header->el_type &&
+  require_content(header != NULL, "parsed RPU header");
+  require_content(header->guessed_profile == 7 && header->el_type &&
               strcmp(header->el_type, "FEL") == 0,
           frame ? "fresh P7 FEL profile" : "synthetic P7 FEL profile");
-  require(!header->disable_residual_flag && !header->use_prev_vdr_rpu_flag &&
+  require_content(!header->disable_residual_flag && !header->use_prev_vdr_rpu_flag &&
               header->vdr_dm_metadata_present_flag &&
               header->coefficient_data_type == 0 &&
               header->coefficient_log2_denom == 23 &&
@@ -117,7 +127,7 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
               header->el_bit_depth_minus8 == 2 &&
               header->vdr_bit_depth_minus8 == 4,
           frame ? "bounded fresh P7 header subset" : "bounded fresh P7 control header subset");
-  require(header->rpu_type == 2 && header->rpu_format == 18 &&
+  require_content(header->rpu_type == 2 && header->rpu_format == 18 &&
               header->vdr_rpu_profile == 1 && header->vdr_rpu_level == 0 &&
               header->vdr_seq_info_present_flag &&
               !header->chroma_resampling_explicit_filter_flag &&
@@ -126,21 +136,21 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
           "unsupported normalization/explicit filter header");
   const DoviRpuDataMapping *mapping = dovi_rpu_get_data_mapping(rpu);
   const DoviVdrDmData *dm = dovi_rpu_get_vdr_dm_data(rpu);
-  require(!header->bl_video_full_range_flag,
+  require_content(!header->bl_video_full_range_flag,
           "unsupported full-range base metadata");
-  require(!header->spatial_resampling_filter_flag &&
+  require_content(!header->spatial_resampling_filter_flag &&
               header->el_spatial_resampling_filter_flag,
           "unsupported spatial resampling flags");
-  require(mapping && mapping->num_x_partitions_minus1 == 0 &&
+  require_content(mapping && mapping->num_x_partitions_minus1 == 0 &&
               mapping->num_y_partitions_minus1 == 0,
           "unsupported mapping partitions");
-  require(dm && dm->signal_bit_depth == 12 && dm->signal_color_space == 0 &&
+  require_content(dm && dm->signal_bit_depth == 12 && dm->signal_color_space == 0 &&
               dm->signal_chroma_format == 0,
           "unsupported reconstructed signal representation");
-  require(mapping && dm && mapping->nlq && mapping->nlq_method_idc == 0 &&
+  require_content(mapping && dm && mapping->nlq && mapping->nlq_method_idc == 0 &&
               mapping->nlq_num_pivots_minus2 == 0,
           "LINEAR_DZ mapping and DM metadata");
-  require(dm->signal_eotf == 65535 && dm->signal_full_range_flag == 1,
+  require_content(dm->signal_eotf == 65535 && dm->signal_full_range_flag == 1,
           "PQ full-range reconstructed control representation");
   dv_target_metadata(dm);
   // Without a display target this master-domain reconstruction maps no display:
@@ -150,14 +160,14 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
   // L255) is carried unapplied by this master reconstruction and exported in
   // the original RPU: any version is accepted.
   if (dm->dm_data.level5)
-    require((unsigned)dm->dm_data.level5->active_area_left_offset +
+    require_content((unsigned)dm->dm_data.level5->active_area_left_offset +
                     dm->dm_data.level5->active_area_right_offset <
                 (unsigned)picture_width &&
                 (unsigned)dm->dm_data.level5->active_area_top_offset +
                     dm->dm_data.level5->active_area_bottom_offset <
                 (unsigned)picture_height,
             "invalid active area metadata");
-  require(dm->signal_eotf_param0 == 0 && dm->signal_eotf_param1 == 0 &&
+  require_content(dm->signal_eotf_param0 == 0 && dm->signal_eotf_param1 == 0 &&
               dm->signal_eotf_param2 == 0,
           "unsupported EOTF parameters");
   struct dv_decoded_mapping decoded = {0};
@@ -167,7 +177,7 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
     if (!frame) {
       const DoviReshapingCurve *curve = &mapping->curves[component];
       const DoviPolynomialCurve *poly = curve->polynomial;
-      require(curve->mapping_idc == 0 && curve->pivots.len == 2 &&
+      require_content(curve->mapping_idc == 0 && curve->pivots.len == 2 &&
                   curve->pivots.data && curve->pivots.data[0] == 0 &&
                   curve->pivots.data[1] == 1023 && poly &&
                   poly->poly_order_minus1.len == 1 &&
@@ -181,22 +191,22 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
               "single identity polynomial segment");
       const int64_t *integer = poly->poly_coef_int.list[0]->data;
       const uint64_t *fraction = poly->poly_coef.list[0]->data;
-      require(integer && fraction && integer[0] == 0 && integer[1] == 1 &&
+      require_content(integer && fraction && integer[0] == 0 && integer[1] == 1 &&
                   fraction[0] == 0 && fraction[1] == 0,
               "identity polynomial coefficient control");
       out->comp[component].num_pivots = 2;
-      out->comp[component].pivots[1] = curve->pivots.data[1] / 1023.0f;
+      out->comp[component].pivots[1] = curve->pivots.data[1] / 1024.0f;
       out->comp[component].poly_coeffs[0][1] =
           integer[1] + fraction[1] / denominator;
     }
     const DoviRpuDataNlq *nlq = mapping->nlq;
-    require(nlq->nlq_offset[component] <= 1023 &&
+    require_content(nlq->nlq_offset[component] <= 1023 &&
                 nlq->linear_deadzone_slope_int[component] == 0 &&
                 nlq->linear_deadzone_threshold_int[component] == 0 &&
                 nlq->linear_deadzone_slope[component] < (1ULL << 23) &&
                 nlq->linear_deadzone_threshold[component] < (1ULL << 23),
             "bounded fractional NLQ parameters");
-    require(nlq_clip_is_nonbinding(nlq->nlq_offset[component],
+    require_content(nlq_clip_is_nonbinding(nlq->nlq_offset[component],
                                    nlq->linear_deadzone_slope[component],
                                    nlq->linear_deadzone_threshold[component],
                                    nlq->vdr_in_max_int[component],
@@ -205,21 +215,24 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
     if (!frame) {
       double slope = nlq->linear_deadzone_slope[component];
       double threshold = nlq->linear_deadzone_threshold[component];
-      out->nlq[component].offset = nlq->nlq_offset[component] / 1023.0f;
-      out->nlq[component].deadzone_slope = 1023.0 * slope / denominator;
-      out->nlq[component].deadzone_threshold =
-          (threshold - slope / 2) / denominator;
+      // libplacebo's own units (pl_map_dovi_metadata): offset in EL codes,
+      // slope, threshold and limit over 2^coef_log2_denom.
+      out->nlq[component].offset = nlq->nlq_offset[component];
+      out->nlq[component].deadzone_slope = slope / denominator;
+      out->nlq[component].deadzone_threshold = threshold / denominator;
+      out->nlq[component].hdr_in_max =
+          nlq->vdr_in_max_int[component] + nlq->vdr_in_max[component] / denominator;
     }
   }
   if (frame) {
-    require(dv_map_decoded_metadata(frame, 7, true, &decoded),
+    require_content(dv_map_decoded_metadata(frame, 7, true, &decoded),
             "bounded decoder-derived FEL metadata mapping");
     *out = decoded.dovi;
     for (int component = 0; component < 3; component++) {
       const DoviRpuDataNlq *nlq = mapping->nlq;
       const AVDOVINLQParams *actual =
           &av_dovi_get_mapping(decoded.source)->nlq[component];
-      require(actual->nlq_offset == nlq->nlq_offset[component] &&
+      require_content(actual->nlq_offset == nlq->nlq_offset[component] &&
                   actual->linear_deadzone_slope == nlq->linear_deadzone_slope[component] &&
                   actual->linear_deadzone_threshold == nlq->linear_deadzone_threshold[component] &&
                   actual->vdr_in_max == (nlq->vdr_in_max_int[component] << 23) +
@@ -251,19 +264,19 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
     const AVDOVIColorMetadata *color = av_dovi_get_color(decoded.source);
     for (int i = 0; i < 3; i++) {
       AVRational offset = color->ycc_to_rgb_offset[i];
-      require((int64_t)offset.num * (INT64_C(1) << 28) ==
+      require_content((int64_t)offset.num * (INT64_C(1) << 28) ==
                   (int64_t)offsets[i] * offset.den,
               "raw and decoded FEL color offsets agree");
       for (int j = 0; j < 3; j++) {
         AVRational n = color->ycc_to_rgb_matrix[3 * i + j];
         AVRational l = color->rgb_to_lms_matrix[3 * i + j];
-        require((int64_t)n.num * 8192 == (int64_t)nonlinear[3 * i + j] * n.den &&
+        require_content((int64_t)n.num * 8192 == (int64_t)nonlinear[3 * i + j] * n.den &&
                     (int64_t)l.num * 16384 == (int64_t)linear[3 * i + j] * l.den,
                 "raw and decoded FEL color matrices agree");
       }
     }
   } else {
-    require(memcmp(nonlinear, expected_nonlinear, sizeof(nonlinear)) == 0 &&
+    require_content(memcmp(nonlinear, expected_nonlinear, sizeof(nonlinear)) == 0 &&
                 memcmp(linear, expected_linear, sizeof(linear)) == 0 &&
                 memcmp(offsets, expected_offsets, sizeof(offsets)) == 0,
             "unsupported source color matrix/offset subset");
@@ -345,7 +358,8 @@ struct segment_gpu {
   pl_renderer renderer;
   pl_tex textures[2][3], output_texture, native_texture;
   pl_tex mapped[2][4];
-  float *output, *staging;
+  float *output;
+  uint16_t *staging;
 };
 static struct segment_gpu context;
 static void gpu_init(int width, int height, int el_width, int el_height) {
@@ -403,13 +417,14 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
 
   context = (struct segment_gpu){
       .log = log, .vk = vk, .gpu = gpu, .format = format, .renderer = renderer};
-  context.plane_format =
-      pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 32, 32, PL_FMT_CAP_SAMPLEABLE);
-  require(context.plane_format && context.plane_format->texel_size == 4,
-          "native float plane format");
+  context.plane_format = pl_find_fmt(gpu, PL_FMT_UNORM, 1, 16, 16,
+                                     PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR);
+  require(context.plane_format && context.plane_format->texel_size == 2 &&
+              context.plane_format->host_bits[0] == 16,
+          "linearly sampled UNORM16 plane format");
   context.output = malloc(EXPORT_FLOAT_COUNT * sizeof(float));
   require(context.output, "bounded raster output buffer");
-  context.staging = malloc((size_t)WIDTH * HEIGHT * sizeof(float));
+  context.staging = malloc((size_t)WIDTH * HEIGHT * sizeof(uint16_t));
   require(context.staging != NULL, "bounded reusable native plane staging");
   for (int layer = 0; layer < 2; layer++) {
     for (int c = 0; c < 3; c++) {
@@ -421,20 +436,26 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
       require(context.textures[layer][c] != NULL, "persistent native plane texture");
     }
   }
-  context.output_texture = EXPORT_YUV10 ? dv_yuv10_source_texture(gpu, EXPORT_WIDTH, EXPORT_HEIGHT) : NULL;
-  if (!context.output_texture)
+  // The 10-bit export reads its picture from UNORM16; a device without that
+  // format is refused, never handed a float texture instead.
+  context.output_texture = EXPORT_YUV10 ? dv_yuv10_source_texture(gpu, EXPORT_WIDTH, EXPORT_HEIGHT, false) : NULL;
+  require(!EXPORT_YUV10 || context.output_texture != NULL,
+          "export-target-unsupported: renderable UNORM16 RGBA");
+  if (!EXPORT_YUV10)
     context.output_texture = pl_tex_create(gpu,
         pl_tex_params(.w = EXPORT_WIDTH, .h = EXPORT_HEIGHT, .format = format,
-                      .renderable = true, .host_readable = true,
-                      .sampleable = EXPORT_YUV10));
+                      .renderable = true, .host_readable = true));
   require(context.output_texture != NULL, "persistent export float texture");
   require(!EXPORT_YUV10 || dv_yuv10_init(log, gpu, EXPORT_WIDTH, EXPORT_HEIGHT),
           "GPU yuv420p10 export planes");
-  if (dv_target.nits || EXPORT_WIDTH != WIDTH || EXPORT_HEIGHT != HEIGHT) {
-    context.native_texture = pl_tex_create(gpu,
-        pl_tex_params(.w = WIDTH, .h = HEIGHT, .format = format,
-                      .renderable = true, .sampleable = true));
-    require(context.native_texture != NULL, "persistent native reconstructed float texture");
+  if (dv_target.nits || !EXPORT_YUV10 || EXPORT_WIDTH != WIDTH || EXPORT_HEIGHT != HEIGHT) {
+    // The player reconstructs into UNORM16 and maps from it; do the same, so
+    // display management reads the same master codes on both sides.
+    // No float fallback: a master reconstructed into another format is not
+    // the picture the mapping was qualified on, so the device is refused.
+    context.native_texture = dv_yuv10_source_texture(gpu, WIDTH, HEIGHT, true);
+    require(context.native_texture != NULL,
+            "reconstruction-target-unsupported: linearly sampled renderable UNORM16 RGBA");
   }
   printf("{\"kind\":\"gpu_context_created\",\"width\":%d,\"height\":%d}\n",
          WIDTH, HEIGHT);
@@ -479,21 +500,21 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
     }
   struct pl_frame enhancement_frame = {
       .num_planes = 3,
-      .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL},
+      .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL,
+               .bits = {.sample_depth = 16, .color_depth = 10, .bit_shift = 6}},
       .color = pl_color_space_hdr10};
   struct pl_frame source = {
       .num_planes = 3,
       .repr = {.sys = PL_COLOR_SYSTEM_DOLBYVISION,
                .levels = PL_COLOR_LEVELS_FULL,
                .dovi = &metadata,
-               .bits = {.sample_depth = 10, .color_depth = 10}},
-      .color = pl_color_space_hdr10,
+               .bits = {.sample_depth = 16, .color_depth = 10, .bit_shift = 6}},
       .enhancement_layer = &enhancement_frame};
   if (hardware) {
     // Map each decoded surface, then restate the representation the native
     // path uses: DV-coded full-range BL with the parsed metadata, and raw EL
-    // residual components. The mapped sample/colour depth (10 in 16) keeps
-    // the same code/1023 normalization as the host upload.
+    // residual components. The mapped sample/colour depth (10 in 16) is the
+    // same code << 6 UNORM16 contract as the host upload.
     bool mapped = true;
     for (int layer = 0; layer < 2 && mapped; layer++) {
       struct pl_frame *live = &fel_mapped[layer];
@@ -515,8 +536,8 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
       fel_unmap(gpu);
       dv_hw_host_copy = true;
       source.num_planes = enhancement_frame.num_planes = 3;
-      source.repr.bits = (struct pl_bit_encoding){.sample_depth = 10, .color_depth = 10};
-      enhancement_frame.repr.bits = (struct pl_bit_encoding){0};
+      source.repr.bits = (struct pl_bit_encoding){.sample_depth = 16, .color_depth = 10, .bit_shift = 6};
+      enhancement_frame.repr.bits = source.repr.bits;
       require(dv_host_pack != NULL, "decoded surface host copy");
       // The caller owns and frees decoded[].
       for (int layer = 0; layer < 2; layer++)
@@ -533,8 +554,8 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
     for (int c = 0; c < 3; c++) {
       int w = c ? width / 2 : width, h = c ? height / 2 : height;
       size_t count = (size_t)w * h;
-      float *plane = context.staging;
-      require(dv_unpack_10bit_plane(decoded[layer] + offset, count, plane),
+      uint16_t *plane = context.staging;
+      require(dv_shift_10bit_plane(decoded[layer] + offset, count, plane),
               "native10-bit sample range");
       require(pl_tex_upload(gpu, pl_tex_transfer_params(
           .tex = context.textures[layer][c], .ptr = plane)), "native plane upload");
@@ -548,43 +569,32 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
   }
   pl_frame_set_chroma_location(&source, bl_chroma);
   pl_frame_set_chroma_location(&enhancement_frame, el_chroma);
-  // Native point resampling has exact texel-edge ties (e.g. odd BL x on
-  // half-sized left-sited EL). At non-power-of-two rasters, interpolation of
-  // normalized float coordinates can approach that edge from either side.
-  // Resolve ties toward the positive texel with a fixed 1/64 reference-pixel
-  // bias. Our admitted ratios are 1, 1/2 and 1/4; every non-tie sample is at
-  // least 1/8 texel from an edge, so this does not change its nearest texel.
-  // This explicit point policy is backend mechanics, not a Dolby filter claim.
-  for (int c = 0; c < source.num_planes; c++) {
-    source.planes[c].shift_x -= 1.0f / 64;
-    source.planes[c].shift_y -= 1.0f / 64;
-  }
-  for (int c = 0; c < enhancement_frame.num_planes; c++) {
-    enhancement_frame.planes[c].shift_x -= 1.0f / 64;
-    enhancement_frame.planes[c].shift_y -= 1.0f / 64;
-  }
+  // One sampling contract with the native player (its reconstruct() in the
+  // mpv patch series): every BL and EL plane is sampled bilinearly at its own
+  // siting, and libplacebo rounds the resampled EL code before LINEAR_DZ.
+  // No point policy and no tie bias: bilinear sampling has no texel-edge ties.
 
   pl_tex output_texture = context.output_texture;
-  bool resized = EXPORT_WIDTH != WIDTH || EXPORT_HEIGHT != HEIGHT;
-  pl_tex native_texture = (resized || dv_target.nits) ? context.native_texture : output_texture;
+  // An unresized, untargeted yuv420p10 export reconstructs straight into its
+  // UNORM16 source texture; every other export reconstructs into the UNORM16
+  // native texture first, so the master codes never depend on the export.
+  bool staged = context.native_texture != NULL;
+  pl_tex native_texture = staged ? context.native_texture : output_texture;
   struct pl_frame destination = {.num_planes = 1,
                                  .planes = {{.texture = native_texture,
                                              .components = 3,
                                              .component_mapping = {0, 1, 2}}},
                                  .repr = {.sys = PL_COLOR_SYSTEM_RGB,
-                                          .levels = PL_COLOR_LEVELS_FULL,
-                                          .bits = {.color_depth = 32}},
-                                 .color = pl_color_space_hdr10};
-  source.color.hdr.max_luma = destination.color.hdr.max_luma = 10000;
-  source.color.hdr.min_luma = destination.color.hdr.min_luma = 0.005;
+                                          .levels = PL_COLOR_LEVELS_FULL}};
+  dv_master_frames(&source, &destination);
   struct pl_color_map_params color_map = pl_color_map_default_params;
   color_map.tone_mapping_function = &pl_tone_map_clip;
   color_map.gamut_mapping = &pl_gamut_map_clip;
   color_map.metadata = PL_HDR_METADATA_NONE;
   struct pl_render_params parameters = pl_render_fast_params;
   parameters.color_map_params = &color_map;
-  parameters.plane_upscaler = &pl_filter_nearest;
-  parameters.plane_downscaler = &pl_filter_nearest;
+  parameters.plane_upscaler = &pl_filter_bilinear;
+  parameters.plane_downscaler = &pl_filter_bilinear;
   parameters.dither_params = NULL;
   parameters.peak_detect_params = NULL;
   parameters.color_adjustment = NULL;
@@ -594,7 +604,7 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
           "full renderer export");
   if (dv_target.nits)
     destination.planes[0].texture = dv_target_render(context.log, gpu, native_texture, frame_index);
-  if (resized || dv_target.nits) export_native_rgb(renderer, destination, output_texture);
+  if (staged) export_native_rgb(renderer, destination, output_texture);
   struct pl_render_errors errors = pl_renderer_get_errors(renderer);
   require(errors.errors == 0 && errors.num_disabled_hooks == 0,
           "renderer error-free export");

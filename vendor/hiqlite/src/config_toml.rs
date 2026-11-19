@@ -397,6 +397,10 @@ impl NodeConfig {
             snapshot_chunk_timeout: crate::config::DEFAULT_SNAPSHOT_CHUNK_TIMEOUT,
             snapshot_transfer_timeout: crate::config::DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT,
             snapshot_storage_deferral: std::time::Duration::from_secs(600),
+            #[cfg(feature = "sqlite")]
+            applied_mark_tables: Vec::new(),
+            #[cfg(feature = "sqlite")]
+            applied_mark_deletes_only: Vec::new(),
             tls_raft,
             tls_api,
             secret_raft,

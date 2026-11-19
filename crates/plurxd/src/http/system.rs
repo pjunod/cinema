@@ -73,18 +73,18 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
     let setup_required = state.store.count_users().await? == 0;
     let android_app = super::web::android_apk_path(&state.system.data_dir).is_some();
     let playback_auto_abr = state
-        .store
-        .get_setting(keys::PLAYBACK_AUTO_ABR)
+        .applied
+        .setting(keys::PLAYBACK_AUTO_ABR)
         .await?
         .is_some_and(|value| value.trim() == "1");
     let playback_display_aware_auto = state
-        .store
-        .get_setting(keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+        .applied
+        .setting(keys::PLAYBACK_DISPLAY_AWARE_AUTO)
         .await?
         .is_some_and(|value| value.trim() == "1");
     let display_mode_match = state
-        .store
-        .get_setting(keys::PLAYBACK_DISPLAY_MODE_MATCH)
+        .applied
+        .setting(keys::PLAYBACK_DISPLAY_MODE_MATCH)
         .await?
         .is_some_and(|value| value.trim() == "1");
     Ok(Json(ServerInfo {
@@ -112,8 +112,8 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
 /// The server name an operator configured (Settings first, then config).
 async fn configured_server_name(state: &AppState) -> Result<String, ApiError> {
     Ok(state
-        .store
-        .get_setting(keys::SERVER_NAME)
+        .applied
+        .setting(keys::SERVER_NAME)
         .await?
         .unwrap_or_else(|| state.server_name.clone()))
 }
@@ -204,7 +204,7 @@ pub async fn features(
     // Every client reads this on each home load, so it names its four keys
     // instead of taking the whole settings table, which grows with the
     // catalogue. One snapshot keeps the four mutually consistent.
-    let settings = state.store.get_settings(&FeaturesDto::KEYS).await?;
+    let settings = state.applied.setting_values(&FeaturesDto::KEYS).await?;
     Ok(Json(FeaturesDto::from_snapshot(&settings, &state.node_id)))
 }
 
@@ -548,8 +548,8 @@ pub async fn system_info(
     let (hw_in_use, hw_max) = state.transcode.hardware_slots().await;
     let replication = state.replication.status().await;
     let hwaccel_requested = state
-        .store
-        .get_setting(&crate::state::node_hwaccel_key(&state.node_id))
+        .applied
+        .setting(&crate::state::node_hwaccel_key(&state.node_id))
         .await?;
     let optimization =
         crate::transcoder_optimization::status(&state.system, &state.transcode).await;
@@ -557,15 +557,15 @@ pub async fn system_info(
         && hwaccel_requested != state.system.hwaccel_override)
         || optimization.restart_required;
     let name = state
-        .store
-        .get_setting(keys::SERVER_NAME)
+        .applied
+        .setting(keys::SERVER_NAME)
         .await?
         .unwrap_or_else(|| state.server_name.clone());
     let hostname = state.node_hostname.clone();
     let ffmpeg_support = crate::ffmpeg_support::report(&state.system).await;
     let current_preference = state
-        .store
-        .get_setting(keys::HWACCEL)
+        .applied
+        .setting(keys::HWACCEL)
         .await?
         .unwrap_or_default();
     let encoder = state.transcode.encoder_for_preference(&current_preference);
@@ -1020,6 +1020,7 @@ fn bounded_playback_query(query: PlaybackEventsQuery) -> PlaybackEventQuery {
         since_ms: query.since,
         event: query.event,
         limit: query.limit.clamp(1, 2_000),
+        ..PlaybackEventQuery::default()
     }
 }
 
@@ -1240,6 +1241,96 @@ pub struct ClientLog {
     /// document is built from (`"5,8"`). Split here rather than on the wire so
     /// a client that grows a profile does not need a new field.
     pub declared_dv_profiles: Option<String>,
+    /// How a prepared switch ended at its seam, with the evidence the client
+    /// measured (plan ruling 3: the processed upgrade leaves the Developer
+    /// tab only after twenty clean, fully measured switches per platform).
+    pub(crate) prepared_seam: Option<ClientPreparedSeam>,
+}
+
+/// One `prepared_seam` report. Every field is the client's observation; the
+/// server counts them (`plurx_playback_preparation_seams_*`) and decides
+/// nothing from them.
+#[derive(Deserialize, Debug, Clone, Default)]
+#[serde(default)]
+pub(crate) struct ClientPreparedSeam {
+    platform: String,
+    outcome: String,
+    /// The ±2 s window around the commit was sampled end to end.
+    frames_complete: bool,
+    dropped_frames: Option<u64>,
+    /// Audio continuity was measured by an instrument of its own, not
+    /// inferred from the picture.
+    audio_observed: bool,
+    /// The change also took an ordinary reopen.
+    reopened: bool,
+}
+
+impl ClientPreparedSeam {
+    /// The counted report, or `None` for a platform or outcome outside the
+    /// vocabulary (a newer client's word is dropped, not guessed at).
+    pub(crate) fn report(
+        &self,
+    ) -> Option<(
+        crate::playback_control::ClientPlatform,
+        crate::playback_control::PreparedSeamReport,
+    )> {
+        use crate::playback_control::ClientPlatform;
+        let platform = match self.platform.as_str() {
+            "web" => ClientPlatform::Web,
+            "apple" => ClientPlatform::Apple,
+            "android" => ClientPlatform::Android,
+            "linux" => ClientPlatform::Linux,
+            _ => return None,
+        };
+        let outcome = crate::playback_control::PREPARED_SEAM_OUTCOMES
+            .iter()
+            .position(|known| *known == self.outcome)?;
+        Some((
+            platform,
+            crate::playback_control::PreparedSeamReport {
+                outcome,
+                frames_complete: self.frames_complete,
+                dropped_frames: self.dropped_frames,
+                audio_observed: self.audio_observed,
+                reopened: self.reopened,
+            },
+        ))
+    }
+}
+
+/// Whether the session a `prepared_seam` report names is a processed Dolby
+/// Vision / HDR10-E successor, read from its durable recipe: the server's own
+/// record of what that successor delivers, so the processed upgrade's bar
+/// counts its own switches (review 3 S4) without a new beacon field and for
+/// every client version. Bounded: a read that misses its budget, or a session
+/// with no route (a refused successor that never committed), counts as an
+/// ordinary switch.
+///
+/// A read-only observer, so it reads the node's applied view (E1c, §6.1).
+async fn prepared_seam_session_processed(state: &AppState, session_id: &str) -> bool {
+    let read = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        crate::media_sessions::read_media_session_route_view(
+            &state.applied,
+            crate::media_sessions::RouteReadSite::Observer,
+            session_id,
+        ),
+    )
+    .await;
+    let Ok(Ok(crate::media_sessions::RouteViewAnswer {
+        route: Some(route), ..
+    })) = read
+    else {
+        return false;
+    };
+    serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(&route.recipe_json).is_ok_and(
+        |recipe| {
+            recipe.request.dv_processing_destination.is_some()
+                || recipe
+                    .candidate_catalog
+                    .is_some_and(|catalog| catalog.candidate.processed_dv)
+        },
+    )
 }
 
 /// Sustained rate and burst allowance for `/client-log`, in reports per minute.
@@ -1460,7 +1551,18 @@ pub async fn client_log(
         tracing::warn!(target: "plurxd::client", "{line}");
     }
 
-    let event = client_playback_event(&ev, user.id);
+    if let Some((platform, report)) = ev
+        .prepared_seam
+        .as_ref()
+        .and_then(ClientPreparedSeam::report)
+    {
+        let processed = match ev.session_id.as_deref() {
+            Some(session) => prepared_seam_session_processed(&state, session).await,
+            None => false,
+        };
+        crate::playback_control::record_prepared_seam(platform, processed, report);
+    }
+    let mut event = client_playback_event(&ev, user.id);
     // A first frame or a failure report settles the start attempt this
     // node opened for the viewer and file (C-08 M5 row 4); any other beacon
     // about a play in progress keeps that play alive. The beacon's own
@@ -1474,6 +1576,42 @@ pub async fn client_log(
             event.reason.as_deref(),
             std::time::Instant::now(),
         );
+        // Plan ruling 3: processed Dolby Vision is an upgrade after the
+        // first frame. The viewer's first picture for a session this node
+        // owns starts its upgrade, if the create left one waiting.
+        if event.event == "ttff" {
+            if let Some(session) = event.session_id.as_deref() {
+                super::hls::processed_upgrade::note_first_frame(&state, user.id, session);
+            }
+        }
+        // The same report also settles the create it answers (G1): carry that
+        // create's attempt id on the beacon, and record the first frame as a
+        // row of its own. Matched by the session the report names, so two
+        // devices of one viewer on one title settle their own creates.
+        let session = event.session_id.clone();
+        if let Some(settled) = state.start_attempts.settle(
+            user.id,
+            file_id,
+            session.as_deref(),
+            &event.event,
+            std::time::Instant::now(),
+        ) {
+            carry_create_attempt(&mut event, &settled.attempt);
+            if settled.outcome == crate::playstart::SettledOutcome::Presented {
+                crate::telemetry::emit(
+                    Arc::clone(&state.store),
+                    crate::playstart::presented_event(
+                        &settled.attempt,
+                        (user.id, file_id),
+                        settled.session.as_deref(),
+                        event.method.as_deref(),
+                        event.ms,
+                        event.reason.as_deref(),
+                        event.at_unix_ms,
+                    ),
+                );
+            }
+        }
     }
     // Deliberately not `ev.ua`: the class must come from the same input the
     // read paths use, or the prior is written under a key nothing reads.
@@ -1762,6 +1900,27 @@ fn emit_client_playback_event(
         .as_deref()
         .map(crate::transcode::session_log_id);
     crate::telemetry::emit_with_network(store, event, network, client);
+}
+
+/// Put the create's attempt id in the beacon's `attempt` column, where the
+/// Starts view joins on it. The player's own per-page counter (`a1`, `a2`, …)
+/// names an attempt only within one page and so cannot tell two devices
+/// apart; it moves to `extra.client_attempt` rather than being lost.
+fn carry_create_attempt(event: &mut PlaybackEvent, attempt: &str) {
+    let mut extra = event
+        .extra
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .and_then(|value| match value {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if let Some(client) = event.attempt.take() {
+        extra.insert("client_attempt".to_owned(), client.into());
+    }
+    event.attempt = Some(attempt.chars().take(64).collect());
+    event.extra = Some(serde_json::Value::Object(extra).to_string());
 }
 
 fn normalize_client_marker_prewarm(event: &mut PlaybackEvent) {
@@ -2535,6 +2694,11 @@ pub struct SettingsDto {
     pub dolby_vision_hdr_processing: bool,
     pub dolby_vision_display_target: bool,
     pub dolby_vision_fel_reencode: bool,
+    /// F+ curves per client platform, default off (Developer).
+    pub dolby_vision_refit_web: bool,
+    pub dolby_vision_refit_apple: bool,
+    pub dolby_vision_refit_android: bool,
+    pub dolby_vision_refit_linux: bool,
     /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
     /// built-in default. Never zero — "no working set" is not a configuration
     /// this accepts (M3 handoff §6).
@@ -2714,13 +2878,30 @@ async fn subtitle_store_diagnostics(
     diagnostics
 }
 
-async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
+/// Where [`settings_dto`] reads the settings table (E1b, contract §4.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsDtoSource {
+    /// `GET`: a polled page, from this node's applied view.
+    View,
+    /// The `PUT` response: the web client renders it as the saved state, and
+    /// it carries `live_tv_config_generation`, which the next save must echo
+    /// — a lagging replica's older generation would make that save conflict.
+    Authority,
+}
+
+async fn settings_dto(
+    state: &AppState,
+    source: SettingsDtoSource,
+) -> Result<SettingsDto, ApiError> {
     // This page renders the settings as one administrative snapshot. On the
     // clustered backend, reading each field independently turns one response
     // into dozens of leader barriers; it can also mix values from different
     // commits. Cache usage below is the node-local physical inventory shared
     // by all playback writers, including restart leftovers and reservations.
-    let settings = state.store.settings_snapshot().await?;
+    let settings = match source {
+        SettingsDtoSource::View => state.applied.settings_snapshot().await?.values,
+        SettingsDtoSource::Authority => Arc::new(state.store.settings_snapshot().await?),
+    };
     let capacity_snapshot = state.store.resource_capacity_snapshot().await?;
     let setting = |key: &str| settings.get(key).cloned();
     let decoder_health_requested =
@@ -3044,6 +3225,22 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::DV_FEL_REENCODE).as_deref(),
             false,
         ),
+        dolby_vision_refit_web: plurx_core::store::stored_switch(
+            setting(keys::DV_REFIT_WEB).as_deref(),
+            false,
+        ),
+        dolby_vision_refit_apple: plurx_core::store::stored_switch(
+            setting(keys::DV_REFIT_APPLE).as_deref(),
+            false,
+        ),
+        dolby_vision_refit_android: plurx_core::store::stored_switch(
+            setting(keys::DV_REFIT_ANDROID).as_deref(),
+            false,
+        ),
+        dolby_vision_refit_linux: plurx_core::store::stored_switch(
+            setting(keys::DV_REFIT_LINUX).as_deref(),
+            false,
+        ),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
@@ -3110,9 +3307,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         transcode_max_hw_sessions,
         transcode_software_pool_threads,
         transcode_capacity_settings: {
-            let mut values = capacity_snapshot
-                .as_ref()
-                .map_or_else(|| settings.clone(), |snapshot| snapshot.values.clone());
+            let mut values = capacity_snapshot.as_ref().map_or_else(
+                || settings.as_ref().clone(),
+                |snapshot| snapshot.values.clone(),
+            );
             if capacity_snapshot.is_none() {
                 values.remove(keys::MAX_HW_SESSIONS_PROVENANCE);
                 values.remove(keys::SW_POOL_THREADS_PROVENANCE);
@@ -3263,7 +3461,7 @@ pub async fn get_settings(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Json<SettingsDto>, ApiError> {
-    Ok(Json(settings_dto(&state).await?))
+    Ok(Json(settings_dto(&state, SettingsDtoSource::View).await?))
 }
 
 /// PUT /api/v1/settings/transcode-capacity. Separate transaction boundary:
@@ -3282,7 +3480,9 @@ pub async fn update_resource_capacity(
             "resource limits changed; reload before choosing a mode".into(),
         ));
     }
-    Ok(Json(settings_dto(&state).await?))
+    Ok(Json(
+        settings_dto(&state, SettingsDtoSource::Authority).await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -3364,6 +3564,10 @@ pub struct UpdateSettings {
     pub dolby_vision_hdr_processing: Option<bool>,
     pub dolby_vision_display_target: Option<bool>,
     pub dolby_vision_fel_reencode: Option<bool>,
+    pub dolby_vision_refit_web: Option<bool>,
+    pub dolby_vision_refit_apple: Option<bool>,
+    pub dolby_vision_refit_android: Option<bool>,
+    pub dolby_vision_refit_linux: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
     pub vod_materialize_budget_secs: Option<String>,
@@ -3540,6 +3744,10 @@ impl UpdateSettings {
             || self.dolby_vision_hdr_processing.is_some()
             || self.dolby_vision_display_target.is_some()
             || self.dolby_vision_fel_reencode.is_some()
+            || self.dolby_vision_refit_web.is_some()
+            || self.dolby_vision_refit_apple.is_some()
+            || self.dolby_vision_refit_android.is_some()
+            || self.dolby_vision_refit_linux.is_some()
             || self.vod_working_set_bytes.is_some()
             || self.vod_block_budget_secs.is_some()
             || self.vod_materialize_budget_secs.is_some()
@@ -4589,6 +4797,30 @@ pub async fn update_settings(
             .put_setting(keys::DV_FEL_REENCODE, if on { "1" } else { "0" })
             .await?;
     }
+    if let Some(on) = req.dolby_vision_refit_web {
+        state
+            .store
+            .put_setting(keys::DV_REFIT_WEB, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dolby_vision_refit_apple {
+        state
+            .store
+            .put_setting(keys::DV_REFIT_APPLE, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dolby_vision_refit_android {
+        state
+            .store
+            .put_setting(keys::DV_REFIT_ANDROID, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dolby_vision_refit_linux {
+        state
+            .store
+            .put_setting(keys::DV_REFIT_LINUX, if on { "1" } else { "0" })
+            .await?;
+    }
     if let Some(output) = live_tv_deinterlace_output {
         state
             .store
@@ -4897,7 +5129,9 @@ pub async fn update_settings(
             .await?;
         tracing::info!(armed = on, "genre backfill");
     }
-    Ok(Json(settings_dto(&state).await?))
+    Ok(Json(
+        settings_dto(&state, SettingsDtoSource::Authority).await?,
+    ))
 }
 
 /// GET /api/v1/scan/status — per-library scan status (keyed by library id).
@@ -5880,12 +6114,21 @@ pub async fn activity_detail(
     if user.0.is_admin {
         response["processes"] = serde_json::to_value(plurx_core::process::priority::running())
             .map_err(|error| ApiError::Internal(error.to_string()))?;
-        response["workers"] = serde_json::to_value(clustered_workers(
+        let mut workers = clustered_workers(
             &state.node_id,
             super::internal_activity::local_workers(&state).await,
             &peers,
-        ))
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
+        );
+        // Operations observations include learner workers. Keep live Activity
+        // observations preferred; worker capacity never grants playback authority.
+        for (node_id, observation) in state.peer_status_cache.worker_observations().await {
+            workers.entry(node_id).or_insert(observation);
+        }
+        response["worker_observed_nodes"] =
+            serde_json::to_value(workers.keys().collect::<Vec<_>>())
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+        response["workers"] =
+            serde_json::to_value(workers).map_err(|error| ApiError::Internal(error.to_string()))?;
     }
     Ok(Json(response))
 }
@@ -6048,6 +6291,8 @@ pub(crate) struct MetricsState {
     plex_census: Arc<super::PlexCensus>,
     start_attempts: Arc<crate::playstart::StartAttempts>,
     route_cache: Arc<crate::media_sessions::RouteCacheMetrics>,
+    applied: plurx_core::store::AppliedViewMetrics,
+    cluster_directory: crate::cluster::Directory,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -6072,6 +6317,8 @@ impl FromRef<AppState> for MetricsState {
             plex_census: Arc::clone(&state.plex_census),
             start_attempts: Arc::clone(&state.start_attempts),
             route_cache: state.media_sessions.route_cache_metrics(),
+            applied: state.applied.metrics_handle(),
+            cluster_directory: state.cluster.directory(),
         }
     }
 }
@@ -6276,6 +6523,124 @@ fn render_snapshot_metrics(out: &mut String, snapshot: DbSnapshotMetricsSnapshot
     }
 }
 
+/// Cluster facade B2: peer-directory reads by outcome. Loaded at scrape time
+/// from atomics; no Store read, no timer.
+fn render_cluster_directory_metrics(
+    reads: plurx_core::cluster::membership::directory::DirectoryReadCounts,
+) -> String {
+    format!(
+        "# HELP plurx_cluster_directory_reads_total Peer-directory reads by outcome: hit answered from the cached roster snapshot, reload a local read that replaced it, uncached a local read that could not be cached (no applied-mark stamp, or the roster moved during the read).\n\
+         # TYPE plurx_cluster_directory_reads_total counter\n\
+         plurx_cluster_directory_reads_total{{outcome=\"hit\"}} {}\n\
+         plurx_cluster_directory_reads_total{{outcome=\"reload\"}} {}\n\
+         plurx_cluster_directory_reads_total{{outcome=\"uncached\"}} {}\n",
+        reads.hit, reads.reload, reads.uncached
+    )
+}
+
+/// Playback-start E1a: the applied view's reads and the baseline it is sized
+/// against. Loaded at scrape time from atomics; no Store read, no timer.
+fn render_applied_view_metrics(
+    observation: &plurx_core::store::AppliedViewObservation,
+    wait: &hiqlite::DbReadPoolWait,
+) -> String {
+    let mut out = String::from(
+        "# HELP plurx_applied_view_reads_total Applied-view reads by view and by what answered: view is this node's own replica (on SQLite, the only copy), authority a quorum read, with the reason the view could not answer.\n\
+         # TYPE plurx_applied_view_reads_total counter\n",
+    );
+    for (view, source, reason, count) in &observation.reads {
+        out.push_str(&format!(
+            "plurx_applied_view_reads_total{{view=\"{view}\",source=\"{source}\",reason=\"{reason}\"}} {count}\n"
+        ));
+    }
+    out.push_str(
+        "# HELP plurx_applied_view_reloads_total Memo or route-cache reloads caused by an applied-view stamp that no longer matched, by view. view=settings counts settings-memo reloads, at most one per settings change a reader saw; view=route counts route-cache entries a moved route slot made stale, each followed by one local re-read. plurx_applied_view_table_changes_total is the upper bound per-table invalidation can reload at.\n\
+         # TYPE plurx_applied_view_reloads_total counter\n",
+    );
+    for (view, count) in &observation.reloads {
+        out.push_str(&format!(
+            "plurx_applied_view_reloads_total{{view=\"{view}\"}} {count}\n"
+        ));
+    }
+    if !observation.revisions.is_empty() {
+        out.push_str(
+            "# HELP plurx_applied_view_table_changes_total Applied entries that changed each view's table on this replica (the applied mark's revision). Per-table invalidation reloads a view at most this often.\n\
+             # TYPE plurx_applied_view_table_changes_total counter\n",
+        );
+        for (view, revision) in &observation.revisions {
+            out.push_str(&format!(
+                "plurx_applied_view_table_changes_total{{view=\"{view}\"}} {revision}\n"
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "# HELP plurx_applied_view_proof Whether this node holds a serving proof the applied view can read under (always 1 on SQLite).\n\
+         # TYPE plurx_applied_view_proof gauge\n\
+         plurx_applied_view_proof{{mode=\"{}\"}} {}\n",
+        observation.mode,
+        u8::from(observation.proof_present),
+    ));
+    if let (Some(generation), Some(applied_index)) =
+        (observation.generation, observation.applied_index)
+    {
+        out.push_str(&format!(
+            "# HELP plurx_applied_view_image_stable Whether this replica's SQLite image is stable (0 while a snapshot is installed, and until restart after a failed restore).\n\
+             # TYPE plurx_applied_view_image_stable gauge\n\
+             plurx_applied_view_image_stable {}\n\
+             # HELP plurx_applied_view_applied_index The last Raft log index whose effects this node's read pool can see.\n\
+             # TYPE plurx_applied_view_applied_index gauge\n\
+             plurx_applied_view_applied_index {applied_index}\n\
+             # HELP plurx_applied_view_failed_replacements_total Snapshot restores that began and did not complete in this process.\n\
+             # TYPE plurx_applied_view_failed_replacements_total counter\n\
+             plurx_applied_view_failed_replacements_total {}\n",
+            u8::from(generation & 1 == 0),
+            observation.failed_replacements,
+        ));
+    }
+    out.push_str(
+        "# HELP plurx_hiqlite_read_pool_wait_seconds Time a local replicated-store query waited for a read-pool connection before it ran.\n\
+         # TYPE plurx_hiqlite_read_pool_wait_seconds histogram\n",
+    );
+    for (bound, count) in hiqlite::DB_READ_POOL_WAIT_BOUNDS_NANOS
+        .iter()
+        .zip(wait.cumulative_buckets)
+    {
+        out.push_str(&format!(
+            "plurx_hiqlite_read_pool_wait_seconds_bucket{{le=\"{}\"}} {count}\n",
+            prometheus_seconds_label(*bound)
+        ));
+    }
+    out.push_str(&format!(
+        "plurx_hiqlite_read_pool_wait_seconds_bucket{{le=\"+Inf\"}} {count}\n\
+         plurx_hiqlite_read_pool_wait_seconds_sum {}.{:09}\n\
+         plurx_hiqlite_read_pool_wait_seconds_count {count}\n",
+        wait.sum_nanos / 1_000_000_000,
+        wait.sum_nanos % 1_000_000_000,
+        count = wait.count,
+    ));
+    out
+}
+
+/// Hiqlite patch 32: replies the SQLite writer produced after the Raft apply
+/// or teardown that asked for them had stopped waiting. Fixed labels, loaded
+/// from atomics at scrape time.
+fn render_writer_abandoned_replies(rows: &[crate::cluster::WriterAbandonedReply]) -> String {
+    let mut out = String::from(
+        "# HELP plurx_hiqlite_writer_abandoned_replies_total Replicated-store writer replies whose requester (a cancelled Raft apply, or a teardown) had stopped waiting, by request and by whether the abandoned result was an error. The write itself committed or rolled back as usual; an error's text is in the node log.\n\
+         # TYPE plurx_hiqlite_writer_abandoned_replies_total counter\n",
+    );
+    for row in rows {
+        out.push_str(&format!(
+            "plurx_hiqlite_writer_abandoned_replies_total{{request=\"{request}\",outcome=\"ok\"}} {}\n\
+             plurx_hiqlite_writer_abandoned_replies_total{{request=\"{request}\",outcome=\"error\"}} {}\n",
+            row.ok,
+            row.error,
+            request = row.request,
+        ));
+    }
+    out
+}
+
 fn prometheus_seconds_label(nanos: u64) -> String {
     let whole = nanos / 1_000_000_000;
     let remainder = nanos % 1_000_000_000;
@@ -6375,10 +6740,13 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
         "# HELP plurx_background_resource_reservations Unexpired shared admission reservations.\n\
          # TYPE plurx_background_resource_reservations gauge\n\
          plurx_background_resource_reservations{{resource_class=\"source_io\"}} {}\n\
+         # HELP plurx_background_source_recovery_pending Source owners still holding capacity well after their authority lapsed (the expiry sweep is not running).\n\
+         # TYPE plurx_background_source_recovery_pending gauge\n\
+         plurx_background_source_recovery_pending {}\n\
          # HELP plurx_background_legacy_pending Sealed legacy interests awaiting bounded import.\n\
          # TYPE plurx_background_legacy_pending gauge\n\
          plurx_background_legacy_pending {}\n",
-        sample.background_jobs.source_io_reservations, sample.background_jobs.legacy_pending,
+        sample.background_jobs.source_io_reservations, sample.background_jobs.source_recovery_pending, sample.background_jobs.legacy_pending,
     ));
     let analysis = sample.analysis;
     out.push_str(
@@ -6451,6 +6819,12 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
              # TYPE plurx_analysis_queue_claimable gauge\n\
              # HELP plurx_analysis_queue_running_past_lease Fragment-index jobs sitting running past a lease nobody renewed.\n\
              # TYPE plurx_analysis_queue_running_past_lease gauge\n\
+             # HELP plurx_analysis_queue_eligible Due fragment-index work some live engine can claim now (queued jobs plus compatible pre-worker requests).\n\
+             # TYPE plurx_analysis_queue_eligible gauge\n\
+             # HELP plurx_analysis_queue_waiting Fragment-index work inside a retry wait: pre-worker requests and queued worker jobs.\n\
+             # TYPE plurx_analysis_queue_waiting gauge\n\
+             # HELP plurx_analysis_queue_incompatible Due pre-worker fragment-index requests nobody can claim: no live worker runs their engine digest, or their target was removed.\n\
+             # TYPE plurx_analysis_queue_incompatible gauge\n\
              # HELP plurx_analysis_queue_claims_since_start Claims this process has watched, since it started. Shared with skip-marker work.\n\
              # TYPE plurx_analysis_queue_claims_since_start gauge\n\
              # HELP plurx_analysis_queue_lease_losses_since_start Lost leases this process has watched, since it started.\n\
@@ -6462,6 +6836,9 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
              plurx_analysis_queue_claimed_24h {}\n\
              plurx_analysis_queue_claimable {}\n\
              plurx_analysis_queue_running_past_lease {}\n\
+             plurx_analysis_queue_eligible {}\n\
+             plurx_analysis_queue_waiting {}\n\
+             plurx_analysis_queue_incompatible {}\n\
              plurx_analysis_queue_claims_since_start {}\n\
              plurx_analysis_queue_lease_losses_since_start {}\n",
             report.health.ready_24h,
@@ -6469,8 +6846,21 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
             report.health.claimed_24h,
             report.health.claimable,
             report.health.running_past_lease,
+            report.health.eligible,
+            report.health.waiting,
+            report.health.incompatible,
             report.claims_since_start,
             report.lease_losses_since_start,
+        ));
+    }
+    out.push_str(
+        "# HELP plurx_analysis_queue_failed_by_code Failed analysis rows by last error code (bounded; unlisted codes count as other).\n\
+         # TYPE plurx_analysis_queue_failed_by_code gauge\n",
+    );
+    for (slot, code) in plurx_core::store::ANALYSIS_FAILURE_CODES.iter().enumerate() {
+        out.push_str(&format!(
+            "plurx_analysis_queue_failed_by_code{{code=\"{code}\"}} {}\n",
+            analysis.failed_by_code[slot]
         ));
     }
     out.push_str(
@@ -6512,7 +6902,13 @@ pub(crate) async fn metrics(
     let (sessions, active_cache_entries) = state.transcode.snapshot();
     let decode_fact_metrics = state.transcode.decode_facts_prometheus();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
-    let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot());
+    let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot())
+        + &render_applied_view_metrics(
+            &state.applied.observation(),
+            &crate::cluster::read_pool_wait(),
+        )
+        + &render_writer_abandoned_replies(&crate::cluster::writer_abandoned_replies())
+        + &render_cluster_directory_metrics(state.cluster_directory.reads());
     let membership_metrics = render_passive_membership_metrics(state.passive_membership.snapshot());
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
@@ -6543,7 +6939,7 @@ pub(crate) async fn metrics(
         super::prometheus_http_request_metrics(),
         crate::panics::prometheus_panics(),
         crate::state::fragment_index_validation_prometheus() + &super::browse::detail_projection_prometheus(),
-        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &state.clock.prometheus(),
+        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &crate::background_jobs::analysis_reconcile::prometheus() + &crate::state::analysis_completed_prometheus(&state.node_id) + &state.clock.prometheus() + &crate::source_custody::launch_prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();

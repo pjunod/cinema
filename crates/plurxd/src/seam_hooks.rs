@@ -72,7 +72,17 @@ pub(crate) struct PauseSlot(std::sync::Mutex<Option<std::sync::Arc<AsyncPause>>>
 impl PauseSlot {
     /// Arm the point with a new pause named `point`, and return it.
     pub(crate) fn arm(&self, point: &'static str) -> std::sync::Arc<AsyncPause> {
-        let pause = AsyncPause::new(point);
+        self.arm_for(point, ASYNC_PAUSE_BOUND)
+    }
+
+    /// [`PauseSlot::arm`] with an explicit bound, for a test that must hold
+    /// an owner past the default one.
+    pub(crate) fn arm_for(
+        &self,
+        point: &'static str,
+        bound: std::time::Duration,
+    ) -> std::sync::Arc<AsyncPause> {
+        let pause = AsyncPause::with_bound(point, bound);
         *self
             .0
             .lock()

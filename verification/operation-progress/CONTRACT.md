@@ -1,11 +1,98 @@
 # Operation progress — what the finite model can establish
 
-**Status:** independently approved; all nine configurations qualified. Delivery and the current main gate are recorded in the status page.
+**Status:** all nine configurations qualified at the original reviewed
+source. The adaptive/current-main integration requires fresh source mapping
+and promotion checks. See the status page for delivery and gate results.
 
 Companion to [README.md](README.md) (commands and configuration registry)
 and [WAIT-MAP.md](WAIT-MAP.md) (source waits and external boundaries).
 This contract defines the meaning of `OperationProgress.tla`; it does not
 extend the original [safety contract](../durable-jobs/CONTRACT.md).
+
+## HDR integration with item pins — 2026-11-18
+
+Main `1d350d82` introduces item pins and the reviewed claim/predicate
+closure. Every incoming item pin and dependency is retained. The mapped
+custody activation and TranscodeManager producer items remain byte-identical;
+the HDR changes in those files lie outside those pinned items. No item hash
+is refreshed. The dated whole-file review below remains historical context.
+Models, configurations and prior qualification identities are unchanged;
+this source review does not claim new TLC or runtime execution.
+
+## HDR playback ownership — scoped source review on 2026-11-17
+
+Codex compared PR #1727 at `19266fde08e2` with main `e59cd50c69b1`.
+An independent Sol source review checked the changed ordering and model
+boundaries. This correspondence review records no new runtime execution,
+TLC qualification or refinement theorem.
+
+The mapped custody activation body is byte-identical. The surrounding
+production change splits policy enqueue from acknowledgement: the observer
+publication mutex covers enqueue, while the asynchronous reply is awaited
+outside it. Successful acknowledgement still precedes releasing held reads,
+notifying readers and publishing rolling state; send/reply failures propagate.
+A queued operation may outlive a dropped waiter, which cannot by itself resume
+reads or establish rolling state without the successful reply path.
+
+`AdmissionUntilJoined` and `AttemptCleanup` retain owned admission through
+work join. The custody activation/cleanup dependency remains outside the
+finite model, as recorded in [WAIT-MAP.md](WAIT-MAP.md). Observer publication
+revocation, identity/epoch checks and enqueue-versus-retirement ordering are
+runtime obligations; revocation is not a physical-stop proof. Actual
+SourceInput/read/child/writer joins must retain custody through settlement.
+The existing PR #1727 lifetime regressions exercise those runtime boundaries;
+their definitions do not establish their execution or model qualification.
+
+Only this reviewed whole-file custody fingerprint and its correspondence
+record change here. Model, configuration, property, fairness and historical
+receipt bytes remain unchanged. This review adds no observer-liveness,
+byte-service, scheduling-fairness or physical-stop guarantee to the model.
+
+## Current-main item pin reconciliation — 2026-11-18
+
+PR1676 head `804633cb4` is integrated with main `965900224` without changing
+incoming Rust, SQL, model, configuration or toolchain bytes. Main moved
+claim execution into `claim_attempt` and `local_claim_verdict`, and split
+`CLAIM_SQL` into predicate macros. The former state-predicate anchor now
+selects `macro_rules! claim_state`; keeping only that item would lose the
+rest of the formerly pinned claim statement. Eleven additional dependency
+rows pin the statement/verdict constants, moved helpers and extracted
+predicate macros. The existing mutation checks exercise every moved item.
+
+The selected library candidate listing retains `admissible_only: false`.
+The daemon records the incoming Skipped/Settled/Proposed classification;
+claim acknowledgement and deadline resolution retain their existing wait
+and authority boundaries. The finite models do not establish local-replica
+application liveness or qualify the new title/artifact admission paths.
+Only the nine drifted item pins across the three packages are refreshed.
+Source correspondence is separate from affected formal smokes and full
+Main promotion qualification; historical receipts retain their identities.
+
+## Source-budget recipe requests — source review on 2026-11-09
+
+Compared with main `8ab61a779`, the shared queue adds only the
+`request_dv_fel_variant` trait method and its title-store delegation. The
+conformance parent adds that method to its inventory. Current source custody,
+claim, renewal, settlement, publication and authority bodies remain unchanged.
+The title store reopens its demand outbox for source-bound recipe requests,
+reuses queued work, and retains bounded peer receipts. These title-specific
+operations remain outside the modeled library publication path. The new
+runtime regression exercises them separately; defining it is not execution
+or formal qualification evidence.
+
+Only live whole-file fingerprints for the changed sources are refreshed.
+Current mappings, unique anchors, model/configuration bytes and historical
+qualification identities are preserved. This source review adds no fairness
+premise, model transition, TLC execution or refinement claim.
+
+## Queue observation source review on 2026-11-07
+
+Compared with `4ddbf1229`, the shared queue adds read-only counts of recent
+worker attempts and waiting manual requests. The SQLite and Hiqlite metrics
+queries count expired source custody, and the daemon caches that count for
+Activity and its sampler warning. These reads have no effect on claim,
+renewal, physical settlement, or any modeled transition. The focused queue
+regressions cover the observable rates and warnings.
 
 ## Composed main/effort source correspondence — 2026-10-28
 
@@ -175,7 +262,7 @@ mutation adds the missing reverse wait, and fairness cannot rescue it.
 | Boundary | Classification and premise |
 |---|---|
 | `ProbeReturn`, `WalkReturn` | **PRM-fs:** each selected filesystem step eventually returns; blocking filesystem syscalls have no local finite bound |
-| `Admission` | **PRM-admission:** the selected capable worker has suitable physical capacity; production admission is try-only, not a waiting reservation |
+| `Admission` | **PRM-admission:** the selected capable worker has suitable physical capacity; production admission is try-only, not a waiting reservation. Scope: the `library-work-v1` path. A targeted library job's probe-only admission does not instantiate this premise, and `StoreApply` has no claim-refused outcome, so the model says nothing about the progress of a targeted request; it is not proved |
 | `AuthorityReturn`, `QueueAuthorityReturn` | **PRM-authority:** selected authority checks return; local metrics are examined, remote client construction is an external boundary |
 | `StoreApply`, `StoreReply`, domain/queue backend steps | **PRM-backend:** after finite modeled faults, quorum, transport, rate limiting, forwarding and store scheduling permit normal calls to apply and return |
 | Caller timeout | **Code fact for selected Hiqlite caller:** TimedClient wraps the whole transaction future with a 3-second deadline; acquiring the publication lock can precede that window |
@@ -372,3 +459,54 @@ finite model to caption continuity, playback deadlines or remote-worker
 liveness. Model/configuration bytes, fairness premises and historical
 receipts retain their identities. Offline mapping validation is distinct
 from runtime tests, TLC qualification and a refinement proof.
+
+## November 7 library dispatch and source release
+
+Library discovery now polls during an active scan. Source pressure checks read the original physical claim identity without locking the publisher whose pending write the driver must poll. Current Store authority and the local monotonic deadline still govern source use. The release regression holds a committed acknowledgement pending during a pressure check, then observes the next real scan complete.
+
+## Pipeline-v2 and HDR integration — source correspondence, 2026-11-09
+
+The merged source retains the pipeline sidecar admission/status methods and
+adds main's `request_dv_fel_variant` trait method with its title-store
+delegation. The library claim, renewal, settlement, publication and authority
+bodies retain both parents' source. The Store parent registers both sets of
+conformance tests. Refresh only those whole-file source hashes after checking
+the existing anchors; model/configuration bytes and qualification identities
+are unchanged. This is source correspondence, not model execution evidence.
+
+## Item pins replace whole-file pins — 2026-11-15
+
+Paul ruled on 2026-11-15 that a mapping pins the anchored item, not the whole
+source file. Each row now records the item its anchor selects (`scope`,
+`item`, `item_sha256`);
+[the README](../durable-jobs/README.md#source-pins-cover-the-anchored-item)
+defines the items and the hash. The migration ran at main `40cc6460d`, where
+every whole-file pin matched, so each pin records source already reviewed.
+
+**Coverage changed, and this is what it is now.** The 60 original rows pin
+named items. Two anchor a match arm (`Request::AcquireDomain => {` in
+`perform`, and row 27's `Query::Transaction(req) => {` in the vendored
+writer); each pins its function without the bodies of the other arms, so
+row 27 still sees the writer's loop, the scrutinee and every arm's pattern in
+order, which is where "serial" lives.
+
+70 `same-file dependency of …` rows pin what those items read in their own
+file and that carries part of the claim: `decide_cluster_job_authority`,
+`local_node_is_committed_voter` and the other membership reads behind rows 31
+and 32; `RELEASE_ATTEMPTS`, `RELEASE_RETRY_DELAY`, `lease_time_remaining` and
+`revoke` behind rows 13 to 15; `claim_with_resolution`, `library_candidates`,
+`settle` and the other helpers of rows 01 to 07; `publish_then_send`,
+`send_reply` and the source-layout guards of row 27; the publication helpers
+of rows 19 and 20; the timed client's `inner`, `validate_sql` and timeout
+error; the walker's page size and cancellation check; and the scheduler and
+worker loop bodies behind rows 42 and 43. `trait ClusterJobAuthority` in
+`coordination.rs` has a row because `may_execute_job` is its provided method.
+
+**Accepted loss.** No dependency rows for the rows recorded as outside the
+model (caption migration, managed-resource views, source-custody recovery),
+for `main.rs` startup, for the snapshot, backup and migration helpers of the
+writer, or for the scanner's naming and reporting helpers. Nothing in another
+file is followed except the trait above, and nothing more than one call away.
+
+No source, anchor, model, configuration or property changes. This is a change
+to the drift check, not review or execution evidence.

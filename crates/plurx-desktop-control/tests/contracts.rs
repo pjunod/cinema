@@ -889,7 +889,7 @@ fn wrapped_native_archive(wrapper: Option<&str>) -> Vec<u8> {
             repository: REPOSITORY.into(),
             version: "0.7.10".into(),
             source_commit: "b".repeat(40),
-            architecture: Architecture::Universal,
+            architecture: Architecture::Arm64,
         })
         .expect("release fixture"),
     ));
@@ -924,9 +924,9 @@ fn wrapped_native_archive(wrapper: Option<&str>) -> Vec<u8> {
 }
 fn native_archive_artifact(bytes: &[u8]) -> ArtifactV1 {
     ArtifactV1 {
-        name: "plurxd-0.7.10-macos-universal.tar.gz".into(),
+        name: "plurxd-0.7.10-macos-arm64.tar.gz".into(),
         platform: Platform::Macos,
-        architecture: Architecture::Universal,
+        architecture: Architecture::Arm64,
         format: Format::TarGz,
         component: Component::NativeRuntime,
         package_name: "plurx-native".into(),
@@ -938,7 +938,7 @@ fn native_archive_artifact(bytes: &[u8]) -> ArtifactV1 {
 #[test]
 fn canonical_wrapped_native_archive_round_trip_shares_preparation_and_promotion_root() {
     use plurx_desktop_control::native;
-    let wrapper = "plurxd-0.7.10-macos-universal";
+    let wrapper = "plurxd-0.7.10-macos-arm64";
     let bytes = wrapped_native_archive(Some(wrapper));
     let mut i = installed();
     i.method = InstallMethod::MacosNative;
@@ -991,7 +991,7 @@ fn canonical_wrapped_native_archive_round_trip_shares_preparation_and_promotion_
 #[test]
 fn native_archive_root_rejects_flat_wrong_wrappers_and_extra_siblings() {
     use plurx_desktop_control::native::archive_package_root;
-    for wrapper in [None, Some("plurxd-0.7.9-macos-universal"), Some("package")] {
+    for wrapper in [None, Some("plurxd-0.7.9-macos-arm64"), Some("package")] {
         let bytes = wrapped_native_archive(wrapper);
         let artifact = native_archive_artifact(&bytes);
         let extracted = Scratch::new();
@@ -1000,7 +1000,7 @@ fn native_archive_root_rejects_flat_wrong_wrappers_and_extra_siblings() {
         assert!(archive_package_root(&extracted.0, &artifact, "0.7.10").is_err());
     }
     for sibling_directory in [false, true] {
-        let bytes = wrapped_native_archive(Some("plurxd-0.7.10-macos-universal"));
+        let bytes = wrapped_native_archive(Some("plurxd-0.7.10-macos-arm64"));
         let artifact = native_archive_artifact(&bytes);
         let extracted = Scratch::new();
         extract_archive(Cursor::new(bytes), &extracted.0, 1024 * 1024).expect("wrapped fixture");
@@ -1016,7 +1016,7 @@ fn native_archive_root_rejects_flat_wrong_wrappers_and_extra_siblings() {
 fn native_archive_root_binds_signed_identity_and_refuses_every_symlink_path() {
     use plurx_desktop_control::native::archive_package_root;
     use std::os::unix::fs::symlink;
-    let wrapper = "plurxd-0.7.10-macos-universal";
+    let wrapper = "plurxd-0.7.10-macos-arm64";
     let bytes = wrapped_native_archive(Some(wrapper));
     let artifact = native_archive_artifact(&bytes);
     let extracted = Scratch::new();
@@ -1025,9 +1025,9 @@ fn native_archive_root_binds_signed_identity_and_refuses_every_symlink_path() {
     for mutation in 0..6 {
         let mut wrong = artifact.clone();
         match mutation {
-            0 => wrong.name = "plurxd-0.7.9-macos-universal.tar.gz".into(),
+            0 => wrong.name = "plurxd-0.7.9-macos-arm64.tar.gz".into(),
             1 => wrong.platform = Platform::Linux,
-            2 => wrong.architecture = Architecture::Arm64,
+            2 => wrong.architecture = Architecture::Universal,
             3 => wrong.format = Format::Deb,
             4 => wrong.component = Component::Server,
             _ => wrong.package_name = "plurxd".into(),
@@ -1392,7 +1392,9 @@ fn debian_server_first_configuration_keeps_unpacked_desktop_absent_until_its_own
 }
 
 #[test]
-fn thin_macos_source_install_selects_only_signed_universal_release_cohort() {
+fn every_macos_native_install_selects_only_the_signed_arm64_release_cohort() {
+    // Universal is the record an earlier (Intel-capable) release left behind;
+    // it, a source build and an arm64 release install all move to arm64.
     for architecture in [
         Architecture::Arm64,
         Architecture::Amd64,
@@ -1402,16 +1404,16 @@ fn thin_macos_source_install_selects_only_signed_universal_release_cohort() {
         i.method = InstallMethod::MacosNative;
         i.architecture = architecture;
         let mut m = manifest();
-        m.artifacts = vec![native_archive_artifact(b"universal fixture")];
+        m.artifacts = vec![native_archive_artifact(b"arm64 fixture")];
         let candidate = signed(&m, &i, &AcceptedReleasesV1::default())
-            .expect("native source to signed universal release");
-        let cohort = select_cohort(&candidate, &i).expect("universal cohort");
+            .expect("native install to signed arm64 release");
+        let cohort = select_cohort(&candidate, &i).expect("arm64 cohort");
         assert_eq!(cohort.len(), 1);
-        assert_eq!(cohort[0].architecture, Architecture::Universal);
-        m.artifacts[0].architecture = Architecture::Arm64;
+        assert_eq!(cohort[0].architecture, Architecture::Arm64);
+        m.artifacts[0].architecture = Architecture::Universal;
         assert!(
             signed(&m, &i, &AcceptedReleasesV1::default()).is_err(),
-            "a thin runtime never enables thin release archives"
+            "a universal archive is no longer a release cohort"
         );
     }
 }

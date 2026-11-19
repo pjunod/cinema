@@ -701,7 +701,13 @@ mod tests {
                             .await
                             .expect("actual pinned identity");
                             match peer
-                                .file_start(&credential, &expected, &"a".repeat(64), &canonical)
+                                .file_start(
+                                    &credential,
+                                    &expected,
+                                    &"a".repeat(64),
+                                    &canonical,
+                                    None,
+                                )
                                 .await
                             {
                                 Ok(crate::http::sharing_direct_wire::DecodedSourceStart::Hls(
@@ -806,12 +812,12 @@ mod tests {
             .expect("direct pinned client");
             for viewer in [String::new(), "A".repeat(64), "g".repeat(64)] {
                 assert!(peer
-                    .file_start(&credential, &expected, &viewer, &direct_canonical)
+                    .file_start(&credential, &expected, &viewer, &direct_canonical, None)
                     .await
                     .is_err());
             }
             assert!(peer
-                .file_start(&credential, &expected, &"a".repeat(64), "{}")
+                .file_start(&credential, &expected, &"a".repeat(64), "{}", None)
                 .await
                 .is_err());
             assert_eq!(
@@ -823,7 +829,13 @@ mod tests {
             assert!(
                 tokio::time::timeout(
                     std::time::Duration::from_millis(50),
-                    peer.file_start(&credential, &expected, &"a".repeat(64), &direct_canonical)
+                    peer.file_start(
+                        &credential,
+                        &expected,
+                        &"a".repeat(64),
+                        &direct_canonical,
+                        None
+                    )
                 )
                 .await
                 .is_err(),

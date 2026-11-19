@@ -20,9 +20,55 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.8.0**, build `187` — progressive captions discover stopped
-> operations before explicit Resume and show current nonretryable range failures.
-> Discovery creates no demand; focused validation and physical acceptance remain open.
+> Status: **v0.8.0**, build `207` — prepared Dolby Vision handoffs retain
+> the executing choice and film position after optional Auto failures, and
+> the control playhead stays in title time for streams that began mid-title.
+>
+> Build `206` — the ebook reader accepts the same supported server origins as the session.
+>
+> Build `205` — direct Dolby Vision playback receives the
+> original-file enhancement report, and playback controls show when Cinema is
+> tone mapping. Native `DYN` requires a selected Dolby Vision decoder on a Dolby
+> Vision display; pending or fallback playback explains why it is inactive.
+> Server tone mapping requires current processing evidence and is shown
+> separately from native Dolby Vision. Physical Lenovo verification remains open.
+>
+> Build `203` — the rendezvous never precedes a prepared
+> successor's own start, so a processed upgrade staged at the window its trial
+> already produced is met where it begins. Build 203 changes only the version
+> code so Google Play can deliver a fresh install to existing testers.
+>
+> Build `199` — a prepared successor primes and serves
+> untunneled, so a Dolby Vision-enhanced upgrade no longer takes the
+> television's hardware A/V sync from the player on screen.
+>
+> Build `197` — releases builds 195–196 through the
+> internal-testing channel: no app change; the channel's release guard needs a
+> version commit after the last Android source change.
+>
+> Build `196` — Playback Info shows the server's
+> real reason a Dolby Vision enhancement was skipped or is still qualifying.
+>
+> Build `195` — the HEVC decoder envelope is the one
+> Media3's own decoder selector reports, rather than a re-derivation of it.
+>
+> Build `194` — the HEVC decoder envelope stops at the
+> vendor's declared performance points, the bound Media3's decoder selector
+> applies, so the hvc1 probe holds and processed Dolby Vision (HDR10-E) can
+> upgrade playback on decoders such as the Google TV Streamer's.
+>
+> Build `193` — a prepared switch hands MediaSession the successor only
+> after its decoded frame and reports its seam (`prepared_seam`) with decoder-counter frame
+> and audio-underrun evidence, once per commit that began, with whether an ordinary reopen
+> actually ran in its window; a create refusal no retry can outlive
+> (`transcode_height_unavailable`, `transcode_scratch_exhausted`, `replacement_expired`) ends the
+> start on its own surface row, and `media_session_overloaded` is retried; every session create tells the server what its start
+> sequence has left (`X-Plurx-Startup-Remaining-Ms`); media waits retire with their settled
+> or superseded destination intent, matching the shared playback-surface contract. Native qualification
+> is tracked in PR #1378; physical acceptance remains open.
+>
+> Build `188` — progressive captions discover stopped operations before explicit Resume
+> and show current nonretryable range failures. Discovery creates no demand.
 >
 > Build `185` — the player shows the server's Dolby
 > Vision enhancement: one teal `FEL` / `RPU` / `DYN` pill per active

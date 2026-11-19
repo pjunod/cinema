@@ -377,6 +377,12 @@ fn clone_error(error: &PeerError) -> PeerError {
         PeerError::InvalidResponse => PeerError::InvalidResponse,
         PeerError::Rejected(status) => PeerError::Rejected(*status),
         PeerError::DolbyVisionUnsupported => PeerError::DolbyVisionUnsupported,
+        PeerError::Busy { retry_after_secs } => PeerError::Busy {
+            retry_after_secs: *retry_after_secs,
+        },
+        PeerError::StartNotYet { retry_after_secs } => PeerError::StartNotYet {
+            retry_after_secs: *retry_after_secs,
+        },
     }
 }
 

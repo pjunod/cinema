@@ -89,8 +89,12 @@ fun LibraryScreen(
     val preferences by vm.preferences.collectAsStateWithLifecycle()
     val home by vm.home.collectAsStateWithLifecycle()
     val kind = home.libraries.firstOrNull { it.id in libraryIds }?.kind
-    val pagerFactory = remember(vm, libraryIds) { { order: String -> vm.libraryPager(libraryIds, order) } }
-    LibraryScreen(libraryIds, title, preferences, kind, pagerFactory, onOpenItem, onBack, vm::setLibraryPresentation)
+    val presence = preferences.libraryPresence
+    val pagerFactory = remember(vm, libraryIds, presence) { { order: String -> vm.libraryPager(libraryIds, order, presence) } }
+    LibraryScreen(
+        libraryIds, title, preferences, kind, pagerFactory, onOpenItem, onBack, vm::setLibraryPresentation,
+        presence = presence, onPresenceChange = vm::setLibraryPresence,
+    )
 }
 
 /** The production grid with its account-bound dependencies supplied by the
@@ -107,6 +111,8 @@ internal fun LibraryScreen(
     onOpenItem: (Long) -> Unit,
     onBack: () -> Unit,
     onPresentationChange: (LibraryPresentation) -> Unit = {},
+    presence: tv.plurx.app.data.LibraryPresence = tv.plurx.app.data.LibraryPresence.Disk,
+    onPresenceChange: ((tv.plurx.app.data.LibraryPresence) -> Unit)? = null,
 ) {
     val formFactor = currentFormFactor()
     val side = formFactor.horizontalPadding()
@@ -209,6 +215,16 @@ internal fun LibraryScreen(
                 onSelect = { filter = it },
                 modifier = Modifier.weight(1f),
             )
+            if (onPresenceChange != null) {
+                ChoicePicker(
+                    label = "Files",
+                    value = presence,
+                    options = tv.plurx.app.data.LibraryPresence.entries,
+                    optionLabel = { it.label },
+                    onSelect = onPresenceChange,
+                    modifier = Modifier.weight(1f),
+                )
+            }
         }
 
         OutlinedTextField(

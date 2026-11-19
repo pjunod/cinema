@@ -30,12 +30,32 @@
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/parseutils.h>
+#include <libavutil/sha.h>
 #include <libdovi/rpu_parser.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "title_constants.h"
+// This is a whole-title scan, not a bounded renderer window. Its existing
+// frame/packet limits and daemon total/active owner deadlines remain in force;
+// source-service admission budgets every finite Range. Do not impose the
+// renderer's 128 MiB cumulative window on a complete source scan.
+#define WINDOW_READ_LIMIT UINT64_MAX
+#include "movie_source_io.h"
+
+static struct budget_io title_io = {.fd = -1, .upstream = -1};
+static AVIOContext *title_avio;
+// Optional disk-conversion sidecar: decode-order RPU hash and exact source PTS.
+static FILE *rpu_timeline;
+static void close_title_io(void) {
+  if (title_avio) {
+    av_freep(&title_avio->buffer);
+    avio_context_free(&title_avio);
+  }
+  movie_source_close(&title_io);
+}
+
 
 #define MAX_TITLE_FRAMES 100000000ULL
 #define MAX_UNIT_NALS 4096
@@ -51,6 +71,7 @@ struct title_stats {
   uint64_t frames, valid, missing, invalid;
   unsigned max_pq;
   struct dv_title_constants mastering;
+  bool saw_fel, saw_mel, unknown_el;
 };
 struct picture_time {
   int64_t pts, duration;
@@ -69,11 +90,26 @@ static bool known_pps[64];
 static void need(bool ok, const char *why) {
   if (!ok) {
     fprintf(stderr, "DV title scan refused: %s\n", why);
+    close_title_io();
     exit(1);
   }
 }
+static void open_title_io(AVFormatContext *input, const char *source) {
+  need(movie_source_open(&title_io, source) >= 0,
+       "held regular title source or private source capability");
+  uint8_t *buffer = av_malloc(65536);
+  need(buffer != NULL, "bounded title IO buffer");
+  title_avio = avio_alloc_context(buffer, 65536, 0, &title_io,
+                                  movie_read, NULL, movie_seek);
+  if (!title_avio) av_free(buffer);
+  need(title_avio != NULL, "title IO context");
+  input->pb = title_avio;
+  input->flags |= AVFMT_FLAG_CUSTOM_IO;
+  need(movie_source_bind_demuxer(input) >= 0, "closed title demux protocol authority");
+}
 static void unknown_constants(void) {
   dv_title_constants_unknown(&stats.mastering);
+  stats.unknown_el = true;
 }
 static int nal_type(const struct nal *nal) { return (nal->data[0] >> 1) & 0x3f; }
 static int nal_layer(const struct nal *nal) {
@@ -183,7 +219,7 @@ static void hold_rpu(const struct nal *nal) {
 }
 
 // One picture's metadata: the RPU the decoder attaches to it, if any.
-static void observe_rpu(void) {
+static void observe_rpu(int64_t pts) {
   if (!rpu.held) {
     stats.missing++;
     unknown_constants();
@@ -211,6 +247,23 @@ static void observe_rpu(void) {
     unknown_constants();
     goto done;
   }
+  if (rpu_timeline) {
+    struct AVSHA *sha = av_sha_alloc();
+    uint8_t hash[32];
+    need(sha != NULL && av_sha_init(sha, 256) == 0, "timeline SHA256");
+    av_sha_update(sha, nal, size + 2);
+    av_sha_final(sha, hash);
+    av_free(sha);
+    need(fprintf(rpu_timeline, "%"PRId64" ", pts) > 0, "timeline write");
+    for (unsigned i = 0; i < 32; i++)
+      need(fprintf(rpu_timeline, "%02x", hash[i]) == 2, "timeline hash");
+    need(fputc('\n', rpu_timeline) != EOF, "timeline newline");
+  }
+  if (header->guessed_profile == 7 && header->el_type &&
+      strcmp(header->el_type, "FEL") == 0) stats.saw_fel = true;
+  else if (header->guessed_profile == 7 && header->el_type &&
+           strcmp(header->el_type, "MEL") == 0) stats.saw_mel = true;
+  else stats.unknown_el = true;
   if (!dm->dm_data.level1) {
     stats.missing++;
   } else if (dm->dm_data.level1->max_pq > 4095 ||
@@ -329,7 +382,7 @@ static void observe_unit(const AVPacket *packet, int length_size) {
   times[stats.frames].pts = packet->pts;
   times[stats.frames].duration = packet->duration;
   stats.frames++;
-  observe_rpu();
+  observe_rpu(packet->pts);
 }
 
 static int by_pts(const void *a, const void *b) {
@@ -362,7 +415,8 @@ static int configuration(const AVCodecParameters *par) {
 }
 
 int main(int argc, char **argv) {
-  need(argc == 3, "usage: scan_title HELD_SOURCE VIDEO_INDEX");
+  need(argc == 3 || (argc == 5 && strcmp(argv[3], "--rpu-timeline") == 0),
+       "usage: scan_title HELD_SOURCE VIDEO_INDEX [--rpu-timeline OUTPUT]");
   char *end;
   errno = 0;
   long index = strtol(argv[2], &end, 10);
@@ -375,6 +429,7 @@ int main(int argc, char **argv) {
   input->max_streams = 256;
   input->probesize = 1024 * 1024;
   input->max_analyze_duration = AV_TIME_BASE;
+  open_title_io(input, argv[1]);
   need(avformat_open_input(&input, argv[1], NULL, NULL) >= 0, "source open");
   // Supported catalogue containers expose codec parameters on opening. Avoid
   // a second analysis pass and never seek past the start of the title.
@@ -389,6 +444,12 @@ int main(int argc, char **argv) {
   for (unsigned i = 0; i < input->nb_streams; i++)
     if (i != (unsigned long)index) input->streams[i]->discard = AVDISCARD_ALL;
   int length_size = configuration(stream->codecpar);
+  if (argc == 5) {
+    rpu_timeline = fopen(argv[4], "wx");
+    need(rpu_timeline != NULL, "exclusive RPU timeline sidecar");
+    need(fprintf(rpu_timeline, "# %d/%d\n", stream->time_base.num,
+                 stream->time_base.den) > 0, "timeline time base");
+  }
   AVPacket *packet = av_packet_alloc();
   need(packet != NULL, "bounded demux buffer");
   int ret;
@@ -463,10 +524,20 @@ int main(int argc, char **argv) {
     } else printf("null");
     printf("}");
   } else printf("\"state\":\"%s\"", stats.mastering.l9_state == 3 ? "inconsistent" : "unknown");
+  printf("},\"el_kind\":{\"state\":\"%s\"",
+         stats.saw_fel && stats.saw_mel ? "inconsistent" :
+         stats.unknown_el || !(stats.saw_fel || stats.saw_mel) ? "unknown" : "consistent");
+  if (!(stats.saw_fel && stats.saw_mel) && !stats.unknown_el &&
+      (stats.saw_fel || stats.saw_mel))
+    printf(",\"value\":\"%s\"", stats.saw_fel ? "fel" : "mel");
   printf("}}\n");
   need(!ferror(stdout) && fflush(stdout) == 0, "aggregate output");
+  if (rpu_timeline)
+    need(fflush(rpu_timeline) == 0 && fclose(rpu_timeline) == 0,
+         "complete RPU timeline sidecar");
   free(times);
   av_packet_free(&packet);
   avformat_close_input(&input);
+  close_title_io();
   return 0;
 }

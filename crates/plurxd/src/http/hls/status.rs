@@ -34,11 +34,38 @@ async fn status_local_answer(
     // Durable authority is classified before touching process-local
     // telemetry. Random/ended/remote capabilities therefore cannot make a
     // lingering actor do work or leak whether it still exists.
-    let resolution = state
+    //
+    // View first (playback-start E1c, §6.1, §12-5): the cached route lookup
+    // admits an active route; any other verdict ends the request, so a
+    // quorum read confirms it first, as `relay_if_remote` reclassifies. The
+    // view never answers alone for a local actor either: the post-publication
+    // read below (`StatusBracket`) is the quorum half of that bracket.
+    let resolution = match state
         .media_sessions
-        .authoritative_media_route_resolution_before(session, &state.node_id, request_deadline)
+        .status_view_media_route_resolution_before(session, &state.node_id, request_deadline)
         .await
-        .map_err(|_| response_publication_timeout())?;
+        .map_err(|_| response_publication_timeout())?
+    {
+        active @ (DurableRouteResolution::ActiveLocal(_)
+        | DurableRouteResolution::ActiveRemote(_)) => active,
+        _ => {
+            let confirmed = state
+                .media_sessions
+                .status_media_route_resolution_before(
+                    crate::media_sessions::RouteReadSite::StatusFirst,
+                    session,
+                    &state.node_id,
+                    request_deadline,
+                )
+                .await
+                .map_err(|_| response_publication_timeout())?;
+            state
+                .media_sessions
+                .adopt_authoritative_route(session, super::relay::durable_route(&confirmed))
+                .await;
+            confirmed
+        }
+    };
     let mut route = match resolution {
         DurableRouteResolution::Absent => return Err(ApiError::NotFound("hls session")),
         DurableRouteResolution::Terminal(_) => return Err(media_session_ended()),
@@ -61,7 +88,8 @@ async fn status_local_answer(
             .map_err(|_| response_publication_timeout())?;
             match state
                 .media_sessions
-                .authoritative_media_route_resolution_before(
+                .status_media_route_resolution_before(
+                    crate::media_sessions::RouteReadSite::StatusBracket,
                     session,
                     &state.node_id,
                     request_deadline,
@@ -138,7 +166,12 @@ async fn status_local_answer(
         }
         let resolution = state
             .media_sessions
-            .authoritative_media_route_resolution_before(session, &state.node_id, request_deadline)
+            .status_media_route_resolution_before(
+                crate::media_sessions::RouteReadSite::StatusReclassify,
+                session,
+                &state.node_id,
+                request_deadline,
+            )
             .await
             .map_err(|_| response_publication_timeout())?;
         match resolution {

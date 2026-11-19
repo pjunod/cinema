@@ -9,8 +9,8 @@ use std::time::Duration;
 use plurx_core::cluster::coordination::ClusterJobAuthority;
 use plurx_core::error::StoreError;
 use plurx_core::store::background_jobs::{
-    BackgroundJob, ClaimJob, ClaimOutcome, ClaimResolution, JobPublishOutcome, JobSettlement,
-    JobToken, PublishTranscodeJob, RenewJobs, RenewOutcome, ResolveClaim, SettleJob,
+    BackgroundJob, ClaimJob, ClaimOutcome, ClaimPath, ClaimResolution, JobPublishOutcome,
+    JobSettlement, JobToken, PublishTranscodeJob, RenewJobs, RenewOutcome, ResolveClaim, SettleJob,
     TranscodeJobOutput, JOB_LEASE_MS, JOB_RENEW_INTERVAL_MS,
 };
 use plurx_core::store::Store;
@@ -27,8 +27,20 @@ pub(crate) mod subtitle_fixture;
 pub(crate) mod faults;
 #[path = "background_job_metrics.rs"]
 mod metrics;
+#[cfg(target_os = "linux")]
+pub(crate) use metrics::claim_skipped;
 use metrics::Event;
 pub(crate) use metrics::{accepted_claims, prometheus};
+
+#[path = "background_jobs/analysis_reconcile.rs"]
+pub(crate) mod analysis_reconcile;
+#[path = "background_jobs/source.rs"]
+mod source;
+#[cfg(target_os = "linux")]
+pub(crate) use source::RawRetirement;
+pub(crate) use source::{
+    budgeted, source_budget, SourceHolder, SourcePacingClock, SourceReadBudget,
+};
 
 const PUBLICATION_MARGIN: Duration = Duration::from_secs(3);
 
@@ -322,6 +334,29 @@ struct Inner {
     lost: CancellationToken,
     /// Historical acknowledged completion only; never artifact authority.
     copy_output_completed: AtomicBool,
+    /// Retained independently of the renewable/retired job token. Only an
+    /// explicit finish after physical join may settle this source custody.
+    source_custody:
+        Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken>,
+    source_budget: Arc<SourceReadBudget>,
+    /// Opened only by `finish` after retirement; authorizes the live
+    /// completion ledger. Drop never opens it.
+    settle: CancellationToken,
+}
+
+/// What a fenced F+ publication did.
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RefitPublication {
+    /// The table is the file's current one and the job succeeded.
+    Published,
+    /// The attempt no longer owns the title (cancelled, superseded, lease
+    /// lost): nothing was written and nothing is left to settle.
+    Fenced,
+    /// The rows fail their own check (a non-finite number, a table over the
+    /// one-write bound, rows that disagree with their digest): the same rows
+    /// fail again, so the attempt fails.
+    Invalid(String),
 }
 
 #[derive(Clone)]
@@ -383,7 +418,7 @@ impl BackgroundJobController {
         size(Self::finish)
     }
     pub(crate) async fn finish(self) -> BackgroundControllerClosed {
-        let receipt = self.fence.finish_original_controller().await;
+        let receipt = self.fence.finish_original_worker().await;
         metrics::execution(self.fence.0.kind, self.fence.0.started.elapsed());
         // self's Drop destroys job/active before the payload marker is set.
         receipt
@@ -401,6 +436,12 @@ impl Drop for BackgroundControllerPayload {
 /// A failed RPC is not a failed claim. Resolve the same identity while the
 /// caller continues holding its local permit; do not try another candidate
 /// merely because the first acknowledgement disappeared.
+///
+/// `claim_write` and `claim_refused` count proposals only, so their ratio is
+/// the share of proposals the statement refused. A claim this node's applied
+/// replica showed the statement refusing was never proposed: it counts
+/// `claim_skipped{reason}` and nothing else. A claim the authoritative
+/// pre-read settled, or one whose call failed before saying, is neither.
 pub(crate) async fn claim_with_resolution(
     store: &dyn Store,
     candidate: &BackgroundJob,
@@ -408,12 +449,20 @@ pub(crate) async fn claim_with_resolution(
 ) -> Result<Option<(BackgroundJob, Instant)>, StoreError> {
     let kind = request.kind;
     let issued = Instant::now();
-    metrics::event(kind, Event::ClaimWrite);
     let queue_age = request
         .now_ms
         .saturating_sub(candidate.created_at_ms)
         .max(0) as u64;
-    let result = claim_with_resolution_inner(store, request).await;
+    let mut path = None;
+    let result = claim_with_resolution_inner(store, request, &mut path).await;
+    if let Some(ClaimPath::Skipped(block)) = path {
+        metrics::claim_skipped(kind, block);
+        return result;
+    }
+    let proposed = path == Some(ClaimPath::Proposed);
+    if proposed {
+        metrics::event(kind, Event::ClaimWrite);
+    }
     metrics::claim_latency(kind, issued.elapsed());
     match &result {
         Ok(Some(_)) => {
@@ -423,7 +472,8 @@ pub(crate) async fn claim_with_resolution(
                 metrics::event(kind, Event::Takeover);
             }
         }
-        Ok(None) => metrics::event(kind, Event::ClaimRefused),
+        Ok(None) if proposed => metrics::event(kind, Event::ClaimRefused),
+        Ok(None) => {}
         Err(_) => metrics::event(kind, Event::ClaimError),
     }
     result
@@ -432,16 +482,19 @@ pub(crate) async fn claim_with_resolution(
 async fn claim_with_resolution_inner(
     store: &dyn Store,
     request: ClaimJob,
+    path: &mut Option<ClaimPath>,
 ) -> Result<Option<(BackgroundJob, Instant)>, StoreError> {
     let issued = Instant::now();
     let deadline = issued + Duration::from_millis(JOB_LEASE_MS as u64);
-    let claimed = if request.kind.permits_artifact_execution() {
-        store.claim_artifact_job(request.clone()).await
-    } else {
-        store.claim_job(request.clone()).await
-    };
+    // `claim_artifact_job` is `claim_job` behind the same artifact-kind check
+    // this worker already branches on; the attempt form reports the path.
+    let claimed = store.claim_job_attempt(request.clone()).await;
     #[cfg(test)]
     let claimed = faults::after_commit(faults::CLAIM, claimed);
+    let claimed = claimed.map(|attempt| {
+        *path = Some(attempt.path);
+        attempt.outcome
+    });
     match claimed {
         Ok(ClaimOutcome::Claimed { job }) if Instant::now() < deadline => {
             let remaining = job.token.as_ref().map_or(0, |token| {
@@ -514,8 +567,161 @@ async fn claim_with_resolution_inner(
     Ok(None)
 }
 
+/// Called by the operation owner only after its read/child join, or before
+/// input was ever exposed. The proof write is durable before the exact row is
+/// deleted, so restart replay can finish an unacknowledged DELETE.
+pub(crate) async fn settle_joined_source_custody(
+    store: &Arc<dyn Store>,
+    receipt: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+) {
+    let _receipt_owner = crate::source_custody::lock_background_settlement(&receipt).await;
+    loop {
+        match crate::source_custody::persist_background_settlement(&receipt) {
+            Ok(()) => break,
+            Err(error) => tracing::warn!(custody_id=%receipt.custody_id,%error,
+                "joined source journal remains pending"),
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    loop {
+        match store.mark_background_source_settled(receipt.clone()).await {
+            Ok(false) => {
+                if let Err(error) =
+                    crate::source_custody::clear_background_settlement(store, &receipt)
+                {
+                    tracing::warn!(%error,"background source journal cleanup will replay");
+                }
+                return;
+            }
+            Ok(true) => break,
+            Err(error) => tracing::warn!(custody_id=%receipt.custody_id,%error,
+                "joined source proof remains pending"),
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    loop {
+        let deleted = store
+            .release_background_source_custody(receipt.clone(), unix_ms().unwrap_or_default())
+            .await;
+        #[cfg(test)]
+        let deleted = faults::after_commit(faults::SOURCE_RELEASE, deleted);
+        match deleted {
+            Ok(_) => {
+                if let Err(error) =
+                    crate::source_custody::clear_background_settlement(store, &receipt)
+                {
+                    tracing::warn!(%error,"background source journal cleanup will replay");
+                }
+                return;
+            }
+            Err(error) => tracing::warn!(custody_id=%receipt.custody_id,%error,
+                "joined source deletion remains pending"),
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Initial registration itself carries a durable no-reader proof. DELETE is
+/// conditional on that proof, so a duplicate or ambiguously armed reader stays
+/// charged instead of being mistaken for this unstarted operation.
+pub(crate) async fn settle_no_reader_source_custody(
+    store: &Arc<dyn Store>,
+    receipt: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+) {
+    loop {
+        match store
+            .release_background_source_custody(receipt.clone(), unix_ms().unwrap_or_default())
+            .await
+        {
+            Ok(_) => return,
+            Err(error) => tracing::warn!(custody_id=%receipt.custody_id,%error,
+                "no-reader source deletion remains pending"),
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// A registration error may be a committed insert with a lost acknowledgement.
+/// Close the exact claim before resolving it, so no delayed write can create a
+/// source reader after a no-reader receipt is released.
+async fn settle_unstarted_job_source(
+    store: &Arc<dyn Store>,
+    owner: plurx_core::store::background_jobs_resources::BackgroundSourceOwner,
+    mut receipt: Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken>,
+) {
+    let plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Job { token } = &owner
+    else {
+        return;
+    };
+    loop {
+        let now_ms = unix_ms().unwrap_or_default();
+        let resolution = store
+            .resolve_claim(ResolveClaim {
+                job_id: token.job_id.clone(),
+                node_id: token.node_id.clone(),
+                boot_id: token.boot_id.clone(),
+                claim_id: token.claim_id.clone(),
+                fence: Some(token.fence),
+                dispatched_at_ms: now_ms,
+                now_ms,
+            })
+            .await;
+        let settlement = match resolution {
+            Ok(ClaimResolution::Running { token }) => Some((
+                token,
+                JobSettlement::Yield {
+                    error_code: Some("source_registration_unavailable".into()),
+                    checkpoint: None,
+                    not_before_ms: now_ms,
+                },
+            )),
+            Ok(ClaimResolution::CancelRequested { cleanup_token }) => {
+                Some((cleanup_token, JobSettlement::Cancel))
+            }
+            Ok(
+                ClaimResolution::LostOwnership
+                | ClaimResolution::Settled { .. }
+                | ClaimResolution::ExpiredOrPruned,
+            ) => break,
+            Err(error) => {
+                tracing::warn!(%error,job=%token.job_id,
+                "unstarted source claim fencing will retry");
+                None
+            }
+        };
+        if let Some((token, settlement)) = settlement {
+            if let Err(error) = store
+                .settle_job(SettleJob {
+                    token,
+                    settlement,
+                    now_ms,
+                })
+                .await
+            {
+                tracing::warn!(%error,"unstarted source claim settlement will retry");
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    loop {
+        if let Some(held) = receipt.take() {
+            settle_no_reader_source_custody(store, held).await;
+            return;
+        }
+        match store.register_background_source_custody(owner.clone(), unix_ms().unwrap_or_default()).await {
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::Registered(held)) => {
+                receipt = Some(held);
+            }
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::NotRequired
+                | plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::LostOwnership) => return,
+            Err(error) => tracing::warn!(%error,"unstarted source receipt resolution will retry"),
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 impl ActiveBackgroundJob {
-    pub(crate) fn start(
+    pub(crate) async fn start(
         store: Arc<dyn Store>,
         authority: Arc<dyn ClusterJobAuthority>,
         token: JobToken,
@@ -528,6 +734,51 @@ impl ActiveBackgroundJob {
                 "background claim acknowledgement arrived after its deadline".to_owned(),
             ));
         }
+        let owner = plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Job {
+            token: token.clone(),
+        };
+        let registration = store
+            .register_background_source_custody(owner.clone(), unix_ms()?)
+            .await;
+        #[cfg(test)]
+        let registration = faults::after_commit(faults::SOURCE_REGISTER, registration);
+        let source_custody = match registration {
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::Registered(receipt)) => Some(receipt),
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::NotRequired) => None,
+            Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::LostOwnership) => {
+                return Err(StoreError::Task("source custody claim unavailable before execution".into()));
+            }
+            Err(error) => {
+                settle_unstarted_job_source(&store, owner, None).await;
+                return Err(error);
+            }
+        };
+        if Instant::now() >= deadline {
+            settle_unstarted_job_source(&store, owner, source_custody).await;
+            return Err(StoreError::Task(
+                "source custody registration exceeded the claim deadline".into(),
+            ));
+        }
+        if let Some(receipt) = &source_custody {
+            if let Err(error) =
+                crate::source_custody::activate_background_with_journal(&store, receipt.clone())
+                    .await
+            {
+                settle_unstarted_job_source(&store, owner, source_custody).await;
+                return Err(StoreError::Task(error));
+            }
+        }
+        let lost = CancellationToken::new();
+        let settle = CancellationToken::new();
+        let source_budget = match &source_custody {
+            Some(receipt) => SourceReadBudget::with_completion(
+                Arc::clone(&store),
+                receipt,
+                lost.clone(),
+                settle.clone(),
+            ),
+            None => SourceReadBudget::new(Arc::clone(&store), owner, lost.clone()),
+        };
         let (deadline, _) = watch::channel(deadline);
         let application =
             plurx_core::adaptive_resources::runtime::application::PendingApplicationGroup::new();
@@ -554,8 +805,11 @@ impl ActiveBackgroundJob {
                     payloads_dropped: AtomicBool::new(false),
                     application: application.clone(),
                     deadline,
-                    lost: CancellationToken::new(),
+                    lost,
                     copy_output_completed: AtomicBool::new(false),
+                    source_custody,
+                    source_budget,
+                    settle,
                 })
                 .map_err(|_| {
                     StoreError::Task("original controller state registration failed".to_owned())
@@ -635,7 +889,7 @@ impl ActiveBackgroundJob {
 
     /// Call only after the handler's child and output work have joined.
     pub(crate) async fn finish(self) {
-        let _ = self.fence.finish_original_controller().await;
+        let _ = self.fence.finish_original_worker().await;
         metrics::execution(self.fence.0.kind, self.fence.0.started.elapsed());
     }
 }
@@ -645,8 +899,8 @@ impl Drop for ActiveBackgroundJob {
         self.fence.0.lost.cancel();
         self.fence.0.stop.cancel();
         // Do not release a durable reservation here: a dropped caller is not
-        // proof that its child exited. The lease remains until explicit join
-        // and finish, or expiry. The original handle stays in JobFence even
+        // proof that its child exited. Physical source custody survives
+        // logical lease expiry. The heartbeat handle stays in JobFence even
         // if a finishing waiter is cancelled.
     }
 }
@@ -698,6 +952,9 @@ impl JobFence {
             deadline: _,
             lost: _,
             copy_output_completed: _,
+            source_custody: _,
+            source_budget: _,
+            settle: _,
         } = &**self.0;
         let frame_bytes = {
             let original = heartbeat.lock().await;
@@ -785,6 +1042,23 @@ impl JobFence {
         }
     }
 
+    /// This caller has joined its handler before releasing source custody.
+    /// A logical-controller-only waiter cannot supply that physical fact.
+    async fn finish_original_worker(&self) -> BackgroundControllerClosed {
+        let receipt = self.finish_original_controller().await;
+        if let Some(custody) = self.0.source_custody.clone() {
+            // The loss token now forbids new enrollment. A Linux completion
+            // ledger waits for actual held clones and raw children before it
+            // can publish source settlement.
+            if self.0.source_budget.completion_owns_settlement() {
+                self.0.settle.cancel();
+            } else {
+                settle_joined_source_custody(&self.0.store, custody).await;
+            }
+        }
+        receipt
+    }
+
     pub(crate) fn application_group(
         &self,
     ) -> &plurx_core::adaptive_resources::runtime::application::PendingApplicationGroup {
@@ -794,6 +1068,10 @@ impl JobFence {
     pub(crate) fn copy_output_completed(&self) -> bool {
         self.0.copy_output_completed.load(Ordering::Acquire)
     }
+    pub(crate) fn source_budget(&self) -> Arc<SourceReadBudget> {
+        Arc::clone(&self.0.source_budget)
+    }
+
     pub(crate) fn loss_token(&self) -> CancellationToken {
         self.0.lost.clone()
     }
@@ -829,6 +1107,99 @@ impl JobFence {
             .as_ref()
             .filter(|current| current.same_claim_as(original))
             .cloned()
+    }
+
+    /// The source controller can be driving the same future that holds
+    /// `state` across a publication RPC. Waiting for that lock here would
+    /// strand the publisher and its physical custody after the write commits.
+    /// Source RPCs authenticate the original claim identity and recheck the
+    /// current running state and expiry in the Store. Its renewable revision
+    /// is required by publication, but is not part of physical source ownership.
+    fn source_token(&self) -> Option<&JobToken> {
+        if self.0.lost.is_cancelled() || Instant::now() >= *self.0.deadline.borrow() {
+            return None;
+        }
+        self.0.source_budget.job_token()
+    }
+
+    pub(crate) async fn source_may_continue(&self) -> Result<bool, StoreError> {
+        #[cfg(test)]
+        faults::worker::at(faults::worker::Point::SourcePermissionCheck).await;
+        let Some(token) = self.source_token() else {
+            return Ok(false);
+        };
+        let permitted = self
+            .0
+            .store
+            .background_source_may_continue(
+                plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Job {
+                    token: token.clone(),
+                },
+                unix_ms()?,
+            )
+            .await;
+        #[cfg(test)]
+        if matches!(&permitted, Ok(false)) {
+            faults::worker::at(faults::worker::Point::SourcePermissionDenied).await;
+        }
+        permitted
+    }
+
+    /// Caller must hold a verified whole-group stop acknowledgement.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn pause_source(&self) -> Result<bool, StoreError> {
+        let Some(token) = self.source_token().filter(|_| self.may_publish()) else {
+            return Ok(false);
+        };
+        self.0
+            .store
+            .pause_background_source(token.clone(), unix_ms()?)
+            .await
+    }
+
+    /// Source capacity is reacquired atomically before the caller sends CONT.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn resume_source(&self) -> Result<bool, StoreError> {
+        if !self.0.authority.may_execute_job(self.0.kind).await {
+            return Ok(false);
+        }
+        let Some(token) = self.source_token().filter(|_| self.may_publish()) else {
+            return Ok(false);
+        };
+        self.0
+            .store
+            .resume_background_source(token.clone(), unix_ms()?)
+            .await
+    }
+
+    pub(crate) async fn source_checkpoint_artifacts(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        self.0.store.source_checkpoint_artifacts(node_id).await
+    }
+
+    /// The artifact must already be atomically durable. Serialize this update
+    /// with renewal/settlement so its token cannot race our own heartbeat.
+    pub(crate) async fn checkpoint(
+        &self,
+        checkpoint: serde_json::Value,
+    ) -> Result<bool, StoreError> {
+        let state = self.0.state.lock().await;
+        if self.0.lost.is_cancelled()
+            || state.cancelling
+            || Instant::now() >= *self.0.deadline.borrow()
+            || !self.0.authority.may_execute_job(self.0.kind).await
+        {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        self.0
+            .store
+            .checkpoint_job(token, checkpoint, unix_ms()?)
+            .await
     }
 
     async fn renew(&self) -> Result<bool, StoreError> {
@@ -1005,7 +1376,10 @@ impl JobFence {
             .complete_library_work(token, request_id, result, unix_ms()?)
             .await;
         #[cfg(test)]
-        let completed = faults::after_commit(faults::COMPLETE, completed);
+        let completed = {
+            faults::worker::at(faults::worker::Point::CompletionCommitted).await;
+            faults::after_commit(faults::COMPLETE, completed)
+        };
         completed
     }
 
@@ -1680,6 +2054,62 @@ impl JobFence {
         Ok(published)
     }
 
+    /// Publish the title's whole curve table under the attempt's
+    /// then-current token, in one replicated write (decision A). A store
+    /// error is retried with backoff while the lease still holds (decision
+    /// I); rows that fail their own check are deterministic and are not
+    /// sent. The claim lock is released between tries so the heartbeat can
+    /// renew the lease.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn publish_dv_refit(
+        &self,
+        title: plurx_core::store::dv_refit_jobs::RefitTitle,
+        scenes: Vec<plurx_core::store::dv_refit_jobs::RefitSceneRow>,
+    ) -> Result<RefitPublication, StoreError> {
+        use plurx_core::store::dv_refit_jobs::PublishRefitJob;
+        let mut delay = std::time::Duration::from_millis(500);
+        loop {
+            let mut state = self.0.state.lock().await;
+            if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                metrics::event(self.0.kind, Event::FencedPublication);
+                return Ok(RefitPublication::Fenced);
+            }
+            let Some(token) = state.token.clone() else {
+                metrics::event(self.0.kind, Event::FencedPublication);
+                return Ok(RefitPublication::Fenced);
+            };
+            let request = PublishRefitJob {
+                token,
+                title: title.clone(),
+                scenes: scenes.clone(),
+                now_ms: unix_ms()?,
+            };
+            if let Err(reason) = request.check() {
+                return Ok(RefitPublication::Invalid(reason));
+            }
+            match self.0.store.publish_dv_refit_job(request).await {
+                Ok(
+                    JobPublishOutcome::Published { .. }
+                    | JobPublishOutcome::AlreadyPublished { .. },
+                ) => {
+                    metrics::event(self.0.kind, Event::Published);
+                    state.token = None;
+                    return Ok(RefitPublication::Published);
+                }
+                Ok(_) => {
+                    metrics::event(self.0.kind, Event::FencedPublication);
+                    return Ok(RefitPublication::Fenced);
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "F+ publication retried while the claim holds");
+                }
+            }
+            drop(state);
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(std::time::Duration::from_secs(8));
+        }
+    }
+
     pub(crate) async fn publish_probe(
         &self,
         output: plurx_core::store::background_jobs_probe::ProbeOutput,
@@ -2040,6 +2470,10 @@ pub(crate) async fn claim_pretranscode(
     };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    // Execution authority is read once per pass for every kind it may claim,
+    // and once more before its first claim, not once per candidate: a
+    // learner's check is a quorum read, and per candidate it was one per
+    // refusal. An owned job keeps re-checking authority while it runs.
     let mut kinds = Vec::new();
     for kind in [
         JobKind::TranscodePrepare,
@@ -2053,6 +2487,9 @@ pub(crate) async fn claim_pretranscode(
     if kinds.is_empty() {
         return Ok(None);
     }
+    // Re-read authority once more right before this pass first claims:
+    // a node de-authorised while it walked the page claims nothing.
+    let mut authority_rechecked = false;
     let mut cursor = None;
     for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
         let page = store
@@ -2062,6 +2499,8 @@ pub(crate) async fn claim_pretranscode(
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
+                // A refused claim here only moves to the next candidate.
+                admissible_only: true,
             })
             .await?;
         for candidate in page.jobs {
@@ -2099,12 +2538,6 @@ pub(crate) async fn claim_pretranscode(
                 let Some(admission) = transcode.admit_encoded_preparation() else {
                     return Ok(None);
                 };
-                if !authority
-                    .may_execute_job(JobKind::EncodedOutputPrepare)
-                    .await
-                {
-                    continue;
-                }
                 let now_ms = unix_ms()?;
                 let request = ClaimJob {
                     job_id: candidate.id.clone(),
@@ -2117,6 +2550,15 @@ pub(crate) async fn claim_pretranscode(
                     now_ms,
                     dispatched_at_ms: now_ms,
                 };
+                if !authority_rechecked {
+                    if !authority
+                        .may_execute_job(JobKind::EncodedOutputPrepare)
+                        .await
+                    {
+                        return Ok(None);
+                    }
+                    authority_rechecked = true;
+                }
                 let Some((job, deadline)) =
                     claim_with_resolution(store.as_ref(), &candidate, request).await?
                 else {
@@ -2130,7 +2572,8 @@ pub(crate) async fn claim_pretranscode(
                     })?,
                     deadline,
                     JobKind::EncodedOutputPrepare,
-                )?;
+                )
+                .await?;
                 return Ok(Some(PreparationClaim::Encoded(job, active, admission)));
             }
             if let JobPayload::CopyOutputPrepare {
@@ -2148,9 +2591,6 @@ pub(crate) async fn claim_pretranscode(
                 let Some(admission) = transcode.admit_fragment().await else {
                     return Ok(None);
                 };
-                if !authority.may_execute_job(JobKind::CopyOutputPrepare).await {
-                    continue;
-                }
                 let now_ms = unix_ms()?;
                 let request = ClaimJob {
                     job_id: candidate.id.clone(),
@@ -2163,6 +2603,12 @@ pub(crate) async fn claim_pretranscode(
                     now_ms,
                     dispatched_at_ms: now_ms,
                 };
+                if !authority_rechecked {
+                    if !authority.may_execute_job(JobKind::CopyOutputPrepare).await {
+                        return Ok(None);
+                    }
+                    authority_rechecked = true;
+                }
                 let Some((job, deadline)) =
                     claim_with_resolution(store.as_ref(), &candidate, request).await?
                 else {
@@ -2176,7 +2622,8 @@ pub(crate) async fn claim_pretranscode(
                     })?,
                     deadline,
                     JobKind::CopyOutputPrepare,
-                )?;
+                )
+                .await?;
                 return Ok(Some(PreparationClaim::Copy(job, active, admission)));
             }
             let JobPayload::TranscodePrepare {
@@ -2212,9 +2659,6 @@ pub(crate) async fn claim_pretranscode(
                     continue;
                 }
             };
-            if !authority.may_execute_job(JobKind::TranscodePrepare).await {
-                return Ok(None);
-            }
             let now_ms = unix_ms()?;
             let request = ClaimJob {
                 job_id: candidate.id.clone(),
@@ -2227,6 +2671,12 @@ pub(crate) async fn claim_pretranscode(
                 now_ms,
                 dispatched_at_ms: now_ms,
             };
+            if !authority_rechecked {
+                if !authority.may_execute_job(JobKind::TranscodePrepare).await {
+                    return Ok(None);
+                }
+                authority_rechecked = true;
+            }
             let Some((job, deadline)) =
                 claim_with_resolution(store.as_ref(), &candidate, request).await?
             else {
@@ -2243,7 +2693,8 @@ pub(crate) async fn claim_pretranscode(
                 original_claim.clone(),
                 deadline,
                 JobKind::TranscodePrepare,
-            )?;
+            )
+            .await?;
             let fence = crate::transcode::PretranscodeFence::new(
                 projection.clone(),
                 active.fence(),
@@ -2323,6 +2774,7 @@ pub(crate) async fn claim_fragment(
     };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    // Authority once per pass, as in `claim_pretranscode`.
     let mut eligible_kinds = Vec::new();
     for kind in [JobKind::FragmentIndexBuild, JobKind::ArtifactHydrate] {
         if authority.may_execute_job(kind).await {
@@ -2332,6 +2784,9 @@ pub(crate) async fn claim_fragment(
     if eligible_kinds.is_empty() {
         return Ok(None);
     }
+    // Re-read authority once more right before this pass first claims:
+    // a node de-authorised while it walked the page claims nothing.
+    let mut authority_rechecked = false;
     let mut cursor = None;
     for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
         let page = store
@@ -2341,6 +2796,8 @@ pub(crate) async fn claim_fragment(
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
+                // A refused claim here only moves to the next candidate.
+                admissible_only: true,
             })
             .await?;
         for candidate in page.jobs {
@@ -2375,9 +2832,6 @@ pub(crate) async fn claim_fragment(
             let Some(admission) = transcode.admit_fragment().await else {
                 return Ok(None);
             };
-            if !authority.may_execute_job(kind).await {
-                continue;
-            }
             let now_ms = unix_ms()?;
             let request = ClaimJob {
                 job_id: candidate.id.clone(),
@@ -2390,6 +2844,12 @@ pub(crate) async fn claim_fragment(
                 now_ms,
                 dispatched_at_ms: now_ms,
             };
+            if !authority_rechecked {
+                if !authority.may_execute_job(kind).await {
+                    return Ok(None);
+                }
+                authority_rechecked = true;
+            }
             let Some((job, deadline)) =
                 claim_with_resolution(store.as_ref(), &candidate, request).await?
             else {
@@ -2423,7 +2883,8 @@ pub(crate) async fn claim_fragment(
                     .ok_or_else(|| StoreError::Task("claimed fragment has no token".into()))?,
                 deadline,
                 kind,
-            )?;
+            )
+            .await?;
             return Ok(Some((projection, active, admission)));
         }
         cursor = page.next;
@@ -2483,6 +2944,7 @@ pub(crate) async fn fragment_siblings(
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
+                admissible_only: false,
             })
             .await?;
         for candidate in page.jobs {
@@ -2567,7 +3029,8 @@ pub(crate) async fn fragment_siblings(
                 token,
                 deadline,
                 JobKind::FragmentIndexBuild,
-            )?;
+            )
+            .await?;
             found.push((projection, Some(active)));
         }
         cursor = page.next;
@@ -2581,17 +3044,23 @@ pub(crate) async fn fragment_siblings(
 /// Bounded, node-local eligibility observations. They never settle durable work:
 /// another member may have a readable mount while this one does not.
 #[derive(Default)]
-pub(crate) struct LibraryReadiness(
-    std::sync::Mutex<std::collections::BTreeMap<i64, LibraryReadinessProblem>>,
-);
+pub(crate) struct LibraryReadiness {
+    problems: std::sync::Mutex<std::collections::BTreeMap<i64, LibraryReadinessProblem>>,
+    advertised: std::sync::Mutex<std::collections::BTreeMap<String, LibraryTurnObservation>>,
+    interactive_waiting: AtomicBool,
+}
 
-/// How long one root-check failure stays a statement about this node. The
-/// library loop re-checks every queued library at least every ~30 s
-/// ([`IdlePoll`] tops out at 25 s plus 5 s of jitter) for as long as this node
-/// may run cluster jobs. An observation four polls old describes a node that
-/// stopped checking (a learner, maintenance, a lost membership), not one that
-/// still cannot read the roots, and Activity must not keep printing it.
+/// How long a root-check failure stays a statement about this node if its
+/// library worker loses authority or stops checking that library.
 const LIBRARY_READINESS_TTL: Duration = Duration::from_secs(120);
+const LIBRARY_TURN_REFRESH: Duration = Duration::from_secs(3);
+
+struct LibraryTurnObservation {
+    revision: i64,
+    capacity: plurx_core::store::background_jobs::LibraryTurnCapacity,
+    recorded: Instant,
+    interactive: bool,
+}
 
 #[derive(Clone)]
 struct LibraryReadinessProblem {
@@ -2600,9 +3069,68 @@ struct LibraryReadinessProblem {
     observed: std::time::Instant,
 }
 impl LibraryReadiness {
+    pub(crate) fn poll_interval(&self) -> Duration {
+        if self.interactive_waiting.load(Ordering::Relaxed) {
+            Duration::from_millis(750)
+        } else {
+            Duration::from_secs(5)
+        }
+    }
+
+    /// Cache only the permission to request a turn. The durable claim always
+    /// rechecks interest, eligibility and the complete set of shared resources.
+    async fn advertise(
+        &self,
+        store: &dyn Store,
+        candidate: &BackgroundJob,
+        node: &str,
+        roots: &[std::path::PathBuf],
+        capacity: plurx_core::store::background_jobs::LibraryTurnCapacity,
+    ) -> Result<bool, StoreError> {
+        let now = Instant::now();
+        {
+            let mut recent = self
+                .advertised
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            recent.retain(|_, row| {
+                now.saturating_duration_since(row.recorded) < LIBRARY_TURN_REFRESH
+            });
+            if let Some(row) = recent
+                .get(&candidate.id)
+                .filter(|row| row.revision == candidate.revision && row.capacity == capacity)
+            {
+                return Ok(row.interactive);
+            }
+        }
+        let interactive = store
+            .advertise_library_turn(
+                &candidate.id,
+                candidate.revision,
+                node,
+                roots,
+                capacity,
+                unix_ms()?,
+            )
+            .await?;
+        self.advertised
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                candidate.id.clone(),
+                LibraryTurnObservation {
+                    revision: candidate.revision,
+                    capacity,
+                    recorded: now,
+                    interactive,
+                },
+            );
+        Ok(interactive)
+    }
+
     fn record(&self, library_id: i64, roots: &[std::path::PathBuf], problem: Option<String>) {
         let mut rows = self
-            .0
+            .problems
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(problem) = problem {
@@ -2640,7 +3168,7 @@ impl LibraryReadiness {
         now: std::time::Instant,
     ) -> std::collections::HashMap<i64, String> {
         let observations: std::collections::BTreeMap<i64, LibraryReadinessProblem> = self
-            .0
+            .problems
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
@@ -2666,6 +3194,168 @@ impl LibraryReadiness {
     }
 }
 
+async fn library_candidate_readiness(
+    store: &dyn Store,
+    authority: &dyn ClusterJobAuthority,
+    transcode: &crate::transcode::TranscodeManager,
+    node: &str,
+    library_filter: Option<i64>,
+    readiness: &LibraryReadiness,
+    candidate: &BackgroundJob,
+) -> Result<Option<LibraryCandidateReadiness>, StoreError> {
+    use plurx_core::store::background_jobs::{JobPayload, LibraryTurnCapacity};
+    use plurx_core::store::background_jobs_library::{
+        LIBRARY_TARGETED_GENERATION, LIBRARY_WORK_GENERATION,
+    };
+    let Ok(payload) = candidate.supported_payload() else {
+        return Ok(None);
+    };
+    let kind = payload.kind();
+    let (library_id, targeted) = match payload {
+        JobPayload::LibraryScan {
+            library_id,
+            generation,
+        }
+        | JobPayload::MetadataRefresh {
+            library_id,
+            generation,
+        } if generation == LIBRARY_WORK_GENERATION => (library_id, false),
+        JobPayload::LibraryScan {
+            library_id,
+            generation,
+        } if generation == LIBRARY_TARGETED_GENERATION => (library_id, true),
+        _ => return Ok(None),
+    };
+    if library_filter.is_some_and(|wanted| wanted != library_id) {
+        return Ok(None);
+    }
+    let library = store.get_library(library_id).await?;
+    // A deleted library still needs its accepted requests settled.
+    let mut problem = library
+        .as_ref()
+        .filter(|library| library.paths.is_empty())
+        .map(|_| {
+            "This node observed no library roots; waiting for a compatible worker.".to_owned()
+        });
+    let mut unreadable = None;
+    for path in library.iter().flat_map(|library| &library.paths) {
+        if let Err(error) = tokio::fs::read_dir(path).await {
+            problem = Some(format!("This node could not read library root {}: {error}. Waiting for a compatible worker.", path.display()));
+            unreadable = Some(path.clone());
+            break;
+        }
+    }
+    let readable = problem.is_none();
+    readiness.record(
+        library_id,
+        library
+            .as_ref()
+            .map_or(&[], |library| library.paths.as_slice()),
+        problem,
+    );
+    if !readable {
+        if let Some(root) = unreadable.filter(|_| targeted) {
+            note_targeted_wait(
+                store,
+                &candidate.id,
+                &format!("root_unreadable:{}", root.display()),
+            )
+            .await;
+        }
+        return Ok(None);
+    }
+    if !authority.may_run_cluster_jobs().await {
+        return Ok(None);
+    }
+    let protected = transcode.background_yield_reason().is_some();
+    let capacity = if protected {
+        LibraryTurnCapacity::Unavailable
+    } else if transcode.fragment_worker_may_start() {
+        LibraryTurnCapacity::Available
+    } else if transcode.background_worker_in_use() {
+        LibraryTurnCapacity::HeavyOccupied
+    } else {
+        LibraryTurnCapacity::Unavailable
+    };
+    let interactive = match library.as_ref() {
+        Some(library) if candidate.priority >= 2 => {
+            readiness
+                .advertise(store, candidate, node, &library.paths, capacity)
+                .await?
+        }
+        _ => false,
+    };
+    if protected && targeted {
+        // Playback protection holds it, not the fence: drop a reason an
+        // earlier pass wrote that may no longer be true.
+        refresh_targeted_wait(store, &candidate.id, library_id, library.as_ref()).await;
+    }
+    Ok((!protected).then_some(LibraryCandidateReadiness {
+        kind,
+        interactive,
+        targeted,
+        library_id,
+    }))
+}
+
+/// What one readable library candidate needs from the claim: its kind,
+/// whether it holds an interactive dispatch turn, and whether it is a
+/// contract v2 targeted request.
+struct LibraryCandidateReadiness {
+    kind: plurx_core::store::background_jobs::JobKind,
+    interactive: bool,
+    targeted: bool,
+    library_id: i64,
+}
+
+async fn library_candidates(
+    store: &dyn Store,
+    node: &str,
+    after: Option<plurx_core::store::background_jobs::CandidateCursor>,
+) -> Result<plurx_core::store::background_jobs::CandidatePage, StoreError> {
+    use plurx_core::store::background_jobs::{CandidateQuery, JobKind, MAX_PAGE_SIZE};
+    store
+        .job_candidates(CandidateQuery {
+            node_id: node.into(),
+            kinds: vec![JobKind::LibraryScan, JobKind::MetadataRefresh],
+            after,
+            now_ms: unix_ms()?,
+            limit: MAX_PAGE_SIZE,
+            admissible_only: false,
+        })
+        .await
+}
+
+/// Keep other readable libraries in line for the next source turn while the
+/// only compatible worker is still executing its current library scan.
+pub(crate) async fn advertise_library_successors(
+    store: &dyn Store,
+    authority: &dyn ClusterJobAuthority,
+    transcode: &crate::transcode::TranscodeManager,
+    node: &str,
+    readiness: &LibraryReadiness,
+) -> Result<(), StoreError> {
+    use plurx_core::store::background_jobs::{MAX_ACTIVE_JOBS, MAX_PAGE_SIZE};
+    if !authority.may_run_cluster_jobs().await {
+        return Ok(());
+    }
+    let mut cursor = None;
+    for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
+        let page = library_candidates(store, node, cursor).await?;
+        for candidate in page.jobs.iter().filter(|candidate| candidate.priority >= 2) {
+            library_candidate_readiness(
+                store, authority, transcode, node, None, readiness, candidate,
+            )
+            .await?;
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// Library coordinators share the same physical heavy-work admission as
 /// preparation/indexing. Source checks happen before claiming; domain-lease
 /// contention is resolved by the caller through an uncharged yield.
@@ -2684,71 +3374,54 @@ pub(crate) async fn claim_library(
     )>,
     StoreError,
 > {
-    use plurx_core::store::background_jobs::{
-        CandidateQuery, JobKind, JobPayload, MAX_ACTIVE_JOBS, MAX_PAGE_SIZE,
-    };
+    use plurx_core::store::background_jobs::{MAX_ACTIVE_JOBS, MAX_PAGE_SIZE};
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    readiness
+        .interactive_waiting
+        .store(false, Ordering::Relaxed);
     if !authority.may_run_cluster_jobs().await {
         return Ok(None);
     }
     let mut cursor = None;
     for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
-        let page = store
-            .job_candidates(CandidateQuery {
-                node_id: node.into(),
-                kinds: vec![JobKind::LibraryScan, JobKind::MetadataRefresh],
-                after: cursor,
-                now_ms: unix_ms()?,
-                limit: MAX_PAGE_SIZE,
-            })
-            .await?;
+        let page = library_candidates(store.as_ref(), node, cursor).await?;
         for candidate in page.jobs {
-            let Ok(payload) = candidate.supported_payload() else {
-                continue;
-            };
-            let kind = payload.kind();
-            let library_id = match payload {
-                JobPayload::LibraryScan {
-                    library_id,
-                    generation,
-                }
-                | JobPayload::MetadataRefresh {
-                    library_id,
-                    generation,
-                } if generation == "library-work-v1" => library_id,
-                _ => continue,
-            };
-            if library_filter.is_some_and(|wanted| wanted != library_id) {
-                continue;
-            }
-            let library = store.get_library(library_id).await?;
-            // A deleted library still needs its accepted requests settled.
-            let mut problem = library
-                .as_ref()
-                .filter(|library| library.paths.is_empty())
-                .map(|_| {
-                    "This node observed no library roots; waiting for a compatible worker."
-                        .to_owned()
-                });
-            for path in library.iter().flat_map(|library| &library.paths) {
-                if let Err(error) = tokio::fs::read_dir(path).await {
-                    problem = Some(format!("This node could not read library root {}: {error}. Waiting for a compatible worker.", path.display()));
-                    break;
-                }
-            }
-            let readable = problem.is_none();
-            readiness.record(
+            let Some(LibraryCandidateReadiness {
+                kind,
+                interactive,
+                targeted,
                 library_id,
-                library
-                    .as_ref()
-                    .map_or(&[], |library| library.paths.as_slice()),
-                problem,
-            );
-            if !readable {
+            }) = library_candidate_readiness(
+                store.as_ref(),
+                authority.as_ref(),
+                transcode,
+                node,
+                library_filter,
+                readiness,
+                &candidate,
+            )
+            .await?
+            else {
                 continue;
-            }
-            let Some(admission) = transcode.admit_fragment().await else {
+            };
+            // A targeted request runs under a probe admission: it is never
+            // refused because the heavy lane is busy (contract v2 §5.1).
+            let admission = if targeted {
+                transcode.admit_targeted_probe().await
+            } else if interactive {
+                readiness.interactive_waiting.store(true, Ordering::Relaxed);
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    transcode.admit_interactive_library(),
+                )
+                .await
+                .ok()
+                .flatten()
+            } else {
+                transcode.admit_fragment().await
+            };
+            let Some(admission) = admission else {
                 return Ok(None);
             };
             if !authority.may_run_cluster_jobs().await {
@@ -2772,6 +3445,28 @@ pub(crate) async fn claim_library(
             )
             .await?
             else {
+                if targeted {
+                    // Refused while still queued — the provider cap, or a
+                    // claim this pass raced — rather than lost to another
+                    // worker: say what it waits on now, not what an earlier
+                    // pass saw.
+                    let queued = store
+                        .background_job(&candidate.id)
+                        .await?
+                        .is_some_and(|job| {
+                            job.state == plurx_core::store::background_jobs::JobState::Queued
+                        });
+                    if queued {
+                        let library = store.get_library(library_id).await?;
+                        refresh_targeted_wait(
+                            store.as_ref(),
+                            &candidate.id,
+                            library_id,
+                            library.as_ref(),
+                        )
+                        .await;
+                    }
+                }
                 continue;
             };
             let active = ActiveBackgroundJob::start(
@@ -2782,7 +3477,8 @@ pub(crate) async fn claim_library(
                     .ok_or_else(|| StoreError::Task("library claim has no owner".into()))?,
                 deadline,
                 kind,
-            )?;
+            )
+            .await?;
             return Ok(Some((job, active, admission)));
         }
         cursor = page.next;
@@ -2791,6 +3487,61 @@ pub(crate) async fn claim_library(
         }
     }
     Ok(None)
+}
+
+/// A targeted candidate this pass could not claim for a reason other than an
+/// unreadable root (playback protection, the provider cap, a raced claim).
+/// Its one named wait is its own library's fence: `full_scan:<library>`
+/// while that lease is visibly live, otherwise nothing, so a reason written
+/// by an earlier fence refusal or root check does not outlive it. The lease
+/// read is this node's local hint and the write is advisory and idempotent.
+async fn refresh_targeted_wait(
+    store: &dyn Store,
+    job_id: &str,
+    library_id: i64,
+    library: Option<&plurx_core::domain::Library>,
+) {
+    let Ok(now_ms) = unix_ms() else {
+        return;
+    };
+    let fenced = match store
+        .lease_expiry_hint(&format!("scan:library:{library_id}"))
+        .await
+    {
+        Ok(expires) => expires.is_some_and(|expires| expires > now_ms),
+        Err(error) => {
+            tracing::warn!(%error, job_id, "reading the library fence for waiting_on");
+            return;
+        }
+    };
+    let waiting_on = if fenced {
+        format!(
+            "full_scan:{}",
+            library.map_or_else(|| library_id.to_string(), |library| library.name.clone())
+        )
+    } else {
+        String::new()
+    };
+    note_targeted_wait(store, job_id, &waiting_on).await;
+}
+
+/// Record, on every pending request of a targeted library job, what it is
+/// waiting on. Advisory: the request record is still the authority, so a
+/// failed write is logged and the claim decision stands.
+pub(crate) async fn note_targeted_wait(store: &dyn Store, job_id: &str, waiting_on: &str) {
+    let now_ms = match unix_ms() {
+        Ok(now_ms) => now_ms,
+        Err(error) => {
+            tracing::warn!(%error, job_id, "no clock for targeted waiting_on");
+            return;
+        }
+    };
+    if let Err(error) = store
+        .set_library_job_waiting_on(job_id, waiting_on, now_ms)
+        .await
+    {
+        tracing::warn!(%error, job_id, waiting_on, "recording targeted waiting_on");
+    }
 }
 
 /// The caller holds physical admission through execution and cleanup.
@@ -2806,9 +3557,13 @@ pub(crate) async fn claim_subtitle(
     };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    // Authority once per pass, as in `claim_pretranscode`.
     if !authority.may_execute_job(JobKind::SubtitleExtract).await {
         return Ok(None);
     }
+    // Re-read authority once more right before this pass first claims:
+    // a node de-authorised while it walked the page claims nothing.
+    let mut authority_rechecked = false;
     let mut cursor = None;
     for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
         let page = store
@@ -2818,6 +3573,8 @@ pub(crate) async fn claim_subtitle(
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
+                // A refused claim here only moves to the next candidate.
+                admissible_only: true,
             })
             .await?;
         for candidate in page.jobs {
@@ -2841,10 +3598,13 @@ pub(crate) async fn claim_subtitle(
             if tokio::fs::File::open(&file.path).await.is_err() {
                 continue;
             }
-            if !authority.may_execute_job(JobKind::SubtitleExtract).await {
-                return Ok(None);
-            }
             let now_ms = unix_ms()?;
+            if !authority_rechecked {
+                if !authority.may_execute_job(JobKind::SubtitleExtract).await {
+                    return Ok(None);
+                }
+                authority_rechecked = true;
+            }
             let Some((job, deadline)) = claim_with_resolution(
                 store.as_ref(),
                 &candidate,
@@ -2872,7 +3632,8 @@ pub(crate) async fn claim_subtitle(
                     .ok_or_else(|| StoreError::Task("subtitle claim has no owner".into()))?,
                 deadline,
                 JobKind::SubtitleExtract,
-            )?;
+            )
+            .await?;
             return Ok(Some((job, active)));
         }
         cursor = page.next;
@@ -2884,7 +3645,7 @@ pub(crate) async fn claim_subtitle(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use plurx_core::cluster::coordination::UnclusteredJobAuthority;
     use plurx_core::store::background_jobs::{
@@ -3010,6 +3771,7 @@ mod tests {
                 after: None,
                 now_ms: unix_ms().expect("clock"),
                 limit: plurx_core::store::background_jobs::MAX_PAGE_SIZE,
+                admissible_only: false,
             })
             .await
             .expect("candidates");
@@ -3322,7 +4084,68 @@ mod tests {
         active.finish().await;
     }
 
-    async fn active() -> (Arc<dyn Store>, String, ActiveBackgroundJob) {
+    #[tokio::test]
+    async fn source_checkpoint_keeps_ownership_revision_and_survives_yield_without_accepting_stale_writers(
+    ) {
+        let (store, id, active) = active().await;
+        let fence = active.fence();
+        let token = fence.snapshot().await.expect("current ownership");
+        let reference = serde_json::json!({"version":1,"node_id":"node-a","artifact":format!("{}.json", "a".repeat(64)),"offset":65});
+        assert!(fence
+            .checkpoint(serde_json::json!({"source_attestation":reference}))
+            .await
+            .expect("checkpoint write"));
+        assert_eq!(fence.snapshot().await.expect("still owned"), token);
+        let mut stale = token.clone();
+        stale.fence += 1;
+        assert!(!store
+            .checkpoint_job(
+                stale,
+                serde_json::json!({"source_attestation":null}),
+                unix_ms().expect("clock")
+            )
+            .await
+            .expect("stale fence"));
+        assert!(fence
+            .settle(JobSettlement::Yield {
+                error_code: Some("foreground_preempted".into()),
+                checkpoint: Some(serde_json::json!({"staging_node_id":"node-a"})),
+                not_before_ms: unix_ms().expect("clock")
+            })
+            .await
+            .expect("yield"));
+        let job = store
+            .background_job(&id)
+            .await
+            .expect("job read")
+            .expect("job");
+        assert_eq!(
+            job.checkpoint.as_ref().expect("queued checkpoint")["source_attestation"],
+            reference
+        );
+        assert_eq!(
+            job.checkpoint.as_ref().expect("queued checkpoint")["staging_node_id"],
+            "node-a"
+        );
+        assert!(!store
+            .checkpoint_job(
+                token,
+                serde_json::json!({"source_attestation":null}),
+                unix_ms().expect("clock")
+            )
+            .await
+            .expect("settled writer"));
+        assert_eq!(
+            store
+                .source_checkpoint_artifacts("node-a")
+                .await
+                .expect("owned artifacts"),
+            vec![format!("{}.json", "a".repeat(64))]
+        );
+        active.finish().await;
+    }
+
+    pub(crate) async fn active() -> (Arc<dyn Store>, String, ActiveBackgroundJob) {
         active_with_deadline(None).await
     }
 
@@ -3337,6 +4160,30 @@ mod tests {
         authority: Arc<dyn ClusterJobAuthority>,
     ) -> (Arc<dyn Store>, String, ActiveBackgroundJob) {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let (id, active) = claimed_on(Arc::clone(&store), local_deadline, authority).await;
+        (store, id, active)
+    }
+
+    /// The exact source custody a fixture job registered.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn source_custody(
+        active: &ActiveBackgroundJob,
+    ) -> Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken> {
+        active.fence.0.source_custody.clone()
+    }
+
+    /// A real claimed job on a caller-configured Store (e.g. one whose exact
+    /// source-custody backend is enabled).
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn active_on(store: Arc<dyn Store>) -> (String, ActiveBackgroundJob) {
+        claimed_on(store, None, Arc::new(UnclusteredJobAuthority)).await
+    }
+
+    async fn claimed_on(
+        store: Arc<dyn Store>,
+        local_deadline: Option<Duration>,
+        authority: Arc<dyn ClusterJobAuthority>,
+    ) -> (String, ActiveBackgroundJob) {
         let library = store
             .create_library(&plurx_core::domain::NewLibrary {
                 name: "worker fault fixture".into(),
@@ -3427,8 +4274,9 @@ mod tests {
             local_deadline.map_or(deadline, |duration| Instant::now() + duration),
             JobKind::FragmentIndexBuild,
         )
+        .await
         .expect("start");
-        (store, id, active)
+        (id, active)
     }
 
     struct ArtifactAuthority(std::sync::atomic::AtomicBool);
@@ -3725,6 +4573,21 @@ mod tests {
     #[tokio::test]
     async fn lost_claim_acknowledgement_resolves_the_original_attempt() {
         let (store, id, active) = active().await;
+        // Model process loss after physical join without retiring the claim.
+        active.fence.0.stop.cancel();
+        {
+            let mut heartbeat = active.fence.0.heartbeat.lock().await;
+            let original = heartbeat.task.as_mut().expect("original fixture heartbeat");
+            original.wait().await.expect("join fixture heartbeat");
+            heartbeat.task.take();
+        }
+        let custody = active
+            .fence
+            .0
+            .source_custody
+            .clone()
+            .expect("source custody");
+        settle_joined_source_custody(&store, custody).await;
         let candidate = store.background_job(&id).await.expect("read").expect("job");
         let now_ms = candidate
             .token
@@ -3796,6 +4659,63 @@ mod tests {
             Some(after)
         );
         active.finish().await;
+    }
+
+    #[tokio::test]
+    async fn source_pressure_can_progress_while_the_publisher_holds_the_job_fence() {
+        let (store, id, active) = active().await;
+        let fence = active.fence();
+        // This is the exact guard held across complete_library_work. The
+        // source supervisor cannot poll that publisher while awaiting a check.
+        let publishing = fence.0.state.lock().await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            assert!(fence.source_may_continue().await.expect("live reader"));
+            #[cfg(target_os = "linux")]
+            {
+                assert!(fence.pause_source().await.expect("verified pause"));
+                assert!(fence.resume_source().await.expect("reacquire slot"));
+            }
+            store
+                .cancel_job(plurx_core::store::background_jobs::CancelJob {
+                    job_id: id,
+                    now_ms: unix_ms().expect("clock"),
+                })
+                .await
+                .expect("cancel reader")
+                .expect("owned job");
+            assert!(!fence.source_may_continue().await.expect("revoked reader"));
+            #[cfg(target_os = "linux")]
+            {
+                assert!(!fence.pause_source().await.expect("revoked pause"));
+                assert!(!fence.resume_source().await.expect("revoked resume"));
+            }
+        })
+        .await
+        .expect("source checks must finish before polling the publisher again");
+        drop(publishing);
+        active.finish().await;
+    }
+
+    #[tokio::test]
+    async fn joined_source_settlement_retries_without_losing_exact_receipt() {
+        let (store, _id, active) = active().await;
+        let receipt = active
+            .fence
+            .0
+            .source_custody
+            .clone()
+            .expect("source custody");
+        let ((), dropped) = faults::dropping(faults::SOURCE_RELEASE, active.finish()).await;
+        assert_eq!(dropped, faults::SOURCE_RELEASE);
+        assert!(store
+            .settled_background_source_custody()
+            .await
+            .expect("proof rows")
+            .is_empty());
+        assert!(!store
+            .release_background_source_custody(receipt, unix_ms().expect("clock"))
+            .await
+            .expect("exact row already retired"));
     }
 
     #[tokio::test]
