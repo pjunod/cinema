@@ -1,5 +1,5 @@
 use super::*;
-use plurx_core::store::{TokenAudience, TokenAuthentication};
+use plurx_core::store::{keys, TokenAudience, TokenAuthentication};
 
 #[tokio::test]
 async fn token_proof_uses_the_authoritative_audience_and_policy_read_on_each_backend() {
