@@ -1577,7 +1577,6 @@ impl VodServe {
                 }),
             supersession_user: attribution.supersession_user.to_owned(),
             block_budget: settings.block_budget,
-            sdr_master_codecs: settings.sdr_master_codecs,
             lifecycle: Arc::clone(&lifecycle),
             incarnation: Arc::new(()),
             last_touch: StdMutex::new(Instant::now()),
@@ -2412,7 +2411,6 @@ impl VodServe {
             ),
             passive_grant: None,
             retained_output: None,
-            sdr_master_codecs: false,
             rendition: Some(Arc::clone(&rendition)),
             rendition_key: rendition.key.clone(),
             file: Arc::new(rendition.recipe.file.clone()),
@@ -3126,7 +3124,7 @@ mod principal_demand_tests {
             audio_claim: None,
             audio_delivery: None,
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
         };
         let initial_cap = serve.shared.pool.global_cap();
@@ -3136,7 +3134,6 @@ mod principal_demand_tests {
             block_budget: Duration::from_secs(30),
             materialize_budget: Duration::from_secs(30),
             blocked_get_cap: initial_cap + 7,
-            sdr_master_codecs: false,
             index_cluster_cache: false,
             hevc_unverified_copy: false,
             live_recovery: true,

@@ -2210,10 +2210,9 @@ fn source_native_presentation(
             codecs.truncate(codecs.find(',').unwrap_or(codecs.len()));
         }
         let context = HlsContext {
-            codec_facts: Some(
-                super::response::FrozenHlsCodecFacts::encoded(&encoding.plan)
-                    .with_sdr_master_codecs(facts.sdr_master_codecs),
-            ),
+            codec_facts: Some(super::response::FrozenHlsCodecFacts::encoded(
+                &encoding.plan,
+            )),
             bandwidth: encoding.plan.output_contract().output_bandwidth(),
             file_id: file.id,
             start_seconds: 0.0,
@@ -2238,14 +2237,11 @@ fn source_native_presentation(
             probe,
         );
         let context = HlsContext {
-            codec_facts: Some(
-                super::response::FrozenHlsCodecFacts::audio(
-                    facts.audio_delivery.as_ref(),
-                    !facts.file.audio_streams.is_empty(),
-                    facts.aac,
-                )
-                .with_sdr_master_codecs(facts.sdr_master_codecs),
-            ),
+            codec_facts: Some(super::response::FrozenHlsCodecFacts::audio(
+                facts.audio_delivery.as_ref(),
+                !facts.file.audio_streams.is_empty(),
+                facts.aac,
+            )),
             bandwidth: None,
             file_id: facts.file.id,
             start_seconds: 0.0,
