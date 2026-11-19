@@ -309,6 +309,19 @@ class NativeJvmSourceOnlyPlaybackCase(unittest.TestCase):
         self.assertTrue(native.same_jvm_fixture_tree(
             prior, merged, 'tests/playback', retention.git_bytes))
 
+    def test_tags_ownership_census_change_preserves_jvm_resources(self):
+        prior = '2d743ba9314a1838143fe15834e51a192c603e3d'
+        merged = 'edb0d8d8b499ce954548b421790eba430e4427e7'
+        ledger = 'tests/playback/rolling-producer-owners.toml'
+        self.assertTrue(native.same_jvm_fixture_tree(
+            prior, merged, 'tests/playback', retention.git_bytes))
+
+        def altered(commit, path):
+            raw = retention.git_bytes(commit, path)
+            return raw + b'\nother change\n' if commit == merged and path == ledger else raw
+
+        self.assertFalse(native.same_jvm_fixture_tree(prior, merged, 'tests/playback', altered))
+
     def test_unknown_resource_tree_or_modified_reviewed_file_is_refused(self):
         import subprocess
         prior = '5ca3abcb0259b401b7da3716c41f6026e2b95415'
