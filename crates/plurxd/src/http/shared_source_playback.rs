@@ -3136,10 +3136,6 @@ async fn build_real_source_start_fixture(
 mod tests;
 
 #[cfg(test)]
-#[path = "source_voter_fixture.rs"]
-pub(crate) mod source_voter_fixture;
-
-#[cfg(test)]
 #[path = "sharing_source_adapter_tests.rs"]
 mod actor_adapter_tests;
 
