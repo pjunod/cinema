@@ -959,7 +959,20 @@ impl SessionDir {
         }
         self.optional_write = !active;
         for (name, bytes) in files {
-            if let Err(error) = self.publish_file(name, bytes).await {
+            let mut result = self.publish_file(name, bytes).await;
+            if self.optional_write
+                && result
+                    .as_ref()
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+                && inventory.choose(None).is_some()
+            {
+                // The master selected the split while this write was
+                // optional. No bytes landed, so this member now waits for
+                // the same required grant as the rest of the published layout.
+                self.optional_write = false;
+                result = self.publish_file(name, bytes).await;
+            }
+            if let Err(error) = result {
                 self.optional_write = false;
                 if active || inventory.choose(None).is_some() {
                     return Err(error);
