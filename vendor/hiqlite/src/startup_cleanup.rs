@@ -654,8 +654,8 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_retirement_wakes_below_floor_builder_without_closing_its_writer() {
-        use openraft::{RaftSnapshotBuilder, RaftStateMachine};
-        use std::future::Future as _;
+        use openraft::RaftSnapshotBuilder;
+        use openraft::storage::RaftStateMachine;
         let root = std::env::temp_dir().join(format!(
             "sqlite-deferred-retirement-{}",
             uuid::Uuid::now_v7()
@@ -717,7 +717,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_raft_constructor_finishes_accepted_build_before_releasing_storage() {
-        use openraft::{RaftSnapshotBuilder, RaftStateMachine};
+        use openraft::RaftSnapshotBuilder;
+        use openraft::storage::RaftStateMachine;
         use std::future::Future as _;
         let root = std::env::temp_dir().join(format!(
             "sqlite-constructor-retirement-{}",
@@ -814,7 +815,8 @@ mod tests {
         use crate::store::state_machine::sqlite::{
             state_machine::StateMachineSqlite, writer::WriterRequest,
         };
-        use openraft::{RaftSnapshotBuilder, RaftStateMachine};
+        use openraft::RaftSnapshotBuilder;
+        use openraft::storage::RaftStateMachine;
         use std::future::Future as _;
 
         let root =
