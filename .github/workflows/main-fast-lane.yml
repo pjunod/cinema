@@ -127,6 +127,7 @@ jobs:
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
       - name: Select affected compile surfaces
         id: scope
@@ -186,36 +187,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Select affected worker controller proof inputs
-        id: worker-control-inputs
-        env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          if [ -z "$PR_BASE_SHA" ] || [ -z "$PR_HEAD_SHA" ]; then
-            echo "pull request base/head SHA is missing" >&2
-            exit 1
-          fi
-          changed="$(git diff --name-only "$PR_BASE_SHA...$PR_HEAD_SHA")"
-          affected=false
-          while IFS= read -r path; do
-            case "$path" in
-              crates/plurx-worker-control/*|verification/worker-control/*|\
-              crates/plurxd/src/library_work.rs|crates/plurxd/src/library_work/env.rs|\
-              crates/plurxd/Cargo.toml|\
-              Cargo.toml|Cargo.lock|rust-toolchain.toml|\
-              scripts/check-worker-control|validation/worker_control_resume.py|\
-              .github/workflows/main-fast-lane.yml)
-                affected=true
-                break
-                ;;
-            esac
-          done <<< "$changed"
-          printf 'affected=%s\n' "$affected" >> "$GITHUB_OUTPUT"
-          echo "Worker controller proof inputs affected: $affected"
       - name: Install the pinned Python 3.12 runtime
-        if: steps.worker-control-inputs.outputs.affected == 'true'
         run: |
           set -euo pipefail
           python_dir="$GITHUB_WORKSPACE/target/worker-control-python-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -235,18 +207,15 @@ jobs:
           rm -- "$runtime_archive"
           printf '%s\n' "$python_dir/python/bin" >> "$GITHUB_PATH"
       - name: Install the pinned Rust controller prerequisite
-        if: steps.worker-control-inputs.outputs.affected == 'true'
         uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
         with:
           toolchain: "1.97.1"
       - name: Prepare same-PR worker proof resumption
         id: worker-control-resume
-        if: steps.worker-control-inputs.outputs.affected == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -m validation.worker_control_resume
       - name: Cache the pinned worker controller toolchain
-        if: steps.worker-control-inputs.outputs.affected == 'true'
         env:
           PLURX_WORKER_CACHE_BASE: ${{ github.server_url }}/api/packages/noirr/generic/plurx-worker-control-toolchain
           PLURX_WORKER_CACHE_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
@@ -263,7 +232,6 @@ jobs:
             --output target/worker-control-tools/archives/kani-0.68.0-x86_64-unknown-linux-gnu.tar.gz
           unset PLURX_WORKER_CACHE_TOKEN
       - name: Run the pinned production worker controller proof
-        if: steps.worker-control-inputs.outputs.affected == 'true'
         run: >-
           python3 scripts/check-worker-control full
           --cache-dir target/worker-control-tools
@@ -271,7 +239,7 @@ jobs:
           --resume-from "${{ steps.worker-control-resume.outputs.resume_dir }}"
           --provision
       - name: Attach worker proof resume provenance
-        if: always() && steps.worker-control-inputs.outputs.affected == 'true'
+        if: always()
         run: |
           set -euo pipefail
           output_dir="$GITHUB_WORKSPACE/target/verification/worker-control-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -280,7 +248,7 @@ jobs:
           test -s "$origin"
           cp -- "$origin" "$output_dir/resume-origin.json"
       - name: Preserve worker controller proof receipts and logs
-        if: always() && steps.worker-control-inputs.outputs.affected == 'true'
+        if: always()
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: worker-control-proof-${{ github.run_id }}-${{ github.run_attempt }}
@@ -288,7 +256,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Remove this job's Python runtime
-        if: always() && steps.worker-control-inputs.outputs.affected == 'true'
+        if: always()
         run: |
           python_dir="$GITHUB_WORKSPACE/target/worker-control-python-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           test -n "$GITHUB_WORKSPACE"
@@ -820,6 +788,7 @@ jobs:
           SCOPE_RESULT: ${{ needs.scope.result }}
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           WORKER_CONTROL_RESULT: ${{ needs.worker_control_proof.result }}
+          WORKER_CONTROL_REQUIRED: ${{ needs.scope.outputs.worker_control }}
           RUST_RESULT: ${{ needs.rust_compile.result }}
           RUST_UNITS_RESULT: ${{ needs.rust_units.result }}
           WEB_RESULT: ${{ needs.web_compile.result }}
@@ -831,10 +800,10 @@ jobs:
           if [ "$PAPERWORK_RESULT" != success ]; then
             echo "paperwork ended with: $PAPERWORK_RESULT"; exit 1
           fi
-          if [ "$WORKER_CONTROL_RESULT" != success ]; then
-            echo "The required production worker controller proof ended with: $WORKER_CONTROL_RESULT"
-            exit 1
-          fi
+          case "$WORKER_CONTROL_REQUIRED:$WORKER_CONTROL_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "Worker controller proof did not match its scope (required=$WORKER_CONTROL_REQUIRED result=$WORKER_CONTROL_RESULT)"; exit 1 ;;
+          esac
           for result in \
             "$SCOPE_RESULT" "$PREFLIGHT_RESULT" \
             "$RUST_RESULT" "$RUST_UNITS_RESULT" "$WEB_RESULT" "$APPLE_RESULT" \

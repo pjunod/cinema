@@ -4,7 +4,7 @@
 `validation.ci_scope` prints (`key=value`) on stdin and writes them back for
 `$GITHUB_OUTPUT`, adding three:
 
-* `preflight` and `worker_control`: whether those jobs run (`true` outside a probe);
+* `preflight` and `worker_control`: whether policy and controller proof are due;
 * `train_selected`: `true` on a probe, where the promotion gate does not run.
 
 A probe is a pull request the merge train opens to re-run only some jobs: its
@@ -13,9 +13,9 @@ head branch starts with `train/`, its author is the train's bot account
 `Train-Jobs:` line naming fast-lane job ids. On a probe exactly the named
 jobs run, each forced on whatever the diff says (a probe on `main` alone has an
 empty diff, and a job must run to be judged); every other selectable job is off.
-Anywhere else the scope passes through unchanged. A probe naming a job this
-module cannot select fails the scope job, so the train sees its jobs skipped
-and stops rather than misreading a skipped job as a pass.
+Ordinary pull requests keep the compile scope and select the worker proof
+from their exact source diff. A probe naming an unsupported job fails the
+scope job so the train stops before interpreting the selected results.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 # Fast-lane job id -> the scope outputs that switch it on.
@@ -37,6 +38,19 @@ SELECTABLE = {
     "android_compile": ("android_jvm",),
 }
 SURFACES = ("rust_units", "rust", "web_layout", "apple", "desktop_macos", "android_jvm")
+WORKER_PROOF_FILES = frozenset({
+    ".github/workflows/main-fast-lane.yml",
+    "Cargo.lock",
+    "Cargo.toml",
+    "rust-toolchain.toml",
+    "crates/plurxd/Cargo.toml",
+    "crates/plurxd/src/library_work.rs",
+    "crates/plurxd/src/library_work/env.rs",
+    "scripts/check-worker-control",
+    "validation/merge_train.py",
+    "validation/worker_control_resume.py",
+})
+WORKER_PROOF_TREES = ("crates/plurx-worker-control/", "verification/worker-control/")
 TRAIN_JOBS = re.compile(r"(?m)^Train-Jobs: *(.*?) *$")
 TRAIN_TESTS = re.compile(r"(?m)^Train-Tests: *(.*?) *$")
 # `<binary id> <test path>`: binary ids look like `plurxd::bin/plurxd`; one space.
@@ -87,6 +101,27 @@ def train_tests(event: dict, bot: str) -> list[str] | None:
     return sorted(set(ids))
 
 
+
+def worker_proof_required(event: dict) -> bool:
+    pull = event.get("pull_request") or {}
+    base = (pull.get("base") or {}).get("sha", "")
+    head = (pull.get("head") or {}).get("sha", "")
+    # Missing identities cannot establish that the proof is unnecessary.
+    if not all(isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha)
+               for sha in (base, head)):
+        return True
+    checkout = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    if checkout != head:
+        raise SystemExit("merge-train: worker proof scope checkout does not match the PR head")
+    # Report both ends of a rename so moving a protected input also selects proof.
+    paths = subprocess.check_output(
+        ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}"]
+    )
+    return any(
+        path in WORKER_PROOF_FILES or path.startswith(WORKER_PROOF_TREES)
+        for path in map(os.fsdecode, paths.split(b"\0"))
+    )
+
 def scope(lines: list[str], jobs: list[str] | None, enabled: bool = True,
           tests: list[str] | None = None) -> list[str]:
     values = dict(line.split("=", 1) for line in lines if "=" in line)
@@ -101,7 +136,9 @@ def scope(lines: list[str], jobs: list[str] | None, enabled: bool = True,
             values[output] = "false"
         values.update(train_selected="false", run_lane="false")
     elif jobs is None:
-        values.update(preflight="true", worker_control="true", train_selected="false", run_lane="true")
+        values["preflight"] = "true"
+        values.setdefault("worker_control", "true")
+        values.update(train_selected="false", run_lane="true")
     else:
         unknown = sorted(set(jobs) - set(SELECTABLE))
         if unknown:
@@ -128,7 +165,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"merge-train probe: running only {', '.join(jobs) or '(nothing)'}", file=sys.stderr)
     if tests:
         print(f"merge-train probe: running only {len(tests)} named Rust unit test(s)", file=sys.stderr)
-    print("\n".join(scope(sys.stdin.read().splitlines(), jobs, enabled, tests)))
+    lines = sys.stdin.read().splitlines()
+    if enabled and jobs is None:
+        affected = str(worker_proof_required(event)).lower()
+        print(f"Worker controller proof inputs affected: {affected}", file=sys.stderr)
+        lines.append(f"worker_control={affected}")
+    print("\n".join(scope(lines, jobs, enabled, tests)))
     return 0
 
 

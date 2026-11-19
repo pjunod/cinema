@@ -3,6 +3,7 @@
 import io
 import json
 import hashlib
+from itertools import takewhile
 import os
 from pathlib import Path
 import re
@@ -37,48 +38,31 @@ class WorkerControlCiTests(unittest.TestCase):
         self.proof = job_block(self.workflow, "worker_control_proof")
         self.gate = job_block(self.workflow, "promotion_gate")
 
-    def test_proof_job_selects_only_relevant_source_changes(self) -> None:
+    def test_lightweight_scope_selects_proof_before_a_heavy_runner_is_requested(self) -> None:
+        scope = job_block(self.workflow, "scope")
+        self.assertIn("python3 -m validation.merge_train scope", scope)
+        self.assertIn("worker_control: ${{ steps.scope.outputs.worker_control }}", scope)
         self.assertIn("needs: scope", self.proof)
-        self.assertIn("if: github.event.pull_request.draft == false", self.proof)
-        selection = step_block(self.proof, "Select affected worker controller proof inputs")
-        self.assertIn('git diff --name-only "$PR_BASE_SHA...$PR_HEAD_SHA"', selection)
-        for path in (
-            "crates/plurx-worker-control/*",
-            "crates/plurxd/src/library_work.rs",
-            "crates/plurxd/src/library_work/env.rs",
-            "crates/plurxd/Cargo.toml",
-            "Cargo.toml",
-            "Cargo.lock",
-            "rust-toolchain.toml",
-            "scripts/check-worker-control",
-            "validation/worker_control_resume.py",
-            "verification/worker-control/*",
-            ".github/workflows/main-fast-lane.yml",
-        ):
-            with self.subTest(path=path):
-                self.assertIn(path, selection)
+        self.assertIn("needs.scope.outputs.worker_control == 'true'", self.proof)
+        self.assertNotIn("Select affected worker controller proof inputs", self.proof)
 
     def test_selected_inputs_run_pinned_full_proof_and_preserve_attempt(self) -> None:
         python = step_block(self.proof, "Install the pinned Python 3.12 runtime")
-        self.assertIn("steps.worker-control-inputs.outputs.affected == 'true'", python)
         self.assertIn("target/worker-control-python-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT", python)
         self.assertIn("731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91", python)
         self.assertIn("sys.version_info[:3] == (3, 12, 15)", python)
 
         rust = step_block(self.proof, "Install the pinned Rust controller prerequisite")
-        self.assertIn("steps.worker-control-inputs.outputs.affected == 'true'", rust)
         self.assertIn("dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5", rust)
         self.assertIn('toolchain: "1.97.1"', rust)
         self.assertLess(self.proof.index("Install the pinned Rust controller prerequisite"),
                         self.proof.index("Run the pinned production worker controller proof"))
 
         resume = step_block(self.proof, "Prepare same-PR worker proof resumption")
-        self.assertIn("steps.worker-control-inputs.outputs.affected == 'true'", resume)
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", resume)
         self.assertIn("python3 -m validation.worker_control_resume", resume)
 
         run = step_block(self.proof, "Run the pinned production worker controller proof")
-        self.assertIn("steps.worker-control-inputs.outputs.affected == 'true'", run)
         self.assertIn("scripts/check-worker-control full", run)
         self.assertIn("--cache-dir target/worker-control-tools", run)
         self.assertIn("target/verification/worker-control-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT", run)
@@ -89,7 +73,6 @@ class WorkerControlCiTests(unittest.TestCase):
 
         artifact = step_block(self.proof, "Preserve worker controller proof receipts and logs")
         self.assertIn("always()", artifact)
-        self.assertIn("steps.worker-control-inputs.outputs.affected == 'true'", artifact)
         self.assertIn("target/verification/worker-control-${{ github.run_id }}-${{ github.run_attempt }}/", artifact)
         self.assertIn("if-no-files-found: error", artifact)
         self.assertRegex(artifact, r"retention-days:\s*90\b")
@@ -101,7 +84,6 @@ class WorkerControlCiTests(unittest.TestCase):
 
     def test_worker_cache_uses_its_manifest_and_drops_auth_before_proof(self) -> None:
         cache = step_block(self.proof, "Cache the pinned worker controller toolchain")
-        self.assertIn("if: steps.worker-control-inputs.outputs.affected == 'true'", cache)
         self.assertIn(
             "PLURX_WORKER_CACHE_BASE: ${{ github.server_url }}/api/packages/noirr/generic/plurx-worker-control-toolchain",
             cache,
@@ -185,11 +167,34 @@ Path(option('--output')).write_bytes(b'offline pinned archive fixture')
                         self.assertNotEqual(result.returncode, 0)
                         self.assertNotIn("proof-ready", result.stdout)
 
-    def test_promotion_gate_requires_worker_proof_success(self) -> None:
+    def test_promotion_gate_requires_positive_proof_exactly_when_selected(self) -> None:
         self.assertIn("- worker_control_proof", self.gate)
-        self.assertIn("WORKER_CONTROL_RESULT: ${{ needs.worker_control_proof.result }}", self.gate)
-        self.assertIn('if [ "$WORKER_CONTROL_RESULT" != success ]; then', self.gate)
-        self.assertIn('echo "The required production worker controller proof ended with:', self.gate)
+        step = step_block(self.gate, "Require policy and every affected compile surface")
+        self.assertIn("WORKER_CONTROL_RESULT: ${{ needs.worker_control_proof.result }}", step)
+        self.assertIn("WORKER_CONTROL_REQUIRED: ${{ needs.scope.outputs.worker_control }}", step)
+        lines = step.split("        run: |\n", 1)[1].splitlines()
+        script = "\n".join(
+            line.removeprefix("          ")
+            for line in takewhile(lambda line: not line or line.startswith("          "), lines)
+        )
+        results = {
+            name: "success" for name in (
+                "PAPERWORK_RESULT", "SCOPE_RESULT", "PREFLIGHT_RESULT", "RUST_RESULT",
+                "RUST_UNITS_RESULT", "WEB_RESULT", "APPLE_RESULT", "ANDROID_RESULT",
+            )
+        }
+        for required, proof, success in (
+            ("true", "success", True), ("true", "skipped", False),
+            ("true", "failure", False), ("false", "skipped", True),
+            ("false", "failure", False), ("false", "success", False),
+            ("", "skipped", False),
+        ):
+            with self.subTest(required=required, result=proof):
+                env = dict(os.environ, **results, RUST_UNITS_REQUIRED="true",
+                           WORKER_CONTROL_REQUIRED=required, WORKER_CONTROL_RESULT=proof)
+                actual = subprocess.run(["bash", "-eu", "-c", script], cwd=ROOT,
+                                        env=env, capture_output=True, text=True)
+                self.assertEqual(actual.returncode == 0, success, actual.stdout + actual.stderr)
 
 
 class WorkerControlResumeFixtures(unittest.TestCase):

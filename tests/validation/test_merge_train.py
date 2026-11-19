@@ -10,11 +10,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from validation.merge_train import lane_enabled, scope, selection, train_tests  # noqa: E402
+from validation.merge_train import lane_enabled, scope, selection, train_tests, worker_proof_required  # noqa: E402
 
 LANE = ROOT / ".github/workflows/main-fast-lane.yml"
 SCOPE_LINES = ["rust=false", "apple=false", "desktop_macos=false", "android_jvm=false", "web_layout=true",
@@ -52,6 +53,38 @@ class SelectionCase(unittest.TestCase):
         out = scope(SCOPE_LINES, None)
         self.assertEqual(out[: len(SCOPE_LINES)], SCOPE_LINES)
         self.assertEqual(out[len(SCOPE_LINES):], ["rust_units=true", "train_tests=", "preflight=true", "worker_control=true", "train_selected=false", "run_lane=true"])
+
+    def test_ordinary_scope_preserves_unaffected_but_worker_probe_forces_proof(self):
+        lines = SCOPE_LINES + ["worker_control=false"]
+        ordinary = dict(line.split("=") for line in scope(lines, None))
+        probe = dict(line.split("=") for line in scope(lines, ["worker_control_proof"]))
+        self.assertEqual(ordinary["worker_control"], "false")
+        self.assertEqual(probe["worker_control"], "true")
+
+    def test_worker_proof_uses_exact_checkout_and_all_ends_of_the_diff(self):
+        base, head = "a" * 40, "b" * 40
+        source = {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}
+        for path, required in (
+            ("docs/ci/MERGE-TRAIN.md", False),
+            ("crates/plurxd/src/http/browse.rs", False),
+            ("crates/plurxd/src/library_work.rs", True),
+            ("crates/plurx-worker-control/src/nested/driver.rs", True),
+            ("verification/worker-control/cases.json", True),
+            ("validation/merge_train.py", True),
+            ("Cargo.lock", True),
+        ):
+            with self.subTest(path=path), patch(
+                "validation.merge_train.subprocess.check_output",
+                side_effect=[head + "\n", path.encode() + b"\0"],
+            ) as git:
+                self.assertEqual(worker_proof_required(source), required)
+                self.assertEqual(git.call_args.args[0], [
+                    "git", "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}",
+                ])
+        self.assertTrue(worker_proof_required({}))
+        with patch("validation.merge_train.subprocess.check_output", return_value=base + "\n"):
+            with self.assertRaises(SystemExit):
+                worker_proof_required(source)
 
     def test_rust_compile_and_unit_probes_select_independent_stages(self):
         for selected, rust, units in (("rust_compile", "true", "false"), ("rust_units", "false", "true")):
