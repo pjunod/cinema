@@ -127,6 +127,16 @@ pub enum TableWatch {
 }
 
 impl TableWatch {
+    /// Whether the original trusted table/image observation is still current.
+    /// Fallback sources cannot prove quiet and must retain periodic reads.
+    pub fn unchanged(&self) -> bool {
+        match self {
+            #[cfg(feature = "hiqlite-store")]
+            Self::Applied(watch) => watch.trusted() && !watch.moved(),
+            _ => false,
+        }
+    }
+
     /// Arm before the read this watch follows. Unknown tables or an untrusted
     /// image conservatively retain the existing one-second re-observation.
     #[cfg(feature = "hiqlite-store")]

@@ -5444,6 +5444,7 @@ async fn lease_tick_inventory(
     state: &AppState,
     idle_process: bool,
     now_ms: i64,
+    idle_watch: Option<&plurx_core::store::TableWatch>,
 ) -> Option<Vec<OwnedMediaSessionLease>> {
     // One deadline for the hint and the inventory together: an idle tick
     // that times out on its local read cannot then spend a second one.
@@ -5451,16 +5452,17 @@ async fn lease_tick_inventory(
     if idle_process
         && lease_tick_live(state.transcode.renewable_session_ids().await).is_empty()
         && !state.media_sessions.has_lease_seeds().await
-        && matches!(
-            tokio::time::timeout_at(
-                deadline,
-                state
-                    .store
-                    .owned_media_sessions_hint(&state.node_id, now_ms),
-            )
-            .await,
-            Ok(Ok(false))
-        )
+        && (idle_watch.is_some_and(plurx_core::store::TableWatch::unchanged)
+            || matches!(
+                tokio::time::timeout_at(
+                    deadline,
+                    state
+                        .store
+                        .owned_media_sessions_hint(&state.node_id, now_ms),
+                )
+                .await,
+                Ok(Ok(false))
+            ))
     {
         return Some(Vec::new());
     }
@@ -5489,6 +5491,7 @@ pub(crate) async fn lease_loop(state: AppState) {
     let mut interval = tokio::time::interval(LEASE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut known = HashMap::<String, (String, i64, i64, bool)>::new();
+    let mut idle_watch = None;
     let mut settling = HashSet::<String>::new();
     let mut settlement_backoff = HashMap::<String, StaleSettlementBackoff>::new();
     let (settled_tx, mut settled_rx) =
@@ -5762,12 +5765,20 @@ pub(crate) async fn lease_loop(state: AppState) {
                 .into_iter()
                 .collect::<HashSet<_>>(),
         );
+        // Subscribe before inventory: a row committed during its read must
+        // invalidate the empty answer on the next safety tick.
+        let next_idle_watch = state.cluster.watch(&["media_sessions"]);
         let routes = lease_tick_inventory(
             &state,
             known.is_empty() && vod_capabilities.is_empty(),
             now_ms,
+            idle_watch.as_ref(),
         )
         .await;
+        idle_watch = routes
+            .as_ref()
+            .filter(|rows| rows.is_empty())
+            .map(|_| next_idle_watch);
         // Sample process-local liveness *after* the owner inventory. A
         // takeover that commits while the Store read is in flight is then
         // observed either through its settlement guard or through the adopted
