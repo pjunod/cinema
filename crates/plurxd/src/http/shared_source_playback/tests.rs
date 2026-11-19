@@ -201,7 +201,8 @@ async fn actual_source_initialization_interleave(assertion_case: InitializationA
     use plurx_core::store::sharing_source_ingress_custody::pause_source_ingress_initialization_for_fixture;
     use std::time::{Duration, Instant};
 
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::NativeCopy, None).await;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::NativeCopy, None).await;
+    fixture.keep_fixture_membership_stable().await;
     let mut recipe: Value =
         serde_json::from_slice(&fixture.request).expect("complete native recipe");
     let request_id = recipe["session"]["request_id"]
