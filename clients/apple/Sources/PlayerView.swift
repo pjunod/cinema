@@ -134,19 +134,27 @@ struct PlayerMetadataBadge: Equatable, Identifiable {
 }
 
 enum PlayerMetadataBadgeMetrics {
-    static let rowSpacing: CGFloat = 5
-    static let contentSpacing: CGFloat = 4
-    static let horizontalPadding: CGFloat = 6
-    static let verticalPadding: CGFloat = 2
     static let strokeWidth: CGFloat = 1
     /// Readable, but plainly the "off" treatment next to a lit chip.
     static let dimmedOpacity: Double = 0.45
 
     #if os(tvOS)
-    static let fontSize: CGFloat = 16
-    static let iconSize: CGFloat = 19
-    static let tracking: CGFloat = 0.55
+    // Read from the couch: the pills keep their information, order and tone
+    // colours, at a ten-foot size in the default type design.
+    static let rowSpacing: CGFloat = 10
+    static let contentSpacing: CGFloat = 8
+    static let horizontalPadding: CGFloat = 16
+    static let verticalPadding: CGFloat = 9
+    static let fontSize: CGFloat = 22
+    static let iconSize: CGFloat = 24
+    static let tracking: CGFloat = 0.3
+    static let fontDesign: Font.Design = .default
     #else
+    static let rowSpacing: CGFloat = 5
+    static let contentSpacing: CGFloat = 4
+    static let horizontalPadding: CGFloat = 6
+    static let verticalPadding: CGFloat = 2
+    static let fontDesign: Font.Design = .rounded
     static let fontSize: CGFloat = 10
     static let iconSize: CGFloat = 13
     static let tracking: CGFloat = 0.35
@@ -303,7 +311,7 @@ private struct PlayerMetadataBadgeView: View {
         .font(.system(
             size: PlayerMetadataBadgeMetrics.fontSize,
             weight: .bold,
-            design: .rounded
+            design: PlayerMetadataBadgeMetrics.fontDesign
         ))
         .tracking(PlayerMetadataBadgeMetrics.tracking)
         .foregroundStyle(badge.tone.color)
@@ -857,6 +865,21 @@ struct PlayerView: View {
                                 #endif
                         }
                         .padding(20)
+                        #if os(tvOS)
+                        // A bottom scrim so white chrome reads over a bright
+                        // picture without boxing each label.
+                        .background(alignment: .bottom) {
+                            LinearGradient(
+                                colors: [.clear, .black.opacity(0.55), .black.opacity(0.85)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .frame(height: 560)
+                            .ignoresSafeArea()
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                        }
+                        #endif
                         .transition(.opacity)
                     }
 
@@ -1879,19 +1902,24 @@ struct PlayerView: View {
 
             #if os(tvOS)
             if controller.knownDurationMs > 0 {
-                HStack(spacing: 12) {
+                HStack(spacing: 28) {
                     playbackTimeLabel(pendingMs ?? controller.currentMs)
                         .accessibilityIdentifier("player-position")
                     tvTimeline
                         .layoutPriority(1)
-                    playbackTimeLabel(controller.knownDurationMs)
+                    playbackTimeLabel(
+                        max(controller.knownDurationMs - (pendingMs ?? controller.currentMs), 0),
+                        remaining: true
+                    )
                 }
+                .padding(.top, 18)
             }
             HStack(spacing: 12) {
                 transportControlGroup
                 Spacer(minLength: 8)
                 playbackOptionGroup
             }
+            .padding(.top, 10)
             #else
             touchPlaybackRows
             #endif
@@ -1936,16 +1964,40 @@ struct PlayerView: View {
         return year.map(String.init)
     }
 
-    private func playbackTimeLabel(_ milliseconds: Int) -> some View {
-        Text(formatTime(milliseconds))
+    private func playbackTimeLabel(_ milliseconds: Int, remaining: Bool = false) -> some View {
+        Text(remaining ? "-" + formatTime(milliseconds) : formatTime(milliseconds))
             .fixedSize()
             #if os(tvOS)
-            .padding(.horizontal, TVPlayerChromeMetrics.timeHorizontalInset)
-            .padding(.vertical, TVPlayerChromeMetrics.timeVerticalInset)
-            .background(.black.opacity(0.58), in: Capsule())
+            .font(.system(size: TVPlayerChromeMetrics.timeFontSize, weight: .semibold).monospacedDigit())
+            .foregroundStyle(.white)
+            .shadow(color: .black.opacity(0.6), radius: 6)
             #endif
     }
 
+    #if os(tvOS)
+    /// Ten-foot header: the title, the show / episode line, and the quality
+    /// pills. The synopsis and date line live in the Info panel, not over the
+    /// picture.
+    private var playbackInfoHeader: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.system(size: TVPlayerChromeMetrics.titleFontSize, weight: .bold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+            if let line = subtitle?.trimmingCharacters(in: .whitespacesAndNewlines), !line.isEmpty {
+                Text(line)
+                    .font(.system(size: TVPlayerChromeMetrics.subtitleFontSize, weight: .medium))
+                    .foregroundStyle(.white.opacity(TVPlayerChromeMetrics.subtitleOpacity))
+                    .lineLimit(1)
+            }
+            playbackFacts
+                .padding(.top, 8)
+        }
+        .frame(maxWidth: 1_400, alignment: .leading)
+        .shadow(color: .black.opacity(0.5), radius: 8)
+        .accessibilityElement(children: .combine)
+    }
+    #else
     private var playbackInfoHeader: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(playbackHeading)
@@ -1971,19 +2023,15 @@ struct PlayerView: View {
             }
 
             Text(Self.nowPlayingSummary(overview))
-                #if os(tvOS)
-                .font(.system(size: TVPlayerChromeMetrics.infoBodyFontSize, weight: .regular))
-                .lineLimit(3)
-                #else
                 .font(.system(size: 15, weight: .regular))
                 .lineLimit(3)
-                #endif
                 .foregroundStyle(.white.opacity(0.88))
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: 1_180, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
+    #endif
 
     private var playbackHeading: String {
         [subtitle, title]
@@ -2524,7 +2572,11 @@ struct PlayerView: View {
             controller.skip(seconds: -10)
             revealControls()
         } label: {
+            #if os(tvOS)
+            HStack(spacing: 8) { seekArrows(count: 2, backward: true); Text("10") }
+            #else
             seekArrows(count: 2, backward: true)
+            #endif
         }
         .accessibilityLabel("Back 10 seconds")
         .accessibilityIdentifier("player-skip-back")
@@ -2540,7 +2592,11 @@ struct PlayerView: View {
             controller.skip(seconds: -30)
             revealControls()
         } label: {
+            #if os(tvOS)
+            HStack(spacing: 8) { seekArrows(count: 3, backward: true); Text("30") }
+            #else
             seekArrows(count: 3, backward: true)
+            #endif
         }
         .accessibilityLabel("Back 30 seconds")
         .accessibilityIdentifier("player-skip-back-30")
@@ -2556,8 +2612,13 @@ struct PlayerView: View {
             controller.togglePlayPause()
             revealControls()
         } label: {
+            #if os(tvOS)
+            tvControlLabel(controller.isPlaying ? "pause.fill" : "play.fill",
+                           controller.isPlaying ? "Pause" : "Play")
+            #else
             Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
                 .frame(minWidth: 20)
+            #endif
         }
         .accessibilityLabel(controller.isPlaying ? "Pause" : "Play")
         .accessibilityIdentifier("player-play-pause")
@@ -2577,7 +2638,11 @@ struct PlayerView: View {
             controller.skip(seconds: 10)
             revealControls()
         } label: {
+            #if os(tvOS)
+            HStack(spacing: 8) { Text("10"); seekArrows(count: 2, backward: false) }
+            #else
             seekArrows(count: 2, backward: false)
+            #endif
         }
         .accessibilityLabel("Forward 10 seconds")
         .accessibilityIdentifier("player-skip-forward")
@@ -2593,7 +2658,11 @@ struct PlayerView: View {
             controller.skip(seconds: 30)
             revealControls()
         } label: {
+            #if os(tvOS)
+            HStack(spacing: 8) { Text("30"); seekArrows(count: 3, backward: false) }
+            #else
             seekArrows(count: 3, backward: false)
+            #endif
         }
         .accessibilityLabel("Forward 30 seconds")
         .accessibilityIdentifier("player-skip-forward-30")
@@ -2615,8 +2684,13 @@ struct PlayerView: View {
             pictureInPicture.toggle()
             revealControls()
         } label: {
+            #if os(tvOS)
+            Image(systemName: pictureInPicture.isActive ? "pip.exit" : "pip.enter")
+                .font(.system(size: TVPlayerControlButtonStyle.iconSize, weight: .semibold))
+            #else
             Image(systemName: pictureInPicture.isActive ? "pip.exit" : "pip.enter")
                 .foregroundStyle(pictureInPicture.isActive ? Palette.accent : .white)
+            #endif
         }
         .disabled(!controlState.isButtonEnabled)
         .confirmationDialog("Progressive captions are displayed on this device.", isPresented: $confirmingCaptionPiP, titleVisibility: .visible) {
@@ -2643,8 +2717,13 @@ struct PlayerView: View {
             withAnimation { showStats.toggle() }
             revealControls()
         } label: {
+            #if os(tvOS)
+            Image(systemName: "info.circle")
+                .font(.system(size: TVPlayerControlButtonStyle.iconSize, weight: .semibold))
+            #else
             Image(systemName: "info.circle.fill")
                 .foregroundStyle(showStats ? Palette.accent : .white)
+            #endif
         }
         .accessibilityLabel("Playback info")
         #if os(tvOS)
@@ -2670,7 +2749,7 @@ struct PlayerView: View {
             menuOpener = .settings
             tvMoreOpen = true
         } label: {
-            Image(systemName: "ellipsis")
+            tvControlLabel("ellipsis", "More")
         }
         .accessibilityLabel("More")
         .accessibilityIdentifier("player-more")
@@ -2712,6 +2791,53 @@ struct PlayerView: View {
     }
 
     #if os(tvOS)
+    /// An icon and a word, for the labelled player pills.
+    private func tvControlLabel(_ systemImage: String, _ text: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: TVPlayerControlButtonStyle.iconSize, weight: .semibold))
+            Text(text)
+        }
+    }
+
+    /// "Buttons say their value": the control name, then its current value.
+    private func tvValueLabel(_ name: String, value: String) -> some View {
+        HStack(spacing: 12) {
+            // The name outranks the value: if the row is short of width, the
+            // value truncates and the control keeps saying what it is.
+            Text(name).layoutPriority(1)
+            Text(value).opacity(0.62)
+        }
+    }
+
+    /// Keeps a value short enough that the whole control row fits one line.
+    static func tvShortValue(_ value: String, limit: Int = 12) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > limit else { return trimmed }
+        return String(trimmed.prefix(limit - 1)).trimmingCharacters(in: .whitespaces) + "…"
+    }
+
+    private var tvAudioValue: String {
+        guard let track = controller.audioTracks.first(where: { $0.index == controller.selectedAudio })
+            ?? controller.audioTracks.first(where: { $0.default })
+            ?? controller.audioTracks.first else { return "" }
+        let parts = [Self.languageName(track.language) ?? track.title, Self.soundLabel(track)?.mark]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+        return Self.tvShortValue(parts.joined(separator: " "))
+    }
+
+    private var tvSubtitleValue: String {
+        guard let selected = controller.selectedSubtitle,
+              let track = controller.subtitles.first(where: { $0.index == selected }) else { return "Off" }
+        return Self.tvShortValue(Self.languageName(track.language) ?? track.title ?? "On")
+    }
+
+    private var tvQualityValue: String {
+        if controller.selectedQualityIsOriginal { return "Original" }
+        return controller.selectedHeight.map { "\($0)p" } ?? "Auto"
+    }
+
     /// SwiftUI's Slider is unavailable on tvOS. This focusable bar previews
     /// Left/Right without seeking, commits with Select, and cancels with Menu.
     /// Up reaches the marker row and Down restores the transport row. This uses
@@ -2725,37 +2851,50 @@ struct PlayerView: View {
             let previewFraction = controller.knownDurationMs > 0
                 ? min(max(Double(pendingMs ?? controller.currentMs) / Double(controller.knownDurationMs), 0), 1)
                 : 0
+            let focused = focusedControl == .progress
+            let barHeight = focused
+                ? TVPlayerChromeMetrics.focusedTimelineHeight
+                : TVPlayerChromeMetrics.timelineHeight
+            let knobX = geometry.size.width * (pendingMs == nil ? playedFraction : previewFraction)
             ZStack(alignment: .leading) {
-                Capsule().fill(.white.opacity(0.25))
-                Capsule()
-                    .fill(Palette.accent)
-                    .frame(width: geometry.size.width * playedFraction)
-                if pendingMs != nil {
-                    Capsule()
-                        .fill(Palette.accent.opacity(0.5))
-                        .frame(width: geometry.size.width * previewFraction)
-                }
-            }
-            .overlay {
-                if focusedControl == .progress {
-                    ZStack {
-                        Capsule().stroke(
-                            .black.opacity(0.96),
-                            lineWidth: TVPlayerProgressFocusRing.outerStrokeWidth
-                        )
-                        Capsule().stroke(
-                            Palette.accent.opacity(0.34),
-                            lineWidth: TVPlayerProgressFocusRing.fadeStrokeWidth
-                        )
-                        Capsule().stroke(
-                            Palette.accent,
-                            lineWidth: TVPlayerProgressFocusRing.accentStrokeWidth
-                        )
+                Group {
+                    Capsule().fill(.white.opacity(0.3))
+                    if pendingMs != nil {
+                        Capsule()
+                            .fill(.white.opacity(0.55))
+                            .frame(width: geometry.size.width * previewFraction)
                     }
+                    Capsule()
+                        .fill(.white)
+                        .frame(width: geometry.size.width * playedFraction)
+                }
+                .frame(height: barHeight)
+                .shadow(color: .white.opacity(focused ? 0.35 : 0), radius: 10)
+                if focused {
+                    ZStack {
+                        Circle()
+                            .fill(.white.opacity(0.28))
+                            .frame(
+                                width: TVPlayerChromeMetrics.knobHaloSize,
+                                height: TVPlayerChromeMetrics.knobHaloSize
+                            )
+                        Circle()
+                            .fill(.white)
+                            .frame(
+                                width: TVPlayerChromeMetrics.knobSize,
+                                height: TVPlayerChromeMetrics.knobSize
+                            )
+                            .shadow(color: .white.opacity(0.6), radius: 12)
+                    }
+                    .position(x: knobX, y: geometry.size.height / 2)
+                    .allowsHitTesting(false)
                 }
             }
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .leading)
+            .animation(.easeOut(duration: 0.14), value: focused)
         }
-        .frame(height: 8)
+        // Tall enough for the focused knob so focusing never moves the row.
+        .frame(height: TVPlayerChromeMetrics.knobHaloSize)
         .contentShape(Rectangle())
         .playerRemoteAdapter(
             .timeline,
@@ -2898,7 +3037,7 @@ struct PlayerView: View {
         }
         #else
         Button { openRemoteTracks(.audio) } label: {
-            Image(systemName: "speaker.wave.2.fill")
+            tvValueLabel("Audio", value: tvAudioValue)
         }
         .accessibilityLabel("Audio track")
         .buttonStyle(TVPlayerControlButtonStyle())
@@ -2923,8 +3062,7 @@ struct PlayerView: View {
         }
         #else
         Button { openRemoteTracks(.subtitles) } label: {
-            Image(systemName: "captions.bubble.fill")
-                .foregroundStyle(controller.selectedSubtitle == nil ? .white : Palette.accent)
+            tvValueLabel("Subtitles", value: tvSubtitleValue)
         }
         .accessibilityLabel("Subtitles")
         .buttonStyle(TVPlayerControlButtonStyle())
@@ -2953,7 +3091,7 @@ struct PlayerView: View {
         }
         #else
         Button { openRemoteTracks(.quality) } label: {
-            Image(systemName: "slider.horizontal.3")
+            tvValueLabel("Quality", value: tvQualityValue)
         }
         .accessibilityLabel("Playback quality")
         .buttonStyle(TVPlayerControlButtonStyle())
