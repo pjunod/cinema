@@ -8855,3 +8855,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.k
 source_anchor = "fun owns(acknowledgement: ActionAcknowledgement): Boolean"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedControlHandoffTest.kt"
 test_anchor = "fun handoffOwnsOnlyItsActionAndAdoptsOnlyUnderItsOwnRevision()"
+
+[[fixes]]
+id = "apple.tvos-dvr-scheduled-detail-initial-focus"
+commits = ["1279f4e59bb1d24b073a08fbe38e8099175095e5"]
+source = "clients/apple/Sources/DvrRecordings.swift"
+source_anchor = 'if row.state == .scheduled && focusedControl == nil {'
+test = "clients/apple/UITests/TVDvrNavigationTests.swift"
+test_anchor = "func testRecordingDetailsRuleConfirmationAndManualChannelReturn() throws"
