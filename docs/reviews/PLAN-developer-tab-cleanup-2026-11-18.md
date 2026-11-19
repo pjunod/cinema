@@ -1,7 +1,12 @@
-# Developer tab cleanup — plan for review (2026-11-18)
+# Developer tab cleanup — plan, revision 2 (2026-11-18)
+
+**Status:** open — revision 2 is being built in PR #1802.
+
+Revision 2 folds in Paul's rulings on the Fable review (same day). The
+Decisions table and the Build section below are current; superseded rows say so.
 
 Owner: Claude (claude-opus-5-5, session 01BCWL9xwkar1pfxbk97l2fh).
-Verified against: origin/main @ 8630ee43.
+Verified against: origin/main @ 8630ee43 (merged up to 05a84b93d before review).
 
 ## Problem
 
@@ -29,20 +34,20 @@ same problem.
 | 7 | Adaptive Auto quality | `playback_auto_abr` | Always on. Switch removed. |
 | 8 | Fit Auto to display | `playback_display_aware_auto` | Always on. Switch removed. |
 | 9 | Network priors | `playback_network_priors` | Always on (part of Auto). Switch removed. |
-| 10 | CODECS on SDR master playlists | `playback_sdr_master_codecs` | Always on. Switch removed. |
+| 10 | CODECS on SDR master playlists | `playback_sdr_master_codecs` | **Rev 2: removed entirely** — key, switch and every code path that prints CODECS on SDR masters (prior revert 97176881e; PLAYBACK-INFO-MISSING-FIELDS-RCA.md:702). No dead code left. |
 | 11 | Shared libraries | `sharing_enabled` | Moves to Settings → Sharing, same key. |
-| 12 | Companion remotes | `cinema_remote_control` | Moves to Remote settings, same key. |
-| 13 | Background invitations | `cinema_remote_invitations` | Moves to Remote settings, same key. |
+| 12 | Companion remotes | `cinema_remote_control` | Moves to the new **Remotes & devices** tab, same key. |
+| 13 | Background invitations | `cinema_remote_invitations` | Moves to Remotes & devices, same key. |
 | 14 | Jellyfin client compatibility | `jellyfin_compatibility_enabled` | Moves to Integrations, same key. |
 | 15 | HTTPS | https endpoints | Moves to System. |
 | 16 | Dolby Vision processing | `dolby_vision_hdr_processing` | Playback toggle, same key. |
 | 17 | FEL preservation (P8.1) | `dolby_vision_fel_reencode` | Playback toggle, same key. |
 | 18 | Dolby Vision F+ curves | refit per-platform switches | Playback toggle(s), same keys. |
 | 19 | Display-targeted HDR10-E / SDR | `dolby_vision_display_target` | Playback toggle, same key. |
-| 20 | Complete-output preparation | `vod_output_preparation` | Server-wide selector in Settings → Playback, **plus a per-playback override in the player to turn it off for that playback (new)**. |
+| 20 | Complete-output preparation | `vod_output_preparation` | Server-wide selector in Settings → Playback, **plus a per-playback override in the player (new). Rev 2: the override also skips rolling retention for that playback — one switch, nothing kept.** |
 | 21 | Rolling output retention | `vod_rolling_retention` | Always on. Switch removed. |
 | 22 | Content-aware encoding | `content_aware_encoding` | Always on. Switch removed. |
-| 23 | Reordered VOD frames | `vod_reorder_frames` | Always on (normal x264 VOD recipe). Switch removed. |
+| 23 | Reordered VOD frames | `vod_reorder_frames` | **Rev 2: Playback toggle**, same key, default unchanged (VIDEO-QUALITY-STATUS.md:98 measured no win). |
 | 24 | Mac video processing | `macos_video_processing_enabled` | Stays in Developer. |
 | 25 | Mac HEVC output | `macos_hevc_output_enabled` | Stays in Developer. |
 | 26 | Unverified HEVC copy | `hevc_unverified_copy` | Stays in Developer. |
@@ -83,7 +88,41 @@ Maintenance / Playback by `settingsRouteTab` and aren't part of this change.)
 7. **Docs:** update `docs/` references to Developer-tab locations, plus the
    settings index row.
 
-## Questions for the reviewer
+## Revision 2 — review findings and how each is handled
+
+1. B-frames: ruled a Playback toggle; no digest change.
+2. Always-on keys stay in the public server-info DTO as constant `true`
+   (clients default a missing field to false); PUT still accepts the fields and
+   ignores them; the keys leave `QUALITY_PLANNING_KEYS` / `playback_input_keys`;
+   display-aware Auto's off-path refusal in `hls/control.rs` goes.
+3. New Settings tab **Remotes & devices** (`#/settings/remotes`), reachable by
+   non-admins: server switches for admins, the four device-local toggles (CEC,
+   receiver, companion, suggestions) for everyone. `settingsRouteTab` redirects
+   every old `#/settings/developer/<anchor>` hash to its new home; menu and
+   sharing links updated.
+4. `/developer/readiness` and `/developer/source-recovery` keep their paths
+   (shipped clients call them). The shared helpers (`devReq`,
+   `applyDeveloperReadiness`, subtitle setup) move out of
+   settings-developer.js into a shared file; the Cluster read-budget row covers
+   source-recovery.
+5. AGENTS.md:151-153 and docs/features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md
+   are amended to the new rule (Developer = in-development only, name + switch,
+   detail collapsed, no graduation prose); placement tests rewritten.
+6. SDR CODECS: removed entirely (see item 10).
+7. Override shape: optional field on `CreateOverrides`, carried as
+   `#[serde(skip)]` on `SessionRequest` (never serialized, so mixed fleets are
+   unaffected); honoured at create.rs:4608 and :5895 and at retention start.
+   A takeover or resurrected session falls back to the server setting — stated
+   in the control's help text.
+8. Native inventory: Android `playback_display_mode_match` → Android Settings →
+   Playback; Apple cinemaRemote toggle and Screen invitations → Remotes &
+   devices; `SharedSharingDeveloperCard` → Sharing; `DiagnosticReportButton`
+   removed from Developer (Help keeps it); F+ spool delete/reload move with
+   item 18; server copy pointing at Settings → Developer reworded.
+9. Noted, no change: retention honours the cache budget (50 GiB unset);
+   network priors store per-user /24 history (D6 fixed).
+
+## Questions for the reviewer (revision 1)
 
 - Does any "always on" item (7–10, 21–23) have a known open defect or a
   resource risk that makes forcing it on wrong? Name it concretely: code

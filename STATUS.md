@@ -3,15 +3,7 @@
 **Updated:** 2026-11-16 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
-- **2026-11-18 · Developer tab cleanup:** Owner Claude (claude-opus-5-5,
-  session 01BCWL9x). Developer keeps only Mac video processing, Mac HEVC
-  output and Unverified HEVC copy as name + switch with detail collapsed;
-  everything else moved, became always on, or was removed per Paul's rulings
-  ([plan rev 2](docs/reviews/PLAN-developer-tab-cleanup-2026-11-18.md),
-  [where each item went](docs/features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#developer-cleanup-2026-11-18-supersedes-the-lifecycle-table-below)).
-  Branch `claude/devtab-cleanup`; web, native and docs committed; server half
-  and test rewrite in progress; then draft PR, review, fast lane, merge.
-
+- **2026-11-18 · Developer tab cleanup:** Owner Claude (claude-opus-5-5); [PR #1802](http://forge.lan:3000/noirr/plurx/pulls/1802), [plan](docs/reviews/PLAN-developer-tab-cleanup-2026-11-18.md). Developer keeps three in-development switches; the rest moved, became always on or went.
 - **2026-11-16 · Native prepared forward rendezvous:** owner GPT. New Moon's
   native seeks trailed 90–97 ms; buffered forward aim+existing hold preserves the guard.
   Astra review and 103 focused tests pass; Safari acceptance, seam and deadline
@@ -98,20 +90,14 @@ B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; sim
   deployment paths. Focused fixture validation is recorded in its PR; real
   desktop/engine acceptance and custom Pi ownership migration remain open.
 
-## macOS source installation and the missing tray
-
-**Source correction built; PR review pending.** The first tray promotion packaged the companion for release archives but left `make install-macos` on the daemon-only path. Source installation now stages a complete native runtime and companion before migration; the explicit server-only path retains legacy prefix installs. [Desktop controls](docs/server/DESKTOP-CONTROL.md) explains installation, opening the app and separate login preferences. The focused controller/migration and installer regressions pass; independent PR review remains pending.
-
-## Native server tray, startup policy and release upgrades
-
-**Source built and reviewed on `effort/desktop-tray`; [PR #1213](http://forge.lan:3000/noirr/plurx/pulls/1213) records main promotion; not deployed.** The [implementation ledger](docs/features/DESKTOP-TRAY-IMPLEMENTATION.md) tracks macOS and Linux desktop controls, separate server/tray startup choices, and signed GitHub artifact upgrades. Astra completed the PR #1220 review; root addresses all eight findings and owns passing unit tests and merge gates. Controller, daemon, native UI and packaging source is built in cohort PR #1220. The [qualification ledger](docs/features/DESKTOP-TRAY-QUALIFICATION.md) distinguishes passing review regressions, repository merge evidence and remaining native distribution acceptance.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19, 2026-10-26, 2026-11-07, 2026-11-15 and 2026-11-18 into the status history of their subject folder. One row per section, newest first.
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19, 2026-10-26, 2026-11-07, 2026-11-15, 2026-11-18 and 2026-11-19 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| Undated | Native server tray, startup policy and release upgrades | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
+| Undated | macOS source installation and the missing tray | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
 | Undated | Playback startup path: the per-read stall and the web scrim | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-11 | Startup and tone-map: fewer create-path reads, a tone-map census, lab arms | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-10 | HDR tone-map on Apple Silicon runs on the GPU, held to CPU parity | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
