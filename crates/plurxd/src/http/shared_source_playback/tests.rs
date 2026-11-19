@@ -1960,7 +1960,8 @@ async fn actual_source_media_revocation() {
         sync::{atomic::Ordering, Arc},
         time::{Duration, Instant},
     };
-    let fixture = real_source_start_fixture().await;
+    let mut fixture = real_source_start_fixture().await;
+    fixture.keep_fixture_membership_stable().await;
     let response = fixture_start(
         axum::extract::State((*fixture.state).clone()),
         fixture.headers.clone(),
@@ -3356,7 +3357,7 @@ async fn sharing_source_http_budgeted_start_answers_not_yet_and_rejoins_the_same
 }
 async fn actual_source_budgeted_start() {
     use std::time::{Duration, Instant};
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::ColdCopy, None).await;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::ColdCopy, None).await;
     // Occupied software capacity: the Source cannot publish until released.
     let hold = fixture
         .state
@@ -3391,16 +3392,18 @@ async fn actual_source_budgeted_start() {
         .expect("actual HTTP client");
     // Two independent requests of the same file: one whose viewer leaves
     // mid-preparation, and one that will publish.
+    let request_template = fixture.request.clone();
     let body = |request_id: Uuid| {
-        let mut value: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+        let mut value: Value = serde_json::from_slice(&request_template).expect("recipe");
         value["session"]["request_id"] = json!(request_id.to_string());
         serde_json::to_vec(&value).expect("recipe bytes")
     };
     let (rejoined, abandoned) = (Uuid::new_v4(), Uuid::new_v4());
+    let request_headers = fixture.headers.clone();
     let post = |bytes: Vec<u8>, remaining: Option<u64>| {
         let mut request = client
             .post(&path)
-            .headers(fixture.headers.clone())
+            .headers(request_headers.clone())
             .body(bytes);
         if let Some(ms) = remaining {
             request = request.header(super::super::hls::STARTUP_REMAINING_HEADER, ms.to_string());
@@ -3419,9 +3422,9 @@ async fn actual_source_budgeted_start() {
             .and_then(|v| v["code"].as_str().map(str::to_owned))
             .unwrap_or_default()
     };
+    let state = std::sync::Arc::clone(&fixture.state);
     let entry_of = |request_id: Uuid| {
-        fixture
-            .state
+        state
             .transcode
             .source_http_starts
             .entries
@@ -3440,7 +3443,7 @@ async fn actual_source_budgeted_start() {
         .expect("Source file")
         .file;
     let indexed = || {
-        let store = std::sync::Arc::clone(&fixture.state.store);
+        let store = std::sync::Arc::clone(&state.store);
         let (id, size, mtime) = (file.id, file.size, file.mtime);
         async move {
             store
@@ -3618,6 +3621,7 @@ async fn actual_source_budgeted_start() {
         .transcode
         .test_hold_source_software_capacity()
         .expect("software capacity occupied again");
+    fixture.keep_fixture_membership_stable().await;
     // The Start that publishes: told "not yet" on its 4 s clock while
     // capacity is held (inside the 5 s admission queue), its entry and
     // incarnation retained.
