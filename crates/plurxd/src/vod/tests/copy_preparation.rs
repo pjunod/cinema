@@ -896,26 +896,32 @@ async fn retain_output_off_cancels_only_an_unshared_queued_own_preparation() {
         let store = Arc::clone(&store);
         async move { store.background_job(&id).await.expect("job read").expect("job").state }
     };
-    let (job_id, created) = manager.enqueue_copy_output(&manual, &file, &settings())
+    let (unshared, created) = manager.enqueue_copy_output(&manual, &file, &settings())
         .await.expect("enqueue").expect("a row");
     assert!(created, "the first start creates the row");
+    manager.record_queued_output("viewer-a", unshared.clone(), true).await;
+    manager.stop_output_retention("viewer-a").await;
+    assert_eq!(job_state(unshared).await, JobState::Cancelled);
+
     let mut second = manual.clone();
     second.playback_id = "metadata-second".into();
-    let (joined, joined_created) = manager.enqueue_copy_output(&second, &file, &settings())
+    let (job_id, created) = manager.enqueue_copy_output(&second, &file, &settings())
+        .await.expect("new enqueue").expect("a row");
+    assert!(created, "new demand can prepare an output after cancellation");
+    let mut third = manual;
+    third.playback_id = "metadata-third".into();
+    let (joined, joined_created) = manager.enqueue_copy_output(&third, &file, &settings())
         .await.expect("dedup enqueue").expect("a row");
     assert_eq!((joined.as_str(), joined_created), (job_id.as_str(), false));
-    manager.record_queued_output("viewer-a", job_id.clone(), true).await;
-    manager.record_queued_output("viewer-b", joined, false).await;
-    manager.stop_output_retention("viewer-a").await;
-    assert_eq!(job_state(job_id.clone()).await, JobState::Queued,
-        "viewer-b joined it, so it is not viewer-a's alone");
+    manager.record_queued_output("viewer-b", job_id.clone(), true).await;
+    // A peer viewer may join the replicated queue without appearing in this ledger.
     manager.stop_output_retention("viewer-b").await;
     assert_eq!(job_state(job_id.clone()).await, JobState::Queued,
-        "a dedup join is never the joiner's to cancel");
-    // Its own, unshared and still queued: cancelled.
-    manager.record_queued_output("viewer-c", job_id.clone(), true).await;
+        "the other playback's durable waiter prevents cancellation");
+    manager.record_queued_output("viewer-c", joined, false).await;
     manager.stop_output_retention("viewer-c").await;
-    assert_eq!(job_state(job_id).await, JobState::Cancelled);
+    assert_eq!(job_state(job_id).await, JobState::Queued,
+        "a dedup join is never the joiner's to cancel");
 }
 
 /// Once its executor has claimed it, a viewer's opt-out leaves the

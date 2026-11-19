@@ -6097,34 +6097,12 @@ impl TranscodeManager {
     /// serving another viewer's dedup-joined request, and losing a queued row
     /// costs no more than the title's next start offering it again.
     async fn cancel_output_job(&self, session_id: &str, job_id: String) {
-        use plurx_core::store::background_jobs::{CancelJob, JobState};
-        match self.store.background_job(&job_id).await {
-            Ok(Some(job)) if job.state == JobState::Queued => {}
-            Ok(_) => {
-                tracing::debug!(
-                    target: "plurxd::transcode",
-                    session_id,
-                    job_id,
-                    "complete output preparation left alone: no longer queued"
-                );
-                return;
-            }
-            Err(error) => {
-                tracing::info!(
-                    target: "plurxd::transcode",
-                    session_id,
-                    job_id,
-                    %error,
-                    "complete output preparation not cancelled"
-                );
-                return;
-            }
-        }
+        use plurx_core::store::background_jobs::CancelJob;
         let request = CancelJob {
             job_id: job_id.clone(),
             now_ms: crate::media_sessions::unix_ms(),
         };
-        if let Err(error) = self.store.cancel_job(request).await {
+        if let Err(error) = self.store.cancel_unshared_output_job(request).await {
             tracing::info!(
                 target: "plurxd::transcode",
                 session_id,
@@ -6140,7 +6118,7 @@ impl TranscodeManager {
     /// producer abandons its retained collection, a hand-off still waiting
     /// for the enqueue worker is dropped, and a complete-output row this
     /// session's own start created is cancelled while it is still queued and
-    /// no other session on this node joined it. A dedup join, a shared row and
+    /// no other playback in the cluster joined it. A dedup join, a shared row and
     /// a running preparation all stay. Idempotent.
     pub(crate) async fn stop_output_retention(&self, session_id: &str) {
         let queued = self

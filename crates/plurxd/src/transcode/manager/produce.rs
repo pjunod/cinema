@@ -276,9 +276,10 @@ impl TranscodeManager {
             serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
         ));
         let now = crate::media_sessions::unix_ms();
+        let proposed_id = uuid::Uuid::new_v4().to_string();
         self.store
             .enqueue_job(EnqueueJob {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: proposed_id.clone(),
                 payload,
                 dedupe_key: digest.clone(),
                 priority: 1,
@@ -286,7 +287,11 @@ impl TranscodeManager {
                 now_ms: now,
                 request: JobRequest {
                     scope: "encoded_output_prepare".to_owned(),
-                    request_id: digest.clone(),
+                    // Retain one waiter per playback on the shared preparation.
+                    request_id: hex::encode(Sha256::digest(format!(
+                        "{digest}:{}",
+                        request.playback_id
+                    ))),
                     request_digest: digest,
                     consumer_kind: "encoded_output".to_owned(),
                     consumer_ref: file.id.to_string(),
@@ -305,10 +310,10 @@ impl TranscodeManager {
             .await
             .map_err(|error| error.to_string())
             .map(|outcome| match outcome {
-                // The row this start reached, and whether it created it; a
-                // dedup join is never the joiner's to cancel.
+                // Accepted can also mean a new waiter joined an existing job.
                 plurx_core::store::background_jobs::EnqueueOutcome::Accepted { job_id, .. } => {
-                    Some((job_id, true))
+                    let created = job_id == proposed_id;
+                    Some((job_id, created))
                 }
                 plurx_core::store::background_jobs::EnqueueOutcome::Existing {
                     job_id,
@@ -679,9 +684,10 @@ impl TranscodeManager {
             serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
         ));
         let now = crate::media_sessions::unix_ms();
+        let proposed_id = uuid::Uuid::new_v4().to_string();
         self.store
             .enqueue_job(EnqueueJob {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: proposed_id.clone(),
                 payload,
                 dedupe_key: digest.clone(),
                 priority: 1,
@@ -689,7 +695,11 @@ impl TranscodeManager {
                 now_ms: now,
                 request: JobRequest {
                     scope: "copy_output_prepare".to_owned(),
-                    request_id: digest.clone(),
+                    // Retain one waiter per playback on the shared preparation.
+                    request_id: hex::encode(Sha256::digest(format!(
+                        "{digest}:{}",
+                        request.playback_id
+                    ))),
                     request_digest: digest,
                     consumer_kind: "copy_output".to_owned(),
                     consumer_ref: file.id.to_string(),
@@ -708,10 +718,10 @@ impl TranscodeManager {
             .await
             .map_err(|error| error.to_string())
             .map(|outcome| match outcome {
-                // The row this start reached, and whether it created it; a
-                // dedup join is never the joiner's to cancel.
+                // Accepted can also mean a new waiter joined an existing job.
                 plurx_core::store::background_jobs::EnqueueOutcome::Accepted { job_id, .. } => {
-                    Some((job_id, true))
+                    let created = job_id == proposed_id;
+                    Some((job_id, created))
                 }
                 plurx_core::store::background_jobs::EnqueueOutcome::Existing {
                     job_id,
