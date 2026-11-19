@@ -3588,7 +3588,10 @@ async fn actual_source_budgeted_start() {
     })
     .await
     .expect("the End is owned");
-    assert!(!indexed().await, "the owned index is still unpersisted at End");
+    assert!(
+        !indexed().await,
+        "the owned index is still unpersisted at End"
+    );
     held_index.release();
     let receipt = tokio::time::timeout(Duration::from_secs(40), end)
         .await
