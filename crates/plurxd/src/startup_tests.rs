@@ -5010,7 +5010,7 @@ fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
         .find("\n        }\n")
         .expect("the signal/leave select ends the future's first statement");
     let handoff = future
-        .find("membership_shutdown.handoff_for_shutdown().await;")
+        .find("operations_shutdown.handoff_for_shutdown().await;")
         .expect("the shutdown future hands leadership off");
     let first_await = future[select_end..]
         .find(".await")
@@ -5018,12 +5018,12 @@ fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
         .expect("the drain awaits");
     assert_eq!(
         first_await,
-        handoff + "membership_shutdown.handoff_for_shutdown()".len(),
+        handoff + "operations_shutdown.handoff_for_shutdown()".len(),
         "the handoff is the drain's first await"
     );
     for later in [
         "leave_shutdown.cancel();",
-        "begin_restart_preparation_until(",
+        "prepare_restart_fence(",
         "public_listener_stop.cancel();",
         "jellyfin_stop.cancel();",
     ] {
@@ -5033,14 +5033,14 @@ fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
         assert!(handoff < at, "the handoff must run before {later}");
     }
     let clone = source
-        .find("let membership_shutdown = state.membership.clone();")
-        .expect("the handoff owns a membership clone");
+        .find("let operations_shutdown = state.cluster.operations();")
+        .expect("the handoff owns the facade operations");
     let router = source
         .find("let app = http::router(state);")
         .expect("the router takes the state");
     assert!(
         clone < router,
-        "clone membership before the router takes the state"
+        "take the facade operations before the router takes the state"
     );
 }
 

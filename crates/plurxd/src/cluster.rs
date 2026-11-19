@@ -352,6 +352,13 @@ mod operations {
         pub(crate) async fn claim_outage_cleanup(&self) -> tokio::sync::OwnedMutexGuard<()> {
             self.cluster.fence.planned_outage_cleanup_guard().await
         }
+        /// The drain's stop-time leadership handoff: the manager's one
+        /// bounded handoff, which writes nothing and never fails.
+        pub(crate) async fn handoff_for_shutdown(
+            &self,
+        ) -> plurx_core::cluster::membership::ShutdownHandoff {
+            self.cluster.membership.handoff_for_shutdown().await
+        }
         pub(crate) async fn prepare_restart_fence(
             &self,
             expires_at_unix_ms: u64,

@@ -297,9 +297,9 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("live_tv.rs", "serving", 13),
     ("live_tv/dvr.rs", "serving", 12),
     ("live_tv/resource.rs", "serving", 3),
-    ("main.rs", "membership", 15),
+    ("main.rs", "membership", 14),
     ("main.rs", "replication", 4),
-    ("main.rs", "serving", 4),
+    ("main.rs", "serving", 3),
     ("main.rs", "type", 5),
     ("main.rs", "manager", 8),
     ("media_pool.rs", "serving", 3),
@@ -323,7 +323,7 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
 ];
 
 /// The sum of [`REACH_AROUNDS`]; it may only fall.
-const CEILING: usize = 201;
+const CEILING: usize = 199;
 
 fn exempt(rel: &str) -> bool {
     EXEMPT.iter().any(|(path, _)| rel == *path)

@@ -2577,8 +2577,7 @@ async fn boot_observing(
     let telemetry_store = Arc::clone(&state.store);
     let leave_shutdown = state.shutdown.clone();
     let live_tv_shutdown = Arc::clone(&state.live_tv);
-    let serving_shutdown = state.serving.clone();
-    let membership_shutdown = state.membership.clone();
+    let operations_shutdown = state.cluster.operations();
     // The database Raft core's own terminal state. A core that quit on a
     // fatal error (a full disk, a storage error, a panic) never serves again
     // in this process, so it resolves the same drain a signal does and the
@@ -2669,7 +2668,7 @@ async fn boot_observing(
         // (bounded at 10 s), and every replicated node stops campaigning, so
         // the drain's own writes go to the successor and the survivors never
         // wait out a timeout election. It never fails; the drain continues.
-        membership_shutdown.handoff_for_shutdown().await;
+        operations_shutdown.handoff_for_shutdown().await;
         // One drain token for both causes: owners that must hand work back
         // before exit (shared session retirement) observe `state.shutdown`,
         // and a signal is as much a drain as a committed leave.
@@ -2681,9 +2680,7 @@ async fn boot_observing(
             .saturating_add(10_000)
             .try_into()
             .unwrap_or(u64::MAX);
-        let _ = serving_shutdown
-            .begin_restart_preparation_until(expires)
-            .await;
+        let _ = operations_shutdown.prepare_restart_fence(expires).await;
         crate::telemetry::drain_for_shutdown(&telemetry_store).await;
         if let Err(error) = live_tv_shutdown.shutdown().await {
             #[cfg(any(target_os = "linux", target_os = "macos"))]

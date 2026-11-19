@@ -1,6 +1,6 @@
 # Cluster facade slice 4 — operations keep their exact authority
 
-**Status:** open — preparatory wrappers on the slice-4 task branch; C7-sensitive shutdown wiring and final qualification await #1646 landing.
+**Status:** open — #1646 landed on main (`2218f207`); integrated with slices 5–7c on one task branch, with the C7-sensitive shutdown wiring migrated; review, gate and landing pending.
 **Owner:** Codex. **Prepared:** 2026-11-16.
 
 Companion to [the facade contract](CLUSTER-FACADE-BUILD.md),
@@ -136,3 +136,32 @@ source checks and behavioral results, not final integrated qualification.
 Preparation only. C7 is separately qualifying on main; no slice-4 review,
 regression, gate, source landing or deployment is claimed. The implementation
 will record exact removals and actual qualification here and in its task PR.
+
+## Integration with landed C7 (2026-11-18)
+
+Paul asked for bigger pull requests, so slices 4 through 7c are delivered as
+one task into `effort/cluster-facade`. That task still gets one whole-diff
+adversarial review, focused regressions and one exact-head Effort
+development gate. Current main, with C7 at `2218f207` and the formal item
+pins from #1676, is merged under the stacked slices.
+
+- C7's own drain wiring already went through the facade
+  (`state.cluster.core_failure()`). The merge kept that delegate next to the
+  slice's serving-authority delegates.
+- The drain's two raw shutdown handles were the last C7-sensitive callers.
+  `state.membership.clone()` was used only for the stop-time leadership
+  handoff, and `state.serving.clone()` only for the media-start fence. Both
+  now go through one `state.cluster.operations()` handle.
+  - `Operations::handoff_for_shutdown` delegates to the manager's single
+    bounded handoff.
+  - The fence uses the existing `prepare_restart_fence`, which calls the
+    same `begin_restart_preparation_until`.
+  - C2 order is unchanged, and
+    `the_signal_path_hands_leadership_off_before_any_listener_stops`
+    follows the new spellings. The handoff is still the drain's first
+    await, before the leave token, the fence and both listener stops.
+- `main.rs` pins move from membership 15 to 14 and from serving 4 to 3, and
+  `CEILING` moves from 201 to 199.
+- The rolling-producer owner count reconciles to 927: 936 at the base, minus
+  10 from the facade slices, plus 1 from #1736.
+
