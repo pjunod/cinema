@@ -3,11 +3,26 @@ set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo 'install: run as root' >&2; exit 1; }
 [ "$#" -eq 1 ] || { echo 'usage: install <host-specific runner-vms.json>' >&2; exit 2; }
 here=$(cd -P -- "$(dirname -- "$0")" && pwd -P)
+# A code/config replacement participates in the same target admission domain.
+# Release before systemctl starts the service, which acquires this lock itself.
+install -d -m 0755 /var/lib/plurx-runner-watchdog
+( umask 077; touch /var/lib/plurx-runner-watchdog/admission.lock )
+chmod 0600 /var/lib/plurx-runner-watchdog/admission.lock
+exec 9>>/var/lib/plurx-runner-watchdog/admission.lock
+flock -x 9
+if [ -e /var/lib/plurx-runner-watchdog/maintenance.json ] || [ -L /var/lib/plurx-runner-watchdog/maintenance.json ]; then
+  echo 'install: host maintenance is active; reconcile its owner before replacing code or configuration' >&2
+  exit 1
+fi
 install -d /etc/plurx-ci
 install -m 0644 "$1" /etc/plurx-ci/runner-vms.json
-install -m 0755 "$here/plurx-runner-watchdog" /usr/local/sbin/plurx-runner-watchdog
+# Publish a new inode atomically; inherited watchdog FDs keep their approved bytes.
+install -m 0755 "$here/plurx-runner-watchdog" /usr/local/sbin/.plurx-runner-watchdog.new
+mv -f /usr/local/sbin/.plurx-runner-watchdog.new /usr/local/sbin/plurx-runner-watchdog
 install -m 0755 "$here/plurx-runner-reconcile" /usr/local/sbin/plurx-runner-reconcile
 install -m 0644 "$here/plurx-runner-watchdog.service" "$here/plurx-runner-watchdog.timer" /etc/systemd/system/
+flock -u 9
+exec 9>&-
 systemctl daemon-reload
 systemctl enable --now plurx-runner-watchdog.timer
 systemctl start plurx-runner-watchdog.service
