@@ -26,10 +26,9 @@ final class TVRemoteManagementNavigationTests: TVNavigationTestCase {
         let manage = app.buttons["Manage remote pairings"]
         reachForSetup(manage, in: app, limit: 5)
         assertFocus(manage, in: app, context: "Remote management entry")
-        let enable = app.cells.matching(NSPredicate(format: "label == %@", "Enable Cinema remotes on this installation")).firstMatch
-        reachForSetup(enable, in: app, limit: 6)
-        assertFocus(enable, in: app, context: "Cinema remotes switch")
         let toggle = app.switches["Enable Cinema remotes on this installation"].firstMatch
+        reachForSetup(toggle, in: app, limit: 6)
+        assertFocus(toggle, in: app, context: "Cinema remotes switch")
         if toggle.value as? String == "0" { remote.press(.select) }
         let registered = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             server.requestCount("POST /api/remote/v1/receivers") > 0
