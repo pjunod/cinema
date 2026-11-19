@@ -979,7 +979,7 @@ async fn a05_geometry_promoted_compat_copy_carries_resolved_auto_policy() {
         quality_auto: Some(true),
         caps: Some(
             serde_json::from_value(serde_json::json!({"v":2,"video":[{
-                "codec":"h264","max_width":1920,"max_height":1080
+                "codec":"h264","max_width":1920,"max_height":1080,"present":["sdr"]
             }]}))
             .expect("bounded decoder caps"),
         ),

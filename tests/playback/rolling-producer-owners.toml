@@ -7358,8 +7358,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Main 945 + 3 = 948.
 # PR #1802 adds two relay response status reads and five route-test status reads.
 # All seven matches inspect HTTP replies and launch no processes.
+# Removing the retired parser-floor refusal drops one HTTP status read.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 956
+expected_occurrences = 955
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
