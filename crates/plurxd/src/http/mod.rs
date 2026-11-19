@@ -620,6 +620,7 @@ fn http_route_group(path: &str) -> usize {
         "/"
         | "/api/v1/server"
         | "/api/v1/server/node"
+        | crate::discovery::PATH
         | "/api/v1/settings"
         | "/api/v1/subtitle-transcription"
         | "/api/v1/subtitle-translation"
@@ -1664,6 +1665,7 @@ pub fn router(state: AppState) -> Router {
         .merge(shared_library::viewer_router(state.clone()))
         .merge(shared_playback::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
+        .route("/server/discovery", get(system::discovery_eligibility))
         .route("/server/node", get(system::server_node))
         .nest("/delegation", delegation::router())
         .route("/me", get(auth::me))
@@ -2680,6 +2682,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
         && matches!(
             path,
             "/api/v1/cluster/nodes"
+                | crate::discovery::PATH
                 | "/api/v1/cluster/status"
                 | "/api/v1/cluster/support-bundle"
                 | "/api/v1/cluster/media"
@@ -2810,6 +2813,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         && matches!(
             path,
             "/api/v1/cluster/nodes"
+                | crate::discovery::PATH
                 | "/api/v1/cluster/status"
                 | "/api/v1/cluster/support-bundle"
                 | cluster_operations::INTERNAL_PATH
@@ -2980,6 +2984,9 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
 /// (`capacity_role_refusal`) and any sender choosing peers for an internal
 /// route use this one predicate, so they cannot drift apart.
 fn serving_role_admits(role: LocalServingRole, method: &Method, path: &str) -> bool {
+    if method == Method::GET && path == crate::discovery::PATH {
+        return true;
+    }
     match role {
         LocalServingRole::Unclustered | LocalServingRole::Voter => true,
         LocalServingRole::Learner => learner_route_eligible(method, path),
@@ -2992,6 +2999,11 @@ fn capacity_role_refusal(
     method: &Method,
     path: &str,
 ) -> Option<Response> {
+    // Discovery reports standing, never serving authority. Even a fenced or
+    // unreadable admission projection must be able to withdraw a LAN record.
+    if method == Method::GET && path == crate::discovery::PATH {
+        return None;
+    }
     match role {
         Some(LocalServingRole::Unclustered | LocalServingRole::Voter) => None,
         Some(role @ LocalServingRole::Learner) if serving_role_admits(role, method, path) => None,
@@ -3220,7 +3232,12 @@ async fn desktop_http_admission_gate(
         || path == internal_clock::PATH
         || matches!(
             path,
-            "/healthz" | "/readyz" | "/metrics" | "/api/v1/server" | "/api/v1/server/node"
+            "/healthz"
+                | "/readyz"
+                | "/metrics"
+                | "/api/v1/server"
+                | "/api/v1/server/node"
+                | crate::discovery::PATH
         );
     if control_plane {
         return next.run(request).await;

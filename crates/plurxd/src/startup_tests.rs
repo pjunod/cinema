@@ -361,6 +361,7 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
         source: MembershipManager,
         raft_id: u64,
         observed: Arc<AtomicBool>,
+        standing: Arc<std::sync::Mutex<Option<crate::cluster::StandingWatch>>>,
         origin: String,
     }
     impl plurx_core::cluster::migration::StartupClockObserver for AuditObserver {
@@ -389,6 +390,17 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
                     !roster.voters.contains(&self.raft_id),
                     "desired voter must still be a committed learner at observation entry"
                 );
+                // Only the actual joining manager supplies standing. The SQLite
+                // monitor/fence scaffold is unused by this membership observation;
+                // this assertion does not qualify joining-node serving authority.
+                let replication =
+                    plurx_core::cluster::migration::status::ReplicationMonitor::sqlite();
+                let fence = crate::serving_fence::ServingFence::new(replication.metrics_handle());
+                let facade =
+                    crate::cluster::Cluster::new(fence, membership.clone(), replication, None);
+                let standing = facade.standing_watch();
+                assert_eq!(standing.current(), crate::cluster::Standing::Learner);
+                *self.standing.lock().expect("standing slot") = Some(standing);
                 crate::cluster::StartupClock::start(
                     &*self.owner,
                     crate::cluster::startup_clock(membership),
@@ -396,7 +408,19 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
                 )
                 .await?;
                 let response = crate::cluster::test_calls(self.source.clone())
-                    .clock_request(&node_id, &self.origin)
+                    // This probes authenticated route availability, not timing.
+                    // The actual observer owns timing qualification; a second
+                    // capture here races its legitimate clock publication.
+                    .request(
+                        &node_id,
+                        &self.origin,
+                        reqwest::Method::GET,
+                        crate::http::internal_clock::PATH,
+                        Vec::new(),
+                        tokio::time::Instant::now() + Duration::from_secs(2),
+                        1024,
+                        crate::cluster::calls::PeerAuthMode::ExactRequestAndMemberResponse,
+                    )
                     .await
                     .map_err(|error| {
                         plurx_core::error::StoreError::Database(format!("{error:?}"))
@@ -405,6 +429,14 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
                     response.status,
                     reqwest::StatusCode::OK,
                     "pending learner serves authenticated clock observation before promotion"
+                );
+                let probe: crate::http::internal_clock::ClockResponse =
+                    serde_json::from_slice(&response.body)
+                        .expect("signed pending-learner clock response");
+                assert_eq!(probe.node_id, node_id);
+                assert!(
+                    response.clock_timing.is_none(),
+                    "route probe must not mint timing evidence"
                 );
                 self.observed.store(true, Ordering::SeqCst);
                 Ok(())
@@ -452,10 +484,24 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
             })
             .await
     });
+    // This case asserts a refusal, while production defaults to advisory.
+    // Select enforcement before acquisition so the original is a strict
+    // singleton proof and the later assertion measures membership invalidation.
+    manager.clock_guard().set_enforced(true);
     let original = manager
         .clock_guard()
         .acquire_owned_for(plurx_core::cluster::clock::ClockDecision::MembershipChange)
         .expect("actual singleton clock proof");
+    // A mode cycle alone must preserve the original strict ticket. The join
+    // itself uses the normal advisory startup policy; this case is not an
+    // enforced-clock finalization/convergence test.
+    manager.clock_guard().set_enforced(false);
+    manager.clock_guard().set_enforced(true);
+    assert!(
+        original.revalidate().is_ok(),
+        "enforcement changes alone preserve the singleton proof"
+    );
+    manager.clock_guard().set_enforced(false);
     let token = manager
         .issue_token(Duration::from_secs(120))
         .await
@@ -467,11 +513,13 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
     joining_config.cluster.join_token_file = token_path.clone();
     let joining_owner = Arc::new(StartupObservationHttp::new(joining_config.server.bind));
     let observed = Arc::new(AtomicBool::new(false));
+    let standing = Arc::new(std::sync::Mutex::new(None));
     let observer = AuditObserver {
         owner: Arc::clone(&joining_owner),
         source: manager.clone(),
         raft_id: token.raft_id,
         observed: Arc::clone(&observed),
+        standing: Arc::clone(&standing),
         origin: joining_config.cluster.artwork_url.clone(),
     };
     let joined = tokio::time::timeout(
@@ -489,6 +537,21 @@ async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
         .expect("watch")
         .membership_snapshot();
     assert!(applied.committed && applied.voters.contains(&token.raft_id));
+    let mut standing = standing
+        .lock()
+        .expect("standing slot")
+        .take()
+        .expect("watch created as actual learner");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), standing.changed())
+            .await
+            .expect("applied promotion notification"),
+        Some(crate::cluster::Standing::Voter)
+    );
+    assert_eq!(standing.current(), crate::cluster::Standing::Voter);
+    drop(standing);
+
+    manager.clock_guard().set_enforced(true);
     assert!(
         original.revalidate().is_err(),
         "actual member/promotion changes invalidate the original singleton proof"
@@ -1919,6 +1982,12 @@ async fn identity_server(body: &'static str) -> (String, tokio::task::JoinHandle
         "/api/v1/server",
         axum::routing::get(move || async move { ([("content-type", "application/json")], body) }),
     );
+    let app = app.route(
+        crate::discovery::PATH,
+        axum::routing::get(|| async {
+            axum::Json(crate::discovery::Eligibility { advertise: true })
+        }),
+    );
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -2066,7 +2135,7 @@ async fn a_discovery_daemon_that_cannot_be_withdrawn_still_drains_cleanly() {
         JellyfinStandardListener::default(),
         https::Serving::default(),
         progress,
-        Some(daemon),
+        Some(discovery::Owner::with_advertisement_for_test(daemon)),
         async move {
             let _ = stopped.await;
         },
@@ -2212,7 +2281,15 @@ async fn gdm_answers_a_search_and_ignores_everything_else() {
         .expect("bind server");
     let server_addr = server.local_addr().expect("addr");
     let responder = tokio::spawn(async move {
-        let _ = gdm_serve(&server, "instance-id", None, "Living Room", 32400).await;
+        let _ = gdm_serve(
+            &server,
+            "instance-id",
+            None,
+            "Living Room",
+            32400,
+            &standalone_discovery(),
+        )
+        .await;
     });
 
     let client = tokio::net::UdpSocket::bind("127.0.0.1:0")
@@ -3331,7 +3408,14 @@ async fn a_loopback_server_starts_no_discovery_at_all() {
     let tmp = crate::test_tempdir().expect("tempdir");
     let config = config_in(tmp.path());
     assert!(
-        start_discovery(&config, "instance-1", None, advertiser_that_fails).is_none(),
+        start_discovery(
+            &config,
+            "instance-1",
+            None,
+            advertiser_that_fails,
+            standalone_discovery()
+        )
+        .is_none(),
         "a loopback bind must not be advertised"
     );
 }
@@ -4016,7 +4100,14 @@ async fn a_lan_server_answers_plex_searches_on_the_configured_port() {
 
     // The full boot-time wiring: discovery starts the responder, and the
     // stub advertiser keeps Bonjour off the network.
-    assert!(start_discovery(&config, "instance-1", None, advertiser_that_fails).is_none());
+    let discovery = start_discovery(
+        &config,
+        "instance-1",
+        None,
+        advertiser_that_fails,
+        standalone_discovery(),
+    )
+    .expect("owned GDM responder");
 
     let client = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
@@ -4045,6 +4136,7 @@ async fn a_lan_server_answers_plex_searches_on_the_configured_port() {
     assert!(reply.contains("Name: Loft"), "{reply}");
     assert!(reply.contains("Port: 32400"), "{reply}");
     assert!(reply.contains("Resource-Identifier: instance-1"), "{reply}");
+    discovery.shutdown().await;
     std::env::remove_var("PLURX_GDM_PORT");
 }
 
@@ -4296,7 +4388,17 @@ async fn a_gdm_port_that_cannot_be_bound_is_a_warning_not_a_failure() {
     let _capture = capturing(&logs);
     // The responder is spawned, not awaited — a bind that fails must not be
     // something the caller waits on.
-    spawn_gdm_responder(&config, "instance-1".to_owned(), None, taken);
+    let discovery = discovery::Owner::start(
+        standalone_discovery(),
+        || None,
+        Some(discovery::Gdm {
+            instance_id: "instance-1".into(),
+            node_id: None,
+            name: config.server.name.clone(),
+            http_port: config.server.bind.port(),
+            port: taken,
+        }),
+    );
     for _ in 0..50 {
         if !logs.tail("warn", 8).is_empty() {
             break;
@@ -4318,6 +4420,7 @@ async fn a_gdm_port_that_cannot_be_bound_is_a_warning_not_a_failure() {
         "the operator needs the reason, not just the symptom: {}",
         line.message
     );
+    discovery.shutdown().await;
 }
 
 /// The one line an operator reads to confirm which server, which node, and
@@ -5190,4 +5293,8 @@ fn a_dead_raft_core_drains_like_a_signal_and_exits_non_zero() {
         "the runtime drops before the process exits"
     );
     assert_eq!(source.matches("std::process::exit(code)").count(), 1);
+}
+
+fn standalone_discovery() -> tokio::sync::watch::Receiver<crate::cluster::Standing> {
+    tokio::sync::watch::channel(crate::cluster::Standing::Standalone).1
 }

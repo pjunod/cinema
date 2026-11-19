@@ -553,6 +553,11 @@ Recorded 2026-11-14.
    this audit changed B3 from "flip the default" to "every site declares its
    class", and moved token authentication out of P0 (B3a).
 
+5. **Learner discovery (C8) — Paul decided 2026-11-16:** hide learners from
+   discovery. [Execution plan](LEARNER-DISCOVERY-BUILD.md) covers in-process
+   Bonjour/GDM and the host companion, promotion and withdrawal. Source and
+   fleet acceptance remain open; the decision itself is resolved.
+
 ## 9. What is sound and should not be disturbed
 
 - The serving fence: store-free, generation-monotonic, never extends a lease.

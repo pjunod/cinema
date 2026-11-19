@@ -61,6 +61,18 @@ pub struct ServerInfo {
     pub display_mode_match: bool,
 }
 
+/// Store-free discovery policy, available even while a learner cannot serve identity.
+pub(crate) async fn discovery_eligibility(
+    State(state): State<AppState>,
+) -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(crate::discovery::Eligibility {
+            advertise: crate::discovery::visible(state.cluster.role().standing),
+        }),
+    )
+}
+
 /// GET /api/v1/server — public; drives the client's setup-vs-login decision.
 ///
 /// It stays credential-free in both directions: a client probing an unknown

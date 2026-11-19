@@ -975,6 +975,19 @@ impl Cluster {
         }
     }
 
+    /// Change notification over the same local applied membership as role().
+    pub(crate) fn standing_watch(&self) -> StandingWatch {
+        // Subscribe before sampling so a transition cannot fall between them.
+        let changes = self.membership.local_db_raft_metrics();
+        let last = self.role().standing;
+        StandingWatch {
+            cluster: self.clone(),
+            changes,
+            last,
+            ended: false,
+        }
+    }
+
     /// Who can help, for `purpose`; see [`Directory::peers`].
     pub(crate) async fn peers(&self, purpose: Purpose) -> Result<Peers, ClusterError> {
         self.directory.peers(purpose).await
@@ -1355,6 +1368,40 @@ impl Observations {
     }
     pub(crate) fn members(&self) -> plurx_core::cluster::membership::PassiveMembershipMetricsView {
         self.members.snapshot()
+    }
+}
+
+/// Owned notifications for applied standing; no Store access or relay task.
+#[derive(Clone)]
+pub(crate) struct StandingWatch {
+    cluster: Cluster,
+    changes: Option<hiqlite::LocalDbRaftMetrics>,
+    last: Standing,
+    ended: bool,
+}
+impl StandingWatch {
+    pub(crate) fn current(&self) -> Standing {
+        self.cluster.role().standing
+    }
+
+    pub(crate) async fn changed(&mut self) -> Option<Standing> {
+        if self.ended {
+            return std::future::pending().await;
+        }
+        loop {
+            let current = self.current();
+            if current != self.last {
+                self.last = current;
+                return Some(current);
+            }
+            let Some(changes) = self.changes.as_mut() else {
+                return std::future::pending().await;
+            };
+            if !changes.wait_for_change().await {
+                self.ended = true;
+                return None;
+            }
+        }
     }
 }
 
