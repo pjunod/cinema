@@ -1,7 +1,6 @@
 # Guarded runner admission — pin instance identity at the owner
 
-**Status:** open — source reviewed; isolated owner deployed and manual start observed;
-pickup, Guarded qualification and main promotion pending ·
+**Status:** built and manually qualified on the isolated owner ·
 **Written:** 2026-11-16 · **Owner:** Codex, with Astra review
 
 Companion to the [ci-fleet supervisor plan](http://forge.lan:3000/noirr/ci-fleet):
@@ -82,18 +81,33 @@ pass. The local commit hook stopped at Cargo, which is absent on this Mac.
 No Rust source changed; whole-workspace formatting/Clippy were not run locally
 and the repository promotion gate remains required. A source-only commit uses
 the hook's documented single-commit bypass, without claiming those checks.
-Repository promotion remains open. The installed owner has verified Incus UUID
-and generation fields on one isolated 6-CPU/24-GiB VM. Three capped prepared-owner
-prefix trials reached the native admission guard in 2.502, 1.928 and 2.294 seconds
-under the unchanged 10% CPU/100-MiB host cap. The actual guarded manual command
-then returned `started`, was durably acknowledged, and produced two advancing
-service observations. The fixed qualification workflow completed on its exact
-runner. Pickup verification remained `service_restored`: the collector omitted
-successful run-jobs completeness required by the verifier. Its independently
-reviewed correction passes 977 source regressions and the 385-ms capped target;
-the approved corrective collector canary is still observing. A fresh verified
-pickup, full busy shadow, one automatic recovery, restored production mapping
-and exact-current-tree promotion remain required. Do not infer qualification from a
+Promotion uses this companion's ordinary current-head Main promotion gate. The
+installed owner has verified Incus UUID and generation fields on one isolated
+6-CPU/24-GiB VM. Three capped prepared-owner prefix trials reached the native
+admission guard in 2.502, 1.928 and 2.294 seconds under the unchanged 10% CPU and
+100-MiB host cap. The actual guarded manual command returned `started`, was
+durably acknowledged, and produced two advancing service observations. After
+the collector's job-intake completeness correction, the product verified a new
+fixed-workflow pickup on the exact private runner. Astra accepted this manual
+qualification on 2026-11-19. The earlier successful workflow that lacked
+product pickup credit remains separate historical evidence.
+
+A full 600-second busy shadow and a fresh stopped-resource recommendation were
+also accepted. The first automatic command safely deferred before admission:
+its caller's 15-second offer left only 1.883 seconds for a live claim. The native
+owner recorded no external submission. That separate collector correction
+allows a 30-second offer while preserving the native five-second deadline and
+all freshness, identity and safety-budget checks. Production registration and
+all eight saved files were restored under Observe with no automatic allowlist;
+the operator's restorative start is not recovery evidence.
+
+Successful automatic recovery is a separate ci-fleet qualification, documented
+in its canonical ledger. It is not an additional prerequisite for promoting
+this unchanged, manually qualified native-owner component. Automatic activation
+requires a current reviewed resource and live shadow/ready evidence. Successful
+automatic qualification then requires an actual supervisor-originated owner
+start, service recovery and eligible pickup.
+Do not infer qualification from a
 capability string or a passing fixture. The current upstream retired the
 engineering-knowledge pilot; the older primary-tree query returned no reviewed
 coverage for this file, and no retired tooling is restored by this change.

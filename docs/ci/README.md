@@ -7,7 +7,7 @@ a document to this folder.
 
 | File | Answers | |
 |---|---|---|
-| [GUARDED-RUNNER-ADMISSION.md](GUARDED-RUNNER-ADMISSION.md) | UUID/generation-pinned VM admission, shared target-host mutation lock and remaining ci-fleet qualification. | open |
+| [GUARDED-RUNNER-ADMISSION.md](GUARDED-RUNNER-ADMISSION.md) | UUID/generation-pinned VM admission, shared target-host mutation lock and accepted isolated manual qualification; automatic supervision remains separately qualified in ci-fleet. | built |
 | [RUST-GATE-IMAGE.md](RUST-GATE-IMAGE.md) | The Rust gate's image, pool and parallelism | built |
 | [GENERAL-LANE-IMAGE.md](GENERAL-LANE-IMAGE.md) | Why every `general` job runs in the pinned CI image, what that image holds and lacks, and which jobs stay on the host | built |
 | [MEDIA-RUNTIME.md](MEDIA-RUNTIME.md) | Publishing the pinned media base separately, consuming it in application builds, and updating or rolling back its digest. | built |
