@@ -3030,6 +3030,29 @@ impl MediaSessionStore for SqliteStore {
                     control_receipt,
                 }));
             };
+            let adaptive_claim = tx
+                .query_row(attempts::VIEWER_COMMIT_SCHEMA, [], |row| row.get::<_, String>(0))?
+                .eq("1")
+                .then(|| {
+                    let layout = if rebuilt {
+                        attempt_schema::Layout::Principal
+                    } else {
+                        attempt_schema::Layout::Legacy
+                    };
+                    attempts::viewer_commit_claim(
+                        layout,
+                        attempt_schema::OutageFence::Standalone,
+                        &staged,
+                        &request,
+                    )
+                });
+            let adaptive_pointer_guard = match &adaptive_claim {
+                Some(claim) => {
+                    tx.execute(&claim.open, [])?;
+                    &claim.pointer_guard
+                }
+                None => "",
+            };
             // The CAS this whole milestone exists for. The predecessor comes
             // from the ledger, never from a fresh read of the pointer: a
             // pointer that moved since the preparation means a newer player
@@ -3071,7 +3094,8 @@ impl MediaSessionStore for SqliteStore {
                       JOIN quality_cancellation_receipts receipt ON receipt.receipt_key = owner.cancellation_key
                       WHERE owner.staged_incarnation_id = ?1)
                     AND (?8 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
-                      WHERE {owner_3} AND playback_id = ?4 AND revision != ?8))"),
+                      WHERE {owner_3} AND playback_id = ?4 AND revision != ?8))
+                    {adaptive_pointer_guard}"),
                 params![
                     staged.staged_incarnation_id,
                     now_ms,
@@ -3084,6 +3108,9 @@ impl MediaSessionStore for SqliteStore {
                     request.control_receipt.as_ref().map(|receipt|receipt.session_id.as_str()),
                 ],
             )?;
+            if let Some(claim) = adaptive_claim {
+                tx.execute(&claim.close, [])?;
+            }
             if pointer_advanced != 1 {
                 // A newer generation exists. Abort the staged successor rather
                 // than reap it — see the trait doc; this branch is the reason

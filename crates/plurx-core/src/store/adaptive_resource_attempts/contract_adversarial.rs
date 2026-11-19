@@ -820,6 +820,33 @@ async fn ready_staged_adoption(
     (activation, staged, incumbent)
 }
 
+fn staged_viewer_commit(
+    p: &plurx_core::domain::MediaSessionPreparation,
+    incumbent: &MediaSessionRoute,
+) -> plurx_core::domain::MediaSessionPreparationCommitRequest {
+    let now_ms = p.now_ms + 2;
+    plurx_core::domain::MediaSessionPreparationCommitRequest {
+        staged_incarnation_id: p.incarnation_id.clone(),
+        expected_predecessor_owner_node_id: incumbent.owner_node_id.clone(),
+        expected_predecessor_owner_epoch: incumbent.owner_epoch,
+        expected_desired_revision: p.expected_desired_revision,
+        now_ms,
+        lease_expires_at_ms: 35_000,
+        control_receipt: Some(plurx_core::domain::MediaSessionTerminalAck {
+            incarnation_id: incumbent.incarnation_id.clone(),
+            session_id: incumbent.session_id.clone(),
+            owner_node_id: incumbent.owner_node_id.clone(),
+            owner_epoch: incumbent.owner_epoch,
+            client_instance_id: Uuid::new_v4().to_string(),
+            sequence: 2,
+            request_fingerprint: "f".repeat(64),
+            response_json: "{}".to_owned(),
+            expires_at_ms: 40_000,
+            updated_at_ms: now_ms,
+        }),
+    }
+}
+
 #[tokio::test]
 async fn staged_adopt_keeps_incumbent_current_until_existing_viewer_commit() {
     for_each_adaptive_backend(|store, _| async move {
@@ -903,20 +930,21 @@ async fn staged_adopt_keeps_incumbent_current_until_existing_viewer_commit() {
                 .expect("attempt Fence after transfer"),
             AttemptMutation::Refused(AttemptRefusal::WinnerLost)
         );
-        let commit = plurx_core::domain::MediaSessionPreparationCommitRequest {
-            staged_incarnation_id: p.incarnation_id.clone(),
-            expected_predecessor_owner_node_id: p.expected_predecessor_owner_node_id.clone(),
-            expected_predecessor_owner_epoch: p.expected_predecessor_owner_epoch,
-            expected_desired_revision: p.expected_desired_revision,
-            now_ms: p.now_ms + 2,
-            lease_expires_at_ms: 35_000,
-            control_receipt: None,
-        };
+        let commit = staged_viewer_commit(p, &incumbent);
         let committed = store
             .commit_media_session_preparation(&p.principal, &p.playback_id, &commit)
             .await
             .expect("existing viewer transaction")
             .expect("same successor");
+        assert_eq!(committed.control_receipt, commit.control_receipt);
+        let replay = store
+            .commit_media_session_preparation(&p.principal, &p.playback_id, &commit)
+            .await
+            .expect("durable viewer receipt replay")
+            .expect("same committed viewer");
+        assert_eq!(replay.route, committed.route);
+        assert_eq!(replay.control_receipt, commit.control_receipt);
+        assert!(replay.predecessor.is_none());
         assert_eq!(committed.route.incarnation_id, p.incarnation_id);
         assert_eq!(
             committed.route.lease_expires_at_ms,
@@ -1034,6 +1062,58 @@ async fn staged_adopt_refuses_changed_ask_and_abort_keeps_native_debt() {
             store.stage_adaptive_winner(&staged).await.expect("ended exact replay"),
             AttemptAdoption::Replay(outcome) if outcome.route.state == "ended"
         ));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn staged_adopt_refuses_unproven_or_changed_viewer_commit() {
+    for_each_adaptive_backend(|store, _| async move {
+        for remove_receipt in [true, false] {
+            let (_, staged, incumbent) = ready_staged_adoption(store.as_ref()).await;
+            let p = &staged.preparation;
+            assert!(matches!(
+                store.stage_adaptive_winner(&staged).await.expect("stage"),
+                AttemptAdoption::Applied(_)
+            ));
+            let mut commit = staged_viewer_commit(p, &incumbent);
+            if remove_receipt {
+                commit.control_receipt = None;
+            } else {
+                let changed = store
+                    .record_desired_selection(
+                        &p.principal,
+                        &p.playback_id,
+                        &"2".repeat(64),
+                        "{}",
+                        p.now_ms + 1,
+                    )
+                    .await
+                    .expect("new desired ask");
+                // Even a fresh read at the viewer commit cannot authorize a
+                // generation that was prepared for a different ask.
+                commit.expected_desired_revision = Some(changed.revision);
+            }
+            assert!(store
+                .commit_media_session_preparation(&p.principal, &p.playback_id, &commit)
+                .await
+                .expect("rejected viewer commit")
+                .is_none());
+            assert_eq!(
+                store
+                    .media_session_route_for_playback(&p.principal, &p.playback_id)
+                    .await
+                    .expect("predecessor remains current"),
+                Some(incumbent)
+            );
+            let held = store
+                .adaptive_request_status(&staged.binding.key, &staged.binding.principal)
+                .await
+                .expect("original adaptive request")
+                .expect("retained original winner");
+            assert_eq!(held.disposition, RequestDisposition::Adopted);
+            assert_eq!(held.attempts[0].phase, AttemptPhase::Winner);
+        }
     })
     .await;
 }

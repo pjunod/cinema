@@ -280,3 +280,135 @@ pub(crate) async fn stage<B: Backend>(
         staged_outcome(store, input).await?,
     ))
 }
+
+/// Viewer commits also run against legacy databases without the adjunct.
+/// Only use the scoped SQL when all its referenced adaptive tables exist.
+pub(crate) const VIEWER_COMMIT_SCHEMA: &str = "SELECT CAST(COUNT(*)=5 AS TEXT) AS payload
+    FROM sqlite_master WHERE type='table' AND name IN
+    ('media_resource_schema','media_resource_requests','media_resource_attempts',
+     'media_resource_operations','media_resource_assertions')";
+
+pub(crate) struct ViewerCommitClaim {
+    pub(crate) open: String,
+    pub(crate) pointer_guard: String,
+    pub(crate) close: String,
+}
+
+/// Give the existing viewer CAS the one pointer mutation the adaptive guard
+/// requires. The claim has no session or operation fields and is removed
+/// before the transaction finishes. It cannot adopt a second winner.
+pub(crate) fn viewer_commit_claim(
+    layout: Layout,
+    outage: schema::OutageFence,
+    staged: &crate::domain::MediaSessionStagedGeneration,
+    request: &crate::domain::MediaSessionPreparationCommitRequest,
+) -> ViewerCommitClaim {
+    let owner = quote(&staged.principal.owner_key());
+    let playback = quote(&staged.playback_id);
+    let next = quote(&staged.staged_incarnation_id);
+    let prior = quote(&staged.expected_predecessor_incarnation_id);
+    let prior_node = quote(&request.expected_predecessor_owner_node_id);
+    let prior_epoch = request.expected_predecessor_owner_epoch;
+    let now = request.now_ms;
+    let blocked = MEDIA_SESSION_PUBLICATION_BLOCKED;
+    let ask = request
+        .expected_desired_revision
+        .map_or_else(|| "NULL".into(), |revision| revision.to_string());
+    let (receipt, exact_predecessor) = request.control_receipt.as_ref().map_or_else(
+        || ("NULL".to_owned(), "0".to_owned()),
+        |receipt| {
+            (
+                quote(&receipt.request_fingerprint),
+                format!(
+                    "old.incarnation_id={} AND old.session_id={}",
+                    quote(&receipt.incarnation_id),
+                    quote(&receipt.session_id)
+                ),
+            )
+        },
+    );
+    let claim = format!(
+        "json_object('action','adopt','route_incarnation_id',{next},'viewer_commit',{receipt})"
+    );
+    let active_claim = format!(
+        "EXISTS(SELECT 1 FROM media_resource_schema WHERE singleton=1 AND mutation_claim={claim})"
+    );
+    let after_handoff = layout.owner("s");
+    let before_handoff = layout.owner("old");
+    let prep_owner = layout.owner("p");
+    let desired_owner = layout.owner("desired");
+    let pointer_owner = layout.owner("pointer");
+    let root_owner = layout.owner("root");
+    let ready = schema::ready_guard_for(layout, outage);
+    let removed = quote(&crate::cluster::coordination::removed_job_owner_key(""));
+    let worker_unfenced = match outage {
+        schema::OutageFence::Standalone => "1",
+        schema::OutageFence::Replicated => {
+            "NOT EXISTS(SELECT 1 FROM cluster_operation_leases WHERE node_id=s.owner_node_id)
+            AND NOT EXISTS(SELECT 1 FROM cluster_node_maintenance WHERE node_id=s.owner_node_id)"
+        }
+    };
+    ViewerCommitClaim {
+        open: format!(
+            "UPDATE media_resource_schema SET mutation_claim={claim}
+             WHERE singleton=1 AND revision<9223372036854775807 AND ({ready})
+             AND EXISTS(SELECT 1 FROM media_resource_attempts a
+             JOIN media_resource_requests r USING(owner_key,request_id,request_incarnation_id)
+             JOIN media_resource_operations op ON op.operation_id=r.last_operation_id
+             JOIN media_sessions s ON s.incarnation_id=a.route_incarnation_id
+             JOIN media_session_requests root ON root.request_id=r.request_id AND {root_owner}={owner}
+             JOIN media_session_preparations p ON p.staged_incarnation_id=s.incarnation_id
+             JOIN media_sessions old ON old.incarnation_id=p.expected_predecessor_incarnation_id
+             JOIN media_playback_pointers pointer ON pointer.current_incarnation_id=old.incarnation_id
+             JOIN quality_preparation_owners q ON q.staged_incarnation_id=s.incarnation_id
+             JOIN job_leases lease ON lease.resource='session:'||s.incarnation_id
+             JOIN job_leases old_lease ON old_lease.resource='session:'||old.incarnation_id
+             WHERE a.route_incarnation_id={next} AND r.owner_key={owner} AND a.phase='winner'
+             AND a.ordinal=1 AND r.winner_attempt_id=a.attempt_id AND r.disposition='adopted'
+             AND op.action='adopt' AND op.attempt_id=a.attempt_id
+             AND op.owner_key=r.owner_key AND op.request_id=r.request_id
+             AND op.request_incarnation_id=r.request_incarnation_id
+             AND op.payload_digest=r.last_payload_digest AND op.payload_digest=a.last_payload_digest
+             AND op.request_sequence=r.sequence AND op.attempt_sequence=a.sequence
+             AND json_extract(r.binding_json,'$.expected_predecessor_incarnation_id')={prior}
+             AND json_extract(r.binding_json,'$.expected_predecessor_owner_epoch')={prior_epoch}
+             AND json_extract(r.binding_json,'$.expected_desired_revision') IS {ask}
+             AND (SELECT revision FROM media_playback_desired desired
+             WHERE {desired_owner}={owner} AND desired.playback_id={playback}) IS {ask}
+             AND {after_handoff}={owner} AND {before_handoff}={owner}
+             AND {prep_owner}={owner} AND {pointer_owner}={owner}
+             AND s.playback_id={playback} AND old.playback_id={playback}
+             AND p.playback_id={playback} AND pointer.playback_id={playback}
+             AND s.state='active' AND s.publication_ready_at_ms={blocked}
+             AND s.request_fingerprint=json_extract(r.binding_json,'$.request_fingerprint')
+             AND root.state='resolved' AND root.incarnation_id=s.incarnation_id
+             AND root.request_fingerprint=s.request_fingerprint AND root.playback_id={playback}
+             AND root.owner_node_id=s.owner_node_id
+             AND s.owner_node_id=a.worker_node_id AND s.owner_epoch=a.owner_epoch AND a.owner_epoch=1
+             AND json_extract(a.worker_json,'$.node_id')=s.owner_node_id
+             AND json_extract(a.worker_json,'$.worker_instance_id')=a.worker_instance_id
+             AND json_extract(a.worker_json,'$.planning_generation')=json_extract(r.binding_json,'$.planning_generation')
+             AND json_extract(a.worker_json,'$.planning_source_digest')=json_extract(r.binding_json,'$.planning_source_digest')
+             AND s.session_id=a.session_id AND s.recovery_epoch=old.recovery_epoch
+             AND s.recovery_epoch=json_extract(r.binding_json,'$.recovery_epoch')
+             AND s.lease_expires_at_ms=p.deadline_ms AND p.deadline_ms>{now}
+             AND lease.owner_node_id=s.owner_node_id AND lease.fence=s.owner_epoch
+             AND lease.expires_at_ms=s.lease_expires_at_ms AND lease.revision<9223372036854775807
+             AND old.incarnation_id={prior} AND old.owner_node_id={prior_node} AND old.owner_epoch={prior_epoch}
+             AND old.state='active' AND old.publication_ready_at_ms=0 AND old.lease_expires_at_ms>{now}
+             AND old_lease.owner_node_id=old.owner_node_id AND old_lease.fence=old.owner_epoch
+             AND old_lease.expires_at_ms=old.lease_expires_at_ms AND ({exact_predecessor})
+             AND NOT EXISTS(SELECT 1 FROM quality_cancellation_receipts c WHERE c.receipt_key=q.cancellation_key)
+             AND NOT EXISTS(SELECT 1 FROM settings WHERE key={removed}||s.owner_node_id)
+             AND ({worker_unfenced}))"
+        ),
+        pointer_guard: format!(
+            "AND (NOT EXISTS(SELECT 1 FROM media_resource_attempts WHERE route_incarnation_id={next})
+             OR {active_claim})"
+        ),
+        close: format!(
+            "UPDATE media_resource_schema SET mutation_claim=NULL,revision=revision+1
+             WHERE singleton=1 AND mutation_claim={claim}"
+        ),
+    }
+}

@@ -13,7 +13,7 @@ use super::{
 mod adoption;
 mod staged_adoption;
 pub(crate) use adoption::{adopt, commit_adoption, publish, AdoptionPlan};
-pub(crate) use staged_adoption::stage;
+pub(crate) use staged_adoption::{stage, viewer_commit_claim, VIEWER_COMMIT_SCHEMA};
 
 macro_rules! impl_attempt_store {
     ($store:ty) => {

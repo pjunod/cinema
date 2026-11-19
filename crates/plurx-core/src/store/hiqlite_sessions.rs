@@ -4253,6 +4253,27 @@ impl MediaSessionStore for HiqliteAuthStore {
                 let _ = release.await;
             }
         }
+        let adaptive_claim =
+            (attempts::Backend::attempt_read(self, attempts::VIEWER_COMMIT_SCHEMA.into())
+                .await?
+                .as_slice()
+                == ["1"])
+            .then(|| {
+                let layout = if layout.rebuilt {
+                    attempt_schema::Layout::Principal
+                } else {
+                    attempt_schema::Layout::Legacy
+                };
+                attempts::viewer_commit_claim(
+                    layout,
+                    attempt_schema::OutageFence::Replicated,
+                    &staged,
+                    request,
+                )
+            });
+        let adaptive_pointer_guard = adaptive_claim
+            .as_ref()
+            .map_or("", |claim| claim.pointer_guard.as_str());
         let predecessor_incarnation = staged.expected_predecessor_incarnation_id.clone();
         let staged_lease_resource = format!("session:{}", staged.staged_incarnation_id);
         let receipt_session_id = request
@@ -4348,6 +4369,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                         AND receipt_predecessor.owner_epoch = $11
                         AND receipt_predecessor.{owner_3}))
                     {user_exists_3}
+                    {adaptive_pointer_guard}
                   RETURNING current_incarnation_id"
                 ),
                 params!(
@@ -4495,6 +4517,22 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ));
         }
+        let pointer_index = if let Some(claim) = adaptive_claim {
+            // Keep the claim in this Raft proposal, surrounding only the
+            // existing pointer CAS. The following write still consumes that
+            // exact statement's observable output.
+            statements[1].1[5] = Param::StmtOutputNamed(1, "current_incarnation_id".into());
+            statements.insert(0, (claim.open, params!()));
+            statements.insert(2, (claim.close, params!()));
+            1
+        } else {
+            0
+        };
+        let cas_loss = if pointer_index == 0 {
+            "StmtIndex(1) does not have observable row output"
+        } else {
+            "StmtIndex(2) does not have observable row output"
+        };
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
@@ -4506,10 +4544,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         {
             Ok(results) => results,
             Err(error) => {
-                if error
-                    .to_string()
-                    .contains("StmtIndex(1) does not have observable row output")
-                {
+                if error.to_string().contains(cas_loss) {
                     return classify_preparation_commit_cas_loss(
                         "commit_media_session_preparation",
                         self,
@@ -4525,10 +4560,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         let changed = match results.into_iter().collect::<Result<Vec<_>, _>>() {
             Ok(changed) => changed,
             Err(error) => {
-                if error
-                    .to_string()
-                    .contains("StmtIndex(1) does not have observable row output")
-                {
+                if error.to_string().contains(cas_loss) {
                     return classify_preparation_commit_cas_loss(
                         "commit_media_session_preparation",
                         self,
@@ -4547,7 +4579,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     .to_owned(),
             ));
         }
-        let fresh_commit = changed.first().copied() == Some(1);
+        let fresh_commit = changed.get(pointer_index).copied() == Some(1);
         if !fresh_commit {
             // Defensive fallback for clients which report a zero affected-row
             // result instead of surfacing the missing statement output. The
