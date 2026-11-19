@@ -1,0 +1,18 @@
+{
+  "nodes": [
+    {
+      "name": "voter-a",
+      "url": "http://media1:32400",
+      "expected_source": "0000000000000000000000000000000000000000",
+      "expected_build": "replace-with-exact-deployed-build",
+      "expected_role": "voter"
+    },
+    {
+      "name": "learner",
+      "url": "http://lab1:32400",
+      "expected_source": "0000000000000000000000000000000000000000",
+      "expected_build": "replace-with-exact-deployed-build",
+      "expected_role": "learner"
+    }
+  ]
+}

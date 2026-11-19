@@ -10,6 +10,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Passive cluster timing metrics report bounded AppendEntries RPC-attempt and receiver-handler gaps, handler latency and existing serving-monitor wake lateness. A finite read-only collector records source, role, term and process cohorts; these observations do not change Raft or serving deadlines.
+
 - A per-title `dv_refit` background job fits F+ mapping curves for Profile 7
   FEL titles (FEL-RPU-REFIT-BUILD.md milestone 3), while an explicit FEL disk
   conversion is waiting or any of four new Developer switches is on (`playback.dolby_vision_refit_web`, `_apple`,

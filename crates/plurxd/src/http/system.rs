@@ -6163,6 +6163,37 @@ impl FromRef<AppState> for MetricsState {
     }
 }
 
+/// Correlatable timing signals, not Raft authority or physical delivery evidence.
+fn render_cluster_timing_metrics(
+    observations: &crate::cluster::Observations,
+    uptime: std::time::Duration,
+) -> String {
+    let append = observations.append_timing();
+    let wake = observations.monitor_wake();
+    let mut out = format!("# HELP plurx_cluster_timing_epoch_info Process-local timing observation epoch.\n# TYPE plurx_cluster_timing_epoch_info gauge\nplurx_cluster_timing_epoch_info{{epoch=\"{:016x}\"}} 1\nplurx_cluster_timing_uptime_seconds {}\nplurx_cluster_append_observation_evictions_total {}\n", append.process_epoch, uptime.as_secs_f64(), append.evictions);
+    for row in append.rows {
+        let labels = format!("group=\"db\",stage=\"{}\",local=\"{}\",remote=\"{}\",source=\"{}\",term=\"{}\",endpoint=\"{:016x}\"", row.stage.label(), row.local_node, row.remote_node, row.source_epoch, row.term, row.endpoint_fingerprint);
+        for (name, value) in [
+            ("samples_total", row.samples as f64),
+            ("heartbeats_total", row.heartbeats as f64),
+            ("errors_total", row.errors as f64),
+            ("gap_samples_total", row.gap_samples as f64),
+            ("gap_seconds_sum", row.gap_sum_seconds),
+            ("gap_seconds_max", row.gap_max_seconds),
+            ("elapsed_seconds_sum", row.elapsed_sum_seconds),
+            ("elapsed_seconds_max", row.elapsed_max_seconds),
+            ("last_sample_age_seconds", row.since_last_seconds),
+        ] {
+            out.push_str(&format!(
+                "plurx_cluster_append_observation_{name}{{{labels}}} {value}\n"
+            ));
+        }
+    }
+    let labels = format!("source=\"{}\"", wake.instance);
+    out.push_str(&format!("plurx_cluster_serving_monitor_wake_samples_total{{{labels}}} {}\nplurx_cluster_serving_monitor_wake_lateness_seconds_sum{{{labels}}} {}\nplurx_cluster_serving_monitor_wake_lateness_seconds_max{{{labels}}} {}\nplurx_cluster_serving_monitor_wake_lateness_seconds_last{{{labels}}} {}\n",wake.samples,wake.total.as_secs_f64(),wake.maximum.as_secs_f64(),wake.last.as_secs_f64()));
+    out
+}
+
 fn render_passive_membership_metrics(
     view: plurx_core::cluster::membership::PassiveMembershipMetricsView,
 ) -> String {
@@ -6747,7 +6778,8 @@ pub(crate) async fn metrics(
             &state.cluster_observations.read_pool_wait(),
         )
         + &render_writer_abandoned_replies(state.cluster_observations.writer_replies())
-        + &render_cluster_directory_metrics(state.cluster_directory.reads());
+        + &render_cluster_directory_metrics(state.cluster_directory.reads())
+        + &render_cluster_timing_metrics(&state.cluster_observations, state.started_at.elapsed());
     let membership_metrics =
         render_passive_membership_metrics(state.cluster_observations.members());
     let process_metrics = format!(

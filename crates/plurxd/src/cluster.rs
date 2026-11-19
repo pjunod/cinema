@@ -973,6 +973,7 @@ impl Cluster {
     }
     pub(crate) fn observations(&self) -> Observations {
         Observations {
+            fence: self.fence.clone(),
             monitor: self.replication.clone(),
             raft: self.replication.metrics_handle(),
             members: self.membership.metrics_handle(),
@@ -1338,11 +1339,19 @@ impl From<hiqlite::DbWriterAbandonedReplies> for WriterReplyObservation {
 /// HTTP composition or request attribution.
 #[derive(Clone)]
 pub(crate) struct Observations {
+    fence: ServingFence,
     monitor: plurx_core::cluster::migration::status::ReplicationMonitor,
     raft: plurx_core::cluster::migration::status::PassiveRaftMetrics,
     members: plurx_core::cluster::membership::PassiveMembershipMetrics,
 }
 impl Observations {
+    pub(crate) fn append_timing(&self) -> hiqlite::AppendTimingSnapshot {
+        hiqlite::append_timing_observations()
+    }
+    pub(crate) fn monitor_wake(&self) -> crate::serving_fence::MonitorWakeObservation {
+        self.fence.monitor_wake_observation()
+    }
+
     /// Process-wide atomics copied at scrape time, with no Store query.
     pub(crate) fn read_pool_wait(&self) -> ReadPoolWait {
         hiqlite::db_read_pool_wait().into()

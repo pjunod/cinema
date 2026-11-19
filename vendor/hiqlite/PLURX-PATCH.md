@@ -1,9 +1,9 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries thirty-four patches for clustered deployments. An
+Apache-2.0. Plurx carries thirty-five patches for clustered deployments. An
 upstream release can retire the eleven generic bugs and the one dependency-only
-constraint; it cannot retire the twenty-two Plurx policies:
+constraint; it cannot retire the twenty-three Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
 still needs a public upstream issue or pull request; it is deliberately not a
@@ -45,6 +45,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 32 | Keep the SQLite writer alive when a reply's receiver is gone | generic bug | pending M6 | Upstream release delivers every writer reply without panicking when a cancelled Raft apply or a teardown has dropped its receiver. |
 | 33 | A dead database Raft core is reported, and a snapshot build that cannot fit is never started | plurx policy | — | Never; Plurx ends a process whose core quit and owns its snapshot storage policy; OpenRaft 0.9 makes any build storage error fatal. |
 | 34 | Dead-core teardown releases the SQL writer and a failed build's files without panicking | generic bug | pending M6 | Upstream release shuts its SQL writer down whatever the WAL's shutdown returns, maps a closed writer channel to an error in `shutdown` and `build_snapshot`, and removes a failed build's temporary image. |
+| 35 | Bounded passive DB AppendEntries timing observations | plurx policy | — | Retire when upstream exposes bounded source/term/endpoint-scoped RPC attempt, receiver-entry and completion timing without changing Raft behavior. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -677,3 +678,7 @@ it to pin OpenRaft 0.9.25 and its resolver-selected transitive dependencies, so
 the focused vendor lane exercises the snapshot reset semantics actually
 shipped by the application. The workspace excludes this directory
 deliberately.
+
+## 35. Passive DB append timing observations
+
+`append_timing.rs` records at most64 local-node/remote/stage summaries. Outgoing observations start at RaftNetwork DB AppendEntries API entry; incoming observations bracket the existing server append handler. Empty heartbeats and data appends both count. These are RPC-attempt/handler gaps and handler latency, not physical socket writes, network delivery, RTT or a proof of scheduler starvation. Pool/AppState source-instance epochs, leader terms and endpoint fingerprints reset histories; old sources/terms cannot overwrite newer observations. This is bounded generic observability consumed by Plurx, not a new upstream dependency or a change to pooling, clock capture, RPC budgets or election policy. Poisoned or evicted observation state changes no Raft result.
