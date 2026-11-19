@@ -2143,7 +2143,7 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         io: media_io_observation(),
         // Older owners must not dispatch their removed relay endpoint here.
         live_tv_processing: false,
-        live_tv_resource_processing: state.serving.is_ready()
+        live_tv_resource_processing: state.cluster.ready()
             && state.cluster.role().admission != Admission::Maintenance,
     }
 }
@@ -2192,7 +2192,7 @@ pub(crate) async fn local_quality_catalog(
     let complete_descriptions = std::sync::Mutex::new(Vec::new());
     let binding = std::sync::Mutex::new(None);
     let work = async {
-        if !state.serving.accepting_new_media().await {
+        if !state.cluster.admitting_new_media().await {
             return Err(CatalogCause::AuthorityRefused);
         }
         let quorum_snapshot;
@@ -2402,7 +2402,7 @@ pub(crate) async fn local_offer(state: &AppState, request: &MediaOfferRequest) -
             ..base()
         };
     }
-    if !state.serving.accepting_new_media().await {
+    if !state.cluster.admitting_new_media().await {
         return MediaOffer {
             refusal_code: Some("serving_fenced".to_owned()),
             ..base()

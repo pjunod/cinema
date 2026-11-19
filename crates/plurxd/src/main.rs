@@ -145,7 +145,7 @@ use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
 use hyper_util::service::TowerToHyperService;
 use plurx_core::cluster::coordination::StoreCoordinator;
 use plurx_core::cluster::migration::{
-    connect_activated_store, select_daemon_store_observing, SelectedBackend, StartupClockObserver,
+    connect_activated_store, select_daemon_store_observing, SelectedBackend,
 };
 use plurx_core::config::{Config, StorageConfig};
 use plurx_core::domain::LibraryKind;
@@ -1937,16 +1937,16 @@ async fn run(config: Config) -> anyhow::Result<()> {
     let desktop = desktop_control::DesktopControl::from_environment()?;
 
     let observation = Arc::new(StartupObservationHttp::new(config.server.bind));
-    let mut selected =
-        match select_daemon_store_observing(&config, Some(observation.as_ref())).await {
-            Ok(selected) => selected,
-            Err(error) => {
-                observation.stop_and_drain().await;
-                return Err(error).with_context(|| {
-                    format!("selecting store in {}", config.storage.data_dir.display())
-                });
-            }
-        };
+    let clock_observer = cluster::StartupClockAdapter(observation.as_ref());
+    let mut selected = match select_daemon_store_observing(&config, Some(&clock_observer)).await {
+        Ok(selected) => selected,
+        Err(error) => {
+            observation.stop_and_drain().await;
+            return Err(error).with_context(|| {
+                format!("selecting store in {}", config.storage.data_dir.display())
+            });
+        }
+    };
     // Which backend is serving is not otherwise observable. A recovery boot
     // binds and serves normally on unreplicated SQLite, so a persistently
     // failing activation otherwise looks only like a flapping container, with
@@ -1998,8 +1998,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         {
             tracing::warn!(%error, "source recovery evidence retained for retry");
         }
-        let replication = selected.replication_monitor();
-        let membership = selected.membership_manager();
+        let cluster_parts = cluster::ClusterParts::of(&selected);
         let catalogue = selected.catalogue_reader();
         let applied = selected.applied_view();
         let dirs = create_dirs_for_config(&config)?;
@@ -2022,8 +2021,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let parts = Boot {
             source_activation_at_boot: Some(source_layout_ready),
             store,
-            replication,
-            membership,
+            cluster_parts,
             catalogue,
             applied,
             identity: selected.identity.clone(),
@@ -2083,8 +2081,7 @@ struct Boot {
     store: Arc<dyn plurx_core::store::Store>,
     catalogue: plurx_core::store::CatalogueReader,
     applied: plurx_core::store::AppliedView,
-    replication: plurx_core::cluster::migration::status::ReplicationMonitor,
-    membership: plurx_core::cluster::membership::MembershipManager,
+    cluster_parts: cluster::ClusterParts,
     identity: plurx_core::cluster::ClusterIdentity,
     /// Resolved before the store is handed on, so a node that cannot open its
     /// existing Trakt rows fails here rather than at the first sync.
@@ -2300,10 +2297,10 @@ impl Drop for StartupObservationHttp {
     }
 }
 
-impl StartupClockObserver for StartupObservationHttp {
+impl cluster::StartupClock for StartupObservationHttp {
     fn start(
         &self,
-        membership: plurx_core::cluster::membership::MembershipManager,
+        clock: cluster::ClockOperations,
         node_id: String,
     ) -> std::pin::Pin<
         Box<
@@ -2327,7 +2324,7 @@ impl StartupClockObserver for StartupObservationHttp {
                     .await
                     .map_err(|error| plurx_core::error::StoreError::Database(error.to_string()))?,
             };
-            let observer = crate::clock_offset::ClockObserver::new(membership.clone());
+            let observer = crate::clock_offset::ClockObserver::new(clock.clone());
             let pending = axum::Router::new()
                 .route(
                     http::internal_clock::PATH,
@@ -2335,7 +2332,7 @@ impl StartupClockObserver for StartupObservationHttp {
                 )
                 .route("/readyz", axum::routing::get(startup_pending_readyz))
                 .with_state(http::internal_clock::ObservationContext {
-                    clock: cluster::startup_clock(membership.clone()),
+                    clock,
                     node_id,
                     observer: observer.clone(),
                 })
@@ -2434,8 +2431,7 @@ async fn boot_observing(
     let Boot {
         source_activation_at_boot,
         store,
-        replication,
-        membership,
+        cluster_parts,
         catalogue,
         applied,
         identity,
@@ -2472,8 +2468,7 @@ async fn boot_observing(
         instance_id.clone(),
         credential_key,
         backup_source,
-        replication,
-        membership,
+        cluster_parts,
         catalogue,
         applied,
         store,
@@ -2502,25 +2497,17 @@ async fn boot_observing(
         );
         state.clock_observer = observer;
     }
-    state
-        .membership
-        .set_ingress_custody_boot(Some(state.sharing.accepted_drivers.boot_id()));
-    state
-        .membership
-        .publish_ingress_custody_boot()
+    let sharing_boot = state.cluster.sharing_boot();
+    sharing_boot.record_custody_boot(Some(state.sharing.accepted_drivers.boot_id()));
+    sharing_boot
+        .announce_custody_boot()
         .await
         .context("publishing actual accepted-driver custody boot")?;
-    state
-        .membership
-        .prepare_purpose_master(purpose_master)
+    sharing_boot
+        .qualify_purpose_master(purpose_master)
         .await
         .context("qualifying coordinated sharing purpose master")?;
-    match tokio::time::timeout(
-        Duration::from_secs(5),
-        state.membership.coordinate_purpose_keys(),
-    )
-    .await
-    {
+    match tokio::time::timeout(Duration::from_secs(5), sharing_boot.coordinate_purposes()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::warn!(code = error.code(), "sharing purpose factory is pending"),
         Err(_) => tracing::warn!(code = "deadline", "sharing purpose factory is pending"),
@@ -2668,7 +2655,7 @@ async fn boot_observing(
         // (bounded at 10 s), and every replicated node stops campaigning, so
         // the drain's own writes go to the successor and the survivors never
         // wait out a timeout election. It never fails; the drain continues.
-        operations_shutdown.handoff_for_shutdown().await;
+        operations_shutdown.hand_off_leadership_for_stop().await;
         // One drain token for both causes: owners that must hand work back
         // before exit (shared session retirement) observe `state.shutdown`,
         // and a signal is as much a drain as a committed leave.
@@ -3594,8 +3581,7 @@ fn build_state(
     cluster_id: String,
     credential_key: Arc<plurx_core::secrets::CredentialKey>,
     backup_source: Option<crate::cluster::BackupSource>,
-    replication: plurx_core::cluster::migration::status::ReplicationMonitor,
-    membership: plurx_core::cluster::membership::MembershipManager,
+    cluster_parts: cluster::ClusterParts,
     catalogue: plurx_core::store::CatalogueReader,
     applied: plurx_core::store::AppliedView,
     store: Arc<dyn plurx_core::store::Store>,
@@ -3613,8 +3599,7 @@ fn build_state(
             trusted_proxies: config.server.trusted_proxies.clone(),
             scan_prune_percent: config.storage.scan_prune_percent,
             credential_key,
-            replication,
-            membership,
+            cluster_parts,
             cluster_id,
             shared_cache_dir: config.cluster.shared_cache_dir.clone(),
             shared_cache_id: config.cluster.shared_cache_id.clone(),
@@ -3763,20 +3748,14 @@ fn spawn_background_loops(
         state.clone(),
         background_shutdown.clone(),
     ));
-    let replication = state.replication.clone();
-    tokio::spawn(replication.passive_metrics_loop(background_shutdown.clone().cancelled_owned()));
-    tokio::spawn(
-        state
-            .serving
-            .clone()
-            .monitor_loop(background_shutdown.clone()),
-    );
+    state
+        .cluster
+        .spawn_fence_and_metrics(background_shutdown.clone());
     tokio::spawn(
         std::sync::Arc::clone(&state.transcode)
             .serving_fence_loop(state.cluster.subscribe_authority()),
     );
-    state.membership.register_media_relay_acquisition();
-    tokio::spawn(state.membership.clone().heartbeat_loop());
+    state.cluster.start_heartbeat_with_relay();
     tokio::spawn(std::sync::Arc::clone(&state.media_pool).poll_loop());
     tokio::spawn(
         std::sync::Arc::clone(&state.media_pool)
@@ -3829,7 +3808,7 @@ fn spawn_background_loops(
     // Answers "can you read this package's source?" while a peer is being
     // removed. Every node has to be listening for its own removal to be
     // possible, so this runs whether or not a removal is in progress.
-    tokio::spawn(state.membership.clone().offline_source_probe_loop());
+    state.cluster.spawn_source_probe_answers();
     // Artwork filenames are replicated facts, but their bytes are node-local.
     // Reconcile them independently of traffic so every voter is ready to
     // become the public leader before a failover actually happens.

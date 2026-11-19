@@ -1041,7 +1041,7 @@ pub(crate) async fn readiness_for_config(
         },
     });
 
-    let protocol = state.membership.live_tv_protocol_pending_nodes().await;
+    let protocol = state.cluster.live_tv_pending_nodes().await;
     let protocol_ready = matches!(&protocol, Ok(nodes) if nodes.is_empty());
     checks.push(LiveTvReadinessCheck {
         id: "cluster_protocol",

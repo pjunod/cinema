@@ -6664,7 +6664,7 @@ pub(crate) async fn takeover_loop(state: AppState) {
             scan_cursor = None;
             continue;
         }
-        let clock = state.membership.clock_guard();
+        let clock = state.cluster.clock();
         let page = match clock_guarded_expiry_scan(&clock, |now_ms| {
             state
                 .store
@@ -7366,8 +7366,8 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         metric.outcome = TAKEOVER_SKIPPED;
         return Ok(());
     }
-    let clock = acquire_takeover_clock(&state.membership.clock_guard(), &route.owner_node_id)
-        .map_err(|cause| {
+    let clock =
+        acquire_takeover_clock(&state.cluster.clock(), &route.owner_node_id).map_err(|cause| {
             metric.outcome = TAKEOVER_SKIPPED;
             format!("media-session takeover clock refused: {cause:?}")
         })?;

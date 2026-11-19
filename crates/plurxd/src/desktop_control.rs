@@ -1359,7 +1359,7 @@ mod tests {
             let observation = Arc::new(crate::StartupObservationHttp::new(config.server.bind));
             let selected = plurx_core::cluster::migration::select_daemon_store_observing(
                 &config,
-                Some(observation.as_ref()),
+                Some(&crate::cluster::StartupClockAdapter(observation.as_ref())),
             )
             .await
             .expect("desktop control fixture");
@@ -1380,8 +1380,7 @@ mod tests {
                 selected.identity.cluster_id.clone(),
                 Arc::clone(&selected.credential_key),
                 selected.local_client().map(crate::cluster::backup_source),
-                selected.replication_monitor(),
-                selected.membership_manager(),
+                crate::cluster::ClusterParts::of(&selected),
                 selected.catalogue_reader(),
                 selected.applied_view(),
                 store,
@@ -1396,20 +1395,28 @@ mod tests {
             );
             state.clock_observer = observation.observer().await.expect("startup clock owner");
             state
-                .membership
+                .cluster
+                .test_membership()
                 .heartbeat()
                 .await
                 .expect("desktop control fixture");
             let stop = CancellationToken::new();
             let metrics = tokio::spawn(
                 state
-                    .replication
+                    .cluster
+                    .test_replication()
                     .clone()
                     .passive_metrics_loop(stop.clone().cancelled_owned()),
             );
-            let serving = tokio::spawn(state.serving.clone().monitor_loop(stop.clone()));
+            let serving = tokio::spawn(
+                state
+                    .cluster
+                    .test_fence()
+                    .clone()
+                    .monitor_loop(stop.clone()),
+            );
             tokio::time::timeout(Duration::from_secs(8), async {
-                while !state.serving.is_ready() {
+                while !state.cluster.test_fence().is_ready() {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
             })
@@ -1454,7 +1461,12 @@ mod tests {
             };
             assert!(committed.committed);
             assert!(state.shutdown.is_cancelled());
-            assert!(state.serving.try_restart_admission().await.is_none());
+            assert!(state
+                .cluster
+                .test_fence()
+                .try_restart_admission()
+                .await
+                .is_none());
             // Closing the controller leaves the committed daemon owner alive.
             stop.cancel();
             metrics.await.expect("desktop control fixture");

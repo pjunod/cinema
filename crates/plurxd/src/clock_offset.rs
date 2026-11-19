@@ -6,7 +6,6 @@ use futures_util::{stream, StreamExt};
 use plurx_core::cluster::clock::{ClockDecisionTicket, PeerClockOffset, CLOCK_OBSERVATION_MAX_AGE};
 use plurx_core::cluster::membership::{
     normalize_internal_http_base, ClockLeadershipIdentity, ClockPeerRoster, MembershipError,
-    MembershipManager,
 };
 use plurx_core::error::StoreError;
 use plurx_core::store::Store;
@@ -253,10 +252,9 @@ pub(crate) struct LearnerClockBarrier {
 }
 
 impl ClockObserver {
-    pub(crate) fn new(membership: MembershipManager) -> Self {
+    pub(crate) fn new(clock: crate::cluster::ClockOperations) -> Self {
         let (requests, receiver) = mpsc::channel(1);
         let (completion, _) = watch::channel(Completion::default());
-        let clock = crate::cluster::startup_clock(membership);
         let transport = clock.calls();
         Self(Arc::new(ObserverInner {
             transport,
@@ -1330,7 +1328,9 @@ mod tests {
 
     #[test]
     fn k06_clock_observer_single_owner_and_bounded_coalescing() {
-        let observer = ClockObserver::new(MembershipManager::unavailable());
+        let observer = ClockObserver::new(crate::cluster::startup_clock(
+            plurx_core::cluster::membership::MembershipManager::unavailable(),
+        ));
         let mut receiver = observer.claim_receiver().expect("one owner");
         assert!(observer.clone().claim_receiver().is_none());
         for _ in 0..128 {

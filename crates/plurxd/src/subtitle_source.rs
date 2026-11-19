@@ -599,7 +599,7 @@ impl StoreAccess {
 
     /// The operator's saved manual enable switch. Readiness probes are shown
     /// in Developer settings but never consulted when this value is set.
-    pub(crate) async fn cluster_enabled(&self) -> bool {
+    pub(crate) async fn cluster_sources_enabled(&self) -> bool {
         let Some(store) = self.catalog() else {
             return false;
         };

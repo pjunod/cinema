@@ -381,3 +381,205 @@ model execution. Added regressions distinguish standalone job/admission from
 fresh committed authority and cloned clock identity from independent sources.
 Focused execution, updated census/ownership checks and final intended-base
 review/gate/landing remain pending.
+
+## 7d contract: runtime ownership and a census that classifies by declaration
+
+**Owner:** Claude (effort `E-E154B131A2`). The plan comes before the code.
+Base: `effort/cluster-facade` with slices 4–7c (#1795). One task PR goes
+into the effort, with focused regressions, one whole-diff adversarial
+review and one exact-head Effort gate.
+
+### What the 199 remaining sites are
+
+The census counts spellings. A source inventory of every remaining site
+(2026-11-18) found that about 147 of the 199 are not raw handles.
+
+- **118 name collisions.** Data fields that happen to be called
+  `membership`, `serving` or `replication`:
+  - the cluster-operations rows (46);
+  - clock and desktop status (21);
+  - the wait pool, `dv_runtime`, `system`, and the CLI rows in `main.rs`;
+  - facade-fed `serving` authority fields in Live TV, DVR, resources,
+    sharing and stream (32);
+  - and nine enum variants named `ServingFence`.
+- **25 job-gate calls.** These call `may_run_cluster_jobs` through the typed
+  job capability, not through the manager.
+
+About 51 sites reach real raw handles:
+
+- **7 already covered.** `media_pool` and `media_sessions` raw calls that
+  have exact facade equivalents.
+- **About 44 with no facade equivalent yet:**
+  - background loop ownership: passive metrics, the fence monitor,
+    heartbeat, offline-source probe, and relay registration;
+  - boot-time ingress custody and purpose-key coordination;
+  - relay acquisition support;
+  - Live TV protocol readiness;
+  - the startup clock observer's input type;
+  - and `Boot`, `AppConfig`, `build_state` and `AppState` carrying the three
+    raw handles.
+
+Renaming the collision fields would make the number fall without proving
+anything. The acceptance contract forbids it, along with broad method
+exclusions and new file exemptions.
+
+### Census: classify by what the crate declares
+
+The census stays a `syn` source census. It changes what it may conclude
+from a name:
+
+1. **Declarations first.** Collect every struct field, tuple-struct field,
+   enum-variant field and `let` binding with an explicit type across the
+   crate's production `src/`. Do this for the three names and for any field
+   whose type names one of `TYPES`.
+2. **Field-name classes count only where a raw declaration exists.** An
+   access, pattern or shorthand named `membership`, `serving` or
+   `replication` counts if any non-exempt declaration of that name is
+   raw or unknown. Raw means its type names one of `TYPES`. Unknown means a
+   generic parameter, an alias, `impl Trait`, `dyn` or any type the census
+   cannot resolve. If every declaration of that name is a proven local or
+   standard type that names no raw type, the access is not counted.
+   - This is conservative: one raw field anywhere keeps every access with
+     that name counted.
+   - Private fields declared inside the exempt facade files are left out,
+     because the compiler rejects access to them from outside. A
+     compiler probe proves that.
+3. **Raw types are counted wherever they are named.** That covers fields of
+   any name, parameters, return types (raw-returning accessors), `use`
+   imports, and `use … as` aliases. The alias is new: today the census
+   cannot see one.
+   - A path segment counts as the raw type only when it does not resolve to
+     a crate enum's variant of the same name.
+   - Unknown receivers and unresolvable paths remain counted.
+4. **Method classes** (ROLE, ROSTER, manager) stay name-based.
+   - A ROLE or ROSTER name counts while plurx-core exposes the manager's
+     inherent method of that name to this crate, that is, while it is `pub`.
+     The census reads this visibility from plurx-core on every run.
+   - 7c made those methods `pub(super)`, so the compiler rejects direct calls
+     to them (the E0624 probe). A call by that name can then only reach a
+     trait impl, such as the 25 `ClusterJobAuthority::may_run_cluster_jobs`
+     job-gate calls.
+   - Any raw manager behind such a trait is counted where it is named or
+     held.
+   - If a raw method becomes `pub` again, its callers count again at once.
+     That keeps role and roster detection live after the visibility change.
+   - Renaming the trait method instead would move the formal model's
+     anchors for no gain in what the census can see.
+   - Other manager-method names that collide with an unrelated local method
+     are resolved by moving the caller to a facade name.
+     `Operations::handoff_for_shutdown` becomes a facade name that is not a
+     manager name.
+5. **Negative controls become fixtures.** The census tests must still fail
+   for each of these:
+   - a renamed raw field;
+   - a `use … as` alias of a raw type;
+   - a raw clone through a local binding;
+   - a shorthand field and a destructuring pattern;
+   - a split line;
+   - a macro body;
+   - an accessor that returns a raw type;
+   - a generic-typed `membership` field;
+   - a new file.
+
+   They must also pass for a proven-local DTO field named `membership`.
+
+### Runtime ownership (as built)
+
+- **Parts through startup.** `Boot`, `build_state` and `AppConfig` carry one
+  opaque `ClusterParts`. It is built by `ClusterParts::of(&SelectedStore)` in
+  the facade module, and its fields are private.
+  `Cluster::compose(parts, applied_mark)` builds the fence from the
+  replication metrics handle, as `new_configured` did, then the facade. There
+  is no raw-parts getter, `Deref` or callback.
+- **Raw fields removed.** `AppState.replication`, `.serving` and
+  `.membership` are deleted.
+- **Narrow capabilities.** Each delegates the original call, in the original
+  order:
+  - `spawn_fence_and_metrics`: the passive sampler, then the fence monitor;
+  - `start_heartbeat_with_relay`: relay registration, then the heartbeat;
+  - `spawn_source_probe_answers`;
+  - `sharing_boot()`, with `record_custody_boot`, `announce_custody_boot`,
+    `qualify_purpose_master` and `coordinate_purposes`;
+  - `relay_supported_by`, `live_tv_pending_nodes` and `own_hostname`.
+
+  Their names are not manager method names. `Operations::handoff_for_shutdown`
+  became `hand_off_leadership_for_stop`. `StoreAccess::cluster_enabled` (the
+  subtitle cluster-sources switch) became `cluster_sources_enabled`.
+- **Startup clock.** plurx-core's `StartupClockObserver` still hands its
+  observer the manager. `StartupClockAdapter` in the facade turns it into
+  `ClockOperations` at once. The daemon's observer implements the facade's
+  `StartupClock`, and `ClockObserver::new` takes `ClockOperations`. plurx-core
+  is unchanged.
+- **Test hooks.** `#[cfg(test)]` only, never compiled into production: the
+  compiler probe shows E0599. They are:
+  - `test_fence`, `test_membership` and `test_replication`, which return the
+    facade's own parts;
+  - `with_membership`, which rebuilds the facade as `replace_membership`
+    always did;
+  - `with_replication`, which swaps only the monitor;
+  - `ClusterParts::from_handles` and `ClusterParts::standalone`;
+  - `AppState::replace_replication`.
+
+  Fixtures reach the same objects as before, and no assertion changed.
+
+### Census rules added by the 7d review
+
+- **Accessor class.** A call to a function that a read source declares
+  returning a raw type counts. This covers a `pub` dependency function, a
+  trait method, a visible facade function, or any function of this crate.
+  `selected.membership_manager()` is counted however its result is bound. A
+  raw type's own methods are not accessors: they need a raw receiver, which
+  is counted where it is obtained.
+- **Generic projections are unknown.** A field typed `P::Fence` counts.
+- **The facade's own tree.** Private fields declared in an exempt facade file
+  are ignored only outside that file's module tree. A counted `cluster/…`
+  file can name them, so they count there.
+- **`Self::`.** `Self::Variant` is a variant only inside an `impl` of the enum
+  that declares it.
+- **Every dependency source must parse.** A test requires it.
+
+### Done when
+
+- `REACH_AROUNDS` is empty and `CEILING` is 0, with the classification above.
+- Every negative control fails as intended, and the local-DTO control passes.
+- Sibling-module compiler probes reject direct raw `AppState` access, and
+  access to private facade fields.
+- C2 and C7 order, clock startup, admission, learner job decisions, custody
+  proofs, backup sequencing and settings-change proofs keep their regressions.
+- The formal item pins are re-recorded only after the item bodies are
+  reviewed.
+
+No fleet claim is made here. Deploying stays with Paul.
+
+## 7d delivery ledger
+
+- **Branch.** `claude/cluster-facade-7d`, on #1795's head `c85c80a`.
+- **Census.**
+  - The census moved from spellings to declarations: 199 → 190 for the nine
+    enum variants, → 183 for seven covered facade calls, → 158 for the 25
+    `ClusterJobAuthority` job-gate calls (role and roster now count by
+    visibility).
+  - It reached 0 once the raw fields were gone and `cluster_sources_enabled`
+    was renamed. `REACH_AROUNDS` is empty and `CEILING` is 0.
+  - After the review it is still 0 with the accessor class and the stricter
+    rules. All 15 census tests and the 7 ratchet tests pass.
+- **Focused regressions.** 234 tests passed at `64a8373`. They are the
+  integrated 4–7c set, every `startup_tests` case, `clock_offset`, the
+  internal-clock causal test and the census. Effort evidence `EV-5e2b97a254`.
+- **Compiler probe.** It is valid at `64a8373`, effort evidence for operation
+  `check-7d-probe-64a8373-c`. It ran on an archive of the exact commit with
+  one probe module (script
+  `/Volumes/Untitled/agent/claude/cluster-layer-20261118/probe-7d.py`). The
+  scratch copy is deleted after each run.
+  - Raw `AppState` fields give E0609 (three times).
+  - Private `Cluster` and `ClusterParts` fields give E0616 (four times).
+  - A test-only hook gives E0599.
+  - The facade route compiles, with no other error.
+- **Review.** One whole-diff adversarial review asked for changes: two
+  majors (the inferred-binding bypass and two stale item pins) and five
+  minors. All are fixed in the review-fix commit.
+  - The `fn run` and `fn spawn_background_loops` item pins were re-recorded
+    after review: the modeled facts are unchanged.
+  - Three desktop protected-filesystem cases still need a protected host.
+- **Not yet claimed.** Effort gate, landing, main promotion and deployment.
+

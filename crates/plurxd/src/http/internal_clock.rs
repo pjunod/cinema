@@ -174,9 +174,12 @@ mod causal_tests {
         let startup = Arc::new(crate::StartupObservationHttp::new(
             source_config.server.bind,
         ));
-        let selected = select_daemon_store_observing(&source_config, Some(startup.as_ref()))
-            .await
-            .expect("actual singleton activation within production phase");
+        let selected = select_daemon_store_observing(
+            &source_config,
+            Some(&crate::cluster::StartupClockAdapter(startup.as_ref())),
+        )
+        .await
+        .expect("actual singleton activation within production phase");
         startup.stop_probe().await;
         let leader = selected.membership_manager();
         let token = leader
@@ -279,7 +282,7 @@ mod causal_tests {
         );
         assert!(leadership.membership.members.contains(&token.raft_id));
 
-        let observer = ClockObserver::new(leader.clone());
+        let observer = ClockObserver::new(crate::cluster::startup_clock(leader.clone()));
         observer.test_hold_periodic(true);
         let stop = tokio_util::sync::CancellationToken::new();
         let owner = {
@@ -297,7 +300,7 @@ mod causal_tests {
             );
             tokio::spawn(async move { startup.serve_normal(app, stop.cancelled()).await })
         };
-        let learner_observer = ClockObserver::new(learner.clone());
+        let learner_observer = ClockObserver::new(crate::cluster::startup_clock(learner.clone()));
         let learner_app = clock_app(
             learner.clone(),
             learner_id.clone(),

@@ -354,7 +354,7 @@ mod operations {
         }
         /// The drain's stop-time leadership handoff: the manager's one
         /// bounded handoff, which writes nothing and never fails.
-        pub(crate) async fn handoff_for_shutdown(
+        pub(crate) async fn hand_off_leadership_for_stop(
             &self,
         ) -> plurx_core::cluster::membership::ShutdownHandoff {
             self.cluster.membership.handoff_for_shutdown().await
@@ -561,6 +561,104 @@ pub(crate) fn startup_clock(membership: MembershipManager) -> ClockOperations {
     ClockOperations::new(membership)
 }
 
+/// Boot-time sharing coordination through the manager's original
+/// operations; see [`Cluster::sharing_boot`].
+pub(crate) struct SharingBoot {
+    membership: MembershipManager,
+}
+
+impl SharingBoot {
+    pub(crate) fn record_custody_boot(&self, boot: Option<uuid::Uuid>) {
+        self.membership.set_ingress_custody_boot(boot);
+    }
+
+    pub(crate) async fn announce_custody_boot(&self) -> Result<(), MembershipError> {
+        self.membership.publish_ingress_custody_boot().await
+    }
+
+    pub(crate) async fn qualify_purpose_master(
+        &self,
+        master: std::sync::Arc<plurx_core::secrets::CredentialKey>,
+    ) -> Result<(), MembershipError> {
+        self.membership.prepare_purpose_master(master).await
+    }
+
+    pub(crate) async fn coordinate_purposes(&self) -> Result<(), MembershipError> {
+        self.membership.coordinate_purpose_keys().await
+    }
+}
+
+/// The selected backend's two cluster handles, carried from store
+/// selection to composition without being named outside the facade.
+pub(crate) struct ClusterParts {
+    replication: plurx_core::cluster::migration::status::ReplicationMonitor,
+    membership: MembershipManager,
+}
+
+impl ClusterParts {
+    pub(crate) fn of(selected: &plurx_core::cluster::migration::SelectedStore) -> Self {
+        Self {
+            replication: selected.replication_monitor(),
+            membership: selected.membership_manager(),
+        }
+    }
+
+    /// Parts a fixture already holds.
+    #[cfg(test)]
+    pub(crate) fn from_handles(
+        replication: plurx_core::cluster::migration::status::ReplicationMonitor,
+        membership: MembershipManager,
+    ) -> Self {
+        Self {
+            replication,
+            membership,
+        }
+    }
+
+    /// SQLite with no membership: what unclustered tests compose.
+    #[cfg(test)]
+    pub(crate) fn standalone() -> Self {
+        Self {
+            replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
+            membership: MembershipManager::unavailable(),
+        }
+    }
+}
+
+/// The startup clock observation socket before `AppState` exists:
+/// plurx-core hands its observer the manager, and the facade turns it into
+/// the clock capability at once.
+pub(crate) trait StartupClock: Send + Sync {
+    fn start(
+        &self,
+        clock: ClockOperations,
+        node_id: String,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), plurx_core::error::StoreError>> + Send + '_,
+        >,
+    >;
+}
+
+/// Adapts a [`StartupClock`] to plurx-core's startup observer.
+pub(crate) struct StartupClockAdapter<'a, T: ?Sized>(pub(crate) &'a T);
+
+impl<T: StartupClock + ?Sized> plurx_core::cluster::migration::StartupClockObserver
+    for StartupClockAdapter<'_, T>
+{
+    fn start(
+        &self,
+        membership: MembershipManager,
+        node_id: String,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), plurx_core::error::StoreError>> + Send + '_,
+        >,
+    > {
+        self.0.start(startup_clock(membership), node_id)
+    }
+}
+
 /// The facade. Cheap to clone; clones share one peer directory.
 #[derive(Clone)]
 pub(crate) struct Cluster {
@@ -573,6 +671,62 @@ pub(crate) struct Cluster {
 }
 
 impl Cluster {
+    /// Test-only access to the raw parts, for fixtures that drive the
+    /// fence, manager or monitor directly. Not compiled into production.
+    #[cfg(test)]
+    pub(crate) fn test_fence(&self) -> &ServingFence {
+        &self.fence
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_membership(&self) -> &MembershipManager {
+        &self.membership
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_replication(
+        &self,
+    ) -> &plurx_core::cluster::migration::status::ReplicationMonitor {
+        &self.replication
+    }
+
+    /// This facade with only its replication monitor replaced, for fixtures
+    /// that replace it: the fence, manager, directory, jobs and access stay
+    /// the ones every subsystem was built with.
+    #[cfg(test)]
+    pub(crate) fn with_replication(
+        &self,
+        replication: plurx_core::cluster::migration::status::ReplicationMonitor,
+    ) -> Self {
+        Self {
+            replication,
+            ..self.clone()
+        }
+    }
+
+    /// The same fence and replication monitor over another membership
+    /// manager, for fixtures that replace it.
+    #[cfg(test)]
+    pub(crate) fn with_membership(
+        &self,
+        membership: MembershipManager,
+        mark: Option<hiqlite::AppliedMarkHandle>,
+    ) -> Self {
+        Self::new(
+            self.fence.clone(),
+            membership,
+            self.replication.clone(),
+            mark,
+        )
+    }
+
+    /// Compose the facade from the selected backend's parts: the fence is
+    /// built from the replication metrics handle, as `new_configured` did.
+    pub(crate) fn compose(parts: ClusterParts, mark: Option<hiqlite::AppliedMarkHandle>) -> Self {
+        let fence = ServingFence::new(parts.replication.metrics_handle());
+        Self::new(fence, parts.membership, parts.replication, mark)
+    }
+
     /// The facade over this node's fence and manager; `mark` is the applied
     /// mark the peer directory stamps with (`AppliedView::applied_mark`).
     pub(crate) fn new(
@@ -622,6 +776,58 @@ impl Cluster {
         &self,
     ) -> impl std::future::Future<Output = String> + Send + 'static {
         self.membership.raft_core_failure()
+    }
+
+    /// Start the replication sampler and the fence monitor, in that order,
+    /// as the daemon's background start always has.
+    pub(crate) fn spawn_fence_and_metrics(&self, shutdown: tokio_util::sync::CancellationToken) {
+        tokio::spawn(
+            self.replication
+                .clone()
+                .passive_metrics_loop(shutdown.clone().cancelled_owned()),
+        );
+        tokio::spawn(self.fence.clone().monitor_loop(shutdown));
+    }
+
+    /// Advertise media-relay acquisition, then start the membership
+    /// heartbeat that publishes it.
+    pub(crate) fn start_heartbeat_with_relay(&self) {
+        self.membership.register_media_relay_acquisition();
+        tokio::spawn(self.membership.clone().heartbeat_loop());
+    }
+
+    /// Answer peers asking whether this node can read a package's source
+    /// while a peer is removed.
+    pub(crate) fn spawn_source_probe_answers(&self) {
+        tokio::spawn(self.membership.clone().offline_source_probe_loop());
+    }
+
+    /// Boot-time sharing coordination: accepted-driver custody and purpose
+    /// keys, each the manager's original operation.
+    pub(crate) fn sharing_boot(&self) -> SharingBoot {
+        SharingBoot {
+            membership: self.membership.clone(),
+        }
+    }
+
+    /// Whether `owner_node_id` advertises media-relay acquisition.
+    pub(crate) async fn relay_supported_by(
+        &self,
+        owner_node_id: &str,
+    ) -> Result<bool, MembershipError> {
+        self.membership
+            .media_relay_acquisition_supported(owner_node_id)
+            .await
+    }
+
+    /// Nodes that have not yet taken the current Live TV protocol.
+    pub(crate) async fn live_tv_pending_nodes(&self) -> Result<Vec<String>, MembershipError> {
+        self.membership.live_tv_protocol_pending_nodes().await
+    }
+
+    /// This node's own hostname, when known.
+    pub(crate) fn own_hostname(&self) -> Option<String> {
+        self.membership.local_hostname()
     }
 
     /// This node's standing and admission, from in-process state only: the
@@ -1238,6 +1444,7 @@ impl Directory {
         Self::with_mark(membership, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn with_mark(
         membership: MembershipManager,
         mark: Option<hiqlite::AppliedMarkHandle>,

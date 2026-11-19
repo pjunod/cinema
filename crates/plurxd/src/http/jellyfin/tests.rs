@@ -638,7 +638,11 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
     // untouched, so the same play answers once authority is back. That
     // the native session itself outlives a short loss is the serving
     // fence's own property (`serving_fence_flapping_losses_share_one_grace`).
-    f.state.serving.validation_set_ready(false).await;
+    f.state
+        .cluster
+        .test_fence()
+        .validation_set_ready(false)
+        .await;
     let fenced = f
         .app
         .clone()
@@ -647,7 +651,11 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
         .expect("fenced child");
     assert_eq!(fenced.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(fenced.headers().contains_key("retry-after"));
-    f.state.serving.validation_set_ready(true).await;
+    f.state
+        .cluster
+        .test_fence()
+        .validation_set_ready(true)
+        .await;
     let recovered = f
         .app
         .clone()
