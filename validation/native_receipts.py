@@ -467,7 +467,7 @@ TRANSITION_INVALIDATES = {
 }
 # Reviewed schema-2 runner; changes require another explicit producer review.
 # The current producer selects the standard simulator for the active SDK.
-CASE_RUNNER_SHA256 = '0b469d30a3de5d644db493f14da9aad4e22ce67ce2eeb5226daa6f02a7fb7316'
+CASE_RUNNER_SHA256 = '834944f7ee9e7d235a921a604b4bb150e158b3ca4c169b0cd21d096278f2dbd9'
 
 
 def case_input_compatibility(commit, current):

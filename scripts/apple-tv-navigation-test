@@ -190,11 +190,11 @@ def main():
     try:
         runtime = options.runtime or current_runtime("tvOS")
         receipt["xcode"] = run("xcodebuild", "-version", capture_output=True).stdout.strip()
+        receipt["runtime"] = runtime
         device = run("xcrun", "simctl", "create", "Plurx navigation isolated",
                      "com.apple.CoreSimulator.SimDeviceType.Apple-TV-4K-3rd-generation-4K",
                      runtime, capture_output=True).stdout.strip()
         receipt["simulator_udid"] = device
-        receipt["runtime"] = runtime
         run("xcrun", "simctl", "boot", device)
         run("xcrun", "simctl", "bootstatus", device, "-b")
         run("xcodegen", "generate", "--spec", "clients/apple/project.yml")
@@ -294,7 +294,7 @@ def main():
         (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     if plan_path and not receipt["native_suite_complete"]:
         receipt["status"] = "failed"
-        receipt["error"] = 'Native resume did not cover every required journey'
+        receipt.setdefault("error", 'Native resume did not cover every required journey')
         (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(output / "receipt.json")
     return 0 if receipt["status"] == "passed" else 1

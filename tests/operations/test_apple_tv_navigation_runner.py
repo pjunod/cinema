@@ -132,6 +132,23 @@ class TVNavigationResumeTests(unittest.TestCase):
                                  if final == snapshot else {})
 
 
+    def test_resume_receipt_preserves_simulator_setup_failure(self):
+        required = ['Suite/testOne']
+        plan = {'current_commit': 'head', 'current_run': 4,
+                'tv_cases': {'required_tests': required, 'passes': {}, 'pending': required}}
+        with tempfile.TemporaryDirectory() as directory:
+            path, output = Path(directory) / 'plan.json', Path(directory) / 'result'
+            path.write_text(json.dumps(plan))
+            with patch.object(RUNNER, 'REQUIRED', required), \
+                    patch.object(RUNNER, 'source_snapshot', return_value=('head', False, 'digest')), \
+                    patch.object(RUNNER, 'current_runtime', side_effect=RuntimeError('Current tvOS runtime unavailable')), \
+                    patch.dict(os.environ, {'GITHUB_RUN_ID': '4', 'PLURX_TV_NAVIGATION_PLAN': str(path)}), \
+                    patch.object(RUNNER.sys, 'argv', ['runner', '--output', str(output)]):
+                self.assertEqual(RUNNER.main(), 1)
+            receipt = json.loads((output / 'receipt.json').read_text())
+            self.assertEqual(receipt['error'], 'Current tvOS runtime unavailable')
+            self.assertFalse(receipt['native_suite_complete'])
+
     def test_complete_retained_union_executes_no_native_case(self):
         required = ['Suite/testOne']
         retained = {'Suite/testOne': {'test': 'Suite/testOne'}}
