@@ -1,8 +1,8 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries thirty-three patches for clustered deployments. An
-upstream release can retire the ten generic bugs and the one dependency-only
+Apache-2.0. Plurx carries thirty-four patches for clustered deployments. An
+upstream release can retire the eleven generic bugs and the one dependency-only
 constraint; it cannot retire the twenty-two Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
@@ -44,6 +44,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 31 | One proposal gate on the database Raft, with a local hold and metrics wait | plurx policy | — | Never; a Plurx leader handing off must stop its own log before triggering its successor, and OpenRaft 0.9 has no leadership transfer. |
 | 32 | Keep the SQLite writer alive when a reply's receiver is gone | generic bug | pending M6 | Upstream release delivers every writer reply without panicking when a cancelled Raft apply or a teardown has dropped its receiver. |
 | 33 | A dead database Raft core is reported, and a snapshot build that cannot fit is never started | plurx policy | — | Never; Plurx ends a process whose core quit and owns its snapshot storage policy; OpenRaft 0.9 makes any build storage error fatal. |
+| 34 | Dead-core teardown releases the SQL writer and a failed build's files without panicking | generic bug | pending M6 | Upstream release shuts its SQL writer down whatever the WAL's shutdown returns, maps a closed writer channel to an error in `shutdown` and `build_snapshot`, and removes a failed build's temporary image. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -525,16 +526,31 @@ made-up URL and prevents the fork from being declared fully tracked.
   comfortable floor, or whose storage cannot be measured, keeps the old
   bound (ten minutes by default; 0 attempts it at once). A deferred build
   ends with an error once the SQL writer has stopped, instead of waiting
-  forever or panicking on a closed channel. A build that fails before its
-  rename removes its `<uuid>.temp` and `-journal`, and startup removes any
-  abandoned ones. Both client shutdowns release the SQL writer, and so its
-  lock file, whatever the WAL's shutdown returns. Tests:
-  `mgmt::tests::the_core_stop_names_a_fatal_quit_and_ignores_an_ordinary_stop`,
-  `the_lock_file_is_released_whatever_the_wal_shutdown_returns`, the
-  `snapshot_admission` band tests, and the snapshot builder's and state
-  machine's temp-removal tests.
+  forever. `LocalDbRaftMetrics::core_fatal` reads the same terminal state
+  without waiting, so plurx-core's startup admission and catch-up loops end
+  at once on a dead core instead of at the catch-up deadline. The teardown a
+  dead core then runs is row 34. Tests:
+  `mgmt::tests::the_core_stop_names_a_fatal_quit_and_ignores_an_ordinary_stop`
+  and the `snapshot_admission` band tests.
   Files: `src/client/mgmt.rs`, `src/client/mod.rs`, `src/lib.rs`,
   `src/config.rs`, `src/snapshot_admission.rs`,
+  `src/store/state_machine/sqlite/snapshot_builder.rs`.
+- A teardown after the Raft core died no longer panics or strands state.
+  Upstream skips the SQL writer's shutdown, and so the lock-file removal,
+  when the WAL's shutdown fails, so the next start's `auto-heal` mistakes a
+  clean stop for a crash and rebuilds the state machine. Both client
+  shutdowns now shut the SQL writer down whatever the WAL returns and return
+  the WAL's error after it. The main shutdown also `.expect`ed the writer's
+  channel and acknowledgement, and `build_snapshot` `.expect`ed its request
+  and reply, so a stopped writer panicked the caller. All four now return an
+  error. A build that fails before its rename removes its `<uuid>.temp` and
+  `-journal`, so a full disk is not kept full by a dead build, and startup
+  removes abandoned ones after the lock check and before the writer starts.
+  Tests: `the_lock_file_is_released_whatever_the_wal_shutdown_returns`, the
+  snapshot builder's and state machine's temp-removal tests, and plurxd's
+  `a_follower_whose_raft_core_dies_exits_non_zero_and_rejoins_after_restart`,
+  which checks the lock file is gone after the dead-core exit.
+  Files: `src/client/mgmt.rs`,
   `src/store/state_machine/sqlite/snapshot_builder.rs`,
   `src/store/state_machine/sqlite/state_machine.rs`.
 
@@ -629,7 +645,7 @@ patch description remains the historical/local contract; row 19 stays
   Files: `src/store/state_machine/sqlite/writer.rs`, `src/lib.rs`.
 
 Remove this vendor when both halves of its exit hold. First, the rows an
-upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26, 28 and 32: the
+upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26, 28, 32 and 34: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
 (rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25, 27, 29, 30, 31 and 33) still needs a patch. Their

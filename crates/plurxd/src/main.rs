@@ -2746,16 +2746,25 @@ async fn boot_observing(
     {
         tracing::warn!(%error, "could not record the Plex façade census at shutdown");
     }
-    served?;
-    exit_after_drain(raft_core_fatal.get())
+    exit_after_drain(raft_core_fatal.get(), served.map(drop))
 }
 
-/// How a drained daemon ends: cleanly after a signal or a leave, with an
-/// error, and so a non-zero exit status, after its database Raft core died.
-fn exit_after_drain(raft_core_fatal: Option<&String>) -> anyhow::Result<()> {
+/// How a drained daemon ends: as serving ended after a signal or a leave,
+/// and with the dead core's verdict, so a non-zero exit status and a bounded
+/// store close, after its database Raft core died. The verdict wins over a
+/// serving error during that drain, which is logged: the core is the cause.
+fn exit_after_drain(
+    raft_core_fatal: Option<&String>,
+    served: anyhow::Result<()>,
+) -> anyhow::Result<()> {
     match raft_core_fatal {
-        None => Ok(()),
-        Some(error) => Err(RaftCoreFatal(error.clone()).into()),
+        None => served,
+        Some(error) => {
+            if let Err(serving) = served {
+                tracing::error!(error = %format!("{serving:#}"), "serving also failed while a dead Raft core drained");
+            }
+            Err(RaftCoreFatal(error.clone()).into())
+        }
     }
 }
 
