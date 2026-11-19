@@ -1571,7 +1571,17 @@ final class LiveTvTests: XCTestCase {
 
         // 3. Selecting a channel disabled every row while the tune ran and
         //    threw focus onto the toolbar. `busy` is checked in the action.
-        XCTAssertTrue(source.contains("Button { if !live.busy { selectAiring(channel) } } label: {"))
+        //    Select on a row watches full screen in the same press, through
+        //    the one tune path and the one presentation flag.
+        XCTAssertTrue(source.contains("Button { if !live.busy { watchFullScreen(channel) } } label: {"))
+        let watchFullScreen = source
+            .components(separatedBy: "private func watchFullScreen(_ channel: LiveTvChannel) {")[1]
+            .components(separatedBy: "private func selectAiring(")[0]
+        XCTAssertTrue(watchFullScreen.contains("await live.watch(channel)\n                closeSurfaceIfSessionFinished()"),
+                      "a tune that returns without a session must not strand the cover")
+        XCTAssertTrue(watchFullScreen.contains("fullscreen = true"))
+        XCTAssertTrue(watchFullScreen.contains("guard !fullscreen else { selectAiring(channel); return }"),
+                      "inside the cover the temporary guide keeps its own answer")
         let tvList = source
             .components(separatedBy: "private var tvChannelList: some View {")[1]
             .components(separatedBy: "private var channelFocusIdentity: String {")[0]
