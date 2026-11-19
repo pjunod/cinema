@@ -8852,3 +8852,11 @@ source = "clients/apple/Sources/DvrRecordings.swift"
 source_anchor = 'if row.state == .scheduled && focusedControl == nil {'
 test = "clients/apple/UITests/TVDvrNavigationTests.swift"
 test_anchor = "func testRecordingDetailsRuleConfirmationAndManualChannelReturn() throws"
+
+[[fixes]]
+id = "apple.tvos-shared-playback-restores-file-focus"
+commits = ["fe2f7a9fc05d979a9995493cb7f547b52677d200"]
+source = "clients/apple/Sources/SharedLibrariesView.swift"
+source_anchor = "private func restorePlaybackFocus()"
+test = "clients/apple/UITests/TVSharedPlaybackNavigationTests.swift"
+test_anchor = "func testSharedPlaybackRevealQualityReportAndBackRetainSession() throws"
