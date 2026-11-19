@@ -324,73 +324,165 @@ function clusterMaintenanceAlert(active,ops,localNodeId){
 }
 
 // ---- cluster settings ----------------------------------------------------
-// Saved cluster-wide choices, below the health board. Each graduated from
-// Developer on 2026-10-10 with its switch, saved value and advisory rows intact.
-function clusterPlacementCard(settings){
-  const ready=!!settings.cluster_media_pool_ready;
-  return setCard(`${cardHead("Cluster media placement","Place new streams on compatible workers with spare capacity.",'<span class="pill">Cluster</span>')}
-    ${togRow("cluster-placement-enabled","Enable remote media placement","Existing sessions keep their owner; new sessions can use another worker.",!!settings.cluster_media_pool_enabled)}
-    ${togRow("cluster-takeover-enabled","Enable session takeover","Allow compatible expired sessions to acquire a new owner when remote placement is enabled.",!!settings.cluster_session_takeover_enabled)}
-    ${devStaticReq("Peer protocol observations",ready?"met":"not fully met","Compatible reachable peers are considered individually. A stale or older peer never disables the other workers.",ready?"ok":"")}
-    ${devStaticReq("Worker resources","checked for each start","A selected worker needs the requested codecs, readable source, writable scratch space and an available hardware or CPU reservation.","")}
-    <p class="hint">Requirements are advisory and never prevent saving. Unknown performance measurements affect ranking only. Streams continue through their existing ingress proxy, so ingress bandwidth is still used.</p>
-    <div class="err" id="cluster-placement-error" role="alert"></div>${setCardFoot("saveClusterPlacement")}`,{id:"cluster-placement-settings"});
+// The saved cluster-wide choices, as one list with one Save. Each row is one
+// line; its readiness chip counts what the server reported, and expands in
+// place to the long description and one line per requirement with the
+// server's evidence verbatim. Readiness is advisory: it never disables a
+// switch or the Save. Each graduated from Developer on 2026-10-10; the
+// sentences below are the ones those cards carried.
+// A function rather than a bare const so the definitions travel with the
+// painters that read them (tests borrow declarations, not free statements).
+function clusterSettingRows(){ return [
+  {id:"cluster-placement-enabled",key:"cluster_media_pool_enabled",title:"Remote media placement",
+    line:"Start new streams on any compatible worker with spare capacity.",
+    more:"Existing sessions keep their owner; new sessions can use another worker. Unknown performance measurements affect ranking only. Streams continue through their existing ingress proxy, so ingress bandwidth is still used. Requirements are advisory and never prevent saving.",
+    // Placement's readiness is a saved-settings fact, not a readiness item.
+    checks:settings=>[
+      {title:"Peer protocol observations",status:settings.cluster_media_pool_ready?"met":"unmet",
+        evidence:settings.cluster_media_pool_ready?"met":"not fully met",
+        detail:"Compatible reachable peers are considered individually. A stale or older peer never disables the other workers."},
+      {title:"Worker resources",status:null,evidence:"checked for each start",
+        detail:"A selected worker needs the requested codecs, readable source, writable scratch space and an available hardware or CPU reservation."}]},
+  {id:"cluster-takeover-enabled",key:"cluster_session_takeover_enabled",title:"Session takeover",child:true,
+    line:"Let another worker pick up an expired session."},
+  {id:"bounded-catalogue-reads",key:"bounded_replica_reads",title:"Local catalogue reads",defaultOn:true,
+    line:"Serve browsing from each replica while its consistency proof is fresh.",
+    more:"Uses each replica for browsing when its current consistency proof permits it, and falls back to authority when a replica is stale or a watch-write position is unknown. Saving this preference does not require a readiness result.",
+    item:"bounded_catalogue_reads",reqs:[
+      ["replica_proof","Fresh replica proof","The current term, quorum watermark and apply lag are checked for each read."],
+      ["watch_floor","Watch state consistency","The web client carries its latest acknowledged watch-write position across nodes for 60 seconds. Other clients retain authority reads until they implement the same echo."]]},
+  {id:"cluster-clock-enforced",key:"cluster_clock_guard_enforced",title:"Enforce clock guard",
+    line:"Refuse takeover, expiry scans and membership changes when peer clocks can't be bounded to 2 s.",
+    more:"When on, session takeover, the expired-session scan, membership changes and /readyz are refused while clock evidence is unknown or above 2,000 ms. When off, offsets are still measured and what would have been refused is counted. Startup is never refused. Requirements are advisory and never prevent saving, in either direction.",
+    item:"cluster_clock",reqs:[
+      ["coverage","Every voter reachable and observed","Every committed remote voter must answer a fresh authenticated probe. A learner that does not answer is reported but not required; a learner beyond the bound refuses only the takeover of its own sessions and its own promotion."],
+      ["upper_bound","Worst observed offset within 2 s","Absolute offset plus uncertainty over voters; an unknown member has no numeric offset."],
+      ["ntp","NTP running on every node","Check chronyd or systemd-timesyncd on each node; this server cannot see them."],
+      ["consequence","What enforcement refuses","While enforced, one down voter blocks takeover, the expiry scan and membership changes on every node until it returns or is removed. A down or out-of-bound learner blocks only the takeover of its own sessions and its own promotion, until it returns, is back within the bound, or is removed."]]},
+  {id:"subcluster",key:"subtitle_cluster_sources",title:"Shared subtitle tracks",
+    line:"Copy a verified track from a peer instead of extracting it again.",
+    more:"Joins one cluster extraction and copies a verified track from a peer. Applies to new subtitle flights. Your saved choice controls use; the checks below only advise and never disable the switch or override your saved choice.",
+    item:"subtitle_cluster_sources",reqs:[
+      ["analysis_queue","Analysis queue is enabled","The cluster analysis queue must be available for cold sources."],
+      ["schema_v47","All voters support schema 47","Deploy schema 47 on every voter before enqueuing the subtitle-source component."],
+      ["reachable_peer","A media peer is reachable","A holder can serve verified tracks over the authenticated private media route."],
+      ["local_cache","The subtitle store is local","Keep staging and stored tracks on a local filesystem."],
+      ["free_space","The store has room","Leave capacity for stored tracks and a publish stage."]]},
+  {id:"cluster-transport-recovery",title:"Transport recovery",always:true,
+    line:"Resumes interrupted cluster transfers.",
+    more:"Automatic on clustered nodes; no enable switch is required. Safe use is a deployment decision, not a code gate: keep a ready voter majority, deploy one node at a time, and expose the cluster API only on the trusted cluster network. Readiness is advisory.",
+    item:"cluster_transport_recovery",reqs:[
+      ["recovery_budgets","Recovery budgets","Keep chunk, whole-transfer, final-install, startup, and container-health allowances aligned. Defaults are 30 s, 1,200 s, and 120 s; measured state size may require a longer final-install allowance."],
+      ["cluster_api_advertised","Authenticated diagnostics","Every node must advertise its private Hiqlite API address, share the cluster API credential, and keep /cluster/transport/sqlite off the public Internet."],
+      ["cache_revocation_capability","Cache revocation","Every member of the exact committed configuration must prove the capability in its current heartbeat before cache-only recovery authorization opens."],
+      ["recovery_receipt","Recovery receipt","Qualify the real-TLS 3 MiB transport matrix, acknowledged writes, and twenty learner plus twenty voter recovery cycles before fleet rollout."]]},
+]; }
+function clusterBackupChecks(){ return {id:"cluster-backup",item:"cluster_backup",
+  more:"Builds a consistent, checksummed archive from a voter snapshot. The destination controls scheduling directly: empty means no scheduled run. The checks are advisory and never prevent saving or invoking a backup. Restore first onto an isolated instance — a file that has never been restored is not recovery evidence.",
+  reqs:[["destination","Existing absolute destination","The daemon must be able to write the configured directory."],
+    ["off_node_and_space","Off-node storage and free space","Use a different failure domain and retain at least two image sizes of free space."],
+    ["recent_success","Recent successful archive","A nightly backup is healthy when the last verified publish is less than 26 hours old."]]}; }
+// One row's requirement lines: the server's row for each listed requirement,
+// or the row's own static facts. `status` null means nothing was reported.
+function clusterSettingChecks(row,settings,readiness){
+  if(row.checks) return row.checks(settings);
+  return (row.reqs||[]).map(([reqId,title,detail])=>{
+    const found=devReadinessRow(readiness,row.item,reqId);
+    return {title,detail,status:found?found.status:null,evidence:devReadinessEvidence(found,readiness)};
+  });
 }
-async function saveClusterPlacement(btn){
-  const err=document.getElementById("cluster-placement-error");if(err)err.textContent="";btn.disabled=true;
+// The chip and the text it opens. Both are drawn from the row definition, so
+// a readiness document arriving later redraws exactly these and never the
+// switches beside them.
+function clusterChecksChip(row,checks,readiness){
+  const chip=PlurxClusterPanel.clusterReadinessChip(row.checks?{}:readiness,checks);
+  return `<span class="clchip${chip.tone?` ${chip.tone}`:""}">${esc(chip.label)}</span>`;
+}
+function clusterChecksMore(row,checks){
+  const mark=status=>status==="met"?`<i class="clgood">✓</i>`:status==="unmet"?`<i class="clwarn">!</i>`:`<i class="muted">·</i>`;
+  return `<p>${esc(row.more)}</p>${checks.map(check=>`<div class="clcheck" title="${esc(check.detail||"")}">${mark(check.status)}<div><b>${esc(check.title)}</b>${
+    check.evidence?` <span>— ${esc(check.evidence)}</span>`:""}</div></div>`).join("")}`;
+}
+function clusterChecksHtml(row,settings,readiness){
+  if(!row.more) return {chip:"",more:""};
+  const checks=clusterSettingChecks(row,settings,readiness);
+  return {
+    chip:`<button type="button" class="clchipbtn" data-clchip="${row.id}" aria-expanded="false" aria-controls="clmore-${row.id}" onclick="toggleClusterChecks(this)">${clusterChecksChip(row,checks,readiness)}</button>`,
+    more:`<div class="clmore" id="clmore-${row.id}" data-clmore="${row.id}" hidden>${clusterChecksMore(row,checks)}</div>`,
+  };
+}
+function toggleClusterChecks(button){
+  const more=document.getElementById(button.getAttribute("aria-controls"));
+  if(!more) return;
+  more.hidden=!more.hidden;
+  button.setAttribute("aria-expanded",String(!more.hidden));
+}
+// A readiness document arrived (or failed) after the settings were drawn:
+// redraw the chips and their text in place. The switches, an unsaved edit and
+// an open expansion stay exactly as they are.
+function patchClusterReadiness(readiness){
+  const settings=SETTINGS_DATA&&SETTINGS_DATA.settings;
+  if(!settings) return;
+  for(const row of [...clusterSettingRows(),clusterBackupChecks()]){
+    if(!row.more) continue;
+    const checks=clusterSettingChecks(row,settings,readiness);
+    const chip=document.querySelector(`[data-clchip="${row.id}"]`);
+    if(chip) chip.innerHTML=clusterChecksChip(row,checks,readiness);
+    const more=document.querySelector(`[data-clmore="${row.id}"]`);
+    if(more) more.innerHTML=clusterChecksMore(row,checks);
+  }
+}
+function clusterSettingRow(row,settings,readiness){
+  const checks=clusterChecksHtml(row,settings,readiness);
+  const control=row.always
+    ? `<span class="clauto">always on</span>`
+    : `<input type="checkbox" id="${row.id}"${(row.defaultOn?settings[row.key]!==false:!!settings[row.key])?" checked":""}>`;
+  return `<div class="clset${row.child?" child":""}"><label${row.always?"":` for="${row.id}"`}><span class="t">${esc(row.title)}</span><span class="d">${esc(row.line)}</span></label>${checks.chip||"<span></span>"}${control}</div>${checks.more}`;
+}
+// The mount and its three states. A repaint keeps the live node (see
+// SETTINGS_KEPT_MOUNTS), so an unsaved switch, the Save it enabled and an
+// open expansion survive every status repaint and a Refresh.
+function clusterSettingsSection(d){
+  const settings=d&&d.settings;
+  const head=`<div class="clcardhead"><h2 id="cluster-settings-title">Cluster settings</h2></div>`;
+  if(!settings) return `<section class="clcard" id="cluster-settings" data-state="loading" aria-labelledby="cluster-settings-title">${head}<div class="empty">Loading cluster settings…</div></section>`;
+  // A failed readiness read is not cached as data, so fall back to the last
+  // document the page received (which records the failure) rather than draw
+  // every chip as "checking…" forever.
+  const readiness=d.developerReadiness||DEVELOPER_READINESS;
+  return `<section class="clcard setcard" id="cluster-settings" data-state="ready" aria-labelledby="cluster-settings-title" oninput="markSetCard(this)" onchange="markSetCard(this)">${head}
+    ${clusterSettingRows().map(row=>clusterSettingRow(row,settings,readiness)).join("")}
+    <div class="err" id="cluster-settings-error" role="alert"></div>${setCardFoot("saveClusterSettings")}</section>`;
+}
+// One Save, one PUT, every key on the list.
+async function saveClusterSettings(btn){
+  const err=document.getElementById("cluster-settings-error"); if(err) err.textContent="";
+  btn.disabled=true;
   try{
-    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{
-      cluster_media_pool_enabled:/** @type {HTMLInputElement} */(document.getElementById("cluster-placement-enabled")).checked,
-      cluster_session_takeover_enabled:/** @type {HTMLInputElement} */(document.getElementById("cluster-takeover-enabled")).checked
-    }}));
-    const card=document.getElementById("cluster-placement-settings");if(card)card.outerHTML=clusterPlacementCard(saved);
-  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
-}
-function boundedCatalogueCard(settings,readiness){
-  return setCard(`${cardHead("Local catalogue reads","Use each replica for browsing when its current consistency proof permits it.",'<span class="pill">Cluster reads</span>')}
-    ${togRow("bounded-catalogue-reads","Enable local catalogue reads","Falls back to authority when a replica is stale or a watch-write position is unknown.",settings.bounded_replica_reads!==false)}
-    ${devReq(readiness,"bounded_catalogue_reads","replica_proof","Fresh replica proof","The current term, quorum watermark and apply lag are checked for each read. Saving this preference does not require a readiness result.")}
-    ${devReq(readiness,"bounded_catalogue_reads","watch_floor","Watch state consistency","The web client carries its latest acknowledged watch-write position across nodes for 60 seconds. Other clients retain authority reads until they implement the same echo.")}
-    <div class="err" id="bounded-catalogue-error" role="alert"></div>${setCardFoot("saveBoundedCatalogueReads")}`,{id:"bounded-catalogue-settings"});
-}
-async function saveBoundedCatalogueReads(btn){
-  const err=document.getElementById("bounded-catalogue-error");if(err)err.textContent="";btn.disabled=true;
-  try{
-    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{bounded_replica_reads:/** @type {HTMLInputElement} */(document.getElementById("bounded-catalogue-reads")).checked}}));
-    const card=document.getElementById("bounded-catalogue-settings");if(card)card.outerHTML=boundedCatalogueCard(saved,DEVELOPER_READINESS);
-  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
-}
-function clusterClockCard(settings,readiness){
-  const enabled=!!settings.cluster_clock_guard_enforced;
-  return setCard(`${cardHead("Cluster clock guard","Refuse clock-dependent cluster decisions when peer clock offsets cannot be bounded.",enabled?`<span class="pill warn">enforced</span>`:`<span class="pill">advisory</span>`)}
-    ${togRow("cluster-clock-enforced","Enforce the cluster clock guard","When on, session takeover, the expired-session scan, membership changes and /readyz are refused while clock evidence is unknown or above 2,000 ms. When off, offsets are still measured and what would have been refused is counted. Startup is never refused.",enabled)}
-    ${devReq(readiness,"cluster_clock","coverage","Every voter reachable and observed","Every committed remote voter must answer a fresh authenticated probe. A learner that does not answer is reported but not required; a learner beyond the bound refuses only the takeover of its own sessions and its own promotion.")}
-    ${devReq(readiness,"cluster_clock","upper_bound","Worst observed offset within 2 s","Absolute offset plus uncertainty over voters; an unknown member has no numeric offset.")}
-    ${devReq(readiness,"cluster_clock","ntp","NTP running on every node","Check chronyd or systemd-timesyncd on each node; this server cannot see them.")}
-    ${devReq(readiness,"cluster_clock","consequence","What enforcement refuses","While enforced, one down voter blocks takeover, the expiry scan and membership changes on every node until it returns or is removed. A down or out-of-bound learner blocks only the takeover of its own sessions and its own promotion, until it returns, is back within the bound, or is removed.")}
-    <p class="hint">Requirements are advisory and never prevent saving, in either direction.</p>
-    <div class="err" id="cluster-clock-error" role="alert"></div>${setCardFoot("saveClusterClockGuard")}`,{id:"cluster-clock-settings"});
-}
-async function saveClusterClockGuard(btn){
-  const err=document.getElementById("cluster-clock-error");if(err)err.textContent="";btn.disabled=true;
-  try{
-    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{cluster_clock_guard_enforced:/** @type {HTMLInputElement} */(document.getElementById("cluster-clock-enforced")).checked}}));
-    const card=document.getElementById("cluster-clock-settings");if(card)card.outerHTML=clusterClockCard(saved,DEVELOPER_READINESS);
-  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+    /** @type {Record<string,boolean>} */
+    const body={};
+    for(const row of clusterSettingRows()){
+      if(!row.key) continue;
+      body[row.key]=/** @type {HTMLInputElement} */(document.getElementById(row.id)).checked;
+    }
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body}));
+    const card=document.getElementById("cluster-settings");
+    if(card) card.outerHTML=clusterSettingsSection({settings:saved,developerReadiness:DEVELOPER_READINESS});
+    toast("Cluster settings saved");
+  }catch(error){ if(err) err.textContent=error.message; btn.disabled=false; }
 }
 function clusterBackupCard(settings,readiness){
+  const head=`<div class="clcardhead"><h2 id="cluster-backup-title">Backup</h2>`;
+  if(!settings) return `<section class="clcard" id="cluster-backup" data-state="loading" aria-labelledby="cluster-backup-title">${head}</div><div class="empty">Loading…</div></section>`;
   const enabled=!!String(settings.backup_destination||"").trim();
-  return setCard(`${cardHead("Portable cluster backup","Build a consistent, checksummed archive from a voter snapshot.",`<span class="pill${enabled?" ok":""}">${enabled?"scheduled":"destination empty"}</span>`)}
-      <label class="setfield"><span>Destination</span><input id="backup-destination" value="${esc(settings.backup_destination||"")}" placeholder="/mnt/nas/plurx-backups"></label>
-      <div class="setgrid"><label class="setfield"><span>Daily UTC time</span><input id="backup-schedule" value="${esc(settings.backup_schedule_utc||"02:30")}" placeholder="02:30"></label>
-      <label class="setfield"><span>Artefacts to keep</span><input id="backup-keep" type="number" min="1" max="365" value="${Number(settings.backup_keep)||14}"></label></div>
-      <div class="hint"><b>The destination controls scheduling directly.</b> Empty means no scheduled run. The checks below are advisory and never prevent saving or invoking a backup.</div>
-      <details class="setdetails" open><summary>Readiness</summary><div class="setdetails-body">
-      ${devReq(readiness,"cluster_backup","destination","Existing absolute destination","The daemon must be able to write the configured directory.")}
-      ${devReq(readiness,"cluster_backup","off_node_and_space","Off-node storage and free space","Use a different failure domain and retain at least two image sizes of free space.")}
-      ${devReq(readiness,"cluster_backup","recent_success","Recent successful archive","A nightly backup is healthy when the last verified publish is less than 26 hours old.")}
-      <p class="devcheck-note">Restore first onto an isolated instance. A file that has never been restored is not recovery evidence.</p></div></details>
-      <div class="err" id="backup-settings-error" role="alert"></div>${setCardFoot("saveClusterBackup")}`,{id:"cluster-backup-settings"});
+  const checks=clusterChecksHtml(clusterBackupChecks(),settings,readiness);
+  return `<section class="clcard setcard" id="cluster-backup" data-state="ready" aria-labelledby="cluster-backup-title" oninput="markSetCard(this)" onchange="markSetCard(this)">${head}
+      <div class="row">${checks.chip}<span class="pill${enabled?" ok":""}">${enabled?"scheduled":"destination empty"}</span></div></div>
+    ${checks.more}
+    <div class="clfields"><label class="setfield"><span>Destination</span><input id="backup-destination" value="${esc(settings.backup_destination||"")}" placeholder="/mnt/nas/plurx-backups"></label>
+      <label class="setfield"><span>Daily (UTC)</span><input id="backup-schedule" value="${esc(settings.backup_schedule_utc||"02:30")}" placeholder="02:30"></label>
+      <label class="setfield"><span>Keep</span><input id="backup-keep" type="number" min="1" max="365" value="${Number(settings.backup_keep)||14}"></label></div>
+    <div class="err" id="backup-settings-error" role="alert"></div>${setCardFoot("saveClusterBackup")}</section>`;
 }
 async function saveClusterBackup(btn){
   const err=document.getElementById("backup-settings-error"); if(err)err.textContent="";
@@ -404,55 +496,11 @@ async function saveClusterBackup(btn){
     toast("Cluster backup settings saved"); if(btn)setCardSaved(btn);
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
 }
-function subtitleClusterSourcesCard(s,readiness){
-  const enabled=!!s.subtitle_cluster_sources;
-  return setCard(`${cardHead("Share stored subtitle tracks","Join one cluster extraction and copy a verified track from a peer.",`<span class="pill${enabled?" ok":""}">${enabled?"enabled":"off"}</span>`)}
-      ${togRow("subcluster",`Use cluster subtitle sources`,`Applies to new subtitle flights. Your saved choice controls use; the checks below only advise.`,enabled)}
-      <details class="setdetails"><summary>What to confirm before enabling</summary><div class="setdetails-body">
-      ${devReq(readiness,"subtitle_cluster_sources","analysis_queue","Analysis queue is enabled","The cluster analysis queue must be available for cold sources.")}
-      ${devReq(readiness,"subtitle_cluster_sources","schema_v47","All voters support schema 47","Deploy schema 47 on every voter before enqueuing the subtitle-source component.")}
-      ${devReq(readiness,"subtitle_cluster_sources","reachable_peer","A media peer is reachable","A holder can serve verified tracks over the authenticated private media route.")}
-      ${devReq(readiness,"subtitle_cluster_sources","local_cache","The subtitle store is local","Keep staging and stored tracks on a local filesystem.")}
-      ${devReq(readiness,"subtitle_cluster_sources","free_space","The store has room","Leave capacity for stored tracks and a publish stage.")}
-      <p class="devcheck-note">Advisory only. These observations never disable the switch or override your saved choice.</p>
-      </div></details><div class="err" id="subclustererr" role="alert"></div>${setCardFoot("saveSubtitleClusterSources")}`,{id:"subclustercard"});
-}
-async function saveSubtitleClusterSources(btn){
-  const err=document.getElementById("subclustererr");err.textContent="";if(btn)btn.disabled=true;
-  try{
-    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{subtitle_cluster_sources:(/** @type {HTMLInputElement} */ (document.getElementById("subcluster"))).checked}}));
-    const card=document.getElementById("subclustercard");if(card)card.outerHTML=subtitleClusterSourcesCard(saved,DEVELOPER_READINESS);
-    toast("Cluster subtitle source setting saved");if(btn)setCardSaved(btn);
-  }catch(error){err.textContent=error.message;if(btn)btn.disabled=false;}
-}
-// The health board paints from the roster alone; these cards need the saved
-// settings, which arrive as a secondary read and fill this mount when they do.
-function clusterSettingsSection(d){
-  // A failed readiness read is not cached as data, so fall back to the last
-  // document the page received (which records the failure) rather than draw
-  // every row as "checking…" forever.
-  const settings=d&&d.settings;
-  const head=`<div class="setsection"><h2 id="cluster-settings-title">Cluster settings</h2><p>Where new streams run, how replicas serve browsing, clock enforcement, backups and shared subtitle tracks. Readiness rows are advisory and never block a Save.</p></div>`;
-  if(!settings) return `<section class="cluster-settings" id="cluster-settings" data-state="loading" aria-labelledby="cluster-settings-title">${head}<div class="empty">Loading cluster settings…</div></section>`;
-  const readiness=d.developerReadiness||DEVELOPER_READINESS;
-  return `<section class="cluster-settings" id="cluster-settings" data-state="ready" aria-labelledby="cluster-settings-title">${head}
-    ${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(settings,readiness)}${clusterBackupCard(settings,readiness)}${subtitleClusterSourcesCard(settings,readiness)}</section>`;
-}
-function clusterTransportRecoveryCard(readiness){
-  return setCard(`${cardHead("Transport recovery","Automatic recovery for interrupted cluster transfers. No enable switch is required.",`<span class="pill ok">automatic</span>`)}
-      <details class="setdetails"><summary>Deployment guidance and readiness</summary><div class="setdetails-body">
-      <p class="hint"><b>Safe use is a deployment decision, not a code gate.</b> Keep a ready voter majority, deploy one node at a time, and expose the cluster API only on the trusted cluster network.</p>
-      ${devReq(readiness,"cluster_transport_recovery","recovery_budgets","Recovery budgets","Keep chunk, whole-transfer, final-install, startup, and container-health allowances aligned. Defaults are 30 s, 1,200 s, and 120 s; measured state size may require a longer final-install allowance.")}
-      ${devReq(readiness,"cluster_transport_recovery","cluster_api_advertised","Authenticated diagnostics","Every node must advertise its private Hiqlite API address, share the cluster API credential, and keep <code>/cluster/transport/sqlite</code> off the public Internet.")}
-      ${devReq(readiness,"cluster_transport_recovery","cache_revocation_capability","Cache revocation","Every member of the exact committed configuration must prove the capability in its current heartbeat before cache-only recovery authorization opens.")}
-      ${devReq(readiness,"cluster_transport_recovery","recovery_receipt","Recovery receipt","Qualify the real-TLS 3 MiB transport matrix, acknowledged writes, and twenty learner plus twenty voter recovery cycles before fleet rollout.")}
-      <p class="devcheck-note">Use the supported one-node-at-a-time deployment when these checks are acceptable. Readiness is advisory; transport recovery remains automatic on clustered nodes.</p>
-      </div></details>`);
-}
-// The section's read failed. Its own retry, so the board above never reloads
-// for it; the state marker keeps a repaint from drawing "Loading…" over it.
-function clusterSettingsUnavailable(message){
-  return `<section class="cluster-settings" id="cluster-settings" data-state="error" aria-labelledby="cluster-settings-title"><div class="setsection"><h2 id="cluster-settings-title">Cluster settings</h2></div><div class="hint">Cluster settings are unavailable: ${message}</div><div class="row"><button class="ghost sm" onclick="retryClusterSettings(this)">Retry</button></div></section>`;
+// The settings read failed. Both mounts say so with their own retry, so the
+// page above never reloads for it; the state marker keeps a repaint from
+// drawing "Loading…" over it.
+function clusterSettingsUnavailable(message,id="cluster-settings",title="Cluster settings"){
+  return `<section class="clcard" id="${id}" data-state="error"><div class="clcardhead"><h2>${title}</h2></div><div class="clnote">${title} are unavailable: ${message}</div><div class="clfoot"><button class="ghost sm" onclick="retryClusterSettings(this)">Retry</button></div></section>`;
 }
 async function retryClusterSettings(button){
   const generation=PAGE_RENDER_GENERATION;

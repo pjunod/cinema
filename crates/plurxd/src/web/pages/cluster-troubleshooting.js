@@ -69,15 +69,16 @@ function clusterPanel(d){
   const head=setHead("Cluster",summary,`<button class="ghost sm" onclick="refreshClusterPage(this)">Refresh</button>`);
   const store=clusterDatabasePanel(cluster,replication,ops);
   const settings=clusterSettingsSection(d);
+  const backup=clusterBackupCard(d.settings,d.developerReadiness||DEVELOPER_READINESS);
   if(notClustered){
     const state=PlurxClusterPanel.clusterStateView(cluster);
     return `<div class="clpage">${head}<div class="clstate calm"><h3>${esc(state.title)}</h3><p>${esc(state.body)}</p></div>${clusterAlerts(cluster,null)}
-      <div class="cltwo">${settings}<div class="clstack">${store}</div></div>${clusterLogCard()}</div>`;
+      <div class="cltwo">${settings}<div class="clstack">${store}${backup}</div></div>${clusterLogCard()}</div>`;
   }
   return `<div class="clpage">${head}${clusterStrip(cluster,ops)}${clusterAlerts(cluster,ops)}
     ${clustered?clusterNodesCard(cluster,ops):""}
     <div class="cltwo">${settings}<div class="clstack">${store}</div></div>
-    ${clustered?`<div class="cltwo">${clusterMaintenanceCard(cluster,ops)}<div class="clstack"></div></div>`:""}
+    <div class="cltwo">${clustered?clusterMaintenanceCard(cluster,ops):backup}${clustered?`<div class="clstack">${backup}</div>`:""}</div>
     ${clusterLogCard()}</div>`;
 }
 function retryCluster(){

@@ -1499,6 +1499,38 @@
   .clact .clopsblockers{margin:6px 0 0;font-size:12px}
   .clact .row{flex-wrap:nowrap;gap:8px}
   .cllog{margin:0;border:0;border-radius:0;height:176px;overflow:auto;padding:12px 18px;font-size:12px;line-height:1.6}
+  /* The settings list: one line per choice, its readiness chip, its switch,
+     and the long text one click away. One Save for the whole list. */
+  .clset{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(34px,auto);gap:4px 14px;align-items:center;padding:11px 18px;border-top:1px solid var(--line)}
+  .clset:first-of-type{border-top:0}
+  .clset label{display:block;margin:0;cursor:pointer;color:var(--text)}
+  .clset .t{display:block;font-size:13.5px;font-weight:600}
+  .clset .d{display:block;font-size:12px;color:var(--muted);line-height:1.4;margin-top:1px}
+  .clset input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);justify-self:end}
+  .clset.child{padding-left:38px}
+  .clauto{font-size:11px;color:var(--muted);justify-self:end;white-space:nowrap}
+  .clchipbtn{all:unset;cursor:pointer;border-radius:999px}
+  .clchipbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .clchip{display:inline-block;font-size:11px;font-weight:500;padding:2px 9px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+  .clchip.ok{color:var(--good);border-color:color-mix(in srgb,var(--good) 45%,var(--line))}
+  .clchip.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
+  .clchip::after{content:" ▸";opacity:.7}
+  .clchipbtn[aria-expanded=true] .clchip::after{content:" ▾"}
+  .clmore{background:var(--panel2);border-top:1px solid var(--line);padding:12px 18px 14px;font-size:12.5px;line-height:1.55}
+  .clmore p{margin:0 0 8px;color:var(--muted);max-width:80ch}
+  .clcheck{display:grid;grid-template-columns:16px minmax(0,1fr);gap:2px 8px;padding:4px 0}
+  .clcheck i{font-style:normal;font-weight:700}
+  .clcheck b{font-weight:600}
+  .clcheck span{color:var(--muted)}
+  .clcard .setfoot{margin:0;padding:12px 18px;border-top:1px solid var(--line)}
+  .clcard .err:empty{display:none}
+  .clcard .err{padding:8px 18px 0}
+  .clfields{display:grid;grid-template-columns:minmax(0,1fr) 84px 64px;gap:12px;padding:14px 18px 10px}
+  .clfields .setfield{margin:0}
+  .clfields .setfield>span{display:block;font-size:11.5px;color:var(--muted);margin-bottom:4px}
+  .clfields input{padding:7px 10px;font-size:13px}
+  .clnote{padding:12px 18px;font-size:12.5px;color:var(--muted)}
+  .clfoot{padding:0 18px 14px}
   @media(max-width:1100px){
     .clstrip{grid-template-columns:repeat(3,minmax(0,1fr))}
     .clstrip>div:first-child{grid-column:1/-1;border-bottom:1px solid var(--line)}
@@ -1523,6 +1555,12 @@
     .clact{grid-template-columns:minmax(0,1fr)}
     .clact .row{flex-wrap:wrap}
     .clledger dd{text-align:left}
+    .clset{grid-template-columns:minmax(0,1fr) auto}
+    .clset>.clchipbtn{grid-row:2;grid-column:1;justify-self:start}
+    .clset>span:empty{display:none}
+    .clset>input,.clset>.clauto{grid-row:1;grid-column:2}
+    .clfields{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+    .clfields>.setfield:first-child{grid-column:1/-1}
   }
   /* Trakt device-link code: big, mono, unmissable — you type it on another screen */
   .traktcode{font-family:var(--font-mono);font-size:34px;font-weight:700;letter-spacing:.18em;color:var(--accent);margin:10px 0 2px;user-select:all}

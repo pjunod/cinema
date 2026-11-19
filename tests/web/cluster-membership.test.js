@@ -81,7 +81,14 @@ const BORROWED = [
   "clusterPanel",
   "settingsClusterEnabled",
   "setHead",
-  "clusterTransportRecoveryCard",
+  "clusterBackupCard",
+  "clusterSettingRows",
+  "clusterBackupChecks",
+  "clusterSettingChecks",
+  "clusterChecksChip",
+  "clusterChecksMore",
+  "clusterChecksHtml",
+  "clusterSettingRow",
   "setCard",
   "cardHead",
   "devReq",
@@ -2659,7 +2666,8 @@ test("the join token is never written to browser storage or a URL", () => {
     "copyJoinToken",
     "forgetJoinToken",
     "clusterPanel",
-    "clusterTransportRecoveryCard",
+    "clusterNodesCard",
+    "toggleClusterExpansion",
     "setCard",
     "cardHead",
     "devReq",
@@ -4767,6 +4775,34 @@ test("the maintenance card's rows are cluster-wide and carry the server's verdic
   assert.match(election.action, /disabled/);
   const single = status("single_node", [node("node-1", 1, "voter", { is_leader: true })]);
   assert.deepEqual(PANEL.clusterMaintenanceRows(env, single, null).map((row) => row.id), ["restart", "diagnostics"]);
+});
+
+test("late readiness redraws only the chips and their text, never a switch", () => {
+  const chips = new Map(), mores = new Map();
+  const document = {
+    querySelector: (selector) => {
+      const chip = /data-clchip="([^"]+)"/.exec(selector), more = /data-clmore="([^"]+)"/.exec(selector);
+      if (chip) { if (!chips.has(chip[1])) chips.set(chip[1], { innerHTML: "" }); return chips.get(chip[1]); }
+      if (more) { if (!mores.has(more[1])) mores.set(more[1], { innerHTML: "" }); return mores.get(more[1]); }
+      return null;
+    },
+    getElementById: () => { throw new Error("a switch was reached for"); },
+  };
+  const patch = new Function("document", "PlurxClusterPanel",
+    `const SETTINGS_DATA={settings:{cluster_media_pool_ready:true}};
+     ${["esc", "devReadinessRow", "devReadinessEvidence", "clusterSettingRows", "clusterBackupChecks", "clusterSettingChecks",
+        "clusterChecksChip", "clusterChecksMore", "patchClusterReadiness"].map(shippedSource).join("\n")}
+     return patchClusterReadiness;`)(document, PANEL);
+  patch({ items: [{ id: "cluster_clock", requirements: [
+    { id: "coverage", status: "met", evidence: "4 of 4 answered." }, { id: "ntp", status: "unobservable", evidence: "Not visible." }] }] });
+  assert.equal(chips.get("cluster-clock-enforced").innerHTML, '<span class="clchip warn">1 of 2 checks</span>');
+  assert.match(mores.get("cluster-clock-enforced").innerHTML, /<b>Every voter reachable and observed<\/b> <span>— 4 of 4 answered\./);
+  assert.equal(chips.get("cluster-placement-enabled").innerHTML, '<span class="clchip ok">1 of 1 checks</span>');
+  assert.equal(chips.get("cluster-backup").innerHTML, '<span class="clchip">not reported</span>');
+  assert.equal(chips.has("cluster-takeover-enabled"), false, "a row without checks has no chip");
+  patch({ unavailable: "offline" });
+  assert.equal(chips.get("subcluster").innerHTML, '<span class="clchip warn">checks unavailable</span>');
+  assert.match(mores.get("subcluster").innerHTML, /The prerequisite reading failed: offline/);
 });
 
 main().catch((error) => {
