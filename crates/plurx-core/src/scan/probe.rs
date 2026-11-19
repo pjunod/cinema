@@ -1336,16 +1336,25 @@ pub(crate) mod tests {
     async fn sleeping_probe_is_transient_and_reaped() {
         let _ = std::fs::remove_file(child_pid_file("sleep-deadline"));
         let (_directory, path) = media_fixture();
-        let _fixture = install_fixture(
-            &path,
-            FixtureMode::SleepDeadline,
-            Duration::from_millis(200),
-        );
-        let started = tokio::time::Instant::now();
-        let error = probe(&path).await.expect_err("sleeping probe times out");
-        assert!(matches!(error, ProbeError::Transient { .. }));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        let deadline = Duration::from_secs(10);
+        let _fixture = install_fixture(&path, FixtureMode::SleepDeadline, deadline);
+        let task = tokio::spawn(async move { probe(&path).await });
         let pid = wait_for_pid("sleep-deadline").await;
+        assert!(!task.is_finished(), "the live probe is still pending");
+
+        // Once the real child has started, drive the actual probe deadline
+        // without depending on how quickly this host schedules the child.
+        tokio::time::pause();
+        tokio::time::advance(deadline).await;
+        tokio::time::resume();
+        let error = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("bounded probe cleanup")
+            .expect("probe task joined")
+            .expect_err("sleeping probe exceeds its deadline");
+        assert!(
+            matches!(error, ProbeError::Transient { reason, .. } if reason == "ffprobe exceeded 10 s")
+        );
         assert_pid_gone(pid).await;
     }
 
