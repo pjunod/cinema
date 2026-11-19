@@ -132,6 +132,18 @@ impl Cluster {
     }
 }
 
+/// Local replicated-store counters for a metrics scrape. Both observations
+/// come from process-local atomics and do not read the store.
+pub(crate) fn local_store_observations() -> (
+    hiqlite::DbReadPoolWait,
+    impl AsRef<[hiqlite::DbWriterAbandonedReplies]>,
+) {
+    (
+        hiqlite::db_read_pool_wait(),
+        hiqlite::db_writer_abandoned_replies(),
+    )
+}
+
 /// This node's place in the cluster.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LocalRole {
