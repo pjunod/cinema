@@ -1392,6 +1392,11 @@ struct DvrRecordingDetailView: View {
                         #if os(tvOS)
                         .focusable()
                         .tvSecondaryControl("history", focus: $focusedControl, restore: $restoreTarget)
+                        .onAppear {
+                            if row.state == .scheduled && focusedControl == nil {
+                                focusedControl = "history"
+                            }
+                        }
                         #endif
                     if !dvr.selectedHistoryComplete {
                         Text(dvr.selectedHistoryTruncatedBefore == nil
