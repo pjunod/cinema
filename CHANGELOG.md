@@ -18,6 +18,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Source probes retire raw-reader ownership after proven child reap and
+  supervisor join even when the worker reports an error. The error still
+  reaches the caller; incomplete physical cleanup continues to veto completion.
+
 - Linux Player live starts and out-of-range seeks identify MPV as their consumer,
   so their startup window covers MPV’s producer/reload behavior instead of
   inheriting Safari’s 48-second presentation window. Unknown producer capacity

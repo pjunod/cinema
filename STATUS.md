@@ -3,7 +3,14 @@
 **Updated:** 2026-11-13 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
-- **2026-11-17 · MPV live opening delay:** Owner Codex (Sol implementation; Astra review). Retained phase logs identify a 22.281-second writer-gate-to-snapshot interval under Safari admission. Player0.5.2 declares MPV; all120 Player test cases are accounted for. Rust receipts exposed a steady-state reload counterexample and publication/capacity failures; the revised bound (33.25s of media at1x), short-admission capacity debt and test-clock correction await review and validation. PR held; runtime acceptance open. [Ledger](docs/streaming/MPV-LIVE-STARTUP.md).
+- **2026-11-18 · MPV live opening delay:** Owner Codex (Sol implementation;
+  Astra review). Phase logs identify a 22.281-second writer-gate-to-snapshot
+  interval under Safari admission. MPV's corrected consumer contract and all
+  12 added regressions passed; Player 0.5.2 and the production artifact are
+  verified. Two CI cases remain blocking. A concrete joined-worker retirement
+  accounting defect is repaired with deterministic coverage; sharing control
+  has failure-only diagnostics pending focused review/execution. Normal-route
+  runtime acceptance and merge remain open. [Ledger](docs/streaming/MPV-LIVE-STARTUP.md).
 
 - **2026-11-17 · Web prepared-switch ownership:** owner GPT. New Moon's exposed
   successor could report Waiting under its predecessor's control generation,

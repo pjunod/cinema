@@ -3645,6 +3645,78 @@ async fn packaged_static_ffprobe_uses_supported_bounded_source_read_syscalls() {
 }
 
 #[cfg(target_os = "linux")]
+#[tokio::test]
+async fn tracked_raw_probe_retires_joined_worker_despite_source_service_error() {
+    use std::os::fd::AsRawFd;
+
+    let root = crate::test_tempdir().expect("probe fixture");
+    let probe_path = root.path().join("static-ffprobe");
+    build_static_probe(&probe_path, 0);
+    let probe = DecodeProbeIdentity::discover(probe_path.to_str().expect("probe path"))
+        .await
+        .expect("actual production probe");
+    let (_store, _job, active) = crate::background_jobs::tests::active().await;
+    let budget = active.fence().source_budget();
+    let mut original = tempfile::tempfile().expect("held original");
+    std::io::Write::write_all(&mut original, b"production-bound source")
+        .expect("real source bytes");
+    let source = Arc::new(original);
+    let operation = budget
+        .enroll_preparation(Arc::clone(&source))
+        .expect("audited operation");
+    let mut command = tokio::process::Command::new(
+        probe_launch_path(&probe.executable_snapshot, probe.launch_mode).expect("launch path"),
+    );
+    command.as_std_mut().arg0(probe.executable());
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let arguments = [OsString::from("-v")];
+    let supervisor = crate::background_jobs::budgeted(Arc::clone(&budget), async {
+        configure_probe_execution(
+            &mut command,
+            probe.launch_mode,
+            std::time::Instant::now() + Duration::from_secs(5),
+            probe.executable_snapshot.as_file().as_raw_fd(),
+            Some(source.as_raw_fd()),
+            probe.executable(),
+            &arguments,
+            TEST_FACT_WORK.class,
+            crate::producer_spawn::StdioFacts::NULL,
+        )
+    })
+    .await
+    .expect("tracked production supervisor");
+    assert_eq!(budget.completion_observation(), Some((1, 1, false)));
+    let (mut child, _job, mut supervisor, _pause) =
+        spawn_configured_probe(command, supervisor, TEST_FACT_WORK, None)
+            .await
+            .expect("actual source-bearing child");
+    let status = child.wait().await.expect("physical child reap");
+    assert!(status.success(), "the actual source read completed");
+    // Inject the service result at its real supervisor boundary after a
+    // successful child reap, independently of deadline/kill scheduling.
+    let expected = DecodeFactError::SourceService("injected joined source service error".into());
+    *supervisor
+        .linux
+        .as_ref()
+        .expect("actual Linux supervisor")
+        .source_failure
+        .lock()
+        .expect("source failure") = Some(expected.clone());
+    drop((operation, source));
+    assert_eq!(budget.completion_observation(), Some((0, 1, false)));
+    assert_eq!(supervisor.finish_joined(), Err(expected));
+    assert!(supervisor.linux.as_ref().expect("supervisor").worker.is_none());
+    assert_eq!(budget.completion_observation(), Some((0, 0, false)));
+    drop(supervisor);
+    assert_eq!(budget.completion_observation(), Some((0, 0, false)));
+    active.finish().await;
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tracked_raw_probe_retirement_survives_timeout_and_abandoned_collector() {
     struct ReleaseWorker;

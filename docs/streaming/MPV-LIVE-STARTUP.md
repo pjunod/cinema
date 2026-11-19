@@ -111,6 +111,27 @@ complete-object validation, ownership/attempt fences and retired-object promises
 remain in their existing paths. No timer, retry, watchdog or forced transport
 capability masks missing media.
 
+## Qualification follow-up
+
+All 12 added MPV/bootstrap/capacity tests passed on source `a9dc89cf0`.
+Failed-only CI then retained two blockers in unchanged paths: raw-probe
+retirement and sharing-actor control. Base comparison passes both; the captured
+failures alone do not establish their causal relationship to the startup change.
+
+Source inspection found a separate accounting defect: `finish_joined` could
+return a source-service error after joining its worker but before marking raw
+retirement. The correction records proven physical completion while returning
+the original semantic error. An incomplete reap/join still vetoes completion.
+A deterministic real-process regression injects a source error after child reap
+and verifies worker join, error propagation and zero remaining raw ownership.
+The captured timeout's exact worker outcome remains unknown.
+
+Sharing-control failures now collect bounded, sanitized fixture observations
+through existing APIs. Requests, assertions, authority checks and deadlines are
+unchanged. The [manual exact-case selector](../ci/RUST-UNIT-FANOUT.md#5-re-running)
+permits focused diagnosis; its partial passes do not replace full merge coverage.
+These changes await source review and execution before runtime qualification.
+
 ## Acceptance
 
 The causal regression constrains complete inventory by production timestamps
