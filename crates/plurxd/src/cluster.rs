@@ -1857,6 +1857,16 @@ pub(crate) mod calls {
     pub(crate) const SIGNATURE_HEADER: &str = "x-plurx-cluster-signature";
     pub(crate) const RESPONSE_SIGNATURE_HEADER: &str = "x-plurx-response-signature";
 
+    /// Race bounded, lookup-owned holder futures. Dropping the stream cancels
+    /// pending requests; callers validate each answer before selecting a winner.
+    /// All requests must receive the lookup's one absolute deadline.
+    pub(crate) fn race_holders<F: Future>(
+        requests: impl IntoIterator<Item = F>,
+    ) -> impl futures_util::Stream<Item = F::Output> {
+        use futures_util::StreamExt;
+        futures_util::stream::iter(requests).buffer_unordered(4)
+    }
+
     #[derive(Clone, Copy)]
     pub(crate) enum PeerAuthMode {
         LegacyActivity,
@@ -2518,6 +2528,66 @@ pub(crate) mod calls {
         /// Every transport must take the membership manager's pooled client. A
         /// client built here is a connection pool per caller, which is what made
         /// node-to-node requests redial on every use.
+        #[tokio::test]
+        async fn holder_race_is_bounded_and_drops_losers_after_a_later_holder_wins() {
+            struct Active(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+            impl Drop for Active {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let active = Arc::new(AtomicUsize::new(0));
+            let maximum = Arc::new(AtomicUsize::new(0));
+            let started = Arc::new(AtomicUsize::new(0));
+            {
+                let requests = (0..12).map(|holder| {
+                    let active = active.clone();
+                    let maximum = maximum.clone();
+                    let started = started.clone();
+                    async move {
+                        started.fetch_add(1, Ordering::SeqCst);
+                        let running = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        maximum.fetch_max(running, Ordering::SeqCst);
+                        let _active = Active(active);
+                        if holder != 1 {
+                            std::future::pending::<()>().await;
+                        }
+                        holder
+                    }
+                });
+                let responses = race_holders(requests);
+                futures_util::pin_mut!(responses);
+                assert_eq!(
+                    responses.next().await,
+                    Some(1),
+                    "the first holder is stalled"
+                );
+                assert!(maximum.load(Ordering::SeqCst) <= 4);
+                assert!(started.load(Ordering::SeqCst) <= 4);
+            }
+            assert_eq!(
+                active.load(Ordering::SeqCst),
+                0,
+                "no detached loser remains"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn queued_holder_requests_share_the_original_absolute_deadline() {
+            let started = tokio::time::Instant::now();
+            let deadline = started + Duration::from_secs(8);
+            let responses = race_holders((0..12).map(|_| async move {
+                tokio::time::timeout_at(deadline, std::future::pending::<()>()).await
+            }));
+            let results: Vec<_> = responses.collect().await;
+            assert_eq!(results.len(), 12);
+            assert!(results.iter().all(Result::is_err));
+            assert_eq!(
+                tokio::time::Instant::now() - started,
+                Duration::from_secs(8)
+            );
+        }
+
         #[test]
         fn a_transport_never_builds_its_own_http_client() {
             let source = include_str!("cluster.rs");

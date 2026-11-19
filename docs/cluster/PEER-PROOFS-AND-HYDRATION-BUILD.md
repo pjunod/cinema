@@ -66,3 +66,20 @@ negative expiry, audience, revocation, stale-ticket, role and source controls.
 Record exact source and execution receipts. Final integration requires the
 normal effort gate and current-main promotion; no fleet deployment occurs
 in this lane.
+
+## 6. Implementation progress
+
+Bounded racing is implemented for fragment indexes, copy-index v3 and
+subtitle representations. Candidate validation and stale-row cleanup live
+inside each candidate future, so cleanup on an invalid fast response cannot
+hold up a valid peer. Installation and publication remain single-winner.
+Losing candidate futures, including best-effort exact stale-row deletions,
+are cancelled with the lookup; these deletions are idempotent catalogue
+cleanup, not authority or lease mutations.
+
+The pinned macOS daemon baseline at `259e1f06a` fails on the two inherited
+Linux-only `vodencode::dv_runtime` references in `state.rs`. No passing daemon
+build or regression execution is claimed. Linux compile qualification is
+being established. Peer-authorizer reuse, outcome health and token-proof
+caching remain unimplemented; this bounded hydration change does not close
+B5 or B3a by itself.
