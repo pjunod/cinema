@@ -195,7 +195,8 @@ mod tests {
 
     #[test]
     fn exact_state_retry_envelope_fits_the_accepted_recovery_budget() {
-        let attempts = u32::try_from(store::IDEMPOTENT_WRITE_MAX_ATTEMPTS).unwrap();
+        let attempts = u32::try_from(store::IDEMPOTENT_WRITE_MAX_ATTEMPTS)
+            .expect("the configured retry count must fit a duration multiplier");
         let envelope = store::STORE_TIMEOUT * attempts
             + store::IDEMPOTENT_WRITE_RETRY_DELAY * attempts.saturating_sub(1);
         shorter(

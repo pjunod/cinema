@@ -87,3 +87,9 @@ The [C5 evaluation](OPENRAFT-010-EVALUATION.md) pins the actual 0.10.0 release
 and corrects the audit's unverified C4 stall threshold. No C4 fleet result is
 claimed. Daemon compilation, strict Clippy, final-base checks and landing
 remain integration obligations until their receipts are recorded.
+
+The source-only formal correspondence checks also pass for durable jobs,
+operation progress and worker refinement. Reviewed alias items retain their
+values, and explicit timing-module dependencies keep future shared-value
+changes inside the drift checks. No model or configuration changed; there
+is no new TLC execution claim.
