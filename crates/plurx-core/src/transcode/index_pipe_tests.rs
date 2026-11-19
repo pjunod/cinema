@@ -1081,9 +1081,26 @@ fn exact_packet_clock_is_scoped_to_a_third_output_on_the_same_input() {
         )
         .expect("distinct inherited outputs");
         assert_eq!(clocked.first().map(String::as_str), Some("-copyts"));
-        assert_eq!(&clocked[1..=measured.len()], measured.as_slice());
+        let input_end = measured.iter().position(|arg| arg == "-i").expect("input") + 2;
+        assert_eq!(&clocked[1..input_end + 1], &measured[..input_end]);
         assert_eq!(clocked.iter().filter(|arg| arg.as_str() == "-i").count(), 1);
-        let clock = &clocked[measured.len() + 1..];
+        let mut start = 1;
+        for output in ["pipe:1", "pipe:4"] {
+            let end = clocked
+                .iter()
+                .position(|arg| arg == output)
+                .expect("MP4 output");
+            let block = &clocked[start..end];
+            assert!(block
+                .windows(2)
+                .any(|pair| pair == ["-avoid_negative_ts", "make_non_negative"]));
+            assert!(block.windows(2).any(|pair| pair[0] == "-movflags"
+                && pair[1].split('+').any(|flag| flag == "frag_discont")));
+            assert!(block.windows(2).any(|pair| pair == ["-use_editlist", "0"]));
+            assert!(!block.contains(&"make_zero".into()));
+            start = end + 1;
+        }
+        let clock = &clocked[start..];
         assert!(contains_run(
             clock,
             &strip_plurx_markers(&copy_video_args(&file, video))

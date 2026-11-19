@@ -7,6 +7,45 @@ and [WAIT-MAP.md](WAIT-MAP.md) (source waits and external boundaries).
 This contract defines the meaning of `OperationProgress.tla`; it does not
 extend the original [safety contract](../durable-jobs/CONTRACT.md).
 
+## HDR integration with item pins — 2026-11-18
+
+Main `1d350d82` introduces item pins and the reviewed claim/predicate
+closure. Every incoming item pin and dependency is retained. The mapped
+custody activation and TranscodeManager producer items remain byte-identical;
+the HDR changes in those files lie outside those pinned items. No item hash
+is refreshed. The dated whole-file review below remains historical context.
+Models, configurations and prior qualification identities are unchanged;
+this source review does not claim new TLC or runtime execution.
+
+## HDR playback ownership — scoped source review on 2026-11-17
+
+Codex compared PR #1727 at `19266fde08e2` with main `e59cd50c69b1`.
+An independent Sol source review checked the changed ordering and model
+boundaries. This correspondence review records no new runtime execution,
+TLC qualification or refinement theorem.
+
+The mapped custody activation body is byte-identical. The surrounding
+production change splits policy enqueue from acknowledgement: the observer
+publication mutex covers enqueue, while the asynchronous reply is awaited
+outside it. Successful acknowledgement still precedes releasing held reads,
+notifying readers and publishing rolling state; send/reply failures propagate.
+A queued operation may outlive a dropped waiter, which cannot by itself resume
+reads or establish rolling state without the successful reply path.
+
+`AdmissionUntilJoined` and `AttemptCleanup` retain owned admission through
+work join. The custody activation/cleanup dependency remains outside the
+finite model, as recorded in [WAIT-MAP.md](WAIT-MAP.md). Observer publication
+revocation, identity/epoch checks and enqueue-versus-retirement ordering are
+runtime obligations; revocation is not a physical-stop proof. Actual
+SourceInput/read/child/writer joins must retain custody through settlement.
+The existing PR #1727 lifetime regressions exercise those runtime boundaries;
+their definitions do not establish their execution or model qualification.
+
+Only this reviewed whole-file custody fingerprint and its correspondence
+record change here. Model, configuration, property, fairness and historical
+receipt bytes remain unchanged. This review adds no observer-liveness,
+byte-service, scheduling-fairness or physical-stop guarantee to the model.
+
 ## Current-main item pin reconciliation — 2026-11-18
 
 PR1676 head `804633cb4` is integrated with main `965900224` without changing
