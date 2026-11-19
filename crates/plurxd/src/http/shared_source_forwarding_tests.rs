@@ -89,7 +89,7 @@ async fn actual_nonowner_forwarding(
         .await
         .expect("worker bind");
     let worker_address = worker_listener.local_addr().expect("worker address");
-    let worker = real_source_start_fixture_at(worker_listener, fixture_body_budget).await;
+    let mut worker = real_source_start_fixture_at(worker_listener, fixture_body_budget).await;
     // Exercise both actual node and sharing routes with the strict sharing
     // fallback once; the ordinary web-shell fallback is irrelevant here.
     let worker_router = super::super::router((*worker.state).clone())
@@ -220,6 +220,7 @@ async fn actual_nonowner_forwarding(
     })
     .await
     .expect("Source worker production passive/quorum placement readiness");
+    worker.keep_fixture_membership_stable().await;
     assert_ne!(worker.state.node_id, ingress.node_id);
     assert_ne!(
         worker.state.sharing.accepted_drivers.boot_id(),
