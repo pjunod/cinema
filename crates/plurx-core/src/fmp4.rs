@@ -7112,5 +7112,9 @@ pub fn segment_name(index: u64) -> String {
     format!("seg{index:05}.m4s")
 }
 
+pub mod track_projection;
+pub mod video_splice;
+mod video_splice_format;
+
 #[cfg(test)]
 mod tests;
