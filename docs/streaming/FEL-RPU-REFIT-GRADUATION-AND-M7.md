@@ -101,15 +101,28 @@ requires a decoded successor frame at the boundary; source, daemon, fitted
 digest and durable route transition are bound in the private receipt. An
 earlier attempt was confounded by diagnostic media requests during staging;
 the successful observation used metadata only. This scoped result does not
-establish optical mapping, seeking, dropped frames, audio behavior or the
-remaining platform coverage. Physical graduation remains open.
+establish optical mapping, dropped frames, audio behavior or the remaining
+platform coverage. Physical graduation remains open.
+
+A later passive request trace on the same installed tvOS client bound a
+206.864-second fixture to fitted digest
+`87da3b1748ed2906ee51897d5fa31e19f5f2a91ec5fc9d49a0db45050a109065`.
+The client committed its fitted successor and reported a presented-frame
+seek resume in 65 ms. Its first cold fitted fragment took 3.141 seconds to
+first byte and 4.399 seconds to complete. The complete media extent was
+fetched. A final operator Back action may have exited playback, so this run
+is not a natural-completion witness. The fixture repeats the original 310
+coded pictures sixteen times; it supplies UI runway, not independent title
+quality evidence. An earlier cold-entry timeout remains unresolved because
+that attempt lacked per-request transport tracing. Successful playback does
+not erase that failure or justify extending the handoff deadline.
 
 The current host inventory sees a physical Apple TV 4K (3rd generation).
 Its scoped playback result is recorded above. The inspected learner service
 image is based on `254df39f7afb`, before the F+ merge; it cannot qualify this
 feature. Paul authorized a fresh isolated M5 test instance on 2026-11-19, with its
-own store and listeners and no production cluster join. No service, client app or processing bundle is installed,
-restarted or upgraded as part of this work. Test fixtures must be identified
+own store and listeners and no production cluster join. No production service, client app or installed production processing bundle
+is installed, restarted or upgraded as part of this work. Test fixtures must be identified
 as fixtures and cannot alone satisfy real plurx session acceptance.
 
 ## Native M5 test-instance prerequisites
@@ -186,15 +199,32 @@ is replaced or upgraded.
    does not publish a full-title replacement or remove an original. The
    existing nonzero-video-origin disk refusal remains a separate open finding.
 
-The historical calibrated native TopLeft encoder input has not been recovered.
-A new bounded CPU diagnostic export is being built from the already bound FEL
-composition. It will declare its colour conversion, quantization, TopLeft
-sampling, source RPU and exact frame clocks as a distinct representation.
-Independent code and clock validation must precede its use by an encoder;
-this input will not inherit historical native byte identity or quality wins.
-The four reference models remain distinct and unchanged. Calibration windows
-0–47 and96–143 are retained; evaluation192–239 remains reserved. No candidate
-score can inform the representation or margin choices.
+The historical calibrated native TopLeft encoder input was not recovered.
+The new bounded CPU diagnostic export is a distinct representation with
+explicit conversion, quantization, TopLeft sampling, source RPUs and clocks.
+Independent validation matched all 48 frame identities and 24,883,200
+full-plane samples in each calibration/evaluation export. Lossless NUT
+packaging preserved every raw frame and the separate uniform encode clock.
+It does not inherit historical native byte identity or quality wins.
+
+The [Michael trial protocol](../../tools/dv_processing/diagnostics/fel_quality/protocol-m7-michael5400-20261119.json)
+was frozen before candidate work: calibration frames 0–47 and 96–143,
+evaluation frames 192–239, minimum 0.05 mean ΔITP gain in every model/window
+and pooled result, and strict shadow-tail non-regression. The margin rounds
+up the observed calibration model spread; it is a policy buffer, not a
+statistical or perceptual significance claim. The authored 128.5–130 Mb/s
+trial band is experimental and exceeds the original source rate; it gives
+no delivery or replacement permission. Only the inherited NP1 recipe and at
+most four rate-only attempts are allowed, within the fixed author envelope.
+
+The actual served F+ evaluation baseline was measured once after protocol
+freeze (Model B mean 1.397672 ΔITP). The other three frozen models were also
+measured once. Baseline/none/zero same-input encoder controls passed, with
+byte-identical elementary streams. They remain reusable while their consumed
+inputs, encoder, harness and recipe bindings match. The bounded NP1 trial
+has started; candidate authoring, actual authored-rate admission and paired
+quality results remain pending. Runtime title-qualification integration is
+not implemented by this offline trial.
 
 ## Execution ledger
 
@@ -202,10 +232,10 @@ score can inform the representation or margin choices.
 |---|---|---|
 | Original native M6 | Pass retained | No repeat of the 48-point M3 experiment |
 | M5 migration | Source and exact helper/master binding retained | Preserve source/device identities |
-| Physical matrix | tvOS fitted handoff/completion retained; full matrix open | Seek, mapping, drops and remaining client/device scopes |
-| M7 baseline | Two disjoint48-frame calibration windows bound and scored once in all four models | Retain scores; evaluation192–239 reserved |
-| Numeric margin | Awaiting new encoder-input representation calibration | Protocol frozen before new NP1 candidate scores |
-| NP1 trials/integration | Not yet run/built | Bound baseline/protocol; focused new-arm evidence |
+| Physical matrix | tvOS fitted handoff and seek retained; earlier 52-second completion retained; full matrix open | Unresolved cold timeout, mapping, drops and remaining client/device scopes |
+| M7 baseline | Two calibration windows and frozen evaluation192–239 bound and scored once in all four models | Retain source-bound scores |
+| Numeric margin | Frozen at 0.05 with strict shadow-tail limits before candidate work | Apply unchanged to paired outputs |
+| NP1 trials/integration | Three encoder controls passed; bounded trial running; integration open | Actual authored rate/readback, paired result and existing-job integration |
 
 Adversarial review happens when the change is ready to merge. Afterwards run
 only the remaining required fast-lane checks, preserving every valid pass.
