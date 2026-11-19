@@ -4940,7 +4940,7 @@ test("alerts are empty when healthy and most severe first otherwise", () => {
   // Recovery carries the maintenance target and the down voters inside it.
   cluster.nodes[0].maintenance = true;
   cluster.recovery = { required: true, quorum_available: false, reachable_voters: 2, required_voters: 3 };
-  assert.deepEqual(PANEL.clusterAlertKinds(cluster, null, {}).map((k) => k.kind), ["recovery", "reconfiguration"]);
+  assert.deepEqual(PANEL.clusterAlertKinds(cluster, null, { refusal: true }).map((k) => k.kind), ["recovery", "refusal", "reconfiguration"]);
   cluster.recovery.required = false;
   assert.deepEqual(PANEL.clusterAlertKinds(cluster, null, {}).map((k) => k.kind),
     ["maintenance", "voter_down", "reconfiguration"]);

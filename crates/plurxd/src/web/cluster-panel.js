@@ -1031,22 +1031,21 @@
   // beside it. `context.refusal` is the shell's module state.
   function clusterAlertKinds(cluster,ops,context={}){
     const kinds=[];
-    if(context.refusal) kinds.push({kind:"refusal",tone:"bad"});
-    if(!cluster||cluster.unavailable){
-      if(!cluster||cluster.code!=="membership_unavailable") kinds.push({kind:"roster_failed",tone:"warn"});
-      return kinds;
+    if(cluster&&!cluster.unavailable){
+      const nodes=cluster.nodes||[];
+      const recovery=clusterRecoveryState(cluster);
+      if(recovery.required) kinds.push({kind:"recovery",tone:"bad"});
+      if(!recovery.required&&nodes.some(n=>n.maintenance)) kinds.push({kind:"maintenance",tone:"warn"});
+      const local=clusterDirectMaintenanceStatus(ops,cluster.local_node_id);
+      const media=local&&local.media;
+      if(media&&media.new_admissions_blocked) kinds.push({kind:"restart",tone:media.drained?"good":"warn"});
+      if(!recovery.required&&nodes.some(n=>n.is_voter&&!n.reachable&&!n.maintenance))
+        kinds.push({kind:"voter_down",tone:"warn"});
+      if(ops&&ops.unavailable) kinds.push({kind:"ops_unavailable",tone:"warn"});
+      if(cluster.availability==="degraded_reconfiguration") kinds.push({kind:"reconfiguration",tone:"warn"});
     }
-    const nodes=cluster.nodes||[];
-    const recovery=clusterRecoveryState(cluster);
-    if(recovery.required) kinds.unshift({kind:"recovery",tone:"bad"});
-    if(!recovery.required&&nodes.some(n=>n.maintenance)) kinds.push({kind:"maintenance",tone:"warn"});
-    const local=clusterDirectMaintenanceStatus(ops,cluster.local_node_id);
-    const media=local&&local.media;
-    if(media&&media.new_admissions_blocked) kinds.push({kind:"restart",tone:media.drained?"good":"warn"});
-    if(!recovery.required&&nodes.some(n=>n.is_voter&&!n.reachable&&!n.maintenance))
-      kinds.push({kind:"voter_down",tone:"warn"});
-    if(ops&&ops.unavailable) kinds.push({kind:"ops_unavailable",tone:"warn"});
-    if(cluster.availability==="degraded_reconfiguration") kinds.push({kind:"reconfiguration",tone:"warn"});
+    if(context.refusal) kinds.push({kind:"refusal",tone:"bad"});
+    if(!cluster||(cluster.unavailable&&cluster.code!=="membership_unavailable")) kinds.push({kind:"roster_failed",tone:"warn"});
     return kinds.filter(k=>k.tone==="bad").concat(kinds.filter(k=>k.tone!=="bad"));
   }
   // Which voter stopped answering, for how long, and what that now blocks.
