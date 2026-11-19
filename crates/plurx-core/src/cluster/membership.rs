@@ -3323,7 +3323,6 @@ fn reduction_reference_key(reference: &hiqlite::ReductionFenceReference) -> Stri
     )
 }
 
-
 /// "Every active node proves `capability` with the binary it is running now."
 fn capability_ready_predicate(capability: &str) -> String {
     format!(
