@@ -978,8 +978,7 @@ impl TranscodeManager {
                     HlsContext {
                         codec_facts: Some(
                             FrozenHlsCodecFacts::encoded(&encoding.plan)
-                                .with_retained_output(retained_output)
-                                .with_sdr_master_codecs(facts.sdr_master_codecs),
+                                .with_retained_output(retained_output),
                         ),
                         bandwidth: measured_bandwidth
                             .or_else(|| encoding.plan.output_contract().output_bandwidth()),
@@ -1035,8 +1034,7 @@ impl TranscodeManager {
                             !facts.file.audio_streams.is_empty(),
                             facts.aac,
                         )
-                        .with_retained_output(retained_output)
-                        .with_sdr_master_codecs(facts.sdr_master_codecs),
+                        .with_retained_output(retained_output),
                     ),
                     bandwidth: measured_bandwidth,
                     file_id: facts.file.id,

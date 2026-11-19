@@ -2661,50 +2661,6 @@ async fn control_local_with_observation(
             None,
         );
     }
-    // This binary is a parser-floor owner, not a candidate-route owner.
-    // Structural validation above also runs on relaying ingress; semantic
-    // refusal belongs here, after routing, before any owner mutation.
-    let display_aware_enabled = state
-        .store
-        .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-        .await
-        .ok()
-        .flatten()
-        .is_some_and(|value| value.trim() == "1");
-    if !display_aware_enabled
-        && request.demand != crate::playback_control::PlaybackDemand::End
-        && (request
-            .capabilities
-            .as_ref()
-            .is_some_and(|caps| caps.decoder_caps.is_some())
-            || matches!(
-                request.selection.quality,
-                crate::playback_control::QualitySelection::Auto {
-                    candidate_id: Some(_),
-                    ..
-                }
-            ))
-    {
-        return control_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_control",
-            "this media owner cannot honor the negotiated candidate route",
-            Some(route.incarnation_id.clone()),
-            Some(owner_epoch),
-            None,
-            Some(
-                if request
-                    .capabilities
-                    .as_ref()
-                    .is_some_and(|caps| caps.decoder_caps.is_some())
-                {
-                    "capabilities.decoder_caps_unsupported"
-                } else {
-                    "selection.quality.candidate_id_unsupported"
-                },
-            ),
-        );
-    }
     let can_settle_preparation = request
         .accepts(crate::playback_control::PREPARE_REPLACEMENT_ACTION)
         || request.acknowledgement.is_some()

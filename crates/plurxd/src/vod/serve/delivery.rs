@@ -2025,17 +2025,17 @@ pub(crate) fn processing_activity_text(
         DvDestination::Profile81 => (
             "Reconstructed Dolby Vision Profile 8.1",
             "Dolby Vision client playing a Profile 7 FEL title; FEL re-encode is on in \
-             Settings → Developer",
+             Settings → Playback",
         ),
         DvDestination::Hdr10 => (
             "Processed HDR10 (HDR10-E)",
             "HDR client playing a Dolby Vision title; Dolby Vision processing is on in \
-             Settings → Developer",
+             Settings → Playback",
         ),
         DvDestination::Sdr => (
             "Processed SDR",
             "SDR display playing a Dolby Vision title; display targeting is on in \
-             Settings → Developer",
+             Settings → Playback",
         ),
     };
     let tail = if destination == DvDestination::Profile81 {

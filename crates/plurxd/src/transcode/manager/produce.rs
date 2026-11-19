@@ -233,7 +233,7 @@ impl TranscodeManager {
         file: &plurx_core::domain::MediaFile,
         settings: &crate::vodserve::VodSettings,
         encoding: &crate::vodencode::Encoding,
-    ) -> Result<(), String> {
+    ) -> Result<Option<(String, bool)>, String> {
         use plurx_core::store::background_jobs::{EnqueueJob, JobPayload, JobRequest};
         let node = request
             .candidate_context
@@ -276,9 +276,10 @@ impl TranscodeManager {
             serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
         ));
         let now = crate::media_sessions::unix_ms();
+        let proposed_id = uuid::Uuid::new_v4().to_string();
         self.store
             .enqueue_job(EnqueueJob {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: proposed_id.clone(),
                 payload,
                 dedupe_key: digest.clone(),
                 priority: 1,
@@ -286,7 +287,11 @@ impl TranscodeManager {
                 now_ms: now,
                 request: JobRequest {
                     scope: "encoded_output_prepare".to_owned(),
-                    request_id: digest.clone(),
+                    // Retain one waiter per playback on the shared preparation.
+                    request_id: hex::encode(Sha256::digest(format!(
+                        "{digest}:{}",
+                        request.playback_id
+                    ))),
                     request_digest: digest,
                     consumer_kind: "encoded_output".to_owned(),
                     consumer_ref: file.id.to_string(),
@@ -303,8 +308,20 @@ impl TranscodeManager {
                 },
             })
             .await
-            .map_err(|error| error.to_string())?;
-        Ok(())
+            .map_err(|error| error.to_string())
+            .map(|outcome| match outcome {
+                // Accepted can also mean a new waiter joined an existing job.
+                plurx_core::store::background_jobs::EnqueueOutcome::Accepted { job_id, .. } => {
+                    let created = job_id == proposed_id;
+                    Some((job_id, created))
+                }
+                plurx_core::store::background_jobs::EnqueueOutcome::Existing {
+                    job_id,
+                    cancelled: false,
+                    ..
+                } => Some((job_id, false)),
+                _ => None,
+            })
     }
 
     pub(crate) async fn produce_encoded_output_job(
@@ -366,7 +383,7 @@ impl TranscodeManager {
         let mut request = SessionRequest {
             source_telemetry: None,
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
             vod_only: false,
@@ -510,7 +527,7 @@ impl TranscodeManager {
         request: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
         settings: &crate::vodserve::VodSettings,
-    ) -> Result<(), String> {
+    ) -> Result<Option<(String, bool)>, String> {
         use plurx_core::store::background_jobs::{
             CopyOutputIntent, CopyOutputProfile, EnqueueJob, JobPayload, JobRequest,
         };
@@ -521,26 +538,26 @@ impl TranscodeManager {
             ..
         } = request.kind
         else {
-            return Ok(());
+            return Ok(None);
         };
         let context = request.candidate_context.as_ref();
         if context.is_some_and(|context| !context.normalized_geometry) {
-            return Ok(());
+            return Ok(None);
         }
         let Some(node) = (match context {
             Some(context) => context.owner_node_id.as_deref(),
             None => self.cache_location().map(|(_, node)| node),
         }) else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(audio_delivery) = request.audio_delivery.clone() else {
-            return Ok(());
+            return Ok(None);
         };
         if request.subtitle_burn.is_some() || request.audio_claim.is_none() {
-            return Ok(());
+            return Ok(None);
         }
         if request.audio_offset_ms != file.audio_offset_ms {
-            return Ok(());
+            return Ok(None);
         }
         let selected_audio = request.audio_index.map_or_else(
             || file.audio_streams.first(),
@@ -560,7 +577,7 @@ impl TranscodeManager {
                     file.audio_offset_ms,
                 )
         {
-            return Ok(());
+            return Ok(None);
         }
         let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
         let probe = self
@@ -603,10 +620,10 @@ impl TranscodeManager {
                     != context.candidate_id
                 || super::manager_candidates::copy_candidate_grade(file) != context.grade
         }) {
-            return Ok(());
+            return Ok(None);
         }
         if !source.unchanged() {
-            return Ok(());
+            return Ok(None);
         }
         let cap = u64::try_from(file.size)
             .ok()
@@ -667,9 +684,10 @@ impl TranscodeManager {
             serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
         ));
         let now = crate::media_sessions::unix_ms();
+        let proposed_id = uuid::Uuid::new_v4().to_string();
         self.store
             .enqueue_job(EnqueueJob {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: proposed_id.clone(),
                 payload,
                 dedupe_key: digest.clone(),
                 priority: 1,
@@ -677,7 +695,11 @@ impl TranscodeManager {
                 now_ms: now,
                 request: JobRequest {
                     scope: "copy_output_prepare".to_owned(),
-                    request_id: digest.clone(),
+                    // Retain one waiter per playback on the shared preparation.
+                    request_id: hex::encode(Sha256::digest(format!(
+                        "{digest}:{}",
+                        request.playback_id
+                    ))),
                     request_digest: digest,
                     consumer_kind: "copy_output".to_owned(),
                     consumer_ref: file.id.to_string(),
@@ -694,8 +716,20 @@ impl TranscodeManager {
                 },
             })
             .await
-            .map_err(|error| error.to_string())?;
-        Ok(())
+            .map_err(|error| error.to_string())
+            .map(|outcome| match outcome {
+                // Accepted can also mean a new waiter joined an existing job.
+                plurx_core::store::background_jobs::EnqueueOutcome::Accepted { job_id, .. } => {
+                    let created = job_id == proposed_id;
+                    Some((job_id, created))
+                }
+                plurx_core::store::background_jobs::EnqueueOutcome::Existing {
+                    job_id,
+                    cancelled: false,
+                    ..
+                } => Some((job_id, false)),
+                _ => None,
+            })
     }
 
     /// Actual copy preparation uses the existing claimed/admitted worker lane
@@ -832,7 +866,7 @@ impl TranscodeManager {
         let mut request = SessionRequest {
             source_telemetry: None,
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
             vod_only: false,
@@ -1486,26 +1520,24 @@ impl TranscodeManager {
         // Offline requests retain their accepted recipe. Their durable worker
         // can still prepare measured evidence for subsequent requests without
         // changing this package's immutable rate-control snapshot.
-        if self.content_encoding_enabled().await {
-            if let Ok(libraries) = self.store.list_libraries().await {
-                let roots = libraries
-                    .into_iter()
-                    .flat_map(|library| library.paths)
-                    .collect::<Vec<_>>();
-                if let Some(source) = pretranscode_source_snapshot(file, &roots).await {
-                    let source = Arc::new(source);
-                    let _ = self
-                        .analyze_content_for_producer(
-                            file,
-                            &opts,
-                            encoder,
-                            Some(&source),
-                            None,
-                            cancelled,
-                            deadline,
-                        )
-                        .await;
-                }
+        if let Ok(libraries) = self.store.list_libraries().await {
+            let roots = libraries
+                .into_iter()
+                .flat_map(|library| library.paths)
+                .collect::<Vec<_>>();
+            if let Some(source) = pretranscode_source_snapshot(file, &roots).await {
+                let source = Arc::new(source);
+                let _ = self
+                    .analyze_content_for_producer(
+                        file,
+                        &opts,
+                        encoder,
+                        Some(&source),
+                        None,
+                        cancelled,
+                        deadline,
+                    )
+                    .await;
             }
         }
         let mut recovery_began_now = false;
