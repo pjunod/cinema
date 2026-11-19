@@ -473,7 +473,12 @@ impl TokenProofSource {
     pub fn still_valid(&self) -> bool {
         #[cfg(feature = "hiqlite-store")]
         {
-            self.local.membership_snapshot().running && self.watch.trusted() && !self.watch.moved()
+            let local = self.local.membership_snapshot();
+            local.running
+                && local.committed
+                && local.members.contains(&local.node_id)
+                && self.watch.trusted()
+                && !self.watch.moved()
         }
         #[cfg(not(feature = "hiqlite-store"))]
         {
