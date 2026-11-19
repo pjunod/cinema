@@ -10,13 +10,13 @@ Prepare direct timing observations and a bounded external collector. Existing de
 
 Record lateness when the existing serving-monitor sleep resolves, against that same Sleep's monotonic deadline. Keep the exact sleep and refresh order, and add no poller/task. This is serving-monitor wake lateness, which includes runtime scheduling/timer delay; it does not attribute the cause to CPU starvation.
 
-Record DB AppendEntries attempts in the existing network writer task after cancelled/reset request filtering, immediately before handing the serialized append to the bounded writer queue. Include empty heartbeats and data appends. Call the observation writer-queue send-attempt gap: it is neither physical socket completion nor peer delivery/RTT. Do not move clock-capture, pooling, connection/reset or snapshot logic.
+Record DB AppendEntries RPC attempts at the existing RaftNetwork API entry. Also record incoming DBAppend handler entry/completion gaps and handler duration, using the request vote and current passive membership endpoint identity. Include empty heartbeats and data appends. Call the outgoing observation RPC-attempt gap: it precedes transport queueing and is neither physical socket completion nor peer delivery/RTT. Incoming handler duration includes Raft/store work and is not network RTT. Do not move clock-capture, pooling, connection/reset or snapshot logic.
 
 A process-local observational registry retains at most64 local-node/target entries. Reset each series on leader term or endpoint identity change, ignore older terms, and evict only observational state at capacity. Do not carry history across process/source changes. Snapshots copy plain bounded data under a short non-async lock; failures never affect authority.
 
 ## 3. File ownership
 
-Own vendor hiqlite `append_timing.rs`, its lib export and the DBAppend writer hook in network/raft_client.rs; generic fork patch documentation; daemon serving_fence.rs observation fields/monitor sampling, cluster.rs Observations projection, http/system.rs metrics rendering; a bounded standard-library collector and focused tests. No OpenRaft dependency change, raw client getter, new runtime task or product toggle.
+Own vendor hiqlite `append_timing.rs`, its lib export and the DBAppend API hook in network/raft_client.rs plus handler hooks in network/raft_server.rs; generic fork patch documentation; daemon serving_fence.rs observation fields/monitor sampling, cluster.rs Observations projection, http/system.rs metrics rendering; a bounded standard-library collector and focused tests. No OpenRaft dependency change, raw client getter, new runtime task or product toggle.
 
 ## 4. Collector and evidence
 
