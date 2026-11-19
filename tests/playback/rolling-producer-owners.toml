@@ -1370,7 +1370,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # settlement is then awaited). The 5100 ms wait holds mode 25 paused before the
 # native spawn past five seconds, so the window must use fresh current authority.
 # None is shipped; none certifies settlement or retries anything.
-expected_occurrences = 91
+# PR #1802 relay review adds one 25 ms poll inside the 30s retained-copy test deadline.
+expected_occurrences = 92
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -2354,7 +2355,8 @@ pattern = "publication_ready_at_ms"
 # builds one blocked and one publishable media-session row to prove an idle
 # lease tick takes no inventory and an owned row still does. Test-only; no
 # fence is advanced or cleared.
-expected_occurrences = 171
+# PR #1802 owner-mismatch tests build one blocked route and one ready route.
+expected_occurrences = 173
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -2428,7 +2430,8 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # behind the blocked sentinel, as every activation must. Test-only.
 # 60 -> 61 with #1629: the same lease_inventory_tests.rs fixture seeds one
 # row with the blocked sentinel. Test-only.
-expected_occurrences = 61
+# PR #1802 owner-mismatch coverage uses the blocked sentinel in its test fixture.
+expected_occurrences = 62
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -6065,7 +6068,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Developer tab cleanup (2026-11-18): -4 test timers. Network priors are
 # always on, so the priors-off client-log barriers and their timeouts in
 # link_receipts tests are gone; no production timer changed. Main 2266 - 4 = 2262.
-expected_occurrences = 2262
+# PR #1802 adds a timeout and a 25 ms poll to the retained-copy reuse test.
+expected_occurrences = 2264
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -7346,7 +7350,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Developer tab cleanup (2026-11-18): +3 net lexical `.status(` matches in
 # the retain-output route tests (HTTP response status reads); no process.
 # Main 945 + 3 = 948.
-expected_occurrences = 948
+# PR #1802 adds two relay response status reads and five route-test status reads.
+# All seven matches inspect HTTP replies and launch no processes.
+expected_occurrences = 955
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
