@@ -26,6 +26,8 @@ pub(crate) enum PeerAuthMode {
     ExactRequestAndResponse,
     /// A committed member, including a learner, must prove the response.
     ExactRequestAndMemberResponse,
+    /// Preserve legacy response facts, with optional authenticated additions.
+    ExactRequestWithOptionalMemberResponse,
 }
 
 #[derive(Debug)]
@@ -84,7 +86,36 @@ impl PeerTransport {
             None,
         )
         .await
-        .map(|(response, _)| response)
+        .map(|(response, _, _)| response)
+    }
+
+    /// Request the same route across mixed versions. The caller must ignore
+    /// all supplemental evidence unless the exact member response verified.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn request_with_optional_member_response(
+        &self,
+        expected_node_id: &str,
+        base: &str,
+        method: reqwest::Method,
+        path: &str,
+        body: Vec<u8>,
+        deadline: tokio::time::Instant,
+        max_response_bytes: usize,
+    ) -> Result<(PeerResponse, bool), PeerTransportError> {
+        self.request_with_optional_header(
+            expected_node_id,
+            base,
+            method,
+            path,
+            body,
+            deadline,
+            max_response_bytes,
+            PeerAuthMode::ExactRequestWithOptionalMemberResponse,
+            None,
+            None,
+        )
+        .await
+        .map(|(response, _, verified)| (response, verified))
     }
 
     /// `request`, plus the peer's `Retry-After` when it is a small
@@ -115,6 +146,7 @@ impl PeerTransport {
             None,
         )
         .await
+        .map(|(response, retry_after, _)| (response, retry_after))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -143,7 +175,7 @@ impl PeerTransport {
             None,
         )
         .await
-        .map(|(response, _)| response)
+        .map(|(response, _, _)| response)
     }
 
     pub(crate) async fn clock_request(
@@ -165,7 +197,7 @@ impl PeerTransport {
             Some(&guard),
         )
         .await
-        .map(|(response, _)| response)
+        .map(|(response, _, _)| response)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -181,7 +213,7 @@ impl PeerTransport {
         auth_mode: PeerAuthMode,
         extra_header: Option<(&'static str, &'static str)>,
         clock_guard: Option<&plurx_core::cluster::clock::ClusterClockGuard>,
-    ) -> Result<(PeerResponse, Option<u32>), PeerTransportError> {
+    ) -> Result<(PeerResponse, Option<u32>, bool), PeerTransportError> {
         let Some(url) = peer_url(base, path) else {
             return Err(PeerTransportError::Unreachable);
         };
@@ -198,7 +230,8 @@ impl PeerTransport {
                 .map(SignedPeerAuth::Activity),
             PeerAuthMode::ExactRequest
             | PeerAuthMode::ExactRequestAndResponse
-            | PeerAuthMode::ExactRequestAndMemberResponse => self
+            | PeerAuthMode::ExactRequestAndMemberResponse
+            | PeerAuthMode::ExactRequestWithOptionalMemberResponse => self
                 .membership
                 .sign_internal_peer_request(
                     expected_node_id,
@@ -213,12 +246,21 @@ impl PeerTransport {
         .map_err(|_| PeerTransportError::Unreachable)?;
         let response_binding = match &auth {
             SignedPeerAuth::Exact(auth) => match auth_mode {
-                PeerAuthMode::ExactRequestAndResponse => {
-                    Some((auth.node_id.clone(), auth.nonce.clone(), false))
-                }
-                PeerAuthMode::ExactRequestAndMemberResponse => {
-                    Some((auth.node_id.clone(), auth.nonce.clone(), true))
-                }
+                PeerAuthMode::ExactRequestAndResponse => Some((
+                    auth.node_id.clone(),
+                    auth.nonce.clone(),
+                    ResponseProof::Voter,
+                )),
+                PeerAuthMode::ExactRequestAndMemberResponse => Some((
+                    auth.node_id.clone(),
+                    auth.nonce.clone(),
+                    ResponseProof::Member,
+                )),
+                PeerAuthMode::ExactRequestWithOptionalMemberResponse => Some((
+                    auth.node_id.clone(),
+                    auth.nonce.clone(),
+                    ResponseProof::OptionalMember,
+                )),
                 _ => None,
             },
             _ => None,
@@ -246,11 +288,7 @@ impl PeerTransport {
                     PeerTransportError::Unreachable
                 }
             })?;
-        let signature = response
-            .headers()
-            .get(RESPONSE_SIGNATURE_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
+        let signature = response.headers().get(RESPONSE_SIGNATURE_HEADER).cloned();
         let retry_after = retry_after_seconds(response.headers());
         read_then_verify(
             response,
@@ -259,14 +297,20 @@ impl PeerTransport {
             timestamp_ms,
             clock_guard.zip(clock_ticket),
             |response| async move {
-                if let Some((target, nonce, member_scoped)) = response_binding {
+                let response_verified = if let Some((target, nonce, proof)) = response_binding {
+                    if proof == ResponseProof::OptionalMember && signature.is_none() {
+                        return Ok((response, false));
+                    }
                     #[cfg(test)]
                     if signature.is_none() {
                         eprintln!("Peer diagnostic stage=missing_response_signature path={path} status={}", response.status);
                     }
-                    let signature = signature.ok_or(PeerTransportError::InvalidResponse)?;
+                    let signature = signature
+                        .as_ref()
+                        .and_then(|header| header.to_str().ok())
+                        .ok_or(PeerTransportError::InvalidResponse)?;
                     let payload = signed_response_payload(response.status.as_u16(), &response.body);
-                    let verified = if member_scoped {
+                    let verified = if proof != ResponseProof::Voter {
                         tokio::time::timeout_at(
                             deadline,
                             self.membership.authorize_internal_peer_member_response(
@@ -275,7 +319,7 @@ impl PeerTransport {
                                 &nonce,
                                 path,
                                 &payload,
-                                &signature,
+                                signature,
                             ),
                         )
                         .await
@@ -290,7 +334,7 @@ impl PeerTransport {
                                 &nonce,
                                 path,
                                 &payload,
-                                &signature,
+                                signature,
                             ),
                         )
                         .await
@@ -302,12 +346,15 @@ impl PeerTransport {
                         eprintln!("Peer diagnostic stage=response_authentication path={path} status={}", response.status);
                         return Err(PeerTransportError::InvalidResponse);
                     }
-                }
-                Ok(response)
+                    true
+                } else {
+                    false
+                };
+                Ok((response, response_verified))
             },
         )
         .await
-        .map(|response| (response, retry_after))
+        .map(|(response, verified)| (response, retry_after, verified))
     }
 
     /// Send an authenticated peer request but leave the response body as a
@@ -338,7 +385,9 @@ impl PeerTransport {
                 .sign_activity_request(expected_node_id, timestamp_ms)
                 .map(SignedPeerAuth::Activity),
             // A stream has no complete body to authenticate at this layer.
-            PeerAuthMode::ExactRequestAndResponse | PeerAuthMode::ExactRequestAndMemberResponse => {
+            PeerAuthMode::ExactRequestAndResponse
+            | PeerAuthMode::ExactRequestAndMemberResponse
+            | PeerAuthMode::ExactRequestWithOptionalMemberResponse => {
                 return Err(PeerTransportError::InvalidResponse);
             }
             PeerAuthMode::ExactRequest => self
@@ -504,7 +553,14 @@ pub(crate) fn peer_url(base: &str, path: &str) -> Option<reqwest::Url> {
     Some(url)
 }
 
-async fn read_then_verify<F, Fut>(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResponseProof {
+    Voter,
+    Member,
+    OptionalMember,
+}
+
+async fn read_then_verify<F, Fut, T>(
     response: reqwest::Response,
     deadline: tokio::time::Instant,
     max_response_bytes: usize,
@@ -514,10 +570,10 @@ async fn read_then_verify<F, Fut>(
         plurx_core::cluster::clock::ClockDecisionTicket,
     )>,
     verify: F,
-) -> Result<PeerResponse, PeerTransportError>
+) -> Result<T, PeerTransportError>
 where
     F: FnOnce(PeerResponse) -> Fut,
-    Fut: Future<Output = Result<PeerResponse, PeerTransportError>>,
+    Fut: Future<Output = Result<T, PeerTransportError>>,
 {
     let mut response = read_bounded(response, deadline, max_response_bytes).await?;
     // Capture t4 before even constructing the verification future.
@@ -755,7 +811,7 @@ mod tests {
                 1024,
                 signed_t1,
                 Some((&guard, stamp)),
-                |_| async { Err(PeerTransportError::InvalidResponse) }
+                |_| async { Err::<PeerResponse, _>(PeerTransportError::InvalidResponse) }
             )
             .await
             .expect_err("failed proof discards timing"),

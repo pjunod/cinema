@@ -2347,6 +2347,8 @@ pub(crate) struct RemoteStartResponse {
 mod adaptive_intent;
 #[cfg(target_os = "linux")]
 pub(crate) use adaptive_intent::bounded_digest as bounded_adaptive_digest;
+#[cfg(target_os = "linux")]
+pub(crate) use adaptive_intent::bounded_digest_bytes as bounded_adaptive_digest_bytes;
 
 /// Versioned adaptive preparation retains the authoritative attempt identity
 /// alongside intent that the worker rederives locally before native entry.

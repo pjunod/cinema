@@ -5197,6 +5197,23 @@ async fn create_with_purpose_attempt(
     }
     let placement_deadline = crate::media_pool::create_stage_deadline(START_DEADLINE);
 
+    #[cfg(target_os = "linux")]
+    let adaptive_software_source = source.as_ref().filter(|file| {
+        planning_snapshot.is_some()
+            && matches!(
+                request.kind,
+                crate::transcode::SessionKind::Transcode { .. }
+            )
+            && request.start_seconds == 0.0
+            && request.subtitle_burn.is_none()
+            && !request.hdr10
+            && !native_subtitles
+            && request.continuous_media.is_none()
+            && library_channel.is_none()
+            && file.dolby_vision.is_empty()
+    });
+    #[cfg(target_os = "linux")]
+    let mut ranked_software_offers = None;
     let candidate_owner = request
         .candidate_context
         .as_ref()
@@ -5218,19 +5235,38 @@ async fn create_with_purpose_attempt(
             request.subtitle_burn,
             request.hdr10,
         ) {
-            Ok(offer_request) => state
-                .media_pool
-                .offers(&state, offer_request)
-                .await
-                .offers
-                .into_iter()
-                .filter(|offer| offer.eligible)
-                .fold(Vec::new(), |mut candidates, offer| {
-                    if !candidates.contains(&offer.node_id) {
-                        candidates.push(offer.node_id);
+            Ok(offer_request) => {
+                #[cfg(target_os = "linux")]
+                let offer_request = {
+                    let mut offer_request = offer_request;
+                    if adaptive_software_source.is_some() {
+                        offer_request.finite_service = planning_snapshot
+                            .as_ref()
+                            .and_then(|snapshot| remote_request.finite_service_request(snapshot));
                     }
-                    candidates
-                }),
+                    offer_request
+                };
+                let offers = state.media_pool.offers(&state, offer_request).await.offers;
+                #[cfg(target_os = "linux")]
+                if adaptive_software_source.is_some() {
+                    ranked_software_offers = Some(
+                        offers
+                            .iter()
+                            .filter(|offer| offer.eligible && offer.encoder == "software")
+                            .map(|offer| offer.node_id.clone())
+                            .collect(),
+                    );
+                }
+                offers.into_iter().filter(|offer| offer.eligible).fold(
+                    Vec::new(),
+                    |mut candidates, offer| {
+                        if !candidates.contains(&offer.node_id) {
+                            candidates.push(offer.node_id);
+                        }
+                        candidates
+                    },
+                )
+            }
             Err(_) => Vec::new(),
         }
     };
@@ -5244,23 +5280,10 @@ async fn create_with_purpose_attempt(
         owner_candidates.push(state.node_id.clone());
     }
     #[cfg(target_os = "linux")]
-    let adaptive_software_source = source.as_ref().filter(|file| {
-        planning_snapshot.is_some()
-            && matches!(
-                request.kind,
-                crate::transcode::SessionKind::Transcode { .. }
-            )
-            && request.start_seconds == 0.0
-            && request.subtitle_burn.is_none()
-            && !request.hdr10
-            && !native_subtitles
-            && request.continuous_media.is_none()
-            && library_channel.is_none()
-            && file.dolby_vision.is_empty()
-    });
-    #[cfg(target_os = "linux")]
     let adaptive_software_offers: std::collections::HashSet<String> =
-        if let Some(file) = adaptive_software_source {
+        if let Some(offers) = ranked_software_offers {
+            offers
+        } else if let Some(file) = adaptive_software_source {
             match MediaOfferRequest::new(
                 file,
                 height,

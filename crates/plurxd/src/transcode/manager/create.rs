@@ -3860,6 +3860,8 @@ impl TranscodeManager {
         let encoding = Arc::new(crate::vodencode::Encoding {
             #[cfg(target_os = "linux")]
             planning_metadata: None,
+            #[cfg(target_os = "linux")]
+            placement_request_digest: None,
             source_clock,
             shared_audio,
             source_object_version,

@@ -350,7 +350,14 @@ pub(super) fn compile(
         demand,
         application_owner_bytes: 0,
         output,
+        placement_observation: None,
     };
+    if let Some((digest, planning)) = encoding
+        .placement_request_digest
+        .zip(encoding.planning_metadata.as_ref())
+    {
+        request.observe_placement_for(digest, planning);
+    }
     // Complete the SAME metadata profile before core admission. Runtime
     // knows its configured root and the exact source/executable selections;
     // construction later checks actual requested capacities against this

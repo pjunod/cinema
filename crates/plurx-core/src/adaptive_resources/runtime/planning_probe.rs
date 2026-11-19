@@ -144,6 +144,10 @@ impl FixedProbeMetadataLease {
             .take_application_lease(requested_bytes)
             .ok_or_else(|| super::operations::OperationError::State.into())
     }
+    pub(super) fn placement_metadata_binding(&self) -> super::ReservationBinding {
+        self.payload.release.binding
+    }
+
     pub fn application_limit_bytes(&self) -> Option<u64> {
         self.payload.release.application.application_limit_bytes()
     }

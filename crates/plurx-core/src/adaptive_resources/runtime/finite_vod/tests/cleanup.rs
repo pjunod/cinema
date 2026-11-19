@@ -449,6 +449,8 @@ fn original_owner_with_producer(
                 trial: false,
             },
             application_owner_bytes: 0,
+            #[cfg(target_os = "linux")]
+            placement_observation: None,
             output: FiniteOutputLimits {
                 response_memory_bytes: 1024 * 1024,
                 retained_metadata_bytes: 1024 * 1024,

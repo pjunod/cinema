@@ -40,6 +40,7 @@ pub(in crate::adaptive_resources::runtime) struct HistoryBasis {
     runtime_epoch: [u8; 32],
     workload: [u8; 32],
     recipe: [u8; 32],
+    placement: Option<super::super::FinitePlacementObservation>,
 }
 impl HistoryBasis {
     /// Exact, conservatively narrow class for node-local service hysteresis.
@@ -122,6 +123,7 @@ pub(in crate::adaptive_resources::runtime) fn history_basis(
         runtime_epoch: epoch.finalize().into(),
         workload: workload.finalize().into(),
         recipe: recipe.finalize().into(),
+        placement: request.placement_observation,
     })
 }
 
@@ -178,8 +180,14 @@ fn rebase_for_new_mix(
     *recorded_windows = 0;
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ObservationKey {
+    history: HistoryKey,
+    placement: Option<[u8; 32]>,
+}
+
 fn refresh_history_key(
-    key: &mut Option<HistoryKey>,
+    key: &mut Option<ObservationKey>,
     basis: Option<HistoryBasis>,
     ledger: Option<&crate::adaptive_resources::ResourceLedger>,
     selected_family: Option<crate::adaptive_resources::FamilyIdentity>,
@@ -192,11 +200,15 @@ fn refresh_history_key(
         *key = None;
         return MixRefresh::Unavailable;
     };
-    let Ok(mix) = ledger.actual_history_mix_for(selected_family) else {
+    let original_metadata = basis.placement.map(|placement| placement.original_metadata);
+    let Ok(mix) = ledger.observation_history_mix(Some(selected_family), original_metadata) else {
         *key = None;
         return MixRefresh::Unavailable;
     };
-    let refreshed = basis.with_mix(mix);
+    let refreshed = ObservationKey {
+        history: basis.with_mix(mix.full),
+        placement: mix.incumbents,
+    };
     if *key == Some(refreshed) {
         MixRefresh::Unchanged
     } else {
@@ -209,7 +221,7 @@ pub(super) struct FiniteTelemetry {
     basis: Option<HistoryBasis>,
     ledger: Option<crate::adaptive_resources::ResourceLedger>,
     selected_family: Option<crate::adaptive_resources::FamilyIdentity>,
-    key: Option<HistoryKey>,
+    key: Option<ObservationKey>,
     control: RegisteredChildControl,
     history: Arc<Mutex<ResourceHistory>>,
     baseline: Option<Baseline>,
@@ -353,13 +365,14 @@ impl FiniteTelemetry {
             self.reset();
             return;
         };
+        let observed = self.key.expect("checked above");
         let key = HistoryKey {
             phase: if self.recorded_windows == 0 {
                 CostPhase::Startup
             } else {
                 CostPhase::Steady
             },
-            ..self.key.expect("checked above")
+            ..observed.history
         };
         let sample = CostSample {
             at: sampled_at,
@@ -369,14 +382,22 @@ impl FiniteTelemetry {
             elapsed_ns,
             observed_resident_bytes: resident,
         };
-        if self
-            .history
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .observe(key, sample)
         {
-            self.recorded = true;
-            self.recorded_windows = self.recorded_windows.saturating_add(1);
+            let mut history = self
+                .history
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if history.observe(key, sample) {
+                if let Some((placement, incumbents)) = self
+                    .basis
+                    .and_then(|basis| basis.placement)
+                    .zip(observed.placement)
+                {
+                    history.tag_finite_placement_sample(key, sample, placement.request, incumbents);
+                }
+                self.recorded = true;
+                self.recorded_windows = self.recorded_windows.saturating_add(1);
+            }
         }
         self.baseline = Some(current);
         self.units = 0;

@@ -15,6 +15,7 @@ impl TranscodeManager {
         file: &plurx_core::domain::MediaFile,
         planning: &plurx_core::store::PlaybackPlanningSnapshot,
         report: FixedProbeMetadataLease,
+        placement_request_digest: Option<[u8; 32]>,
     ) -> Result<Arc<crate::vodencode::Encoding>, String> {
         if request.file_id != file.id
             || planning.file.id != file.id
@@ -226,6 +227,7 @@ impl TranscodeManager {
             handoff_claim: std::sync::Mutex::new(None),
             hooks: Box::new(crate::vodencode::NoopEncodingHooks),
             planning_metadata: Some(report),
+            placement_request_digest,
         });
         Ok(encoding)
     }

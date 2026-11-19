@@ -293,6 +293,8 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
     let encoding = Arc::new(crate::vodencode::Encoding {
         #[cfg(target_os = "linux")]
         planning_metadata: None,
+        #[cfg(target_os = "linux")]
+        placement_request_digest: None,
         source_clock: plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
         shared_audio: None,
         candidate_recipe: None,
@@ -2150,6 +2152,8 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     let fresh = Arc::new(crate::vodencode::Encoding {
         #[cfg(target_os = "linux")]
         planning_metadata: None,
+        #[cfg(target_os = "linux")]
+        placement_request_digest: None,
         source_clock: plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
         shared_audio: None,
         candidate_recipe: None,

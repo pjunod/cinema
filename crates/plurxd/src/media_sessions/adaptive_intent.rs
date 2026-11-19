@@ -5,6 +5,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub(crate) fn bounded_digest<T: serde::Serialize>(value: &T) -> Result<String, String> {
+    bounded_digest_bytes(value).map(hex::encode)
+}
+
+pub(crate) fn bounded_digest_bytes<T: serde::Serialize>(value: &T) -> Result<[u8; 32], String> {
     struct HashedEnvelope {
         hash: Sha256,
         bytes: usize,
@@ -31,7 +35,7 @@ pub(crate) fn bounded_digest<T: serde::Serialize>(value: &T) -> Result<String, S
     };
     serde_json::to_writer(&mut output, value)
         .map_err(|_| "adaptive source binding exceeds its bounded request envelope".to_owned())?;
-    Ok(hex::encode(output.hash.finalize()))
+    Ok(output.hash.finalize().into())
 }
 
 /// Same field order, namespace aliases and omission rules as the owned Wire.
@@ -106,6 +110,80 @@ impl RemoteStartRequest {
             library_channel: library_channel.as_ref(),
             request,
         }
+    }
+
+    /// Stable inputs to the ordinary finite worker, apart from per-viewer
+    /// identity, which has no effect on its selected encoding. Profiled
+    /// candidates and retained variants have separate realization paths.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn finite_service_request(
+        &self,
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+    ) -> Option<crate::media_pool::FiniteServiceRequest> {
+        let request = &self.request;
+        let crate::transcode::SessionKind::Transcode { height } = request.kind else {
+            return None;
+        };
+        if request.presentation != crate::transcode::Presentation::Vod
+            || request.start_seconds != 0.0
+            || request.subtitle_burn.is_some()
+            || request.hdr10
+            || request.dv_processing_destination.is_some()
+            || request.continuous_media.is_some()
+            || self.library_channel.is_some()
+            || self.retained_output.is_some()
+            || self.candidate_id.is_some()
+            || self.candidate_catalog.is_some()
+            || request.candidate_context.is_some()
+            || !snapshot.file.dolby_vision.is_empty()
+            || request.file_id != snapshot.file.id
+            || self.source_size != snapshot.file.size
+            || self.source_mtime != snapshot.file.mtime
+        {
+            return None;
+        }
+        let planning_source_digest =
+            crate::media_pool::PlanningBinding::bounded_source_digest(snapshot)?;
+        let recipe_inputs = bounded_digest_bytes(&(
+            "plurx:ordinary-finite-placement:v1",
+            snapshot.generation,
+            planning_source_digest,
+            request.file_id,
+            height,
+            request.audio_index,
+            request.audio_offset_ms,
+            &request.audio_claim,
+            &request.audio_delivery,
+            request.vod_only,
+            request.passive_vod,
+            request.finite_bitrate_limit_bps,
+            request.block_budget_secs,
+            &request.source_telemetry,
+        ))
+        .ok()?;
+        Some(crate::media_pool::FiniteServiceRequest {
+            recipe_inputs,
+            planning_generation: snapshot.generation,
+            planning_source_digest,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn finite_placement_observation_key(
+        &self,
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+    ) -> Option<[u8; 32]> {
+        let crate::transcode::SessionKind::Transcode { height } = self.request.kind else {
+            return None;
+        };
+        let query = self.finite_service_request(snapshot)?;
+        Some(query.observation_key(
+            snapshot.file.id,
+            snapshot.file.size,
+            snapshot.file.mtime,
+            height,
+            self.request.audio_index,
+        ))
     }
 
     /// The origin computes this once before rewriting per-attempt identity.

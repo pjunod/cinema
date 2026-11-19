@@ -1756,6 +1756,8 @@ printf '%s\n' '{}'
     let mut encoding = crate::vodencode::Encoding {
         #[cfg(target_os = "linux")]
         planning_metadata: None,
+        #[cfg(target_os = "linux")]
+        placement_request_digest: None,
         source_object_version: source.object_version().to_owned(),
         source_clock: runtime.source_clock,
         shared_audio: None,

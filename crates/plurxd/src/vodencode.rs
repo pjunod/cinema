@@ -353,6 +353,9 @@ pub(crate) struct Encoding {
     #[cfg(target_os = "linux")]
     pub planning_metadata:
         Option<plurx_core::adaptive_resources::runtime::planning_probe::FixedProbeMetadataLease>,
+    /// Advisory placement identity of this original ordinary finite ask.
+    #[cfg(target_os = "linux")]
+    pub(crate) placement_request_digest: Option<[u8; 32]>,
     pub source_object_version: String,
     pub source_clock: plurx_core::transcode::VodSourceClock,
     pub plan: ResolvedTranscode,
@@ -1226,6 +1229,8 @@ impl Encoding {
         Arc::new(Encoding {
             #[cfg(target_os = "linux")]
             planning_metadata: self.planning_metadata.clone(),
+            #[cfg(target_os = "linux")]
+            placement_request_digest: self.placement_request_digest,
             source_object_version: self.source_object_version.clone(),
             source_clock: self.source_clock,
             plan: self.plan.clone(),

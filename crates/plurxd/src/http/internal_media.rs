@@ -19,7 +19,7 @@ use super::error::ApiError;
 use super::extract::AdminUser;
 use super::peer_transport::exact_auth_from_headers;
 use crate::media_pool::{
-    local_offer, local_snapshot, MediaDirectoryDiagnostics, MediaOffer, MediaOfferRequest,
+    local_offer, local_snapshot, MediaDirectoryDiagnostics, MediaOfferRequest,
     PlacementDiagnostics, OFFERS_PATH, SNAPSHOT_PATH,
 };
 use crate::media_sessions::MEDIA_BODY_READ_BUFFER;
@@ -533,13 +533,21 @@ pub(crate) async fn offers(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<MediaOffer>, StatusCode> {
+) -> Result<Response, StatusCode> {
     authorize(&state, &headers, "POST", OFFERS_PATH, &body).await?;
     let request = serde_json::from_slice::<MediaOfferRequest>(&body)
         .ok()
         .filter(MediaOfferRequest::is_valid)
         .ok_or(StatusCode::BAD_REQUEST)?;
-    Ok(Json(local_offer(&state, &request).await))
+    let mut offer = local_offer(&state, &request).await;
+    if offer.finite_service.is_some() {
+        let body = serde_json::to_vec(&offer).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Ok(signed) = signed_peer_json(&state, &headers, OFFERS_PATH, body) {
+            return Ok(signed);
+        }
+        offer.finite_service = None;
+    }
+    Ok(Json(offer).into_response())
 }
 
 pub(crate) async fn shared_cache_canary(
@@ -622,16 +630,20 @@ pub(crate) async fn subtitle_range(
         StatusCode::CONFLICT
     })?;
     let body = serde_json::to_vec(&answer).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let auth = exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    signed_peer_json(&state, &headers, crate::subtitle_ranges::PATH, body)
+}
+
+fn signed_peer_json(
+    state: &AppState,
+    headers: &HeaderMap,
+    path: &str,
+    body: Vec<u8>,
+) -> Result<Response, StatusCode> {
+    let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let payload = super::peer_transport::signed_response_payload(StatusCode::OK.as_u16(), &body);
     let signature = state
         .membership
-        .sign_internal_peer_response(
-            &auth.node_id,
-            &auth.nonce,
-            crate::subtitle_ranges::PATH,
-            &payload,
-        )
+        .sign_internal_peer_response(&auth.node_id, &auth.nonce, path, &payload)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Response::builder()
         .status(StatusCode::OK)

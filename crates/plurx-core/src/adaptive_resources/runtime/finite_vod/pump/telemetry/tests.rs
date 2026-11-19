@@ -192,6 +192,7 @@ fn actual_retained_mix_change_rekeys_and_rebases_window() {
         runtime_epoch: [1; 32],
         workload: [2; 32],
         recipe: [3; 32],
+        placement: None,
     };
     let mut key = None;
     assert_eq!(
@@ -203,7 +204,7 @@ fn actual_retained_mix_change_rekeys_and_rebases_window() {
         ),
         MixRefresh::Changed
     );
-    let old_key = key.expect("first live mixture key");
+    let old_key = key.expect("first live mixture key").history;
     let old_baseline = baseline(Instant::now(), 7, 11, 100, 2);
     let mut window = Some(old_baseline);
     let mut units = 3;
@@ -239,7 +240,7 @@ fn actual_retained_mix_change_rekeys_and_rebases_window() {
     assert_eq!(window.map(|sample| sample.at), Some(current.at));
     assert_eq!(units, 0);
     assert_eq!(recorded_windows, 0);
-    let new_key = key.expect("rebound live mixture key");
+    let new_key = key.expect("rebound live mixture key").history;
     assert_ne!(old_key.concurrent_mix, new_key.concurrent_mix);
     assert_eq!(new_key.phase, CostPhase::Startup);
     assert_eq!(

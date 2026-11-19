@@ -423,9 +423,10 @@ pub(crate) struct PlanningBinding {
     pub source_digest: String,
 }
 impl PlanningBinding {
-    pub(crate) fn from_snapshot(snapshot: &plurx_core::store::PlaybackPlanningSnapshot) -> Self {
-        use sha2::{Digest, Sha256};
-        let encoded = serde_json::to_vec(&(
+    fn snapshot_inputs(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+    ) -> impl Serialize + '_ {
+        (
             "plurx:planning-source-reorder-capacity:v2",
             &snapshot.file,
             &snapshot.probe_json,
@@ -438,12 +439,23 @@ impl PlanningBinding {
                 plurx_core::store::keys::SW_POOL_THREADS_PROVENANCE,
             ]
             .map(|key| (key, snapshot.settings.get(key))),
-        ))
-        .expect("source snapshot serializes");
+        )
+    }
+
+    pub(crate) fn from_snapshot(snapshot: &plurx_core::store::PlaybackPlanningSnapshot) -> Self {
+        let encoded = serde_json::to_vec(&Self::snapshot_inputs(snapshot))
+            .expect("source snapshot serializes");
         Self {
             generation: snapshot.generation,
             source_digest: hex::encode(Sha256::digest(encoded)),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn bounded_source_digest(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+    ) -> Option<[u8; 32]> {
+        crate::media_sessions::bounded_adaptive_digest_bytes(&Self::snapshot_inputs(snapshot)).ok()
     }
 }
 
@@ -1141,6 +1153,54 @@ pub(crate) struct QualityCatalogResult {
     pub causes: Vec<CatalogCause>,
 }
 
+/// An additive query attached only to the selected ordinary finite route.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct FiniteServiceRequest {
+    pub(crate) recipe_inputs: [u8; 32],
+    pub(crate) planning_generation: i64,
+    pub(crate) planning_source_digest: [u8; 32],
+}
+
+impl FiniteServiceRequest {
+    pub(crate) fn observation_key(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        target_height: i64,
+        audio_index: Option<i64>,
+    ) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(b"plurx:finite-service-offer:v1");
+        for value in [
+            file_id,
+            source_size,
+            source_mtime,
+            target_height,
+            audio_index.unwrap_or(-1),
+        ] {
+            hash.update(value.to_le_bytes());
+        }
+        hash.update(self.planning_generation.to_le_bytes());
+        hash.update(self.planning_source_digest);
+        hash.update(self.recipe_inputs);
+        hash.finalize().into()
+    }
+}
+
+/// One measured service window for the matching recipe and current mix.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct FiniteServiceEvidence {
+    request_digest: [u8; 32],
+    observed_recipe: [u8; 32],
+    incumbent_mix: [u8; 32],
+    elapsed_ns_per_unit: u64,
+    cpu_ns_per_unit: u64,
+    completed_units: u64,
+    sample_age_upper_ms: u32,
+    remaining_freshness_ms: u32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct MediaOfferRequest {
     pub protocol_version: i64,
@@ -1156,6 +1216,47 @@ pub(crate) struct MediaOfferRequest {
     pub hdr10: bool,
     pub output_contract: String,
     pub scratch_bytes_required: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) finite_service: Option<FiniteServiceRequest>,
+}
+
+impl FiniteServiceEvidence {
+    fn age_at(
+        mut self,
+        request_digest: [u8; 32],
+        exchange_started: &plurx_core::cluster::clock::ContinuousClockCapture,
+    ) -> Option<Self> {
+        let max_ms =
+            u32::try_from(plurx_core::resource_history::RECENT_LIFETIME.as_millis()).ok()?;
+        if self.request_digest != request_digest
+            || self.observed_recipe == [0; 32]
+            || self.incumbent_mix == [0; 32]
+            || self.elapsed_ns_per_unit == 0
+            || self.completed_units == 0
+            || self.remaining_freshness_ms == 0
+            || self
+                .sample_age_upper_ms
+                .checked_add(self.remaining_freshness_ms)?
+                > max_ms
+        {
+            return None;
+        }
+        let advertised = Duration::from_millis(u64::from(self.remaining_freshness_ms));
+        // Reuse the conservative causal age from the original local exchange
+        // start. The signed worker response was computed within that exchange.
+        // No remote clock value is compared to an ingress clock value.
+        let remaining = exchange_started
+            .deadline_after(advertised)
+            .ok()?
+            .entry_remaining()
+            .ok()?;
+        let remaining_ms = u32::try_from(remaining.as_millis()).ok()?;
+        self.sample_age_upper_ms = self
+            .sample_age_upper_ms
+            .checked_add(self.remaining_freshness_ms.checked_sub(remaining_ms)?)?;
+        self.remaining_freshness_ms = remaining_ms;
+        (remaining_ms != 0).then_some(self)
+    }
 }
 
 impl MediaOfferRequest {
@@ -1183,12 +1284,24 @@ impl MediaOfferRequest {
             hdr10,
             output_contract: "hls-mpegts-v1".to_owned(),
             scratch_bytes_required,
+            finite_service: None,
         };
         request.request_fingerprint = request.fingerprint();
         request
             .is_valid()
             .then_some(request)
             .ok_or("invalid_request")
+    }
+
+    fn finite_service_key(&self) -> Option<[u8; 32]> {
+        let query = self.finite_service.as_ref()?;
+        Some(query.observation_key(
+            self.file_id,
+            self.source_size,
+            self.source_mtime,
+            self.target_height,
+            self.audio_index,
+        ))
     }
 
     pub(crate) fn is_valid(&self) -> bool {
@@ -1262,6 +1375,8 @@ pub(crate) struct MediaOffer {
     pub free_hardware_slots: u32,
     pub free_software_threads: u32,
     pub recent_speed: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) finite_service: Option<FiniteServiceEvidence>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -2223,6 +2338,10 @@ impl MediaPool {
                 offers: Vec::new(),
             };
         }
+        let evidence_exchange = request
+            .finite_service
+            .as_ref()
+            .and_then(|_| state.membership.clock_guard().capture_continuous().ok());
         let snapshots = match tokio::time::timeout_at(deadline, async {
             self.expire().await;
             self.snapshots
@@ -2298,6 +2417,13 @@ impl MediaPool {
         let mut ranking_snapshots = snapshots;
         if let Some(local_snapshot) = local_snapshot {
             ranking_snapshots.insert(state.node_id.clone(), local_snapshot);
+        }
+        let evidence_window = request.finite_service_key().zip(evidence_exchange.as_ref());
+        for row in &mut offers {
+            row.finite_service = row
+                .finite_service
+                .zip(evidence_window)
+                .and_then(|(evidence, (digest, exchange))| evidence.age_at(digest, exchange));
         }
         rank_offers(
             &mut offers,
@@ -2463,8 +2589,8 @@ async fn fetch_offer(
     deadline: tokio::time::Instant,
 ) -> Option<MediaOffer> {
     let base = peer.http_base.as_deref()?;
-    let response = transport
-        .request(
+    let (response, verified) = transport
+        .request_with_optional_member_response(
             &peer.node_id,
             base,
             reqwest::Method::POST,
@@ -2472,14 +2598,16 @@ async fn fetch_offer(
             body,
             deadline,
             MAX_OFFER_BYTES,
-            PeerAuthMode::ExactRequest,
         )
         .await
         .ok()?;
     if !response.status.is_success() {
         return None;
     }
-    let offer = serde_json::from_slice::<MediaOffer>(&response.body).ok()?;
+    let mut offer = serde_json::from_slice::<MediaOffer>(&response.body).ok()?;
+    if !verified || !offer.eligible || offer.encoder != "software" {
+        offer.finite_service = None;
+    }
     offer_is_bounded(&offer, &peer.node_id, fingerprint, scratch_bytes_required).then_some(offer)
 }
 
@@ -2773,6 +2901,82 @@ pub(crate) async fn prepared_vod_owner(
 }
 
 pub(crate) async fn local_offer(state: &AppState, request: &MediaOfferRequest) -> MediaOffer {
+    #[cfg(target_os = "linux")]
+    if let Some(query) = request.finite_service.as_ref().filter(|query| {
+        request.start_millis == 0
+            && !request.hdr10
+            && request.subtitle_index.is_none()
+            && query.planning_generation >= 0
+            && query.planning_source_digest != [0; 32]
+    }) {
+        let request_digest = query.observation_key(
+            request.file_id,
+            request.source_size,
+            request.source_mtime,
+            request.target_height,
+            request.audio_index,
+        );
+        if let Some(runtime) = state
+            .resource_runtime
+            .as_ref()
+            .filter(|runtime| runtime.finite_placement_hint(request_digest).is_some())
+        {
+            let base = base_local_offer(state, request);
+            let corroborate = state.store.playback_planning_snapshot(
+                request.file_id,
+                &crate::transcode::QUALITY_PLANNING_KEYS,
+            );
+            tokio::pin!(base, corroborate);
+            // The speculative lookup may finish on the existing offer's
+            // time. Once the ordinary result is ready it owns the reply.
+            return tokio::select! {
+                biased;
+                snapshot = &mut corroborate => {
+                    let binding_matches = snapshot.ok().flatten().is_some_and(|snapshot| {
+                        snapshot.generation == query.planning_generation
+                            && PlanningBinding::bounded_source_digest(&snapshot)
+                                == Some(query.planning_source_digest)
+                    });
+                    let mut offer = base.await;
+                    if binding_matches && offer.eligible && offer.encoder == "software" {
+                        offer.finite_service = state.membership.clock_guard()
+                            .capture_continuous().ok()
+                            .zip(runtime.finite_placement_hint(request_digest))
+                            .and_then(|(clock, sample)| finite_service_evidence(request_digest, sample, &clock));
+                    }
+                    offer
+                }
+                offer = &mut base => offer,
+            };
+        }
+    }
+    base_local_offer(state, request).await
+}
+
+#[cfg(target_os = "linux")]
+fn finite_service_evidence(
+    request_digest: [u8; 32],
+    sample: plurx_core::resource_history::FinitePlacementHint,
+    clock: &plurx_core::cluster::clock::ContinuousClockCapture,
+) -> Option<FiniteServiceEvidence> {
+    let elapsed_ns_per_unit = u64::try_from(sample.elapsed_per_unit.as_nanos()).ok()?;
+    let sample_age_upper_ms =
+        u32::try_from(sample.sample_age.as_nanos().div_ceil(1_000_000)).ok()?;
+    let remaining_freshness_ms = u32::try_from(sample.remaining_freshness.as_millis()).ok()?;
+    FiniteServiceEvidence {
+        request_digest,
+        observed_recipe: sample.recipe,
+        incumbent_mix: sample.incumbents,
+        elapsed_ns_per_unit,
+        cpu_ns_per_unit: sample.cpu_ns_per_unit,
+        completed_units: sample.completed_units,
+        sample_age_upper_ms,
+        remaining_freshness_ms,
+    }
+    .age_at(request_digest, clock)
+}
+
+async fn base_local_offer(state: &AppState, request: &MediaOfferRequest) -> MediaOffer {
     let base = || MediaOffer {
         node_id: state.node_id.clone(),
         request_fingerprint: request.request_fingerprint.clone(),
@@ -2790,6 +2994,7 @@ pub(crate) async fn local_offer(state: &AppState, request: &MediaOfferRequest) -
         free_hardware_slots: 0,
         free_software_threads: 0,
         recent_speed: None,
+        finite_service: None,
     };
     if !request.is_valid() {
         return MediaOffer {
@@ -3073,6 +3278,18 @@ fn compare_offer(
                 (None, Some(_)) => Ordering::Less,
                 (None, None) => Ordering::Equal,
             }
+        })
+        .then_with(|| {
+            let measured = |offer: &MediaOffer| {
+                offer.finite_service.map(|evidence| {
+                    (
+                        std::cmp::Reverse(evidence.elapsed_ns_per_unit),
+                        std::cmp::Reverse(evidence.cpu_ns_per_unit),
+                        evidence.completed_units,
+                    )
+                })
+            };
+            measured(left).cmp(&measured(right))
         })
         .then_with(|| compare_speed(left.recent_speed, right.recent_speed))
         .then_with(|| compare_spare(left, right, left_snapshot, right_snapshot))
@@ -3564,6 +3781,7 @@ mod tests {
             hdr10: false,
             output_contract: "hls-mpegts-v1".into(),
             scratch_bytes_required: 1,
+            finite_service: None,
         };
         request.request_fingerprint = request.fingerprint();
         assert!(request.is_valid());
@@ -3881,6 +4099,7 @@ mod tests {
             free_hardware_slots: 0,
             free_software_threads: 4,
             recent_speed: Some(2.0),
+            finite_service: None,
         }
     }
 
@@ -4084,6 +4303,7 @@ mod tests {
             hdr10: false,
             output_contract: "hls-mpegts-v1".to_owned(),
             scratch_bytes_required: 1,
+            finite_service: None,
         };
         assert!(snapshot_can_answer(
             &snapshot("capable", &["hevc"], 1080),
@@ -4307,6 +4527,82 @@ mod tests {
             select_live_tv_worker(vec![busy, free, old, learner], &voters, "owner"),
             "free"
         );
+    }
+
+    #[test]
+    fn finite_service_key_binds_the_authenticated_planning_fields() {
+        let mut request = offer_request_for_original_budget_test();
+        let query = FiniteServiceRequest {
+            recipe_inputs: [1; 32],
+            planning_generation: 12,
+            planning_source_digest: [2; 32],
+        };
+        request.finite_service = Some(query.clone());
+        let observed = request
+            .finite_service_key()
+            .expect("the original finite query");
+
+        request.finite_service = Some(FiniteServiceRequest {
+            planning_generation: query.planning_generation + 1,
+            ..query.clone()
+        });
+        let body = serde_json::to_vec(&request).expect("rebound offer JSON");
+        let rebound: MediaOfferRequest = serde_json::from_slice(&body).expect("rebound offer wire");
+        assert!(rebound.is_valid());
+        assert_ne!(rebound.finite_service_key(), Some(observed));
+
+        request.finite_service = Some(FiniteServiceRequest {
+            planning_source_digest: [3; 32],
+            ..query
+        });
+        let body = serde_json::to_vec(&request).expect("rebound offer JSON");
+        let rebound: MediaOfferRequest = serde_json::from_slice(&body).expect("rebound offer wire");
+        assert!(rebound.is_valid());
+        assert_ne!(rebound.finite_service_key(), Some(observed));
+    }
+
+    #[test]
+    fn measured_finite_service_orders_eligible_workers_after_cache_and_capacity() {
+        let mut slow = offer("slow");
+        slow.recent_speed = Some(6.0);
+        slow.finite_service = Some(FiniteServiceEvidence {
+            request_digest: [1; 32],
+            observed_recipe: [2; 32],
+            incumbent_mix: [3; 32],
+            elapsed_ns_per_unit: 2_000_000_000,
+            cpu_ns_per_unit: 1_000_000_000,
+            completed_units: 1,
+            sample_age_upper_ms: 1,
+            remaining_freshness_ms: 14_999,
+        });
+        let mut fast = offer("fast");
+        fast.recent_speed = Some(1.0);
+        fast.finite_service = slow.finite_service.map(|sample| FiniteServiceEvidence {
+            elapsed_ns_per_unit: 1_000_000_000,
+            ..sample
+        });
+        let mut unavailable = offer("unavailable");
+        unavailable.eligible = false;
+        unavailable.finite_service = fast.finite_service;
+        let mut busy = offer("busy");
+        busy.free_software_threads = 0;
+        busy.finite_service = fast.finite_service;
+        let mut cached = offer("cache");
+        cached.cache_hit = true;
+        // An absent field is the original wire shape and remains eligible.
+        let wire = serde_json::to_value(&cached).expect("legacy-compatible offer JSON");
+        assert!(wire.get("finite_service").is_none());
+        let legacy: MediaOffer =
+            serde_json::from_value(wire).expect("legacy-compatible offer parser");
+        assert!(legacy.eligible && legacy.finite_service.is_none());
+
+        let mut candidates = vec![slow, fast, busy, unavailable, legacy];
+        rank_offers(&mut candidates, &HashMap::new(), "request", "slow");
+        let order = candidates
+            .iter()
+            .map(|offer| offer.node_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(order, ["cache", "fast", "slow", "busy", "unavailable"]);
     }
 
     #[test]

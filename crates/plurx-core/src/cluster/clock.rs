@@ -1875,7 +1875,7 @@ impl ContinuousDeadline {
 }
 
 #[cfg(target_os = "linux")]
-fn continuous_clock_ns() -> Result<u64, ClockRefusal> {
+pub(crate) fn continuous_clock_ns() -> Result<u64, ClockRefusal> {
     let mut sample = std::mem::MaybeUninit::<libc::timespec>::uninit();
     // SAFETY: sample points to writable timespec storage; success initializes
     // it before assume_init. CLOCK_BOOTTIME is read-only and owns no native fd.

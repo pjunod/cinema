@@ -1667,6 +1667,7 @@ impl super::TranscodeManager {
                 &snapshot.file,
                 &snapshot,
                 report,
+                envelope.finite_placement_observation_key(&snapshot),
             )
             .await?;
         let mut file = snapshot.file;

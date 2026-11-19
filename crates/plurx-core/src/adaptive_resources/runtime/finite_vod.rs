@@ -128,6 +128,14 @@ pub struct FiniteOutputLimits {
     pub bootstrap_memory_bytes: u64,
 }
 
+/// Fixed attribution to the original planning owner for placement telemetry.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+pub struct FinitePlacementObservation {
+    request: [u8; 32],
+    original_metadata: super::ReservationBinding,
+}
+
 pub struct SoftwareVodRequest {
     #[cfg(target_os = "linux")]
     pub native_plan: Option<FiniteNativePlan>,
@@ -145,6 +153,8 @@ pub struct SoftwareVodRequest {
     /// a separate lifetime slot from Rendition metadata and response bodies.
     pub application_owner_bytes: u64,
     pub output: FiniteOutputLimits,
+    #[cfg(target_os = "linux")]
+    pub placement_observation: Option<FinitePlacementObservation>,
     /// The original continuous create cutoff, carried through P into this R
     /// owner: a local create's own ingress cutoff or a remote grant. It is
     /// checked before any constructor IO and then at every fresh arm and
@@ -158,6 +168,22 @@ impl SoftwareVodRequest {
     /// The legacy scheduler's zero-based epoch is a separate counter; this
     /// value never resets or rewrites an existing admitted asset.
     pub const INITIAL_GENERATION_EPOCH: u64 = 1;
+
+    #[cfg(target_os = "linux")]
+    pub fn observe_placement_for(
+        &mut self,
+        request: [u8; 32],
+        planning: &super::planning_probe::FixedProbeMetadataLease,
+    ) {
+        if let [source] = self.sources.as_slice() {
+            if planning.matches_source(source) {
+                self.placement_observation = Some(FinitePlacementObservation {
+                    request,
+                    original_metadata: planning.placement_metadata_binding(),
+                });
+            }
+        }
+    }
 
     /// Requested capacity of the request's present planning graph. This is a
     /// heap projection, not native custody, admission, or a bound on future
@@ -1000,6 +1026,24 @@ impl NodeResourceRuntime {
                 }
             },
         ))
+    }
+}
+
+impl NodeResourceRuntime {
+    /// Read only current incumbent commitments and one fresh actual service
+    /// window. The upcoming attempt owns nothing at this point.
+    #[cfg(target_os = "linux")]
+    pub fn finite_placement_hint(
+        &self,
+        request: [u8; 32],
+    ) -> Option<crate::resource_history::FinitePlacementHint> {
+        let mix = self.ledger.prospective_history_mix().ok()?;
+        // A persisted history save can hold this mutex through fsync. The
+        // optional pre-Claim lookup spends only immediately available memory.
+        self.history
+            .try_lock()
+            .ok()?
+            .finite_placement_hint(request, mix)
     }
 }
 

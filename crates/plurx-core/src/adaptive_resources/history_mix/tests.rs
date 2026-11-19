@@ -29,6 +29,13 @@ fn demand(resources: ResourceVector) -> WorkloadDemand {
 }
 
 fn fixture(retained_memory: u64) -> Fixture {
+    fixture_before_selection(retained_memory, |_| ()).0
+}
+
+fn fixture_before_selection<T>(
+    retained_memory: u64,
+    before_selection: impl FnOnce(&ResourceLedger) -> T,
+) -> (Fixture, T) {
     use crate::adaptive_resources::MemoryClaim;
     use crate::process::observation::Metric;
     let ledger = ResourceLedger::new(
@@ -80,6 +87,7 @@ fn fixture(retained_memory: u64) -> Fixture {
         .expect("accounting-only retained swap fixture");
     drop(source_reservation);
 
+    let before_selection = before_selection(&ledger);
     let selected_family = ledger.new_family().expect("selected family");
     let roles = [FamilyRoleDemand {
         role: FamilyRole::Video,
@@ -94,13 +102,16 @@ fn fixture(retained_memory: u64) -> Fixture {
         .reserve_families_claiming(&families, Some(&[MemoryClaim::UnknownProducerPeak]))
         .expect("selected serialized producer");
     let (selected, _cleanup) = selected.pop().expect("selected video role");
-    Fixture {
-        ledger,
-        selected_family,
-        selected,
-        retained_binding,
-        retained_durable,
-    }
+    (
+        Fixture {
+            ledger,
+            selected_family,
+            selected,
+            retained_binding,
+            retained_durable,
+        },
+        before_selection,
+    )
 }
 
 fn replace_retained(fixture: &mut Fixture, memory: u64) {
@@ -250,6 +261,85 @@ fn actual_mix_refuses_another_active_role_and_unknown_held_state() {
             .ledger
             .actual_history_mix_for(unknown.selected_family),
         Err(AdmissionRefusal::InsufficientEvidence)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn placement_omits_only_the_original_metadata_from_the_observed_mix() {
+    let (actual, (own, _other, one_metadata)) = fixture_before_selection(256, |ledger| {
+        let add_metadata = || {
+            let roles = [
+                FamilyRoleDemand {
+                    role: FamilyRole::Video,
+                    demand: demand(vector(128, 1)),
+                    retained: None,
+                },
+                FamilyRoleDemand {
+                    role: FamilyRole::Companion,
+                    demand: demand(ResourceVector {
+                        peak_memory_bytes: 128,
+                        ..ResourceVector::default()
+                    }),
+                    retained: None,
+                },
+            ];
+            let family = ledger.new_family().expect("planning family");
+            let mut pair = ledger
+                .reserve_families_claiming(
+                    &[FamilyDemand {
+                        identity: family,
+                        roles: &roles,
+                    }],
+                    Some(&[
+                        MemoryClaim::UnknownProducerPeak,
+                        MemoryClaim::PlanningMetadata,
+                    ]),
+                )
+                .expect("original planning pair");
+            let (metadata, _metadata_close) = pair.pop().expect("original M");
+            let (producer, _producer_close) = pair.pop().expect("original unstarted P");
+            drop(producer);
+            metadata
+        };
+        let own = add_metadata();
+        let one_metadata = ledger
+            .prospective_history_mix()
+            .expect("one actual incumbent M");
+        (own, add_metadata(), one_metadata)
+    });
+    let mix = actual
+        .ledger
+        .observation_history_mix(Some(actual.selected_family), Some(own.custody_binding()))
+        .expect("full and placement observations");
+    assert_eq!(mix.incumbents, Some(one_metadata));
+    assert_ne!(mix.full, one_metadata);
+    assert_eq!(
+        actual
+            .ledger
+            .snapshot()
+            .expect("unchanged planning charges")
+            .planning_metadata_held,
+        2
+    );
+    assert_eq!(
+        actual.ledger.prospective_history_mix(),
+        Err(AdmissionRefusal::InsufficientEvidence),
+        "the still-held producer makes the prospective mix unknown"
+    );
+    let wrong_original = actual
+        .ledger
+        .observation_history_mix(
+            Some(actual.selected_family),
+            Some(actual.selected.custody_binding()),
+        )
+        .expect("full observation with a mismatched planning binding");
+    assert_eq!(wrong_original.full, mix.full);
+    assert_eq!(wrong_original.incumbents, None);
+    let _held = actual.ledger.inner.lock().expect("hold the ledger lock");
+    assert_eq!(
+        actual.ledger.prospective_history_mix(),
+        Err(AdmissionRefusal::Unavailable)
     );
 }
 

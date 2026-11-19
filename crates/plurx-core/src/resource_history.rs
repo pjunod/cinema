@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 const MAX_CLASSES: usize = 1024;
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 const PRIOR_LIFETIME_MS: u64 = 7 * 24 * 60 * 60 * 1000;
-const RECENT_LIFETIME: Duration = Duration::from_secs(15);
+pub const RECENT_LIFETIME: Duration = Duration::from_secs(15);
 
 /// Canonical adapter digests include helper/executable hashes, device/driver/API
 /// and effective limits in runtime_epoch; graph stages, geometry, fps, HDR,
@@ -46,6 +46,37 @@ pub struct CostSample {
     pub elapsed_ns: u64,
     /// Observed allocation, emphatically not a safe upper bound.
     pub observed_resident_bytes: u64,
+}
+
+impl CostSample {
+    fn per_unit(self) -> Option<(u64, u64)> {
+        let round_up = self.completed_units.checked_sub(1)?;
+        Some((
+            self.cpu_ns.checked_add(round_up)? / self.completed_units,
+            self.elapsed_ns.checked_add(round_up)? / self.completed_units,
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct PlacementSample {
+    request: [u8; 32],
+    incumbents: [u8; 32],
+    sample: CostSample,
+    observed_boot_ns: u64,
+}
+
+/// One live, matching durable service window in the worker's current mix.
+#[cfg(target_os = "linux")]
+pub struct FinitePlacementHint {
+    pub recipe: [u8; 32],
+    pub incumbents: [u8; 32],
+    pub elapsed_per_unit: Duration,
+    pub cpu_ns_per_unit: u64,
+    pub completed_units: u64,
+    pub sample_age: Duration,
+    pub remaining_freshness: Duration,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -95,6 +126,8 @@ struct Image {
 struct Entry {
     summary: CostSummary,
     last_monotonic: Option<Instant>,
+    #[cfg(target_os = "linux")]
+    placement: Option<PlacementSample>,
     lru: u64,
 }
 
@@ -161,6 +194,8 @@ impl ResourceHistory {
                             Entry {
                                 summary,
                                 last_monotonic: None,
+                                #[cfg(target_os = "linux")]
+                                placement: None,
                                 lru: history.clock,
                             },
                         );
@@ -247,18 +282,7 @@ impl ResourceHistory {
         }) {
             return false;
         }
-        let Some(cpu) = sample
-            .cpu_ns
-            .checked_add(sample.completed_units - 1)
-            .map(|sum| sum / sample.completed_units)
-        else {
-            return false;
-        };
-        let Some(elapsed) = sample
-            .elapsed_ns
-            .checked_add(sample.completed_units - 1)
-            .map(|sum| sum / sample.completed_units)
-        else {
+        let Some((cpu, elapsed)) = sample.per_unit() else {
             return false;
         };
         let Some(clock) = self.clock.checked_add(1) else {
@@ -284,6 +308,8 @@ impl ResourceHistory {
                 last_unix_ms: sample.unix_ms,
             },
             last_monotonic: None,
+            #[cfg(target_os = "linux")]
+            placement: None,
             lru: clock,
         });
         entry.summary.samples = entry.summary.samples.saturating_add(1);
@@ -295,8 +321,104 @@ impl ResourceHistory {
             .max(sample.observed_resident_bytes);
         entry.summary.last_unix_ms = sample.unix_ms;
         entry.last_monotonic = Some(sample.at);
+        #[cfg(target_os = "linux")]
+        {
+            entry.placement = None;
+        }
         entry.lru = clock;
         true
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn tag_finite_placement_sample(
+        &mut self,
+        key: HistoryKey,
+        sample: CostSample,
+        request: [u8; 32],
+        incumbents: [u8; 32],
+    ) {
+        let Some(entry) = self.entries.get_mut(&key) else {
+            return;
+        };
+        if key.phase != CostPhase::Startup || entry.last_monotonic != Some(sample.at) {
+            return;
+        }
+        if let Ok(observed_boot_ns) = crate::cluster::clock::continuous_clock_ns() {
+            entry.placement = Some(PlacementSample {
+                request,
+                incumbents,
+                sample,
+                observed_boot_ns,
+            });
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn finite_placement_hint(
+        &self,
+        request: [u8; 32],
+        incumbents: [u8; 32],
+    ) -> Option<FinitePlacementHint> {
+        self.finite_placement_hint_at(
+            request,
+            incumbents,
+            crate::cluster::clock::continuous_clock_ns().ok()?,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn finite_placement_hint_at(
+        &self,
+        request: [u8; 32],
+        incumbents: [u8; 32],
+        now_boot_ns: u64,
+    ) -> Option<FinitePlacementHint> {
+        use crate::resource_policy::{assess_finite_observed_service, FiniteObservedService};
+        use sha2::{Digest, Sha256};
+
+        let mut matches = self.entries.iter().filter_map(|(key, entry)| {
+            let tagged = entry.placement?;
+            if tagged.request != request || tagged.incumbents != incumbents {
+                return None;
+            }
+            let sample_age =
+                Duration::from_nanos(now_boot_ns.checked_sub(tagged.observed_boot_ns)?);
+            let remaining = RECENT_LIFETIME.checked_sub(sample_age)?;
+            (!remaining.is_zero()).then_some((key, tagged, sample_age, remaining))
+        });
+        let (key, tagged, sample_age, remaining_freshness) = matches.next()?;
+        // A single intent naming more than one live realized recipe/epoch is
+        // ambiguous. Do not guess which prior a new claim would select.
+        if matches.next().is_some() {
+            return None;
+        }
+        let (cpu_ns_per_unit, elapsed_ns) = tagged.sample.per_unit()?;
+        let sample_summary = CostSummary {
+            samples: 1,
+            max_cpu_ns_per_unit: cpu_ns_per_unit,
+            max_elapsed_ns_per_unit: elapsed_ns,
+            max_observed_resident_bytes: tagged.sample.observed_resident_bytes,
+            last_unix_ms: tagged.sample.unix_ms,
+        };
+        let FiniteObservedService::PriorWithinRemaining(elapsed_per_unit) =
+            assess_finite_observed_service(Some(sample_summary), None, 1, Duration::MAX)
+        else {
+            return None;
+        };
+        let mut recipe = Sha256::new();
+        recipe.update(b"plurx:finite-placement-observed-recipe:v1");
+        recipe.update(key.runtime_epoch);
+        recipe.update(key.workload);
+        recipe.update(key.recipe);
+        Some(FinitePlacementHint {
+            recipe: recipe.finalize().into(),
+            incumbents,
+            elapsed_per_unit,
+            cpu_ns_per_unit,
+            completed_units: tagged.sample.completed_units,
+            sample_age,
+            remaining_freshness,
+        })
     }
 
     /// Atomic replacement of bounded summaries only; never stores claims, trial
@@ -439,6 +561,59 @@ mod tests {
             observed_resident_bytes: 1024,
         }
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finite_placement_requires_one_recent_exact_recipe_and_incumbent_mix() {
+        let directory = tempfile::tempdir().expect("durable test TMPDIR");
+        let mut history = ResourceHistory::open(directory.path(), uuid::Uuid::new_v4(), 1000);
+        let requested = [5; 32];
+        let incumbents = [6; 32];
+        let first = HistoryKey {
+            phase: CostPhase::Startup,
+            ..key(1)
+        };
+        let observation = sample(Instant::now(), 1000);
+        assert!(history.observe(first, observation));
+        history.tag_finite_placement_sample(first, observation, requested, incumbents);
+        let observed = history.entries[&first]
+            .placement
+            .expect("live first observation")
+            .observed_boot_ns;
+        assert!(history
+            .finite_placement_hint_at(requested, [9; 32], observed)
+            .is_none());
+        assert!(history
+            .finite_placement_hint_at([7; 32], incumbents, observed)
+            .is_none());
+        let matched = history
+            .finite_placement_hint_at(requested, incumbents, observed)
+            .expect("recent exact placement observation");
+        assert_eq!(matched.elapsed_per_unit, Duration::from_nanos(67));
+        assert_eq!(matched.completed_units, 3);
+        assert!(history
+            .finite_placement_hint_at(
+                requested,
+                incumbents,
+                observed
+                    + u64::try_from(RECENT_LIFETIME.as_nanos())
+                        .expect("fixed freshness fits nanoseconds"),
+            )
+            .is_none());
+        let second = HistoryKey {
+            phase: CostPhase::Startup,
+            ..key(2)
+        };
+        assert!(history.observe(second, observation));
+        history.tag_finite_placement_sample(second, observation, requested, incumbents);
+        let observed = history.entries[&second]
+            .placement
+            .expect("live conflicting observation")
+            .observed_boot_ns;
+        assert!(history
+            .finite_placement_hint_at(requested, incumbents, observed)
+            .is_none());
+    }
+
     #[test]
     fn exclusive_owner_conflict_is_empty_volatile_and_restart_restores_only_priors() {
         let directory = tempfile::tempdir().expect("durable test TMPDIR");
