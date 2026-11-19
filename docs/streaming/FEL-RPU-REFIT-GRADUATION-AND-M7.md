@@ -33,11 +33,12 @@ the native-qualified coefficient grid. Do not call them current served F+.
 
 ## Physical playback graduation
 
-The Developer card requires copy-path serving and physical playback on each
-server-recognized platform before its switches move to Settings → Playback.
-Do not move the switches merely because a platform ignores the curves or an
-offscreen renderer passes. Mapping behavior is a measured fact, not a new
-client capability signal or a decoder change.
+Current main places the F+ switches in Settings → Playback under its revised
+Developer lifecycle policy. Their location does not establish copy-path or
+physical acceptance. Retain separate evidence for every server-recognized
+platform; ignoring curves or passing an offscreen render proves neither.
+Mapping behavior is a measured fact, not a new client capability signal or a
+decoder change.
 
 | Platform | Retained evidence | Remaining physical evidence |
 |---|---|---|
