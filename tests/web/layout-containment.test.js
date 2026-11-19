@@ -210,7 +210,9 @@ assert.match(index, /\.specs\{[^}]*grid-template-columns:84px minmax\(0,1fr\)/);
 assert.match(index, /\.specs dd\{[^}]*min-width:0[^}]*overflow-wrap:anywhere/);
 assert.match(index, /\.specs \.trk\{[^}]*max-width:100%[^}]*overflow-wrap:anywhere/);
 assert.match(index, /\.specs \.trkfold summary\{[^}]*width:fit-content[^}]*max-width:100%/);
-assert.match(index, /\.clv\{[^}]*min-width:0[^}]*overflow:hidden;text-overflow:ellipsis/);
+assert.match(index, /\.clv\{[^}]*min-width:0[^}]*overflow-wrap:anywhere/);
+assert.match(index, /\.clnodetable td\.clname,\.clnodetable td\[data-label=Build\]\{[^}]*overflow-wrap:anywhere/);
+assert.match(index, /@container clnodes \(max-width:980px\)\{/);
 
 const baseline = fs.readFileSync(path.join(ROOT, "scripts/ui-baseline"), "utf8");
 for (const stress of ["stress_long_track_containment", "stress_cluster_strip_containment"]) {

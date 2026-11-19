@@ -1425,6 +1425,7 @@
   .clcardhead .clwhy{text-align:right}
   .clcardhead h2 small{font-weight:500;color:var(--muted);letter-spacing:0;text-transform:none;font-size:12.5px;margin-left:8px}
   .clcardhead .row{gap:8px;flex-wrap:nowrap;align-items:center}
+  .clcardhead .row>button{white-space:nowrap;flex:0 0 auto}
   .clcardhead select{width:auto;font-size:12.5px;padding:4px 8px}
   .clcardhead label.chk{padding:0;font-size:12.5px;color:var(--muted)}
   .clcardhead label.chk input{width:15px;height:15px}
@@ -1433,8 +1434,9 @@
   .clwhy{font-size:12px;color:var(--muted);line-height:1.4}
   .cldot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-right:8px;vertical-align:1px;flex:0 0 auto}
   .cldot.good{background:var(--good)} .cldot.warn{background:var(--warn)} .cldot.bad{background:var(--bad)}
-  /* The strip: the page's verdict and five readings. Values never wrap; a
-     long hostname ellipsizes inside its own cell instead of widening the row. */
+  /* The strip: the page's verdict and five readings. Nothing in it is hidden:
+     a long value or sub-line wraps inside its own cell instead of widening the
+     row or being cut off. */
   .clstrip{display:grid;grid-template-columns:minmax(250px,1.7fr) repeat(5,minmax(0,1fr))}
   .clstrip>div{padding:13px 16px 14px;border-left:1px solid var(--line);min-width:0}
   .clstrip>div:first-child{border-left:3px solid var(--line)}
@@ -1442,8 +1444,8 @@
   .clstrip[data-tone=warn]>div:first-child{border-left-color:var(--warn)}
   .clstrip[data-tone=bad]>div:first-child{border-left-color:var(--bad)}
   .clk{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)}
-  .clv{font-size:17px;font-weight:700;margin-top:3px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
-  .cls{font-size:12px;color:var(--muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .clv{font-size:17px;font-weight:700;margin-top:3px;min-width:0;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+  .cls{font-size:12px;color:var(--muted);margin-top:1px;line-height:1.4;overflow-wrap:anywhere}
   /* Alerts: one block per condition, most severe first, none when healthy. */
   .clalert{display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:12px 16px;border-radius:10px;font-size:13px;line-height:1.5;
     background:color-mix(in srgb,var(--warn) 9%,var(--panel));border:1px solid color-mix(in srgb,var(--warn) 45%,var(--line))}
@@ -1460,9 +1462,18 @@
   .clalertnext{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px}
   #cluster-operations:empty{display:none}
   .clexpansion{padding:14px 18px;border-bottom:1px solid var(--line);background:var(--panel2)}
-  /* The nodes table. It grows with the roster: no height cap, no inner scroll. */
-  .clnodetable{margin:0}
+  /* The nodes table. It grows with the roster: no height cap, no inner scroll.
+     It is sized by its card, never clipped by it: the Node and Build cells
+     wrap, and below the card width at which nine columns fit, every row
+     reflows into a labelled card (the .adminwrap phone layout) — driven by the
+     card's own width, not the viewport's, so the sidebar and a long roster
+     cannot push a column out of sight. 980px: the eight other columns take
+     about 680px with stock readings, and below 980 the Node cell drops under
+     the ~180px a hostname and two pills need (measured in the render harness). */
+  #cluster-nodes{container:clnodes/inline-size}
+  .clnodetable{margin:0;width:100%}
   .clnodetable th,.clnodetable td{padding:10px 12px;font-size:13px;vertical-align:middle;white-space:nowrap}
+  .clnodetable td.clname,.clnodetable td[data-label=Build]{white-space:normal;overflow-wrap:anywhere;min-width:0}
   .clnodetable th{font-size:10.5px;letter-spacing:.08em;background:color-mix(in srgb,var(--panel2) 55%,var(--panel))}
   .clnodetable th:first-child,.clnodetable td:first-child{padding-left:18px}
   .clnodetable th:last-child,.clnodetable td:last-child{padding-right:18px;text-align:right}
@@ -1470,7 +1481,8 @@
   .clnodetable td.num{font-variant-numeric:tabular-nums}
   .clnodetable tr.clrow{cursor:pointer}
   .clnodetable tr.clrow:hover>td{background:color-mix(in srgb,var(--accent) 5%,transparent)}
-  .clnodetable tr.clrow:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+  .clnodebtn{all:unset;cursor:pointer;border-radius:4px;overflow-wrap:anywhere}
+  .clnodebtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .clnodetable tr.stale>td{color:var(--muted)}
   .clnodetable tr[hidden]{display:none}
   .clnodetable tr.setdrawer>td{text-align:left;padding:16px 18px;white-space:normal}
@@ -1481,9 +1493,11 @@
   .cldrawer{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px 28px}
   .cldrawer h4{margin:0 0 8px;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)}
   .cldrawer .kvgrid{font-size:12.5px;gap:5px 14px}
-  .cldrawer .kvgrid dd{overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
-  .cldraweract{grid-column:1/-1;display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
-  .cldraweract .clpush{margin-left:auto;display:flex;gap:10px;align-items:center}
+  .cldrawer .kvgrid dd{word-break:normal;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+  .cldraweract{grid-column:1/-1;display:flex;gap:10px 16px;align-items:center;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+  .clactitem{display:inline-flex;gap:4px 10px;align-items:center;flex-wrap:wrap;min-width:0}
+  .clactitem>button{flex:0 0 auto}
+  .cldraweract .clpush{margin-left:auto}
   .cldraweract .clexpansion{flex-basis:100%;border:1px solid var(--line);border-radius:8px}
   /* Two-up: settings beside the store, maintenance beside backup. */
   .cltwo{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,.75fr);gap:18px;align-items:start}
@@ -1524,6 +1538,7 @@
   .clcheck i{font-style:normal;font-weight:700}
   .clcheck b{font-weight:600}
   .clcheck span{color:var(--muted)}
+  .clcheck small{display:block;color:var(--muted);font-size:12px;line-height:1.45;margin-top:1px}
   .clcard .setfoot{margin:0;padding:12px 18px;border-top:1px solid var(--line)}
   .clcard .err:empty{display:none}
   .clcard .err{padding:8px 18px 0}
@@ -1539,19 +1554,28 @@
     .clstrip>div:nth-child(2),.clstrip>div:nth-child(5){border-left:0}
     .clstrip>div:nth-child(n+5){border-top:1px solid var(--line)}
   }
-  @media(max-width:900px){ .cltwo{grid-template-columns:minmax(0,1fr)} .cldrawer{grid-template-columns:minmax(0,1fr);gap:16px} }
+  @media(max-width:900px){ .cltwo{grid-template-columns:minmax(0,1fr)} }
+  @container clnodes (max-width:980px){
+    .clnodetable,.clnodetable tbody,.clnodetable tr,.clnodetable td{display:block;width:auto}
+    .clnodetable thead{display:none}
+    .clnodetable{padding:10px 12px 2px}
+    .clnodetable tr{border:1px solid var(--line);border-radius:10px;padding:10px 13px;margin:0 0 10px;background:var(--panel)}
+    .clnodetable tr[hidden]{display:none}
+    .clnodetable td,.clnodetable td:first-child,.clnodetable td:last-child{padding:3px 0;border:0;white-space:normal;text-align:left}
+    .clnodetable td[data-label]::before{content:attr(data-label);display:block;color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:1px}
+    .clnodetable tr.clrow{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:2px 12px}
+    .clnodetable tr.clrow>td.clname{grid-column:1/-1;padding-bottom:6px}
+    .clnodetable tr.clrow:hover>td{background:none}
+    .clnodetable tr.setdrawer{margin-top:-10px;border-top-left-radius:0;border-top-right-radius:0;background:var(--panel2)}
+    .clnodetable tr.setdrawer>td{padding:6px 0 4px;background:none}
+    .cldrawer{grid-template-columns:minmax(0,1fr);gap:16px}
+  }
   @media(max-width:640px){
     .clstrip{grid-template-columns:repeat(2,minmax(0,1fr))}
     .clstrip>div{border-left:0;border-top:1px solid var(--line)}
     .clstrip>div:nth-child(even){border-right:1px solid var(--line)}
     .clstrip>div:first-child{border-top:0;border-right:0}
     .clstrip>div:nth-child(n+5){border-top:1px solid var(--line)}
-    .clnodetable{padding:10px 12px 2px}
-    .clnodetable td{white-space:normal}
-    .clnodetable td:last-child{text-align:left}
-    .clnodetable tr.clrow{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:2px 12px}
-    .clnodetable tr.clrow>td.clname{grid-column:1/-1;padding-bottom:6px}
-    .clnodetable th:first-child,.clnodetable td:first-child{padding-left:0}
     .clcardhead{flex-wrap:wrap}
     .clcardhead .row{flex-wrap:wrap}
     .clact{grid-template-columns:minmax(0,1fr)}
