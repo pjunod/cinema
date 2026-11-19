@@ -39,7 +39,7 @@
 //!
 //! It is a source census: it counts spellings, not calls or cost.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
@@ -400,25 +400,275 @@ fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
     }
 }
 
-#[derive(Default)]
-struct Counter {
-    counts: BTreeMap<Class, usize>,
+/// Where a source sits, which decides which of its declarations can reach
+/// a counted site.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// A counted production file of this crate: every declaration.
+    Daemon,
+    /// An exempt facade file: only fields visible outside it. A private
+    /// facade field cannot be named from a counted file; the compiler
+    /// rejects it.
+    Facade,
+    /// Another workspace or vendored crate: only its `pub` fields and
+    /// aliases, which are all this crate can reach.
+    Dependency,
 }
 
-impl Counter {
+/// What the sources declare, read before any site is counted, so a field
+/// spelling counts only where a raw handle can actually sit behind it.
+///
+/// A name counts when no read source declares it (an unknown receiver), or
+/// when any declaration of it has a raw or unresolved type: one of
+/// [`TYPES`] or an alias of one, a generic parameter, `impl Trait`, `dyn`
+/// or `_`. Only a name every declaration gives a proven type is not
+/// counted. One raw field anywhere keeps the name counted everywhere.
+#[derive(Default)]
+struct Declarations {
+    declared_fields: BTreeSet<String>,
+    raw_fields: BTreeSet<String>,
+    /// Local names that stand for a raw type: `use … as`, `type X = …`.
+    raw_aliases: BTreeSet<String>,
+    /// `(enum, variant)` of every enum the counted crate declares, so
+    /// `Rejection::ServingFence` is not the fence.
+    variants: BTreeSet<(String, String)>,
+    pending_fields: Vec<(String, syn::Type, BTreeSet<String>)>,
+    type_items: Vec<(String, syn::Type)>,
+}
+
+impl Declarations {
+    fn of(source: &str) -> Self {
+        let mut declarations = Self::default();
+        declarations.read(source, Scope::Daemon);
+        declarations.finish();
+        declarations
+    }
+
+    fn read(&mut self, source: &str, scope: Scope) {
+        let Ok(file) = syn::parse_file(source) else {
+            assert!(scope == Scope::Dependency, "a production file parses");
+            return;
+        };
+        let mut reader = DeclarationReader {
+            declarations: self,
+            scope,
+            generics: Vec::new(),
+        };
+        reader.visit_file(&file);
+    }
+
+    /// Resolve aliases of aliases, then classify every pending field.
+    fn finish(&mut self) {
+        loop {
+            let before = self.raw_aliases.len();
+            for (name, ty) in &self.type_items {
+                if type_names_raw(ty, &BTreeSet::new(), &self.raw_aliases, false) {
+                    self.raw_aliases.insert(name.clone());
+                }
+            }
+            if self.raw_aliases.len() == before {
+                break;
+            }
+        }
+        for (name, ty, generics) in std::mem::take(&mut self.pending_fields) {
+            if type_names_raw(&ty, &generics, &self.raw_aliases, true) {
+                self.raw_fields.insert(name);
+            }
+        }
+    }
+
+    fn counts_field(&self, name: &str) -> bool {
+        !self.declared_fields.contains(name) || self.raw_fields.contains(name)
+    }
+}
+
+/// Whether a type names a raw cluster type or an alias of one; with
+/// `unresolved`, also whether the census cannot tell what it is.
+fn type_names_raw(
+    ty: &syn::Type,
+    generics: &BTreeSet<String>,
+    aliases: &BTreeSet<String>,
+    unresolved: bool,
+) -> bool {
+    struct Probe<'a> {
+        generics: &'a BTreeSet<String>,
+        aliases: &'a BTreeSet<String>,
+        unresolved: bool,
+        hit: bool,
+    }
+    impl<'ast> Visit<'ast> for Probe<'_> {
+        fn visit_type_impl_trait(&mut self, ty: &'ast syn::TypeImplTrait) {
+            self.hit |= self.unresolved;
+            syn::visit::visit_type_impl_trait(self, ty);
+        }
+        fn visit_type_trait_object(&mut self, ty: &'ast syn::TypeTraitObject) {
+            self.hit |= self.unresolved;
+            syn::visit::visit_type_trait_object(self, ty);
+        }
+        fn visit_type_infer(&mut self, ty: &'ast syn::TypeInfer) {
+            self.hit |= self.unresolved;
+            syn::visit::visit_type_infer(self, ty);
+        }
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            for segment in &path.segments {
+                let name = segment.ident.to_string();
+                if TYPES.contains(&name.as_str()) || self.aliases.contains(&name) {
+                    self.hit = true;
+                }
+            }
+            if self.unresolved
+                && path.segments.len() == 1
+                && self.generics.contains(&path.segments[0].ident.to_string())
+            {
+                self.hit = true;
+            }
+            syn::visit::visit_path(self, path);
+        }
+    }
+    let mut probe = Probe {
+        generics,
+        aliases,
+        unresolved,
+        hit: false,
+    };
+    probe.visit_type(ty);
+    probe.hit
+}
+
+struct DeclarationReader<'d> {
+    declarations: &'d mut Declarations,
+    scope: Scope,
+    generics: Vec<BTreeSet<String>>,
+}
+
+impl DeclarationReader<'_> {
+    fn with_generics(&mut self, generics: &syn::Generics, visit: impl FnOnce(&mut Self)) {
+        let mut names = self.generics.last().cloned().unwrap_or_default();
+        for param in generics.type_params() {
+            names.insert(param.ident.to_string());
+        }
+        self.generics.push(names);
+        visit(self);
+        self.generics.pop();
+    }
+
+    fn public(vis: &syn::Visibility) -> bool {
+        matches!(vis, syn::Visibility::Public(_))
+    }
+}
+
+impl<'ast> Visit<'ast> for DeclarationReader<'_> {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        let skip = match item {
+            syn::Item::Mod(item) => is_cfg_test(&item.attrs),
+            syn::Item::Struct(item) => is_cfg_test(&item.attrs),
+            syn::Item::Enum(item) => is_cfg_test(&item.attrs),
+            syn::Item::Union(item) => is_cfg_test(&item.attrs),
+            syn::Item::Impl(item) => is_cfg_test(&item.attrs),
+            syn::Item::Fn(item) => is_cfg_test(&item.attrs),
+            syn::Item::Type(item) => is_cfg_test(&item.attrs),
+            syn::Item::Use(item) => is_cfg_test(&item.attrs),
+            _ => false,
+        };
+        if !skip {
+            syn::visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+        self.with_generics(&item.generics, |reader| {
+            syn::visit::visit_item_struct(reader, item);
+        });
+    }
+
+    fn visit_item_union(&mut self, item: &'ast syn::ItemUnion) {
+        self.with_generics(&item.generics, |reader| {
+            syn::visit::visit_item_union(reader, item);
+        });
+    }
+
+    fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
+        if self.scope != Scope::Dependency {
+            for variant in &item.variants {
+                self.declarations
+                    .variants
+                    .insert((item.ident.to_string(), variant.ident.to_string()));
+            }
+        }
+        self.with_generics(&item.generics, |reader| {
+            syn::visit::visit_item_enum(reader, item);
+        });
+    }
+
+    fn visit_field(&mut self, field: &'ast syn::Field) {
+        if is_cfg_test(&field.attrs) {
+            return;
+        }
+        let Some(name) = field.ident.as_ref().map(ToString::to_string) else {
+            return;
+        };
+        let visible = match self.scope {
+            Scope::Daemon => true,
+            Scope::Facade => !matches!(field.vis, syn::Visibility::Inherited),
+            Scope::Dependency => Self::public(&field.vis),
+        };
+        if visible && Class::field(&name).is_some() {
+            self.declarations.declared_fields.insert(name.clone());
+            let generics = self.generics.last().cloned().unwrap_or_default();
+            self.declarations
+                .pending_fields
+                .push((name, field.ty.clone(), generics));
+        }
+    }
+
+    fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+        if self.scope != Scope::Dependency || Self::public(&item.vis) {
+            self.declarations
+                .type_items
+                .push((item.ident.to_string(), (*item.ty).clone()));
+        }
+    }
+
+    fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
+        if TYPES.contains(&rename.ident.to_string().as_str()) {
+            self.declarations
+                .raw_aliases
+                .insert(rename.rename.to_string());
+        }
+    }
+}
+
+struct Counter<'d> {
+    counts: BTreeMap<Class, usize>,
+    declarations: &'d Declarations,
+}
+
+impl Counter<'_> {
+    /// A field spelling counts only where a raw handle can sit behind it.
+    fn field(&self, name: &str) -> Option<Class> {
+        Class::field(name).filter(|_| self.declarations.counts_field(name))
+    }
+
     fn add(&mut self, class: Class) {
         *self.counts.entry(class).or_default() += 1;
     }
 
-    /// The class of a path given as its segment names, if it counts.
-    fn path_class<'a>(mut segments: impl Iterator<Item = &'a str>) -> Option<Class> {
-        let first = segments.next()?;
-        if TYPES.contains(&first) {
-            return Some(Class::Type);
-        }
+    /// The class of a path given as its segment names, if it counts. A raw
+    /// type's name, or an alias of one, is the raw type unless it follows
+    /// `Self` or an enum this crate declares with a variant of that name.
+    fn path_class<'a>(&self, segments: impl Iterator<Item = &'a str>) -> Option<Class> {
+        let segments = segments.collect::<Vec<_>>();
+        let first = *segments.first()?;
         let mut class = (first == "hiqlite").then_some(Class::Hiqlite);
-        for segment in segments {
-            if TYPES.contains(&segment) {
+        for (at, segment) in segments.iter().enumerate() {
+            let raw = TYPES.contains(segment) || self.declarations.raw_aliases.contains(*segment);
+            let variant = at > 0
+                && (segments[at - 1] == "Self"
+                    || self
+                        .declarations
+                        .variants
+                        .contains(&(segments[at - 1].to_owned(), (*segment).to_owned())));
+            if raw && !variant {
                 class = Some(Class::Type);
             }
         }
@@ -447,7 +697,7 @@ impl Counter {
 
     fn use_leaf(&mut self, prefix: &[String], leaf: Option<String>) {
         let segments = prefix.iter().map(String::as_str).chain(leaf.as_deref());
-        if let Some(class) = Self::path_class(segments) {
+        if let Some(class) = self.path_class(segments) {
             self.add(class);
         }
     }
@@ -477,7 +727,7 @@ impl Counter {
                             if let Some(class) = Class::method(&name) {
                                 self.add(class);
                             }
-                        } else if let Some(class) = Class::field(&name) {
+                        } else if let Some(class) = self.field(&name) {
                             self.add(class);
                         }
                         at += 2;
@@ -507,7 +757,7 @@ impl Counter {
                     {
                         self.add(Class::Transport);
                     }
-                    if let Some(class) = Self::path_class(segments.iter().map(String::as_str)) {
+                    if let Some(class) = self.path_class(segments.iter().map(String::as_str)) {
                         self.add(class);
                     }
                     at = next;
@@ -520,7 +770,7 @@ impl Counter {
     }
 }
 
-impl<'ast> Visit<'ast> for Counter {
+impl<'ast> Visit<'ast> for Counter<'_> {
     fn visit_item(&mut self, item: &'ast syn::Item) {
         let attrs = match item {
             syn::Item::Const(item) => &item.attrs,
@@ -583,7 +833,7 @@ impl<'ast> Visit<'ast> for Counter {
         }
         // `Foo { membership }`: the shorthand moves the handle by name.
         if let (None, syn::Member::Named(name)) = (&field.colon_token, &field.member) {
-            if let Some(class) = Class::field(&name.to_string()) {
+            if let Some(class) = self.field(&name.to_string()) {
                 self.add(class);
             }
         }
@@ -597,7 +847,7 @@ impl<'ast> Visit<'ast> for Counter {
             return;
         }
         if let syn::Member::Named(name) = &field.member {
-            if let Some(class) = Class::field(&name.to_string()) {
+            if let Some(class) = self.field(&name.to_string()) {
                 self.add(class);
             }
         }
@@ -635,7 +885,7 @@ impl<'ast> Visit<'ast> for Counter {
 
     fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
         if let syn::Member::Named(name) = &field.member {
-            if let Some(class) = Class::field(&name.to_string()) {
+            if let Some(class) = self.field(&name.to_string()) {
                 self.add(class);
             }
         }
@@ -668,7 +918,7 @@ impl<'ast> Visit<'ast> for Counter {
             .iter()
             .map(|segment| segment.ident.to_string())
             .collect::<Vec<_>>();
-        if let Some(class) = Self::path_class(names.iter().map(String::as_str)) {
+        if let Some(class) = self.path_class(names.iter().map(String::as_str)) {
             self.add(class);
         }
         syn::visit::visit_path(self, path);
@@ -684,12 +934,61 @@ impl<'ast> Visit<'ast> for Counter {
     }
 }
 
-/// Count one file's source.
+/// Count one self-contained source: its own declarations decide its
+/// field spellings.
 fn census_of(source: &str) -> BTreeMap<Class, usize> {
+    census_with(source, &Declarations::of(source))
+}
+
+fn census_with(source: &str, declarations: &Declarations) -> BTreeMap<Class, usize> {
     let file = syn::parse_file(source).expect("a production file parses");
-    let mut counter = Counter::default();
+    let mut counter = Counter {
+        counts: BTreeMap::new(),
+        declarations,
+    };
     counter.visit_file(&file);
     counter.counts
+}
+
+/// Production sources of every other workspace and vendored crate, whose
+/// `pub` fields this crate can reach.
+fn dependency_sources() -> Vec<String> {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .canonicalize()
+        .expect("the crate directory");
+    let mut roots = Vec::new();
+    for parent in [manifest.join(".."), manifest.join("../../vendor")] {
+        for entry in std::fs::read_dir(&parent).expect("a workspace crate directory") {
+            let path = entry.expect("a workspace crate").path().join("src");
+            let Ok(path) = path.canonicalize() else {
+                continue;
+            };
+            if path.is_dir() && !path.starts_with(&manifest) {
+                roots.push(path);
+            }
+        }
+    }
+    let mut sources = Vec::new();
+    while let Some(directory) = roots.pop() {
+        for entry in std::fs::read_dir(&directory).expect("a source directory") {
+            let path = entry.expect("a source entry").path();
+            let stem = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("");
+            if path.is_dir() {
+                if stem != "tests" {
+                    roots.push(path);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && stem != "tests"
+                && !stem.ends_with("_tests")
+            {
+                sources.push(std::fs::read_to_string(&path).expect("read a dependency source"));
+            }
+        }
+    }
+    sources
 }
 
 type Census = BTreeMap<(String, Class), usize>;
@@ -701,18 +1000,37 @@ fn src_root() -> std::path::PathBuf {
 /// Every production file's reach-arounds.
 fn census() -> Census {
     let root = src_root();
+    let files = source_inventory::production_files(&root, &[])
+        .into_iter()
+        .map(|path| {
+            let rel = path
+                .strip_prefix(&root)
+                .expect("a production file under src")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let source = std::fs::read_to_string(&path).expect("read a production file");
+            (rel, source)
+        })
+        .collect::<Vec<_>>();
+    let mut declarations = Declarations::default();
+    for (rel, source) in &files {
+        let scope = if exempt(rel) {
+            Scope::Facade
+        } else {
+            Scope::Daemon
+        };
+        declarations.read(source, scope);
+    }
+    for source in dependency_sources() {
+        declarations.read(&source, Scope::Dependency);
+    }
+    declarations.finish();
     let mut census = Census::new();
-    for path in source_inventory::production_files(&root, &[]) {
-        let rel = path
-            .strip_prefix(&root)
-            .expect("a production file under src")
-            .to_string_lossy()
-            .replace('\\', "/");
-        if exempt(&rel) {
+    for (rel, source) in &files {
+        if exempt(rel) {
             continue;
         }
-        let source = std::fs::read_to_string(&path).expect("read a production file");
-        for (class, count) in census_of(&source) {
+        for (class, count) in census_with(source, &declarations) {
             census.insert((rel.clone(), class), count);
         }
     }
@@ -923,6 +1241,114 @@ fn a_struct_update_in_a_macro_is_not_a_field() {
     assert_eq!(counted.get(&Class::Serving), None);
     let counted = census_of("fn f() -> Vec<S> { vec![s.serving] }");
     assert_eq!(counted.get(&Class::Serving), Some(&1));
+}
+
+/// Classification by declaration: what the census must still count, and the
+/// one shape it no longer counts, a field every declaration proves local.
+#[test]
+fn spellings_count_by_what_the_crate_declares() {
+    let counted: &[(&str, &str, Class)] = &[
+        (
+            "a raw handle under another field name",
+            "struct S { handle: MembershipManager }\n\
+             async fn f(s: &S) { let _ = s.handle.promote_learner(1).await; }",
+            Class::Type,
+        ),
+        (
+            "a use-as alias of a raw type",
+            "use plurx_core::cluster::membership::MembershipManager as Mm;\n\
+             fn f(m: Mm) -> Mm { m }",
+            Class::Type,
+        ),
+        (
+            "a type alias of a raw type",
+            "type Mm = plurx_core::cluster::membership::MembershipManager;\n\
+             fn f(m: Mm) {}",
+            Class::Type,
+        ),
+        (
+            "an accessor returning a raw type",
+            "impl S { fn raw(&self) -> &ServingFence { &self.x } }",
+            Class::Type,
+        ),
+        (
+            "a generic-typed field",
+            "struct S<T> { membership: T }\n\
+             fn f<T>(s: &S<T>) { let _ = &s.membership; }",
+            Class::Membership,
+        ),
+        (
+            "a trait-object field",
+            "struct S { serving: Box<dyn Gate> }\n\
+             fn f(s: &S) { let _ = &s.serving; }",
+            Class::Serving,
+        ),
+        (
+            "a raw clone through a local binding",
+            "struct S { membership: MembershipManager }\n\
+             fn f(s: &S) { let m = s.membership.clone(); drop(m); }",
+            Class::Membership,
+        ),
+        (
+            "a proven field sharing its name with a raw one",
+            "struct Row { membership: Status }\n\
+             struct State { membership: MembershipManager }\n\
+             fn f(r: &Row) -> &str { &r.membership.node_id }",
+            Class::Membership,
+        ),
+        (
+            "an undeclared receiver",
+            "fn f(s: &Other) -> bool { s.serving.is_ready() }",
+            Class::Serving,
+        ),
+        (
+            "the raw type beside a same-named variant",
+            "enum E { ServingFence }\n\
+             fn f(fence: ServingFence) -> E { E::ServingFence }",
+            Class::Type,
+        ),
+    ];
+    for (name, source, class) in counted {
+        let found = census_of(source).get(class).copied().unwrap_or(0);
+        assert!(
+            found > 0,
+            "{name}: {} is not counted in {source}",
+            class.label()
+        );
+    }
+    let alias = census_of(
+        "use plurx_core::cluster::membership::MembershipManager as Mm;\n\
+         fn f(m: Mm) -> Mm { m }",
+    );
+    assert_eq!(
+        alias.get(&Class::Type),
+        Some(&3),
+        "the import and both uses"
+    );
+
+    let local = census_of(
+        "struct Row { membership: Status, serving: Readiness }\n\
+         enum Rejection { ServingFence }\n\
+         impl Rejection { fn code(&self) -> u16 { match self { Self::ServingFence => 503 } } }\n\
+         fn f(r: &Row) -> bool { r.serving.ready && !r.membership.node_id.is_empty() }\n\
+         fn g() -> Rejection { Rejection::ServingFence }",
+    );
+    assert_eq!(
+        local,
+        BTreeMap::new(),
+        "proven local fields and variants are not raw"
+    );
+}
+
+/// A file the census has never seen fails naming that file.
+#[test]
+fn a_new_file_fails_naming_itself() {
+    let real = pinned();
+    let mut observed = real.clone();
+    observed.insert(("brand_new.rs".to_owned(), Class::Membership), 1);
+    assert!(differences(&observed, &real)
+        .iter()
+        .any(|line| line.starts_with("brand_new.rs [membership]")));
 }
 
 /// The manager's public surface is read from plurx-core, so a new method is
