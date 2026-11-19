@@ -233,7 +233,7 @@ impl TranscodeManager {
         file: &plurx_core::domain::MediaFile,
         settings: &crate::vodserve::VodSettings,
         encoding: &crate::vodencode::Encoding,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<(String, bool)>, String> {
         use plurx_core::store::background_jobs::{EnqueueJob, JobPayload, JobRequest};
         let node = request
             .candidate_context
@@ -305,11 +305,16 @@ impl TranscodeManager {
             .await
             .map_err(|error| error.to_string())
             .map(|outcome| match outcome {
-                // Only a row this call created is this session's to cancel;
-                // a dedup hit belongs to whoever queued it first.
+                // The row this start reached, and whether it created it; a
+                // dedup join is never the joiner's to cancel.
                 plurx_core::store::background_jobs::EnqueueOutcome::Accepted { job_id, .. } => {
-                    Some(job_id)
+                    Some((job_id, true))
                 }
+                plurx_core::store::background_jobs::EnqueueOutcome::Existing {
+                    job_id,
+                    cancelled: false,
+                    ..
+                } => Some((job_id, false)),
                 _ => None,
             })
     }
@@ -517,7 +522,7 @@ impl TranscodeManager {
         request: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
         settings: &crate::vodserve::VodSettings,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<(String, bool)>, String> {
         use plurx_core::store::background_jobs::{
             CopyOutputIntent, CopyOutputProfile, EnqueueJob, JobPayload, JobRequest,
         };
@@ -703,11 +708,16 @@ impl TranscodeManager {
             .await
             .map_err(|error| error.to_string())
             .map(|outcome| match outcome {
-                // Only a row this call created is this session's to cancel;
-                // a dedup hit belongs to whoever queued it first.
+                // The row this start reached, and whether it created it; a
+                // dedup join is never the joiner's to cancel.
                 plurx_core::store::background_jobs::EnqueueOutcome::Accepted { job_id, .. } => {
-                    Some(job_id)
+                    Some((job_id, true))
                 }
+                plurx_core::store::background_jobs::EnqueueOutcome::Existing {
+                    job_id,
+                    cancelled: false,
+                    ..
+                } => Some((job_id, false)),
                 _ => None,
             })
     }

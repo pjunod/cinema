@@ -6047,8 +6047,9 @@ impl TranscodeManager {
                         elapsed_ms,
                         "complete output preparation queued"
                     );
-                    if let Some(job_id) = job {
-                        self.record_queued_output(&work.session_id, job_id).await;
+                    if let Some((job_id, created)) = job {
+                        self.record_queued_output(&work.session_id, job_id, created)
+                            .await;
                     }
                 }
                 Err(error) => tracing::info!(
@@ -6073,21 +6074,53 @@ impl TranscodeManager {
             .refused(session_id)
     }
 
-    /// Remember the complete-output row this session's start created, or
+    /// Remember the complete-output row this session's start reached, or
     /// cancel it at once when the viewer already turned retention off.
-    async fn record_queued_output(&self, session_id: &str, job_id: String) {
-        let kept = self
+    pub(crate) async fn record_queued_output(
+        &self,
+        session_id: &str,
+        job_id: String,
+        created: bool,
+    ) {
+        let cancel = self
             .retain_output
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .record_queued(session_id, job_id.clone());
-        if !kept {
+            .record_queued(session_id, job_id, created);
+        if let Some(job_id) = cancel {
             self.cancel_output_job(session_id, job_id).await;
         }
     }
 
+    /// Cancel a preparation row only while it is still queued. A running
+    /// preparation is never cancelled from here: the encode may already be
+    /// serving another viewer's dedup-joined request, and losing a queued row
+    /// costs no more than the title's next start offering it again.
     async fn cancel_output_job(&self, session_id: &str, job_id: String) {
-        let request = plurx_core::store::background_jobs::CancelJob {
+        use plurx_core::store::background_jobs::{CancelJob, JobState};
+        match self.store.background_job(&job_id).await {
+            Ok(Some(job)) if job.state == JobState::Queued => {}
+            Ok(_) => {
+                tracing::debug!(
+                    target: "plurxd::transcode",
+                    session_id,
+                    job_id,
+                    "complete output preparation left alone: no longer queued"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::info!(
+                    target: "plurxd::transcode",
+                    session_id,
+                    job_id,
+                    %error,
+                    "complete output preparation not cancelled"
+                );
+                return;
+            }
+        }
+        let request = CancelJob {
             job_id: job_id.clone(),
             now_ms: crate::media_sessions::unix_ms(),
         };
@@ -6106,8 +6139,9 @@ impl TranscodeManager {
     /// (`POST /api/v1/hls/{session}/retain-output`). Off only: the rolling
     /// producer abandons its retained collection, a hand-off still waiting
     /// for the enqueue worker is dropped, and a complete-output row this
-    /// session's own start created is cancelled. A row another start queued
-    /// first (a dedup hit) is not this session's and stays. Idempotent.
+    /// session's own start created is cancelled while it is still queued and
+    /// no other session on this node joined it. A dedup join, a shared row and
+    /// a running preparation all stay. Idempotent.
     pub(crate) async fn stop_output_retention(&self, session_id: &str) {
         let queued = self
             .retain_output

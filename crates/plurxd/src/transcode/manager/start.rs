@@ -667,14 +667,13 @@ impl TranscodeManager {
             settings,
             item_title,
         } = inputs;
-        // `retain_output: Some(false)` is the viewer's per-playback opt-out
-        // (`SessionRequest::retain_output`); anything else follows the
-        // server's cache budget.
-        let retained_budget = if retain_output == Some(false) {
-            None
-        } else {
-            Self::rolling_retained_budget_from(&settings)
-        };
+        // The server's cache budget governs both reuse of an existing retained
+        // copy and new collection. `retain_output: Some(false)` is the
+        // viewer's per-playback opt-out (`SessionRequest::retain_output`): it
+        // stops this session collecting, never its reuse of a copy that
+        // already exists.
+        let retained_budget = Self::rolling_retained_budget_from(&settings);
+        let collect_retained = retain_output != Some(false);
         let pacing = Self::pacing_from_settings(&settings, false).await;
         let sw_budget = Self::num_from(
             &settings,
@@ -1190,7 +1189,7 @@ impl TranscodeManager {
                 rolling_provenance.as_ref(),
                 file.duration_ms,
                 file.size,
-                retained_budget,
+                retained_budget.filter(|_| collect_retained),
                 &dir,
                 file.id,
                 &item_title,
@@ -1807,14 +1806,13 @@ impl TranscodeManager {
             settings,
             item_title,
         } = self.rolling_start_inputs(file_id, None, plan).await?;
-        // `retain_output: Some(false)` is the viewer's per-playback opt-out
-        // (`SessionRequest::retain_output`); anything else follows the
-        // server's cache budget.
-        let retained_budget = if retain_output == Some(false) {
-            None
-        } else {
-            Self::rolling_retained_budget_from(&settings)
-        };
+        // The server's cache budget governs both reuse of an existing retained
+        // copy and new collection. `retain_output: Some(false)` is the
+        // viewer's per-playback opt-out (`SessionRequest::retain_output`): it
+        // stops this session collecting, never its reuse of a copy that
+        // already exists.
+        let retained_budget = Self::rolling_retained_budget_from(&settings);
+        let collect_retained = retain_output != Some(false);
         // Same make-before-break rule as the transcode path. A takeover
         // continues an existing incarnation and supersedes nothing.
         if replacement_deadline.is_none() && takeover.is_none() {
@@ -2161,7 +2159,7 @@ impl TranscodeManager {
                 rolling_provenance.as_ref(),
                 file.duration_ms,
                 file.size,
-                retained_budget,
+                retained_budget.filter(|_| collect_retained),
                 &dir,
                 file.id,
                 &item_title,

@@ -1535,16 +1535,27 @@
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store), work.path().to_path_buf(),
             EncoderCaps::default(), Pipeline::Cpu));
         manager.record_retained_headroom(1 << 50);
-        // Rolling retention is always on; `retention: false` is the viewer's
-        // per-playback opt-out (`SessionRequest::retain_output`).
+        let (info, session) = d3_start(&manager, file_id, retention, "d3").await;
+        (manager, session, info, file_id, media, work)
+    }
+
+    /// One copy start of the d3 fixture. Rolling retention is always on;
+    /// `retention: false` is the viewer's per-playback opt-out
+    /// (`SessionRequest::retain_output`).
+    async fn d3_start(
+        manager: &Arc<TranscodeManager>,
+        file_id: i64,
+        retention: bool,
+        playback_id: &str,
+    ) -> (StartInfo, Arc<Session>) {
         let supersession_user = serde_json::json!(["username", "owner"]).to_string();
         let info = manager.start_copy_with_audio_offset(file_id, 0.0, None, 0, CopySessionOptions {
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
             dual_layer_as_copied: false,
-        }, "owner", &supersession_user, None, None, None, "d3", false, None,
+        }, "owner", &supersession_user, None, None, None, playback_id, false, None,
             (!retention).then_some(false), false, None).await.expect("ordinary start");
         let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("session");
-        (manager, session, info, file_id, media, work)
+        (info, session)
     }
 
     async fn d3_wait_for_links(directory: &std::path::Path) {
@@ -1564,6 +1575,26 @@
         assert!(session.rolling_collection.is_none(),
             "retain_output: Some(false) keeps this playback's output out of the retained cache");
         manager.stop_session(&info.session_id, "test_done").await;
+    }
+
+    /// The opt-out stops this playback collecting, never its reuse of a
+    /// retained copy that already exists.
+    #[tokio::test]
+    async fn an_opted_out_start_still_reuses_an_existing_retained_copy() {
+        let (manager, session, info, file_id, _media, _work) = d3_copy_session("1", true).await;
+        let production = session.rolling_provenance.as_ref().expect("production");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while manager.vod.acquire_rolling_output(production).is_none() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.expect("the first playback published its retained copy");
+        manager.stop_session(&info.session_id, "test_done").await;
+        drop(session);
+        let (declined, reused) = d3_start(&manager, file_id, false, "d3-declined").await;
+        assert!(reused.rolling_artifact.is_some(),
+            "an opted-out start is served from the existing retained copy");
+        assert!(reused.rolling_collection.is_none(), "and collects nothing of its own");
+        manager.stop_session(&declined.session_id, "test_done").await;
     }
 
     #[tokio::test]

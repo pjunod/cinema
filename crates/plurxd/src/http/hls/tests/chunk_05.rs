@@ -3461,6 +3461,89 @@ async fn retain_output_route_refuses_anything_but_off_for_a_real_session() {
     assert!(!state.transcode.output_retention_refused(&session));
 }
 
+/// The owner side of the relay answers only for its own sessions: a relay
+/// that names another node is 400, and a route whose durable owner is not the
+/// node the relay expected is 409. Ingress for that route relays and, with the
+/// owner unreachable, answers 503.
+#[tokio::test]
+async fn retain_output_relay_refuses_an_owner_mismatch() {
+    use plurx_core::domain::{MediaSessionActivation, MediaSessionActivationSettlement};
+    let (state, user, _file_id) = servable_state().await;
+    let now = unix_ms();
+    let activation = MediaSessionActivation {
+        incarnation_id: uuid::Uuid::new_v4().to_string(),
+        session_id: uuid::Uuid::new_v4().to_string(),
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: user.id,
+        },
+        playback_id: "relay-mismatch".into(),
+        recovery_epoch: String::new(),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: false,
+        request_id: None,
+        request_fingerprint: "a".repeat(64),
+        owner_node_id: "another-node".into(),
+        recipe_json: "{}".into(),
+        response_json: "{}".into(),
+        publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms: 0,
+        now_ms: now,
+        lease_expires_at_ms: now + 60_000,
+        expected_desired_revision: None,
+    };
+    state
+        .store
+        .activate_media_session(&activation)
+        .await
+        .expect("activate")
+        .expect("activation accepted");
+    state
+        .store
+        .settle_media_session_activation(
+            &activation,
+            MediaSessionActivationSettlement::Confirm {
+                publication_ready_at_ms: 0,
+            },
+            now,
+        )
+        .await
+        .expect("confirm")
+        .expect("confirmed route");
+    let session = activation.session_id.clone();
+    let named_elsewhere = retain_output_relayed(
+        &state,
+        RetainOutputRelayRequest {
+            session_id: session.clone(),
+            expected_owner_node_id: "another-node".into(),
+        },
+    )
+    .await;
+    assert_eq!(named_elsewhere.status(), StatusCode::BAD_REQUEST);
+    let mismatch = retain_output_relayed(
+        &state,
+        RetainOutputRelayRequest {
+            session_id: session.clone(),
+            expected_owner_node_id: state.node_id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(mismatch.status(), StatusCode::CONFLICT);
+    assert!(!state.transcode.output_retention_refused(&session));
+    let ingress = retain_output(
+        State(state.clone()),
+        AxPath(session.clone()),
+        Bytes::from_static(br#"{"retain_output":false}"#),
+    )
+    .await;
+    assert_eq!(ingress.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // The create-time relay is best effort: an unreachable owner is reported,
+    // never a failed create.
+    assert_eq!(
+        relay_retain_output_off(&state, "another-node", &session).await,
+        RetainOutputRelayOutcome::Unreachable
+    );
+}
+
 /// Mid-playback: turning retention off for a live session is recorded on
 /// its owner, so its pending complete-output hand-off is dropped and any row
 /// its own start created is cancelled. Repeating it is harmless.

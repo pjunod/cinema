@@ -97,6 +97,49 @@ async fn retain_output_routed(
         .into_response()
 }
 
+/// After a remote start that opted out at create, tell the owner. The
+/// override is `#[serde(skip)]` on the worker wire (whose envelope is
+/// `deny_unknown_fields`), so this relay is how a mixed fleet learns it: an
+/// owner that predates the route answers 404 and the playback simply keeps
+/// the server setting there. Best effort; never fails the create.
+pub(crate) async fn relay_retain_output_off(
+    state: &AppState,
+    owner_node_id: &str,
+    session_id: &str,
+) -> RetainOutputRelayOutcome {
+    let relay = RetainOutputRelayRequest {
+        session_id: session_id.to_owned(),
+        expected_owner_node_id: owner_node_id.to_owned(),
+    };
+    let outcome = match state
+        .media_sessions
+        .retain_output(owner_node_id, &relay)
+        .await
+    {
+        Ok(response) if response.status().is_success() => RetainOutputRelayOutcome::Applied,
+        Ok(response) => RetainOutputRelayOutcome::Refused(response.status()),
+        Err(_) => RetainOutputRelayOutcome::Unreachable,
+    };
+    if outcome != RetainOutputRelayOutcome::Applied {
+        tracing::info!(
+            target: "plurxd::http::hls",
+            session_id,
+            owner_node_id,
+            ?outcome,
+            "the remote owner did not take this playback's retain_output opt-out"
+        );
+    }
+    outcome
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RetainOutputRelayOutcome {
+    Applied,
+    /// The owner answered; a 404 is an owner that predates the route.
+    Refused(StatusCode),
+    Unreachable,
+}
+
 fn retain_output_unavailable() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,

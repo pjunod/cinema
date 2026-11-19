@@ -4944,6 +4944,11 @@ async fn create_with_purpose_attempt(
     } else {
         let activation_state = state.clone();
         let activation_owner = owner_node_id.clone();
+        // `SessionRequest::retain_output` never crosses the worker wire, so a
+        // playback that opted out at create tells its remote owner once the
+        // session is confirmed, over the same relay the mid-playback switch
+        // uses.
+        let retain_output_off = request.retain_output == Some(false);
         tokio::spawn(plurx_core::store::scope_http_store_operations(
             activation_counts,
             async move {
@@ -4988,6 +4993,14 @@ async fn create_with_purpose_attempt(
                 activation_state.media_sessions.cache_route(route).await;
                 if let Some(guard) = guard.as_mut() {
                     guard.disarm();
+                }
+                if retain_output_off {
+                    relay_retain_output_off(
+                        &activation_state,
+                        &activation_owner,
+                        &request.activation.session_id,
+                    )
+                    .await;
                 }
                 Ok(())
             },

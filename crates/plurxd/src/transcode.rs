@@ -955,8 +955,32 @@ const RETAIN_OUTPUT_LEDGER_MAX: usize = 4096;
 pub(crate) struct RetainOutputLedger {
     /// Sessions whose viewer turned output retention off.
     refused: HashMap<String, Instant>,
-    /// The complete-output job a session's start created (never a dedup hit).
-    queued: HashMap<String, (String, Instant)>,
+    /// The complete-output job each session's start reached, whether it
+    /// created the row or dedup-joined one, and when.
+    queued: HashMap<String, QueuedOutput>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QueuedOutput {
+    job_id: String,
+    /// This session's enqueue created the row (not a dedup join).
+    created: bool,
+    at: Instant,
+}
+
+/// Drop the oldest entries of `map` until at most `max` remain.
+fn evict_oldest<V>(map: &mut HashMap<String, V>, max: usize, at: impl Fn(&V) -> Instant) {
+    if map.len() <= max {
+        return;
+    }
+    let mut ages = map
+        .iter()
+        .map(|(key, value)| (at(value), key.clone()))
+        .collect::<Vec<_>>();
+    ages.sort_unstable();
+    for (_, key) in ages.into_iter().take(map.len() - max) {
+        map.remove(&key);
+    }
 }
 
 impl RetainOutputLedger {
@@ -964,49 +988,68 @@ impl RetainOutputLedger {
         self.refused
             .retain(|_, at| now.duration_since(*at) < RETAIN_OUTPUT_LEDGER_TTL);
         self.queued
-            .retain(|_, (_, at)| now.duration_since(*at) < RETAIN_OUTPUT_LEDGER_TTL);
-        if self.refused.len() > RETAIN_OUTPUT_LEDGER_MAX {
-            self.refused.clear();
-        }
-        if self.queued.len() > RETAIN_OUTPUT_LEDGER_MAX {
-            self.queued.clear();
-        }
+            .retain(|_, row| now.duration_since(row.at) < RETAIN_OUTPUT_LEDGER_TTL);
+        evict_oldest(&mut self.refused, RETAIN_OUTPUT_LEDGER_MAX, |at| *at);
+        evict_oldest(&mut self.queued, RETAIN_OUTPUT_LEDGER_MAX, |row| row.at);
     }
 
-    /// Record the refusal; returns the job this session queued, if any.
+    /// The job `session_id` may cancel: one its own start created, that no
+    /// other session on this node has joined. A row someone else shares is
+    /// theirs too and stays.
+    fn cancellable(&self, session_id: &str, row: &QueuedOutput) -> Option<String> {
+        let shared = self
+            .queued
+            .iter()
+            .any(|(other, joined)| other != session_id && joined.job_id == row.job_id);
+        (row.created && !shared).then(|| row.job_id.clone())
+    }
+
+    /// Record the refusal; returns the job this session may cancel, if any.
     fn refuse(&mut self, session_id: &str) -> Option<String> {
         let now = Instant::now();
         self.prune(now);
         self.refused.insert(session_id.to_owned(), now);
-        self.queued.remove(session_id).map(|(job, _)| job)
+        let row = self.queued.remove(session_id)?;
+        self.cancellable(session_id, &row)
     }
 
     fn refused(&self, session_id: &str) -> bool {
         self.refused.contains_key(session_id)
     }
 
-    /// Record a row this session's start created. `false` when the session
-    /// already refused retention, so the caller cancels it instead.
-    fn record_queued(&mut self, session_id: &str, job_id: String) -> bool {
+    /// Record the row this session's start reached. Returns the job to
+    /// cancel at once when the session already refused retention.
+    fn record_queued(&mut self, session_id: &str, job_id: String, created: bool) -> Option<String> {
         let now = Instant::now();
         self.prune(now);
+        let row = QueuedOutput {
+            job_id,
+            created,
+            at: now,
+        };
         if self.refused.contains_key(session_id) {
-            return false;
+            return self.cancellable(session_id, &row);
         }
-        self.queued.insert(session_id.to_owned(), (job_id, now));
-        true
+        self.queued.insert(session_id.to_owned(), row);
+        None
+    }
+
+    /// A session that ended has nothing left to opt out of.
+    fn forget(&mut self, session_id: &str) {
+        self.refused.remove(session_id);
+        self.queued.remove(session_id);
     }
 }
 
 #[cfg(test)]
 mod retain_output_ledger_tests {
-    use super::RetainOutputLedger;
+    use super::*;
 
     #[test]
-    fn refusing_hands_back_only_this_sessions_own_row_and_blocks_later_ones() {
+    fn refusing_hands_back_only_an_unshared_row_this_session_created() {
         let mut ledger = RetainOutputLedger::default();
-        assert!(ledger.record_queued("a", "job-a".into()));
-        assert!(ledger.record_queued("b", "job-b".into()));
+        assert_eq!(ledger.record_queued("a", "job-a".into(), true), None);
+        assert_eq!(ledger.record_queued("b", "job-b".into(), true), None);
         assert!(!ledger.refused("a"));
         assert_eq!(ledger.refuse("a").as_deref(), Some("job-a"));
         assert!(ledger.refused("a"));
@@ -1016,11 +1059,31 @@ mod retain_output_ledger_tests {
             None,
             "idempotent: the row was handed back once"
         );
-        assert!(
-            !ledger.record_queued("a", "job-late".into()),
-            "a row created after the refusal is the caller's to cancel"
+        assert_eq!(
+            ledger
+                .record_queued("a", "job-late".into(), true)
+                .as_deref(),
+            Some("job-late"),
+            "a row created after the refusal is cancelled at once"
         );
-        assert_eq!(ledger.refuse("b").as_deref(), Some("job-b"));
+        // A dedup join is never the joiner's to cancel, and a row another
+        // session joined is no longer its creator's alone.
+        assert_eq!(ledger.record_queued("c", "job-b".into(), false), None);
+        assert_eq!(ledger.refuse("b"), None, "c shares job-b");
+        assert_eq!(ledger.refuse("c"), None, "c only joined job-b");
+    }
+
+    #[test]
+    fn the_ledger_evicts_its_oldest_entries_and_forgets_ended_sessions() {
+        let mut ledger = RetainOutputLedger::default();
+        for index in 0..=RETAIN_OUTPUT_LEDGER_MAX {
+            ledger.refuse(&format!("s{index}"));
+        }
+        assert_eq!(ledger.refused.len(), RETAIN_OUTPUT_LEDGER_MAX);
+        assert!(!ledger.refused("s0"), "the oldest goes first");
+        assert!(ledger.refused(&format!("s{RETAIN_OUTPUT_LEDGER_MAX}")));
+        ledger.forget(&format!("s{RETAIN_OUTPUT_LEDGER_MAX}"));
+        assert!(!ledger.refused(&format!("s{RETAIN_OUTPUT_LEDGER_MAX}")));
     }
 }
 

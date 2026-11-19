@@ -1925,6 +1925,45 @@ async fn quality_schedule_routes_bound_bodies_and_require_peer_auth() {
     );
 }
 
+#[tokio::test]
+async fn retain_output_routes_bound_bodies_and_require_peer_auth() {
+    let app = test_app();
+    for path in [
+        format!("/api/v1/hls/{}/retain-output", uuid::Uuid::new_v4()),
+        hls::RETAIN_OUTPUT_PATH.to_owned(),
+    ] {
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(vec![b'x'; hls::RETAIN_OUTPUT_MAX_BYTES + 1]))
+            .expect("oversized retain-output");
+        assert_eq!(
+            app.clone()
+                .oneshot(request)
+                .await
+                .expect("response")
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+    let relay = serde_json::json!({
+        "session_id": uuid::Uuid::new_v4().to_string(),
+        "expected_owner_node_id": "any-node",
+    });
+    let unsigned = Request::builder()
+        .method("POST")
+        .uri(hls::RETAIN_OUTPUT_PATH)
+        .header("content-type", "application/json")
+        .body(Body::from(relay.to_string()))
+        .expect("unsigned relay");
+    assert_eq!(
+        app.oneshot(unsigned).await.expect("response").status(),
+        StatusCode::UNAUTHORIZED,
+        "the owner relay is peer-authenticated"
+    );
+}
+
 #[test]
 fn trace_targets_omit_queries_and_redact_capability_paths() {
     let ordinary: Uri = "/api/v1/search?q=secret&X-Plex-Token=credential"
