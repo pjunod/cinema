@@ -13468,6 +13468,75 @@ async fn replicated_scan_request_drops(client: &Client) -> Vec<String> {
     validated_scan_request_drops(&shape, (marker, marker), rows[0].value)
 }
 
+/// Plan removal of an exact, empty replicated fixture extension before an
+/// older migration reconstructs its dependencies.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_empty_extension_rewind(
+    client: &Client,
+    expected: Vec<(String, String, String)>,
+    marker: &str,
+) -> Vec<String> {
+    let names = expected
+        .iter()
+        .map(|(_, name, _)| format!("'{}'", name.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let installed: Vec<_> = client
+        .query_consistent(
+            format!(
+                "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL
+                 AND (name IN ({names}) OR tbl_name IN ({names})) ORDER BY type,name"
+            ),
+            hiqlite::params!(),
+        )
+        .await
+        .expect("replicated fixture extension inventory")
+        .iter_mut()
+        .map(|row| {
+            (
+                row.get::<String>("type"),
+                row.get::<String>("name"),
+                row.get::<String>("sql"),
+            )
+        })
+        .collect();
+    assert_eq!(installed, expected, "exact published fixture extension");
+    require_replicated_fixture_marker(client, marker, 1).await;
+    for (kind, name, _) in &expected {
+        if kind == "table" {
+            let rows: Vec<I64Value> = client
+                .query_consistent_map(
+                    format!(
+                        r#"SELECT count(*) AS value FROM "{}""#,
+                        name.replace('"', "\"\"")
+                    ),
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("complete fixture extension data inventory");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].value,
+                i64::from(name == marker),
+                "accepted data in {name} must not be discarded"
+            );
+        }
+    }
+    let mut drops = Vec::new();
+    for kind in ["trigger", "view", "table"] {
+        for (object_kind, name, _) in expected.iter().rev() {
+            if object_kind == kind {
+                drops.push(format!(
+                    r#"DROP {} "{}""#,
+                    kind.to_ascii_uppercase(),
+                    name.replace('"', "\"\"")
+                ));
+            }
+        }
+    }
+    drops
+}
+
 /// A historical queue fixture cannot retain half of the independent managed
 /// extension after removing its background objects. Rewind only an empty,
 /// unactivated current extension, then let ordinary open reinstall it.
@@ -13485,6 +13554,23 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
             .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
             .collect()
     }
+    use queue_fixture::source_extensions_fixture::{
+        coordination_tail_witness, published_v124_reservation_trigger,
+        storage_domain_pending_fixture_shape,
+    };
+    let storage_domain_drops = replicated_empty_extension_rewind(
+        client,
+        storage_domain_pending_fixture_shape(),
+        "background_storage_domain_pending_schema",
+    )
+    .await;
+    let mut coordination_drops = replicated_empty_extension_rewind(
+        client,
+        coordination_tail_witness(),
+        "analysis_coordination_schema",
+    )
+    .await;
+    coordination_drops.push(published_v124_reservation_trigger().to_owned());
     let scan_request_drops = replicated_scan_request_drops(client).await;
     let source_drops = replicated_source_tail_drops(client, |_| true).await;
     let handoff_shape = extension_shape(client, queue_fixture::HANDOFF_FIXTURE_SHAPE_SQL).await;
@@ -13650,8 +13736,10 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_eq!(jobs.len(), 1);
     let translation_drops =
         queue_fixture::validated_empty_translation_rewind(&shape, &counts, jobs[0].value);
-    let mut statements: Vec<_> = scan_request_drops
+    let mut statements: Vec<_> = storage_domain_drops
         .into_iter()
+        .chain(coordination_drops)
+        .chain(scan_request_drops)
         .chain(source_drops)
         .chain(tail_drops)
         .chain(handoff_drops)
@@ -19449,6 +19537,9 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "api_keys",
             "background_artifact_repairs",
             "background_artwork_locations",
+            "background_dv_refit_outcomes",
+            "background_dv_refit_scenes",
+            "background_dv_refit_titles",
             "background_embeddings",
             "background_fragment_targets",
             "background_job_attempts",

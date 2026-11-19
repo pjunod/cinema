@@ -375,7 +375,7 @@ const COORDINATION_FIXTURE_SCHEMA: &str = concat!(
 /// v127 replaces this v124 trigger rather than adding it.
 const REPLACED_RESERVATION_TRIGGER: &str = "analysis_source_reserve_on_claim";
 
-fn coordination_tail_witness() -> Vec<(String, String, String)> {
+pub(crate) fn coordination_tail_witness() -> Vec<(String, String, String)> {
     let witness = rusqlite::Connection::open_in_memory().expect("published coordination witness");
     witness
         .execute_batch(
@@ -402,7 +402,7 @@ fn coordination_tail_witness() -> Vec<(String, String, String)> {
 }
 
 /// The v124 definition v127 replaced, from its own published migration.
-fn published_v124_reservation_trigger() -> &'static str {
+pub(crate) fn published_v124_reservation_trigger() -> &'static str {
     let mut statements = include_str!("../../src/store/background_jobs_viewer_analysis.sql")
         .split("-- next statement")
         .filter(|statement| {
@@ -658,6 +658,36 @@ pub(crate) fn rewind_title_v2_to_v131(connection: &rusqlite::Connection) {
     });
 }
 
+const STORAGE_DOMAIN_PENDING_FIXTURE_SHAPE_SQL: &str = "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (
+        name IN ('background_storage_domain_pending','background_storage_domains_live',
+        'background_storage_domain_changed_roots','background_storage_domain_disturbed',
+        'background_storage_domain_holders','background_storage_domain_affected_jobs',
+        'background_storage_domains_apply','background_storage_domain_pending_schema')
+        OR tbl_name IN ('background_storage_domain_pending','background_storage_domain_pending_schema'))
+        ORDER BY type,name";
+
+fn storage_domain_pending_fixture_objects(
+    catalogue: &rusqlite::Connection,
+) -> Vec<(String, String, String)> {
+    catalogue
+        .prepare(STORAGE_DOMAIN_PENDING_FIXTURE_SHAPE_SQL)
+        .expect("storage domain fixture inventory")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("storage domain fixture objects")
+        .collect::<Result<_, _>>()
+        .expect("complete storage domain fixture objects")
+}
+
+pub(crate) fn storage_domain_pending_fixture_shape() -> Vec<(String, String, String)> {
+    let witness = rusqlite::Connection::open_in_memory().expect("published storage domain witness");
+    witness.execute_batch("CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);")
+        .expect("storage domain trigger dependency");
+    witness
+        .execute_batch(include_str!("../../src/store/storage_domain_pending.sql"))
+        .expect("published v131 storage domain extension");
+    storage_domain_pending_fixture_objects(&witness)
+}
+
 /// Rewind an owned, empty v131 storage-domain extension to published v130.
 /// Desired configuration is user data, including an already settled revision,
 /// so no pending-table row may be discarded by a historical fixture.
@@ -672,31 +702,9 @@ fn rewind_empty_storage_domain_pending_to_v130(connection: &rusqlite::Connection
         version, 131,
         "only the published v131 storage domain tail may be rewound"
     );
-    let shape_sql = "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (
-        name IN ('background_storage_domain_pending','background_storage_domains_live',
-        'background_storage_domain_changed_roots','background_storage_domain_disturbed',
-        'background_storage_domain_holders','background_storage_domain_affected_jobs',
-        'background_storage_domains_apply','background_storage_domain_pending_schema')
-        OR tbl_name IN ('background_storage_domain_pending','background_storage_domain_pending_schema'))
-        ORDER BY type,name";
-    let objects = |catalogue: &rusqlite::Connection| -> Vec<(String, String, String)> {
-        catalogue
-            .prepare(shape_sql)
-            .expect("storage domain fixture inventory")
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .expect("storage domain fixture objects")
-            .collect::<Result<_, _>>()
-            .expect("complete storage domain fixture objects")
-    };
-    let witness = rusqlite::Connection::open_in_memory().expect("published storage domain witness");
-    witness.execute_batch("CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);")
-        .expect("storage domain trigger dependency");
-    witness
-        .execute_batch(include_str!("../../src/store/storage_domain_pending.sql"))
-        .expect("published v131 storage domain extension");
     assert_eq!(
-        objects(connection),
-        objects(&witness),
+        storage_domain_pending_fixture_objects(connection),
+        storage_domain_pending_fixture_shape(),
         "exact published storage domain tail required"
     );
     let marker: (i64, i64) = connection.query_row(
