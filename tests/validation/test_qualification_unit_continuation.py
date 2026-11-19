@@ -921,7 +921,8 @@ class HistoricalRetentionExecutorCase(unittest.TestCase):
             q.authenticate_tags_store_ci(api, run, job, workflow, inputs, 1, raw)
             attachment.assert_called_once_with(api, 1660, 160, q.TAGS_STORE_ANDROID_UUID,
                                                q.TAGS_STORE_ANDROID_DIGEST)
-            for status in ('running', 'failure', 'cancelled'):
+            q.authenticate_tags_store_ci(api, run, {**job, 'status': 'failure'}, workflow, inputs, 1, raw)
+            for status in ('running', 'cancelled'):
                 with self.subTest(status=status), self.assertRaises(receipts.ReceiptError):
                     q.authenticate_tags_store_ci(api, run, {**job, 'status': status}, workflow, inputs, 1, raw)
             with self.assertRaises(receipts.ReceiptError):

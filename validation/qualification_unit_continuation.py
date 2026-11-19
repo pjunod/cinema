@@ -1768,7 +1768,7 @@ def authenticate_tags_store_ci(api, run, job, workflow, inputs, repository, raw)
 
     receipts.require(
         (run['id'], job['id']) == TAGS_STORE_RUN and run['commit_sha'] == TAGS_STORE_SOURCE
-        and job['task_id'] == 35134 and job['attempt'] == 1 and job['status'] == 'success'
+        and job['task_id'] == 35134 and job['attempt'] == 1 and job['status'] in {'success', 'failure'}
         and job['runs_on'] == ['ci-nonvoter-store'] and repository == 1
         and inputs['promotion_pr'] == '1660' and inputs['promotion_base_sha'] == TAGS_STORE_BASE,
         'Tags Store receipt needs the complete first native job')
@@ -1801,6 +1801,9 @@ def authenticate_tags_store_ci(api, run, job, workflow, inputs, repository, raw)
         and set(enrolled['lanes']) == {'android_device', 'android_jvm'},
         'Tags Store historical results must have executed natively')
     lines = clean_log(raw.decode()).splitlines()
+    # Separate validity of the original executor from test success. The
+    # normal command validator requires every named outcome and terminal
+    # summary, then requires applicable later passes for any failed bodies.
     receipts.require('info: default host tuple is x86_64-unknown-linux-gnu' in lines
                      and any('docker run image=node:22-bookworm platform=linux/amd64 ' in line for line in lines),
                      'Tags Store historical executor platform differs')
