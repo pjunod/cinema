@@ -95,3 +95,9 @@ The current source tree's Rust author remains the production implementation.
 Its external diagnostic harness, pinned build receipt, original binary and
 source archive are retained by hash in private evidence. No runtime binary
 or media fixture is installed by these tools.
+
+The extractor accepts `--window START END` as rational source seconds on the
+1/1000 clock. Omission retains the original first window. A new-window
+request must match its extraction receipt and all 48 captured frame clocks;
+legacy receipts without an explicit window remain valid only for the original
+window. Keep completed baseline requests and results unchanged.

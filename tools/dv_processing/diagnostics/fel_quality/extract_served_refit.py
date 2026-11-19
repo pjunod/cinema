@@ -1,9 +1,11 @@
-"""Extract the first Michael5400 served F+ window from local HTTP captures.
+"""Extract a 48-frame Michael5400 served F+ window from local HTTP captures.
 
 Supply the exact init and its byte concatenation with the served fragments,
 without remuxing. --source-pts-offset is a caller-proven rational in seconds:
 source PTS seconds = served PTS ticks * served time base + offset. This tool
-does not discover an offset or authenticate HTTP capture provenance. It emits
+does not discover an offset or authenticate HTTP capture provenance.
+--window START END selects a half-open source-time range in rational seconds
+on the 1/1000 clock. Omit it to use the first window. The tool emits
 served_refit_eval.py readback and receipt documents, plus the selected raw
 UNSPEC62 NALs. Input and scratch paths belong to the caller's task.
 """
@@ -20,6 +22,7 @@ MAX_INPUT = 512 * 1024 * 1024
 MAX_PACKETS = 4096
 MAX_INIT = 4 * 1024 * 1024
 TIME_BASE = "1/1000"
+ORIGINAL_WINDOW = ["125/1000", "2127/1000"]
 WINDOW = (Fraction(125, 1000), Fraction(2127, 1000))
 FRAME_COUNT = 48
 PIVOTS = [0, 128, 128, 128, 128, 128, 128, 128, 127]
@@ -33,6 +36,18 @@ VIDEO_CONFIG = {
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def parse_window(values):
+    require(isinstance(values, list) and len(values) == 2 and
+            all(isinstance(value, str) and len(value) <= 64 and
+                re.fullmatch(r"[0-9]+/[1-9][0-9]*", value) for value in values),
+            "window must contain two nonnegative rational source times")
+    start, end = map(Fraction, values)
+    clock = Fraction(TIME_BASE)
+    require(start < end and all((value / clock).denominator == 1 for value in (start, end)),
+            "window must have ordered whole source ticks")
+    return start, end
 
 
 def sha_bytes(data):
@@ -166,7 +181,7 @@ def dump_units(ffmpeg, media, scratch, count):
     return packets
 
 
-def capture_frames(events_path, source):
+def capture_frames(events_path, source, window):
     documents = [json.loads(line) for line in events_path.read_text().splitlines()]
     source_rows = [doc for doc in documents if doc.get("kind") == "source"]
     require(len(source_rows) == 1 and source_rows[0].get("source_sha256") == source["sha256"]
@@ -174,16 +189,16 @@ def capture_frames(events_path, source):
     rows = [doc for doc in documents if doc.get("kind") == "accepted_source_pair"]
     require([row["frame"] for row in rows] == list(range(FRAME_COUNT)), "capture must identify 48 frames")
     clocks = [Fraction(row["pts"]) for row in rows]
-    require(clocks == sorted(set(clocks)) and clocks[0] == WINDOW[0] and clocks[-1] < WINDOW[1]
-            and clocks[-1] + Fraction(rows[-1]["duration"]) == WINDOW[1], "capture clocks differ from requested window")
+    require(clocks == sorted(set(clocks)) and clocks[0] == window[0] and clocks[-1] < window[1]
+            and clocks[-1] + Fraction(rows[-1]["duration"]) == window[1], "capture clocks differ from requested window")
     return dict(zip(clocks, rows, strict=True))
 
 
-def select_packets(packets, time_base, offset, captured):
+def select_packets(packets, time_base, offset, captured, window=WINDOW):
     by_clock = {}
     for index, row in enumerate(packets):
         clock = row["pts"] * time_base + offset
-        if WINDOW[0] <= clock < WINDOW[1]:
+        if window[0] <= clock < window[1]:
             require(clock in captured and clock not in by_clock, f"unmatched or duplicate packet PTS: {clock}")
             by_clock[clock] = (index, row)
     require(set(by_clock) == set(captured), "packet clock transform does not cover all captured source frames")
@@ -239,6 +254,7 @@ def write_json(path, document):
 
 
 def extract(args):
+    window = parse_window(args.window)
     refs = {name: input_receipt(getattr(args, name), MAX_INIT if name in ("init", "events") else MAX_INPUT)
             for name in ("source", "served", "init", "events")}
     tools = {}
@@ -250,7 +266,7 @@ def extract(args):
     with args.served.open("rb") as stream:
         require(stream.read(len(init_bytes)) == init_bytes, "served media must begin with the exact captured init")
     config = init_config(init_bytes)
-    captured = capture_frames(args.events, refs["source"])
+    captured = capture_frames(args.events, refs["source"], window)
     _, source_tb, source_packets = packet_metadata(args.ffprobe, args.source)
     served_stream, served_tb, served_packets = packet_metadata(args.ffprobe, args.served)
     require(source_tb == Fraction(args.source_time_base), "probed source video time base differs from capture")
@@ -258,8 +274,8 @@ def extract(args):
           if side.get("side_data_type") == "DOVI configuration record"]
     require(len(dv) == 1 and all(dv[0].get(key) == value for key, value in config.items() if key != "box"),
             "probe Dolby signaling differs from the captured init")
-    source = select_packets(source_packets, source_tb, Fraction(0), captured)
-    served = select_packets(served_packets, served_tb, args.source_pts_offset, captured)
+    source = select_packets(source_packets, source_tb, Fraction(0), captured, window)
+    served = select_packets(served_packets, served_tb, args.source_pts_offset, captured, window)
 
     selected, proofs = [], []
     with tempfile.TemporaryDirectory(prefix="served-refit-au-", dir=args.scratch_root) as scratch:
@@ -314,7 +330,7 @@ def extract(args):
                "source_sha256": refs["source"]["sha256"], "served_sha256": refs["served"]["sha256"],
                "init_sha256": refs["init"]["sha256"],
                "readback_sha256": sha_bytes(readback_path.read_bytes()), "video_config": config,
-               "source_time_base": args.source_time_base, "served_time_base": str(served_tb),
+               "window": args.window, "source_time_base": args.source_time_base, "served_time_base": str(served_tb),
                "source_pts_offset_seconds": str(args.source_pts_offset), "frames": proofs,
                "scope": "local caller-supplied captures; HTTP receipt authority is external",
                "vcl_hash": "ordered layer-zero VCL NAL type, length u64 big-endian, canonical Annex B payload"}
@@ -327,6 +343,7 @@ def main():
         parser.add_argument("--" + name, required=True, type=Path)
     parser.add_argument("--source-time-base", required=True, choices=[TIME_BASE])
     parser.add_argument("--source-pts-offset", required=True, type=Fraction, metavar="N/D")
+    parser.add_argument("--window", nargs=2, metavar=("START", "END"), default=ORIGINAL_WINDOW)
     args = parser.parse_args()
     try:
         require(args.scratch_root.is_absolute() and args.scratch_root.is_dir(),

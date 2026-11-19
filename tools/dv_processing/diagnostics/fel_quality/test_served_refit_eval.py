@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from served_refit_eval import VIDEO_CONFIG, bind_readback, validate_curves, verify_extraction
+from served_refit_eval import VIDEO_CONFIG, bind_readback, parse_window, validate_curves, verify_extraction
 
 
 def readback(pts):
@@ -53,6 +53,19 @@ class ServedReadbackTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Q12"):
             validate_curves(curve)
 
+
+    def test_nonoriginal_window_requires_matching_extraction_receipt(self):
+        frames = [readback(4129), readback(4171)]
+        requested = parse_window(["4129/1000", "6131/1000"])
+        for claimed in (None, ["4129/1000", "6132/1000"]):
+            receipt = dict(self.receipt)
+            if claimed is not None:
+                receipt["window"] = claimed
+            with self.assertRaisesRegex(ValueError, "receipt window differs"):
+                bind_readback({"frames": frames}, receipt, self.refs, [4129, 4171], False, requested)
+        receipt = dict(self.receipt, window=["4129/1000", "6131/1000"])
+        got = bind_readback({"frames": frames}, receipt, self.refs, [4129, 4171], False, requested)
+        self.assertEqual(got, frames)
 
     def test_extraction_retains_raw_wire_bytes_for_each_scored_clock(self):
         with TemporaryDirectory() as scratch:

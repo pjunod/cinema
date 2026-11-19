@@ -2,7 +2,7 @@
 
 Run: python served_refit_eval.py REQUEST.json NEW_RESULT.json
 
-Request schema 1 has window ["125/1000", "2127/1000"] and an artifacts
+Request schema 1 has a 48-frame window of two rational source times and an artifacts
 object keyed by source, bl, el, rpus, events, metadata, master_binding,
 readback, init, and served_receipt. Each artifact is {path, sha256} with an
 absolute pathname. The capture artifacts are capture_layers/metadata output.
@@ -11,6 +11,8 @@ readback contains frames in rpu_refit_write's schema with source_pts (integer
 source ticks) and rpu_sha256 (the served UNSPEC62 NAL hash) added to each row.
 By default every readback row belongs to the requested window; an explicit
 allow_extra_readback_frames:true allows unrelated clocks outside the window.
+The extractor receipt must carry the same window. Legacy receipts without
+a window are compatible with the original ["125/1000", "2127/1000"] request.
 
 The caller's packet-extraction receipt must provide source_sha256,
 init_sha256, readback_sha256, source_time_base ("1/1000"), served_time_base,
@@ -40,6 +42,7 @@ import numpy as np
 
 import four_model_audit as fm
 from dv_patch_check import reshape
+from extract_served_refit import ORIGINAL_WINDOW, TIME_BASE, WINDOW, parse_window
 
 HERE = Path(__file__).resolve().parent
 PROTOCOL = HERE / "protocol-lattice-michael5400-20261111.json"
@@ -51,8 +54,6 @@ ARTIFACTS = {
     "source", "bl", "el", "rpus", "events", "metadata",
     "master_binding", "readback", "init", "served_receipt",
 }
-WINDOW = ["125/1000", "2127/1000"]
-TIME_BASE = "1/1000"
 WIDTH, HEIGHT = 3840, 2160
 ROI = [0, 32, WIDTH, 2128]
 FRAME_COUNT = 48
@@ -89,7 +90,7 @@ def require_fields(value, expected, label):
 
 
 def bind_artifacts(request):
-    require_fields(request, {"schema": 1, "window": WINDOW}, "request")
+    require_fields(request, {"schema": 1}, "request")
     references = request["artifacts"]
     require(set(references) == ARTIFACTS, "request artifact names differ from schema 1")
     paths = {}
@@ -107,7 +108,7 @@ def read_jsonl(path):
         return [json.loads(line) for line in stream]
 
 
-def validate_capture(events, metadata, paths, source_sha):
+def validate_capture(events, metadata, paths, source_sha, window):
     sources = [event for event in events if event.get("kind") == "source"]
     require(len(sources) == 1, "capture must identify exactly one source")
     require_fields(sources[0], {"source_sha256": source_sha, "time_base": TIME_BASE,
@@ -120,7 +121,7 @@ def validate_capture(events, metadata, paths, source_sha):
             require_fields(pair, {"frame": frame, "bl_width": WIDTH, "bl_height": HEIGHT,
                                   "el_width": WIDTH // 2, "el_height": HEIGHT // 2}, "capture frame")
             pts = Fraction(pair["pts"])
-            require(Fraction(WINDOW[0]) <= pts < Fraction(WINDOW[1]) and
+            require(window[0] <= pts < window[1] and
                     (previous is None or pts > previous), f"capture frame {frame}: invalid or duplicate PTS")
             ticks = pts / Fraction(TIME_BASE)
             require(ticks.denominator == 1, f"capture frame {frame}: non-integral source clock")
@@ -137,8 +138,8 @@ def validate_capture(events, metadata, paths, source_sha):
                 require(len(raw) == size and hashlib.sha256(raw).hexdigest() == pair[f"{field}_sha256"],
                         f"capture frame {frame}: {field} hash mismatch")
         require(all(not stream.read(1) for stream in (bl, el, rpus)), "capture contains trailing bytes")
-    require(Fraction(pairs[0]["pts"]) == Fraction(WINDOW[0]) and
-            Fraction(pairs[-1]["pts"]) + Fraction(pairs[-1]["duration"]) == Fraction(WINDOW[1]),
+    require(Fraction(pairs[0]["pts"]) == window[0] and
+            Fraction(pairs[-1]["pts"]) + Fraction(pairs[-1]["duration"]) == window[1],
             "capture does not span the requested window")
     return [frame["pts_ticks"] for frame in metadata]
 
@@ -205,13 +206,15 @@ def validate_curves(row):
             for channel in chroma), "invalid served Q12 chroma coefficient lattice")
 
 
-def bind_readback(document, receipt, refs, ticks, allow_extra):
+def bind_readback(document, receipt, refs, ticks, allow_extra, window=WINDOW):
     require_fields(receipt, {"source_sha256": refs["source"]["sha256"], "init_sha256": refs["init"]["sha256"],
                              "readback_sha256": refs["readback"]["sha256"],
                              "source_time_base": TIME_BASE}, "served extraction receipt")
     require_fields(receipt["video_config"], VIDEO_CONFIG, "served init profile")
     wanted = set(ticks)
-    low, high = (int(Fraction(value) / Fraction(TIME_BASE)) for value in WINDOW)
+    require(parse_window(receipt.get("window", ORIGINAL_WINDOW)) == window,
+            "served extraction receipt window differs from request")
+    low, high = (int(value / Fraction(TIME_BASE)) for value in window)
     by_pts = {}
     for row in document["frames"]:
         pts = row["source_pts"]
@@ -330,23 +333,25 @@ def evaluate(request_path):
     request_sha = sha(request_path)
     request = json.loads(request_path.read_text())
     refs = request["artifacts"]
+    window = parse_window(request["window"])
     allow_extra = request.get("allow_extra_readback_frames", False)
     require(type(allow_extra) is bool, "allow_extra_readback_frames must be a Boolean")
     paths = bind_artifacts(request)
     tools = {path.name: sha(path) for path in (Path(__file__), HERE / "four_model_audit.py",
-                                               HERE / "vector_metrics.py", HERE / "dv_patch_check.py", PROTOCOL)}
+                                               HERE / "vector_metrics.py", HERE / "dv_patch_check.py",
+                                               HERE / "extract_served_refit.py", PROTOCOL)}
     require_fields(tools, FROZEN, "frozen scorer")
     require(Path(fm.__file__).resolve() == HERE / "four_model_audit.py" and
             Path(fm.vm.__file__).resolve() == HERE / "vector_metrics.py", "scorer imports escaped their source")
     events, metadata = read_jsonl(paths["events"]), read_jsonl(paths["metadata"])
-    ticks = validate_capture(events, metadata, paths, refs["source"]["sha256"])
+    ticks = validate_capture(events, metadata, paths, refs["source"]["sha256"], window)
     validate_master(json.loads(paths["master_binding"].read_text()), paths, refs["events"]["sha256"])
     receipt = json.loads(paths["served_receipt"].read_text())
-    curves = bind_readback(json.loads(paths["readback"].read_text()), receipt, refs, ticks, allow_extra)
+    curves = bind_readback(json.loads(paths["readback"].read_text()), receipt, refs, ticks, allow_extra, window)
     verify_extraction(receipt, paths, refs, events, curves)
     bands = json.loads(PROTOCOL.read_text())["luminance_bands_reference_weighted_linear_Y_nits"]
     return {"schema": 1, "kind": "served_fplus_baseline", "request_sha256": request_sha,
-            "artifacts": refs, "scorers": tools, "window": WINDOW, "source_time_base": TIME_BASE,
+            "artifacts": refs, "scorers": tools, "window": request["window"], "source_time_base": TIME_BASE,
             "sampling": {"roi": ROI, "stride": 8, "axis_phases": [0, 1], "frames": FRAME_COUNT},
             "authority": {"reference": "frozen four-model reconstruction; helper composition agreed on fit/held-out parity lattices",
                           "served": "caller extraction receipt identifies the served init and per-picture curve readback",

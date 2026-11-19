@@ -2,7 +2,7 @@
 from fractions import Fraction
 import unittest
 
-from extract_served_refit import VIDEO_CONFIG, access_unit, init_config, select_packets
+from extract_served_refit import VIDEO_CONFIG, access_unit, init_config, parse_window, select_packets
 
 
 def box(kind, payload):
@@ -46,6 +46,16 @@ class ServedExtractorTests(unittest.TestCase):
             select_packets(packets, Fraction(1, 1000), Fraction(126, 1000), captured)
         with self.assertRaisesRegex(ValueError, "duplicate"):
             select_packets(packets + [packets[1]], Fraction(1, 1000), Fraction(125, 1000), captured)
+
+    def test_explicit_window_binds_nonzero_source_clocks(self):
+        window = parse_window(["4129/1000", "6131/1000"])
+        captured = {Fraction(4129, 1000): {}, Fraction(4171, 1000): {}}
+        packets = [{"pts": 0}, {"pts": 42}, {"pts": 2002}]
+        got = select_packets(packets, Fraction(1, 1000), Fraction(4129, 1000), captured, window)
+        self.assertEqual(list(got.values()), [(0, packets[0]), (1, packets[1])])
+        for invalid in (["6131/1000", "4129/1000"], ["1/2000", "6131/1000"], ["4.129", "6.131"]):
+            with self.assertRaises(ValueError):
+                parse_window(invalid)
 
 
 if __name__ == "__main__":
