@@ -1,10 +1,65 @@
 //! Admitted leaf workers never mutate catalogue identity or scan completion.
 #[cfg(target_os = "linux")]
+mod dv_refit;
+#[cfg(target_os = "linux")]
 mod dv_title;
 #[cfg(target_os = "linux")]
 pub(crate) mod fel_qualification;
 #[cfg(target_os = "linux")]
+mod refit_work;
+#[cfg(target_os = "linux")]
 mod title_work;
+
+/// The F+ statistics spool under a node's runtime cache (decision A):
+/// node-local, never replicated, listed and deleted from Developer.
+pub(crate) const REFIT_SPOOL_DIR: &str = "dv-refit";
+
+pub(crate) fn refit_spool_root(runtime_cache: &std::path::Path) -> std::path::PathBuf {
+    runtime_cache.join(REFIT_SPOOL_DIR)
+}
+
+/// (complete, bytes) per spool file.
+pub(crate) fn refit_spool_list(root: &std::path::Path) -> Vec<(bool, u64)> {
+    #[cfg(target_os = "linux")]
+    {
+        dv_refit::list(root)
+            .into_iter()
+            .map(|e| (e.complete, e.bytes))
+            .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        Vec::new()
+    }
+}
+
+pub(crate) fn refit_spool_entries(root: &std::path::Path) -> Vec<serde_json::Value> {
+    #[cfg(target_os = "linux")]
+    {
+        dv_refit::list(root)
+            .into_iter()
+            .filter_map(|e| serde_json::to_value(e).ok())
+            .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        Vec::new()
+    }
+}
+
+pub(crate) fn refit_spool_clear(root: &std::path::Path) -> std::io::Result<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        dv_refit::clear(root)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        Ok(0)
+    }
+}
 
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use dv_title::{publish_title_for_control, publish_title_with_tools_for_control};
@@ -43,6 +98,38 @@ async fn snapshot(path: &Path) -> Option<(i64, i64)> {
     .ok()?;
     Some((size, mtime))
 }
+/// Keep the current lane owner polled while a higher-priority admission waits.
+/// Pressure retires that owner before the pending admission can acquire its lane.
+#[cfg(target_os = "linux")]
+async fn drive_playback_admission<T>(
+    admission: impl std::future::Future<Output = T>,
+    pressure: impl std::future::Future<Output = ()>,
+    refit: &mut Option<refit_work::RefitTask>,
+    shutdown: &CancellationToken,
+) -> Option<T> {
+    tokio::pin!(admission, pressure);
+    loop {
+        let has_refit = refit.is_some();
+        let fit = async {
+            match refit.as_mut() {
+                Some(work) => work.work.as_mut().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            result = &mut admission => return Some(result),
+            _ = fit => { refit.take(); }
+            () = &mut pressure, if has_refit => {
+                if let Some(work) = refit.take() { work.stop().await; }
+            }
+            () = shutdown.cancelled() => {
+                if let Some(work) = refit.take() { work.stop().await; }
+                return None;
+            }
+        }
+    }
+}
+
 pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     let boot = uuid::Uuid::new_v4().to_string();
     let mut cursor = None;
@@ -51,12 +138,22 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     let mut title: Option<title_work::TitleTask> = None;
     #[cfg(target_os = "linux")]
     let mut title_after = 0;
+    // The F+ fit shares the title lane: it starts only when no title scan
+    // does, and either one yields to ordinary probes.
+    #[cfg(target_os = "linux")]
+    let mut refit: Option<refit_work::RefitTask> = None;
+    #[cfg(target_os = "linux")]
+    let mut refit_after = 0;
     #[cfg(target_os = "linux")]
     let mut live_title_after = 0;
     loop {
         if shutdown.is_cancelled() {
             #[cfg(target_os = "linux")]
             if let Some(work) = title.take() {
+                work.stop().await;
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(work) = refit.take() {
                 work.stop().await;
             }
             return;
@@ -82,21 +179,38 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
         // probe pagination, including when that pagination has more pages.
         #[cfg(target_os = "linux")]
         if title.is_none() && !shutdown.is_cancelled() {
-            match title_work::TitleTask::start(
+            let requested = state.transcode.playback_qualification_requested();
+            let admission = title_work::TitleTask::start(
                 &state,
                 &boot,
                 &mut title_after,
                 &mut live_title_after,
                 true,
-            )
-            .await
-            {
-                Ok(work) => title = work,
-                Err(error) => tracing::warn!(%error,"playback qualification demand unavailable"),
+            );
+            match drive_playback_admission(admission, requested, &mut refit, &shutdown).await {
+                Some(Ok(work)) => title = work,
+                Some(Err(error)) => {
+                    tracing::warn!(%error,"playback qualification demand unavailable")
+                }
+                None => continue,
             }
         }
         #[cfg(target_os = "linux")]
-        let ordinary_idle = title.is_none();
+        if let Some(work) = refit.as_mut() {
+            match work.should_yield(&state).await {
+                Ok(true) => {
+                    if let Some(work) = refit.take() {
+                        work.stop().await;
+                    }
+                    cursor = None;
+                    yielded = true;
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error,"F+ priority observation unavailable"),
+            }
+        }
+        #[cfg(target_os = "linux")]
+        let ordinary_idle = title.is_none() && refit.is_none();
         #[cfg(not(target_os = "linux"))]
         let ordinary_idle = true;
         let published = if ordinary_idle {
@@ -112,7 +226,12 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             false
         };
         #[cfg(target_os = "linux")]
-        if title.is_none() && cursor.is_none() && !yielded && !published && !shutdown.is_cancelled()
+        if title.is_none()
+            && refit.is_none()
+            && cursor.is_none()
+            && !yielded
+            && !published
+            && !shutdown.is_cancelled()
         {
             match title_work::TitleTask::start(
                 &state,
@@ -126,6 +245,12 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 Ok(work) => title = work,
                 Err(error) => tracing::warn!(%error,"title demand unavailable"),
             }
+            if title.is_none() {
+                match refit_work::RefitTask::start(&state, &boot, &mut refit_after).await {
+                    Ok(work) => refit = work,
+                    Err(error) => tracing::warn!(%error, "F+ demand unavailable"),
+                }
+            }
         }
         #[cfg(target_os = "linux")]
         {
@@ -135,9 +260,16 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                     None => std::future::pending().await,
                 }
             };
+            let refit_poll = async {
+                match refit.as_mut() {
+                    Some(work) => work.work.as_mut().await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 () = shutdown.cancelled() => {},
                 _ = title_poll => { title = None; },
+                _ = refit_poll => { refit = None; },
                 () = tokio::time::sleep(idle.after_completion(published)) => {},
             }
         }
@@ -167,6 +299,7 @@ async fn pass(
             after: cursor.clone(),
             now_ms: now_ms(),
             limit: 128,
+            admissible_only: false,
         })
         .await?;
     page.jobs
@@ -772,6 +905,50 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn playback_admission_reaps_the_fit_that_owns_its_lane() {
+        let lane = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = Arc::clone(&lane).acquire_owned().await.expect("fit lane");
+        let cancel = CancellationToken::new();
+        let stopped = cancel.clone();
+        let (reaped, observed) = tokio::sync::oneshot::channel();
+        let fit = async move {
+            stopped.cancelled().await;
+            drop(held);
+            reaped.send(()).expect("reap observed");
+            true
+        };
+        let mut refit = Some(refit_work::RefitTask::owned_lane_fixture(
+            Box::pin(fit),
+            cancel,
+        ));
+        let (waiters, mut pressure) = tokio::sync::watch::channel(0usize);
+        let admission = async {
+            waiters.send_replace(1);
+            lane.acquire_owned()
+                .await
+                .expect("qualified successor lane")
+        };
+        let requested = async {
+            pressure.wait_for(|n| *n > 0).await.expect("pressure");
+        };
+        let shutdown = CancellationToken::new();
+        let admitted = tokio::time::timeout(
+            Duration::from_secs(1),
+            drive_playback_admission(admission, requested, &mut refit, &shutdown),
+        )
+        .await
+        .expect("admission cannot wait behind an unpolled fit")
+        .expect("not shut down");
+        observed
+            .await
+            .expect("fit physically completed before successor");
+        assert!(refit.is_none());
+        drop(admitted);
+    }
+
     use plurx_core::store::{SqliteStore, Store};
     use plurx_core::transcode::{EncoderCaps, Pipeline};
 
@@ -966,6 +1143,7 @@ mod tests {
             after: None,
             now_ms: now_ms(),
             limit: 32,
+            admissible_only: false,
         };
         let first = state
             .store

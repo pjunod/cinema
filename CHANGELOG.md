@@ -8,6 +8,43 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- A per-title `dv_refit` background job fits F+ mapping curves for Profile 7
+  FEL titles (FEL-RPU-REFIT-BUILD.md milestone 3), while an explicit FEL disk
+  conversion is waiting or any of four new Developer switches is on (`playback.dolby_vision_refit_web`, `_apple`,
+  `_android`, `_linux`, default off; web and Apple Settings). It runs the
+  Dolby Vision helper's `--refit-stats` mode over the whole title beside
+  playback on a 3-thread reservation, shows as "Dolby Vision F+ curve fit" in
+  Activity, resumes from a node-local spool after a preemption, and can be
+  cancelled and retried from the background-jobs page; a failed or cancelled
+  title is not fitted again until its source changes or it is retried. Each
+  title's curve table (scene spans, the quantised served coefficients, held-out
+  errors, verdict and curve digest) is published in one replicated write
+  (SQLite v134; a shape-verified hiqlite extension; carried by the SQLite to
+  cluster import), and a superseded table stays addressable by digest for
+  seven days. The Developer card lists and deletes the spool. Indexed copy
+  serving can use fitted curves when its platform switch is on and a typed
+  client platform was accepted at a session boundary.
+- The Dolby Vision helper's `--refit-stats` mode takes `--threads N` and
+  `--resume FIRST FIRST_PTS`, reports each scene's RPU scene lengths, exits 3
+  for a refusal of the title's content (1 for any other failure), and logs
+  nothing from libav.
+- The Profile 7 → 8.1 indexed copy converter writes pinned F+ curves into
+  each RPU by exact presentation time. Fitted indexes and cache identities
+  include the curve digest; disabled platforms, unfitted titles and live
+  copy keep v1 identity bytes. An initial session without accepted typed
+  client control remains on v1 until the next session boundary.
+
+- Permanent FEL disk conversion waits for a current fit, identity verdict or
+  recorded content refusal before dropping the enhancement layer. Complete
+  title scans record FEL/MEL classification; fitted RPUs are authored by exact
+  source PTS, injected, and read back frame by frame before publication.
+  Waiting conversions explain their queue state in file details.
+- Web and Apple playback information reports the attached conversion's F+
+  mapping and held-out gain, or its identity reason. This metadata comes from
+  the pinned rendition and adds no curve-store read to status polls.
+
 ### Removed
 
 - The engineering knowledge pilot (`scripts/knowledge`, `validation/knowledge/`,
@@ -18,6 +55,32 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- F+ publishes chroma MMR coefficients on the Q12 grid tested on the native path and
+  qualifies their actual stored precision. The new fitting method reuses
+  existing statistics; new sessions wait for its replacement table while
+  existing digest pins retain their original coefficients.
+- Safari prepared upgrades that have buffered the current picture but still
+  play behind it now seek to a buffered forward rendezvous and hold there.
+  Seek latency no longer leaves both exact-current attempts behind the moving
+  incumbent; the same decoded-frame guard still decides whether to expose.
+
+- Web prepared upgrades keep predecessor control observations on their own
+  media source through exposure, so a transient successor wait cannot cancel
+  its own preparation. The first visible frame freezes the final commit;
+  retries and close preserve that exact settlement before changing reporters.
+
+- Dolby Vision titles the server reconstructs from the base layer alone no
+  longer have their black level raised: Profile 5, Profile 8, and Profile 7
+  when it is processed without its enhancement layer. The reconstruction pass
+  handed libplacebo the stream's own colour description, which made it
+  tone-map a picture it was only meant to compose: black came out at 0.005
+  nits instead of 0, and in dark scenes every colour channel below a pixel's
+  brightest was lifted with it (washed-out letterbox bars and shadows, on
+  every display bucket, HDR10 master included). Both reconstruction paths now
+  describe the composed master identically on both sides, as the native
+  player does, and every image build renders a control through the base path
+  and fails if black or dark colour moves. Profile 7 FEL and HDR10-E output is
+  byte for byte what it was.
 - A Raft apply that is cancelled or torn down mid-write (the Raft core
   stopping, the runtime shutting down) no longer takes the node's store
   writers down with it. The vendored Hiqlite SQLite writer and WAL writer
@@ -37,6 +100,17 @@ bump may break compatibility and a **patch** bump never does.
   Still paid every tick: the recording loop's row listings, the reminder loop's transition write,
   and the background lanes' and subtitle passes' queue reads (cluster layer audit, item A4,
   [build plan](docs/cluster/IDLE-QUORUM-POLLERS-BUILD.md)).
+- Background workers no longer propose job claims their node can already see
+  will be refused. A node with a local replica checks the claim statement's
+  own conditions there first, and a claim held back by the source slot, a
+  foreground window, missing demand or a stale row costs one local read
+  instead of a quorum read and a Raft proposal. The pre-transcode, fragment
+  and subtitle claim passes list only such admissible jobs there, so a queue
+  behind a held source lists nothing until the slot frees; library turns and
+  every other listing are unchanged. `plurx_background_claim_skipped_total{kind,reason}`
+  counts the skipped claims, and `claim_write`/`claim_refused` now count
+  proposals only
+  ([plan](docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md)).
 - Linux replicated servers validate actual-host reboot identity before serving;
   required deployment mounts preserve source-custody recovery after a reboot.
 - Android prepared Dolby Vision handoffs now keep the executing playback choice

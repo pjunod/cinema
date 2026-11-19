@@ -2038,6 +2038,10 @@ pub(crate) enum ControlAction {
         /// carries it, so a switch does not drop the indicator.
         #[serde(skip_serializing_if = "Option::is_none")]
         enhancement: Option<Box<plurx_core::playback::enhancement::PlaybackEnhancement>>,
+        /// The successor's delivered profile, from its verified StartResponse.
+        /// The PQ base candidate grade cannot distinguish HDR10 from P81.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivered_dolby_vision_profile: Option<u8>,
     },
 }
 
@@ -2063,6 +2067,7 @@ pub(crate) struct PreparedSuccessorAction {
     pub media_origin_ms: i64,
     pub effective_selection: EffectiveSelection,
     pub enhancement: Option<plurx_core::playback::enhancement::PlaybackEnhancement>,
+    pub delivered_dolby_vision_profile: Option<u8>,
 }
 
 impl PreparedSuccessorAction {
@@ -2075,6 +2080,7 @@ impl PreparedSuccessorAction {
             media_origin_ms: self.media_origin_ms,
             effective_selection: self.effective_selection,
             enhancement: self.enhancement.map(Box::new),
+            delivered_dolby_vision_profile: self.delivered_dolby_vision_profile,
         }
     }
 }
@@ -3953,6 +3959,11 @@ fn adopt_observation_token(
 }
 
 impl ControlState {
+    /// The typed platform accepted for this session's current control epoch.
+    pub(crate) fn client_platform(&self) -> Option<ClientPlatform> {
+        self.client_platform
+    }
+
     pub(crate) fn invalidate_observational_attachment(&mut self) {
         self.advance_observational_lifetime();
     }

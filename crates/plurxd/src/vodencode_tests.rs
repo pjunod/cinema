@@ -342,6 +342,10 @@ async fn playback_info_stream_format_is_the_attached_frozen_recipe() {
     let mut rendition = synthetic_rendition(base.path()).await;
     let live = Arc::get_mut(&mut rendition).expect("unshared rendition");
     live.recipe.file = file;
+    // Source tags cannot turn an ordinary frozen SDR encoding into DV. Only
+    // its own admitted processing plan may describe a processed DV carrier.
+    live.recipe.file.hdr = Some("dolby_vision".into());
+    live.recipe.file.dolby_vision.profile = Some(7);
     live.recipe.encoding = Some(Arc::clone(&encoding));
     let touched = Instant::now();
     insert_control_session(&serve, "attached-a", rendition.clone(), touched).await;
@@ -510,6 +514,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         aac: true,
         audio_delivery: None,
         video: CopyVideoOptions::new(false, false),
+        dv_refit_gain: None,
         source_object_version: Some(encoding.source_object_version.clone()),
         cluster_cache_key: None,
         copy_index_init_contract: None,
@@ -1512,6 +1517,7 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
                 aac: true,
                 audio_delivery: None,
                 video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
                 copy_index_init_contract: None,
@@ -1642,6 +1648,7 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
                 audio_index: None,
                 aac: true,
                 video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
                 source_object_version: Some(legacy_encoding.source_object_version.clone()),
                 cluster_cache_key: None,
                 copy_index_init_contract: None,
@@ -2626,6 +2633,7 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
                 aac: true,
                 audio_delivery: None,
                 video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
                 copy_index_init_contract: None,
@@ -2787,6 +2795,7 @@ async fn an_expired_deadline_without_an_encoder_permit_is_capacity_not_producer_
                 aac: true,
                 audio_delivery: None,
                 video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
                 copy_index_init_contract: None,
@@ -2912,6 +2921,7 @@ async fn an_expired_verdict_waits_for_the_producer_state_instead_of_guessing() {
                 aac: true,
                 audio_delivery: None,
                 video: CopyVideoOptions::new(false, false),
+                dv_refit_gain: None,
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
                 copy_index_init_contract: None,

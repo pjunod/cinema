@@ -609,3 +609,102 @@ async fn sole_voter_handoff() {
     );
     selected.shutdown().await.expect("stop singleton");
 }
+
+#[test]
+fn a_dead_raft_core_is_reported_and_an_ordinary_stop_is_not() {
+    startup_observer::run_plural_fixture("singleton-dead-core", dead_raft_core);
+}
+
+/// The live voter's `snapshots` directory, wherever the layout puts it.
+fn snapshots_directory(root: &std::path::Path) -> std::path::PathBuf {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory).expect("readable data dir") {
+            let path = entry.expect("data dir entry").path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "snapshots")
+                    && path
+                        .parent()
+                        .is_some_and(|parent| parent.ends_with("state_machine"))
+                {
+                    return path;
+                }
+                stack.push(path);
+            }
+        }
+    }
+    panic!(
+        "no state_machine/snapshots directory under {}",
+        root.display()
+    );
+}
+
+async fn dead_raft_core() {
+    // An ordinary stop is the core stopping because we stopped it.
+    let (_ordinary_directory, ordinary) = singleton().await;
+    let ordinary_failure = ordinary.membership_manager().raft_core_failure();
+    ordinary
+        .shutdown()
+        .await
+        .expect("stop the ordinary singleton");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), ordinary_failure)
+            .await
+            .is_err(),
+        "an ordinary Raft shutdown is not a dead core"
+    );
+
+    // A storage failure the core cannot survive: the snapshots directory is
+    // replaced by a file, which no permission (root included) lets a build
+    // write under, and OpenRaft 0.9 turns the failed build into a fatal quit.
+    let (directory, selected) = singleton().await;
+    let failure = selected.membership_manager().raft_core_failure();
+    let second = selected.membership_manager().raft_core_failure();
+    let snapshots = snapshots_directory(directory.path());
+    let parked = snapshots.with_file_name("snapshots.parked");
+    std::fs::rename(&snapshots, &parked).expect("park the snapshots directory");
+    std::fs::write(&snapshots, b"not a directory").expect("block the snapshots path");
+    selected
+        .local_client()
+        .expect("local voter client")
+        .trigger_local_db_snapshot()
+        .await
+        .expect("the snapshot command is accepted");
+    let error = tokio::time::timeout(Duration::from_secs(60), failure)
+        .await
+        .expect("the core quits on the failed build");
+    assert!(!error.is_empty(), "the fatal error is named");
+    let again = tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .expect("every observer sees the same terminal state");
+    assert_eq!(again, error);
+
+    // The dead core's last metrics still name this node leader; the stop's
+    // handoff must see the dead core first and return at once.
+    let last = selected
+        .local_client()
+        .expect("local voter client")
+        .metrics_db()
+        .await
+        .expect("a dead core's last metrics");
+    assert!(last.running_state.is_err(), "the core is dead");
+    assert_eq!(
+        last.current_leader,
+        Some(last.id),
+        "and still names itself leader"
+    );
+    let started = Instant::now();
+    assert_eq!(
+        selected.membership_manager().handoff_for_shutdown().await,
+        crate::cluster::membership::ShutdownHandoff::CoreStopped,
+        "a dead core cannot hand leadership off"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "a dead core's stop must not wait: {:?}",
+        started.elapsed()
+    );
+    std::fs::remove_file(&snapshots).expect("unblock the snapshots path");
+    std::fs::rename(&parked, &snapshots).expect("restore the snapshots directory");
+    let _ = tokio::time::timeout(Duration::from_secs(30), selected.shutdown()).await;
+}

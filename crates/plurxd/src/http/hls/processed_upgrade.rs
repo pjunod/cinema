@@ -1365,6 +1365,13 @@ where
         processed.quality_catalog = Some(Arc::new(catalog));
     }
     state.transcode.remember_processed_candidate(&processed);
+    // Capture the admitted output plan while this exact verified root is
+    // still in hand. The hold and staging share the minted incarnation below;
+    // candidate descriptions and requested destinations do not author delivery.
+    let delivery = super::preparation::StagedProcessingDelivery {
+        dolby_vision_profile: root.encoding.preserves_processed_dv().then_some(8),
+        fel: root.encoding.processed_fel(),
+    };
     // Held until staging returns: the successor's first preparation takes it
     // by its incarnation, and whatever it did not take is freed on drop.
     let _root = state
@@ -1378,7 +1385,7 @@ where
         return "declined";
     }
     let primes = state.hls_route_hooks.get().primes_prepared_successor();
-    let staged = super::preparation::stage_prepared_successor_as(
+    let staged = super::preparation::stage_prepared_successor_with_delivery_as(
         state,
         &intent.session_id,
         &route,
@@ -1397,6 +1404,7 @@ where
         },
         primes,
         ids,
+        Some(delivery),
     )
     .await;
     if staged == super::preparation::PreparationStageOutcome::Staged {

@@ -319,6 +319,7 @@ pub(super) fn valid_start_request() -> RemoteStartRequest {
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -1629,6 +1630,7 @@ fn a_route_the_takeover_path_can_never_accept_is_unrecoverable() {
         request: SessionRequest {
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -1786,6 +1788,7 @@ fn the_takeover_recipe_validator_refuses_vod() {
         request: SessionRequest {
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,

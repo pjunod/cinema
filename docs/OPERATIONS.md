@@ -2136,11 +2136,11 @@ stays `max_in_snapshot_log_to_keep = 1`.
 
 Snapshot builds check `2 × live DB bytes + max(live WAL bytes, 32 MiB) +
 64 MiB` on the state-machine filesystem before requesting the writer cut.
-Insufficient or unknown space defers for ten seconds per recheck, bounded
-by ten minutes; expiry attempts the existing path and cannot claim success
-on a full disk. `plurx_raft_snapshot_deferrals_total{reason="storage"}` counts
-retries; `plurx_raft_snapshot_required_storage_bytes` is the last known local
-floor, not a promise about current free space. Promotion needs the target's
+Below `DB + max(WAL, 32 MiB) + 64 MiB` a build cannot fit and waits,
+rechecked every 10 s, unbounded. Short of the floor but able to fit, or
+unknown, waits at most ten minutes, then attempts.
+`plurx_raft_snapshot_deferrals_total{reason="storage"}` counts retries;
+`plurx_raft_snapshot_required_storage_bytes` is the last known local floor. Promotion needs the target's
 fresh same-heartbeat floor proof and `max(512 MiB, floor)` headroom. Upgrade a
 legacy target before promotion; its old 512 MiB-only readiness is unknown for
 this proof. No new Developer toggle gates this automatic correctness path.
@@ -3358,8 +3358,14 @@ separate placement cohorts. Build skew alone does not prevent placement.
 Strict media-pool envelope changes require a protocol bump and dated note
 here (`make paperwork` checks this). Newest first:
 
-- 2026-11-15: protocol 11 — optional `processed_upgrade` ask on
-  `RemoteStartRequest`.
+- 2026-11-18: Protocol 12 adds the `processed_upgrade` request to
+  `RemoteStartRequest`. Follow the cohort and drain steps above.
+- 2026-11-13: protocol 11 — a server-selected F+ curve digest on the strict
+  `SessionRequest` media-worker envelope, combined with protocol 10 catalog
+  provenance. Use the cohort/drain procedure above; clients send no new
+  platform signal. Detail:
+  [FEL-RPU-REFIT-BUILD.md](streaming/FEL-RPU-REFIT-BUILD.md).
+
 - 2026-11-13: protocol 10 — retain validated source, track and full-capability
   catalog-query provenance in `CandidateCatalogContext` so processed commits
   preserve Copy discovery after Encode normalization. This descriptive query
@@ -3441,14 +3447,9 @@ native-subtitle work: a physical Apple TV rejecting a copied Dolby Vision
 master with CoreMedia `-12927`
 ([docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md](clients/APPLE-NATIVE-SUBTITLES-PLAN.md) §5.4).
 
-Its sibling, `PLURX_HLS_CLOSED_CAPTIONS_NONE`, was retired in favour of
-shipping `CLOSED-CAPTIONS=NONE` on every variant unconditionally. None of
-these variants carries a caption track, so saying so is correct authoring
-rather than an experiment — and an unset rung is not evidence about anything.
-A variant that stays silent lets AVFoundation and ExoPlayer both synthesise a
-phantom CEA-608 option into the text group, which shifts every rendition
-ordinal beneath it: a client asking for the first subtitle rendition by
-position gets the second.
+Its sibling, `PLURX_HLS_CLOSED_CAPTIONS_NONE`, was retired:
+`CLOSED-CAPTIONS=NONE` now ships on every variant. Why is in
+[APPLE-NATIVE-SUBTITLES-PLAN.md](clients/APPLE-NATIVE-SUBTITLES-PLAN.md) §5.4.
 
 | Var | What it adds | Why it might matter |
 |---|---|---|
@@ -4801,15 +4802,15 @@ requires the stopped-writer maintenance procedure in the
 [queue migration contract](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md#7-migration-and-rollback--one-ownership-system-after-cutover);
 do not perform a mixed-version rolling cutover or a binary-only downgrade.
 
-Queue count, oldest age, source-I/O reservations and legacy backlog gauges
-come from the existing cached Store sampler. Worker-event counters and claim,
-queue-wait and execution histograms are process-local; every metrics scrape is
-Store-free. Counts of acknowledged transitions can undercount lost replies and
-reset on restart; durable attempts remain the audit record. Increasing
+Queue, age, reservation and legacy backlog gauges come from the cached Store
+sampler. Worker counters and histograms are process-local; scrapes are
+Store-free. Transition counts can undercount lost replies and reset on
+restart; durable attempts are the audit record. Rising
 `plurx_background_legacy_pending` needs migration attention. Queued work with
-idle compatible workers suggests source/admission trouble; rising age with all
-reservations held suggests capacity pressure. `claim_write` events without
-eligible work indicate an idle-poll regression.
+idle workers suggests admission trouble; rising age with all reservations held
+suggests capacity pressure. `claim_write` counts proposals, `claim_refused`
+their refusals; a claim the local replica shows refused counts
+`plurx_background_claim_skipped_total{kind,reason}` instead.
 
 The cache bytes remain node-local. With P5 remote placement enabled, any
 ingress may select a voter that advertises the exact verified generation and

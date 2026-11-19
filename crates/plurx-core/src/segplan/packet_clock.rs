@@ -756,4 +756,36 @@ mod tests {
                 .is_err());
         }
     }
+
+    /// The F+ packet identity and the copy packet clock share one CBS
+    /// framing: the identity is the SHA-256 of exactly the Annex B bytes the
+    /// clock counts, including the four-byte start code for the first unit
+    /// and for VPS/SPS/PPS.
+    #[test]
+    fn the_refit_packet_identity_hashes_the_bytes_the_clock_counts() {
+        use sha2::{Digest, Sha256};
+        let units: [(u8, usize); 6] = [(35, 1), (32, 4), (33, 4), (34, 4), (39, 5), (1, 9)];
+        let mut sample = Vec::new();
+        let mut annex_b = Vec::new();
+        for (index, (kind, payload)) in units.into_iter().enumerate() {
+            let mut nal = vec![kind << 1, 1];
+            nal.extend(std::iter::repeat_n(0x55, payload));
+            sample.extend(u32::try_from(nal.len()).expect("small unit").to_be_bytes());
+            sample.extend(&nal);
+            if index == 0 || matches!(kind, 32..=34) {
+                annex_b.push(0);
+            }
+            annex_b.extend([0, 0, 1]);
+            annex_b.extend(&nal);
+        }
+        assert_eq!(
+            crate::fmp4::hevc_sample_cbs_annex_b_len(&sample, 4),
+            Ok(annex_b.len())
+        );
+        let expected: [u8; 32] = Sha256::digest(&annex_b).into();
+        assert_eq!(
+            crate::fmp4::hevc_cbs_annex_b_sample_hash(&sample, 4),
+            Ok(expected)
+        );
+    }
 }

@@ -417,6 +417,7 @@ async fn background_transcode_copies_preserve_source_proof_and_settle_only_the_r
                 after: None,
                 now_ms: 1_001,
                 limit: 8,
+                admissible_only: false,
             })
             .await
             .expect("candidate")
@@ -1150,6 +1151,7 @@ async fn background_candidates_rotate_scopes_and_offer_lower_work_after_eight_co
                         after: None,
                         now_ms: 2070,
                         limit: 100,
+                        admissible_only: false,
                     })
                     .await
                     .expect("seven completions");
@@ -1173,6 +1175,7 @@ async fn background_candidates_rotate_scopes_and_offer_lower_work_after_eight_co
                     after: cursor,
                     now_ms: 3000,
                     limit: 1,
+                    admissible_only: false,
                 })
                 .await
                 .expect("paged fair candidates");
@@ -1533,6 +1536,7 @@ async fn background_offline_join_preserves_recipe_authority_and_independent_inte
             after: None,
             now_ms: now + 5,
             limit: 10,
+            admissible_only: false,
         };
         assert!(store
             .job_candidates(remote())
@@ -4648,6 +4652,7 @@ async fn background_subtitles_source_changes_cancel_selected_candidates() {
             after: None,
             now_ms: 1_001,
             limit: 100,
+            admissible_only: false,
         };
         assert_eq!(
             store
@@ -4758,6 +4763,7 @@ async fn background_subtitles_replicated_ready_orphans_are_refused_and_retired()
         after: None,
         now_ms: 1_001,
         limit: 100,
+        admissible_only: false,
     };
     assert_eq!(
         store

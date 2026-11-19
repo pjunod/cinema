@@ -339,6 +339,7 @@ fn preparation_row(
     let staged_request = crate::transcode::SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -472,6 +473,7 @@ async fn activate_superseding_route(
     let request = crate::transcode::SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -843,6 +845,7 @@ async fn delivery_preparation_says_offered_with_the_prepare_action() {
         &crate::transcode::SessionRequest {
             dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -923,6 +926,7 @@ async fn delivery_preparation_says_none_when_the_slot_is_empty() {
         &crate::transcode::SessionRequest {
             dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -1172,6 +1176,7 @@ async fn a_second_ask_supersedes_a_preparation_in_the_registration_window() {
     let candidate = crate::transcode::SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -1372,6 +1377,7 @@ async fn a_committed_successor_survives_the_predecessors_retirement() {
         &crate::transcode::SessionRequest {
             dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -1683,6 +1689,7 @@ async fn a_supersession_in_the_registration_window_still_frees_the_preparation()
     let candidate = crate::transcode::SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -1787,6 +1794,7 @@ async fn same_selection_retry_cannot_revive_cancelled_planning_at_registration()
     let candidate = crate::transcode::SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         candidate_context: None,
         playback_id: playback_id.clone(),
@@ -2272,6 +2280,7 @@ fn staged_candidate_request() -> crate::transcode::SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,

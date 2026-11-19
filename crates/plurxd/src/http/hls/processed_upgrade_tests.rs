@@ -10,6 +10,7 @@ pub(in crate::http) fn ordinary_request(playback_id: &str) -> crate::transcode::
         quality_catalog: None,
         candidate_context: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,

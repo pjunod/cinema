@@ -6421,6 +6421,7 @@ mod display_target_policy_tests {
             max_l1_pq: Some(0),
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
+            el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
         };
         // Use the existing probe writer's actual key, not a synthetic shortcut.
         let document = serde_json::json!({PROBE_FIELD:stats}).to_string();
@@ -6479,6 +6480,7 @@ mod display_target_policy_tests {
                 index: 0,
                 custom_xy: None,
             }),
+            el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
         };
         let record = serde_json::json!({"side_data_type":"Mastering display metadata",
             "red_x":"34000/50000","red_y":"16000/50000","green_x":"13250/50000","green_y":"34500/50000",
@@ -6547,6 +6549,7 @@ mod display_target_policy_tests {
             max_l1_pq: Some(4095),
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
+            el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
         };
         let display = DisplayCaps::default();
         let document = serde_json::json!({"frames":[{"stream_index":7,"side_data_list":[{"side_data_type":"Mastering display metadata","min_luminance":"1/10000"}]}]});
@@ -6683,6 +6686,7 @@ mod display_target_policy_tests {
                 min_1e4_nits: 50,
                 max_nits: 4000,
             }),
+            el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
         };
         let display = DisplayCaps::default();
         let probe = |stats| {
@@ -6737,6 +6741,7 @@ mod display_target_policy_tests {
             max_l1_pq: Some(4095),
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
+            el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
         };
         let display = DisplayCaps {
             hdr: true,
@@ -6833,6 +6838,7 @@ mod display_target_policy_tests {
                 index: 0,
                 custom_xy: None,
             }),
+            el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
         };
         let probe = |stats| serde_json::json!({PROBE_FIELD:stats}).to_string();
         let high = probe(stats);

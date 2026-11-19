@@ -1584,6 +1584,17 @@ impl TimedClient {
         }
     }
 
+    /// Whether this client reads an applied replica in this process (an
+    /// embedded voter or learner). A remote client has none; neither do the
+    /// test-only clients, which must not reach hiqlite at all.
+    pub(super) fn has_local_replica(&self) -> bool {
+        match &self.inner {
+            TimedClientInner::Connected(client) => client.local_db_applied_mark().is_ok(),
+            #[cfg(test)]
+            TimedClientInner::Disconnected | TimedClientInner::InjectedConsistentRead(_) => false,
+        }
+    }
+
     fn takeover_authority_read_metrics(&self) -> &TakeoverAuthorityReadMetrics {
         #[cfg(test)]
         if let TimedClientInner::InjectedConsistentRead(io) = &self.inner {
@@ -2383,6 +2394,7 @@ impl HiqliteAuthStore {
         store.install_custody_retention_schema(None).await?;
         store.install_offloaded_schema(None).await?;
         store.install_storage_domain_pending_schema(None).await?;
+        store.install_dv_refit_schema(None).await?;
         Ok(store)
     }
 
@@ -2595,7 +2607,9 @@ impl HiqliteAuthStore {
                     self.install_scan_request_v2_schema(admission).await?;
                     self.install_custody_retention_schema(admission).await?;
                     self.install_offloaded_schema(admission).await?;
-                    return self.install_storage_domain_pending_schema(admission).await;
+                    self.install_storage_domain_pending_schema(admission)
+                        .await?;
+                    return self.install_dv_refit_schema(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -5048,6 +5062,65 @@ impl HiqliteAuthStore {
         result?;
         Err(StoreError::Migration(
             "scan request v2 schema install did not settle".into(),
+        ))
+    }
+
+    async fn dv_refit_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed F+ shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "dv_refit_schema_version",
+                super::dv_refit_jobs::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::dv_refit_jobs::version(&shape)?;
+        if version == Some(1) {
+            let rows = self
+                .client()
+                // authority: admission must observe the committed marker paired with the shape.
+                .query_consistent_map::<CountRow, _>(
+                    "dv_refit_schema_version",
+                    super::dv_refit_jobs::MARKER_SQL,
+                    params!(),
+                )
+                .await?;
+            if !matches!(rows.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration(
+                    "F+ curve schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+
+    /// F+ curve fits: an independently recognized, additive extension. Nodes
+    /// that predate it never read or write it.
+    async fn install_dv_refit_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.dv_refit_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::dv_refit_jobs::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.dv_refit_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "F+ curve schema install did not settle".into(),
         ))
     }
 

@@ -2634,6 +2634,15 @@ impl PreparationStageOutcome {
     }
 }
 
+/// Delivery truth captured from the exact verified processing root before it
+/// is handed to the staged incarnation. A requested destination or descriptive
+/// candidate never supplies these facts.
+#[derive(Clone, Copy)]
+pub(super) struct StagedProcessingDelivery {
+    pub(super) dolby_vision_profile: Option<u8>,
+    pub(super) fel: Option<bool>,
+}
+
 /// [`stage_prepared_successor_with_prime`] under identities the caller minted.
 /// Preserve cancellation separately from a refused preparation: a live processed
 /// upgrade displaced by incumbent demand waits for its next rendering exchange.
@@ -2650,6 +2659,40 @@ pub(super) async fn stage_prepared_successor_as(
     accepted: AcceptedAsk,
     prime_worker: bool,
     ids: StagedSuccessorIds,
+) -> PreparationStageOutcome {
+    stage_prepared_successor_with_delivery_as(
+        state,
+        session_id,
+        route,
+        predecessor,
+        candidate,
+        source,
+        successor_owner,
+        purpose,
+        accepted,
+        prime_worker,
+        ids,
+        None,
+    )
+    .await
+}
+
+/// The verified processed-upgrade root supplies delivery metadata for these
+/// same minted identities; ordinary staging passes no processing authority.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn stage_prepared_successor_with_delivery_as(
+    state: &AppState,
+    session_id: &str,
+    route: &MediaSessionRoute,
+    predecessor: &RemoteStartRequest,
+    candidate: &crate::transcode::SessionRequest,
+    source: Option<&plurx_core::domain::MediaFile>,
+    successor_owner: &str,
+    purpose: PreparationPurpose,
+    accepted: AcceptedAsk,
+    prime_worker: bool,
+    ids: StagedSuccessorIds,
+    processing: Option<StagedProcessingDelivery>,
 ) -> PreparationStageOutcome {
     // Saving the switch off takes the write side, persists the choice, and
     // settles every registered successor before releasing it. Holding this
@@ -2775,6 +2818,7 @@ pub(super) async fn stage_prepared_successor_as(
     let staged_request = crate::transcode::SessionRequest {
         dv_processing_destination: candidate.dv_processing_destination,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         candidate_context: candidate.candidate_context.clone(),
         request_id: Some(staged_incarnation_id.clone()),
@@ -2902,23 +2946,43 @@ pub(super) async fn stage_prepared_successor_as(
         }
         (crate::transcode::SessionKind::Transcode { .. }, None) => None,
     };
-    let enhancement = grade.and_then(|grade| {
+    let processed_profile = processing.and_then(|delivery| delivery.dolby_vision_profile);
+    let processed_fel = processing.and_then(|delivery| delivery.fel);
+    let (delivered_dynamic_range, delivered_dolby_vision_profile) = grade
+        .map(|grade| {
+            super::create::session_delivered_processing_shape(
+                Some(source),
+                &staged_request.kind,
+                grade,
+                processed_profile,
+            )
+        })
+        .unwrap_or((None, None));
+    let mut enhancement = grade.and_then(|grade| {
         super::create::session_enhancement(
             Some(source),
             &staged_request.kind,
             grade,
-            None,
-            selected
-                .filter(|candidate| candidate.processed_dv)
-                .map(|_| {
-                    source.dolby_vision.profile == Some(7)
-                        && source.dolby_vision.el_present != Some(false)
-                }),
+            processed_profile,
+            processed_fel,
             None,
             None,
             None,
         )
     });
+    // Ordinary prepared selections can attach a processed output without
+    // carrying the upgrade trial's root here. Await current execution evidence
+    // rather than inventing FEL from source tags or suppressing a later receipt.
+    if processing.is_none() && selected.is_some_and(|candidate| candidate.processed_dv) {
+        if let Some(enhancement) = enhancement.as_mut() {
+            // Older native clients gate this snapshot but do not reconstruct
+            // it from the receipt. Keep it neutral, without base-only reasons
+            // that could contradict the eventual processed picture.
+            enhancement.active.clear();
+            enhancement.details.clear();
+            enhancement.requires_effective_processing = true;
+        }
+    }
     let response = StartResponse {
         enhancement,
         effective_processing: None,
@@ -2978,8 +3042,8 @@ pub(super) async fn stage_prepared_successor_as(
         vod: staged_request.presentation == crate::transcode::Presentation::Vod,
         ladder: Vec::new(),
         prior_kbps: None,
-        delivered_dynamic_range: None,
-        delivered_dolby_vision_profile: None,
+        delivered_dynamic_range: delivered_dynamic_range.map(str::to_owned),
+        delivered_dolby_vision_profile,
         control: crate::playback_control::ControlBootstrap::new(
             &staged_session_id,
             &staged_incarnation_id,

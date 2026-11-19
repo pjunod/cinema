@@ -8922,6 +8922,20 @@ final class AppleClientTests: XCTestCase {
         ))
     }
 
+    func testRefitPlaybackReportKeepsFittedGainAndIdentityReasonDistinct() throws {
+        XCTAssertEqual(playbackInfoExplanation("dv_refit"),
+            "Held-out squared code error removed by the served mapping, relative to identity curves. A display may ignore this mapping.")
+        let decoder = JSONDecoder()
+        let fitted = try decoder.decode(DolbyVisionRefitPlaybackReport.self,
+            from: Data(#"{"state":"fitted","gain":0.542}"#.utf8))
+        XCTAssertEqual(fitted.label, "fitted, −54.2%")
+        let identity = try decoder.decode(DolbyVisionRefitPlaybackReport.self,
+            from: Data(#"{"state":"identity","reason":"platform choice is off"}"#.utf8))
+        XCTAssertEqual(identity.label, "identity (platform choice is off)")
+        XCTAssertNil(DolbyVisionRefitPlaybackReport(state: "future", gain: nil, reason: nil).label)
+        XCTAssertEqual(DolbyVisionRefitPlaybackReport(state: "fitted", gain: .infinity, reason: nil).label, "fitted")
+    }
+
     func testToneMapPeakSummaryKeepsPolicyDistinctFromSourceTruth() throws {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase

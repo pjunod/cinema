@@ -4,6 +4,8 @@
 pub mod bounded;
 #[cfg(test)]
 mod census;
+#[cfg(unix)]
+mod child_limits;
 pub mod priority;
 pub mod rlimit;
 pub mod source_lifetime;
