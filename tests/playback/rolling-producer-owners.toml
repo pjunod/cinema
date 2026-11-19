@@ -6084,7 +6084,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # withdrawal-retry backoff on its own task, and the 300 ms settle wait in
 # a_stopped_advertiser_is_not_replaced_until_promotion. Neither is a new owner. = 2281.
 # Three test-only timer shapes: two await artwork identity and one observes probe startup.
-expected_occurrences = 2284
+# The offline fixture waits on the durable state with one timeout and one poll.
+expected_occurrences = 2286
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
