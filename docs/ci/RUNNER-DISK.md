@@ -82,11 +82,10 @@ retain the prior compile selector so already-queued workflow revisions can
 use either host. Registration 62 stays retired because it shared lab1's
 physical budget with the active worker.
 
-Lab2 keeps the original registration 63 in the second former Android
-guest, increased from 10 GiB to 24 GiB. The old Android services and the
-first guest are parked with their disks, registration data and settings
-available for rollback. Lab5 supplies Android CI during the cutover. The
-two Lab2 VM allocations must never run concurrently at those sizes.
+Lab2 keeps registration 63 in the second former Android guest with
+24 GiB RAM and a 116 GiB root disk. The first guest and its prior runner
+settings are parked for rollback. Lab5 supplies Android CI. Running both
+lab2 guests concurrently at those sizes would exceed the host budget.
 
 #### Heavy Rust dispatch
 
