@@ -14,6 +14,38 @@ source mapping**, not an automatic refinement proof. Item hashes in
 that set complete or that the abstractions are correct.
 
 
+## HDR integration with item pins — 2026-11-18
+
+Main `1d350d82` introduces item pins and the reviewed claim/predicate
+closure. Every incoming item pin and dependency is retained. The mapped
+custody activation and TranscodeManager producer items remain byte-identical;
+the HDR changes in those files lie outside those pinned items. No item hash
+is refreshed. The dated whole-file review below remains historical context.
+Models, configurations and prior qualification identities are unchanged;
+this source review does not claim new TLC or runtime execution.
+
+## HDR playback ownership — scoped source review on 2026-11-17
+
+Codex compared PR #1727 at `19266fde08e2` with main `e59cd50c69b1`.
+An independent Sol source review checked the changed ordering and model
+boundaries. This correspondence review records no new runtime execution,
+TLC qualification or refinement theorem.
+
+| Changed source behavior | Model relationship | Correspondence and remaining runtime obligation |
+|---|---|---|
+| `produce_encoded_output_job` and `produce_copy_output_job` explicitly pass `Priority::Background` to their recipe requests | The producer's `publication_fence` path remains domain-only, outside the selected bound `library_scan` / `metadata_refresh` publication model | These are the only two producer changes. Publication guards, claim/binding/token authority and fenced SQL are unchanged. Background priority grants no publication authority; resource availability and scheduling fairness remain external premises. |
+| Source telemetry enqueues its policy command under the observer publication mutex, then awaits the authoritative reply outside that mutex | The custody mapping is a recovery dependency outside the model; `PauseSource` / `ResumeSource` and `S8_PausedSourceIsUnreserved` do not prove byte-service or physical-stop behavior | `finish_projection` must succeed before held reads are released and rolling is published; send/reply failures still propagate. Revocation prevents retired observers from publishing but is not evidence of physical source termination. SourceInput/read/child/writer joins retain physical custody through settlement. |
+
+The custody activation body is byte-identical; the whole-file change includes
+meaningful enqueue/acknowledgement ordering, not merely formatting. Observer
+identity/epoch fencing and enqueue-versus-retirement ordering remain runtime
+obligations, covered by the existing observer-lifetime and explicit-admission
+regressions named in PR #1727. Their definitions are not execution evidence.
+Only the four affected dependency fingerprints across this package and
+operation-progress, the producer citation, and these review records change.
+Model, configuration, property, fairness and historical receipt bytes remain
+unchanged. Anchor uniqueness detects ambiguity, not semantic correspondence.
+
 ## Current-main item pin reconciliation — 2026-11-18
 
 PR1676 head `804633cb4` is integrated with main `965900224` without changing

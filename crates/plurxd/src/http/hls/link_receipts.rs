@@ -1766,6 +1766,7 @@ mod tests {
     }
 
     async fn typed_recovery_controls(review_controls: bool) {
+        crate::http::hls::tests::prepare_catalog_test_encoder().await;
         use crate::transcode::{ReopenReason, SessionKind, SessionRequest};
         use axum::{
             extract::{Path, Query, State},

@@ -6911,6 +6911,7 @@ mod delivered_plan_note_tests {
 /// plan may see an ordinary Copy row, but this request can execute Encode.
 #[tokio::test]
 async fn auto_transcode_selects_an_executable_route_before_normalization() {
+    prepare_catalog_test_encoder().await;
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
     use plurx_core::playback::candidate::CandidateRoute;
     let state = resolver_state();

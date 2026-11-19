@@ -33,16 +33,25 @@ enum AppBuildInfo {
     }
 }
 
+/// Apple TV settings categories in reading order. `id` (the raw value) names
+/// accessibility identifiers and never changes; `title` is what a viewer reads.
 enum TVSettingsCategory: String, CaseIterable, Identifiable {
     case playback = "Playback"
-    case help = "Help"
     case appearance = "Appearance"
     case liveTv = "Live TV"
     case sharing = "Sharing"
-    case account = "Account"
     case remotes = "Remotes & devices"
+    case account = "Account"
+    case help = "Help"
     case about = "About"
     var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .liveTv: return "Live TV & recordings"
+        case .sharing: return "Shared libraries"
+        default: return rawValue
+        }
+    }
 }
 
 /// A menu picker on tvOS draws only its selected value. Keep its setting
@@ -124,6 +133,63 @@ struct SettingsView: View {
                 set: { model.setLanguages(audio: model.audioLang, sub: $0) })
     }
 
+    /// Apple TV reads plain section names; iPhone and iPad keep their own.
+    private func heading(_ category: TVSettingsCategory, _ other: String) -> String {
+        #if os(tvOS)
+        return category.title
+        #else
+        return other
+        #endif
+    }
+
+    private var autoplayLabel: String {
+        #if os(tvOS)
+        return "Play the next episode automatically"
+        #else
+        return "Autoplay next episode"
+        #endif
+    }
+
+    private var liveTvSetupLabel: String {
+        #if os(tvOS)
+        return "Live TV, guide and recording setup"
+        #else
+        return "On/off, tuner, guide, recording and Library channels"
+        #endif
+    }
+
+    private var sharedLibrariesLabel: String {
+        #if os(tvOS)
+        return "Shared libraries and sources"
+        #else
+        return "Shared libraries and Source status"
+        #endif
+    }
+
+    private var captionsLabel: String {
+        #if os(tvOS)
+        return "Caption tools"
+        #else
+        return "Captions and model setup"
+        #endif
+    }
+
+    private var playbackFooter: String {
+        #if os(tvOS)
+        return "Track choices apply when a title has more than one. Instant subtitle switching prepares subtitles from the first frame; After a short pause builds them the first time you turn them on."
+        #else
+        return "Track choices apply when a title has more than one. Instant subtitle switching prepares subtitles from the first frame; After a short pause builds them the first time you turn them on. Pause/resume and quality handoff are on by default; their readiness rows are advisory and never change either switch."
+        #endif
+    }
+
+    /// Pause/resume and quality handoff switches with their readiness page.
+    /// Every platform keeps them under Playback (Developer retired 2026-11-18).
+    @ViewBuilder private var playbackEngineeringRows: some View {
+        Toggle("Bounded pause/resume", isOn: $boundedResumeEnabled)
+        Toggle("Prepared quality handoff", isOn: $preparedHandoffEnabled)
+        NavigationLink("Pause/resume and quality handoff readiness") { PlaybackHandoffDetailsView() }
+    }
+
     private var libraryGroupingLabel: String {
         #if os(tvOS)
         return "Library grouping"
@@ -139,7 +205,7 @@ struct SettingsView: View {
                 List(TVSettingsCategory.allCases) { entry in
                     Button { selectedCategory = entry } label: {
                         HStack {
-                            Text(entry.rawValue)
+                            Text(entry.title)
                             Spacer()
                             if selectedCategory == entry { Image(systemName: "checkmark") }
                         }
@@ -158,7 +224,7 @@ struct SettingsView: View {
                 }
                 Divider()
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(selectedCategory.rawValue).font(.title2.bold()).padding(.horizontal, 24)
+                    Text(selectedCategory.title).font(.title2.bold()).padding(.horizontal, 24)
                     SettingsView(category: selectedCategory, entryRequest: contentEntryRequest)
                         .id(selectedCategory)
                 }
@@ -205,7 +271,7 @@ struct SettingsView: View {
                         Text(readiness.label).tag(readiness)
                     }
                 }
-                Toggle("Autoplay next episode", isOn: Binding(
+                Toggle(autoplayLabel, isOn: Binding(
                     get: { model.autoplay },
                     set: { model.setAutoplay($0) }
                 ))
@@ -213,14 +279,12 @@ struct SettingsView: View {
                     get: { model.autoSkip },
                     set: { model.setAutoSkip($0) }
                 ))
-                Toggle("Bounded pause/resume", isOn: $boundedResumeEnabled)
-                Toggle("Prepared quality handoff", isOn: $preparedHandoffEnabled)
-                NavigationLink("Pause/resume and quality handoff readiness") { PlaybackHandoffDetailsView() }
-                NavigationLink("Captions and model setup") { ProgressiveCaptionSetupView() }
+                playbackEngineeringRows
+                NavigationLink(captionsLabel) { ProgressiveCaptionSetupView() }
             } header: {
                 Text("Playback")
             } footer: {
-                Text("Track choices apply when a title has more than one. Instant subtitle switching prepares subtitles from the first frame; After a short pause builds them the first time you turn them on. Pause/resume and quality handoff are on by default; their readiness rows are advisory and never change either switch.")
+                Text(playbackFooter)
             }
             .settingsCategory(.playback, selection: category)
 
@@ -333,9 +397,10 @@ struct SettingsView: View {
                 }
                 .focused($focusedEntry, equals: .liveTv)
                 #endif
-                NavigationLink("On/off, tuner, guide, recording and Library channels") { LiveTvSettingsView() }
+                NavigationLink(liveTvSetupLabel) { LiveTvSettingsView() }
+                    .accessibilityIdentifier("settings-live-tv-setup")
             } header: {
-                Text("Live TV")
+                Text(heading(.liveTv, "Live TV"))
             } footer: {
                 #if os(tvOS)
                 Text("Layout changes presentation only; the current channel and tuner session continue playing. Server settings require administrator access.")
@@ -345,8 +410,9 @@ struct SettingsView: View {
             }
             .settingsCategory(.liveTv, selection: category)
 
-            Section("Sharing") {
-                NavigationLink("Shared libraries and Source status") { SharedSharingSettingsView() }
+            Section(heading(.sharing, "Sharing")) {
+                NavigationLink(sharedLibrariesLabel) { SharedSharingSettingsView() }
+                    .accessibilityIdentifier("settings-shared-libraries")
                     .focused($focusedEntry, equals: .sharing)
             }
             .settingsCategory(.sharing, selection: category)
