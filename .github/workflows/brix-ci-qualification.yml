@@ -1,0 +1,24 @@
+name: BRIX general runner qualification
+on:
+  push:
+    branches: [codex/brix01-ci-qualification]
+jobs:
+  operations:
+    name: bounded Plurx operations tests
+    runs-on: [self-hosted, Linux, X64, lab, ci-brix-qualification]
+    timeout-minutes: 15
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 9g --cpus 2 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Run the operations resource contracts
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.operations.test_voter_isolation
