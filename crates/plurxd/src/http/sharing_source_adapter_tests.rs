@@ -10,6 +10,92 @@ async fn sharing_source_actor_adapters_actual_h1_h2_control_and_private_metrics(
 async fn sharing_source_actor_adapters_actual_encoded_h1_h2_control_and_private_metrics() {
     Box::pin(actual_actor_adapters(true)).await;
 }
+// Failure-only observations: never renew authority or issue another control.
+async fn actor_control_failure_context(
+    response: &mut axum::response::Response,
+    fixture: &RealSourceStartFixture,
+    actor: &crate::transcode::source_actor::SourceViewerActor,
+    session_id: &str,
+    index: usize,
+    h2: bool,
+    phase: &str,
+    sequence: usize,
+) -> String {
+    use futures_util::FutureExt;
+    let status = response.status().as_u16();
+    let snapshot = std::panic::AssertUnwindSafe(async {
+        let body = std::mem::replace(response.body_mut(), axum::body::Body::empty());
+        let code = axum::body::to_bytes(body, 128 * 1024)
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|value| value.get("code").and_then(Value::as_str).map(str::to_owned));
+        // Only closed error vocabulary is retained; never print arbitrary body data.
+        let code = match code.as_deref() {
+            Some(code @ ("sharing_start_unavailable" | "sharing_start_unresolved"
+                | "sharing_start_deadline" | "sharing_start_conflict"
+                | "sharing_playback_authority_unavailable" | "sharing_body_authority_unavailable"
+                | "sharing_transport_authority_unavailable" | "sharing_invalid_request"
+                | "sharing_body_capacity" | "sharing_connection_authority_capacity")) => code,
+            Some(_) => "other_error_code",
+            None => "no_error_code",
+        };
+        // wait_ready only reads retained state; a single poll cannot wait or renew.
+        let readiness = actor.wait_ready(std::time::Instant::now()).now_or_never();
+        let readiness = match readiness {
+            Some(Ok(_)) => "ready".to_owned(),
+            Some(Err(error)) => format!("{error:?}"),
+            None => "pending".to_owned(),
+        };
+        let vod = fixture.state.transcode.vod_for_test();
+        let recovered = vod.recovered_start(session_id).await.is_some();
+        let facts = vod.hls_facts(session_id).await;
+        let (owner_live, physical_fence) = if let Some(facts) = facts.as_ref() {
+            let live = vod.response_owner_is_live(session_id, &facts.response_owner).await;
+            let fence = match vod.source_response_physical_fence(&facts.response_owner).await {
+                Ok(_) => "current",
+                Err(error) => match error.as_str() {
+                    "Source rendition is absent" => "rendition_absent",
+                    "Source response has no Source rendition" => "not_source_rendition",
+                    "Source held input is absent" => "held_input_absent",
+                    "Source held input changed" => "held_input_changed",
+                    "Source held input changed during response admission" => "held_input_changed_during_admission",
+                    _ => "physical_fence_error",
+                },
+            };
+            (Some(live), fence)
+        } else {
+            (None, "facts_absent")
+        };
+        let observation = vod.source_control_observation_for_test(session_id).await;
+        json!({
+            "index": index, "h2": h2, "phase": phase, "request_sequence": sequence,
+            "expected_status": 200, "actual_status": status, "error_code": code,
+            "actor_readiness": readiness,
+            // No existing read-only API exposes the retirement flag or accepted sequence.
+            "actor_settlement": format!("{:?}", actor.settlement_status()),
+            "actor_retirement_requested": Value::Null, "accepted_sequence": Value::Null,
+            "worker_count": fixture.state.transcode.source_worker_count(),
+            "vod_recovered": recovered, "vod_facts": facts.is_some(),
+            "response_owner_live": owner_live, "physical_fence": physical_fence,
+            "control_observation": observation.as_ref().map(|(snapshot, touched)| json!({
+                "last_touch_age_ms": touched.elapsed().as_millis(),
+                "demand": snapshot.as_ref().map(|snapshot| format!("{:?}", snapshot.demand)),
+                "position_ms": snapshot.as_ref().map(|snapshot| snapshot.position_ms),
+                "buffered_through_ms": snapshot.as_ref().map(|snapshot| snapshot.buffered_through_ms),
+            })),
+        }).to_string()
+    }).catch_unwind();
+    // Diagnostic failure cannot replace the original status assertion.
+    match tokio::time::timeout(std::time::Duration::from_millis(250), snapshot).await {
+        Ok(Ok(context)) => context,
+        outcome => json!({
+            "index": index, "h2": h2, "phase": phase, "request_sequence": sequence,
+            "expected_status": 200, "actual_status": status,
+            "snapshot_error": if outcome.is_err() { "timeout" } else { "panic" },
+        }).to_string(),
+    }
+}
 async fn actual_actor_adapters(encoded: bool) {
     let mut fixture = real_source_start_fixture_with(
         if encoded {
@@ -165,7 +251,7 @@ async fn actual_actor_adapters(encoded: bool) {
             "selection":{"quality":quality,"audio_track":null,"subtitle":{"mode":"off"},"audio_offset_ms":0,"codec":"auto","dynamic_range":"auto"},
             "capabilities":{"platform":"web","max_height":2160,"codecs":["h264"],"dynamic_ranges":["sdr"],"dual_player_preparation":false},"supported_actions":[],"intent":null
         });
-        let response = actual_resource_request(
+        let mut response = actual_resource_request(
             address,
             h2,
             &format!("{base}/control"),
@@ -173,7 +259,15 @@ async fn actual_actor_adapters(encoded: bool) {
             serde_json::to_vec(&control).expect("actual adapter fixture observation"),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::OK);
+        let failure_context = if response.status() != StatusCode::OK {
+            actor_control_failure_context(
+                &mut response, &fixture, &owned.actor, &decoded.response().session_id,
+                index, h2, "control", index + 1,
+            ).await
+        } else {
+            String::new()
+        };
+        assert_eq!(response.status(), StatusCode::OK, "{failure_context}");
         let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
             .await
             .expect("actual adapter fixture observation");
@@ -195,7 +289,7 @@ async fn actual_actor_adapters(encoded: bool) {
         // transport status B would have to guess about.
         let mut foreign_client = control.clone();
         foreign_client["control"]["client_instance_id"] = json!(uuid::Uuid::new_v4().to_string());
-        let response = actual_resource_request(
+        let mut response = actual_resource_request(
             address,
             h2,
             &format!("{base}/control"),
@@ -203,7 +297,15 @@ async fn actual_actor_adapters(encoded: bool) {
             serde_json::to_vec(&foreign_client).expect("actual adapter fixture observation"),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::OK);
+        let failure_context = if response.status() != StatusCode::OK {
+            actor_control_failure_context(
+                &mut response, &fixture, &owned.actor, &decoded.response().session_id,
+                index, h2, "foreign_control", index + 1,
+            ).await
+        } else {
+            String::new()
+        };
+        assert_eq!(response.status(), StatusCode::OK, "{failure_context}");
         let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
             .await
             .expect("actual adapter refusal");
