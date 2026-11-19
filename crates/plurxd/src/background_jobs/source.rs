@@ -583,16 +583,6 @@ mod tests {
         let (store, _job, active) = crate::background_jobs::tests::active().await;
         let fence = active.fence();
         let budget = fence.source_budget();
-        let now = crate::state::clock_ms();
-        // A real exhausted finite receipt: the allocator's existing timer
-        // advances to a fresh Store grant while the process is verified held.
-        *budget.grant.lock().await = Some(BackgroundSourceServiceGrant {
-            receipt_id: uuid::Uuid::new_v4().to_string(),
-            epoch_id: now / 5000,
-            expires_at_ms: now + 3000,
-            byte_allowance: Some(0),
-            resource_keys: vec!["source_io".into()],
-        });
         let directory = crate::test_tempdir().expect("create source test temp directory");
         let manager = crate::transcode::TranscodeManager::new(
             store,
@@ -635,6 +625,17 @@ mod tests {
                     } else {
                         None
                     };
+                    // Issue the exhausted receipt when the scanner and limiter are
+                    // about to run. Manager setup and admission must not use up its
+                    // finite hold before the child can receive any pause credit.
+                    let now = crate::state::clock_ms();
+                    *budget.grant.lock().await = Some(BackgroundSourceServiceGrant {
+                        receipt_id: uuid::Uuid::new_v4().to_string(),
+                        epoch_id: now / 5000,
+                        expires_at_ms: now + 3000,
+                        byte_allowance: Some(0),
+                        resource_keys: vec!["source_io".into()],
+                    });
                     let child = async {
                         let result = bounded::output(
                             "/bin/sh",
