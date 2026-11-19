@@ -18,7 +18,7 @@
         let request = SessionRequest {
             source_telemetry: None,
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -50,7 +50,7 @@ quality_catalog: None,
         // field silently leave the real key while the test stays green.
         let shifted = SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -76,7 +76,7 @@ quality_catalog: None,
         );
         let other_player = SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -137,7 +137,7 @@ quality_catalog: None,
         // not a quiet second stream.
         let different = SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -157,7 +157,7 @@ quality_catalog: None,
         // A fresh key from the same player supersedes, as any restart does.
         let next = SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -205,7 +205,7 @@ quality_catalog: None,
         let request = SessionRequest {
             source_telemetry: None,
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -291,7 +291,7 @@ quality_catalog: None,
         let request = SessionRequest {
             source_telemetry: None,
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -322,7 +322,7 @@ quality_catalog: None,
 
         let retry = SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -364,7 +364,7 @@ quality_catalog: None,
         let original = SessionRequest {
             source_telemetry: None,
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -414,7 +414,7 @@ quality_catalog: None,
         // allowed to create a conflict or become a second ladder step.
         let replay = SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -536,7 +536,7 @@ quality_catalog: None,
 
         let lower = SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -884,7 +884,7 @@ quality_catalog: None,
 
         let foreign = SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -1366,7 +1366,7 @@ quality_catalog: None,
 
         let request = SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -1392,7 +1392,7 @@ quality_catalog: None,
 
         let track_change = SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -1623,7 +1623,7 @@ quality_catalog: None,
 
         let device_b = SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -1651,7 +1651,7 @@ quality_catalog: None,
 
         let foreign_user = SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
@@ -2895,7 +2895,7 @@ scope = "test"
         let mut request = SessionRequest {
             source_telemetry: None,
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             quality_catalog: None,
             continuous_media: None,

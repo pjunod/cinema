@@ -4411,6 +4411,30 @@ impl MediaSessionCoordinator {
         relayed_owner_response(response.status.as_u16(), retry_after, response.body)
     }
 
+    pub(crate) async fn retain_output(
+        &self,
+        owner_node_id: &str,
+        request: &crate::http::hls::RetainOutputRelayRequest,
+    ) -> Result<Response<Body>, PeerTransportError> {
+        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        let deadline = deadline_after(Duration::from_secs(5));
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        let (response, retry_after) = self
+            .transport
+            .request_with_retry_after(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                crate::http::hls::RETAIN_OUTPUT_PATH,
+                body,
+                deadline,
+                1024,
+                PeerAuthMode::ExactRequest,
+            )
+            .await?;
+        relayed_owner_response(response.status.as_u16(), retry_after, response.body)
+    }
+
     pub(crate) async fn quality_control(
         &self,
         owner_node_id: &str,
@@ -7387,7 +7411,7 @@ pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) ->
         typeless_playlist: true,
         request: SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,

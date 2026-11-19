@@ -2325,8 +2325,7 @@ pub async fn decision(
         ));
     }
     let network_prior =
-        super::network::stored_prior(state.store.as_ref(), &state.applied, identity.as_ref())
-            .await?;
+        super::network::stored_prior(state.store.as_ref(), identity.as_ref()).await?;
     let file = load_file(&state, id).await?;
     decision_for_file(
         &state,
@@ -2683,82 +2682,73 @@ async fn decision_for_file(
     // once the catalogue itself is in hand so its enumeration cannot spend
     // it. Missing evidence is Unknown; it never refuses the decision.
     let mut advisory = None;
-    let quality_candidates = if state
-        .applied
-        .setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-        .await?
-        .is_some_and(|value| value.trim() == "1")
-    {
-        if let Some(caps) = q.caps_v2.as_ref() {
-            let request = crate::media_pool::QualityCatalogRequest {
-                audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(caps)
-                    .ok()
-                    .flatten(),
-                audio_delivery: None,
-                copy_contract: None,
-                file_id: file.id,
-                source_size: file.size,
-                source_mtime: file.mtime,
-                caps: caps.clone(),
-                audio_index: selected_audio,
-                audio_offset_ms: file.audio_offset_ms,
-                subtitle_burn: selected_subtitle.filter(|_| selected_subtitle_requires_burn),
-                presentation: crate::transcode::Presentation::Vod,
-            };
-            let accepted = state
-                .media_pool
-                .quality_candidates(state, request.clone())
-                .await;
-            // Costs are advisory, but their source/settings must be the exact
-            // accepted local row. Acquisition and projection share one deadline.
-            let deadline = *advisory.insert(super::hls::link_receipts::advisory_deadline());
-            measured_candidate_outputs = tokio::time::timeout_at(deadline, async {
-                let planning = state
-                    .store
-                    .playback_planning_snapshot(file.id, &crate::transcode::QUALITY_PLANNING_KEYS)
-                    .await
-                    .ok()??;
-                let binding = crate::media_pool::PlanningBinding::from_snapshot(&planning);
-                if planning.file.id != file.id
-                    || planning.file.size != file.size
-                    || planning.file.mtime != file.mtime
-                    || !accepted.iter().any(|entry| {
-                        entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
-                    })
-                {
-                    return None;
-                }
-                let local: Vec<_> = accepted
-                    .iter()
-                    .filter(|entry| {
-                        entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
-                    })
-                    .cloned()
-                    .collect();
-                super::hls::link_receipts::measured_outputs(
-                    state,
-                    &file,
-                    &request,
-                    &local,
-                    Some(&planning),
-                    deadline,
-                )
+    let quality_candidates = if let Some(caps) = q.caps_v2.as_ref() {
+        let request = crate::media_pool::QualityCatalogRequest {
+            audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(caps)
+                .ok()
+                .flatten(),
+            audio_delivery: None,
+            copy_contract: None,
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            caps: caps.clone(),
+            audio_index: selected_audio,
+            audio_offset_ms: file.audio_offset_ms,
+            subtitle_burn: selected_subtitle.filter(|_| selected_subtitle_requires_burn),
+            presentation: crate::transcode::Presentation::Vod,
+        };
+        let accepted = state
+            .media_pool
+            .quality_candidates(state, request.clone())
+            .await;
+        // Costs are advisory, but their source/settings must be the exact
+        // accepted local row. Acquisition and projection share one deadline.
+        let deadline = *advisory.insert(super::hls::link_receipts::advisory_deadline());
+        measured_candidate_outputs = tokio::time::timeout_at(deadline, async {
+            let planning = state
+                .store
+                .playback_planning_snapshot(file.id, &crate::transcode::QUALITY_PLANNING_KEYS)
                 .await
-            })
-            .await
-            .ok()
-            .flatten();
-
-            Some(
-                accepted
-                    .into_iter()
-                    .filter(|entry| !entry.candidate.processed_dv || entry.dispatch_supported)
-                    .map(|entry| entry.candidate)
-                    .collect::<Vec<_>>(),
+                .ok()??;
+            let binding = crate::media_pool::PlanningBinding::from_snapshot(&planning);
+            if planning.file.id != file.id
+                || planning.file.size != file.size
+                || planning.file.mtime != file.mtime
+                || !accepted.iter().any(|entry| {
+                    entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
+                })
+            {
+                return None;
+            }
+            let local: Vec<_> = accepted
+                .iter()
+                .filter(|entry| {
+                    entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
+                })
+                .cloned()
+                .collect();
+            super::hls::link_receipts::measured_outputs(
+                state,
+                &file,
+                &request,
+                &local,
+                Some(&planning),
+                deadline,
             )
-        } else {
-            None
-        }
+            .await
+        })
+        .await
+        .ok()
+        .flatten();
+
+        Some(
+            accepted
+                .into_iter()
+                .filter(|entry| !entry.candidate.processed_dv || entry.dispatch_supported)
+                .map(|entry| entry.candidate)
+                .collect::<Vec<_>>(),
+        )
     } else {
         None
     };

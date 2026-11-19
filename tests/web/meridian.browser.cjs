@@ -133,7 +133,7 @@ test("Meridian roles render across themes and appearances without leaking on exi
 test("Settings fields survive switches and companion navigation cannot control restricted content",async()=>{
  const browser=await chromium.launch({headless:true});
  try{
-  const {page,errors}=await fixture(browser,{tv:true,viewport:{width:1920,height:1080}});await page.goto("http://meridian.test/#/settings/developer");await page.waitForSelector("#cinema-screen-name");
+  const {page,errors}=await fixture(browser,{tv:true,viewport:{width:1920,height:1080}});await page.goto("http://meridian.test/#/settings/remotes");await page.waitForSelector("#cinema-screen-name");
   await page.locator("#cinema-screen-name").fill("Unsaved screen name");await page.evaluate(()=>window.settingsField=document.getElementById("cinema-screen-name"));
   for(const layout of ["classic","meridian"]){await page.evaluate(layout=>setLayout(layout),layout);assert.equal(await page.evaluate(()=>document.getElementById("cinema-screen-name")===window.settingsField&&window.settingsField.value==="Unsaved screen name"),true);}
   const state=await page.evaluate(()=>{cinemaRemoteBind();return CinemaRemote.snapshot();});assert.equal(state.blocked,false);assert.equal(state.text_nonce,null);

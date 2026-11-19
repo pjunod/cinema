@@ -28,7 +28,7 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     ("http/developer.rs", "readiness", 1, false),
     ("http/system.rs", "configured_server_name", 1, true),
     ("http/system.rs", "features", 1, false),
-    ("http/system.rs", "server_info", 3, false),
+    ("http/system.rs", "server_info", 1, false),
     // GET only: the PUT passes `SettingsDtoSource::Authority`.
     ("http/system.rs", "settings_dto", 1, true),
     ("http/system.rs", "system_info", 3, false),
@@ -39,32 +39,13 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     // Network priors decide optional processed output, after owner placement.
     ("http/hls/create.rs", "handed_over_ask", 1, true),
     (
-        "http/hls/create.rs",
-        "resolve_plan_for_principal_with_local_evidence",
-        1,
-        true,
-    ),
-    (
-        "http/hls/link_receipts.rs",
-        "network_priors_enabled",
-        1,
-        true,
-    ),
-    (
-        "http/hls/link_receipts.rs",
-        "processed_candidate_link_evidence",
-        1,
-        true,
-    ),
-    (
         "http/internal_media.rs",
         "subtitle_cluster_source_enabled",
         1,
         true,
     ),
-    ("http/network.rs", "stored_prior", 1, true),
     ("http/preparation.rs", "status", 2, false),
-    ("http/stream.rs", "decision_for_file", 2, true),
+    ("http/stream.rs", "decision_for_file", 1, true),
     ("http/stream.rs", "readrate_setting", 1, true),
     // D3b: the create's one planning read, for the ingress and a remote
     // owner (`planning`, and `planning_from_authority` twice for an owner).
@@ -118,64 +99,10 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
         "chapter_thumbnails",
     ),
     (
-        "http/hls/create.rs",
-        "resolve_plan_for_principal_with_local_evidence",
-        "http/hls/create.rs",
-        "resolve_plan_for_principal",
-    ),
-    (
-        "http/hls/create.rs",
-        "resolve_plan_for_principal_with_local_evidence",
-        "http/hls/create.rs",
-        "resolve_plan_with_scope",
-    ),
-    (
-        "http/hls/link_receipts.rs",
-        "network_priors_enabled",
-        "http/hls/link_receipts.rs",
-        "accept_negative_for_ack",
-    ),
-    (
-        "http/hls/link_receipts.rs",
-        "network_priors_enabled",
-        "http/hls/link_receipts.rs",
-        "filter_catalog",
-    ),
-    (
-        "http/hls/link_receipts.rs",
-        "network_priors_enabled",
-        "http/hls/prepared_link.rs",
-        "proposed_proof",
-    ),
-    (
-        "http/hls/link_receipts.rs",
-        "network_priors_enabled",
-        "http/system.rs",
-        "client_log",
-    ),
-    (
-        "http/hls/link_receipts.rs",
-        "processed_candidate_link_evidence",
-        "http/hls/processed_upgrade.rs",
-        "auto_link_admission",
-    ),
-    (
         "http/internal_media.rs",
         "subtitle_cluster_source_enabled",
         "http/internal_media.rs",
         "serve_subtitle_source",
-    ),
-    (
-        "http/network.rs",
-        "stored_prior",
-        "http/hls/create.rs",
-        "create_with_purpose_attempt",
-    ),
-    (
-        "http/network.rs",
-        "stored_prior",
-        "http/stream.rs",
-        "decision",
     ),
     (
         "http/stream.rs",

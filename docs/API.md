@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-12, plurx has 423 routes declared by the ordinary listener's
+As of 2026-11-18, plurx has 425 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 423 routes across the registered routers.
+plurx has 425 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -413,11 +413,11 @@ stranger should not read. The cluster's other ingress origins are therefore
 Fields: `name`, `version` (bare semver, which is what clients compare), `build`
 (git description), `built_at`, `instance_id`, `node_id`,
 `cluster_advertisement`, `uptime_seconds`, `setup_required`, `android_app`,
-`playback_auto_abr`, `display_mode_match` (the replicated Android-TV cadence
-switch; missing storage is `false`). Also `decoder_compaction_contract`,
-`display_aware_auto_protocol` (always `"route-v1"` on this build) and
-`playback_display_aware_auto` (the Developer switch; missing storage is
-`false`) — see §7.4.
+`playback_auto_abr` (always `true`: adaptive Auto is always on),
+`display_mode_match` (the replicated Android-TV cadence switch; missing storage
+is `false`). Also `decoder_compaction_contract`, `display_aware_auto_protocol`
+(always `"route-v1"` on this build) and `playback_display_aware_auto` (always
+`true`) — see §7.4.
 
 `GET /api/v1/server/node` (signed in) names the machine: `hostname` (the
 answering node's short hostname, the name the cluster roster shows; absent
@@ -580,14 +580,9 @@ progressive playback. It can restore known color corruption. Saving it never
 depends on readiness; `hevc_header_trace_available` is a read-only nullable
 boolean reporting this node’s FFmpeg capability for the Developer advice.
 
-`playback_sdr_master_codecs` is an admin-writable boolean (default `false`,
-store key `playback.sdr_master_codecs`). On, an SDR HLS master variant
-carries `CODECS` when the session's frozen video and audio facts are both
-complete; off is the pre-S-10 master, which carries no `CODECS` on SDR
-variants. HDR and Dolby Vision variants are the same either way. The value is
-fixed when a session is created; a session rebuilt after an owner takeover or
-VOD resurrection reads the current value. Saving it never depends on the Developer
-readiness row (`sdr_master_codecs` → `sdr_codecs_device_requalification`).
+SDR HLS master variants carry no `CODECS`; HDR and Dolby Vision variants keep
+theirs. The retired `playback_sdr_master_codecs` field is no longer reported,
+and a PUT that still sends it is accepted and ignored.
 
 Live-TV settings are a separate transaction with their own generation
 compare-and-swap, and mixing them into a request with any non-Live-TV field is
@@ -611,15 +606,22 @@ Refusals worth knowing, each a 400 unless noted:
   out of range. Switching `auth_token_expiry` from off to on also writes
   `auth_token_expiry_since` = now in the same commit (§2.5).
 
-Two Developer switches govern work a VOD start can leave behind (added
-2026-10-04, both off by default):
+Two features govern work a playback can leave behind:
 
-- `vod_output_preparation` — `"off"`, `"copy"` or `"copy_and_encoded"`. What
-  complete-output preparation a VOD start may queue. Anything else is a 400.
-  It runs whether or not `cache_produce_mins` is on. Turning a kind off
-  cancels that kind's queued rows within a minute, on every node.
-- `vod_rolling_retention` — boolean. Whether a rolling session's segments are
-  hard-linked into a retained artifact as they are written.
+- `vod_output_preparation` — `"off"` (the default), `"copy"` or
+  `"copy_and_encoded"`. What complete-output preparation a VOD start may
+  queue. Anything else is a 400. It runs whether or not `cache_produce_mins`
+  is on. Turning a kind off cancels that kind's queued rows within a minute,
+  on every node.
+- Rolling retention — always on: a rolling session's segments are
+  hard-linked into a retained artifact as they are written. The GET still
+  reports `vod_rolling_retention: true`; a PUT that sends it is ignored.
+
+A player can turn both off for one playback: `overrides.retain_output: false`
+on the session create (§9), or `POST /hls/{session}/retain-output` mid-playback
+(§9.6). `content_aware_encoding`, `playback_network_priors`,
+`playback_auto_abr` and `playback_display_aware_auto` are likewise always on:
+the GET reports `true` and a PUT that sends them is accepted and ignored.
 
 `cache_max_gb` is reported as 50 when no row is stored, and that is the budget
 both features use. VOD rendition admission keeps its own rule: no stored row
@@ -1680,11 +1682,10 @@ qualification; the design is
 [DISPLAY-AWARE-AUTO-QUALITY-PLAN.md](streaming/DISPLAY-AWARE-AUTO-QUALITY-PLAN.md).
 
 - **Advertisement.** `GET /api/v1/server` (§4.1) carries
-  `display_aware_auto_protocol: "route-v1"` and the two switches as
-  `playback_display_aware_auto` and `playback_auto_abr`
-  (`crates/plurxd/src/http/system.rs`; a stored value of exactly `1` is on).
-  The native clients enter their recovery paths only when both switches are
-  on and the protocol is `route-v1`.
+  `display_aware_auto_protocol: "route-v1"` and `playback_display_aware_auto`
+  and `playback_auto_abr`, both always `true`
+  (`crates/plurxd/src/http/system.rs`). The native clients enter their
+  recovery paths only when both are true and the protocol is `route-v1`.
 - **Capabilities.** The v2 capabilities document (§7.1) may carry the
   display's `presentation_target` (`DisplayCaps`) and `audio_sinks`
   (`DeviceCaps`; at most 16 entries), in
@@ -1703,9 +1704,8 @@ qualification; the design is
   legacy handling. Candidate lookup still requires full recipe equality,
   source binding and current capability validation before starting a producer.
 - **Session create (§9).** An Auto ask for one candidate is
-  `intent.selection.quality = {"mode":"auto","candidate_id":…}`. While
-  `playback.display_aware_auto` is off, a create that names a `candidate_id`
-  is refused `400 candidate_route_disabled`. A typed recovery names its
+  `intent.selection.quality = {"mode":"auto","candidate_id":…}`. A typed
+  recovery names its
   predecessor with `previous_session_id` and `reopen_reason`, one of `stall`,
   `link`, `encode`, `decode`, `hold` or `authority` (`ReopenReason`,
   `crates/plurxd/src/transcode/session_request.rs`; an unknown value is
@@ -1910,6 +1910,7 @@ the ffmpeg is taken down.
 | POST | `/hls/{session}/quality-control` | **capability** | Quality-cancellation discovery and cancel; body ≤ 4 KiB (§10) |
 | GET | `/hls/{session}/quality-family` | **capability** | Versioned continuous-family description (§9.6) |
 | POST | `/hls/{session}/quality-schedule` | **capability** | One versioned quality-ledger mutation or read; body ≤ 160 KiB (§9.6) |
+| POST | `/hls/{session}/retain-output` | **capability** | `{"retain_output": false}` only: stop retaining this playback's output; 204, body ≤ 1 KiB (§9.6) |
 | GET | `/hls/{session}/{role}/{rendition}/index.m3u8` | **capability** | One family rendition's media playlist (§9.6) |
 | GET | `/hls/{session}/{role}/{rendition}/{kind}/{object}` | **capability** | One family rendition's init object or media segment (§9.6) |
 | DELETE | `/hls/{session}` | **capability** | Releases the session |
@@ -2246,6 +2247,20 @@ child media, under the parent's capability and response fences. `role` is
 a 64-hex `object` + `.mp4`, or `segment` with a canonical decimal index +
 `.m4s`. Any other spelling is 404 before the session is touched. Segments
 carry the §9.2 entity-tag, range and status contract.
+
+**`POST /hls/{session}/retain-output`** — the player's mid-playback "keep a
+reusable copy: off" switch. The body is exactly `{"retain_output": false}`
+(unknown fields, `true` or a malformed session id are `400`; there is no
+re-enable). The session's owner abandons its rolling retained collection,
+drops a complete-output hand-off it has not yet published, and cancels a
+complete-output row this session's own start created; a row another start
+queued first is not this session's and stays. `204` on success (repeat-safe),
+`404` for an unknown session, `410` for one that has ended, `503` with
+`Retry-After` when the route or owner cannot be read. A non-owner relays it
+over `/internal/cluster/media/sessions/retain-output`. At create, the same
+choice is `overrides.retain_output: false`; it is parsed whether or not the
+body carries caps, is never persisted, and so a takeover or resurrected
+session follows the server setting.
 
 **`POST /hls/{session}/quality-schedule`** — one strict versioned ledger
 exchange: `{version: 1, generation, control_epoch, attachment, transition?,
@@ -4186,6 +4201,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/internal/cluster/sharing/receiver/control` | 128 KiB | Relays bounded Shared receiver status/control/End through the existing receiver dispatch. End uses retained cleanup authority without registering a new writer; response bound 64 KiB. |
 | POST | `/internal/cluster/sharing/receiver/register`, `/internal/cluster/sharing/receiver/ack` | 128 KiB | Authenticates one exact receiver ingress registration or actual-closure acknowledgement against the current owner fence and custody record. |
 | POST | `/internal/cluster/media/sessions/quality-control` | 4 KiB | Relays one quality-cancellation exchange to the expected owner (§10) |
+| POST | `/internal/cluster/media/sessions/retain-output` | 1 KiB | Relays `{session_id, expected_owner_node_id}` for `POST /hls/{session}/retain-output`; a different owner is 400 |
 | POST | `/internal/cluster/media/sessions/quality-schedule` | 160 KiB | Relays one quality-schedule exchange `{session_id, expected_owner_node_id, deadline_unix_ms, request}` with an inherited deadline; a different owner is 400 and the public status contract (§9.6) applies |
 
 These path prefixes are historical, not a versioning scheme. In particular,

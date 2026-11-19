@@ -1379,6 +1379,18 @@ struct MediaIntentEnvelope: Codable {
     var selection: MediaIntentSelection
 }
 
+/// Per-playback overrides of server settings. `retainOutput == false` means
+/// this playback queues no complete-output preparation and keeps no rolling
+/// output. Only ever sent as false; absent follows the server setting.
+struct SessionOverrides: Codable, Equatable {
+    var retainOutput: Bool?
+}
+
+/// Body for `POST /hls/{session_id}/retain-output` (off-only).
+struct RetainOutputRequest: Codable, Equatable {
+    var retainOutput: Bool = false
+}
+
 struct CreateSessionRequest: Codable {
     var intent: MediaIntentEnvelope? = nil
     /// Stable for one player instance; supersession is keyed by it.
@@ -1439,6 +1451,8 @@ struct CreateSessionRequest: Codable {
     /// AVPlayer's device-specific first-byte measurement is still pending;
     /// the server's measured conservative default applies until then.
     var blockBudgetSecs: Double?
+    /// Per-playback overrides; nil unless the viewer turned a switch off.
+    var overrides: SessionOverrides?
 }
 
 struct ProgressRequest: Codable {

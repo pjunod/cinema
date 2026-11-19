@@ -3487,32 +3487,14 @@ in production. A green `make check` says the playlist is syntactically what was
 intended; it does not say AVPlayer will accept it. Treat an unobserved rung as
 untested, and turn it back off if the device does not visibly improve.
 
-### SDR `CODECS` on the master (Developer switch)
+### SDR `CODECS` on the master
 
-**Settings → Developer → Master playlist codecs → *Print CODECS on SDR
-variants*** (`playback.sdr_master_codecs`, API field
-`playback_sdr_master_codecs`) is **off by default**. Off serves the pre-S-10
-master: SDR (`avc1`) variants carry no `CODECS`, which is the shape every
-client has played. On, an SDR variant names its exact `avc1.PPCCLL` string (and
-its audio component) whenever the session's frozen facts are complete — the
-same information HDR masters already carry. HDR10 and Dolby Vision variants
-are identical either way.
-
-It is a switch rather than a default because AVPlayer filters variants on
-`CODECS` before it fetches a byte: a string tvOS or iOS dislikes removes the
-rung silently, and no server counter can see a request that was never made.
-The value is fixed when a session is created (taken from the create's own
-planning-snapshot read, so it costs no extra Store read), so a running
-session's master never changes shape; a session rebuilt after an owner
-takeover or VOD resurrection reads the current value. Flip it, then start a
-**new** playback to observe the effect. The Developer row "Apple TV and iPhone
-keep every SDR variant with CODECS printed" is advisory and reads `unknown`
-until the
-device check in
-[HONEST-MASTER-PLAYLIST §5.4](streaming/HONEST-MASTER-PLAYLIST.md#54-m4--re-qualify-the-sdr-ruling-on-the-named-devices-then-print-codecs)
-is recorded; it never refuses the save. If an SDR title stops offering a
-quality or fails at item preparation on Apple hardware with the switch on,
-turn it off and start playback again.
+SDR (`avc1`) master variants carry no `CODECS`, the shape every client has
+played; HDR10 and Dolby Vision variants keep theirs. AVPlayer filters variants
+on `CODECS` before it fetches a byte, so a string tvOS or iOS dislikes would
+remove a rung silently. The former Developer switch
+(`playback.sdr_master_codecs`) was removed on 2026-11-18; a stored value is
+ignored.
 
 ## Ports
 
@@ -4068,25 +4050,13 @@ they live in that voter's own SQLite sidecar and never pass through Raft.
 | Runtime setting | Default | Meaning |
 |---|---:|---|
 | `telemetry.retain_days` | 30 | Days to keep raw playback rows. `0` disables raw row writes and their pruning while preserving the existing client log lines. It does **not** disable network priors — see the note below |
-| `playback.network_priors` | off | Whether to accumulate per-network playback history and let it choose Auto's starting rung |
 
-Settings → Developer → **Network priors** turns it on and off (2026-10-04;
-before that it had no control). The API does the same:
-
-```
-curl -X PUT http://<server>:32400/api/v1/settings \
-  -H 'Authorization: Bearer <admin token>' \
-  -H 'Content-Type: application/json' \
-  -d '{"playback_network_priors": true}'
-```
-
-Off is the default and off is exactly today's behavior: nothing is stored, no
-response gains a field, and Auto starts where it always did. Off does not turn
-off display-aware Auto's live link evidence: the per-attachment receipts a
-session's owner issues still prove a fresh transfer for an upgrade and still
+Network priors are always on (the former `playback.network_priors` switch was
+removed on 2026-11-18; a stored value is ignored). The per-attachment link
+receipts a session's owner issues prove a fresh transfer for an upgrade and
 acknowledge a link stall so the client steps down. Those receipts live in the
-owner's memory for at most 30 seconds and are never written anywhere. A session
-placed on a peer node, and any IPv6 client, gets no receipts at all. On, plurx keeps
+owner's memory for at most 30 seconds. A session placed on a peer node, and any
+IPv6 client, gets no receipts at all. plurx keeps
 one row per `(user, client class, network fingerprint)` holding a sustained
 throughput estimate and the lowest ladder rung at which that network was seen
 to starve, and consults it when Auto picks a starting height. `/decision` and
@@ -4109,17 +4079,9 @@ Priors are node-local. In a Hiqlite cluster they live in the voter's own
 sidecar and are not replicated, so a client that reaches a different node
 starts cold there. That is accepted, not a defect.
 
-**Priors are also a prerequisite for Fit Auto to display.** Link receipts —
-the server's acknowledgement that a stall was the network's fault, and the
-proof a voluntary upgrade needs — are accepted only while priors are on. With
-the Developer switch for Fit Auto on and priors off, a native client's Auto
-can still step down for producer pressure, decoder failure and link pressure
-it sees before a stall, but it never upgrades, and a link-caused stall
-reopens the same quality until the stall budget runs out. Two cases never get
-link evidence even with priors on: a session whose create was handled by a
+Two cases never get link evidence: a session whose create was handled by a
 peer node (receipts are registered only where the handling node owns the
-session) and an IPv6 client (no network identity). The Developer card lists
-all three as advisory rows. This is documented, not changed, in this build.
+session) and an IPv6 client (no network identity).
 
 The `/24` is taken from `Forwarded`, `X-Forwarded-For`, or `X-Real-IP` when
 present, and otherwise from the socket peer. plurx does not maintain a
@@ -4128,11 +4090,10 @@ headers an authenticated client can choose which of its own buckets it lands
 in. It cannot reach another user's rows — the user comes from the session, not
 the header — so the effect is bounded to that user churning their own 64.
 
-Note on `telemetry.retain_days = 0`: the two switches are independent on
-purpose, so an operator can keep the small aggregate prior without retaining
-raw playback rows. With priors enabled, `0` still folds each client report into
-its prior row and still schedules the daily prune pass for those rows; what it
-disables is raw playback-row writes and their retention.
+Note on `telemetry.retain_days = 0`: it does not affect network priors. `0`
+still folds each client report into its prior row and still schedules the
+daily prune pass for those rows; what it disables is raw playback-row writes
+and their retention.
 
 The scheduler runs one bounded prune pass daily and records its clock in
 `jobs.last_telemetry_prune`. Administrators can query newest-first rows with
@@ -4998,15 +4959,20 @@ legacy path.
 
 ### Complete-output preparation and rolling retention
 
-Two kinds of work a VOD start can leave behind are Developer switches, both
-off by default (2026-10-04). Before then both ran on any node whose
-`cache.max_gb` row existed, and saving the Pre-transcoding card writes that
-row, so saving the card for any reason turned them on.
+Two kinds of work a playback can leave behind. Complete-output preparation is
+a server-wide selector in Settings → Playback, off by default. Rolling
+retention is always on (its former switch, `vod.rolling_retention`, was
+removed on 2026-11-18; a stored value is ignored). A viewer can turn both off
+for one playback from the player: at create (`overrides.retain_output:
+false`) or mid-playback (`POST /api/v1/hls/{session}/retain-output`), which
+abandons the session's rolling collection and cancels the complete-output row
+its own start queued. A takeover or resurrected session follows the server
+setting again.
 
 | Setting | Values | What it does |
 |---|---|---|
 | `vod.output_preparation` | `off` · `copy` · `copy_and_encoded` | Which complete-output preparation a VOD start may queue (`copy_output_prepare`, `encoded_output_prepare`). It runs on the pre-transcode worker whether or not `cache_produce_mins` is on; speculative rows still need that schedule; aggregate playback eviction runs independently. Rows carry a seven-day deadline |
-| `vod.rolling_retention` | off · on | Hard-link a rolling session's segments into `<cache>/renditions/.retained/<nonce>/` so a verified complete output outlives the session |
+| rolling retention | always on | Hard-link a rolling session's segments into `<cache>/renditions/.retained/<nonce>/` so a verified complete output outlives the session |
 
 Both draw from the same aggregate `cache.max_gb` authority as ordinary
 renditions, subtitle caches and live playback scratch: an absent row means

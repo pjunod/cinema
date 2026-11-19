@@ -148,12 +148,13 @@ never disables the switch, rejects its Save, or overrides the saved choice.
 Internal correctness fixes and automatic infrastructure do not acquire
 gratuitous toggles merely because implementation or acceptance is unfinished;
 their Developer entries can explain read-only facts and remaining evidence.
-Developer is where a feature waits while it is not fully active or not fully
-tested, and each card says what it is waiting on (`devGraduation` in
-`web/pages/settings-developer.js`; `tests/web/settings-sections.test.js`
-enforces it). When the feature is done it leaves Developer — to its proper
-settings section if a permanent on/off makes sense, otherwise the advisory
-card (and any temporary toggle) is removed and the feature is simply on.
+Developer holds only features still being built (Paul, 2026-11-18). An
+unrun acceptance or qualification protocol does not keep a working feature
+there. Each Developer card is the feature's name, one line, and its switch;
+readiness or other detail sits in a collapsed Details disclosure, and no
+card carries graduation prose. When a feature works it leaves Developer — to
+its proper settings section if a permanent on/off makes sense, otherwise the
+toggle is removed and the feature is simply on.
 The rule and the current audit are in
 [SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](docs/features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#developer-lifecycle--every-card-graduates).
 

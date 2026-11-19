@@ -1862,6 +1862,8 @@ private fun PlayerContent(
                     controller.setAudioOffset(it)
                     onAudioOffsetChanged(it)
                 },
+                retainOutput = controller.retainOutput,
+                onRetainOutput = controller::setRetainOutput,
                 onDismiss = {
                     panel = null
                     poke()
@@ -2337,9 +2339,13 @@ private fun PlayerSettings(
     currentPosition: () -> Long,
     onReload: (Long, String, PlaybackQuality) -> Unit,
     onAudioOffset: (Long) -> Unit,
+    retainOutput: Boolean,
+    onRetainOutput: (Boolean, () -> Unit) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val preferences by vm.preferences.collectAsStateWithLifecycle()
+    var retain by remember(retainOutput) { mutableStateOf(retainOutput) }
+    var retainFailed by remember { mutableStateOf(false) }
     val initialFocusRequester = remember { FocusRequester() }
     var offset by remember(audioOffsetMs) { mutableLongStateOf(audioOffsetMs) }
     val focusIndex = playerSettingsFocusIndex(preferences.playbackQuality, qualityOptions)
@@ -2388,6 +2394,14 @@ private fun PlayerSettings(
         }
         PanelSwitch("Skip intros and credits", preferences.autoSkip, vm::setAutoSkip)
         PanelSwitch("Autoplay next episode", preferences.autoplayNext, vm::setAutoplayNext)
+        PanelSwitch("Keep a reusable copy of this playback", retain) {
+            retain = it
+            retainFailed = false
+            onRetainOutput(it) { retainFailed = true }
+        }
+        if (retainFailed) {
+            Text("Could not update this playback. Playback continues.", color = Muted, style = MaterialTheme.typography.labelMedium)
+        }
     }
 }
 
