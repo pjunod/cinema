@@ -696,8 +696,14 @@
                 .await
                 .expect("ledger read")
                 .expect("Apple quality handoff staged");
+            let staged_route = fixture
+                .store
+                .media_session_route_by_incarnation(&staged.staged_incarnation_id)
+                .await
+                .expect("staged route read")
+                .expect("the ledger names a successor route");
             let staged: RemoteStartRequest =
-                serde_json::from_str(&staged.recipe_json).expect("durable successor recipe");
+                serde_json::from_str(&staged_route.recipe_json).expect("durable successor recipe");
             let request = staged.request;
             assert!(matches!(
                 request.kind,
