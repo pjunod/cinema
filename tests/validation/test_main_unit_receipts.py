@@ -79,6 +79,14 @@ class History:
         return self.logs.get(identity // 10, b'checkout only\n')
 
 
+class Unreviewed:
+    def applicable(self, test, source, recorded):
+        return True
+
+    def current_digest(self, test):
+        return None
+
+
 class Applicable:
     def __call__(self, test, value):
         return True
@@ -91,11 +99,97 @@ def restore(history, current=99, available=(X, Y, Z)):
     output = io.StringIO()
     with patch.object(main.adoption, 'commit_available', side_effect=lambda commit: commit in available), \
          contextlib.redirect_stdout(output):
-        passes = main.restore(history, SCOPE, current, Applicable())
+        passes, _ = main.restore(history, SCOPE, current, Applicable(), Unreviewed())
     return passes, output.getvalue()
 
 
 class MainUnitReceiptsCase(unittest.TestCase):
+    def test_reviewed_inputs_reconstruct_legacy_and_bind_original_policy(self):
+        row = {'id_prefix': ONE, 'inputs': ['fixture.json'], 'reason': 'Read by the method'}
+        digest = '0' * 64
+        source = {'commit': X, 'run': 10}
+        for name, original_rows, orig_protocol, orig_digest, recorded, expected in (
+            ('legacy compatible', [row], '', digest, None, True),
+            ('legacy changed data', [row], '', '1' * 64, None, False),
+            ('legacy missing witness', [], '', digest, None, False),
+            ('legacy different witness', [dict(row, id_prefix='validation:test_fixture.')], '',
+             digest, None, False),
+            ('legacy cannot attest stored metadata', [row], '', digest, digest, False),
+            ('current exact digest', [row], 'REVIEWED_INPUTS_PROTOCOL = 1', digest, digest, True),
+            ('current missing digest', [row], 'REVIEWED_INPUTS_PROTOCOL = 1', digest, None, False),
+            ('current forged digest', [row], 'REVIEWED_INPUTS_PROTOCOL = 1', digest, '1' * 64, False),
+            ('ambiguous witness', [row, row], '', digest, None, False),
+            ('unbound protocol reference', [row], 'print(REVIEWED_INPUTS_PROTOCOL)', digest, None, False),
+            ('unreadable producer', [row], 'def:', digest, None, False),
+            ('ambiguous protocol', [row], 'REVIEWED_INPUTS_PROTOCOL = 1\nREVIEWED_INPUTS_PROTOCOL = 1',
+             digest, None, False),
+        ):
+            def read(_command, address):
+                if address == X + ':' + main.PRODUCER:
+                    return orig_protocol
+                rows = original_rows if address.startswith(X + ':') else [row]
+                return json.dumps({'version': 1, 'families': rows})
+            with self.subTest(case=name), patch.object(main.adoption, 'git', side_effect=read), \
+                 patch.object(main.adoption, 'input_digest',
+                              side_effect=lambda commit, _row: orig_digest if commit == X else digest):
+                inputs = main.ReviewedInputs(Y)
+                self.assertIs(inputs.applicable(ONE, source, recorded), expected)
+                self.assertTrue(inputs.applicable(TWO, source, None))
+
+    def test_reviewed_bindings_cannot_be_grafted_or_relabelled(self):
+        digest = '0' * 64
+        history = History()
+        history.run(10, X, own=[ONE])
+        start, final = history.run(11, Y, own=[TWO], inherited={ONE: {'run': 10, 'commit': X}})
+        # Matching start and final is necessary but insufficient. The
+        # originating journal never made this claim about ONE.
+        start['reviewed_inputs'] = {ONE: digest}
+        final['reviewed_inputs'] = {ONE: digest, TWO: digest}
+        with patch.object(main.adoption, 'commit_available', return_value=True):
+            passes, bindings = main.restore(history, SCOPE, 99, Applicable(), Unreviewed())
+        self.assertEqual(passes, {ONE: {'run': 10, 'commit': X}, TWO: {'run': 11, 'commit': Y}})
+        self.assertEqual(bindings, {TWO: digest})
+        self.assertFalse(main.inherits(dict(start, reviewed_inputs={}), final))
+        for bad in ({THREE: digest}, {ONE: 'BAD'}, [digest]):
+            with self.subTest(bindings=bad), self.assertRaisesRegex(ReceiptError, 'reviewed input bindings'):
+                main.validate_journal(dict(final, reviewed_inputs=bad), SCOPE, 11, Y)
+
+    def test_main_rechecks_reviewed_inputs_and_records_only_fresh_passes(self):
+        ran = []
+
+        class Fixture(unittest.TestCase):
+            def test_keep(self):
+                self.fail('unchanged unrelated pass must be adopted')
+
+            def test_refresh(self):
+                ran.append(self.id())
+
+        class ChangedInputs:
+            def applicable(self, test, source, recorded):
+                return not test.endswith('test_refresh')
+
+            def current_digest(self, test):
+                if test.endswith('test_refresh'):
+                    return '1' * 64
+                return None
+
+        suites = {name: [Fixture('test_keep'), Fixture('test_refresh')] for name in main.receipts.SUITES}
+        passes = {name + ':' + test.id(): {'commit': X, 'run': 10}
+                  for name, tests in suites.items() for test in tests}
+        bindings = {key: '0' * 64 for key in passes if key.endswith('test_refresh')}
+        journal = {'commit': Y, 'run': 11, 'applicability_commit': Y, 'complete': False,
+                   'fixture_errors': [], 'passes': dict(passes), 'reviewed_inputs': bindings}
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(main.receipts, 'SourceApplicability', return_value=Applicable()), \
+             patch.object(main.receipts, 'discover', side_effect=suites.__getitem__):
+            path = Path(directory) / 'receipt.json'
+            self.assertEqual(main.execute(journal, path, reviewed=ChangedInputs()), 0)
+            self.assertEqual(json.loads(path.read_text()), journal)
+        self.assertEqual(ran, [Fixture('test_refresh').id()] * 2)
+        self.assertEqual(journal['reviewed_inputs'], {key: '1' * 64 for key in bindings})
+        self.assertEqual(journal['passes'], {key: {'commit': Y, 'run': 11} if key in bindings else value
+                                            for key, value in passes.items()})
+
     def test_prepare_crash_without_marker_or_journal_does_not_block(self):
         history = History()
         history.run(10, X, own=[ONE])
@@ -116,7 +210,7 @@ class MainUnitReceiptsCase(unittest.TestCase):
         history.run(11, Y, final=False, marker=False)
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            passes = main.restore(history, SCOPE, 12, Applicable())
+            passes, _ = main.restore(history, SCOPE, 12, Applicable(), Unreviewed())
         self.assertEqual(passes, {})
         self.assertIn(f'run 10: journal not adopted — commit {gone} is not available in this checkout', output.getvalue())
 
@@ -260,18 +354,18 @@ class MainUnitReceiptsCase(unittest.TestCase):
             path = Path(directory) / 'receipt.json'
             journal = {'version': main.receipts.VERSION, 'scope': SCOPE, 'commit': commit, 'run': 4,
                        'applicability_commit': commit, 'passes': dict(cached), 'fixture_errors': [], 'complete': False}
-            self.assertEqual(main.execute(journal, path), 0)
+            self.assertEqual(main.execute(journal, path, reviewed=Unreviewed()), 0)
             self.assertEqual(sorted(Fixture.ran), ['changed', 'changed', 'unreadable', 'unreadable'])
             self.assertEqual({test: value['run'] for test, value in journal['passes'].items()},
                              {test: 3 if test.endswith('test_kept') else 4 for test in cached})
             Recheck.error = main.receipts.IntegrityError('Current unit worktree differs from dispatched Git source')
             journal.update(passes=dict(cached), complete=False)
             with self.assertRaises(main.receipts.IntegrityError):
-                main.execute(journal, path)
+                main.execute(journal, path, reviewed=Unreviewed())
             # Without a current-source prepare nothing may be skipped at all.
             journal.update(passes=dict(cached), applicability_commit=X)
             with self.assertRaisesRegex(ReceiptError, 'Missing current-source prepare'):
-                main.execute(journal, path)
+                main.execute(journal, path, reviewed=Unreviewed())
 
     def test_current_run_integrity_still_refuses(self):
         history = History()
@@ -367,7 +461,7 @@ class MainUnitReceiptsCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             journal = {'commit': 'a' * 40, 'run': 1, 'applicability_commit': 'a' * 40, 'passes': {}, 'fixture_errors': [], 'complete': False}
             suites = {name: [Fixture('test_skip')] for name in main.receipts.SUITES}
-            self.assertEqual(main.execute(journal, Path(directory) / 'receipt.json', suites), 0)
+            self.assertEqual(main.execute(journal, Path(directory) / 'receipt.json', suites, reviewed=Unreviewed()), 0)
             self.assertEqual(journal['passes'], {})
             self.assertEqual(len(journal['skips']), 2)
             self.assertTrue(journal['complete'])
@@ -383,7 +477,7 @@ class MainUnitReceiptsCase(unittest.TestCase):
             suites = {name: [Fixture('test_cached'), Fixture('test_failed')] for name in main.receipts.SUITES}
             for name in suites:
                 journal['passes'][name + ':' + Fixture('test_cached').id()] = {'commit': 'a' * 40, 'run': 1}
-            self.assertEqual(main.execute(journal, Path(directory) / 'receipt.json', suites), 1)
+            self.assertEqual(main.execute(journal, Path(directory) / 'receipt.json', suites, reviewed=Unreviewed()), 1)
             self.assertEqual(len(journal['passes']), 2)
 
     def test_main_unknown_runner_outcome_refuses_complete_receipt(self):
@@ -396,5 +490,5 @@ class MainUnitReceiptsCase(unittest.TestCase):
             journal = {'commit': 'a' * 40, 'run': 1, 'applicability_commit': 'a' * 40, 'passes': {}, 'fixture_errors': [], 'complete': False}
             suites = {name: [Fixture('test_silent')] for name in main.receipts.SUITES}
             with self.assertRaises(ReceiptError):
-                main.execute(journal, Path(directory) / 'receipt.json', suites)
+                main.execute(journal, Path(directory) / 'receipt.json', suites, reviewed=Unreviewed())
             self.assertFalse(journal['complete'])

@@ -140,10 +140,12 @@ def commit_available(commit):
         return False
 
 
-def witness(identity, families):
+def witness(identity, families, *, optional=False):
     matches = [row for row in families
                if (identity.startswith(row["id_prefix"]) if row["id_prefix"].endswith(".")
                    else identity == row["id_prefix"])]
+    if optional and not matches:
+        return None
     require(matches, "Missing reviewed input witness: " + identity)
     size = max(len(row["id_prefix"]) for row in matches)
     exact = [row for row in matches if len(row["id_prefix"]) == size]
