@@ -24,9 +24,10 @@ serving grace, media start/assignment/renewal/claim bounds, job leases and
 clock observation bounds. Dynamic configuration remains dynamic. Constants
 inside independent cache and receipt protocols keep their own policy owners.
 
-The current 16 s write recovery budget exceeds the normal 12 s media lease.
-Centralizing it cannot make that relationship safe. Record it as unresolved;
-C4 requires post-C2 voter stall measurements before floor changes. Keep the
+The 16 s Store retry envelope and 12 s media lease have different owners.
+The source-backed decision in §7 shows that ordinary renewal does not use
+that retry envelope, and confirmation cannot extend the lease. C4 still
+requires post-C2 voter stall measurements before floor changes. Keep the
 existing 24 s takeover claim and its separate runway policy intact.
 
 ## 2. Ownership — isolated source and compiler slot
@@ -169,10 +170,143 @@ Three new relation tests check tombstone coverage and bounded revocation
 phases, passive observation refresh/expiry, and separation from canonical
 wire/token authentication policy. They add no policy choices or floor tuning.
 
-## Root integration of remaining aliases
+## 7. Budget decisions — safety, cleanup and availability are different claims
 
-All 24 requested proof, membership, catalogue and holder aliases are applied
-in the combined tree. Each original expression was checked against the
-reviewed alias manifest before replacement; the shared table's exact-base
-control retains all 134 fixed values. This is source/value correspondence,
-not final combined runtime qualification.
+**Verified source:** integration `be88b1b4dc531808559fc628aa537e66760234d2`,
+2026-11-19. These are source decisions and existing-test references, not new
+runtime qualification. The root owns combined compilation and any fixes.
+
+### 7.1 The sixteen-second Store envelope does not renew a twelve-second lease
+
+**Decision:** retain the distinct budgets; do not increase a media lease just
+because its duration is shorter than the generic exact-state retry envelope.
+The previous numerical comparison alone was not evidence of a renewal bug.
+
+[`renew_with_authority`](../../crates/plurx-core/src/store/hiqlite_sessions.rs)
+uses a transaction through `session_client().txn`, not `execute_idempotent`.
+The Store attempt is bounded by 3 s. The daemon renewal batch owns one shared
+4 s absolute caller deadline; at dispatch it re-samples wall time, refuses
+routes with at most 4 s left, and proposes the fixed expiry from that dispatch
+sample plus 12 s. It does not calculate a new expiry from acknowledgement
+time. An error or timeout is commit-unknown: the exact worker is authority
+fenced even if the durable mutation later finishes. Cleanup cannot fence a
+successor because it checks the incarnation, public session id and owner
+epoch. These paths are in
+[`lease_loop` and `fence_and_reap_sessions`](../../crates/plurxd/src/media_sessions.rs)
+and [the exact-owner fence](../../crates/plurxd/src/transcode/manager/control.rs).
+
+The longer retry envelope belongs to activation **confirmation**. The
+`Confirm` arm of `settle_media_session_activation` updates only
+`publication_ready_at_ms` and `updated_at_ms`. It matches the exact route,
+owner epoch, fixed lease, unpublished sentinel and current playback pointer;
+it never writes `lease_expires_at_ms`. A lost response can therefore be
+recovered without extending the old lease or stealing a successor epoch.
+Ordinary transactions and abandonment do not acquire this retry authority.
+
+The remote activation endpoint's 3 s wait is a response bound, not the
+activation task lifetime: on timeout it retains the exact task and returns
+202. The owner applies a monotonic lease deadline, reserves at most 3 s or
+half the remaining interval for the confirmation recovery read, and accepts
+a positive route only while its exact identity is active and its absolute
+lease expiry is still in the future. A late result after that expiry is not
+new serving authority. See [the activation owner and route predicate](../../crates/plurxd/src/http/hls/create.rs)
+and [the target endpoint](../../crates/plurxd/src/http/internal_media_sessions.rs).
+
+Existing focused coverage:
+
+- `store_contract::activation_confirmation_retries_only_its_exact_state_update`
+  pins the retry's exact update and excludes transactions/abandonment.
+- `store_contract::media_activation_confirmation_recovers_a_committed_timeout`
+  injects an error after a real committed confirmation; it requires the
+  surviving exact activation to be recovered. It needs
+  `cluster-read-cost-validation`, not a bare core unit run.
+- `store_contract::hiqlite_stale_activation_transaction_cannot_revoke_a_renewed_lease`
+  orders a stale activation after another client's renewal and checks the
+  renewed authority survives. It needs `hiqlite-contract-tests`.
+- `http::hls::tests::the_confirmation_reserves_recovery_budget_inside_the_owner_lease`
+  pins the bounded confirmation/recovery split.
+- `media_sessions::tests::takeover_claim_reconciliation_distinguishes_only_exact_authority`
+  refuses an observed winning claim once its immutable lease has expired.
+
+These tests are named coverage, not a claim they were rerun during this
+source investigation. The playback-control actor's monotonic client lease
+and delayed-reply tests are another owner; they do not prove the replicated
+media-owner lease's timing.
+
+### 7.2 Five-second grace is bounded fail-closed behavior, not full failover continuity
+
+**Decision:** preserve the serving proof and generation rules. The existing
+5 s `SessionGrace` keeps already-running resources through a short unknown
+span while admissions and publication remain fenced. Repeated losses spend
+one cumulative outage budget; expiry tears work down instead of refreshing
+the grace. This is safety and bounded cleanup. It is not proof that all
+unplanned leader failures preserve playback.
+
+Source is [the grace owner](../../crates/plurxd/src/serving_fence.rs) and
+[the registry outage loop](../../crates/plurxd/src/transcode/manager/control.rs).
+The tests `an_unknown_span_holds_for_the_grace_and_ends_on_a_definite_answer`,
+`flapping_unknown_spans_share_one_outage_budget` and
+`the_published_outage_deadline_is_the_enforced_one` cover the bounded policy.
+`serving_fence_preserves_real_media_through_2468ms_and_reaps_after_grace`
+qualifies that particular real-media outage and deliberate later teardown;
+it does not qualify every election.
+
+The [C2 receipt](LEADER-SHUTDOWN-HANDOFF-BUILD.md#7-execution-log) records
+cold-kill recovery at 7.50–7.60 s in three harness runs, and much shorter
+successful planned handoffs. The [exact 0.9.25 timer rules](OPENRAFT-010-EVALUATION.md#3-c4-source-result--a-failed-campaign-can-still-disturb-the-leader)
+are state-dependent and do not themselves bound the full outage. Neither
+source justifies calling 5 s an uninterrupted cold-failover guarantee.
+C2 preserves the accepted planned-restart goal; the broader R2/C3
+availability relationship remains open with C4. This is not a reduction of
+that acceptance requirement.
+
+### 7.3 Two bounded corrections are proposed before changing any timer values
+
+**Activation owner deadline:** `activation_lease_deadline` currently adds
+`lease_expires_at_ms - activation.now_ms` to a fresh monotonic `now`. A
+request delivered late, or a second call to that helper, can recreate the
+original full lease as a resource/commit-guard lifetime. The positive route
+predicate still rejects absolute expiry, so this is not evidence of revived
+serving authority. Correct it by translating the actual remaining absolute
+lease once per owner and retaining that monotonic deadline through prepare,
+confirmation and recovery. A delayed-entry and repeated-entry regression
+must demonstrate that elapsed time is consumed instead of minted again.
+
+**Renewal priority and reconciliation bound:** the lease loop awaits
+`reconcile_owned_publication_fences` before renewals. That function gives
+each candidate a fresh 4 s deadline under fanout 16; its total wait depends
+on the number of routes. The old explanatory claim that the last renewal
+is always at most one 3 s tick plus one 4 s deadline old is consequently not
+a proved global bound. Give the phase one absolute deadline or prioritize
+renewal, preserving exact publication/epoch semantics. A fixture with more
+than one fanout of stalled routes must prove that the phase cannot multiply
+its deadline and starve unrelated renewable owners.
+
+Neither correction widens a serving proof, lease, grace or election floor.
+The root must review the bounded fixes before implementation. Once their
+owner chains are bounded, use C4's actual post-C2 recovery/stall evidence to
+choose any wider availability profile and validate the complete renewal
+runway. C3's full relationship acceptance must not be marked complete from
+constant extraction or these source decisions alone.
+
+## 8. Bounded corrections — one captured lease and one tick budget
+
+[The execution plan](CLUSTER-TIMING-BOUNDED-FIXES.md) is implemented in source,
+awaiting root's exact combined compilation and focused regressions. The
+activation owner now translates actual remaining absolute expiry using the
+route predicate's local clock basis and receives one monotonic deadline
+through all local/remote waits. The existing positive route/owner-epoch and
+confirmation recovery guards remain intact.
+
+The lease tick captures its existing 4 s deadline immediately after its tick.
+Inventory, renewal, cause-read/drain attempts and optional publication work
+consume that same budget. Confirmed eligible renewals and ambiguous-owner
+fencing precede optional work; newly fenced identities are removed from its
+candidates. One fanout can spend only the remaining budget; another batch
+cannot start new Store work after expiry. This bounds awaited Store phases,
+not operating-system scheduling or arbitrary lock contention. The 3 s tick,
+Store attempt, 12 s lease and 5 s grace values are unchanged.
+
+The 24 integration aliases described in §6 were already applied in `be88`;
+this correction branch starts from that integrated source. The broader
+availability/grace decision stays open with measured C4 acceptance.

@@ -517,6 +517,10 @@ pub(crate) async fn activate(
     else {
         return StatusCode::BAD_REQUEST.into_response();
     };
+    // Exact-auth validation and the owner check precede translation. The
+    // target uses the same local expiry basis as its route predicate, and
+    // captures this once before admission/ownership awaits can consume it.
+    let activation_deadline = super::hls::activation_lease_deadline(&request.activation);
     let Some(restart_admission) = state.cluster.try_restart_admission().await else {
         return RemoteStartError::RestartDrain.into_response();
     };
@@ -551,19 +555,22 @@ pub(crate) async fn activate(
             authority,
             request.target_generation,
             None,
+            activation_deadline,
         )
         .await
     });
-    match tokio::time::timeout(
-        crate::media_sessions::ACTIVATION_STORE_DEADLINE,
+    match tokio::time::timeout_at(
+        activation_deadline
+            .min(tokio::time::Instant::now() + crate::media_sessions::ACTIVATION_STORE_DEADLINE),
         &mut activation_task,
     )
     .await
     {
         Ok(Ok(Ok(_))) => StatusCode::NO_CONTENT.into_response(),
         Ok(Ok(Err(error))) => {
-            let confirmation_deadline =
-                tokio::time::Instant::now() + crate::media_sessions::ACTIVATION_STORE_DEADLINE;
+            let confirmation_deadline = activation_deadline.min(
+                tokio::time::Instant::now() + crate::media_sessions::ACTIVATION_STORE_DEADLINE,
+            );
             if super::hls::wait_for_confirmed_activation(&state, &activation, confirmation_deadline)
                 .await
                 .is_some()

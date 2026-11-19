@@ -107,10 +107,13 @@ The isolated port must exercise all of these cases before retiring code:
   if retaining 0.9, choose any wider floor from actual post-C2 stall data.
 
 **C4 remains open:** fleet stall measurements and the chosen remedy are not
-present in this lane. The timing extraction changes no election floor,
-lease, proof validity or retry deadline. The 16 s recovery versus 12 s normal
-media lease mismatch also remains an explicit decision owed by the cluster
-owner; the longer takeover claim does not repair the ordinary lease.
+present in this lane. The timing work changes no election floor,
+lease, proof validity or retry policy. Source review distinguishes the 16 s
+exact-state confirmation retry from ordinary renewal: confirmation never
+extends the 12 s lease, and renewal has its own bounded Store attempt and
+cycle. [The bounded corrections](CLUSTER-TIMING-BOUNDED-FIXES.md) consume actual
+remaining activation time and prioritize renewal; they do not claim wider
+cold-failover/grace coverage. That availability decision remains with C4.
 
 ## 5. Evidence — source provenance is not runtime qualification
 
