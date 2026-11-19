@@ -73,6 +73,7 @@ function callerHarness(capQuery="vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0
   const functions=[
     ["detail/preplay-selection.js",["prePlaySelection","playbackSelection","setPrePlay","prePlaySelectionQuery","decisionUrl","askDecision"]],
     ["player/directed-change.js",["openSession"]],
+    ["player/menus.js",["retainOutputOn","togglePlayerRetainOutput"]],
     ["player/measurements.js",["beginPlaybackPreparation","preparationRemainingMs"]],
     ["player/session.js",["newStreamId","remuxUrl"]],
     ["player/audio-sync.js",["subUrl"]],
@@ -101,6 +102,7 @@ function callerHarness(capQuery="vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0
     playContext:playbackFileContextForPlay,
     select:setPrePlay,selection:prePlaySelection,carry:playbackSelection,
     decision:askDecision,legacyDecision:decisionUrl,start:openSession,
+    toggleRetain(){togglePlayerRetainOutput();},retainOn:()=>retainOutputOn(),
     attach(c){PLAYER={fileId:"7",fileContext:c,meta:{fileContext:c},aoffset:0};},
     subtitle:subUrl,thumb:watchChapterThumbUrl,remux:remuxUrl,
     progress(){return reportProgress("7");},next:playNextEpisode,bookNext:playNextAudiobookPart,
@@ -125,6 +127,28 @@ test("a local session create sends the preparation's remaining start time",async
   assert.deepEqual(sent,[15500,11000]);
   await h.start(local,{start:0},null);
   assert.equal(h.requests.at(-1).options.startupRemainingMs,null,"no preparation, no claimed allowance");
+});
+// 2026-11-18: "Keep a reusable copy of this playback" is a per-playback player
+// menu choice. Off means every create of this playback carries
+// overrides.retain_output=false; on (the default) puts nothing on the wire.
+test("a create carries overrides.retain_output=false only after the player menu turns the copy off",async()=>{
+  const h=callerHarness(),local=h.local("7");
+  h.attach(local);
+  const sent=async()=>{await h.start(local,{start:0},null);return h.requests.at(-1).options.body;};
+  assert.equal(h.retainOn(),true,"a fresh playback keeps a reusable copy");
+  let body=await sent();
+  assert.ok(!body.overrides||!Object.hasOwn(body.overrides,"retain_output"),"default create omits retain_output");
+  h.toggleRetain();
+  assert.equal(h.retainOn(),false);
+  body=await sent();
+  assert.equal(body.overrides.retain_output,false,"the create body carries the opt-out");
+  body=await sent();
+  assert.equal(body.overrides.retain_output,false,"a restart, seek or audio switch carries it too");
+  h.toggleRetain();
+  body=await sent();
+  assert.ok(!body.overrides||!Object.hasOwn(body.overrides,"retain_output"),"turning it back on omits it again");
+  const menu=fs.readFileSync(path.join(WEB,"player/menus.js"),"utf8");
+  assert.match(menu,/id="pmenu-retain"[\s\S]*Keep a reusable copy of this playback/);
 });
 test("shipped preplay choices and every file resource caller retain A/B collision context",async()=>{
   const h=callerHarness(),shared=h.shared(reference,detail()),local=h.local("7");

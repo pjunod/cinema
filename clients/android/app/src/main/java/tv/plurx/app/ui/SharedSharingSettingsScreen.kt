@@ -19,7 +19,7 @@ import tv.plurx.app.ui.components.safeDisplayInsets
 import tv.plurx.app.ui.components.tvFocusRing
 
 @Composable
-fun SharedSharingSettingsScreen(onBack: () -> Unit, onLibraries: () -> Unit, onDeveloper: () -> Unit) {
+fun SharedSharingSettingsScreen(onBack: () -> Unit, onLibraries: () -> Unit) {
     var management by remember { mutableStateOf(false) }
     if (management) { SharedSharingManagementScreen(onBack = { management = false }); return }
     var summaries by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
@@ -54,8 +54,7 @@ fun SharedSharingSettingsScreen(onBack: () -> Unit, onLibraries: () -> Unit, onD
         TextButton(onClick = onBack) { Text("Back") }
         Text("Sharing", style = MaterialTheme.typography.headlineMedium)
         SharedLibrariesEntry(onLibraries)
-        TextButton(onClick = onDeveloper) { Text("Sharing enablement in Developer") }
-        Text("Shared playback is implemented; private network, cluster recovery and physical-device qualification remain pending. Enablement remains your choice.")
+        SharedSharingEnableSection()
         summaries.forEach { (label, value) -> Text("$label: $value") }
         errors.forEach { Text(it) }
         TextButton(enabled = !busy, onClick = { scope.launch { load() } }) { Text("Refresh status") }
@@ -64,7 +63,7 @@ fun SharedSharingSettingsScreen(onBack: () -> Unit, onLibraries: () -> Unit, onD
 }
 
 @Composable
-fun SharedSharingDeveloperCard() {
+fun SharedSharingEnableSection() {
     var draft by remember { mutableStateOf(SharedSharingDraft()) }
     var saved by remember { mutableStateOf<Boolean?>(null) }
     var busy by remember { mutableStateOf(false) }
@@ -90,17 +89,19 @@ fun SharedSharingDeveloperCard() {
     }
     LaunchedEffect(Unit) { load() }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("Shared libraries · advisory enablement", style = MaterialTheme.typography.titleLarge)
+        Text("Shared libraries", style = MaterialTheme.typography.titleLarge)
         Row {
             Checkbox(checked = draft.enabled, onCheckedChange = { draft = draft.choose(it) }, modifier = Modifier.tvFocusRing())
             Text("Enable Shared libraries", Modifier.padding(top = 12.dp))
         }
         saved?.let { Text(if (it) "Saved choice: Enabled" else "Saved choice: Disabled") }
-        Text("Source-labelled browsing and Shared playback are implemented. Private network, cluster recovery and physical-device playback still await qualification.")
-        Text("Unknown or unmet readiness never changes your selection or prevents Save.")
-        Text("Leaves Developer when Shared playback, revocation, recovery and physical-device qualification pass; the permanent switch then moves to Settings → Sharing.")
-        Text(message)
+        tv.plurx.app.ui.components.Disclosure("Details") {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Source-labelled browsing and Shared playback are implemented. Readiness never changes your selection or prevents Save.")
+                Text(message)
+                TextButton(enabled = !busy, onClick = { scope.launch { load() } }) { Text("Reload saved choice") }
+            }
+        }
         Button(enabled = !busy, onClick = { scope.launch { save() } }) { Text("Save sharing choice") }
-        TextButton(enabled = !busy, onClick = { scope.launch { load() } }) { Text("Reload saved choice") }
     }
 }

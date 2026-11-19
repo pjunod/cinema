@@ -4,6 +4,7 @@ import tv.plurx.app.data.CreateSessionReq
 import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.PresentationTarget
+import tv.plurx.app.data.SessionOverrides
 import java.util.UUID
 import kotlin.math.abs
 
@@ -37,6 +38,23 @@ class PlaybackIntent(
 
     @Synchronized
     fun qualityForMedia(): PlaybackQuality = retainedExecutionQuality ?: desiredQuality
+
+    /**
+     * "Keep a reusable copy of this playback". Lives with the presentation, so
+     * every create of this playback (initial, fallback, seek, audio switch)
+     * carries it and the next title starts on.
+     */
+    @Volatile
+    var retainOutput: Boolean = true
+        private set
+
+    fun setRetainOutput(retain: Boolean) {
+        retainOutput = retain
+    }
+
+    /** Sends `overrides.retain_output = false` only when the viewer turned it off. */
+    internal fun applyRetention(body: CreateSessionReq): CreateSessionReq =
+        if (retainOutput) body else body.copy(overrides = SessionOverrides(retain_output = false))
 
     /** Viewer transport intent survives plan/controller replacement too. */
     var playbackRequested: Boolean = true

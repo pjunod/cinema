@@ -143,7 +143,7 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
     let not_used = |setting: Option<bool>, setting_name: &str| -> String {
         match (setting, facts.decline_reason) {
             (Some(false), _) => {
-                format!("not used — {setting_name} is off in Settings → Developer")
+                format!("not used — {setting_name} is off in Settings → Playback")
             }
             (_, Some(reason)) => format!("not used for this play — {reason}"),
             (_, None) => "not used for this play".to_owned(),
@@ -478,7 +478,7 @@ mod tests {
         let shown = playback_enhancement(&base).expect("DV source");
         assert!(shown.details[0]
             .text
-            .contains("is off in Settings → Developer"));
+            .contains("is off in Settings → Playback"));
     }
 
     #[test]

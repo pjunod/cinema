@@ -3333,6 +3333,7 @@ async fn probe_system(
         .await?;
     let hwaccel_pref = hwaccel_override.clone().unwrap_or(hwaccel_pref);
     seed_switch_settings(store).await?;
+    seed_always_on_playback_settings(store).await?;
     // Representative comparisons run only on an explicit idle-node request.
     // A saved receipt is reusable only for this executable/fixture/driver set.
     let optimization = match transcoder_optimization::load(store, node_id, &ffmpeg, &encoder_caps)
@@ -3553,6 +3554,48 @@ async fn seed_switch_settings(store: &Arc<dyn plurx_core::store::Store>) -> anyh
             store.put_setting_if_absent(keys::DV_CONVERT, "0").await?;
         }
     }
+    Ok(())
+}
+
+/// The switches this build always treats as on, and nothing in it reads.
+/// Binaries from before 2026-11-18 still read them (and refuse display-aware
+/// control while `playback.display_aware_auto` is absent or `0`), so during a
+/// rolling deploy the stored value has to say on for both builds to agree.
+const ALWAYS_ON_PLAYBACK_SETTINGS: [&str; 5] = [
+    "playback.display_aware_auto",
+    "playback.auto_abr",
+    "playback.network_priors",
+    "transcode.content_aware_encoding",
+    keys::VOD_ROLLING_RETENTION,
+];
+
+/// Marks that [`seed_always_on_playback_settings`] has committed. Written in
+/// the same batch as the switches, so a node that dies between the two
+/// leaves nothing half-done.
+const ALWAYS_ON_PLAYBACK_SETTINGS_SEEDED: &str = "migrations.always_on_playback_2026_11_18";
+
+/// Write `1` to every [`ALWAYS_ON_PLAYBACK_SETTINGS`] key once per cluster,
+/// overwriting an operator's old `0`: the switch it named no longer exists.
+/// Idempotent: the marker commits with the values in one batch, and every
+/// later boot (any node) sees it and writes nothing. Two nodes booting at
+/// once both write the same values, which is harmless, so this needs no
+/// leader.
+async fn seed_always_on_playback_settings(
+    store: &Arc<dyn plurx_core::store::Store>,
+) -> anyhow::Result<()> {
+    if store
+        .get_setting(ALWAYS_ON_PLAYBACK_SETTINGS_SEEDED)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let mut values = ALWAYS_ON_PLAYBACK_SETTINGS
+        .iter()
+        .map(|key| (*key, "1"))
+        .collect::<Vec<_>>();
+    values.push((ALWAYS_ON_PLAYBACK_SETTINGS_SEEDED, "1"));
+    store.put_settings(&values).await?;
     Ok(())
 }
 

@@ -1473,6 +1473,29 @@ final class PlayerController: ObservableObject {
     /// Stable for this player instance. Server-side supersession uses it to
     /// replace this player's own stream without touching another device.
     private let playbackId = UUID().uuidString
+    /// "Keep a reusable copy of this playback". Lives as long as this
+    /// controller, which is one playback: the next title starts on. Off rides
+    /// every create of this playback (initial, fallback, seek, audio switch).
+    @Published private(set) var retainOutput = true
+    /// A failed mid-playback call. A small notice only; playback continues.
+    @Published private(set) var retainOutputFailed = false
+
+    nonisolated static func applyRetention(to body: CreateSessionRequest, retainOutput: Bool) -> CreateSessionRequest {
+        guard !retainOutput else { return body }
+        var stamped = body
+        stamped.overrides = SessionOverrides(retainOutput: false)
+        return stamped
+    }
+
+    func setRetainOutput(_ retain: Bool) {
+        retainOutput = retain
+        retainOutputFailed = false
+        guard !retain, let model, let running = sessionId else { return }
+        Task { [weak self] in
+            do { try await model.retainHlsOutputOff(running) }
+            catch { self?.retainOutputFailed = true }
+        }
+    }
     /// Fresh for every attached AVPlayerItem. `playbackId` cannot serve this
     /// purpose because it deliberately stays stable across session reopens;
     /// telemetry needs the opposite so the stalled predecessor and recovered
@@ -5903,6 +5926,7 @@ final class PlayerController: ObservableObject {
         generation: Int,
         recoveryLinkReceipt: String? = nil
     ) async throws -> HlsStart {
+        let body = Self.applyRetention(to: body, retainOutput: retainOutput)
         let receipt = body.reopenReason == AutoRecoveryCause.link.rawValue ? recoveryLinkReceipt : currentLinkReceipt()
         guard surfaceContext == .start else {
             return try await PlaybackLinkRequestContext.$receipt.withValue(receipt) {
