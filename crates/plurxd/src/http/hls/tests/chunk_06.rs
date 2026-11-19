@@ -917,6 +917,7 @@ fn processed_requalification_replaces_hint_once_and_refuses_full_recipe_collisio
 #[tokio::test]
 async fn a05_geometry_promoted_compat_copy_carries_resolved_auto_policy() {
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    prepare_catalog_test_encoder().await;
     let state = resolver_state();
     let library = state
         .store

@@ -9099,24 +9099,15 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             "durable_queue",
             "durable_role",
             "dv_target_cache",
-            // Display-aware Auto on a single node owns every session.
-            "local_session_owner",
-            // Output preparation and rolling retention: the budget is the
-            // 50 GB unset default; the job list, mode, Stop and live
-            // bytes are statements of what this node reads.
+            // Output preparation reports its default budget, current jobs,
+            // mode, and Stop state.
             "output_budget",
             "output_jobs",
             "output_mode",
             "output_stop",
-            // Network priors' two rows say what the switch does.
-            "priors_cold_start",
-            "priors_history",
             // Empty FEL catalogue and statistics spool, asserted above.
             "refit_coverage",
             "refit_spool",
-            "retention_budget",
-            "retention_cleanup_pending",
-            "retention_live_bytes",
             "rolling_contract_built",
             "runtime",
             "server_preparation_is_real",

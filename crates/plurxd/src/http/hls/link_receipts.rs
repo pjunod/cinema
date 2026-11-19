@@ -3486,6 +3486,19 @@ mod tests {
             );
         }
 
+        let before = filter_catalog(
+            &state,
+            Some(&network),
+            &file,
+            catalog.clone(),
+            advisory_deadline(),
+        )
+        .await;
+        assert_eq!(
+            before, catalog,
+            "no saved negative leaves the catalog intact"
+        );
+
         let now = crate::media_sessions::unix_ms();
         state
             .store
@@ -3502,16 +3515,6 @@ mod tests {
             .await
             .expect("exact negative");
 
-        // Priors off: the negative is not evidence yet, nothing is dropped.
-        let off = filter_catalog(
-            &state,
-            Some(&network),
-            &file,
-            catalog.clone(),
-            advisory_deadline(),
-        )
-        .await;
-        assert_eq!(off.len(), catalog.len());
         let filtered = filter_catalog(
             &state,
             Some(&network),
