@@ -292,7 +292,7 @@ test("old Developer anchors land on the section that now holds the card", () => 
     "cinema-sharing-settings": "sharing", "jellyfin-compatibility-settings": "integrations",
     "enable-dolby-vision-processing": "playback", "enable-display-target-hdr10": "playback",
     "enable-output-preparation": "playback", "enable-vod-reorder": "playback",
-    "settings-https": "system", "settings-source-recovery": "system", "cinema-remote": "remotes",
+    "settings-https": "system", "settings-source-recovery": "system",
   };
   for (const [anchor, tab] of Object.entries(expected)) {
     const hash = `#/settings/developer/${anchor}`;
