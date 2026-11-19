@@ -1190,8 +1190,8 @@ from 2026-11-18 are generic row 34. They stop the SQL writer even if the WAL
 shutdown fails, return errors when the writer has stopped and remove failed
 snapshot images and journals. The 2026-11-17 listener fix is row 35. It retains
 caller-owned listeners through startup without releasing and rebinding their
-reserved addresses. Both are pending M6. The ledgers now contain sixteen
-generic rows, with fourteen pending and two accepted.
+reserved addresses. Both are pending M6. The ledgers now contain
+sixteen generic rows, with fourteen pending and two accepted.
 
 [Upstream PR 374](https://github.com/sebadob/hiqlite/pull/374) merged on
 2026-10-05 as
