@@ -89,6 +89,15 @@ impl Cluster {
         self.fence.authority()
     }
 
+    /// Resolves once, with the error, when this node's own database Raft
+    /// core has quit on a fatal error; never for an ordinary stop or an
+    /// unclustered process. The daemon drains and exits on it.
+    pub(crate) fn core_failure(
+        &self,
+    ) -> impl std::future::Future<Output = String> + Send + 'static {
+        self.membership.raft_core_failure()
+    }
+
     /// This node's standing and admission, from in-process state only: the
     /// applied Raft membership (the source `local_node_is_committed_voter`
     /// reads) and the two atomics the heartbeat publishes. No IO, no await.
@@ -121,6 +130,29 @@ impl Cluster {
     pub(crate) fn directory(&self) -> Directory {
         self.directory.clone()
     }
+}
+
+/// Process-local writer observations projected through the raw cluster owner.
+/// These fixed-label counters need neither a Store nor serving authority.
+pub(crate) struct WriterAbandonedReply {
+    pub(crate) request: &'static str,
+    pub(crate) ok: u64,
+    pub(crate) error: u64,
+}
+pub(crate) fn writer_abandoned_replies() -> Vec<WriterAbandonedReply> {
+    hiqlite::db_writer_abandoned_replies()
+        .into_iter()
+        .map(|row| WriterAbandonedReply {
+            request: row.request,
+            ok: row.ok,
+            error: row.error,
+        })
+        .collect()
+}
+
+/// Process-local read-pool counters; sampling performs no store read.
+pub(crate) fn read_pool_wait() -> hiqlite::DbReadPoolWait {
+    hiqlite::db_read_pool_wait()
 }
 
 /// This node's place in the cluster.

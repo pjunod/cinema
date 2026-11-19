@@ -154,6 +154,70 @@ impl LocalDbRaftMetrics {
     pub async fn wait_for_change(&mut self) -> bool {
         self.receiver.changed().await.is_ok()
     }
+
+    /// Plurx patch 33: wait until this node's database Raft core stops, and
+    /// say how. OpenRaft's core publishes its terminal state as
+    /// `running_state`: `Err(Fatal::Stopped)` after an ordinary
+    /// `Raft::shutdown`, any other `Err` when it quit on a storage error or
+    /// panicked. A watch closed while still reporting `Ok` means the core task
+    /// ended without publishing, which only a panic does. Woken by the watch;
+    /// no polling, no IO.
+    pub async fn core_stopped(&mut self) -> LocalDbCoreStop {
+        loop {
+            let state = classify_core_state(&self.receiver.borrow_and_update().running_state);
+            if let Some(stop) = state {
+                return stop;
+            }
+            if self.receiver.changed().await.is_err() {
+                return classify_core_state(&self.receiver.borrow().running_state).unwrap_or_else(
+                    || {
+                        LocalDbCoreStop::Fatal(
+                            "the Raft core ended without reporting its state".to_owned(),
+                        )
+                    },
+                );
+            }
+        }
+    }
+
+    /// Plurx patch 33: the core's fatal error if it has already quit, read
+    /// from the same watch as [`Self::core_stopped`] without waiting, for a
+    /// caller that already wakes on its own (startup's catch-up loops). An
+    /// ordinary `Raft::shutdown` and a running core are `None`; a watch closed
+    /// while still reporting `Ok` is the panic `core_stopped` reports.
+    #[must_use]
+    pub fn core_fatal(&self) -> Option<String> {
+        match classify_core_state(&self.receiver.borrow().running_state) {
+            Some(LocalDbCoreStop::Fatal(error)) => Some(error),
+            Some(LocalDbCoreStop::Stopped) => None,
+            None if self.receiver.has_changed().is_err() => {
+                Some("the Raft core ended without reporting its state".to_owned())
+            }
+            None => None,
+        }
+    }
+}
+
+/// Plurx patch 33: how this node's database Raft core stopped.
+#[cfg(feature = "sqlite")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LocalDbCoreStop {
+    /// Stopped by `Raft::shutdown`: the process is stopping it on purpose.
+    Stopped,
+    /// Quit on its own: a storage error or a panic. It never serves again in
+    /// this process.
+    Fatal(String),
+}
+
+#[cfg(feature = "sqlite")]
+fn classify_core_state(
+    running_state: &Result<(), openraft::error::Fatal<NodeId>>,
+) -> Option<LocalDbCoreStop> {
+    match running_state {
+        Ok(()) => None,
+        Err(openraft::error::Fatal::Stopped) => Some(LocalDbCoreStop::Stopped),
+        Err(fatal) => Some(LocalDbCoreStop::Fatal(fatal.to_string())),
+    }
 }
 
 #[cfg(feature = "sqlite")]
@@ -829,7 +893,11 @@ impl Client {
                 tracing::warn!("retained startup cleanup still owns accepted SQLite snapshot work");
             }
             state.raft_db.raft.shutdown().await?;
-            state.raft_db.shutdown_handle.shutdown().await?;
+            // Plurx patch 34: the SQL writer's shutdown removes the lock file,
+            // so it runs whatever the WAL's shutdown returns (a WAL whose
+            // writer died on an IO error fails here) and a clean stop is not
+            // mistaken for a crash by the next start's auto-heal.
+            let wal = state.raft_db.shutdown_handle.shutdown().await;
             let (tx, rx) = tokio::sync::oneshot::channel();
             state
                 .raft_db
@@ -839,6 +907,7 @@ impl Client {
                 .map_err(|error| Error::Error(error.to_string().into()))?;
             rx.await
                 .map_err(|error| Error::Error(error.to_string().into()))?;
+            wal?;
             let _ = self
                 .inner
                 .tx_client_db
@@ -1107,7 +1176,14 @@ impl Client {
             }
             state.raft_db.raft.shutdown().await?;
             info!("Shutting down sqlite logs writer");
-            state.raft_db.shutdown_handle.shutdown().await?;
+            // Plurx patch 34: the SQL writer's shutdown removes the lock file,
+            // so it runs whatever the WAL's shutdown returns (a WAL whose
+            // writer died on an IO error fails here) and a clean stop is not
+            // mistaken for a crash by the next start's auto-heal.
+            let wal = state.raft_db.shutdown_handle.shutdown().await;
+            if let Err(error) = &wal {
+                tracing::error!("sqlite logs writer shutdown failed: {error}");
+            }
 
             info!("Shutting down sqlite writer");
             let (tx_sm, rx_sm) = tokio::sync::oneshot::channel();
@@ -1116,10 +1192,11 @@ impl Client {
                 .sql_writer
                 .send_async(WriterRequest::Shutdown(tx_sm))
                 .await
-                .expect("The state machine writer to always be listening");
+                .map_err(|error| Error::Error(error.to_string().into()))?;
             rx_sm
                 .await
-                .expect("To always get an answer from SQL writer");
+                .map_err(|error| Error::Error(error.to_string().into()))?;
+            wal?;
 
             let _ = tx_client_db.send_async(ClientStreamReq::Shutdown).await;
         }
@@ -1505,6 +1582,106 @@ mod tests {
         assert!(!accessor.contains("get_metrics_remote"));
         assert!(!accessor.contains("send_with_retry"));
         assert!(!accessor.contains(".await"));
+    }
+
+    #[tokio::test]
+    async fn the_core_stop_names_a_fatal_quit_and_ignores_an_ordinary_stop() {
+        use super::{LocalDbCoreStop, LocalDbRaftMetrics};
+        use openraft::error::Fatal;
+        use openraft::{StorageError, StorageIOError};
+
+        let initial = RaftMetrics::<u64, Node>::new_initial(1);
+        let (sender, receiver) = tokio::sync::watch::channel(initial.clone());
+        let mut fatal = LocalDbRaftMetrics::from_receiver(receiver.clone());
+        let mut ordinary = LocalDbRaftMetrics::from_receiver(receiver);
+        let waiting = tokio::spawn(async move { fatal.core_stopped().await });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "a running core has not stopped");
+        let mut failed = initial.clone();
+        failed.running_state = Err(Fatal::StorageError(StorageError::IO {
+            source: StorageIOError::write(&std::io::Error::other("database or disk is full")),
+        }));
+        sender.send(failed).expect("watch open");
+        match waiting.await.expect("waiter") {
+            LocalDbCoreStop::Fatal(error) => assert!(error.contains("disk is full"), "{error}"),
+            other => panic!("a storage-error quit is fatal, got {other:?}"),
+        }
+
+        let mut stopped = initial.clone();
+        stopped.running_state = Err(Fatal::Stopped);
+        sender.send(stopped).expect("watch open");
+        assert_eq!(ordinary.core_stopped().await, LocalDbCoreStop::Stopped);
+
+        let (sender, receiver) = tokio::sync::watch::channel(initial);
+        let mut closed = LocalDbRaftMetrics::from_receiver(receiver);
+        drop(sender);
+        assert!(
+            matches!(closed.core_stopped().await, LocalDbCoreStop::Fatal(_)),
+            "a core that vanished without a terminal state died"
+        );
+    }
+
+    #[test]
+    fn the_core_fatal_read_matches_the_stop_without_waiting() {
+        use super::LocalDbRaftMetrics;
+        use openraft::error::Fatal;
+        use openraft::{StorageError, StorageIOError};
+
+        let initial = RaftMetrics::<u64, Node>::new_initial(1);
+        let (sender, receiver) = tokio::sync::watch::channel(initial.clone());
+        let metrics = LocalDbRaftMetrics::from_receiver(receiver);
+        assert_eq!(metrics.core_fatal(), None, "a running core has not died");
+
+        let mut stopped = initial.clone();
+        stopped.running_state = Err(Fatal::Stopped);
+        sender.send(stopped).expect("watch open");
+        assert_eq!(metrics.core_fatal(), None, "an ordinary stop is not a death");
+
+        let mut failed = initial.clone();
+        failed.running_state = Err(Fatal::StorageError(StorageError::IO {
+            source: StorageIOError::write(&std::io::Error::other("database or disk is full")),
+        }));
+        sender.send(failed).expect("watch open");
+        let error = metrics.core_fatal().expect("a storage-error quit is fatal");
+        assert!(error.contains("disk is full"), "{error}");
+
+        let (sender, receiver) = tokio::sync::watch::channel(initial);
+        let vanished = LocalDbRaftMetrics::from_receiver(receiver);
+        drop(sender);
+        assert!(
+            vanished.core_fatal().is_some(),
+            "a core that vanished without a terminal state died"
+        );
+    }
+
+    #[test]
+    fn the_lock_file_is_released_whatever_the_wal_shutdown_returns() {
+        let source = include_str!("mgmt.rs")
+            .split_once("#[cfg(all(test, feature = \"sqlite\"))]")
+            .expect("production code precedes the tests")
+            .0;
+        let source: String = source.split_whitespace().collect();
+        let sites: Vec<&str> = source
+            .split("letwal=state.raft_db.shutdown_handle.shutdown().await;")
+            .skip(1)
+            .collect();
+        assert_eq!(sites.len(), 2, "both shutdown paths hold the WAL result");
+        for site in sites {
+            let writer = site
+                .find("WriterRequest::Shutdown(")
+                .expect("the SQL writer shutdown follows");
+            let wal = site.find("wal?;").expect("the WAL result is returned");
+            assert!(
+                writer < wal,
+                "the lock is released before the WAL error returns"
+            );
+        }
+        assert!(!source.contains("shutdown_handle.shutdown().await?"));
+        assert!(
+            !source.contains("Thestatemachinewritertoalwaysbelistening")
+                && !source.contains("ToalwaysgetananswerfromSQLwriter"),
+            "a stopped SQL writer is an error in both shutdowns, not a panic"
+        );
     }
 
     #[test]

@@ -171,6 +171,7 @@ impl SourceInputByteBudget for crate::background_jobs::SourceReadBudget {
 }
 
 pub(crate) struct SourceInput {
+    observer_publication: Option<crate::source_generation::SourceObserverPublication>,
     url: String,
     broker: Arc<std::sync::Mutex<Option<plurx_core::process::source_lifetime::BrokerRegistration>>>,
     state: Arc<InputState>,
@@ -619,6 +620,7 @@ impl SourceInput {
             );
         });
         Ok(Self {
+            observer_publication: None,
             url,
             broker,
             state,
@@ -739,6 +741,20 @@ impl SourceInput {
             .read_failed
             .load(std::sync::atomic::Ordering::SeqCst)
     }
+    /// Publish only for this physical input's lifetime. A cached rendition may
+    /// retain telemetry intent after retirement, but cannot retain this handle.
+    pub(crate) async fn publish_source_observer(
+        &mut self,
+        owners: &crate::source_generation::SourceRenditionOwners,
+        epoch: u64,
+    ) -> Result<(), String> {
+        let Some(observer) = self.foreground_observer() else {
+            return Ok(());
+        };
+        let (publication, update) = owners.publish_source_observer(epoch, observer);
+        self.observer_publication = Some(publication);
+        update.await
+    }
     pub(crate) fn foreground_observer(&self) -> Option<SourceObserver> {
         self.state.observer.clone()
     }
@@ -760,7 +776,8 @@ impl SourceInput {
 
     /// Join actual source reads, then close the held capability before a
     /// background caller returns its job/resource claim.
-    pub(crate) async fn close_and_wait(self) -> std::io::Result<()> {
+    pub(crate) async fn close_and_wait(mut self) -> std::io::Result<()> {
+        drop(self.observer_publication.take());
         self.revoke_broker();
         self.close.cancel();
         if let Some(observer) = &self.state.observer {
@@ -786,7 +803,8 @@ impl SourceInput {
         .map_err(std::io::Error::other)?;
         Ok(())
     }
-    pub(crate) fn cleanup_pending(self) {
+    pub(crate) fn cleanup_pending(mut self) {
+        drop(self.observer_publication.take());
         self.revoke_broker();
         self.close.cancel();
         if let Some(custody) = self.state.custody.lock().expect("source custody").take() {
@@ -796,6 +814,7 @@ impl SourceInput {
 }
 impl Drop for SourceInput {
     fn drop(&mut self) {
+        drop(self.observer_publication.take());
         self.revoke_broker();
         self.close.cancel();
     }

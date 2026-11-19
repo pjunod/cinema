@@ -19,6 +19,8 @@ mod dolby;
 pub mod dv_fel_qualification;
 pub mod dv_processing;
 pub mod dv_refit;
+pub mod dv_refit_serve;
+pub mod dv_refit_title;
 pub mod dvconvert;
 mod encoder;
 mod enhancement_rate;
@@ -463,6 +465,7 @@ pub struct CopyVideoOptions {
     preserve_dolby_vision: bool,
     promote_hevc_parameter_sets: bool,
     dv_convert: bool,
+    dv_refit_digest: Option<[u8; 32]>,
     retain_hevc_parameter_sets: bool,
 }
 
@@ -473,6 +476,7 @@ impl CopyVideoOptions {
             preserve_dolby_vision,
             promote_hevc_parameter_sets: false,
             dv_convert: false,
+            dv_refit_digest: None,
             retain_hevc_parameter_sets: false,
         }
     }
@@ -527,6 +531,9 @@ impl CopyVideoOptions {
     /// filter, so the invariant lives here and not in each caller (plan §4.8).
     pub const fn with_dolby_vision_conversion(mut self, convert: bool) -> Self {
         self.dv_convert = convert;
+        if !convert {
+            self.dv_refit_digest = None;
+        }
         if convert {
             self.preserve_dolby_vision = true;
         }
@@ -536,6 +543,16 @@ impl CopyVideoOptions {
     /// Whether this copy converts Profile 7 to Profile 8.1.
     pub const fn converts_dolby_vision(self) -> bool {
         self.dv_convert
+    }
+
+    /// A fitted table is an output-affecting part of a converting copy.
+    pub const fn with_dolby_vision_refit(mut self, digest: Option<[u8; 32]>) -> Self {
+        self.dv_refit_digest = if self.dv_convert { digest } else { None };
+        self
+    }
+
+    pub const fn dolby_vision_refit(self) -> Option<[u8; 32]> {
+        self.dv_refit_digest
     }
 
     pub fn from_probe(
@@ -2762,6 +2779,14 @@ pub fn copy_index_shared_args_with_input(
     args
 }
 
+#[derive(Clone, Copy)]
+enum CopyMp4Timeline {
+    /// Existing copy/index consumers expect a zero-based muxed presentation.
+    Rebased,
+    /// Clocked companions compare exact samples and retain track start offsets.
+    SourceClock,
+}
+
 /// One identity's output block of the index pipe, writing to `url`. `trace`
 /// prepends `trace_headers` to an HEVC block's bitstream filters; see
 /// [`copy_index_shared_args_with_input`] for why only one block carries it.
@@ -2770,6 +2795,16 @@ pub fn copy_index_output_args(
     video: CopyVideoOptions,
     url: &str,
     trace: bool,
+) -> Vec<String> {
+    copy_index_output_args_with_timeline(source, video, url, trace, CopyMp4Timeline::Rebased)
+}
+
+fn copy_index_output_args_with_timeline(
+    source: &MediaFile,
+    video: CopyVideoOptions,
+    url: &str,
+    trace: bool,
+    timeline: CopyMp4Timeline,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-map_chapters".into(),
@@ -2780,7 +2815,7 @@ pub fn copy_index_output_args(
         "-sn".into(),
     ];
     args.extend(strip_plurx_markers(&copy_video_args(source, video)));
-    append_copy_mp4_output(&mut args, url);
+    append_copy_mp4_output_with_timeline(&mut args, url, timeline);
     if trace && matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
         if let Some(index) = args.iter().position(|arg| arg == "-bsf:v") {
             args[index + 1] = format!("trace_headers,{}", args[index + 1]);
@@ -2795,12 +2830,36 @@ pub fn copy_index_output_args(
 
 /// The common fragmented MP4 mux contract for playback and index outputs.
 fn append_copy_mp4_output(args: &mut Vec<String>, url: &str) {
+    append_copy_mp4_output_with_timeline(args, url, CopyMp4Timeline::Rebased);
+}
+
+fn append_copy_mp4_output_with_timeline(
+    args: &mut Vec<String>,
+    url: &str,
+    timeline: CopyMp4Timeline,
+) {
+    let (negative_ts, movflags) = match timeline {
+        CopyMp4Timeline::Rebased => (
+            "make_zero",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+        ),
+        // MAKE_ZERO plus no edit list makes MOV stretch a late track's first
+        // sample to start at zero. AAC priming then changes only the AV
+        // companion's first video duration. Shift negative input clocks as a
+        // group, and retain one common track origin via the initial discont;
+        // without discont, MOV independently rebases each track and loses its
+        // A/V start offset. No sample or edit-list repair is needed in Rust.
+        CopyMp4Timeline::SourceClock => (
+            "make_non_negative",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov+frag_discont",
+        ),
+    };
     args.extend(
         [
             "-avoid_negative_ts",
-            "make_zero",
+            negative_ts,
             "-movflags",
-            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            movflags,
             "-use_editlist",
             "0",
             "-f",
@@ -2912,6 +2971,31 @@ pub fn copy_pipe_args_with_index_measurement(
     audio: Option<&crate::playback::audio::AudioDelivery>,
     measurement_url: &str,
 ) -> Result<Vec<String>, &'static str> {
+    copy_pipe_args_with_index_measurement_timeline(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        video,
+        audio,
+        measurement_url,
+        CopyMp4Timeline::Rebased,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_pipe_args_with_index_measurement_timeline(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+    measurement_url: &str,
+    timeline: CopyMp4Timeline,
+) -> Result<Vec<String>, &'static str> {
     let descriptor = measurement_url
         .strip_prefix("pipe:")
         .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
@@ -2930,7 +3014,7 @@ pub fn copy_pipe_args_with_index_measurement(
         audio,
         CopyAudioOffsetMode::SingleInputPacketTimestamps,
     );
-    append_copy_mp4_output(&mut args, "pipe:1");
+    append_copy_mp4_output_with_timeline(&mut args, "pipe:1", timeline);
     if args.iter().filter(|arg| arg.as_str() == "-i").count() != 1 {
         return Err("index measurement requires a single production input");
     }
@@ -2941,15 +3025,23 @@ pub fn copy_pipe_args_with_index_measurement(
             args[level + 1] = "info".to_owned();
         }
     }
-    args.extend(copy_index_output_args(source, video, measurement_url, true));
+    args.extend(copy_index_output_args_with_timeline(
+        source,
+        video,
+        measurement_url,
+        true,
+        timeline,
+    ));
     Ok(args)
 }
 
 /// Add a selected-video packet-clock observation output to the one-input
 /// playback/canonical-measurement recipe. Clock packets retain source decode
-/// timestamps with `-copyts`; MP4 outputs still request their existing
-/// `make_zero` mux normalization. This interaction, especially after seeking,
-/// requires media qualification before the observations can bind a range.
+/// timestamps with `-copyts`. Both MP4 outputs preserve sample durations and
+/// track start offsets: only negative timestamps are shifted, and the initial
+/// fragment has a common track origin. Per-output MAKE_ZERO would stretch a
+/// late track's first sample differently when only the AV mux carries audio.
+/// Seeked measurements still require qualification before binding a range.
 ///
 /// Sizes/checksums describe packets after FFmpeg filters and before any Rust
 /// Dolby Vision rewrite. The caller must correlate packet order with samples
@@ -2972,7 +3064,7 @@ pub fn copy_pipe_args_with_index_and_packet_clock(
         .and_then(|value| value.parse::<i32>().ok())
         .filter(|descriptor| *descriptor >= 3)
         .ok_or("packet clock requires an inherited pipe descriptor >= 3")?;
-    let mut args = copy_pipe_args_with_index_measurement(
+    let mut args = copy_pipe_args_with_index_measurement_timeline(
         source,
         start_seconds,
         audio_index,
@@ -2981,6 +3073,7 @@ pub fn copy_pipe_args_with_index_and_packet_clock(
         video,
         audio,
         measurement_url,
+        CopyMp4Timeline::SourceClock,
     )?;
     let measurement_descriptor = measurement_url[5..]
         .parse::<i32>()

@@ -8,6 +8,43 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- A per-title `dv_refit` background job fits F+ mapping curves for Profile 7
+  FEL titles (FEL-RPU-REFIT-BUILD.md milestone 3), while an explicit FEL disk
+  conversion is waiting or any of four new Developer switches is on (`playback.dolby_vision_refit_web`, `_apple`,
+  `_android`, `_linux`, default off; web and Apple Settings). It runs the
+  Dolby Vision helper's `--refit-stats` mode over the whole title beside
+  playback on a 3-thread reservation, shows as "Dolby Vision F+ curve fit" in
+  Activity, resumes from a node-local spool after a preemption, and can be
+  cancelled and retried from the background-jobs page; a failed or cancelled
+  title is not fitted again until its source changes or it is retried. Each
+  title's curve table (scene spans, the quantised served coefficients, held-out
+  errors, verdict and curve digest) is published in one replicated write
+  (SQLite v134; a shape-verified hiqlite extension; carried by the SQLite to
+  cluster import), and a superseded table stays addressable by digest for
+  seven days. The Developer card lists and deletes the spool. Indexed copy
+  serving can use fitted curves when its platform switch is on and a typed
+  client platform was accepted at a session boundary.
+- The Dolby Vision helper's `--refit-stats` mode takes `--threads N` and
+  `--resume FIRST FIRST_PTS`, reports each scene's RPU scene lengths, exits 3
+  for a refusal of the title's content (1 for any other failure), and logs
+  nothing from libav.
+- The Profile 7 → 8.1 indexed copy converter writes pinned F+ curves into
+  each RPU by exact presentation time. Fitted indexes and cache identities
+  include the curve digest; disabled platforms, unfitted titles and live
+  copy keep v1 identity bytes. An initial session without accepted typed
+  client control remains on v1 until the next session boundary.
+
+- Permanent FEL disk conversion waits for a current fit, identity verdict or
+  recorded content refusal before dropping the enhancement layer. Complete
+  title scans record FEL/MEL classification; fitted RPUs are authored by exact
+  source PTS, injected, and read back frame by frame before publication.
+  Waiting conversions explain their queue state in file details.
+- Web and Apple playback information reports the attached conversion's F+
+  mapping and held-out gain, or its identity reason. This metadata comes from
+  the pinned rendition and adds no curve-store read to status polls.
+
 ### Removed
 
 - The engineering knowledge pilot (`scripts/knowledge`, `validation/knowledge/`,
@@ -18,6 +55,15 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- F+ publishes chroma MMR coefficients on the Q12 grid tested on the native path and
+  qualifies their actual stored precision. The new fitting method reuses
+  existing statistics; new sessions wait for its replacement table while
+  existing digest pins retain their original coefficients.
+- Safari prepared upgrades that have buffered the current picture but still
+  play behind it now seek to a buffered forward rendezvous and hold there.
+  Seek latency no longer leaves both exact-current attempts behind the moving
+  incumbent; the same decoded-frame guard still decides whether to expose.
+
 - Web prepared upgrades keep predecessor control observations on their own
   media source through exposure, so a transient successor wait cannot cancel
   its own preparation. The first visible frame freezes the final commit;
@@ -25,6 +71,19 @@ bump may break compatibility and a **patch** bump never does.
 - Guarded runner VM starts pin instance UUID/generation under the target-host
   admission lock, retain pause and restart-budget checks, and cannot become
   an in-service daemon repair when the VM is already running.
+
+- Auto playback keeps foreground admission through VOD creation, so a cold
+  start can ask background work to yield; prepared successors retain their
+  separate speculative purpose even when they share a cached rendition.
+- Reattaching to a cached VOD rendition no longer sends source telemetry to
+  its retired input owner. The next live input receives pending telemetry.
+- Preserve measured CM29 dark-chroma mapping for qualified P3 display targets with black from zero through 0.005 nits, while retaining each target's tone curve.
+- Clocked Source copies and Analysis gap fills preserve the first video
+  sample's duration when AAC begins earlier. The MP4 muxer previously
+  stretched only the AV companion's first sample, so strict comparison with
+  the video-only observation refused the generation as `copy_sync_unverified`.
+  The clocked mux policy now preserves both sample timing and the A/V start
+  offset without edit lists; companion and seek verification remain strict.
 
 - Dolby Vision titles the server reconstructs from the base layer alone no
   longer have their black level raised: Profile 5, Profile 8, and Profile 7

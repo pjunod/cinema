@@ -181,7 +181,7 @@ pub(super) async fn spawn_generation(
     // Diagnostic only: the processed window's timing line reports it.
     #[cfg(target_os = "linux")]
     let source_open_started = tokio::time::Instant::now();
-    let source_custody = if !source_needed {
+    let mut source_custody = if !source_needed {
         None
     } else if let Some(preparation) = rendition.preparation() {
         let source = match rendition.source.as_ref() {
@@ -266,13 +266,28 @@ pub(super) async fn spawn_generation(
     };
     #[cfg(target_os = "linux")]
     let source_open = source_needed.then(|| source_open_started.elapsed());
-    if let Some(observer) = source_custody
-        .as_ref()
-        .and_then(|input| input.foreground_observer())
-    {
-        rendition
-            .source_owners
-            .set_source_observer(generation_epoch, observer);
+    if !generation_current() {
+        return;
+    }
+    if let Some(input) = source_custody.as_mut() {
+        if let Err(cause) = input
+            .publish_source_observer(&rendition.source_owners, generation_epoch)
+            .await
+        {
+            if !generation_current() {
+                return;
+            }
+            record_failure(
+                shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                cause,
+            );
+            return;
+        }
+    }
+    if !generation_current() {
+        return;
     }
     #[cfg(target_os = "linux")]
     if let Some((encoding, runtime)) = recipe.encoding.as_ref().and_then(|encoding| {
@@ -1325,6 +1340,20 @@ async fn run_generation(
             None => return (None, None),
         }
     };
+    let dv_refit = match rendition.recipe.video.dolby_vision_refit() {
+        Some(digest) => match crate::dv_refit_serving::pinned_table(
+            shared.store.as_ref(), &rendition.recipe.file, digest,
+        ).await {
+            Ok(Some(table)) => Some(table),
+            Ok(None) => return (Some(Outcome::Failed(Failure::Stream(
+                "the rendition's pinned F+ curve table is no longer kept; it needs a new generation identity".into()
+            ))), None),
+            Err(error) => return (Some(Outcome::Failed(Failure::Stream(
+                format!("reading the rendition's F+ curve table: {error}")
+            ))), None),
+        },
+        None => None,
+    };
     let generation = Generation {
         plan: rendition.plan.clone(),
         index: rendition.index.clone(),
@@ -1375,6 +1404,7 @@ async fn run_generation(
         // generation is matched against was built with — they share one
         // `CopyVideoOptions`, so they cannot disagree.
         convert_dolby_vision: rendition.recipe.video.converts_dolby_vision(),
+        dv_refit,
         retain_hevc_parameter_sets: rendition.recipe.video.retains_hevc_parameter_sets(),
     };
     let sink = RenditionSink {

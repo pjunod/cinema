@@ -1,6 +1,7 @@
 # Guarded runner admission — pin instance identity at the owner
 
-**Status:** open — Astra-reviewed source; promotion, deployment and live qualification pending ·
+**Status:** open — source reviewed; isolated owner deployed and manual start observed;
+pickup, Guarded qualification and main promotion pending ·
 **Written:** 2026-11-16 · **Owner:** Codex, with Astra review
 
 Companion to the [ci-fleet supervisor plan](http://forge.lan:3000/noirr/ci-fleet):
@@ -72,7 +73,8 @@ changed or absent generation, running-VM no-daemon-effect, pause during
 headroom and persistence, deadline expiry, timeout uncertainty, actual fsynced
 attempt state and cooperating mutation exclusion. Ansible has five offline
 contract tests and syntax checks for full provisioning, added capacity and
-rolling reboot. These are source checks; no playbook or watchdog ran on a host.
+rolling reboot. These Ansible checks remain offline; no playbook was run.
+The reviewed watchdog is installed for the explicitly approved isolated qualification.
 
 Astra closed the pause-during-persistence and two Ansible maintenance findings.
 Repository paperwork passes (16/16); catalog and 104 served-script syntax checks
@@ -80,10 +82,18 @@ pass. The local commit hook stopped at Cargo, which is absent on this Mac.
 No Rust source changed; whole-workspace formatting/Clippy were not run locally
 and the repository promotion gate remains required. A source-only commit uses
 the hook's documented single-commit bypass, without claiming those checks.
-Repository promotion remains open. Install the reviewed owner
-and all participating mutation paths, verify the installed Incus identity
-fields, then qualify one explicitly authorized non-production VM through the
-complete ci-fleet claim/receipt path. Do not infer qualification from a
+Repository promotion remains open. The installed owner has verified Incus UUID
+and generation fields on one isolated 6-CPU/24-GiB VM. Three capped prepared-owner
+prefix trials reached the native admission guard in 2.502, 1.928 and 2.294 seconds
+under the unchanged 10% CPU/100-MiB host cap. The actual guarded manual command
+then returned `started`, was durably acknowledged, and produced two advancing
+service observations. The fixed qualification workflow completed on its exact
+runner. Pickup verification remained `service_restored`: the collector omitted
+successful run-jobs completeness required by the verifier. Its independently
+reviewed correction passes 977 source regressions and the 385-ms capped target;
+the approved corrective collector canary is still observing. A fresh verified
+pickup, full busy shadow, one automatic recovery, restored production mapping
+and exact-current-tree promotion remain required. Do not infer qualification from a
 capability string or a passing fixture. The current upstream retired the
 engineering-knowledge pilot; the older primary-tree query returned no reviewed
 coverage for this file, and no retired tooling is restored by this change.

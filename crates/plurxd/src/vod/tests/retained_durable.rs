@@ -19,7 +19,7 @@ async fn durable_restore_checks_incoming_tuple_when_healthy_same_key_rendition_i
     };
     let facts = artifact.facts();
     let original = request("incumbent", 0.0);
-    serve.try_create(VodRecipeRequest { root_admission: None, soundtrack: None, companion: None,
+    serve.try_create(VodRecipeRequest { admission_priority: crate::admission::Priority::Live, root_admission: None, soundtrack: None, companion: None,
         measured_candidate: None, retained_capture: RetainedOutputCapture::Restore(Some(facts.clone())),
         request: &original, encoding: None,
     }, &file, &settings(), VodAttribution { user_name: "paul", item_title: "Fixture", supersession_user: "user" }, "incumbent".into())
@@ -32,7 +32,7 @@ async fn durable_restore_checks_incoming_tuple_when_healthy_same_key_rendition_i
     };
     let mut different = original.clone();
     different.audio_claim = Some(plurx_core::playback::audio::AudioClaim { decoders: vec!["aac".into()], sinks: vec![] });
-    let refused = serve.try_create(VodRecipeRequest { root_admission: None, soundtrack: None, companion: None,
+    let refused = serve.try_create(VodRecipeRequest { admission_priority: crate::admission::Priority::Live, root_admission: None, soundtrack: None, companion: None,
         measured_candidate: None, retained_capture: RetainedOutputCapture::Restore(Some(facts.clone())),
         request: &different, encoding: None,
     }, &file, &settings(), VodAttribution { user_name: "paul", item_title: "Fixture", supersession_user: "user" }, "incumbent".into())
@@ -46,7 +46,7 @@ async fn durable_restore_checks_incoming_tuple_when_healthy_same_key_rendition_i
     }
     let init = serve.segment("incumbent", INIT_NAME).await.expect("incumbent remains served");
     assert!(init.result.expect("private init").expect("init").retained_lease.is_some());
-    serve.try_create(VodRecipeRequest { root_admission: None, soundtrack: None, companion: None,
+    serve.try_create(VodRecipeRequest { admission_priority: crate::admission::Priority::Live, root_admission: None, soundtrack: None, companion: None,
         measured_candidate: None, retained_capture: RetainedOutputCapture::New,
         request: &different, encoding: None,
     }, &file, &settings(), VodAttribution { user_name: "paul", item_title: "Fixture", supersession_user: "user" }, "uncaptured".into())
@@ -97,7 +97,7 @@ async fn durable_restore_preserves_none_incumbent_and_original_execution_identit
         fresh.shared.retained_artifacts.own_namespace(base.path()).await
     }).await;
     let restored_request = request("issued", 0.0);
-    fresh.try_create(VodRecipeRequest { root_admission: None, soundtrack: None, companion: None,
+    fresh.try_create(VodRecipeRequest { admission_priority: crate::admission::Priority::Live, root_admission: None, soundtrack: None, companion: None,
         measured_candidate: None, retained_capture: RetainedOutputCapture::Restore(Some(facts.clone())),
         request: &restored_request, encoding: None,
     }, &file, &settings(), VodAttribution { user_name: "paul", item_title: "Fixture", supersession_user: "user" }, "restored".into())
@@ -106,7 +106,7 @@ async fn durable_restore_preserves_none_incumbent_and_original_execution_identit
     assert_eq!(publication.owner.retained_output_facts(), Some(facts.clone()));
     assert!(publication.result.expect("private init").expect("init file").retained_lease.is_some());
     let none_request = request("none", 0.0);
-    fresh.try_create(VodRecipeRequest { root_admission: None, soundtrack: None, companion: None,
+    fresh.try_create(VodRecipeRequest { admission_priority: crate::admission::Priority::Live, root_admission: None, soundtrack: None, companion: None,
         measured_candidate: None, retained_capture: RetainedOutputCapture::Restore(None),
         request: &none_request, encoding: None,
     }, &file, &settings(), VodAttribution { user_name: "paul", item_title: "Fixture", supersession_user: "user" }, "none".into())
@@ -114,7 +114,7 @@ async fn durable_restore_preserves_none_incumbent_and_original_execution_identit
     assert!(fresh.shared.sessions.lock().await.get("none").expect("None session").retained_output.is_none());
     let mut contradictory = facts;
     contradictory.output_identity = "f".repeat(64);
-    let failed = fresh.try_create(VodRecipeRequest { root_admission: None, soundtrack: None, companion: None,
+    let failed = fresh.try_create(VodRecipeRequest { admission_priority: crate::admission::Priority::Live, root_admission: None, soundtrack: None, companion: None,
         measured_candidate: None, retained_capture: RetainedOutputCapture::Restore(Some(contradictory)),
         request: &restored_request, encoding: None,
     }, &file, &settings(), VodAttribution { user_name: "paul", item_title: "Fixture", supersession_user: "user" }, "refused".into())
@@ -134,6 +134,7 @@ async fn durable_completion_requires_actual_trailer_and_refuses_mixed_or_repeate
     let serve = local_serve(base.path().to_owned(), store);
     let video = CopyVideoOptions::new(crate::ffmpeg::has_dovi_rpu().await, false);
     let recipe = Recipe {
+        dv_refit_gain: None,
             source_telemetry:false,
         retained_logical: None, measured_candidate: None, file: file.clone(),
         audio_index: None, aac: true, audio_delivery: None, video,
@@ -175,6 +176,7 @@ async fn durable_completion_requires_actual_trailer_and_refuses_mixed_or_repeate
         encoded_frame_ticks: None,
         encoded_video_origin: None,
         identity: identity.clone(), convert_dolby_vision: false,
+        dv_refit: None,
         retain_hevc_parameter_sets: false, start_entry: 0, policy,
     }, &sink, "durable-trailer-negative").await;
     assert!(matches!(outcome, Outcome::Ran { .. }), "trailerless EOF is not normal completion: {outcome:?}");
