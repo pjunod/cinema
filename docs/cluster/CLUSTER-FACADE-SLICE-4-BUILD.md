@@ -164,4 +164,3 @@ pins from #1676, is merged under the stacked slices.
   `CEILING` moves from 201 to 199.
 - The rolling-producer owner count reconciles to 927: 936 at the base, minus
   10 from the facade slices, plus 1 from #1736.
-

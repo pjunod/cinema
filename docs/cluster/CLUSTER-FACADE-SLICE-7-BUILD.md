@@ -582,4 +582,3 @@ No fleet claim is made here. Deploying stays with Paul.
     after review: the modeled facts are unchanged.
   - Three desktop protected-filesystem cases still need a protected host.
 - **Not yet claimed.** Effort gate, landing, main promotion and deployment.
-

@@ -120,4 +120,3 @@ without suppressions, raised pins or duplicate ownership fixes.
 - **Not yet covered.** Nothing tests that `StandingWatch` ignores Raft metric
   updates that change no standing. That needs a replicated store; its loop
   compares the standing before returning.
-
