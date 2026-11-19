@@ -22,7 +22,7 @@ use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 mod source_digest;
 
 pub(crate) const PEER_PATH_PREFIX: &str = "/internal/media/fragment-index/";
-const PEER_DEADLINE: Duration = Duration::from_secs(8);
+const PEER_DEADLINE: Duration = plurx_core::cluster::timing::holders::FRAGMENT_INDEX_PEER_DEADLINE;
 const HASH_CHUNK: usize = 256 * 1024;
 /// How far a whole-file digest reads between checkpoints a later attempt may
 /// resume from. At the ~105 MB/s a NAS mount gives, that is under a second of

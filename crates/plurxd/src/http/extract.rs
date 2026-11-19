@@ -55,11 +55,13 @@ pub struct AdminUser(pub User);
 /// makes the same write with no bound at all.
 pub struct CacheOnlyAdminUser;
 
-const CACHE_ONLY_ADMIN_PROOF_TTL: Duration = Duration::from_secs(5 * 60);
+const CACHE_ONLY_ADMIN_PROOF_TTL: Duration =
+    plurx_core::cluster::timing::proofs::CACHE_ONLY_ADMIN_PROOF_TTL;
 const MAX_CACHE_ONLY_ADMIN_PROOFS: usize = 64;
 /// Queued callers admitted behind the one active operation, process-wide.
 pub(super) const REVOCATION_WAITERS: usize = 8;
-pub(super) const REVOCATION_ADMISSION_WAIT: Duration = Duration::from_millis(2_500);
+pub(super) const REVOCATION_ADMISSION_WAIT: Duration =
+    plurx_core::cluster::timing::proofs::REVOCATION_ADMISSION_WAIT;
 
 static REVOCATION_COMPLETE: AtomicU64 = AtomicU64::new(0);
 static REVOCATION_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
@@ -204,7 +206,8 @@ struct RemoteCacheOnlyAdminRevocation {
 }
 
 const MAX_REMOTE_CACHE_ONLY_ADMIN_REVOCATIONS: usize = 128;
-const REMOTE_CACHE_ONLY_ADMIN_REVOCATION_TTL: Duration = CACHE_ONLY_ADMIN_PROOF_TTL;
+const REMOTE_CACHE_ONLY_ADMIN_REVOCATION_TTL: Duration =
+    plurx_core::cluster::timing::proofs::REMOTE_CACHE_ONLY_ADMIN_REVOCATION_TTL;
 
 /// Brackets a Store mutation with two cache generations. The first removes
 /// existing proof before the mutation starts; the second prevents an ordinary
@@ -1099,7 +1102,8 @@ impl FromRequestParts<AppState> for CacheOnlyAdminUser {
 /// it cannot authorize. Deliberately shorter than any page's own patience:
 /// the point of the bound is that a wedged Store degrades this guard to a
 /// named refusal instead of hanging the request that reports the wedge.
-const CACHE_ONLY_ADMIN_STORE_FALLBACK_TIMEOUT: Duration = Duration::from_secs(2);
+const CACHE_ONLY_ADMIN_STORE_FALLBACK_TIMEOUT: Duration =
+    plurx_core::cluster::timing::proofs::CACHE_ONLY_ADMIN_STORE_FALLBACK_TIMEOUT;
 
 /// A cluster recovery read this node could not authorize. The code is stable
 /// so a client can tell it apart from a verdict on the credential; the sentence

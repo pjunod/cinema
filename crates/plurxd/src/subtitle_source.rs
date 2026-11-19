@@ -919,7 +919,7 @@ pub(crate) async fn hydrate_from_peers(
         ordinal,
         format.publication_name()
     );
-    let peer_budget = Duration::from_secs(8);
+    let peer_budget = plurx_core::cluster::timing::holders::SUBTITLE_PEER_DEADLINE;
     rows.sort_by_cached_key(|row| {
         reachable.get(&row.node_id).map_or(1, |base| {
             transport.preference(&row.node_id, base, peer_budget)

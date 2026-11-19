@@ -1,6 +1,6 @@
 # General cluster change feed
 
-**Status:** ready to build · **Executes:** B4 from [cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md) · **Written:** 2026-11-19
+**Status:** open; implementation prepared, final qualification pending · **Executes:** B4 from [cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md) · **Written:** 2026-11-19
 
 ## 1. Objective
 
@@ -50,3 +50,11 @@ The sharing claim loop may park only after a successful empty imports inventory 
 | Peer status cache | HTTP observation detects remote process/network recovery which does not change local SQL. Retain its three-second bounded health refresh; peer transport/outcome ownership belongs to B5. |
 
 This table disposes the audit's named D3 standing pollers, not every timer in the repository. Proof renewal, lease expiration, active external work and I/O recovery remain time terms. Fleet idle-read rate acceptance remains a measured integration obligation; source changes alone cannot establish it.
+
+## 8. Peer-proof invalidation registration
+
+The B5 integration appends `cluster_node_activity_keys` after the two work
+slots, at index 19. The original 17 slots and work slots 17–18 retain their
+identities. The combined registry uses 20 of 32 slots; no table or schema is
+created by this registration. Missing or untrusted key observations retain
+the peer-proof reader's conservative applied-index/fresh-read fallback.

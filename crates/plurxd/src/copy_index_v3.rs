@@ -31,7 +31,7 @@ use futures_util::StreamExt;
 use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 
 pub(crate) const PEER_PATH_PREFIX: &str = "/internal/media/copy-index-v3/";
-const PEER_DEADLINE: Duration = Duration::from_secs(8);
+const PEER_DEADLINE: Duration = plurx_core::cluster::timing::holders::COPY_INDEX_V3_PEER_DEADLINE;
 
 /// The body of the one 404 that means "this route knows the variant and this
 /// node does not hold its bytes". Only that answer retires a holder's row: a

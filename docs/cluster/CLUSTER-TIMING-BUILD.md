@@ -168,3 +168,11 @@ revocation, operation and startup sources.
 Three new relation tests check tombstone coverage and bounded revocation
 phases, passive observation refresh/expiry, and separation from canonical
 wire/token authentication policy. They add no policy choices or floor tuning.
+
+## Root integration of remaining aliases
+
+All 24 requested proof, membership, catalogue and holder aliases are applied
+in the combined tree. Each original expression was checked against the
+reviewed alias manifest before replacement; the shared table's exact-base
+control retains all 134 fixed values. This is source/value correspondence,
+not final combined runtime qualification.

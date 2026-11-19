@@ -105,12 +105,20 @@ pub const APPLIED_MARK_DELETES_ONLY: &[&str] = &["tokens"];
 /// Work-arrival tables, appended after the original slots.
 pub const WORK_WATCH_TABLES: &[&str] = &["offline_source_probes", "offline_packages"];
 
+/// Peer proof keys, after all existing roster and work slots. A key rotation
+/// invalidates its proof without treating unrelated state writes as rotation.
+#[cfg(feature = "hiqlite-store")]
+pub const PEER_AUTH_WATCH_TABLES: &[&str] = &["cluster_node_activity_keys"];
+
 /// Every table the applied mark registers, in slot order.
 pub fn applied_mark_tables() -> impl Iterator<Item = &'static str> {
     let tables = APPLIED_VIEW_TABLES.iter().chain(SHARING_WATCH_TABLES);
     #[cfg(feature = "hiqlite-store")]
     let tables = tables.chain(crate::cluster::membership::directory::ROSTER_TABLES.iter());
-    tables.chain(WORK_WATCH_TABLES).copied()
+    let tables = tables.chain(WORK_WATCH_TABLES);
+    #[cfg(feature = "hiqlite-store")]
+    let tables = tables.chain(PEER_AUTH_WATCH_TABLES);
+    tables.copied()
 }
 
 /// A table observer's wait for its next look. Armed before the
@@ -1710,11 +1718,12 @@ mod tests {
         );
         #[cfg(feature = "hiqlite-store")]
         {
-            assert_eq!(tables.len(), 19);
+            assert_eq!(tables.len(), 20);
             assert_eq!(
-                &tables[17..],
+                &tables[17..19],
                 &["offline_source_probes", "offline_packages"]
             );
+            assert_eq!(tables[19], "cluster_node_activity_keys");
         }
         assert!(tables.len() <= 32, "fork applied mark slot capacity");
         assert!(

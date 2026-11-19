@@ -115,7 +115,7 @@ const MEDIA_RELAY_ACQUISITION_HEARTBEAT_SQL: &str =
 
 const PROTOCOL_CHANGE_ABSENCE_WINDOW_MS: i64 =
     crate::cluster::timing::membership::PROTOCOL_CHANGE_ABSENCE_WINDOW_MS;
-const ARTWORK_AUTH_WINDOW_MS: i64 = 60_000;
+const ARTWORK_AUTH_WINDOW_MS: i64 = crate::cluster::timing::proofs::ARTWORK_AUTH_WINDOW_MS;
 /// The one-second acknowledgement bound expires before the shared Raft
 /// election floor. It also precedes the previous release's 1,500 ms floor
 /// during rolling upgrades; it is not a new proof lease.
@@ -292,7 +292,8 @@ const PROMOTION_TARGET_SQL: &str = "SELECT node.raft_id, node.role, node.last_se
 const PROMOTION_BARRIER_WAIT: Duration = Duration::from_secs(20);
 /// Re-probe durable voter storage at least once inside the readiness window.
 /// The fsync work runs on Tokio's blocking pool, never on an async worker.
-const STORAGE_DURABILITY_PROBE_INTERVAL: Duration = Duration::from_secs(20);
+const STORAGE_DURABILITY_PROBE_INTERVAL: Duration =
+    crate::cluster::timing::membership::STORAGE_DURABILITY_PROBE_INTERVAL;
 const STORAGE_DURABILITY_PROBE_MAX_AGE_MS: i64 = NODE_REACHABLE_WINDOW_MS;
 
 /// Whether this process must heartbeat the way a binary that predates the
@@ -1128,7 +1129,7 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
     MARK_LEGACY_NODE_FINALIZE_DURING_REMOVAL_SQL,
 ];
 
-const ACTIVITY_AUTH_WINDOW_MS: i64 = 30_000;
+const ACTIVITY_AUTH_WINDOW_MS: i64 = crate::cluster::timing::proofs::ACTIVITY_AUTH_WINDOW_MS;
 const ACTIVITY_AUTH_CONTEXT: &[u8] = b"plurx-internal-activity-v1";
 const INTERNAL_PEER_AUTH_CONTEXT: &[u8] = b"plurx-internal-peer-request-v1";
 /// A committed roster larger than this is not a bounded operations surface.
@@ -1191,8 +1192,10 @@ const MAX_INTERNAL_REPLAYS_PER_PEER: usize = 4_096;
 // Read proofs need their own short-lived cache: sharing the 30-second mutation
 // cache would either reject valid segment bursts or evict live mutation proofs.
 const MAX_INTERNAL_READ_REPLAYS_PER_PEER: usize = 6_144;
-const INTERNAL_READ_AUTH_WINDOW_MS: i64 = 5_000;
-const INTERNAL_READ_AUTHORITY_TTL: Duration = Duration::from_secs(1);
+const INTERNAL_READ_AUTH_WINDOW_MS: i64 =
+    crate::cluster::timing::proofs::INTERNAL_READ_AUTH_WINDOW_MS;
+const INTERNAL_READ_AUTHORITY_TTL: Duration =
+    crate::cluster::timing::proofs::INTERNAL_READ_AUTHORITY_TTL;
 const MAX_PEER_NODE_ID_BYTES: usize = 256;
 const MAX_JOIN_SOCKET_ADDRESS_BYTES: usize = 512;
 const MAX_JOIN_HTTP_ORIGIN_BYTES: usize = 2_048;
@@ -1221,7 +1224,8 @@ pub fn prometheus_cluster_activity_authority() -> String {
 /// Keep cluster-wide ownership slightly longer than the target's local drain
 /// timer so a second claimant cannot win in the gap between replicated claim
 /// commit and local monotonic-fence installation.
-const CLUSTER_OPERATION_LEASE_EXPIRY_GRACE: Duration = Duration::from_secs(5);
+const CLUSTER_OPERATION_LEASE_EXPIRY_GRACE: Duration =
+    crate::cluster::timing::membership::CLUSTER_OPERATION_LEASE_EXPIRY_GRACE;
 
 /// What a stopping node did about Raft leadership before its drain.
 ///
@@ -4923,8 +4927,10 @@ impl From<&mut Row<'_>> for CacheAdminHolderRow {
     }
 }
 
-const CLUSTER_OPERATION_RETRY_INITIAL: Duration = Duration::from_millis(50);
-const CLUSTER_OPERATION_RETRY_MAX: Duration = Duration::from_secs(2);
+const CLUSTER_OPERATION_RETRY_INITIAL: Duration =
+    crate::cluster::timing::membership::CLUSTER_OPERATION_RETRY_INITIAL;
+const CLUSTER_OPERATION_RETRY_MAX: Duration =
+    crate::cluster::timing::membership::CLUSTER_OPERATION_RETRY_MAX;
 
 fn next_cluster_operation_retry_delay(current: Duration) -> Duration {
     current.saturating_mul(2).min(CLUSTER_OPERATION_RETRY_MAX)
