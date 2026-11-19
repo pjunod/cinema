@@ -3,9 +3,15 @@
 import importlib.machinery
 import importlib.util
 import json
+import hashlib
+import os
 from pathlib import Path
 import unittest
 import tempfile
+import threading
+import subprocess
+import sys
+from unittest.mock import patch
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -301,3 +307,187 @@ class OperatorPauseCase(unittest.TestCase):
         receipt = self.pass_with(only="gha-lab6-general-09")
         self.assertEqual(receipt["errors"], ["gha-lab6-general-09: not managed by this host's watchdog"])
         self.assertFalse([c for c in self.commands if "start" in c])
+
+
+class GuardedAdmissionCase(unittest.TestCase):
+    execute_legacy = RunnerRecoveryCase.execute
+
+    def setUp(self):
+        RunnerRecoveryCase.setUp(self)
+        self.folder = tempfile.TemporaryDirectory(); self.addCleanup(self.folder.cleanup)
+        self.uuid = "00000000-0000-4000-8000-000000000001"
+        self.generation = "00000000-0000-4000-8000-000000000002"
+        self.instance["expanded_config"].update({"volatile.uuid":self.uuid,"volatile.uuid.generation":self.generation})
+        self.maintenance = Path(self.folder.name)/"maintenance.json"
+        self.paused = Path(self.folder.name)/"paused"; self.paused.mkdir()
+
+    def execute(self,*args):
+        if args[1] == "query" and "/state?" not in args[2]:
+            self.commands.append(args); return json.dumps(self.instance)
+        return self.execute_legacy(*args)
+
+    def guarded(self,**kwargs):
+        args = dict(execute=self.execute,memory=lambda:20*watchdog.GIB,host="lab6",now=10000,
+            only=self.name,expected_instance_uuid=self.uuid,expected_instance_generation=self.generation,
+            authorization_deadline=15,monotonic=lambda:10,paused_dir=self.paused,maintenance=self.maintenance,
+            command_id='a'*32,command_hash='b'*64,owner_code_hash='c'*64)
+        args.update(kwargs)
+        return watchdog.recover(self.config,self.state,**args)
+
+    def test_exact_identity_starts_only_vm_and_returns_structured_receipt(self):
+        receipt = self.guarded()
+        self.assertEqual(receipt["owner_contract"],2); self.assertEqual(receipt["outcome"],"started")
+        self.assertEqual(receipt["observed_resource"],receipt["expected_resource"])
+        self.assertEqual(sum(c[1] == "start" for c in self.commands),1)
+        self.assertFalse(any(c[1] == "exec" for c in self.commands))
+
+    def test_same_name_replacement_changed_generation_and_missing_identity_refuse(self):
+        for field in ("volatile.uuid","volatile.uuid.generation"):
+            original = self.instance["expanded_config"][field]
+            for value in ("00000000-0000-4000-8000-000000000009",None):
+                self.instance["expanded_config"][field] = value; self.commands = []
+                receipt = self.guarded()
+                self.assertEqual(receipt["outcome"],"rejected"); self.assertTrue(receipt["errors"])
+                if value is None:self.assertIsNone(receipt['observed_resource'])
+                self.assertFalse(receipt['external_submission_started'])
+                self.assertFalse(any(c[1] in ("start","exec") for c in self.commands))
+            self.instance["expanded_config"][field] = original
+
+    def test_running_vm_never_repairs_an_inactive_daemon(self):
+        self.instance["status"] = "Running"; self.active = "inactive"
+        receipt = self.guarded()
+        self.assertEqual(receipt["outcome"],"already_running")
+        self.assertFalse(any(c[1] in ("start","exec") for c in self.commands))
+
+    def test_pause_arriving_during_headroom_check_blocks_final_admission(self):
+        def memory():
+            (self.paused/self.name).write_text('{"actor":"operator"}')
+            return 20*watchdog.GIB
+        receipt = self.guarded(memory=memory)
+        self.assertEqual(receipt["outcome"],"deferred")
+        self.assertFalse(any(c[1] == "start" for c in self.commands)); self.assertFalse(self.state['attempts'].get(self.name))
+
+    def test_pause_or_maintenance_arriving_during_persistence_blocks_start(self):
+        for marker in (self.paused/self.name,self.maintenance):
+            self.commands = []; self.state = {}
+            receipt = self.guarded(persist=lambda state:marker.write_text('{"owner":"operator"}'))
+            self.assertEqual(receipt['outcome'],'deferred')
+            self.assertFalse(any(c[1] == 'start' for c in self.commands))
+            self.assertEqual(self.state['attempts'][self.name],[10000])
+            marker.unlink()
+
+    def test_maintenance_survives_process_restart_and_blocks_timer_and_guarded(self):
+        self.maintenance.write_text('{"owner":"rolling-maintenance"}')
+        self.assertEqual(self.guarded()["outcome"],"deferred")
+        self.commands = []
+        receipt = watchdog.recover(self.config,{},execute=self.execute,host="lab6",maintenance=self.maintenance)
+        self.assertTrue(receipt["deferred"]); self.assertFalse(any(c[1] == "start" for c in self.commands))
+
+    def test_expiry_before_admission_or_during_persistence_never_starts(self):
+        for times in ([16],[10,16]):
+            self.commands = []; self.state = {}
+            with patch.object(watchdog.time,'monotonic',side_effect=times) as clock:
+                receipt = self.guarded(monotonic=clock)
+            self.assertEqual(receipt["outcome"],"deferred")
+            self.assertFalse(any(c[1] == "start" for c in self.commands))
+
+    def test_start_timeout_is_unknown_with_persisted_attempt_not_success(self):
+        order = []
+        def execute(*args):
+            if args[1] == "start":
+                self.assertEqual(order,["persisted","persisted"])
+                raise subprocess.TimeoutExpired(args,120)
+            return self.execute(*args)
+        receipt = self.guarded(execute=execute,persist=lambda state:order.append("persisted"))
+        self.assertEqual(receipt["outcome"],"unknown"); self.assertTrue(receipt["errors"])
+        self.assertEqual(self.state['attempts'][self.name],[10000])
+
+    def test_unknown_start_retains_owned_inhibition_for_timer_and_managed_mutation(self):
+        def execute(*args):
+            if args[1]=='start':raise subprocess.TimeoutExpired(args,120)
+            return self.execute(*args)
+        self.assertEqual(self.guarded(execute=execute)['outcome'],'unknown')
+        marker = json.loads(self.maintenance.read_text())
+        self.assertEqual(marker['owner'],'a'*32)
+        self.assertEqual(self.state['guarded'][self.name]['phase'],'unknown')
+        self.commands=[]
+        receipt = self.guarded()
+        self.assertEqual(receipt['outcome'],'deferred')
+        self.assertFalse(any(c[1]=='start' for c in self.commands))
+        self.assertTrue(self.maintenance.exists())
+        self.assertEqual(self.state['guarded'][self.name]['phase'],'unknown')
+
+    def test_terminal_record_is_persisted_before_owned_inhibition_is_cleared(self):
+        saved = []
+        def persist(value):
+            saved.append(json.loads(json.dumps(value)))
+            if value.get('guarded',{}).get(self.name,{}).get('phase')=='terminal':
+                self.assertTrue(self.maintenance.exists())
+        receipt = self.guarded(persist=persist)
+        self.assertEqual(receipt['outcome'],'started'); self.assertFalse(self.maintenance.exists())
+        self.assertEqual(saved[-1]['guarded'][self.name]['receipt']['command_hash'],'b'*64)
+
+    def test_kill_after_inhibition_before_external_call_never_retries(self):
+        def persist(value):
+            if value.get('guarded',{}).get(self.name,{}).get('phase')=='submitting':raise OSError('injected disk failure')
+        with self.assertRaises(OSError):self.guarded(persist=persist)
+        self.assertTrue(self.maintenance.exists()); self.assertFalse(any(c[1]=='start' for c in self.commands))
+        self.assertFalse(watchdog.recover_terminal_maintenance(self.state,self.maintenance))
+
+    def test_lost_terminal_reply_can_release_only_the_exact_durable_owner_record(self):
+        with patch.object(watchdog,'clear_maintenance',side_effect=RuntimeError('injected interruption')):
+            with self.assertRaises(RuntimeError):self.guarded()
+        self.assertTrue(self.maintenance.exists())
+        self.assertEqual(self.state['guarded'][self.name]['phase'],'terminal')
+        self.assertTrue(watchdog.recover_terminal_maintenance(self.state,self.maintenance))
+        self.assertFalse(self.maintenance.exists())
+        self.maintenance.write_text('{"owner":"another-maintenance"}')
+        self.assertFalse(watchdog.recover_terminal_maintenance(self.state,self.maintenance))
+        self.assertTrue(self.maintenance.exists())
+
+    def test_partial_identity_contract_cannot_fall_back_to_legacy(self):
+        for kwargs in ({'expected_instance_generation':None},{'authorization_deadline':None},{'only':None},
+                       {'expected_instance_uuid':'not-a-uuid'},{'authorization_deadline':float('nan')}):
+            with self.subTest(kwargs=kwargs),self.assertRaises(ValueError):self.guarded(**kwargs)
+        self.assertEqual(self.commands,[])
+
+    def test_managed_mutator_cannot_replace_identity_between_read_and_start(self):
+        path = Path(self.folder.name)/'admission.lock'; attempted = threading.Event(); mutated = threading.Event(); workers = []
+        def mutate():
+            attempted.set()
+            with watchdog.admission_lock():self.instance['expanded_config']['volatile.uuid']='00000000-0000-4000-8000-000000000009'
+            mutated.set()
+        def execute(*args):
+            result = self.execute(*args)
+            if args[1] == 'query' and '/state?' not in args[2]:
+                worker = threading.Thread(target=mutate); workers.append(worker); worker.start()
+                self.assertTrue(attempted.wait(1)); self.assertFalse(mutated.wait(0.1))
+            if args[1] == 'start':self.assertFalse(mutated.is_set())
+            return result
+        with patch.object(watchdog,'ADMISSION_LOCK',path):
+            with watchdog.admission_lock():receipt=self.guarded(execute=execute)
+            for worker in workers:worker.join(2)
+        self.assertEqual(receipt['outcome'],'started'); self.assertTrue(mutated.is_set())
+
+    def test_attempt_state_is_durably_replaced_before_execution(self):
+        path = Path(self.folder.name)/'state.json'
+        self.guarded(persist=lambda value:watchdog.save_state(path,value))
+        self.assertEqual(json.loads(path.read_text())['attempts'][self.name],[10000])
+        self.assertFalse(path.with_suffix('.tmp').exists())
+
+    def test_source_hash_reads_pinned_inode_across_atomic_installation(self):
+        path = Path(self.folder.name)/'watchdog'; path.write_bytes(b'approved executing bytes')
+        fd = os.open(path,os.O_RDONLY)
+        try:
+            replacement = path.with_suffix('.new'); replacement.write_bytes(b'new deployment bytes'); os.replace(replacement,path)
+            fd_path = ('/proc/self/fd/' if sys.platform.startswith('linux') else '/dev/fd/')+str(fd)
+            with patch.object(watchdog,'__file__',fd_path):
+                self.assertEqual(watchdog.owner_source_hash(),hashlib.sha256(b'approved executing bytes').hexdigest())
+            self.assertNotEqual(watchdog.owner_source_hash(),hashlib.sha256(b'new deployment bytes').hexdigest())
+        finally:os.close(fd)
+
+    def test_contract_description_does_not_touch_state_or_resources(self):
+        process = subprocess.run([sys.executable,str(ROOT/'deploy/runner-recovery/plurx-runner-watchdog'),
+                                  '--describe-owner-contract'],capture_output=True,text=True,timeout=3)
+        self.assertEqual(process.returncode,0); value=json.loads(process.stdout)
+        self.assertEqual(value['version'],2); self.assertTrue(value['monotonic_authorization'])

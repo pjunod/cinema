@@ -32,14 +32,13 @@ class AppleTVModalWiringTests(unittest.TestCase):
 
     def test_native_style_acknowledgment_and_physical_activation_precede_choice_effect(self):
         self.assertIn("func remoteNativeFocus(_ actuallyFocused: Bool)", SOURCE)
-        # The tvOS choice row reports the focus observed by SwiftUI.
-        panel = SOURCE.split("struct RemoteChoicePanel", 1)[1].split("struct RemoteOwnedPresentationProbe", 1)[0]
-        self.assertIn(".buttonStyle(RemoteChoiceRowStyle())", panel)
-        style, row = SOURCE.split("private struct RemoteChoiceRowStyle", 1)[1].split("private struct RemoteChoiceTVRow", 1)
-        tv_style = style.split("#if os(tvOS)", 1)[1].split("#else", 1)[0]
-        self.assertIn("RemoteChoiceTVRow(configuration: configuration)", tv_style)
-        row = row.split("private extension View", 1)[0]
-        self.assertIn(r"@Environment(\.isFocused) private var isFocused", row)
+        # The redesigned TV row reports its own actual native focus.
+        style = SOURCE.split("private struct RemoteChoiceRowStyle", 1)[1].split("private struct RemoteChoiceTVRow", 1)[0]
+        tv, phone = style.split("#if os(tvOS)", 1)[1].split("#else", 1)
+        self.assertIn("RemoteChoiceTVRow(configuration: configuration)", tv)
+        self.assertNotIn("RemoteChoiceTVRow(configuration: configuration)", phone)
+        row = SOURCE.split("private struct RemoteChoiceTVRow", 1)[1].split("private extension View", 1)[0]
+        self.assertIn("@Environment(\\.isFocused) private var isFocused", row)
         self.assertIn(".remoteNativeFocus(isFocused)", row)
         self.assertIn("ReportID(focused: focused, requestRevision: requestRevision,", SOURCE)
         self.assertIn("observesPhysicalActivation: false", SOURCE)

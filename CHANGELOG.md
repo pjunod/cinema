@@ -73,6 +73,9 @@ bump may break compatibility and a **patch** bump never does.
   media source through exposure, so a transient successor wait cannot cancel
   its own preparation. The first visible frame freezes the final commit;
   retries and close preserve that exact settlement before changing reporters.
+- Guarded runner VM starts pin instance UUID/generation under the target-host
+  admission lock, retain pause and restart-budget checks, and cannot become
+  an in-service daemon repair when the VM is already running.
 
 - Auto playback keeps foreground admission through VOD creation, so a cold
   start can ask background work to yield; prepared successors retain their
