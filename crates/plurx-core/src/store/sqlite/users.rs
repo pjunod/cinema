@@ -362,14 +362,26 @@ impl UserStore for SqliteStore {
         token_hash: &str,
         audience: crate::store::TokenAudience,
     ) -> Result<TokenAuthentication, StoreError> {
+        Ok(self
+            .authenticate_token_proof_for(token_hash, audience)
+            .await?
+            .authentication)
+    }
+
+    async fn authenticate_token_proof_for(
+        &self,
+        token_hash: &str,
+        audience: crate::store::TokenAudience,
+    ) -> Result<crate::store::TokenAuthenticationProof, StoreError> {
         // A handoff token is never a row in `tokens`; its own table answers.
         if audience == crate::store::TokenAudience::PlaybackHandoff {
-            return Ok(
-                match self.authenticate_playback_handoff(token_hash).await? {
-                    Some(user) => TokenAuthentication::Authenticated(user),
-                    None => TokenAuthentication::Unknown,
-                },
-            );
+            return Ok(crate::store::TokenAuthenticationProof::uncached(match self
+                .authenticate_playback_handoff(token_hash)
+                .await?
+            {
+                Some(user) => TokenAuthentication::Authenticated(user),
+                None => TokenAuthentication::Unknown,
+            }));
         }
         let audience = audience.as_str();
         let token_hash = token_hash.to_owned();
@@ -421,13 +433,17 @@ impl UserStore for SqliteStore {
             })
             .await?;
         let Some((user, last_seen_at, policy, now)) = found else {
-            return Ok(TokenAuthentication::Unknown);
+            return Ok(crate::store::TokenAuthenticationProof::uncached(
+                TokenAuthentication::Unknown,
+            ));
         };
         if let Some(policy) = policy.filter(|policy| policy.is_expired(last_seen_at, now)) {
             // No touch: refreshing an expired token would revive it.
-            return Ok(TokenAuthentication::Expired {
-                idle_days: policy.idle_days,
-            });
+            return Ok(crate::store::TokenAuthenticationProof::uncached(
+                TokenAuthentication::Expired {
+                    idle_days: policy.idle_days,
+                },
+            ));
         }
         // Touch at most once a minute to keep write volume trivial, and at
         // most once per process: the gate admits one refresh per token per
@@ -454,7 +470,12 @@ impl UserStore for SqliteStore {
                 reservation.retain();
             }
         }
-        Ok(TokenAuthentication::Authenticated(user))
+        // Local Store callers can mutate SQLite without the replicated
+        // credential guards. There is no quorum round to save here: preserve
+        // ordinary Store authentication instead of publishing reusable proof.
+        Ok(crate::store::TokenAuthenticationProof::uncached(
+            TokenAuthentication::Authenticated(user),
+        ))
     }
 
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError> {

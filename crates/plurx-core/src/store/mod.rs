@@ -425,6 +425,99 @@ pub enum TokenAuthentication {
     Unknown,
 }
 
+/// A reusable authentication answer from the same authoritative token/policy
+/// read. Backends that cannot supply the exact boundary leave `lease` absent.
+#[derive(Clone, Debug)]
+pub struct TokenAuthenticationProof {
+    pub authentication: TokenAuthentication,
+    pub lease: Option<TokenAuthenticationLease>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TokenAuthenticationLease {
+    pub observed_at: i64,
+    pub expires_at: i64,
+}
+
+impl TokenAuthenticationProof {
+    pub fn uncached(authentication: TokenAuthentication) -> Self {
+        Self {
+            authentication,
+            lease: None,
+        }
+    }
+
+    #[cfg(any(feature = "hiqlite-store", test))]
+    pub(crate) fn authenticated(
+        user: User,
+        observed_at: i64,
+        last_seen_at: i64,
+        policy: Option<crate::auth::TokenIdlePolicy>,
+    ) -> Self {
+        // Re-read no later than the next activity refresh. Cache hits cannot
+        // keep an idle stamp alive, and policy expiry is never rounded up.
+        let expires_at = observed_at
+            .saturating_add(crate::auth::ACTIVITY_REFRESH_SECS)
+            .min(
+                last_seen_at
+                    .saturating_add(crate::auth::ACTIVITY_REFRESH_SECS)
+                    .saturating_add(1),
+            );
+        let expires_at = policy.map_or(expires_at, |policy| {
+            expires_at.min(policy.expires_at(last_seen_at))
+        });
+        Self {
+            authentication: TokenAuthentication::Authenticated(user),
+            lease: (expires_at > observed_at).then_some(TokenAuthenticationLease {
+                observed_at,
+                expires_at,
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod token_authentication_proof_tests {
+    use super::*;
+    fn user() -> User {
+        User {
+            id: 1,
+            username: "viewer".into(),
+            password_hash: String::new(),
+            is_admin: false,
+            created_at: 0,
+        }
+    }
+    #[test]
+    fn reusable_authentication_never_postpones_an_activity_refresh() {
+        let fresh = TokenAuthenticationProof::authenticated(user(), 100, 100, None);
+        assert_eq!(fresh.lease.unwrap().expires_at, 160);
+        let nearly_due = TokenAuthenticationProof::authenticated(user(), 159, 100, None);
+        assert_eq!(nearly_due.lease.unwrap().expires_at, 161);
+        let due = TokenAuthenticationProof::authenticated(user(), 161, 100, None);
+        assert!(
+            due.lease.is_none(),
+            "the next read must see the refreshed activity stamp"
+        );
+    }
+    #[test]
+    fn reusable_authentication_is_capped_by_the_exact_policy_boundary() {
+        let policy = crate::auth::TokenIdlePolicy {
+            idle_days: 0,
+            since: 120,
+        };
+        let proof = TokenAuthenticationProof::authenticated(user(), 100, 100, Some(policy));
+        assert_eq!(proof.lease.unwrap().expires_at, 120);
+        let expired = TokenAuthenticationProof::authenticated(user(), 120, 100, Some(policy));
+        assert!(expired.lease.is_none());
+        assert!(
+            TokenAuthenticationProof::uncached(TokenAuthentication::Unknown)
+                .lease
+                .is_none()
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeleteTokenByPrefixOutcome {
     Deleted,
@@ -2552,6 +2645,33 @@ pub trait SettingsStore: Send + Sync + 'static {
     /// partial write must never leave a durable configuration that no request
     /// actually submitted.
     async fn put_settings(&self, values: &[(&str, &str)]) -> Result<(), StoreError>;
+    /// Change token expiry policy while the caller holds the exact
+    /// all-member cache-revocation claim. Generic local backends have no peer
+    /// writer; replicated backends must override and validate the live claim.
+    async fn put_auth_token_policy(
+        &self,
+        values: &[(&str, &str)],
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        if values.iter().any(|(key, _)| {
+            !matches!(
+                *key,
+                keys::AUTH_TOKEN_EXPIRY_ENABLED
+                    | keys::AUTH_TOKEN_IDLE_DAYS
+                    | keys::AUTH_TOKEN_EXPIRY_SINCE
+            )
+        }) {
+            return Err(StoreError::Database("invalid token policy key".to_owned()));
+        }
+        if claim.is_some() {
+            return Err(StoreError::Database(
+                "backend cannot verify token policy claim".to_owned(),
+            ));
+        }
+        self.put_settings(values).await?;
+        Ok(true)
+    }
+
     /// Atomically replace a related settings tuple only while its generation
     /// still equals `expected_generation`. `values` must include
     /// `generation_key` set to exactly expected + 1. A false result is a
@@ -2709,6 +2829,18 @@ pub trait UserStore: Send + Sync + 'static {
         token_hash: &str,
         audience: TokenAudience,
     ) -> Result<TokenAuthentication, StoreError>;
+    /// An optional reusable witness from the same authoritative token/policy
+    /// snapshot. A generic Store implementation remains correct and uncached.
+    async fn authenticate_token_proof_for(
+        &self,
+        token_hash: &str,
+        audience: TokenAudience,
+    ) -> Result<TokenAuthenticationProof, StoreError> {
+        Ok(TokenAuthenticationProof::uncached(
+            self.authenticate_token_for(token_hash, audience).await?,
+        ))
+    }
+
     /// Resolve a token hash to its user (touching `last_seen_at`). An expired
     /// token resolves to nobody, so every caller that predates expiry — the
     /// Plex facade, recovery reads — honours the policy without knowing it.

@@ -3813,7 +3813,7 @@ fn server_commit_response_loss_and_crash_expire_cache_admin_exclusion_conservati
 fn cache_admin_exclusion_is_separate_rolling_safe_and_capability_v4() {
     assert_eq!(
         CACHE_ADMIN_REVOCATION_CAPABILITY,
-        "cache_admin_revocation_v4"
+        "cache_admin_revocation_v5"
     );
     assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| {
         statement.contains("CREATE TABLE IF NOT EXISTS cluster_operation_leases")
@@ -10778,4 +10778,96 @@ mod floor_advisory {
             SharingMemberFloor::COUNT
         );
     }
+}
+
+#[test]
+fn token_policy_guards_refuse_legacy_insert_update_delete_and_key_renaming() {
+    let mut connection = rusqlite::Connection::open_in_memory().expect("sqlite");
+    connection.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER);        CREATE TABLE cluster_credential_guard_activation(singleton INTEGER PRIMARY KEY);        CREATE TABLE cluster_credential_mutation_intents(singleton INTEGER PRIMARY KEY);        INSERT INTO settings VALUES('auth.token_idle_days','30',1),('ordinary','x',1);        INSERT INTO cluster_credential_guard_activation VALUES(1);").unwrap();
+    for trigger in [
+        REQUIRE_CURRENT_AUTH_POLICY_INSERT_SQL,
+        REQUIRE_CURRENT_AUTH_POLICY_UPDATE_SQL,
+        REQUIRE_CURRENT_AUTH_POLICY_DELETE_SQL,
+    ] {
+        connection.execute_batch(trigger).unwrap();
+    }
+    for sql in [
+        "INSERT INTO settings VALUES('auth.token_expiry_enabled','0',2)",
+        "UPDATE settings SET value='1' WHERE key='auth.token_idle_days'",
+        "DELETE FROM settings WHERE key='auth.token_idle_days'",
+        "UPDATE settings SET key='ordinary-two' WHERE key='auth.token_idle_days'",
+        "UPDATE settings SET key='auth.token_expiry_since' WHERE key='ordinary'",
+    ] {
+        assert!(
+            connection
+                .execute(sql, [])
+                .unwrap_err()
+                .to_string()
+                .contains("requires current binary"),
+            "{sql}"
+        );
+    }
+    connection
+        .execute("UPDATE settings SET value='y' WHERE key='ordinary'", [])
+        .unwrap();
+    let transaction = connection.transaction().unwrap();
+    transaction
+        .execute(
+            "INSERT INTO cluster_credential_mutation_intents VALUES(1)",
+            [],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE settings SET value='1' WHERE key='auth.token_idle_days'",
+            [],
+        )
+        .unwrap();
+    transaction
+        .execute("DELETE FROM cluster_credential_mutation_intents", [])
+        .unwrap();
+    transaction.commit().unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT value FROM settings WHERE key='auth.token_idle_days'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "1"
+    );
+}
+
+#[test]
+fn general_token_cache_protocol_refuses_a_fresh_v4_member_among_v5_members() {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch("CREATE TABLE cluster_nodes(node_id TEXT PRIMARY KEY,raft_id INTEGER,last_seen_at INTEGER,removed_at INTEGER);        CREATE TABLE cluster_node_capabilities(node_id TEXT,capability TEXT,last_seen_at INTEGER);        CREATE TABLE cluster_credential_guard_activation(singleton INTEGER PRIMARY KEY);        CREATE TABLE cluster_cache_admin_revocation_leases(claim_id TEXT);        INSERT INTO cluster_nodes VALUES('voter',1,100,NULL),('learner',2,100,NULL);        INSERT INTO cluster_node_capabilities VALUES('voter','cache_admin_revocation_v5',100),('learner','cache_admin_revocation_v4',100);        INSERT INTO cluster_credential_guard_activation VALUES(1);").unwrap();
+    let blocked = || {
+        connection
+            .query_row(
+                &committed_cache_admin_revocation_ready_sql(),
+                rusqlite::params!["[1,2]"],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        blocked(),
+        1,
+        "a current v4 heartbeat cannot activate general authentication reuse"
+    );
+    connection.execute("UPDATE cluster_node_capabilities SET capability='cache_admin_revocation_v5' WHERE node_id='learner'", []).unwrap();
+    assert_eq!(blocked(), 0);
+    connection
+        .execute(
+            "UPDATE cluster_nodes SET last_seen_at=101 WHERE node_id='learner'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        blocked(),
+        1,
+        "a rollback without a matching v5 heartbeat closes the cache"
+    );
 }

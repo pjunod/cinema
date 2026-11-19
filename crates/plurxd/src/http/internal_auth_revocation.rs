@@ -296,6 +296,17 @@ impl ClusterCacheRevocation {
         Self::begin(state, local, operation_guard).await
     }
 
+    /// Every cached user may be affected by an expiry-policy tightening.
+    pub(crate) async fn begin_token_policy(state: &AppState) -> Result<Self, ApiError> {
+        let operation_guard = state
+            .cache_only_admin_proofs
+            .acquire_revocation_operation()
+            .await
+            .map_err(|_| admission_error())?;
+        let local = state.cache_only_admin_proofs.begin_global_revocation();
+        Self::begin(state, local, operation_guard).await
+    }
+
     pub(crate) async fn begin_user(state: &AppState, user_id: i64) -> Result<Self, ApiError> {
         let operation_guard = state
             .cache_only_admin_proofs

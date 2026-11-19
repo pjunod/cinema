@@ -686,3 +686,37 @@ async fn a_planned_variant_names_its_head_for_a_sealed_init_refusal() {
         })
     );
 }
+
+/// A fast corrupt answer is not a winner, and a stalled first holder does
+/// not prevent the later verified artifact from being selected.
+#[tokio::test]
+async fn holder_race_selects_verified_bytes_after_a_fast_corrupt_answer() {
+    use futures_util::StreamExt;
+    let source = hex64('8');
+    let (artifact, blob) = variant("race", 100, &sealed_index(&source, true), &source);
+    let requests = (0..3).map(|holder| {
+        let blob = &blob;
+        async move {
+            match holder {
+                0 => std::future::pending::<Vec<u8>>().await,
+                1 => b"corrupt first answer".to_vec(),
+                _ => {
+                    tokio::task::yield_now().await;
+                    blob.clone()
+                }
+            }
+        }
+    });
+    let responses = crate::cluster::calls::race_holders(requests);
+    futures_util::pin_mut!(responses);
+    let mut refused = 0;
+    let selected = loop {
+        let bytes = responses.next().await.expect("a valid holder remains");
+        if blob_matches(&bytes, &artifact) {
+            break bytes;
+        }
+        refused += 1;
+    };
+    assert_eq!(refused, 1);
+    assert_eq!(selected, blob);
+}
