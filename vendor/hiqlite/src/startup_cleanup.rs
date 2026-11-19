@@ -772,15 +772,24 @@ mod tests {
         assert!(matches!(request.await, Err(error) if error.is_cancelled()));
         assert!(probe.try_lock().is_err());
         assert!(!writer_probe.is_disconnected());
-        let released = tokio::task::spawn_blocking(move || {
-            probe.lock().unwrap();
-            probe
-        });
         drop(publication);
-        built
-            .await
-            .expect("accepted builder persisted despite constructor requester cancellation");
-        let probe = released.await.unwrap();
+        // This test uses the real, unpaused Tokio clock. A failed drain
+        // must fail observation, never strand an unabortable kernel waiter.
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            built
+                .await
+                .expect("accepted builder persisted despite constructor requester cancellation");
+            loop {
+                match probe.try_lock() {
+                    Ok(()) => break,
+                    Err(std::fs::TryLockError::WouldBlock) => {}
+                    Err(error) => panic!("actual root lease probe failed: {error}"),
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("physical drainage must be observed within 15s; timeout is not a drain receipt");
         assert!(writer_probe.is_disconnected());
         assert!(
             uuid::Uuid::parse_str(
