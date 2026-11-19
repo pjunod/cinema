@@ -71,9 +71,9 @@ class TVNavigationTestCase: XCTestCase {
         let address = app.textFields.firstMatch
         reachForSetup(address, in: app, limit: 8)
         assertFocus(address, in: app, context: "Fixture server address")
-        remote.press(.select)
         let previous = address.value as? String ?? ""
-        address.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + origin)
+        remote.press(.select)
+        typeInSystemKeyboard(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + origin, in: app)
         dismissKeyboard(in: app)
         let connect = app.buttons["Connect"]
         reachForSetup(connect, in: app, limit: 8)
@@ -86,14 +86,14 @@ class TVNavigationTestCase: XCTestCase {
         let username = app.textFields["Username"]
         reachForSetup(username, in: app, limit: 4)
         assertFocus(username, in: app, context: "Username setup")
-        remote.press(.select)
         let previous = username.value as? String ?? ""
-        username.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + "fixture")
+        remote.press(.select)
+        typeInSystemKeyboard(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + "fixture", in: app)
         dismissKeyboard(in: app)
         reachForSetup(app.secureTextFields["Password"], in: app, limit: 4)
         assertFocus(app.secureTextFields["Password"], in: app, context: "Password setup")
         remote.press(.select)
-        app.secureTextFields["Password"].typeText("fixture")
+        typeInSystemKeyboard("fixture", in: app)
         dismissKeyboard(in: app)
         let signIn = app.buttons["Sign in"]
         reachForSetup(signIn, in: app, limit: 4)
@@ -131,13 +131,25 @@ class TVNavigationTestCase: XCTestCase {
         assertFocus(view, in: app, context: "Presentation setup restores opener")
     }
 
-    func dismissKeyboard(in app: XCUIApplication) {
+    private func waitForSystemKeyboard(in app: XCUIApplication) {
         let keyboard = app.keyboards.firstMatch
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             keyboard.exists && keyboard.hasFocus
         }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 5), .completed,
-                       "System keyboard must own input before Back")
+                       "System keyboard must own input")
+    }
+
+    private func typeInSystemKeyboard(_ text: String, in app: XCUIApplication) {
+        waitForSystemKeyboard(in: app)
+        // tvOS may replace the labeled setup field with an unlabeled system
+        // input when the keyboard opens. Type through the focused application.
+        app.typeText(text)
+    }
+
+    func dismissKeyboard(in app: XCUIApplication) {
+        waitForSystemKeyboard(in: app)
+        let keyboard = app.keyboards.firstMatch
         remote.press(.menu)
         let closed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             !keyboard.exists
