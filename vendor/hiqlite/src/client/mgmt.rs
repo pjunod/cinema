@@ -179,6 +179,23 @@ impl LocalDbRaftMetrics {
             }
         }
     }
+
+    /// Plurx patch 33: the core's fatal error if it has already quit, read
+    /// from the same watch as [`Self::core_stopped`] without waiting, for a
+    /// caller that already wakes on its own (startup's catch-up loops). An
+    /// ordinary `Raft::shutdown` and a running core are `None`; a watch closed
+    /// while still reporting `Ok` is the panic `core_stopped` reports.
+    #[must_use]
+    pub fn core_fatal(&self) -> Option<String> {
+        match classify_core_state(&self.receiver.borrow().running_state) {
+            Some(LocalDbCoreStop::Fatal(error)) => Some(error),
+            Some(LocalDbCoreStop::Stopped) => None,
+            None if self.receiver.has_changed().is_err() => {
+                Some("the Raft core ended without reporting its state".to_owned())
+            }
+            None => None,
+        }
+    }
 }
 
 /// Plurx patch 33: how this node's database Raft core stopped.
@@ -876,7 +893,7 @@ impl Client {
                 tracing::warn!("retained startup cleanup still owns accepted SQLite snapshot work");
             }
             state.raft_db.raft.shutdown().await?;
-            // Plurx patch 33: the SQL writer's shutdown removes the lock file,
+            // Plurx patch 34: the SQL writer's shutdown removes the lock file,
             // so it runs whatever the WAL's shutdown returns (a WAL whose
             // writer died on an IO error fails here) and a clean stop is not
             // mistaken for a crash by the next start's auto-heal.
@@ -1159,7 +1176,7 @@ impl Client {
             }
             state.raft_db.raft.shutdown().await?;
             info!("Shutting down sqlite logs writer");
-            // Plurx patch 33: the SQL writer's shutdown removes the lock file,
+            // Plurx patch 34: the SQL writer's shutdown removes the lock file,
             // so it runs whatever the WAL's shutdown returns (a WAL whose
             // writer died on an IO error fails here) and a clean stop is not
             // mistaken for a crash by the next start's auto-heal.
@@ -1175,10 +1192,10 @@ impl Client {
                 .sql_writer
                 .send_async(WriterRequest::Shutdown(tx_sm))
                 .await
-                .expect("The state machine writer to always be listening");
+                .map_err(|error| Error::Error(error.to_string().into()))?;
             rx_sm
                 .await
-                .expect("To always get an answer from SQL writer");
+                .map_err(|error| Error::Error(error.to_string().into()))?;
             wal?;
 
             let _ = tx_client_db.send_async(ClientStreamReq::Shutdown).await;
@@ -1605,6 +1622,39 @@ mod tests {
     }
 
     #[test]
+    fn the_core_fatal_read_matches_the_stop_without_waiting() {
+        use super::LocalDbRaftMetrics;
+        use openraft::error::Fatal;
+        use openraft::{StorageError, StorageIOError};
+
+        let initial = RaftMetrics::<u64, Node>::new_initial(1);
+        let (sender, receiver) = tokio::sync::watch::channel(initial.clone());
+        let metrics = LocalDbRaftMetrics::from_receiver(receiver);
+        assert_eq!(metrics.core_fatal(), None, "a running core has not died");
+
+        let mut stopped = initial.clone();
+        stopped.running_state = Err(Fatal::Stopped);
+        sender.send(stopped).expect("watch open");
+        assert_eq!(metrics.core_fatal(), None, "an ordinary stop is not a death");
+
+        let mut failed = initial.clone();
+        failed.running_state = Err(Fatal::StorageError(StorageError::IO {
+            source: StorageIOError::write(&std::io::Error::other("database or disk is full")),
+        }));
+        sender.send(failed).expect("watch open");
+        let error = metrics.core_fatal().expect("a storage-error quit is fatal");
+        assert!(error.contains("disk is full"), "{error}");
+
+        let (sender, receiver) = tokio::sync::watch::channel(initial);
+        let vanished = LocalDbRaftMetrics::from_receiver(receiver);
+        drop(sender);
+        assert!(
+            vanished.core_fatal().is_some(),
+            "a core that vanished without a terminal state died"
+        );
+    }
+
+    #[test]
     fn the_lock_file_is_released_whatever_the_wal_shutdown_returns() {
         let source = include_str!("mgmt.rs")
             .split_once("#[cfg(all(test, feature = \"sqlite\"))]")
@@ -1627,6 +1677,11 @@ mod tests {
             );
         }
         assert!(!source.contains("shutdown_handle.shutdown().await?"));
+        assert!(
+            !source.contains("Thestatemachinewritertoalwaysbelistening")
+                && !source.contains("ToalwaysgetananswerfromSQLwriter"),
+            "a stopped SQL writer is an error in both shutdowns, not a panic"
+        );
     }
 
     #[test]

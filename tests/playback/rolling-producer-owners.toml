@@ -1,3 +1,19 @@
+# Subtitle identity fixture: +1 time shape is the one-millisecond sleep while
+# waiting for an observable ctime mutation, bounded by a two-second assertion.
+# It runs on the existing test thread; no production work or settlement owner.
+# PR1727/main8630 structural union (2026-11-18): preserve both reviewed
+# ownership audits below. Compared with actual main, five task shapes are
+# joined test workers/controllers in decode_facts, source_generation,
+# source_input and vodencode_tests. Five observation deadlines are the three
+# DV supervisor bounds, source custody receive and admission init fetch.
+# Four Command constructors are two fixture policy-command builders in
+# copy_analysis/gap_fill_tests (neither launched there), plus the two owned DV
+# children described below. Three process-capable matches are the controlled
+# decode-facts fixture spawn and the two DV children. The two added kill-on-drop
+# guards remain fallback only; existing owners wait/reap before assertions.
+# No production task/timer/process shape, pattern, root or exclusion changed.
+# Static counts are not runtime/physical-settlement evidence.
+
 # Static raw-retirement fixture follow-up (2026-11-17): one controlled worker
 # thread and one scoped controller thread are both joined. The controller's
 # five-second acknowledgement bound fails observation only; raw custody remains
@@ -29,6 +45,38 @@
 # HelperCompletion.wait observations, not five new process waits.
 # No production task, timer or process-launch shape is added. Roots, patterns,
 # extractor, aliases, forbidden-zeroes and unrelated expected rows are unchanged.
+# F+ PR1565 ownership review (2026-11-13), independently reviewed against
+# main e503f8bf3 with the unchanged rust_structural_source extractor and the
+# declared module_roots. Static source ownership evidence only; no runtime or
+# physical-settlement qualification is inferred from these counts.
+# namespaced-task-spawn 1152 -> 1162 (+10): eight production spawn_blocking
+# sites are awaited spool I/O/parsing (source_probe/dv_refit.rs:2), fit solving
+# (refit_work.rs:1), disk RPU author/readback (dv_disk.rs:2), and Developer
+# spool list/delete/readiness (http/developer.rs:3). They retain their captured
+# data/handles through actual closure return; an HTTP waiter disappearing does
+# not establish that blocking work stopped. Two refit_work_tests execute tasks
+# receive cancellation and are joined on normal fixture completion; their
+# twenty-second timeout is a test failure, not child-reap evidence.
+# bare-task-spawn 22 -> 25 (+3): one definition and two awaited calls of the
+# local source_probe::dv_refit::spawn helper, not detached Tokio tasks. The
+# helper delegates to the existing managed child owner, with a clean bundle
+# environment, inherited held descriptors and kernel-bounded direct file output.
+# namespaced-time-constructor 2211 -> 2219 (+8): one production publication
+# retry sleep releases the claim lock so the existing heartbeat can renew;
+# the same exact token/authority fences every retry. Six refit lifecycle
+# fixture sleeps/timeouts and the real-acceptance output deadline are test
+# observations; expiration never establishes process or writer settlement.
+# process-command-construction 342 -> 351 (+9): two production commands are
+# the managed refit helper and the held-source, cancellation-bound, capped
+# first-packet identity probe. Their existing process owners join/reap before
+# returning and retain admission/source ownership. Seven commands are fixtures:
+# the kernel file-limit child, explicit ignored disk helper, four finite
+# nonzero-clock FFmpeg/ffprobe commands, and the ignored acceptance tool helper.
+# process-capable-launch-method 927 -> 930 (+3): awaited fixture output() calls
+# in disk acceptance, nonzero-clock coverage and the real acceptance helper.
+# No new production direct launch/kill/wait, alias, producer-policy owner or
+# forbidden-zero shape is admitted. Patterns, roots, exclusions and every other
+# structural count remain unchanged. Passing source review is not test evidence.
 #
 # S5 source custody / VOD Source-copy yield audit (2026-11-09), authored
 # structural comparison of origin/main c8f8b5aa9 with 3e17df55f using the
@@ -4039,12 +4087,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # token: live_tv/tests.rs spawns dvr_loop twice and reminder_loop once;
 # sharing.rs's idle-loop test spawns run and claim_loop. No production
 # task owner is added.
-# Recovery fixture union: +1 request task held at Source preparation.
-# The fixture awaits this exact task before inspecting its Direct response.
-# Root/recovery merge: exact configured source census measures 1172.
-# Preserve the Root custody/startup observations and recovery fixture sites;
-# earlier counts describe their reviewed snapshots. Patterns/roots unchanged.
-expected_occurrences = 1172
+# F+ (#1565) on main 59022fd2a: main's 1166 plus 10 F+-only task shapes, each awaited
+# or joined by its owner:
+#  +2 dv_disk.rs: spawn_blocking for fitted-RPU authoring and the frame-by-frame readback,
+#     awaited before the converted file is published.
+#  +3 http/developer.rs: spawn_blocking for the Developer F+ spool list, delete and readiness
+#     reads, awaited by the request.
+#  +2 source_probe/dv_refit.rs: spawn_blocking for spool file work and the off-runtime parse.
+#  +1 source_probe/refit_work.rs: spawn_blocking for the curve fit, awaited by the job.
+#  +2 source_probe/refit_work_tests.rs: test-only execute() tasks, each awaited under a
+#     timeout and cancelled by the test.
+# Main 60443f341 has 1181 matches. Recovery adds two request tasks in
+# shared_source_playback/tests.rs. The Direct fixture awaits its Start before
+# checking the response. The cold-index fixture awaits its admission repost
+# after End retires the Start waiter.
+expected_occurrences = 1183
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4325,7 +4382,9 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # PR1491: +3 closure calls, not task calls: producer_spawn.rs calls its
 # `spawn` builder argument twice (mediated and direct), and reader.rs's
 # declared_background_spawn calls `spawn()` after recording the escape tick.
-expected_occurrences = 22
+# F+ descriptor integration: +1 call to the existing dv_refit::spawn wrapper in the isolated
+# configured-policy regression, not a new task or process owner.
+expected_occurrences = 26
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5992,13 +6051,19 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # an applied-view read with timeout on the caller's task (+2); the rest are
 # test-only waits in live_tv/tests.rs (5) and sharing.rs (2). No new task or
 # timer owner.
-# Recovery fixture union: +2, the Store-wall lease-expiry sleep and bounded
-# Source-factory retirement observation. These matches are test-only; the
-# actual Instant::now credit samples do not match this constructor pattern.
-# Root/recovery merge: exact configured source census measures 2262.
-# Preserve the Root custody/startup observations and recovery fixture sites;
-# earlier counts describe their reviewed snapshots. Patterns/roots unchanged.
-expected_occurrences = 2262
+# F+ (#1565) on main 59022fd2a: main's 2251 plus 9 F+-only timer shapes, none a new owner:
+#  +1 background_jobs.rs: publish_dv_refit's bounded backoff sleep between store retries,
+#     on the job's own task while its lease holds.
+#  +1 fragindex/refit_acceptance_tests.rs: timeout bounding the helper/tool output.
+#  +1 source_probe.rs: test timeout proving playback admission never waits behind an
+#     unpolled fit.
+#  +6 source_probe/refit_work_tests.rs: test pacing sleeps and the 20 s bounds on the
+#     joined execute() tasks.
+# Main 60443f341 has 2266 matches, including the subtitle identity fixture.
+# Recovery adds six test-only matches in shared_source_playback/tests.rs.
+# One waits for Store-wall lease expiry, one bounds Source-factory retirement,
+# three bound native failure diagnostics, and one bounds the VTT failure body.
+expected_occurrences = 2272
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6523,7 +6588,20 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # loop verifies relative/custom/non-profile commands keep their resolution
 # and cwd, while a known absolute no-input candidate receives the owned cwd.
 # This fixture launches no child.
-expected_occurrences = 356
+# F+ (#1565) on main 59022fd2a: main's 352 plus 11 F+-only command constructors:
+#  +1 process/bounded.rs: test-only isolated test-executable policy subprocess.
+#  +1 fragindex.rs: the scanner command for the FEL aggregate, launched through the
+#     existing bounded helper owner.
+#  +3 source_probe/dv_refit.rs: the production refit-stats helper launch (bounded owner,
+#     reaped before the spool is read) and two isolated test-image processes.
+#  +1 dv_disk/tests.rs, +1 fragindex/refit_acceptance_tests.rs, +4 fragindex/tests.rs:
+#     test-only helper/FFmpeg/FFprobe fixtures, each awaited with .output().
+# Shared: both sides carried the Twilight/reader source (title-lane scheduling and reader
+# reclamation), so main's figure already counts source_probe/fel_qualification.rs +2 and
+# source_probe/title_work_tests.rs +1.
+# Union at 0d501cae6: 349 + 13 + 3 = 365, less those 3 counted twice = 362; the spool
+# registration test adds one isolated test image: 363.
+expected_occurrences = 367
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7257,14 +7335,14 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # processed_stream_format_reports_the_attached_carrier_not_its_pq_base.
 # It reads the existing VOD owner's status_publication snapshot: no child
 # launch, lease renewal, or ownership transfer. The broad matcher is unchanged.
-# Root / corrected-Q merge: the exact configured rust_structural_source
-# census measures 946 matches, including Root custody-fixture status
-# observations and the Q test-only VOD status observer described above.
-# Preserve both sources; module roots and matching patterns are unchanged.
-# This lexical census is not runtime ownership qualification.
-# Recovery fixture union: +1 Direct-start HTTP Response::status() read.
-# This observes the returned response and launches no process.
-expected_occurrences = 946
+# Root custody-fixture observations and the prepared VOD status observer
+# remain in scope. F+ (#1565) adds five awaited test-only launches in
+# dv_disk/tests.rs, fragindex/refit_acceptance_tests.rs, fragindex/tests.rs
+# and source_probe/dv_refit.rs.
+# Main 60443f341 has 945 matches. Recovery adds six HTTP Response::status()
+# reads in shared_source_playback/tests.rs. They observe the Direct response
+# and native/VTT failure responses.
+expected_occurrences = 951
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7832,7 +7910,14 @@ pattern = "kill_on_drop\\s*\\("
 # Reader B0/B1: -1 former reader-fixture kill_on_drop configuration. Its
 # isolated real no-source true helper uses the production ChildJob and awaits
 # actual exit; no production kill-on-drop guarantee is removed.
-expected_occurrences = 129
+# F+ (#1565) on main 59022fd2a: main's 127 plus 2 F+-only test backstops on the two
+# isolated test images in source_probe/dv_refit.rs, whose normal paths await .output().
+# Shared: both sides carried the Twilight/reader source (title-lane scheduling and reader
+# reclamation), so main's figure already counts source_probe/title_work_tests.rs +1 (the owned
+# sleep child, killed and waited before the successor takes the lane).
+# Union at 0d501cae6: 126 + 2 + 1 = 129, less 1 counted twice = 128; the spool
+# registration test adds one: 129.
+expected_occurrences = 131
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

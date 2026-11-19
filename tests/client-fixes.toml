@@ -10,6 +10,40 @@ source_anchor = "func requestChannel(_ channel: LiveTvChannel) -> Task<Void, Nev
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "func testAHeldChannelKeyIsOneTunerStart()"
 
+# F+ client contracts. Execution receipts remain separate from these anchors.
+[[fixes]]
+id = "dv-refit.apple-error-metric-explanation"
+commits = ["6360b17c6eadee4ad3a8b8118804fec073762436"]
+source = "clients/apple/Sources/PlaybackInfoPanel.swift"
+source_anchor = 'case "dv_refit": return "Held-out squared code error removed'
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testRefitPlaybackReportKeepsFittedGainAndIdentityReasonDistinct()"
+
+[[fixes]]
+id = "dv-refit.web-generation-report"
+commits = ["884cee3152a19d19162ecbb8d7e45a678a0154d9"]
+source = "crates/plurxd/src/web/player/stats.js"
+source_anchor = "function statsRefitCurves(player)"
+test = "tests/playback/web-policy.test.js"
+test_anchor = "F+ playback info follows the attached generation and preserves identity reasons"
+
+[[fixes]]
+id = "dv-refit.apple-generation-report"
+commits = []
+supplements = "dv-refit.web-generation-report"
+source = "clients/apple/Sources/Models.swift"
+source_anchor = "struct DolbyVisionRefitPlaybackReport: Codable"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testRefitPlaybackReportKeepsFittedGainAndIdentityReasonDistinct()"
+
+[[fixes]]
+id = "dv-refit.web-advisory-platform-choices"
+commits = ["b1b8f83955256ece94461df2bf847a2dbe136dba"]
+source = "crates/plurxd/src/web/pages/settings-developer.js"
+source_anchor = "function dolbyVisionRefitCard(settings,readiness)"
+test = "tests/web/settings-sections.test.js"
+test_anchor = "F+ curve switches are four independent, advisory, default-off choices"
+
 # PR #1651: a malformed prepare probes origins outside the signed media range.
 [[fixes]]
 id = "apple.malformed-prepare-outside-signed-origin-range"
@@ -8135,6 +8169,14 @@ source = "clients/apple/Sources/LibraryView.swift"
 source_anchor = "Keep the preamble in the results scroll."
 test = "clients/apple/UITests/TVNavigationTests.swift"
 test_anchor = "testShowRowsKeepWholeCardsVisibleAtExtraLargeSize"
+
+[[fixes]]
+id = "apple.tvos-library-view-all-focus-clearance"
+commits = ["509a4ae3399f5a60577739e4338953dee3c2aade"]
+source = "clients/apple/Sources/LibraryView.swift"
+source_anchor = ".padding(.trailing, 36)"
+test = "clients/apple/UITests/TVNavigationTests.swift"
+test_anchor = "func testRowsViewAllOpensGroupAndBackRestoresHeader() throws"
 
 
 # Direct-GPT DV client corrective commits: source/test anchors only.

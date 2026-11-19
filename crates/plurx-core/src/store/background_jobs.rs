@@ -403,11 +403,11 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
     WHEN json_type(body, '$.retry_of') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM background_jobs original WHERE original.id = json_extract(body, '$.retry_of')
         AND original.state IN ('failed','cancelled') AND original.payload_version = 1
-        AND original.kind IN ('transcode_prepare','artifact_hydrate')
+        AND original.kind IN ('transcode_prepare','artifact_hydrate','dv_refit')
         AND original.dedupe_key = json_extract(body, '$.dedupe_key')
     ) THEN 'conflict'
     WHEN json_type(body, '$.retry_of') IS NOT NULL
-      AND json_extract(body, '$.payload.kind') = 'transcode_prepare' AND NOT EXISTS (
+      AND json_extract(body, '$.payload.kind') IN ('transcode_prepare','dv_refit') AND NOT EXISTS (
         SELECT 1 FROM files WHERE id = json_extract(body, '$.payload.file_id')
           AND size = json_extract(body, '$.payload.source_size')
           AND mtime = json_extract(body, '$.payload.source_mtime')
@@ -1237,6 +1237,8 @@ pub enum JobKind {
     SemanticEmbedding,
     MediaProbe,
     DvTitleScan,
+    /// F+ curve fit of a Profile 7 FEL title: decodes the whole title on the CPU.
+    DvRefit,
 }
 
 impl JobKind {
@@ -1263,7 +1265,8 @@ impl JobKind {
             | Self::ArtworkDerivative
             | Self::SemanticEmbedding
             | Self::MediaProbe
-            | Self::DvTitleScan => true,
+            | Self::DvTitleScan
+            | Self::DvRefit => true,
             Self::LibraryScan | Self::MetadataRefresh => false,
         }
     }
@@ -1601,6 +1604,19 @@ pub enum JobPayload {
         probe_revision: i64,
         scanner_digest: String,
     },
+    /// One title's fit. Its identity (and dedupe key) is the source, the
+    /// selected video stream, the helper's refit identity (refit mode and
+    /// decoder ABI) and the fit method; `probe_revision` records the
+    /// title-scan generation it read and is not part of the identity.
+    DvRefit {
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        video_index: i64,
+        probe_revision: i64,
+        helper_identity: String,
+        fit_version: String,
+    },
 }
 
 impl JobPayload {
@@ -1665,6 +1681,7 @@ impl JobPayload {
             Self::SemanticEmbedding { .. } => JobKind::SemanticEmbedding,
             Self::MediaProbe { .. } => JobKind::MediaProbe,
             Self::DvTitleScan { .. } => JobKind::DvTitleScan,
+            Self::DvRefit { .. } => JobKind::DvRefit,
         }
     }
 
@@ -2021,6 +2038,23 @@ impl JobPayload {
                     && *source_mtime >= 0
                     && *probe_revision > 0
                     && digest(scanner_digest)
+            }
+            Self::DvRefit {
+                file_id,
+                source_size,
+                source_mtime,
+                video_index,
+                probe_revision,
+                helper_identity,
+                fit_version,
+            } => {
+                *file_id > 0
+                    && *source_size >= 0
+                    && *source_mtime >= 0
+                    && (0..=255).contains(video_index)
+                    && *probe_revision > 0
+                    && digest(helper_identity)
+                    && super::dv_refit_jobs::valid_fit_version(fit_version)
             }
             Self::MediaProbe {
                 file_id,
@@ -2973,6 +3007,45 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         output: super::dv_title_jobs::AnalysisTitleOutput,
     ) -> Result<super::dv_title_jobs::AnalysisTitleOutcome, StoreError>;
+    /// Profile 7 FEL titles whose F+ fit is missing or stale for `helper`
+    /// and `fit_version`, after `after_file_id`.
+    async fn dv_refit_demands(
+        &self,
+        helper: &str,
+        fit_version: &str,
+        include_all: bool,
+        after_file_id: i64,
+        limit: u32,
+    ) -> Result<Vec<super::dv_refit_jobs::RefitDemand>, StoreError>;
+    /// Publish a running F+ attempt's whole curve table in one replicated
+    /// write, supersede the file's previous table and settle the job.
+    async fn publish_dv_refit_job(
+        &self,
+        request: super::dv_refit_jobs::PublishRefitJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
+    /// The file's current F+ curve table, for the source its row describes.
+    async fn dv_refit_curves(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<super::dv_refit_jobs::RefitCurveTable>, StoreError>;
+    /// One of the file's F+ curve tables by digest: the current one, or one
+    /// superseded within the last seven days.
+    async fn dv_refit_curves_by_digest(
+        &self,
+        file_id: i64,
+        curve_digest: &str,
+    ) -> Result<Option<super::dv_refit_jobs::RefitCurveTable>, StoreError>;
+    /// Move a stored F+ table's and outcome's title-scan generation forward
+    /// when the newer generation selects the same stream of the same source.
+    async fn rebind_dv_refit(
+        &self,
+        request: super::dv_refit_jobs::RebindRefit,
+    ) -> Result<(), StoreError>;
+    /// Drop F+ tables superseded more than seven days before `now_ms`, and
+    /// outcomes of sources the catalogue no longer has.
+    async fn prune_dv_refit(&self, now_ms: i64) -> Result<(), StoreError>;
+    /// Profile 7 FEL titles and their current F+ tables, by verdict.
+    async fn dv_refit_progress(&self) -> Result<super::dv_refit_jobs::RefitProgress, StoreError>;
     async fn probe_can_preempt_title(
         &self,
         probe_id: &str,
@@ -4097,6 +4170,48 @@ LIMIT 1
     ) -> Result<super::dv_title_jobs::AnalysisTitleOutcome, StoreError> {
         super::dv_title_jobs::publish_from_analysis(self, output).await
     }
+    async fn dv_refit_demands(
+        &self,
+        helper: &str,
+        fit_version: &str,
+        include_all: bool,
+        after_file_id: i64,
+        limit: u32,
+    ) -> Result<Vec<super::dv_refit_jobs::RefitDemand>, StoreError> {
+        super::dv_refit_jobs::demands(self, helper, fit_version, include_all, after_file_id, limit)
+            .await
+    }
+    async fn publish_dv_refit_job(
+        &self,
+        request: super::dv_refit_jobs::PublishRefitJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::dv_refit_jobs::publish(self, request).await
+    }
+    async fn dv_refit_curves(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<super::dv_refit_jobs::RefitCurveTable>, StoreError> {
+        super::dv_refit_jobs::curves(self, file_id).await
+    }
+    async fn dv_refit_curves_by_digest(
+        &self,
+        file_id: i64,
+        curve_digest: &str,
+    ) -> Result<Option<super::dv_refit_jobs::RefitCurveTable>, StoreError> {
+        super::dv_refit_jobs::curves_by_digest(self, file_id, curve_digest).await
+    }
+    async fn rebind_dv_refit(
+        &self,
+        request: super::dv_refit_jobs::RebindRefit,
+    ) -> Result<(), StoreError> {
+        super::dv_refit_jobs::rebind(self, request).await
+    }
+    async fn prune_dv_refit(&self, now_ms: i64) -> Result<(), StoreError> {
+        super::dv_refit_jobs::prune(self, now_ms).await
+    }
+    async fn dv_refit_progress(&self) -> Result<super::dv_refit_jobs::RefitProgress, StoreError> {
+        super::dv_refit_jobs::progress(self).await
+    }
     async fn probe_can_preempt_title(
         &self,
         probe_id: &str,
@@ -5131,7 +5246,9 @@ LIMIT 1
         let payload = original.supported_payload()?;
         if !matches!(
             payload,
-            JobPayload::TranscodePrepare { .. } | JobPayload::ArtifactHydrate { .. }
+            JobPayload::TranscodePrepare { .. }
+                | JobPayload::ArtifactHydrate { .. }
+                | JobPayload::DvRefit { .. }
         ) {
             return Err(invalid("retry requires a domain generation adapter"));
         }

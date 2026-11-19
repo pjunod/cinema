@@ -1894,6 +1894,7 @@ mod tests {
     }
 
     async fn typed_recovery_controls(review_controls: bool) {
+        crate::http::hls::tests::prepare_catalog_test_encoder().await;
         use crate::transcode::{ReopenReason, SessionKind, SessionRequest};
         use axum::{
             extract::{Path, Query, State},
@@ -1947,6 +1948,7 @@ mod tests {
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             vod_only: false,
             passive_vod: false,

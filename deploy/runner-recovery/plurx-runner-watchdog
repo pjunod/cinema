@@ -2,14 +2,19 @@
 """Recover explicitly managed local runner VMs without undoing maintenance."""
 
 import argparse
+from contextlib import contextmanager
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import socket
+import stat
 import subprocess
 import time
+import urllib.parse
+import uuid
 
 GIB = 1024**3
 
@@ -29,6 +34,49 @@ def available_memory():
 
 
 PAUSED_DIR = Path("/var/lib/plurx-runner-watchdog/paused")
+ADMISSION_LOCK = Path("/var/lib/plurx-runner-watchdog/admission.lock")
+MAINTENANCE = Path("/var/lib/plurx-runner-watchdog/maintenance.json")
+OWNER_CONTRACT = {"version": 2, "operation": "start_vm", "identity_admission": 1,
+                  "shared_admission_lock": str(ADMISSION_LOCK), "monotonic_authorization": True, "durable_inflight": True, "code_hash_guard": True}
+
+
+def owner_source_hash():
+    # The Linux host executor invokes /proc/self/fd/N with that FD inherited.
+    # Under atomic installation this names the immutable inode being executed.
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+def canonical_uuid(value):
+    try:
+        parsed = uuid.UUID(value)
+        if str(parsed) != value or not parsed.int:
+            raise ValueError()
+    except (ValueError, AttributeError, TypeError):
+        raise ValueError("expected a canonical nonzero instance UUID") from None
+    return value
+
+
+@contextmanager
+def admission_lock():
+    """Shared with managed provisioning and maintenance on the physical target.
+
+    Fixed path independent of --state: changing history location cannot create
+    a second admission domain. Root-only directory ownership prevents a peer
+    from substituting the flock file used by provisioning.
+    """
+    ADMISSION_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    directory = ADMISSION_LOCK.parent.stat()
+    if directory.st_uid != os.geteuid() or directory.st_mode & 0o022:
+        raise RuntimeError("admission directory must be owned and not group/world writable")
+    fd = os.open(str(ADMISSION_LOCK), os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+            raise RuntimeError("admission lock must be a private owned regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def paused_reason(paused_dir, name):
@@ -48,15 +96,105 @@ def paused_reason(paused_dir, name):
     return f"paused by {detail.get('actor') or 'an operator'}" + (f": {detail['reason']}" if detail.get("reason") else "")
 
 
+
+def save_maintenance(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path),os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os,'O_NOFOLLOW',0),0o600)
+    with os.fdopen(fd,'w') as source:
+        json.dump(value,source); source.flush(); os.fsync(source.fileno())
+    directory = os.open(str(path.parent),os.O_RDONLY)
+    try:os.fsync(directory)
+    finally:os.close(directory)
+
+
+def clear_maintenance(path, expected):
+    path = Path(path)
+    if not path.exists():return
+    if json.loads(path.read_text()) != expected:
+        raise RuntimeError('maintenance ownership changed; preserving intent')
+    path.unlink()
+    directory = os.open(str(path.parent),os.O_RDONLY)
+    try:os.fsync(directory)
+    finally:os.close(directory)
+
+
+
+def recover_terminal_maintenance(state, path):
+    """Only a durably known terminal owner outcome can release its own marker."""
+    try:
+        marker = json.loads(Path(path).read_text())
+        for record in state.get('guarded',{}).values():
+            receipt = record.get('receipt',{})
+            expected = {'owner':record.get('command_id'),'command_hash':record.get('command_hash'),
+                        'owner_code_hash':record.get('owner_code_hash'),'resource':receipt.get('expected_resource'),
+                        'reason':'guarded start awaiting terminal owner outcome'}
+            if (record.get('phase')=='terminal' and receipt.get('outcome') in ('started','already_running','deferred','rejected')
+                    and type(receipt.get('owner_contract')) is int and receipt['owner_contract']==2
+                    and receipt.get('operation')=='start_vm' and receipt.get('command_id')==record.get('command_id')
+                    and receipt.get('command_hash')==record.get('command_hash')
+                    and receipt.get('owner_code_hash')==record.get('owner_code_hash')
+                    and type(receipt.get('external_submission_started')) is bool
+                    and receipt['external_submission_started']==(receipt['outcome']=='started')
+                    and marker==expected):
+                clear_maintenance(path,expected)
+                return True
+    except (OSError,ValueError,TypeError,AttributeError):
+        pass
+    return False
+
+
 def recover(config, state, *, execute=command, memory=available_memory, now=None, host=None, persist=lambda state: None,
-            paused_dir=PAUSED_DIR, only=None):
+            paused_dir=PAUSED_DIR, only=None, expected_instance_uuid=None, expected_instance_generation=None,
+            authorization_deadline=None, monotonic=time.monotonic, maintenance=MAINTENANCE,
+            command_id=None, command_hash=None, owner_code_hash=None):
     now = int(time.time()) if now is None else now
     host = socket.gethostname().split(".")[0] if host is None else host
+    guarded = expected_instance_uuid is not None or expected_instance_generation is not None or authorization_deadline is not None
+    if guarded:
+        if only is None or expected_instance_uuid is None or expected_instance_generation is None or authorization_deadline is None:
+            raise ValueError("guarded admission requires one VM, both expected identities and a monotonic deadline")
+        canonical_uuid(expected_instance_uuid); canonical_uuid(expected_instance_generation)
+        if (not isinstance(command_id,str) or not re.fullmatch(r'[0-9a-f]{32}',command_id)
+                or not isinstance(command_hash,str) or not re.fullmatch(r'[0-9a-f]{64}',command_hash)
+                or not isinstance(owner_code_hash,str) or not re.fullmatch(r'[0-9a-f]{64}',owner_code_hash)):
+            raise ValueError('guarded admission requires immutable command and approved owner hashes')
+        if type(authorization_deadline) not in (int, float) or not 0 < authorization_deadline < float("inf"):
+            raise ValueError("invalid monotonic authorization deadline")
     project = config.get("project", "github-runners")
     reserve = config.get("reserve_gib", 4) * GIB
+    if Path(maintenance).exists():recover_terminal_maintenance(state,maintenance)
     instances = {i["name"]: i for i in json.loads(execute("incus", "list", "--project", project, "--format", "json"))}
     receipt = {"finished": now, "host": host, "recovered": [], "errors": [], "deferred": []}
+    if guarded:
+        receipt.update(owner_contract=2, operation="start_vm", outcome="rejected",
+                       expected_resource={"name":only,"uuid":expected_instance_uuid,"generation":expected_instance_generation},
+                       observed_resource=None, command_id=command_id, command_hash=command_hash, owner_code_hash=owner_code_hash,
+                       external_submission_started=False)
+    inflight_marker = None
+    invoked = False
+    def finish_guarded():
+        if not guarded:return
+        receipt['finished'] = int(time.time())
+        receipt['external_submission_started'] = invoked
+        record = {'command_id':command_id,'command_hash':command_hash,'owner_code_hash':owner_code_hash,
+                  'phase':'unknown' if receipt['outcome']=='unknown' else 'terminal',
+                  'execution_started':invoked,'receipt':receipt}
+        state.setdefault('guarded',{})[only] = record
+        # A terminal owner record must survive before exclusion can be released.
+        state['last_run'] = receipt
+        persist(state)
+        if inflight_marker is not None and record['phase']=='terminal':
+            clear_maintenance(maintenance,inflight_marker)
+    def defer(message):
+        receipt["deferred"].append(message)
+        if guarded:receipt["outcome"] = "deferred"
     attempts = state.setdefault("attempts", {})
+    if Path(maintenance).exists():
+        defer("host maintenance is active")
+        if guarded:receipt["outcome"] = "deferred"
+        state["last_run"] = receipt
+        return receipt
     admission = None
     # MemAvailable includes pages QEMU has not committed yet. Reserve the
     # unused part of every running local guest, including on later passes.
@@ -93,15 +231,34 @@ def recover(config, state, *, execute=command, memory=available_memory, now=None
         if not re.fullmatch(r"gha-[a-z0-9-]+", name) or not re.fullmatch(r"forgejo-runner-gha-[a-z0-9-]+\.service", unit):
             raise ValueError("invalid managed runner identity")
         instance = instances.get(name)
+        if guarded:
+            try:
+                # Exact fresh read under main's shared admission lock. Managed
+                # init/config/start/restore authorities use this same target lock.
+                instance = json.loads(execute("incus", "query", "/1.0/instances/"+urllib.parse.quote(name,safe="")+
+                                              "?project="+urllib.parse.quote(project,safe="")))
+                observed = {"name":instance.get("name"),"uuid":instance.get("expanded_config",{}).get("volatile.uuid"),
+                            "generation":instance.get("expanded_config",{}).get("volatile.uuid.generation")}
+                try:
+                    canonical_uuid(observed['uuid']); canonical_uuid(observed['generation'])
+                except ValueError:
+                    receipt['observed_resource'] = None
+                    raise ValueError('installed Incus identity fields are unavailable') from None
+                receipt["observed_resource"] = observed
+                if observed != receipt["expected_resource"]:
+                    raise ValueError("instance identity differs from guarded plan or is unsupported")
+            except (RuntimeError, subprocess.TimeoutExpired, KeyError, ValueError, TypeError, AttributeError):
+                receipt["errors"].append(f"{name}: guarded identity unavailable or changed")
+                continue
         if not instance or instance.get("location") != host:
             receipt["errors"].append(f"{name}: missing or on another host")
             continue
         if instance["expanded_config"].get("boot.autostart") == "false":
-            receipt["deferred"].append(f"{name}: maintenance")
+            defer(f"{name}: maintenance")
             continue
         reason = paused_reason(paused_dir, name)
         if reason:
-            receipt["deferred"].append(f"{name}: {reason}")
+            defer(f"{name}: {reason}")
             continue
         # Inventory drift must not turn an 8 GiB admission check into a boot
         # of a larger VM. Reconcile configuration instead of guessing units.
@@ -110,25 +267,58 @@ def recover(config, state, *, execute=command, memory=available_memory, now=None
             receipt["errors"].append(f"{name}: memory allocation differs from recovery budget")
             continue
         try:
+            if guarded and instance["status"] == "Running":
+                receipt["outcome"] = "already_running"
+                continue  # start_vm never becomes an in-service daemon repair
             if instance["status"] == "Stopped":
                 history = [t for t in attempts.get(name, []) if now - t < 3600]
                 attempts[name] = history
                 if history and (now - history[-1] < 600 or len(history) >= 3):
-                    receipt["deferred"].append(f"{name}: restart backoff")
+                    defer(f"{name}: restart backoff")
                     continue
                 # Boot only when the full configured allocation leaves host headroom.
                 if boot_headroom() < (managed["memory_gib"] * GIB + reserve):
-                    receipt["deferred"].append(f"{name}: insufficient host memory")
+                    defer(f"{name}: insufficient host memory")
+                    continue
+                if Path(maintenance).exists() or paused_reason(paused_dir,name):
+                    defer(f"{name}: maintenance intent observed before admission")
+                    continue
+                if guarded and monotonic() >= authorization_deadline:
+                    defer(f"{name}: authorization expired before admission")
                     continue
                 admission -= managed["memory_gib"] * GIB
                 history.append(now)
                 # Retain the attempt before an external command: a timeout or
                 # killed watchdog must not reset the OOM retry budget.
                 persist(state)
+                # Slow fsync can outlast new maintenance intent or authorization.
+                if Path(maintenance).exists() or paused_reason(paused_dir,name):
+                    defer(f"{name}: maintenance intent observed before start")
+                    continue
+                if guarded and monotonic() >= authorization_deadline:
+                    defer(f"{name}: authorization expired before start")
+                    continue
+                if guarded:
+                    inflight_marker = {'owner':command_id,'command_hash':command_hash,'owner_code_hash':owner_code_hash,
+                                       'resource':receipt['expected_resource'],'reason':'guarded start awaiting terminal owner outcome'}
+                    save_maintenance(maintenance,inflight_marker)
+                    state.setdefault('guarded',{})[only] = {'command_id':command_id,'command_hash':command_hash,
+                        'owner_code_hash':owner_code_hash,'phase':'submitting','execution_started':True,
+                        'receipt':dict(receipt)}
+                    persist(state)
+                    if paused_reason(paused_dir,name) or monotonic() >= authorization_deadline:
+                        defer(f'{name}: pause or authorization changed before submission')
+                        continue
+                    receipt['outcome'] = 'unknown'
+                    invoked = True
+                    receipt['external_submission_started'] = True
                 execute("incus", "start", "--project", project, name)
                 receipt["recovered"].append(f"{name}: VM started")
+                if guarded:
+                    receipt["outcome"] = "started"
+                    continue  # service/pickup verification is a separate observation
             elif instance["status"] != "Running":
-                receipt["deferred"].append(f"{name}: {instance['status']}")
+                defer(f"{name}: {instance['status']}")
                 continue
             prefix = ("incus", "exec", "--project", project, name, "--")
             # Never restart an active or draining runner: it may own a live job.
@@ -138,14 +328,20 @@ def recover(config, state, *, execute=command, memory=available_memory, now=None
                 receipt["recovered"].append(f"{name}: daemon started")
         except (RuntimeError, subprocess.TimeoutExpired, KeyError, ValueError) as error:
             receipt["errors"].append(f"{name}: {error}")
+    finish_guarded()
     state["last_run"] = receipt
     return receipt
 
 
 def save_state(path, state):
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(state, indent=2) + "\n")
+    with temporary.open("w") as source:
+        source.write(json.dumps(state, indent=2) + "\n")
+        source.flush(); os.fsync(source.fileno())
     os.replace(temporary, path)
+    directory = os.open(str(path.parent), os.O_RDONLY)
+    try:os.fsync(directory)
+    finally:os.close(directory)
 
 
 def main():
@@ -154,16 +350,43 @@ def main():
     parser.add_argument("--state", default="/var/lib/plurx-runner-watchdog/state.json")
     parser.add_argument("--paused-dir", default=str(PAUSED_DIR))
     parser.add_argument("--vm", help="recover only this managed VM (ci-fleet's Start VM and Resume)")
+    parser.add_argument("--reconcile-maintenance-only", action="store_true", help="release only a durably terminal owned marker; perform no Incus operation")
+    parser.add_argument("--describe-owner-contract", action="store_true", help="print the guarded admission contract without accessing resources")
+    parser.add_argument("--expected-instance-uuid")
+    parser.add_argument("--expected-instance-generation")
+    parser.add_argument("--authorization-deadline-monotonic", type=float)
+    parser.add_argument("--expected-owner-sha256")
+    parser.add_argument("--guarded-command-id")
+    parser.add_argument("--guarded-command-hash")
     args = parser.parse_args()
+    if args.describe_owner_contract:
+        print(json.dumps(OWNER_CONTRACT)); return 0
+    expected = (args.expected_instance_uuid, args.expected_instance_generation, args.authorization_deadline_monotonic,
+                args.expected_owner_sha256,args.guarded_command_id,args.guarded_command_hash)
+    if any(value is not None for value in expected):
+        if not args.vm or any(value is None for value in expected):
+            parser.error("guarded admission requires --vm, both expected identities and authorization deadline")
+        try:canonical_uuid(expected[0]); canonical_uuid(expected[1])
+        except ValueError as error:parser.error(str(error))
     path = Path(args.state)
     path.parent.mkdir(parents=True, exist_ok=True)
     # The timer and ci-fleet's Start VM / Resume (`--vm`) can both run a pass:
     # one lock serialises them so neither loses the other's restart history.
-    with path.with_suffix(".lock").open("a") as lock:
+    with admission_lock(), path.with_suffix(".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         state = json.loads(path.read_text()) if path.exists() else {}
+        if args.reconcile_maintenance_only:
+            released = recover_terminal_maintenance(state,MAINTENANCE)
+            active = MAINTENANCE.exists()
+            print(json.dumps({'owner_contract':2,'released':released,'maintenance_active':active}))
+            return int(active)
+        code_hash = owner_source_hash()
+        if args.expected_owner_sha256 is not None and args.expected_owner_sha256 != code_hash:
+            raise RuntimeError('installed owner code differs from the approved command')
         receipt = recover(json.loads(Path(args.config).read_text()), state,
-                          persist=lambda value: save_state(path, value), paused_dir=args.paused_dir, only=args.vm)
+                          persist=lambda value: save_state(path, value), paused_dir=args.paused_dir, only=args.vm,
+                          expected_instance_uuid=expected[0], expected_instance_generation=expected[1],
+                          authorization_deadline=expected[2],command_id=expected[4],command_hash=expected[5],owner_code_hash=code_hash)
         save_state(path, state)
     print(json.dumps(receipt), flush=True)
     return int(bool(receipt["errors"]))

@@ -29,6 +29,8 @@ static bool source_eof, discover_el;
 // --refit-stats / --dump-composed (refit_mode.h): CPU-only F+ statistics.
 // Decoded pairs go to refit_pairs instead of the renderer.
 static bool refit_mode;
+// Frame workers per layer decoder in --refit-stats (--threads N).
+static int refit_threads = 4;
 static void refit_pairs(void);
 // GPU decode: PLURX_DV_DECODE_DEVICE names the admitted VA-API render node.
 // Surfaces stay on the GPU and are mapped into the renderer; a host copy of
@@ -106,6 +108,9 @@ static int video_duration_ns(const char *text, int64_t *duration) {
   return 1;
 }
 
+// need()'s exit status. Only --refit-stats changes it, around the checks that
+// refuse the title's content (refit_mode.h); every other refusal is 1.
+static int refusal_exit = 1;
 static void need(int ok, const char *reason) {
   if (!ok) {
     fprintf(stderr, "Segment refused: %s\n", reason);
@@ -114,7 +119,7 @@ static void need(int ok, const char *reason) {
     // The parent still requires actual reap and SourceInput settlement.
     fflush(stdout);
     fflush(stderr);
-    _exit(1);
+    _exit(refusal_exit);
   }
 }
 static struct rational rational(const char *text) {
@@ -777,8 +782,10 @@ static struct layer open_layer(AVStream *stream, int index) {
   out.decoder->height = expected_h[index];
   // Window admission reserves four frame workers per layer, plus the helper
   // caller and the one software-Vulkan worker. Disable nested slice threading.
-  // A refit decodes in software with the same four workers per layer.
-  out.decoder->thread_count = (window_mode || refit_mode) && !hw_device ? 4 : 1;
+  // A refit decodes in software with --threads workers per layer (default 4).
+  out.decoder->thread_count = window_mode && !hw_device   ? 4
+                              : refit_mode && !hw_device ? refit_threads
+                                                         : 1;
   out.decoder->thread_type = FF_THREAD_FRAME;
   if (hw_device) {
     out.decoder->hw_device_ctx = av_buffer_ref(hw_device);

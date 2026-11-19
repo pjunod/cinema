@@ -1367,6 +1367,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::dv_title_jobs::MIGRATION_V2,
     // v133: optional scoped application login, separate from native sessions.
     super::delegation::SCHEMA,
+    // v134: F+ curve fits for Profile 7 FEL titles, written by `dv_refit` jobs.
+    super::dv_refit_jobs::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1941,6 +1943,7 @@ impl SqliteStore {
         super::playback_handoffs::verify_sqlite(conn)?;
         super::delegation::verify_sqlite(conn)?;
         super::scan_request_v2::verify_sqlite(conn)?;
+        super::dv_refit_jobs::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

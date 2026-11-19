@@ -3556,8 +3556,8 @@ async fn actual_source_budgeted_start() {
         .transcode
         .test_hold_source_software_capacity()
         .expect("actual occupied software capacity");
-    // Hold pure preparation through the viewer-clock checks. Only after the
-    // NotYet rejoin do we let this real worker enter its unchanged queue.
+    // Hold pure preparation until the first viewer clock and repost grace
+    // have elapsed.
     let preparation = fixture
         .state
         .transcode
@@ -3726,21 +3726,40 @@ async fn actual_source_budgeted_start() {
         "local fall-through preserves the ingress clock"
     );
     // Past the viewer's whole window (2 s plus the re-post grace) the
-    // entry is still retained in pure preparation on its own budget. After
-    // this viewer window, release it into the real queue and rejoin only
-    // once its actual owned index child is held after spawn.
+    // same entry is still retained in pure preparation on its own budget.
     tokio::time::sleep_until(tokio::time::Instant::from_std(
         began + Duration::from_millis(4_600),
     ))
     .await;
     let held_preparation = preparation.reached().await;
+    let entry = entry_of(abandoned).expect("the original start is still retained");
+    let planned_incarnation = entry
+        .task
+        .stage
+        .lock()
+        .expect("stage")
+        .incarnation()
+        .expect("the original start has a planned incarnation");
+    // The first answer expired before assignment, so its driver could not
+    // register ingress custody. Repost without an answer clock so the real
+    // driver can register once preparation releases and the factory can run.
+    let mut admission = tokio::spawn(post(body(abandoned), None));
     let viewer_elapsed_before_release = began.elapsed();
     let preparation_released_at = Instant::now();
     held_preparation.release();
     // Free capacity before the actual queue's five-second limit. The next
     // observation is the real owned index child, with permit/fence/authority.
     drop(hold);
-    let held_index = index_pause.reached().await;
+    let held_index = tokio::select! {
+        held = index_pause.reached() => held,
+        answer = &mut admission => {
+            let (status, _, bytes) = answer.expect("admission caller joined");
+            panic!(
+                "the admission repost answered before the cold index spawned: {status} {}",
+                String::from_utf8_lossy(&bytes),
+            );
+        }
+    };
     let index_after_preparation_release = preparation_released_at.elapsed();
     // Rejoin while the actual owned index child is held, rather than
     // inferring a live cold-index operation from a planned incarnation.
@@ -3754,14 +3773,15 @@ async fn actual_source_budgeted_start() {
         "the viewer's window does not end owned preparation: {}; viewer_elapsed={viewer_elapsed_before_release:?}, index_after_preparation_release={index_after_preparation_release:?}",
         String::from_utf8_lossy(&bytes)
     );
-    let entry = entry_of(abandoned).expect("the abandoned start's entry");
-    let incarnation = entry
-        .task
-        .stage
-        .lock()
-        .expect("stage")
-        .incarnation()
-        .expect("the entry owns its claim");
+    assert!(std::sync::Arc::ptr_eq(
+        &entry,
+        &entry_of(abandoned).expect("the abandoned start's entry")
+    ));
+    let incarnation = ingress::actual_assignment(&entry)
+        .expect("the entry owns its assignment")
+        .binding()
+        .incarnation_id();
+    assert_eq!(incarnation, planned_incarnation);
     // Deliver End while this exact owned index child is held after spawn.
     // Its stage cannot complete or its queue expire before End ownership.
     // Releasing the existing seam lets the real index persist and settle.
@@ -3791,13 +3811,13 @@ async fn actual_source_budgeted_start() {
             bytes
         }
     });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while entry.ending.lock().expect("End").is_none() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the End is owned");
+    let (status, _, bytes) = tokio::time::timeout(Duration::from_secs(5), admission)
+        .await
+        .expect("End retires the admitted Start waiter")
+        .expect("admission caller joined");
+    assert!(entry.ending.lock().expect("End").is_some());
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(typed(&bytes), "sharing_start_unavailable");
     assert!(
         held_index.is_held(),
         "owned index hold expired before End observation"

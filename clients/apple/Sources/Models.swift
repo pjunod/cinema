@@ -1250,10 +1250,30 @@ struct HlsStart: Codable {
     var control: ControlBootstrap?
 }
 
+/// The mapping actually carried by this served generation, not a new fit
+/// published during playback. Gain is held-out squared code error removed.
+struct DolbyVisionRefitPlaybackReport: Codable {
+    var state: String
+    var gain: Double?
+    var reason: String?
+
+    var label: String? {
+        switch state {
+        case "fitted":
+            guard let gain, gain.isFinite, (0...1).contains(gain) else { return "fitted" }
+            return String(format: "fitted, −%.1f%%", gain * 100)
+        case "identity":
+            return "identity (\(reason ?? "no fitted mapping in this generation"))"
+        default: return nil
+        }
+    }
+}
+
 /// Live HLS telemetry used by the web client's playback-info panel and now by
 /// the Apple client too. All changing measurements remain optional because a
 /// session has not necessarily produced its first segment when first polled.
 struct PlaybackSessionStatus: Codable {
+    var dolbyVisionRefit: DolbyVisionRefitPlaybackReport?
     var activeEncodeMilliRealtime: Int?
     var activeEncodeAgeMs: Int?
     var activeEncodeActiveMs: Int?

@@ -1,9 +1,9 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries thirty-four patches for clustered deployments. An
-upstream release can retire the eleven generic bugs and the one dependency-only
-constraint; it cannot retire the twenty-two Plurx policies:
+Apache-2.0. Plurx carries thirty-five patches for clustered deployments. An
+upstream release can retire the twelve generic bugs and the one dependency-only
+constraint. The other twenty-two patches encode Plurx policies.
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
 still needs a public upstream issue or pull request; it is deliberately not a
@@ -44,7 +44,8 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 31 | One proposal gate on the database Raft, with a local hold and metrics wait | plurx policy | — | Never; a Plurx leader handing off must stop its own log before triggering its successor, and OpenRaft 0.9 has no leadership transfer. |
 | 32 | Keep the SQLite writer alive when a reply's receiver is gone | generic bug | pending M6 | Upstream release delivers every writer reply without panicking when a cancelled Raft apply or a teardown has dropped its receiver. |
 | 33 | A dead database Raft core is reported, and a snapshot build that cannot fit is never started | plurx policy | — | Never; Plurx ends a process whose core quit and owns its snapshot storage policy; OpenRaft 0.9 makes any build storage error fatal. |
-| 34 | Retain caller-owned listening sockets through node startup | generic bug | pending M6 | Upstream release accepts and validates an owned listener pair without closing and rebinding reserved addresses, retaining startup drainage through Client handoff. |
+| 34 | Dead-core teardown releases the SQL writer and a failed build's files without panicking | generic bug | pending M6 | Upstream release shuts its SQL writer down whatever the WAL's shutdown returns, maps a closed writer channel to an error in `shutdown` and `build_snapshot`, and removes a failed build's temporary image. |
+| 35 | Retain caller-owned listening sockets through node startup | generic bug | pending M6 | Upstream release accepts and validates an owned listener pair without closing and rebinding reserved addresses, retaining startup drainage through Client handoff. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -512,6 +513,48 @@ made-up URL and prevents the fork from being declared fully tracked.
   `src/client/transaction.rs`, `src/client/batch.rs`, `src/client/migrate.rs`,
   `src/client/backup.rs`, `src/backup.rs`, `src/helpers.rs`,
   `src/network/api.rs`, `src/network/management.rs`, `src/dashboard/query.rs`.
+- The SQLite writer no longer panics when the requester of a reply has
+  stopped waiting. Upstream sends every reply with
+  `.expect("oneshot tx to never be dropped")` (thirteen sites across
+  `Execute`, `ExecuteReturning`, `Transaction` and `Batch`) or `.unwrap()`
+  (`Migrate`, the metadata read, the membership update and the RTT probe),
+  and `.expect`s the shutdown acknowledgement. Every applying request comes
+  from the state machine's `apply`, which waits for its reply without a
+  bound, so a receiver is gone only when that Raft apply was cancelled or
+  torn down (the Raft core stopping, the runtime shutting down, a startup
+  cleanup aborting); no caller timeout reaches the writer. The reply then
+  panicked the writer thread: every later write on that node failed until
+  the process restarted, and the panic skipped the metadata persist and the
+  lock-file removal, so the next start rebuilt the database. All applying
+  replies now go through `send_reply`, which tolerates a closed receiver,
+  logs it at `warn` with the request kind, the applied log index and the
+  abandoned result's error text if it was one (several arms report a failed
+  statement, commit or migration only in the reply), and counts it by
+  request and outcome in `db_writer_abandoned_replies`, which plurxd renders
+  as `plurx_hiqlite_writer_abandoned_replies_total`. The metadata read
+  applies nothing and stays at `debug`, uncounted. `publish_then_send`
+  returns nothing, so no arm can make delivery a condition of the writer
+  staying alive. Nothing else changes: the commit or rollback has already
+  happened when the reply is sent and stays authoritative, the applied mark
+  is still published before the reply, and nothing is retried. Real-writer
+  tests abandon a transaction's success and constraint-error replies
+  (`dropped_transaction_success_reply_preserves_commit_and_writer`,
+  `dropped_transaction_error_reply_preserves_rollback_and_writer`); the
+  success and common error replies of `Execute`, `ExecuteReturning` and
+  `Batch`, a successful `Migrate`, the membership update, the applied
+  marker, the RTT probe and the metadata read
+  (`dropped_reply_on_other_arms_preserves_the_write_and_writer`); a failed
+  migration and a failed commit
+  (`dropped_migrate_and_commit_failure_replies_preserve_rollback_and_writer`);
+  and the shutdown acknowledgement
+  (`dropped_shutdown_reply_still_persists_metadata_and_releases_the_lock`).
+  Each reads the rows and the applied-log metadata back from the database
+  file. Parameter-bind errors, the `ExecuteReturning` column-mapping error, a
+  failed transaction open, `SnapshotApply` and `Backup` are held only by the
+  source pin in `every_applying_reply_publishes_first`. The same repair in
+  the WAL writer is `hiqlite-wal` row 7. First written for the transaction
+  arm in `f39353af2` and `8e2a8cb64` (#1261).
+  Files: `src/store/state_machine/sqlite/writer.rs`, `src/lib.rs`.
 - `LocalDbRaftMetrics::core_stopped` waits on the local Raft watch until the
   core stops, and returns `LocalDbCoreStop`. `Stopped` means OpenRaft's
   `Fatal::Stopped` (an ordinary `Raft::shutdown`). `Fatal(text)` means any
@@ -526,18 +569,64 @@ made-up URL and prevents the fork from being declared fully tracked.
   comfortable floor, or whose storage cannot be measured, keeps the old
   bound (ten minutes by default; 0 attempts it at once). A deferred build
   ends with an error once the SQL writer has stopped, instead of waiting
-  forever or panicking on a closed channel. A build that fails before its
-  rename removes its `<uuid>.temp` and `-journal`, and startup removes any
-  abandoned ones. Both client shutdowns release the SQL writer, and so its
-  lock file, whatever the WAL's shutdown returns. Tests:
-  `mgmt::tests::the_core_stop_names_a_fatal_quit_and_ignores_an_ordinary_stop`,
-  `the_lock_file_is_released_whatever_the_wal_shutdown_returns`, the
-  `snapshot_admission` band tests, and the snapshot builder's and state
-  machine's temp-removal tests.
+  forever. `LocalDbRaftMetrics::core_fatal` reads the same terminal state
+  without waiting, so plurx-core's startup admission and catch-up loops end
+  at once on a dead core instead of at the catch-up deadline. The teardown a
+  dead core then runs is row 34. Tests:
+  `mgmt::tests::the_core_stop_names_a_fatal_quit_and_ignores_an_ordinary_stop`
+  and the `snapshot_admission` band tests.
   Files: `src/client/mgmt.rs`, `src/client/mod.rs`, `src/lib.rs`,
   `src/config.rs`, `src/snapshot_admission.rs`,
+  `src/store/state_machine/sqlite/snapshot_builder.rs`.
+- A teardown after the Raft core died no longer panics or strands state.
+  Upstream skips the SQL writer's shutdown, and so the lock-file removal,
+  when the WAL's shutdown fails, so the next start's `auto-heal` mistakes a
+  clean stop for a crash and rebuilds the state machine. Both client
+  shutdowns now shut the SQL writer down whatever the WAL returns and return
+  the WAL's error after it. The main shutdown also `.expect`ed the writer's
+  channel and acknowledgement, and `build_snapshot` `.expect`ed its request
+  and reply, so a stopped writer panicked the caller. All four now return an
+  error. A build that fails before its rename removes its `<uuid>.temp` and
+  `-journal`, so a full disk is not kept full by a dead build, and startup
+  removes abandoned ones after the lock check and before the writer starts.
+  Tests: `the_lock_file_is_released_whatever_the_wal_shutdown_returns`, the
+  snapshot builder's and state machine's temp-removal tests, and plurxd's
+  `a_follower_whose_raft_core_dies_exits_non_zero_and_rejoins_after_restart`,
+  which checks the lock file is gone after the dead-core exit.
+  Files: `src/client/mgmt.rs`,
   `src/store/state_machine/sqlite/snapshot_builder.rs`,
   `src/store/state_machine/sqlite/state_machine.rs`.
+- **Row 35 — Owned startup listeners:** `src/lib.rs` exports a move-only
+  `StartupListeners` pair and non-serialized `StartupResources` variants of the existing
+  membership-admission and clock-observation startup entrypoints. `src/start.rs`
+  validates both bound addresses against the configured local listening addresses
+  and nonzero advertised ports before storage starts, then transfers the exact
+  sockets to the existing server tasks. Supplied resources retain the existing
+  staged listener/storage cleanup owners through Client handoff; ordinary
+  callers keep their bind and startup behavior. `StartupResources` also carries
+  an opaque caller lease. `src/startup_cleanup.rs` and `src/store/mod.rs` transfer
+  completion claims into pending WAL/SQLite constructors and detached cleanup
+  before work can outlive its requester. Only positive handoff or actual
+  listener/WAL/writer shutdown acknowledgements release a claim; missing ACK,
+  error, panic or cancelled cleanup retains the lease fail-closed. Pre-Client
+  listener tasks are joined, rather than aborted without a terminal receipt.
+  Core retains the actual root daemon file through that boundary for every
+  temporary import, active reopen and join, then transfers directly into its
+  post-Client guard. A startup refusal preserves its incoming tree while
+  drainage remains uncertain; subsequent locked recovery owns cleanup. The existing apply-pause validation seam
+  provides asynchronous observation for the core cancellation regression;
+  `fixtures` weak-enables existing `validation-test-helpers` in workspace tests. Core may retain custody of the
+  listening sockets across a sequential import and reopen by lending duplicate
+  descriptors, waiting for confirmed listener/storage drainage, then moving the
+  originals into the active node. Core requires loopback sockets for a fresh
+  singleton import before data-directory mutation, preserving the temporary
+  voter's cleartext confinement; active reopen and join retain their existing
+  transport policy. No endpoint, membership, or admission policy changes. Workspace regressions live in
+  `crates/plurx-core/src/cluster/migration/tests.rs`; pre-Client coverage requires
+  `hiqlite-store,fixtures`. Vendor `startup_cleanup::tests` also proves real WAL
+  constructor drainage retains the root file, and missing writer ACK retains
+  it without asserting termination. A cache constructor cancellation lacks a
+  complete worker receipt and conservatively retains any supplied lease.
 
 **Row 26 upstream receipt, 2026-10-13:** [PR 374](https://github.com/sebadob/hiqlite/pull/374)
 was accepted on 2026-10-05 as
@@ -586,83 +675,8 @@ upstream maintainer disposition or the whole drop condition. The original
 patch description remains the historical/local contract; row 19 stays
 `generic bug` / `pending M6`, and all kinds, counts and removal rules remain.
 
-- The SQLite writer no longer panics when the requester of a reply has
-  stopped waiting. Upstream sends every reply with
-  `.expect("oneshot tx to never be dropped")` (thirteen sites across
-  `Execute`, `ExecuteReturning`, `Transaction` and `Batch`) or `.unwrap()`
-  (`Migrate`, the metadata read, the membership update and the RTT probe),
-  and `.expect`s the shutdown acknowledgement. Every applying request comes
-  from the state machine's `apply`, which waits for its reply without a
-  bound, so a receiver is gone only when that Raft apply was cancelled or
-  torn down (the Raft core stopping, the runtime shutting down, a startup
-  cleanup aborting); no caller timeout reaches the writer. The reply then
-  panicked the writer thread: every later write on that node failed until
-  the process restarted, and the panic skipped the metadata persist and the
-  lock-file removal, so the next start rebuilt the database. All applying
-  replies now go through `send_reply`, which tolerates a closed receiver,
-  logs it at `warn` with the request kind, the applied log index and the
-  abandoned result's error text if it was one (several arms report a failed
-  statement, commit or migration only in the reply), and counts it by
-  request and outcome in `db_writer_abandoned_replies`, which plurxd renders
-  as `plurx_hiqlite_writer_abandoned_replies_total`. The metadata read
-  applies nothing and stays at `debug`, uncounted. `publish_then_send`
-  returns nothing, so no arm can make delivery a condition of the writer
-  staying alive. Nothing else changes: the commit or rollback has already
-  happened when the reply is sent and stays authoritative, the applied mark
-  is still published before the reply, and nothing is retried. Real-writer
-  tests abandon a transaction's success and constraint-error replies
-  (`dropped_transaction_success_reply_preserves_commit_and_writer`,
-  `dropped_transaction_error_reply_preserves_rollback_and_writer`); the
-  success and common error replies of `Execute`, `ExecuteReturning` and
-  `Batch`, a successful `Migrate`, the membership update, the applied
-  marker, the RTT probe and the metadata read
-  (`dropped_reply_on_other_arms_preserves_the_write_and_writer`); a failed
-  migration and a failed commit
-  (`dropped_migrate_and_commit_failure_replies_preserve_rollback_and_writer`);
-  and the shutdown acknowledgement
-  (`dropped_shutdown_reply_still_persists_metadata_and_releases_the_lock`).
-  Each reads the rows and the applied-log metadata back from the database
-  file. Parameter-bind errors, the `ExecuteReturning` column-mapping error, a
-  failed transaction open, `SnapshotApply` and `Backup` are held only by the
-  source pin in `every_applying_reply_publishes_first`. The same repair in
-  the WAL writer is `hiqlite-wal` row 7. First written for the transaction
-  arm in `f39353af2` and `8e2a8cb64` (#1261).
-  Files: `src/store/state_machine/sqlite/writer.rs`, `src/lib.rs`.
-
-- **Row 34 — Owned startup listeners:** `src/lib.rs` exports a move-only
-  `StartupListeners` pair and non-serialized `StartupResources` variants of the existing
-  membership-admission and clock-observation startup entrypoints. `src/start.rs`
-  validates both bound addresses against the configured local listening addresses
-  and nonzero advertised ports before storage starts, then transfers the exact
-  sockets to the existing server tasks. Supplied resources retain the existing
-  staged listener/storage cleanup owners through Client handoff; ordinary
-  callers keep their bind and startup behavior. `StartupResources` also carries
-  an opaque caller lease. `src/startup_cleanup.rs` and `src/store/mod.rs` transfer
-  completion claims into pending WAL/SQLite constructors and detached cleanup
-  before work can outlive its requester. Only positive handoff or actual
-  listener/WAL/writer shutdown acknowledgements release a claim; missing ACK,
-  error, panic or cancelled cleanup retains the lease fail-closed. Pre-Client
-  listener tasks are joined, rather than aborted without a terminal receipt.
-  Core retains the actual root daemon file through that boundary for every
-  temporary import, active reopen and join, then transfers directly into its
-  post-Client guard. A startup refusal preserves its incoming tree while
-  drainage remains uncertain; subsequent locked recovery owns cleanup. The existing apply-pause validation seam
-  provides asynchronous observation for the core cancellation regression;
-  `fixtures` weak-enables existing `validation-test-helpers` in workspace tests. Core may retain custody of the
-  listening sockets across a sequential import and reopen by lending duplicate
-  descriptors, waiting for confirmed listener/storage drainage, then moving the
-  originals into the active node. Core requires loopback sockets for a fresh
-  singleton import before data-directory mutation, preserving the temporary
-  voter's cleartext confinement; active reopen and join retain their existing
-  transport policy. No endpoint, membership, or admission policy changes. Workspace regressions live in
-  `crates/plurx-core/src/cluster/migration/tests.rs`; pre-Client coverage requires
-  `hiqlite-store,fixtures`. Vendor `startup_cleanup::tests` also proves real WAL
-  constructor drainage retains the root file, and missing writer ACK retains
-  it without asserting termination. A cache constructor cancellation lacks a
-  complete worker receipt and conservatively retains any supplied lease.
-
 Remove this vendor when both halves of its exit hold. First, the rows an
-upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26, 28, 32 and 34: the
+upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26, 28, 32, 34 and 35: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
 (rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25, 27, 29, 30, 31 and 33) still needs a patch. Their

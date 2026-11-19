@@ -1,6 +1,6 @@
 # The hiqlite fork and what it drags in — decide the ownership, then cut the graph
 
-**Status:** implementation in progress (M1-M3 merged, M4 merged as far as candle allows; M0 measured and M5 (d) in [#558](http://forge.lan:3000/noirr/plurx/pulls/558), M5 (b)-(c) declined on M0's numbers); M6 two accepted mechanisms, thirteen generic rows pending as of 2026-11-17 · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
+**Status:** implementation in progress (M1-M3 merged, M4 merged as far as candle allows; M0 measured and M5 (d) in [#558](http://forge.lan:3000/noirr/plurx/pulls/558), M5 (b)-(c) declined on M0's numbers); M6 two accepted mechanisms, fourteen generic rows pending as of 2026-11-19 · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
 F-build-ops-codehealth-5, -6, -7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -1185,11 +1185,13 @@ and WAL 7 (keep the SQLite writer and the WAL writer alive when a reply's
 receiver is gone) are `pending M6`, so twelve combined rows are pending; the
 twelve-row inventory above is historical.
 
-**Hiqlite 34 added, 2026-11-17.** The ledgers now contain fifteen generic rows:
-Hiqlite 1, 8, 9, 10, 11, 17, 19, 26, 28, 32 and 34, plus WAL 1, 2, 3 and 7.
-Row 34 retains caller-owned listeners through startup without releasing and
-rebinding their reserved addresses. It is `pending M6`, so thirteen combined
-rows await upstream disposition; the fourteen-row inventory above is historical.
+**Hiqlite 34 and 35 reconciled, 2026-11-19.** The dead-core teardown repairs
+from 2026-11-18 are generic row 34. They stop the SQL writer even if the WAL
+shutdown fails, return errors when the writer has stopped and remove failed
+snapshot images and journals. The 2026-11-17 listener fix is row 35. It retains
+caller-owned listeners through startup without releasing and rebinding their
+reserved addresses. Both are pending M6. The ledgers now contain sixteen
+generic rows, with fourteen pending and two accepted.
 
 [Upstream PR 374](https://github.com/sebadob/hiqlite/pull/374) merged on
 2026-10-05 as
