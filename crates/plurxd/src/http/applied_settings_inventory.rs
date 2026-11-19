@@ -36,6 +36,8 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     ("media_pool.rs", "diagnostics", 2, true),
     // The playback request path: preference reads.
     ("http/chapter_thumbs.rs", "enabled", 1, true),
+    // Network priors decide optional processed output, after owner placement.
+    ("http/hls/create.rs", "handed_over_ask", 1, true),
     (
         "http/hls/create.rs",
         "resolve_plan_for_principal_with_local_evidence",
@@ -98,6 +100,12 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
 /// caller file, caller)`.
 const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
     (
+        "http/hls/create.rs",
+        "handed_over_ask",
+        "http/hls/create.rs",
+        "create_with_purpose_attempt",
+    ),
+    (
         "http/chapter_thumbs.rs",
         "enabled",
         "http/chapter_thumbs.rs",
@@ -149,7 +157,7 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
         "http/hls/link_receipts.rs",
         "processed_candidate_link_evidence",
         "http/hls/processed_upgrade.rs",
-        "admit_processed_candidate",
+        "auto_link_admission",
     ),
     (
         "http/internal_media.rs",
@@ -872,6 +880,8 @@ const PLAN_CALLS: &[(&str, &str, &str, &str)] = &[
     ("http/hls/create.rs", "create_with_purpose_attempt", "validate_hevc_copy_transport", "start_plan.as_deref()"),
     ("http/hls/create.rs", "preview_for_compatibility", "validate_hevc_copy_transport", "None"),
     ("http/hls/preparation.rs", "plan_preparation_with_candidate", "validate_hevc_copy_transport", "None"),
+    // The remote successor restores its own catalog after its prime.
+    ("http/hls/processed_upgrade.rs", "register_handed_over_successor", "restore_candidate_context_with_deadline", "None"),
     ("http/hls/processed_upgrade_qualification.rs", "resolve_current", "validate_candidate_planning_binding", "None"),
     ("http/internal_media_sessions.rs", "start", "create_cluster_session_for_receiver", "plan.as_ref()"),
     ("http/internal_media_sessions.rs", "start", "remote_placement_ready", "plan.as_ref().ok().and_then(Option::as_ref)"),
