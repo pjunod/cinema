@@ -126,6 +126,16 @@ pub(super) async fn spawn_generation(
         recipe.encoding.is_some() || rendition.key.starts_with("source-"),
         permit.is_some(),
     );
+    #[cfg(target_os = "linux")]
+    let processed_original = rendition.adaptive_processed_root();
+    #[cfg(target_os = "linux")]
+    if processed_original
+        .is_some_and(|root| root.cancellation.is_cancelled() || root.window_pending.load(Acquire))
+    {
+        // Only the original window can settle its pending close. A later
+        // window cannot overwrite that fact or spend the same held permit.
+        return;
+    }
     // A family may retain this reservation through several generations, but
     // only the exact unreaped process may use it. Refuse a duplicate launch
     // before opening inputs or spawning a second producer under one credit.
@@ -391,12 +401,15 @@ pub(super) async fn spawn_generation(
                     &encoding.executable.path,
                     crate::dv_segment::SegmentAdmission::Retained(worker),
                     Arc::clone(&rendition.slot),
-                    tokio_util::sync::CancellationToken::new(),
+                    processed_original
+                        .map_or_else(tokio_util::sync::CancellationToken::new, |root| {
+                            root.cancellation.clone()
+                        }),
                     Some(hook),
                     source_custody,
                     None,
                     source_open,
-                    None,
+                    processed_original.map(|root| &root.window_pending),
                 )
                 .await
                 .and_then(|outcome| match outcome {

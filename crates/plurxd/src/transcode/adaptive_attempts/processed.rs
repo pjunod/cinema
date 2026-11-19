@@ -9,6 +9,7 @@ pub(super) struct PreparedProcessedFel {
     duration_ms: i64,
     deferred_window: Option<(i64, i64)>,
     output_digest: [u8; 32],
+    terminal: Option<AdoptedProcessedTerminal>,
 }
 
 impl PreparedProcessedFel {
@@ -19,6 +20,7 @@ impl PreparedProcessedFel {
         let caps = context.canonical_caps.as_ref()?;
         checked_caps([
             std::mem::size_of::<Self>(),
+            AdoptedProcessedTerminal::requested_heap_bytes(),
             std::mem::size_of::<super::super::CandidateExecutionContext>(),
             std::mem::size_of::<plurx_core::store::PlaybackPlanningSnapshot>()
                 + 2 * std::mem::size_of::<usize>(),
@@ -52,6 +54,14 @@ impl PreparedProcessedFel {
 
     pub(super) fn deferred_window(&self) -> Option<(i64, i64)> {
         self.deferred_window
+    }
+
+    pub(super) fn terminal(&self) -> Option<&AdoptedProcessedTerminal> {
+        self.terminal.as_ref()
+    }
+
+    pub(super) fn take_terminal(&mut self) -> Option<AdoptedProcessedTerminal> {
+        self.terminal.take()
     }
 
     pub(super) fn duration_ms(&self) -> i64 {
@@ -406,12 +416,17 @@ impl TranscodeManager {
         };
         let deferred_window = (purpose == AdaptivePreparePurpose::DeferredFel)
             .then_some((verified.start, verified.end));
+        if unsettled_window.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("the original verified FEL qualification remains physically held".into());
+        }
+        let terminal = AdoptedProcessedTerminal::register(&trial.root)?;
         Ok(PreparedProcessedFel {
             trial,
             file,
             duration_ms,
             deferred_window,
             output_digest,
+            terminal: Some(terminal),
         })
     }
 }
@@ -452,6 +467,8 @@ impl TranscodeManager {
             preview_json.capacity(),
         ]);
         if preview_json.len() > crate::media_sessions::ADAPTIVE_PREVIEW_BYTES
+            || adopted_terminal_requested_bytes(&adoption.binding, &adoption.key, &adoption.worker)
+                .is_none_or(|bytes| bytes > attempt_root::FENCE_BYTES)
             || requested_bytes.is_none_or(|bytes| {
                 bytes > crate::media_sessions::MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES
             })
@@ -642,7 +659,7 @@ impl TranscodeManager {
         }
         // The actual pending VOD owner now owns the verified window and credit.
         // The existing viewer commit alone will advance the playback pointer.
-        *held = AttemptState::AdoptedWithoutTerminal;
+        Self::retain_adopted_terminal(entry, &mut held)?;
         Ok(start)
     }
 }

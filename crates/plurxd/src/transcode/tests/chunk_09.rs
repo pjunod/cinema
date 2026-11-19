@@ -3076,6 +3076,7 @@ async fn graph_holding(
     )
     .expect("backend");
     crate::vodencode::dv_runtime::RuntimeRecipe {
+        adaptive_terminal: std::sync::OnceLock::new(),
         tools: Arc::new(crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture(
             backend,
         )),

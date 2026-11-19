@@ -387,6 +387,34 @@ impl VodServe {
         }
     }
 
+    /// Start terminal detach only for this exact original processed root.
+    /// The shared terminal task or an already detached owner still owns proof.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn begin_processed_end(
+        &self,
+        session_id: &str,
+        original: &super::OriginalProcessedRoot,
+    ) {
+        let owner = self
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .filter(|session| {
+                session
+                    .rendition
+                    .as_ref()
+                    .is_some_and(|rendition| original.owns_rendition(rendition))
+            })
+            .map(Session::response_owner);
+        if let Some(owner) = owner {
+            let _ = self
+                .begin_end_inner(session_id, Terminal::Replaced, Some(&owner))
+                .await;
+        }
+    }
+
     /// Read-only assertion after the existing exact-owner cleanup await. Never
     /// starts cleanup itself, so an orphan cannot be repaired by the fixture.
     #[cfg(all(test, target_os = "linux"))]

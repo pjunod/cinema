@@ -1800,8 +1800,16 @@ mod finite_profile;
 #[cfg(target_os = "linux")]
 #[path = "vod/finite_software.rs"]
 pub(crate) mod finite_software;
+#[cfg(target_os = "linux")]
+#[path = "vod/processed_terminal.rs"]
+mod processed_terminal;
 #[path = "vod/shared.rs"]
 mod shared;
+#[cfg(target_os = "linux")]
+pub(crate) use processed_terminal::{
+    AdoptedProcessedTerminal, ConfirmedAdoptedProcessedTerminal, OriginalProcessedRoot,
+};
+
 #[cfg(target_os = "linux")]
 pub(crate) use shared::prepared_attempt_cleanup_frame_bytes;
 #[cfg(target_os = "linux")]

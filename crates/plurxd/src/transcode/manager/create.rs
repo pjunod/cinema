@@ -3814,7 +3814,7 @@ impl TranscodeManager {
                             return Err("complete-title display-target scan changed during preparation".into());
                         }
                     }
-                    let runtime = RuntimeRecipe { tools, source, source_offsets, source_frame_probe,
+                    let runtime = RuntimeRecipe { adaptive_terminal: std::sync::OnceLock::new(), tools, source, source_offsets, source_frame_probe,
                         source_tick, source_origin, native_bl, source_clock, preferences,
                         display_target,
                         display: req.candidate_context.as_ref().and_then(|context| context.canonical_caps.as_ref()).and_then(|caps| caps.display.clone()),

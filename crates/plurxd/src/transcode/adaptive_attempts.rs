@@ -26,8 +26,9 @@ type AttemptRef = attempt_root::AttemptRef<AttemptEntry>;
 
 use crate::media_sessions::{AdaptivePreparePurpose, AdaptiveProcessedRefusal};
 use crate::vodserve::{
-    AdoptedFiniteTerminal, ConfirmedAdoptedFiniteTerminal, PreparedAttemptCleanup,
-    PreparedAttemptCleanupTask, PreparedAttemptRendition,
+    AdoptedFiniteTerminal, AdoptedProcessedTerminal, ConfirmedAdoptedFiniteTerminal,
+    ConfirmedAdoptedProcessedTerminal, PreparedAttemptCleanup, PreparedAttemptCleanupTask,
+    PreparedAttemptRendition,
 };
 
 /// The fixed node controller can refuse a new provisional worker without
@@ -574,12 +575,13 @@ fn adoption_requested_bytes(
 }
 
 fn adopted_terminal_requested_bytes(
-    adoption: &plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption,
+    binding: &RequestBinding,
+    key: &AttemptKey,
+    worker: &WorkerBinding,
 ) -> Option<usize> {
-    let worker = &adoption.worker;
     let strings = checked_caps([
-        control_binding_bytes(&adoption.binding)?,
-        control_key_bytes(&adoption.key)?,
+        control_binding_bytes(binding)?,
+        control_key_bytes(key)?,
         worker.node_id.capacity(),
         worker.planning_source_digest.capacity(),
         worker.selected_recipe_digest.capacity(),
@@ -767,9 +769,6 @@ pub(super) enum AttemptState {
     Handoff(Box<HandoffAttempt>),
     Closing(Box<ClosingAttempt>),
     Adopted(Box<AdoptedAttempt>),
-    // The processed owner has accepted the product. Its durable obligation
-    // remains until the original processed graph can prove terminal closure.
-    AdoptedWithoutTerminal,
     Closed,
     Unknown,
 }
@@ -816,9 +815,37 @@ pub(super) struct AdoptedAttempt {
     key: AttemptKey,
     worker: WorkerBinding,
     adoption_operation_id: Uuid,
-    terminal: Option<AdoptedFiniteTerminal>,
-    confirmed_terminal: Option<ConfirmedAdoptedFiniteTerminal>,
+    terminal: Option<AdoptedPhysicalTerminal>,
+    confirmed_terminal: Option<ConfirmedAdoptedPhysicalTerminal>,
     close: Option<AdoptedAttemptClose>,
+}
+
+enum AdoptedPhysicalTerminal {
+    Finite(AdoptedFiniteTerminal),
+    Processed(AdoptedProcessedTerminal),
+}
+
+enum ConfirmedAdoptedPhysicalTerminal {
+    Finite {
+        _proof: ConfirmedAdoptedFiniteTerminal,
+    },
+    Processed {
+        _proof: ConfirmedAdoptedProcessedTerminal,
+    },
+}
+
+impl AdoptedPhysicalTerminal {
+    async fn positively_closed(&self) -> Result<Option<ConfirmedAdoptedPhysicalTerminal>, String> {
+        match self {
+            Self::Finite(original) => Ok(original
+                .positively_closed()
+                .await?
+                .map(|proof| ConfirmedAdoptedPhysicalTerminal::Finite { _proof: proof })),
+            Self::Processed(original) => Ok(original
+                .positively_closed()?
+                .map(|proof| ConfirmedAdoptedPhysicalTerminal::Processed { _proof: proof })),
+        }
+    }
 }
 
 pub(super) struct ClosingAttempt {
@@ -2741,7 +2768,7 @@ impl super::TranscodeManager {
             .await
             .map_err(|error| format!("reading adaptive viewer: {error}"))?
             .ok_or("adaptive viewer disappeared before Adopt")?;
-        if adopted_terminal_requested_bytes(&adoption)
+        if adopted_terminal_requested_bytes(&adoption.binding, &adoption.key, &adoption.worker)
             .is_none_or(|bytes| bytes > attempt_root::FENCE_BYTES)
         {
             return Err(
@@ -2858,9 +2885,10 @@ impl super::TranscodeManager {
             return Err("adaptive Adopt application fence was already retained".into());
         }
         if !matches!(state, AttemptState::Rich(rich)
-        if rich.adoption.is_some() && match &rich.pending {
-            PreparedWorkerProduct::Finite(pending) => pending.adopted_terminal().is_some(),
-            PreparedWorkerProduct::ProcessedFel(_) => true,
+        if (rich.adoption.is_some() ^ rich.staged_adoption.is_some()) && match &rich.pending {
+            PreparedWorkerProduct::Finite(pending) =>
+                rich.adoption.is_some() && pending.adopted_terminal().is_some(),
+            PreparedWorkerProduct::ProcessedFel(pending) => pending.terminal().is_some(),
         }) {
             return Err("adaptive Adopt has no original terminal selector".into());
         }
@@ -2870,29 +2898,45 @@ impl super::TranscodeManager {
         let RichAttempt {
             mut pending,
             adoption,
+            staged_adoption,
             application_lease,
             settlement,
             ..
         } = *rich;
-        let original = adoption.expect("checked original Adopt");
-        *state = match &mut pending {
-            PreparedWorkerProduct::Finite(pending) => {
-                AttemptState::Adopted(Box::new(AdoptedAttempt {
-                    adoption_operation_id: original.context.operation_id,
-                    binding: original.binding,
-                    key: original.key,
-                    worker: original.worker,
-                    terminal: Some(
-                        pending
-                            .take_adopted_terminal()
-                            .expect("checked terminal selector"),
-                    ),
-                    confirmed_terminal: None,
-                    close: None,
-                }))
-            }
-            PreparedWorkerProduct::ProcessedFel(_) => AttemptState::AdoptedWithoutTerminal,
+        let (adoption_operation_id, binding, key, worker) = match (adoption, staged_adoption) {
+            (Some(original), None) => (
+                original.context.operation_id,
+                original.binding,
+                original.key,
+                original.worker,
+            ),
+            (None, Some(original)) => (
+                original.context.operation_id,
+                original.binding,
+                original.key,
+                original.worker,
+            ),
+            _ => unreachable!("one exact original Adopt operation was checked"),
         };
+        let terminal = match &mut pending {
+            PreparedWorkerProduct::Finite(pending) => AdoptedPhysicalTerminal::Finite(
+                pending
+                    .take_adopted_terminal()
+                    .expect("checked finite selector"),
+            ),
+            PreparedWorkerProduct::ProcessedFel(pending) => AdoptedPhysicalTerminal::Processed(
+                pending.take_terminal().expect("checked processed selector"),
+            ),
+        };
+        *state = AttemptState::Adopted(Box::new(AdoptedAttempt {
+            adoption_operation_id,
+            binding,
+            key,
+            worker,
+            terminal: Some(terminal),
+            confirmed_terminal: None,
+            close: None,
+        }));
         *held = application_lease;
         drop(pending);
         drop(settlement);
@@ -2910,10 +2954,12 @@ impl super::TranscodeManager {
         // End can win after the exact attachment but before its publication
         // reply settled. The armed reader survives in the original Rich owner
         // and proves that it, too, was successfully detached.
-        if matches!(&*state, AttemptState::Rich(rich)
-            if matches!(&rich.pending, PreparedWorkerProduct::Finite(pending)
-                if pending.adopted_terminal().is_some_and(AdoptedFiniteTerminal::reader_detached)))
-        {
+        if matches!(&*state, AttemptState::Rich(rich) if match &rich.pending {
+            PreparedWorkerProduct::Finite(pending) =>
+                pending.adopted_terminal().is_some_and(AdoptedFiniteTerminal::reader_detached),
+            PreparedWorkerProduct::ProcessedFel(pending) =>
+                pending.terminal().is_some_and(AdoptedProcessedTerminal::physical_retirement_observed),
+        }) {
             Self::retain_adopted_terminal(entry, &mut state)?;
             return Ok(());
         }
@@ -3445,18 +3491,22 @@ impl super::TranscodeManager {
                 if route.state != "ended" {
                     return Ok(());
                 }
-                // A durable abort fences further attachment. If it raced
-                // the registered attach, wait for exact VOD terminal cleanup.
-                // No owner or cleanup result is still uncertainty.
-                if rich.staged_attachment_started
-                    && !self
-                        .vod
-                        .end(&route.session_id, crate::vodserve::Terminal::Replaced)
-                        .await
-                {
-                    return Err("staged attachment cleanup remains uncertain".into());
+                let PreparedWorkerProduct::ProcessedFel(pending) = &rich.pending else {
+                    return Err("staged cancellation has no original processed product".into());
+                };
+                let terminal = pending
+                    .terminal()
+                    .ok_or("staged original terminal selector is absent")?;
+                if rich.staged_attachment_started {
+                    // An End request is not a physical receipt. Keep the
+                    // original selector even if there is no attached reader.
+                    self.vod
+                        .begin_processed_end(&route.session_id, terminal.original())
+                        .await;
+                } else {
+                    terminal.no_attachment_entered()?;
                 }
-                *state = AttemptState::AdoptedWithoutTerminal;
+                Self::retain_adopted_terminal(entry, &mut state)?;
                 return Ok(());
             }
         }
@@ -3997,7 +4047,7 @@ impl super::TranscodeManager {
             AttemptState::Handoff(_) => "native_cleanup_registering",
             AttemptState::Closing(closing) if closing.cleanup.known_closed() => "native_closed",
             AttemptState::Closing(_) => "closing_owner_held",
-            AttemptState::Adopted(_) | AttemptState::AdoptedWithoutTerminal => "adopted",
+            AttemptState::Adopted(_) => "adopted",
             AttemptState::Closed => "closed",
             AttemptState::Unknown => "unknown_held",
         }
@@ -4051,14 +4101,11 @@ impl super::TranscodeManager {
             }
             if let Err(error) = self.finish_adopted_terminal(&entry).await {
                 tracing::warn!(attempt_id = %entry.attempt_id(), %error,
-                    "adopted finite attempt retains its exact terminal settlement");
+                    "adopted attempt retains its exact terminal settlement");
             }
             match self.finish_adaptive_close(&entry).await {
                 Ok(_) => {
-                    let terminal = matches!(
-                        *entry.state().await,
-                        AttemptState::Closed | AttemptState::AdoptedWithoutTerminal
-                    );
+                    let terminal = matches!(*entry.state().await, AttemptState::Closed);
                     if terminal && entry.no_original_tasks_or_application() {
                         if let Err(error) = self.adaptive_attempts.remove_terminal(&entry) {
                             tracing::warn!(attempt_id = %entry.attempt_id(), error,

@@ -1719,6 +1719,7 @@ printf '%s\n' '{}'
     .expect("checked control receipt");
     let payloads = vec![digest(&bytes)];
     let runtime = Arc::new(crate::vodencode::dv_runtime::RuntimeRecipe {
+        adaptive_terminal: std::sync::OnceLock::new(),
         tools: Arc::new(crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture(
             backend,
         )),

@@ -800,6 +800,23 @@ pub(crate) struct EncodePermit {
     _reservation: Arc<EncodeReservation>,
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) struct EncodePermitObservation(std::sync::Weak<EncodeReservation>);
+
+#[cfg(target_os = "linux")]
+impl EncodePermitObservation {
+    pub(crate) fn released(&self) -> bool {
+        self.0.strong_count() == 0
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl EncodePermit {
+    pub(crate) fn observe_original(&self) -> EncodePermitObservation {
+        EncodePermitObservation(Arc::downgrade(&self._reservation))
+    }
+}
+
 #[derive(Debug)]
 struct EncodeReservation {
     _hardware: Option<HwSlot>,

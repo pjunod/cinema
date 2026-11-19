@@ -1697,6 +1697,10 @@ impl Shared {
                         Arc::clone(self),
                         Arc::clone(&rendition),
                     ));
+                } else if let Some(original) = rendition.adaptive_processed_root() {
+                    original.install_driver(&rendition, || {
+                        spawn_driver(Arc::clone(self), Arc::clone(&rendition))
+                    })?;
                 }
                 renditions.insert(key.to_string(), Arc::clone(&rendition));
                 #[cfg(target_os = "linux")]
@@ -1725,7 +1729,8 @@ impl Shared {
                 self.working_set.fetch_add(adopted_bytes, Relaxed);
             }
             #[cfg(target_os = "linux")]
-            let spawn_after_publication = rendition.dir.finite_producer().is_none();
+            let spawn_after_publication = rendition.dir.finite_producer().is_none()
+                && rendition.adaptive_processed_root().is_none();
             #[cfg(not(target_os = "linux"))]
             let spawn_after_publication = true;
             if spawn_after_publication {
@@ -2504,14 +2509,34 @@ impl Shared {
         let settlement = tokio::spawn(async move {
             let _build_guard = build_guard;
             shared.hooks.get().after_dormant_purge_removed().await;
-            let _ = perform_driver_step(
-                &shared,
-                &rendition,
-                Step::Terminate {
-                    why: Termination::Idle,
-                },
-            )
-            .await;
+            #[cfg(target_os = "linux")]
+            let original = rendition.adaptive_processed_root();
+            #[cfg(target_os = "linux")]
+            if let Some(original) = original {
+                match original.retire_driver(&rendition).await {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(error) => {
+                        tracing::warn!(target: "plurxd::vodserve", rendition = %rendition.key,
+                            %error, "original processed close remains charged");
+                        return;
+                    }
+                }
+            }
+            #[cfg(target_os = "linux")]
+            let legacy_terminate = original.is_none();
+            #[cfg(not(target_os = "linux"))]
+            let legacy_terminate = true;
+            if legacy_terminate {
+                let _ = perform_driver_step(
+                    &shared,
+                    &rendition,
+                    Step::Terminate {
+                        why: Termination::Idle,
+                    },
+                )
+                .await;
+            }
             shared.pool.close(&rendition.key);
             if counted_finite {
                 let mut manifest = rendition.manifest.lock().await;
@@ -2556,7 +2581,7 @@ impl Shared {
                     tokio::fs::remove_dir_all(rendition.dir.path()).await
                 };
                 if let Err(error) = deletion {
-                    if error.kind() != io::ErrorKind::NotFound {
+                    if error.kind() != io::ErrorKind::NotFound || !legacy_terminate {
                         tracing::warn!(target: "plurxd::vodserve", rendition = %rendition.key,
                             %error, "processed storage cleanup retained for retry");
                         return;
@@ -2564,6 +2589,14 @@ impl Shared {
                 }
                 let claimed = rendition.manifest.lock().await.materialized_bytes();
                 let mut registry = shared.renditions.lock().await;
+                #[cfg(target_os = "linux")]
+                if let Some(original) = original {
+                    if let Err(error) = original.storage_retired(&rendition) {
+                        tracing::warn!(target: "plurxd::vodserve", rendition = %rendition.key,
+                            %error, "original processed retirement is uncertain");
+                        return;
+                    }
+                }
                 if registry
                     .get(&rendition.key)
                     .is_some_and(|current| Arc::ptr_eq(current, &rendition))
