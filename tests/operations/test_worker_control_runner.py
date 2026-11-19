@@ -12,6 +12,8 @@ import tempfile
 from unittest import mock
 from pathlib import Path
 
+from validation.merge_train import WORKER_PROOF_FILES
+
 ROOT = Path(__file__).resolve().parents[2]
 LOADER = importlib.machinery.SourceFileLoader("check_worker_control", str(ROOT / "scripts/check-worker-control"))
 SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
@@ -213,8 +215,7 @@ class WorkerControlInventoryTests(unittest.TestCase):
         interpreter = "crates/plurxd/src/library_work/env.rs"
         self.assertIn(interpreter, runner.GOVERNED)
         self.assertIn(interpreter, runner.PROOF_INPUTS)
-        workflow = (ROOT / ".github/workflows/main-fast-lane.yml").read_text(encoding="utf-8")
-        self.assertIn(interpreter, workflow)
+        self.assertIn(interpreter, WORKER_PROOF_FILES)
 
     def test_exact_six_names_and_counts_are_required(self) -> None:
         self.assertEqual(runner.parse_inventory(inventory()), list(runner.HARNESSES))

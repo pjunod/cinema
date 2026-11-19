@@ -73,7 +73,6 @@ internal fun appVersionLabel(versionName: String, versionCode: Int): String =
 fun SettingsScreen(
     vm: AppViewModel,
     onBack: () -> Unit,
-    onOpenDeveloper: () -> Unit = {},
     onOpenLiveTvSettings: () -> Unit = {},
     onOpenSharing: () -> Unit = {},
     onOpenRemotes: () -> Unit = {},
@@ -186,6 +185,7 @@ fun SettingsScreen(
                     isTelevision = isTelevision(LocalContext.current),
                     onEnabled = vm::setPreparedReplacement,
                 )
+                DisplayCadenceSetting(vm.origin)
             }
         }
         val appearance: @Composable () -> Unit = {
@@ -285,9 +285,8 @@ fun SettingsScreen(
             SettingsSection("Help", "Save a bounded private incident, send it to support, or finish on a phone.") {
                 tv.plurx.app.diagnostics.DiagnosticReportButton()
             }
-            SettingsSection("Developer", "Runtime enablement with the requirements needed to use each feature safely.") {
-        tv.plurx.app.ui.components.TvTextButton(onClick = onOpenRemotes) { Text("Remotes & devices") }
-                PreferenceAction("Match television refresh rate, sharing and remotes", onClick = onOpenDeveloper)
+            SettingsSection("Remotes & devices", "Cinema remotes, paired screens and background invitations.") {
+                PreferenceAction("Remotes & devices", onClick = onOpenRemotes)
             }
 
             SettingsSection("About", null) {
@@ -464,6 +463,35 @@ private fun PreferenceAction(label: String, destructive: Boolean = false, onClic
             style = MaterialTheme.typography.bodyLarge,
             modifier = Modifier.weight(1f),
         )
+    }
+}
+
+/**
+ * Settings → Playback → Match television refresh rate. The server key is
+ * `playback_display_mode_match`, unchanged from when it sat in Developer. Name
+ * and switch only; what it does and what the television must verify sit in a
+ * collapsed Details row, and no observation there disables the switch. The
+ * row is absent until the server settings load (administrator access).
+ */
+@Composable
+private fun DisplayCadenceSetting(origin: String) {
+    val state = tv.plurx.app.livetv.rememberLiveTvAdminState(origin, tv.plurx.app.livetv.LiveTvAdminSurface.Playback)
+    LaunchedEffect(state) { state.load() }
+    val settings = state.saved ?: return
+    PreferenceSwitch(
+        tv.plurx.app.livetv.LiveTvSettingsCard.DisplayCadence.title,
+        settings.playback_display_mode_match,
+    ) { if (!state.busy) state.write(tv.plurx.app.livetv.LiveTvSettingsChange.DisplayModeMatch(it)) }
+    tv.plurx.app.ui.components.Disclosure("Details") {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Requests only a same-resolution refresh rate matching the delivered cadence. A physical television and HDMI sink must verify the result; the observations below never disable or override the switch.")
+            state.developerReadiness?.items?.firstOrNull { it.id == "android_display_mode_match" }
+                ?.requirements?.forEach { requirement ->
+                    Text("${when (requirement.status) { "met" -> "Met"; "unmet" -> "Needs attention"; else -> "Not observable" }}: ${requirement.title}")
+                    Text(requirement.evidence, style = MaterialTheme.typography.bodySmall)
+                } ?: Text("Readiness is unavailable. That does not gate the switch.")
+            Text(state.message, style = MaterialTheme.typography.bodySmall)
+        }
     }
 }
 

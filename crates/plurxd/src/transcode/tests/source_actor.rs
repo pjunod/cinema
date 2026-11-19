@@ -1030,7 +1030,7 @@ async fn source_start_budget_uses_actual_vod_settings_and_admission_policy() {
         source_telemetry: None,
         continuous_media: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         vod_only: false,
         passive_vod: false,

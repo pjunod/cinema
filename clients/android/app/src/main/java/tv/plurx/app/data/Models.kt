@@ -1121,6 +1121,20 @@ data class MediaIntentEnvelope(
     val selection: MediaIntentSelection,
 )
 
+/**
+ * Per-playback overrides of server settings. `retain_output = false` means this
+ * playback queues no complete-output preparation and keeps no rolling output;
+ * the field is only ever sent as false, and absent means "follow the server".
+ */
+@Serializable
+data class SessionOverrides(val retain_output: Boolean? = null)
+
+/** Body for `POST hls/{session}/retain-output`; off-only. */
+@Serializable
+// No default: the shared Json omits default values, and the server requires
+// the field, so `{}` would be refused.
+data class RetainOutputReq(val retain_output: Boolean)
+
 @Serializable
 @OptIn(ExperimentalSerializationApi::class)
 data class CreateSessionReq(
@@ -1198,6 +1212,8 @@ data class CreateSessionReq(
     val presentation: String = "vod",
     /** Media3's measured first-byte budget will replace the server default. */
     val block_budget_secs: Double? = null,
+    /** Per-playback overrides; null unless the viewer turned a switch off. */
+    val overrides: SessionOverrides? = null,
 )
 
 @Serializable

@@ -36,6 +36,7 @@ pub(crate) const HLS_SESSION_ROUTES: &[(&str, &str, bool)] = &[
     ("POST", "/hls/{session}/control", false),
     ("POST", "/hls/{session}/quality-control", false),
     ("POST", "/hls/{session}/quality-schedule", false),
+    ("POST", "/hls/{session}/retain-output", false),
     ("DELETE", "/hls/{session}", false),
 ];
 

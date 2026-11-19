@@ -786,6 +786,15 @@ struct PlurxAPI {
         try await get("hls/\(sessionId)/status")
     }
 
+    /// Off-only: tell a running session to stop keeping a reusable copy (204).
+    func retainHlsOutputOff(sessionId: String) async throws {
+        let req = try jsonRequest("hls/\(sessionId)/retain-output", body: RetainOutputRequest())
+        var authorized = req
+        Session.shared.authorize(&authorized)
+        let (_, resp) = try await ReadAfterHTTP.shared.data(for: authorized, using: session)
+        try Self.check(resp)
+    }
+
     /// DELETE the session the moment playback ends. Without it the encoder
     /// lives on for the idle timeout plus a reaper tick — a hardware slot
     /// held for over a minute for nobody. Best-effort by design: the route is

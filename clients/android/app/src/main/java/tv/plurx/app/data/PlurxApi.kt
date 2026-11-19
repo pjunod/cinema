@@ -317,6 +317,10 @@ interface PlurxApi {
     @DELETE("hls/{session}")
     suspend fun endHlsSession(@Path("session") session: String)
 
+    /** Off-only: stop this running session keeping a reusable copy (204). */
+    @POST("hls/{session}/retain-output")
+    suspend fun retainHlsOutput(@Path("session") session: String, @Body body: RetainOutputReq)
+
     @POST("items/{id}/progress")
     suspend fun progress(@Path("id") id: Long, @Body body: ProgressReq)
 
