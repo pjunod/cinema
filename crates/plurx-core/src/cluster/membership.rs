@@ -42,6 +42,21 @@ use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
 use super::ClusterIdentity;
 
+/// The committed voter ids `MembershipManager::local_node_is_committed_voter`
+/// decides on, read from a Raft metrics `membership_config`
+/// (`openraft::StoredMembership`): `voter_ids()`, the union over a joint
+/// configuration. A macro rather than a function because `openraft` is not a
+/// normal dependency of this crate, so production code cannot name the type;
+/// the lifecycle agreement test applies the same read to the stored
+/// memberships it builds, and the core capability's coherent committed read
+/// (`access::LocalNode::committed`) applies it too. Defined before `mod access`
+/// so that child module sees it.
+macro_rules! committed_voter_ids {
+    ($membership_config:expr) => {
+        $membership_config.voter_ids()
+    };
+}
+
 mod access;
 pub use access::{
     ActiveVoterAuthority, AdministrativeObservation, ClockChanges, ClockProtocol, ClusterAccess,
@@ -3308,18 +3323,6 @@ fn reduction_reference_key(reference: &hiqlite::ReductionFenceReference) -> Stri
     )
 }
 
-/// The committed voter ids `MembershipManager::local_node_is_committed_voter`
-/// decides on, read from a Raft metrics `membership_config`
-/// (`openraft::StoredMembership`): `voter_ids()`, the union over a joint
-/// configuration. A macro rather than a function because `openraft` is not a
-/// normal dependency of this crate, so production code cannot name the type;
-/// the lifecycle agreement test applies the same read to the stored
-/// memberships it builds.
-macro_rules! committed_voter_ids {
-    ($membership_config:expr) => {
-        $membership_config.voter_ids()
-    };
-}
 
 /// "Every active node proves `capability` with the binary it is running now."
 fn capability_ready_predicate(capability: &str) -> String {

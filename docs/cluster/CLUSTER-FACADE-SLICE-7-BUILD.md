@@ -352,6 +352,14 @@ query entry points were retired rather than silenced.
 Real external-crate compiler controls used the exact Cargo-produced core
 metadata: public services compiled; all14 restricted raw methods produced
 E0624; all4 retired raw methods produced E0599; unrelated errors were refused.
+The E0624 result covers inherent method calls; the probe does not import any
+trait. One restricted name, `may_run_cluster_jobs`, is also a method of the
+public `ClusterJobAuthority` trait, which `MembershipManager` implements.
+With the trait in scope, Rust resolves that call to the trait method, so it
+stays reachable through the trait. That is the intended public route for job
+authority: `JobControl` and the manager's trait impl both delegate the same
+original decision. The census still counts any raw `MembershipManager`
+receiver that makes it.
 Probe source and receipts remain in owned durable task storage, outside
 compiler/cache output. Tracked archive blobs were verified before and after.
 

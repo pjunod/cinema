@@ -148,8 +148,11 @@ impl LocalNode {
     pub async fn committed(&self) -> Result<CommittedMembership, MembershipError> {
         let inner = self.manager.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
+        // One metrics read answers both, coherently; each answer applies the
+        // same rule as its original (`local_node_is_committed_voter`,
+        // `local_node_is_committed_member`).
         let voter = super::lifecycle::committed_voter(
-            metrics.membership_config.voter_ids(),
+            committed_voter_ids!(metrics.membership_config),
             inner.identity.raft_id,
         );
         let member = metrics

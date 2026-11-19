@@ -5042,6 +5042,32 @@ fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
         clone < router,
         "take the facade operations before the router takes the state"
     );
+    // The facade's two drain delegates reach the original mechanisms.
+    let facade: String = include_str!("cluster.rs").split_whitespace().collect();
+    let handoff = facade
+        .split_once("pub(crate)asyncfnhandoff_for_shutdown(")
+        .expect("the facade's stop-time handoff")
+        .1
+        .split_once("pub(crate)")
+        .expect("the handoff delegate ends")
+        .0;
+    assert!(
+        handoff.contains("self.cluster.membership.handoff_for_shutdown().await"),
+        "the drain's handoff is the manager's one bounded handoff"
+    );
+    let fence = facade
+        .split_once("pub(crate)asyncfnprepare_restart_fence(")
+        .expect("the facade's restart fence")
+        .1
+        .split_once("pub(crate)")
+        .expect("the restart fence delegate ends")
+        .0;
+    assert!(
+        fence.contains(
+            "self.cluster.fence.begin_restart_preparation_until(expires_at_unix_ms).await"
+        ),
+        "the drain's media fence is the fence's own restart preparation"
+    );
 }
 
 /// Audit C7: a database Raft core that quit on a fatal error resolves the
