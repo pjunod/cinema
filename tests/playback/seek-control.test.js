@@ -606,12 +606,13 @@ function seekBaseHarness(player, positionSec, totalSec) {
     [
       source("unexecutedPlaybackDestinationSec"),
       source("pbRelativeSeekBase"),
-      "return {base:pbRelativeSeekBase, destination:unexecutedPlaybackDestinationSec};",
+      "return {base:pbRelativeSeekBase, destination:() => unexecutedPlaybackDestinationSec(PLAYER)};",
     ].join("\n"),
   )(player, () => positionSec, () => totalSec);
 }
 
 test("a relative seek counts from the destination while a replacement is pending", () => {
+  assert.equal(seekBaseHarness(undefined, 0, 0).destination(), null);
   // The incident: the picture is still at 100 s because the create for 110 has
   // not landed, so the old base -- the attached element's clock -- made every
   // committed +10 land on 110 again.
