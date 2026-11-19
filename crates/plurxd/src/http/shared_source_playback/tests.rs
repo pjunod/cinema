@@ -4167,11 +4167,26 @@ async fn actual_source_budgeted_start() {
     // Free capacity before the actual queue's five-second limit. The next
     // observation is the real owned index child, with permit/fence/authority.
     drop(hold);
-    let held_index = index_pause.reached().await;
+    let entry = entry_of(abandoned).expect("the abandoned start's retained entry");
+    // The first POST answered while pure preparation was held, before any
+    // assignment or ingress registration. Observe this same entry's actual
+    // assignment before rejoining: the factory must see the rejoin driver's
+    // durable ingress custody before it may spawn a source-reading child.
+    let assignment = super::ingress::assigned(
+        &fixture.state,
+        &entry,
+        preparation_released_at + crate::seam_hooks::ASYNC_PAUSE_BOUND,
+    )
+    .await
+    .expect("the retained owner assigns on its preparation budget");
+    // Drive the original clocked rejoin while observing the actual child.
+    // Waiting for the child first would wait for custody that this very POST
+    // has not registered yet. Its original 300 ms answer clock is unchanged.
+    let (held_index, (status, _, bytes)) =
+        tokio::join!(index_pause.reached(), post(body(abandoned), Some(300)));
     let index_after_preparation_release = preparation_released_at.elapsed();
     // Rejoin while the actual owned index child is held, rather than
     // inferring a live cold-index operation from a planned incarnation.
-    let (status, _, bytes) = post(body(abandoned), Some(300)).await;
     assert_eq!(
         (status, typed(&bytes[..])),
         (
@@ -4181,7 +4196,6 @@ async fn actual_source_budgeted_start() {
         "the viewer's window does not end owned preparation: {}; viewer_elapsed={viewer_elapsed_before_release:?}, index_after_preparation_release={index_after_preparation_release:?}",
         String::from_utf8_lossy(&bytes)
     );
-    let entry = entry_of(abandoned).expect("the abandoned start's entry");
     let incarnation = entry
         .task
         .stage
@@ -4189,6 +4203,7 @@ async fn actual_source_budgeted_start() {
         .expect("stage")
         .incarnation()
         .expect("the entry owns its claim");
+    assert_eq!(incarnation, assignment.binding().incarnation_id());
     // Deliver End while this exact owned index child is held after spawn.
     // Its stage cannot complete or its queue expire before End ownership.
     // Releasing the existing seam lets the real index persist and settle.
