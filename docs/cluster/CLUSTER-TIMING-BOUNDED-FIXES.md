@@ -80,3 +80,27 @@ A renewal ACK retains the expiry proposed at dispatch, even if a stalled
 runtime polls it late. Still-live ACKs remain valid; a receipt at or beyond
 the fixed expiry joins the exact-owner fence path immediately. Its boundary
 control tests before/at/after expiry without starting another lease.
+
+## 4. Timing extraction tooling follow-through
+
+Keep deployment startup budgeting tied to the canonical startup timing module
+and verify each migration alias before using its value. Reject missing, duplicate
+or unexpected definitions rather than copying the Rust policy into Python.
+Update the existing deployment contract to consume this checked source reader.
+Formal negative controls must separately distinguish an unchanged anchor with
+an edited item from a removed or duplicated anchor; a declaration-only alias
+anchor must still reject body drift. Run the focused Python controls without
+starting another compiler.
+
+Implemented follow-through: the source reader checks each exact migration
+alias and one canonical startup definition, refusing missing/duplicate aliases,
+wrong domains, direct local literals, ambiguous modules and unsupported
+expressions. The Docker contract uses that reader without removing its separate
+health-grace arithmetic. Formal escape controls verify the exact item-drift
+diagnostic when an anchor survives and independently reject removed/duplicated
+anchors. No mapping hashes or matching rules were changed.
+
+Focused Python validation: startup-budget suite plus connected Pi readiness
+case (33 tests), connected Docker contract (1 test), full formal item-pin suite
+(18 tests), and all three formal mapping checks passed. No Rust compiler was
+started for this tooling repair; combined integration remains root-owned.
