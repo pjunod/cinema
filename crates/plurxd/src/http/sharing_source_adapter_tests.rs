@@ -20,6 +20,7 @@ async fn actual_actor_adapters(encoded: bool) {
         None,
     )
     .await;
+    fixture.keep_fixture_membership_stable().await;
     if encoded {
         let mut recipe: Value =
             serde_json::from_slice(&fixture.request).expect("real encoded recipe");
