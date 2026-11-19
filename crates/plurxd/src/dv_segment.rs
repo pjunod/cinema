@@ -273,20 +273,24 @@ pub(crate) fn supervise_streaming_helper(
 ) -> HelperCompletion {
     let (completed, completion) = tokio::sync::watch::channel(None);
     tokio::spawn(async move {
-        tokio::pin!(helper);
         let retirement = registration.retirement();
-        let result = tokio::select! {
-            result = &mut helper => result,
-            _ = cancel.cancelled() => {
-                helper_cancel.cancel();
-                // Retire the encoder before joining a helper that may be
-                // blocked writing into it. The original slot still owns reap.
-                if let Some(slot) = slot.upgrade() {
-                    let _ = slot.request_registered_retirement(&registration).await;
-                }
-                helper.await
-            },
-            _ = retirement.cancelled() => { helper_cancel.cancel(); helper.await },
+        let result = {
+            // The actual helper future's captures die before we publish its
+            // result. The remaining supervisor can only forward retirement.
+            tokio::pin!(helper);
+            tokio::select! {
+                result = &mut helper => result,
+                _ = cancel.cancelled() => {
+                    helper_cancel.cancel();
+                    // Retire the encoder before joining a helper that may be
+                    // blocked writing into it. The original slot still owns reap.
+                    if let Some(slot) = slot.upgrade() {
+                        let _ = slot.request_registered_retirement(&registration).await;
+                    }
+                    helper.await
+                },
+                _ = retirement.cancelled() => { helper_cancel.cancel(); helper.await },
+            }
         };
         let outcome = if cancel.is_cancelled() || retirement.is_cancelled() {
             HelperOutcome::Cancelled

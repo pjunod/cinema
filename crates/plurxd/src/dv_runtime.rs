@@ -1734,8 +1734,10 @@ async fn capture_private_output(
         }
     }
     registration.wait_confirmed_reap().await;
-    let _ = observed_helper.wait().await;
-    *reaped = true;
+    let _ = observed_helper.clone().wait().await;
+    // wait reports a lost supervisor as an ordinary error to callers. Only
+    // a real receipt from that helper can prove original native settlement.
+    *reaped = observed_helper.outcome().is_some();
     result
 }
 
@@ -2862,6 +2864,52 @@ mod private_window_outcome_tests {
         let job = crate::process_control::ChildJob::attach(&child).expect("encoder job");
         let (registration, writers) = slot.attach_registered_job_owned(child, job, 0, None).await;
         (slot, registration, writers)
+    }
+
+    #[tokio::test]
+    async fn helper_completion_follows_the_original_future_destruction() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Capture(std::sync::Arc<AtomicBool>);
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let (slot, registration, writers) = capture_boundary_encoder().await;
+        let released = std::sync::Arc::new(AtomicBool::new(false));
+        let original = Capture(std::sync::Arc::clone(&released));
+        // poll_fn retains its captures after returning Ready until the future
+        // itself is destroyed. The supervisor is still awaiting retirement.
+        let helper = std::future::poll_fn(move |_| {
+            let _held = &original;
+            std::task::Poll::Ready(Ok(()))
+        });
+        let completion = crate::dv_segment::supervise_streaming_helper(
+            helper,
+            tokio_util::sync::CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::downgrade(&slot),
+            registration.clone(),
+        );
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), completion.wait())
+            .await
+            .expect("the actual helper result");
+        let released_at_result = released.load(Ordering::Acquire);
+        writers.settled();
+        slot.request_registered_retirement(&registration)
+            .await
+            .expect("retire the registered encoder");
+        registration.wait_confirmed_reap().await;
+        assert!(matches!(
+            result,
+            crate::dv_segment::HelperOutcome::Completed
+        ));
+        assert!(
+            released_at_result,
+            "the result cannot precede destruction of the original future"
+        );
     }
 
     #[tokio::test]

@@ -53,6 +53,11 @@ impl std::fmt::Debug for ProcessedOwnerRelease {
 
 impl Drop for ProcessedOwnerRelease {
     fn drop(&mut self) {
+        // Rust continues dropping later fields after a destructor panics.
+        // That must leave the physical release unresolved.
+        if std::thread::panicking() {
+            return;
+        }
         self.original
             .released_owners
             .fetch_or(self.kind as u8, Ordering::Release);
