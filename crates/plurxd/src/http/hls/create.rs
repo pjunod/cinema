@@ -1856,6 +1856,7 @@ pub(crate) struct PlanInputs<'a> {
 /// will never be built has none — which is why M6 reads the grade axis off the
 /// request instead, as `GradeIntent`. See §3.2.1 of the caller handoff for the
 /// claim that was withdrawn here.
+#[cfg(test)]
 pub(crate) async fn resolve_plan(
     inputs: PlanInputs<'_>,
     review: Option<PlanReview>,
