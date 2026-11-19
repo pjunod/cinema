@@ -135,6 +135,7 @@ pub(super) struct Session {
     /// Raw writer revisions are private staged inventory. Only the immutable
     /// snapshot in this actor-authorized clock may cross the HTTP boundary.
     pub(super) publication: Mutex<RollingPublicationClock>,
+    pub(super) native_split: Option<Arc<crate::copyseg::NativeSplitInventory>>,
     pub(super) publication_worker_started: AtomicBool,
     /// One detached, cancellation-safe consumer applies every actor-owned
     /// producer-policy wake. HTTP response futures may disappear after the
@@ -1442,6 +1443,9 @@ impl Session {
             end_list,
             available_at,
         });
+        if let Some(split) = &self.native_split {
+            split.changed.notify_waiters();
+        }
         // The newly committed prefix can establish steady reserve even when
         // the previous prefix was low at this cycle's consumed position.
         // Compare with the steady frontier, never the smaller first gate.

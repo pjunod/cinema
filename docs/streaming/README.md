@@ -1,6 +1,6 @@
 # streaming/ — delivery: VOD, Dolby Vision, capabilities, reliability
 
-Status terms: [index](../README.md). Index new docs here.
+Follow the [docs index rules](../README.md).
 
 Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 
@@ -26,6 +26,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Cold publication and Resume fault repair ledger. | open |
 | [HDR10E-PREPARATION-AND-WEB-RECOVERY.md](HDR10E-PREPARATION-AND-WEB-RECOVERY.md) | Preparation, native observation and rewatch resume repairs. | open |
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
+| [FEL splice](FEL-SERVER-SPLICE-BUILD.md) | Native HLS cutover and rollout. | open |
 | [FEL-PICTURE-QUALITY-INVESTIGATION.md](FEL-PICTURE-QUALITY-INVESTIGATION.md) | FEL quality findings. | open |
 | [FEL-RPU-REFIT-BUILD.md](FEL-RPU-REFIT-BUILD.md) | F+ curves: build plan. | built |
 | [M6 Q12 qualification](FEL-RPU-REFIT-M6-Q12-2026-11-16.json) · [Q23 history](FEL-RPU-REFIT-M6-2026-11-16.json) | Native evidence. | done |

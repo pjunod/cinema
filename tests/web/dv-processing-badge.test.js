@@ -393,3 +393,18 @@ test('a neutral prepared processing claim adopts only the current HDR10 executio
   context.PLAYER.effectiveProcessing={...report(),generation:'22222222-2222-4222-8222-222222222222'};
   assert.equal(context.playerEnhancementRow(context.PLAYER),null,'a stale receipt cannot populate the pending claim');
 });
+
+test('the rolling Dolby Vision report upgrades the current Profile 8.1 row and clears on ordinary media',()=>{
+  const {PLAYER:p,playerEnhancementRow,playerRangeBadge}=setup();
+  p.deliveredRange='dolby_vision';
+  p.deliveredDvProfile=8;
+  p.enhancement={active:['DYN'],details:[{badge:'DYN',active:true,text:'DYN: Dolby Vision metadata'}]};
+  p.effectiveProcessing={generation,hdr10_enhanced:false,profile81_reconstructed:true,
+    fel_contributed:true,applied_operations:['LinearNlqResidual','RpuColorConversion','TargetMapping']};
+  assert.equal(playerEnhancementRow(p).value,'Profile 8.1 FEL');
+  assert.notEqual(playerRangeBadge(source).arrow,'HDR10-E');
+  p.effectiveProcessing.generation='22222222-2222-4222-8222-222222222222';
+  assert.equal(playerEnhancementRow(p).value,'DYN');
+  p.effectiveProcessing=null;
+  assert.equal(playerEnhancementRow(p).value,'DYN');
+});
