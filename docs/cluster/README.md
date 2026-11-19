@@ -14,6 +14,7 @@ failures.
 
 | File | Answers | |
 |---|---|---|
+| [OPENRAFT-010-EVALUATION.md](OPENRAFT-010-EVALUATION.md) | Which native 0.10 mechanisms can replace fork patches 4, 6 and 28, and what exact 0.9.25 source proves about starved voters. | open |
 | [CLUSTER-TIMING-BUILD.md](CLUSTER-TIMING-BUILD.md) | How one shared timing table preserves current budgets and tracks their unresolved relationships and OpenRaft evaluation. | open |
 | [CLUSTER-FACADE-BOUNDARY-DECISION.md](CLUSTER-FACADE-BOUNDARY-DECISION.md) | How core-private mechanisms cross into one daemon facade without fake privacy. | open |
 | [CLUSTER-FACADE-SLICE-7-BUILD.md](CLUSTER-FACADE-SLICE-7-BUILD.md) | The serialized final ownership migrations and evidence required for honest zero. | open |

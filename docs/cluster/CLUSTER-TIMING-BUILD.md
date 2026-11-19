@@ -1,6 +1,6 @@
 # Cluster timing — one budget table and explicit remaining decisions
 
-**Status:** ready to build · **Executes:** C3 and C5 from
+**Status:** implemented; final integration qualification remains · **Executes:** C3 and C5 from
 [the cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md) · **Written:** 2026-11-19
 
 Companion to [the facade contract](CLUSTER-FACADE-BUILD.md). This lane starts
@@ -68,3 +68,22 @@ source checks before and after, and a dedicated target. Compilation proves
 API consistency, not fleet failover or crash durability. A passing relation
 check proves only its named envelope. No C4 measurement or physical
 acceptance is claimed by this lane.
+
+## 5. Local implementation — exact values retained
+
+The extraction centralizes 86 declarations and retains all prior import
+names. Cross-domain formulas now derive membership reachability and protocol
+absence from the heartbeat, job TTL from renewal cadence, media lease/claim
+from lease cadence, and Store-related activation deadlines from the shared
+Store attempt bound. Existing media envelope/runway formulas move unchanged.
+
+At source `38bcf1409`, the isolated replicated-core compile passed. Four
+budget and runway relation tests passed. An independent compiled control
+read the 86 original declarations from the exact `09d4d9502` archive and
+compared their values with the new module: all 86 matched. This control also
+checks its supplied domain safety-window scalar against that archive.
+
+The [C5 evaluation](OPENRAFT-010-EVALUATION.md) pins the actual 0.10.0 release
+and corrects the audit's unverified C4 stall threshold. No C4 fleet result is
+claimed. Daemon compilation, strict Clippy, final-base checks and landing
+remain integration obligations until their receipts are recorded.
