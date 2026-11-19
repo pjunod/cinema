@@ -2627,12 +2627,12 @@ async fn build_real_source_start_fixture(
                 .expect("owned HTTP observation listener"),
         )
     });
-    let mut selected = if let Some(clock) = &startup_clock {
+    let selected = if let Some(clock) = &startup_clock {
         Box::pin(select_daemon_store_observing(&config, Some(clock.as_ref()))).await
     } else {
         crate::sharing_fixture_clock::select_applied_singleton(&config).await
-    }
-    .expect("actual one voter");
+    };
+    let mut selected = source_voter_fixture::finish_boot(&config, selected, "actual one voter");
     selected
         .store
         .put_setting(keys::SHARING_ENABLED, "true")
@@ -3112,6 +3112,10 @@ async fn build_real_source_start_fixture(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "source_voter_fixture.rs"]
+pub(crate) mod source_voter_fixture;
 
 #[cfg(test)]
 #[path = "sharing_source_adapter_tests.rs"]

@@ -10,8 +10,8 @@ use std::{
 };
 
 use super::super::{
-    real_source_start_fixture_with, tests::actual_resource_request, RealSourceStartFixture,
-    SourceFixtureMode,
+    real_source_start_fixture_with, source_voter_fixture, tests::actual_resource_request,
+    RealSourceStartFixture, SourceFixtureMode,
 };
 
 async fn direct_start(
@@ -395,6 +395,14 @@ async fn parked_body(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_direct_body_stops_on_revocation() {
+    source_voter_fixture::run(
+        "http::shared_source_playback::direct::tests::sharing_source_direct_body_stops_on_revocation",
+        Box::pin(direct_body_revocation_fixture()),
+    )
+    .await;
+}
+
+async fn direct_body_revocation_fixture() {
     let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
     let session = started(&fixture).await;
     let gate = Arc::new(SourceReadJobGate::default());

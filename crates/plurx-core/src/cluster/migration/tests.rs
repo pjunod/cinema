@@ -509,6 +509,8 @@ async fn restore_archive_remaps_paths_resets_fingerprint_and_mints_fence() {
 mod restore_endpoints {
     use super::*;
     use serde::{Deserialize, Serialize};
+    pub(super) const STAGED_CLEANUP_CASE: &str =
+        "k06_post_client_uncertain_cleanup_keeps_actual_lock_without_runtime_or_after_abort";
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::process::{Child, Command, ExitStatus, Stdio};
     use std::time::Instant;
@@ -652,6 +654,14 @@ mod restore_endpoints {
         let Some(message) = message.strip_suffix(&suffix) else {
             return false;
         };
+        voter_bind_message(message, raft, api)
+    }
+
+    fn voter_bind_message(
+        message: &str,
+        raft: std::net::SocketAddr,
+        api: std::net::SocketAddr,
+    ) -> bool {
         let occupied = std::io::Error::from_raw_os_error(libc::EADDRINUSE).to_string();
         [("raft", "Raft", raft), ("cluster API", "API", api)].into_iter().any(|(preflight, vendor, address)| {
             message == format!("database error: starting Hiqlite voter: Connect: bind {vendor} listener {address}: {occupied}")
@@ -698,6 +708,21 @@ mod restore_endpoints {
             }
             Err(error) => panic!("source voter: {error:?}"),
         }
+    }
+
+    pub(super) fn staged_voter_acquired(config: &Config) {
+        report(config, "acquired", None);
+    }
+
+    pub(super) fn staged_voter_refused(config: &Config, error: StoreError) -> ! {
+        let message = error.to_string();
+        if matches!(error, StoreError::Database(_) | StoreError::Migration(_))
+            && voter_bind_message(&message, config.cluster.raft_bind, config.cluster.api_bind)
+        {
+            report(config, "refused", Some(message));
+            std::process::exit(COLLISION);
+        }
+        panic!("actual staged Client: {error:?}");
     }
 
     fn read_report(context: &Context, pid: u32, stage: &str) -> Result<Report, String> {
@@ -877,12 +902,18 @@ mod restore_endpoints {
                 match read_report(context, pid, "refused") {
                     Ok(report)
                         if report.error.as_ref().is_some_and(|message| {
-                            bind_collision(
-                                &StoreError::Migration(message.clone()),
-                                &report.source,
-                                report.raft,
-                                report.api,
-                            )
+                            if context.case
+                                == format!("cluster::migration::tests::{STAGED_CLEANUP_CASE}")
+                            {
+                                voter_bind_message(message, report.raft, report.api)
+                            } else {
+                                bind_collision(
+                                    &StoreError::Migration(message.clone()),
+                                    &report.source,
+                                    report.raft,
+                                    report.api,
+                                )
+                            }
                         }) =>
                     {
                         record.collision = Some(report);
@@ -974,7 +1005,9 @@ mod restore_endpoints {
         if let Some(context) = context(case) {
             assert_eq!(context.probe, Probe::Actual);
             assert_eq!(context.sharing, sharing);
-            if sharing {
+            if case == STAGED_CLEANUP_CASE {
+                super::staged_cleanup_keeps_actual_lock_fixture();
+            } else if sharing {
                 startup_observer::run_full_hiqlite_fixture(
                     "restore-sharing-census",
                     restore_archive_sharing_observation_fixture,
@@ -3040,6 +3073,11 @@ fn k06_post_client_cancellation_retains_actual_daemon_lock_until_tls_drain() {
 #[cfg(feature = "hiqlite-store")]
 #[test]
 fn k06_post_client_uncertain_cleanup_keeps_actual_lock_without_runtime_or_after_abort() {
+    restore_endpoints::actual(restore_endpoints::STAGED_CLEANUP_CASE, false);
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn staged_cleanup_keeps_actual_lock_fixture() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -3049,7 +3087,7 @@ fn k06_post_client_uncertain_cleanup_keeps_actual_lock_without_runtime_or_after_
                 .enable_all()
                 .build()
                 .expect("build actual Client runtime");
-            let root = tempfile::tempdir().expect("owned uncertain-cleanup root");
+            let root = restore_endpoints::source_directory();
             let config = membership_test_config(root.path());
             let identity =
                 super::super::initialize_identity(root.path(), &uuid::Uuid::now_v7().to_string())
@@ -3057,11 +3095,15 @@ fn k06_post_client_uncertain_cleanup_keeps_actual_lock_without_runtime_or_after_
             let secrets = load_or_create_secrets(root.path()).expect("actual secrets");
             let target = root.path().join(HIQLITE_ACTIVE_DIRNAME);
             std::fs::create_dir(&target).expect("active directory");
-            let (client, _, _) = runtime
-                .block_on(Box::pin(start_voter(
-                    &config, &target, &secrets, &identity, None, true, None, true, true,
-                )))
-                .expect("actual staged Client");
+            let (client, _, _) = match runtime.block_on(Box::pin(start_voter(
+                &config, &target, &secrets, &identity, None, true, None, true, true,
+            ))) {
+                Ok(boot) => {
+                    restore_endpoints::staged_voter_acquired(&config);
+                    boot
+                }
+                Err(error) => restore_endpoints::staged_voter_refused(&config, error),
+            };
             let make_owned = |name: &str| {
                 let path = root.path().join(name);
                 let lock = File::create(&path).expect("create owned lock");
