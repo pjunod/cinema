@@ -1377,7 +1377,7 @@ impl Session {
         }
         if clock.served.is_none() {
             clock.initial_capacity_pending_after_short_admission = initial_admission_policy
-                == RollingStartupPolicy::MpvReloadWindow
+                == RollingStartupPolicy::MpvReload
                 && !clock.initial_capacity_checked
                 && served_end_ms < rolling_initial_runway_ms(playback_rate);
             tracing::info!(

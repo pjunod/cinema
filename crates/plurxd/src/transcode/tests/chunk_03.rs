@@ -559,7 +559,7 @@
             let hlsjs = transport == Some("hlsjs");
             let mpv = transport == Some("mpv");
             let policy = if mpv {
-                RollingStartupPolicy::MpvReloadWindow
+                RollingStartupPolicy::MpvReload
             } else if hlsjs {
                 RollingStartupPolicy::FirstReloadWindow
             } else {
@@ -793,7 +793,7 @@
                 .expect("the same completed inventory may admit after release");
             let clock = session.publication.lock().await;
             assert_eq!(clock.served.as_ref().expect("released MPV snapshot").end_ms, 34_582);
-            assert_eq!(clock.startup_policy, RollingStartupPolicy::MpvReloadWindow,
+            assert_eq!(clock.startup_policy, RollingStartupPolicy::MpvReload,
                 "a temporary hold must not replace the frozen consumer contract");
             assert_eq!(session.progress.recent_speed(), Some(2.0));
         }
@@ -820,7 +820,7 @@
             assert_eq!(clock.served.as_ref().expect("native complete endpoint").end_ms, 128_000,
                 "{transport}: the effective 124s native floor rounds up, not down to 112s");
             if transport == "mpv" {
-                assert_eq!(clock.startup_policy, RollingStartupPolicy::MpvReloadWindow,
+                assert_eq!(clock.startup_policy, RollingStartupPolicy::MpvReload,
                     "effective fallback must not replace the frozen consumer contract");
             }
         }
@@ -1002,7 +1002,7 @@
         let durations: Vec<i64> = [2_795, 8_100, 4_200, 11_387, 16_000, 1_301]
             .into_iter().cycle().take(300).collect();
         for rate in [0.25, 1.0, 4.0] {
-            let required_ms = RollingStartupPolicy::MpvReloadWindow.bootstrap_ms(rate);
+            let required_ms = RollingStartupPolicy::MpvReload.bootstrap_ms(rate);
             let mut end_ms = 0;
             let first_count = durations.iter().position(|duration| {
                 end_ms += duration;

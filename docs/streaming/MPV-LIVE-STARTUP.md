@@ -158,7 +158,7 @@ Before-change metrics were retained privately from the same lab node. Its
 `plurx_ttff_ms` and `plurx_seek_to_picture_ms` series have zero observations, so
 no historical latency distribution is claimed. Compare after-change server
 phase timestamps with normal-player opening/MIME/first-frame timing; expect
-`MpvReloadWindow` and a 33250 ms bootstrap at 1x with established capacity.
+`MpvReload` and a 33250 ms bootstrap at 1x with established capacity.
 Unknown capacity should report the conservative 48000 ms requirement.
 
 Device acceptance must establish advancing playback without the reload

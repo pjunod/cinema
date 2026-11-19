@@ -146,7 +146,7 @@ pub(super) enum RollingStartupPolicy {
     #[default]
     NativePresentationWindow,
     FirstReloadWindow,
-    MpvReloadWindow,
+    MpvReload,
     #[cfg(test)]
     WebFixedHlsV1,
 }
@@ -158,7 +158,7 @@ impl RollingStartupPolicy {
             Self::Conservative => false,
             Self::NativePresentationWindow => false,
             Self::FirstReloadWindow => true,
-            Self::MpvReloadWindow => true,
+            Self::MpvReload => true,
             #[cfg(test)]
             Self::WebFixedHlsV1 => true,
         }
@@ -167,13 +167,13 @@ impl RollingStartupPolicy {
     /// These consumers have a frozen create position that can authorize one
     /// bounded complete cut beyond the initial floor, even without controls.
     pub(super) fn owns_bootstrap_position(self) -> bool {
-        matches!(self, Self::NativePresentationWindow | Self::MpvReloadWindow)
+        matches!(self, Self::NativePresentationWindow | Self::MpvReload)
     }
 
     /// Unknown or slow MPV capacity keeps the entire native admission
     /// contract, including complete-cut rounding, not merely its duration.
     pub(super) fn admission_policy(self, rate: f64, producer_speed: Option<f64>) -> Self {
-        if self == Self::MpvReloadWindow
+        if self == Self::MpvReload
             && !producer_speed.is_some_and(|speed| speed.is_finite() && speed >= rate)
         {
             Self::NativePresentationWindow
@@ -193,7 +193,7 @@ impl RollingStartupPolicy {
                     ROLLING_RESERVE_MAX_MS,
                 )
             }
-            Self::MpvReloadWindow => rolling_mpv_reload_runway_ms(rate),
+            Self::MpvReload => rolling_mpv_reload_runway_ms(rate),
             #[cfg(test)]
             Self::WebFixedHlsV1 => {
                 ((32_000.0 * rate).ceil() as i64).clamp(32_000, ROLLING_RESERVE_MAX_MS)
@@ -292,7 +292,7 @@ impl RollingPublicationClock {
         if !self.startup_policy_bound && self.served.is_none() {
             self.startup_policy = match transport {
                 Some("hlsjs") => RollingStartupPolicy::FirstReloadWindow,
-                Some("mpv") => RollingStartupPolicy::MpvReloadWindow,
+                Some("mpv") => RollingStartupPolicy::MpvReload,
                 _ => RollingStartupPolicy::NativePresentationWindow,
             };
             self.startup_policy_bound = true;
