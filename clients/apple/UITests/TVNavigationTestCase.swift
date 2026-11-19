@@ -140,7 +140,7 @@ class TVNavigationTestCase: XCTestCase {
                        "System keyboard must own input")
     }
 
-    private func typeInSystemKeyboard(_ text: String, in app: XCUIApplication) {
+    func typeInSystemKeyboard(_ text: String, in app: XCUIApplication) {
         waitForSystemKeyboard(in: app)
         // tvOS may replace the labeled setup field with an unlabeled system
         // input when the keyboard opens. Type through the focused application.
