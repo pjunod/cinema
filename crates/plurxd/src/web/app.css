@@ -1554,7 +1554,7 @@
     .clstrip>div:nth-child(2),.clstrip>div:nth-child(5){border-left:0}
     .clstrip>div:nth-child(n+5){border-top:1px solid var(--line)}
   }
-  @media(max-width:900px){ .cltwo{grid-template-columns:minmax(0,1fr)} }
+  @media(max-width:1180px){ .cltwo{grid-template-columns:minmax(0,1fr)} }
   @container clnodes (max-width:980px){
     .clnodetable,.clnodetable tbody,.clnodetable tr,.clnodetable td{display:block;width:auto}
     .clnodetable thead{display:none}
