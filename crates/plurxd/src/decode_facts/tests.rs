@@ -3644,77 +3644,129 @@ async fn packaged_static_ffprobe_uses_supported_bounded_source_read_syscalls() {
     active.finish().await;
 }
 
+// This is the explicit post-child-reap boundary, not another parser process.
+// Both fixture threads are joined before assertions; the existing real-probe
+// regression below retains end-to-end child/deadline/abandoned-waiter coverage.
 #[cfg(target_os = "linux")]
-#[tokio::test]
-async fn tracked_raw_probe_retires_joined_worker_despite_source_service_error() {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::process::CommandExt;
-
-    let root = crate::test_tempdir().expect("probe fixture");
-    let probe_path = root.path().join("static-ffprobe");
-    build_static_probe(&probe_path, 0);
-    let probe = DecodeProbeIdentity::discover(probe_path.to_str().expect("probe path"))
-        .await
-        .expect("actual production probe");
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn joined_raw_probe_retires_after_service_error_without_losing_the_error() {
+    struct ReleaseWorker(std::sync::mpsc::Sender<()>);
+    impl Drop for ReleaseWorker {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
     let (_store, _job, active) = crate::background_jobs::tests::active().await;
     let budget = active.fence().source_budget();
-    let mut original = tempfile::tempfile().expect("held original");
-    std::io::Write::write_all(&mut original, b"production-bound source")
-        .expect("real source bytes");
-    let source = Arc::new(original);
+    let root = crate::test_tempdir().expect("post-reap source fixture");
+    let source = Arc::new(std::fs::File::create(root.path().join("source")).expect("source"));
     let operation = budget
-        .enroll_preparation(Arc::clone(&source))
+        .enroll_preparation(source)
         .expect("audited operation");
-    let mut command = tokio::process::Command::new(
-        probe_launch_path(&probe.executable_snapshot, probe.launch_mode).expect("launch path"),
-    );
-    command.as_std_mut().arg0(probe.executable());
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let arguments = [OsString::from("-v")];
-    let supervisor = crate::background_jobs::budgeted(Arc::clone(&budget), async {
-        configure_probe_execution(
-            &mut command,
-            probe.launch_mode,
-            std::time::Instant::now() + Duration::from_secs(5),
-            probe.executable_snapshot.as_file().as_raw_fd(),
-            Some(source.as_raw_fd()),
-            probe.executable(),
-            &arguments,
-            TEST_FACT_WORK.class,
-            crate::producer_spawn::StdioFacts::NULL,
-        )
-    })
-    .await
-    .expect("tracked production supervisor");
-    assert_eq!(budget.completion_observation(), Some((1, 1, false)));
-    let (mut child, _job, mut supervisor, _pause) =
-        spawn_configured_probe(command, supervisor, TEST_FACT_WORK, None)
-            .await
-            .expect("actual source-bearing child");
-    let status = child.wait().await.expect("physical child reap");
-    assert!(status.success(), "the actual source read completed");
-    // Inject the service result at its real supervisor boundary after a
-    // successful child reap, independently of deadline/kill scheduling.
-    let expected = DecodeFactError::SourceService("injected joined source service error".into());
-    *supervisor
-        .linux
-        .as_ref()
-        .expect("actual Linux supervisor")
-        .source_failure
-        .lock()
-        .expect("source failure") = Some(expected.clone());
-    drop((operation, source));
-    assert_eq!(budget.completion_observation(), Some((0, 1, false)));
-    assert_eq!(supervisor.finish_joined(), Err(expected));
-    assert!(supervisor.linux.as_ref().expect("supervisor").worker.is_none());
-    assert_eq!(budget.completion_observation(), Some((0, 0, false)));
+    let retirement = budget
+        .raw_retirement()
+        .expect("raw enrollment")
+        .expect("completion ledger");
+    let stop = Arc::new(AtomicBool::new(false));
+    let read_cancel = tokio_util::sync::CancellationToken::new();
+    let worker_stop = Arc::clone(&stop);
+    let worker_cancel = read_cancel.clone();
+    let cleanup_cancel = read_cancel.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let (acknowledge, acknowledged) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let release = ReleaseWorker(release);
+    let worker = std::thread::spawn(move || {
+        runtime.block_on(worker_cancel.cancelled());
+        let _ = acknowledge.send((
+            worker_stop.load(Ordering::Acquire),
+            worker_cancel.is_cancelled(),
+        ));
+        let _ = released.recv();
+        Err(std::io::Error::other("joined worker IO sentinel"))
+    });
+    let expected = DecodeFactError::SourceService("stored service sentinel".into());
+    let mut supervisor = ProbeExecutionSupervisor {
+        descriptors: None,
+        retirement: Some(retirement),
+        linux: Some(LinuxProbeExecSupervisor {
+            child_sender: None,
+            receiver: None,
+            child_sender_fd: -1,
+            stop,
+            worker: Some(worker),
+            read_cancel,
+            source_failure: Arc::new(std::sync::Mutex::new(Some(expected.clone()))),
+            test_counter: None,
+        }),
+    };
+    // The controller records the still-held worker's state before releasing
+    // it. A channel error also drops the release guard; no assertion can strand
+    // a thread, and scope joins the controller before returning observations.
+    let (first, after_first, second, after_second, held) = std::thread::scope(|scope| {
+        let observing = Arc::clone(&budget);
+        let controller = scope.spawn(move || {
+            let acknowledgement = acknowledged.recv_timeout(Duration::from_secs(5));
+            if acknowledgement.is_err() {
+                // Failed observation is not settlement. Unblock the fixture
+                // worker, then still require the actual finish/join below.
+                cleanup_cancel.cancel();
+            }
+            let held = observing.completion_observation();
+            drop(release);
+            (acknowledgement, held)
+        });
+        let first = supervisor.finish_joined();
+        let after_first = budget.completion_observation();
+        let second = supervisor.finish_joined();
+        let after_second = budget.completion_observation();
+        (first, after_first, second, after_second, controller.join())
+    });
     drop(supervisor);
-    assert_eq!(budget.completion_observation(), Some((0, 0, false)));
+    let next = budget.raw_retirement();
+    let next_enrolled = next
+        .as_ref()
+        .map(|value| value.is_some())
+        .map_err(Clone::clone);
+    let during_next = budget.completion_observation();
+    if let Ok(Some(retirement)) = next {
+        // No child or worker was launched by this fresh registration.
+        retirement.joined();
+    }
+    let after_next = budget.completion_observation();
+    drop(operation);
+    let retired = budget.completion_observation();
     active.finish().await;
+
+    let (acknowledgement, held) = held.expect("joined fixture controller");
+    assert_eq!(
+        acknowledgement.expect("worker stop acknowledgement"),
+        (true, true)
+    );
+    assert_eq!(held, Some((1, 1, false)), "worker is still physically held");
+    assert_eq!(
+        first,
+        Err(expected),
+        "stored service error keeps priority over worker IO error"
+    );
+    assert_eq!(
+        after_first,
+        Some((1, 0, false)),
+        "error does not retain joined raw custody"
+    );
+    assert_eq!(second, Ok(()));
+    assert_eq!(
+        after_second, after_first,
+        "retirement is recorded exactly once"
+    );
+    assert_eq!(
+        next_enrolled,
+        Ok(true),
+        "the ledger still accepts the next registration"
+    );
+    assert_eq!(during_next, Some((1, 1, false)));
+    assert_eq!(after_next, Some((1, 0, false)));
+    assert_eq!(retired, Some((0, 0, false)));
 }
 
 #[cfg(target_os = "linux")]
@@ -3801,7 +3853,12 @@ async fn tracked_raw_probe_retirement_survives_timeout_and_abandoned_collector()
         }
     })
     .await
-    .expect("explicit child reap and worker join retire the collector");
+    .unwrap_or_else(|error| {
+        panic!(
+            "explicit child reap and worker join retire the collector: {error:?}; final completion (operations, raw, veto) = {:?}",
+            budget.completion_observation()
+        )
+    });
     assert_eq!(budget.completion_observation(), Some((0, 0, false)));
     active.finish().await;
 }

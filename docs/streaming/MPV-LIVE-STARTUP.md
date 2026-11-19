@@ -1,8 +1,8 @@
 # MPV live startup admission
 
 **Owner:** Codex; Sol implements the Linux Player request and request regressions.
-**Status:** source reviewed and focused cases passed; integrated validation and runtime acceptance pending.
-**Updated:** 2026-11-18.
+**Status:** current main is integrated. The installed ROG baseline passed an actual OSC seek. Patched Play and seek measurements are pending.
+**Updated:** 2026-11-19.
 
 A normal Linux Player seek recreated a live copy session. The first frame
 arrived 26.993 seconds after the OSC click. A complete 2.795-second fragment existed;
@@ -165,3 +165,16 @@ Device acceptance must establish advancing playback without the reload
 counterexample, accepted controls through replacement and native mapping.
 Synthetic tests or a PQ surface do not establish full Dolby Vision, every-frame
 mapping or optical accuracy.
+
+## Current-main integration
+
+The installed ROG baseline ran main `6be46d14838a` with Player `0.5.1-1`.
+An actual OSC seek accepted the replacement's first control at 4.67 seconds
+and confirmed advancing native Dolby Vision at 11.35 seconds. The following
+60.44 seconds captured 12 accepted control exchanges, zero HTTP 409s and zero
+sampled cache pauses. The capture began after Play. These results establish
+the seek baseline for the patched runtime.
+
+Main `60443f341` includes the joined-reader retirement correction in
+`b5c3e8f24`, along with a regression covering worker completion and error
+propagation. The integration keeps main's code and regression.

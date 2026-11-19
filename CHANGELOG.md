@@ -64,10 +64,6 @@ bump may break compatibility and a **patch** bump never does.
   Seek latency no longer leaves both exact-current attempts behind the moving
   incumbent; the same decoded-frame guard still decides whether to expose.
 
-- Source probes retire raw-reader ownership after proven child reap and
-  supervisor join even when the worker reports an error. The error still
-  reaches the caller; incomplete physical cleanup continues to veto completion.
-
 - Linux Player live starts and out-of-range seeks identify MPV as their consumer,
   so their startup window covers MPV’s producer/reload behavior instead of
   inheriting Safari’s 48-second presentation window. Unknown producer capacity
@@ -79,6 +75,22 @@ bump may break compatibility and a **patch** bump never does.
   media source through exposure, so a transient successor wait cannot cancel
   its own preparation. The first visible frame freezes the final commit;
   retries and close preserve that exact settlement before changing reporters.
+- Guarded runner VM starts pin instance UUID/generation under the target-host
+  admission lock, retain pause and restart-budget checks, and cannot become
+  an in-service daemon repair when the VM is already running.
+
+- Auto playback keeps foreground admission through VOD creation, so a cold
+  start can ask background work to yield; prepared successors retain their
+  separate speculative purpose even when they share a cached rendition.
+- Reattaching to a cached VOD rendition no longer sends source telemetry to
+  its retired input owner. The next live input receives pending telemetry.
+- Preserve measured CM29 dark-chroma mapping for qualified P3 display targets with black from zero through 0.005 nits, while retaining each target's tone curve.
+- Clocked Source copies and Analysis gap fills preserve the first video
+  sample's duration when AAC begins earlier. The MP4 muxer previously
+  stretched only the AV companion's first sample, so strict comparison with
+  the video-only observation refused the generation as `copy_sync_unverified`.
+  The clocked mux policy now preserves both sample timing and the A/V start
+  offset without edit lists; companion and seek verification remain strict.
 
 - Dolby Vision titles the server reconstructs from the base layer alone no
   longer have their black level raised: Profile 5, Profile 8, and Profile 7

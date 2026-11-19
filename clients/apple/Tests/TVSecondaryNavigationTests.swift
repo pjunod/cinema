@@ -60,8 +60,14 @@ final class TVSecondaryNavigationTests: XCTestCase {
         XCTAssertEqual(TVSecondaryFocusFallback.target(opener: "grant:2", previous: ["grant:1", "grant:2", "refresh"], surviving: ["refresh", "grant:2", "grant:1"]), "grant:2")
     }
     func testTVHelpHasBoundedCategoryPathIndependentOfSettingsContent() {
-        XCTAssertEqual(TVSettingsCategory.allCases.first, .playback)
-        XCTAssertEqual(TVSettingsCategory.allCases.firstIndex(of: .help), 1)
+        XCTAssertEqual(TVSettingsCategory.allCases,
+                       [.playback, .appearance, .liveTv, .sharing, .remotes, .account, .help, .developer, .about])
+        XCTAssertEqual(TVSettingsCategory.allCases.map(\.title),
+                       ["Playback", "Appearance", "Live TV & recordings", "Shared libraries", "Remotes & devices",
+                        "Account", "Help", "Advanced", "About"])
+        // Identifiers keep their original names whatever the title says.
+        XCTAssertEqual(TVSettingsCategory.developer.id, "Developer")
+        XCTAssertEqual(TVSettingsCategory.liveTv.id, "Live TV")
         XCTAssertEqual(Set(TVSettingsCategory.allCases.map(\.id)).count, TVSettingsCategory.allCases.count)
     }
     func testManualRecordingChannelSearchUsesDisplayedNameAndNumber() {

@@ -2804,15 +2804,13 @@ impl ProbeExecutionSupervisor {
     // Only call after the child/namespace exit route has reaped. A supervisor
     // Drop or an exec error cannot assert that physical reader completion.
     fn finish_joined(&mut self) -> Result<(), DecodeFactError> {
-        // `finish` joins the supervisor worker before returning even when its
-        // source service failed or the joined thread panicked. Those errors
-        // must still reach the caller, but cannot undo physical completion.
-        // An unwind before `finish` returns leaves retirement unjoined.
-        let finished = self.finish();
+        // `finish` joins the worker before reporting its read/service outcome.
+        // That semantic error does not undo this caller's physical reap/join.
+        let result = self.finish();
         if let Some(retirement) = self.retirement.take() {
             retirement.joined();
         }
-        finished
+        result
     }
 
     fn finish(&mut self) -> Result<(), DecodeFactError> {
