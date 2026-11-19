@@ -113,10 +113,21 @@ impl Class {
     }
 
     fn method(name: &str) -> Option<Self> {
+        Self::method_given(name, &manager_pub_fns_cached())
+    }
+
+    /// A role or roster name counts while the manager exposes its inherent
+    /// method to this crate. A module-private one cannot be called from
+    /// here (the compiler rejects it), so a call by that name reaches a trait
+    /// impl, and the raw manager behind such a trait is counted where it is
+    /// named or held. Visibility is read from plurx-core on every run: making
+    /// a raw method `pub` again counts its callers again at once.
+    fn method_given(name: &str, public: &[String]) -> Option<Self> {
+        let exposed = public.iter().any(|method| method == name);
         if ROLE.contains(&name) {
-            Some(Self::Role)
+            exposed.then_some(Self::Role)
         } else if ROSTER.contains(&name) {
-            Some(Self::Roster)
+            exposed.then_some(Self::Roster)
         } else if manager_methods().iter().any(|method| method == name) {
             Some(Self::Manager)
         } else {
@@ -201,6 +212,11 @@ fn manager_methods() -> &'static [String] {
 
 fn manager_pub_fns() -> Vec<String> {
     manager_declared_fns(false)
+}
+
+fn manager_pub_fns_cached() -> &'static [String] {
+    static PUBLIC: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    PUBLIC.get_or_init(manager_pub_fns)
 }
 
 fn manager_declared_fns(include_scoped: bool) -> Vec<String> {
@@ -1344,6 +1360,36 @@ fn a_new_file_fails_naming_itself() {
     assert!(differences(&observed, &real)
         .iter()
         .any(|line| line.starts_with("brand_new.rs [membership]")));
+}
+
+/// Role and roster detection follows the manager's real visibility: a name
+/// the manager exposes counts, and the same name counts no longer once
+/// plurx-core makes its inherent method module-private.
+#[test]
+fn role_and_roster_names_count_while_the_manager_exposes_them() {
+    let exposed = vec![
+        "may_run_cluster_jobs".to_owned(),
+        "operations_peers".to_owned(),
+    ];
+    assert_eq!(
+        Class::method_given("may_run_cluster_jobs", &exposed),
+        Some(Class::Role)
+    );
+    assert_eq!(
+        Class::method_given("operations_peers", &exposed),
+        Some(Class::Roster)
+    );
+    assert_eq!(Class::method_given("may_run_cluster_jobs", &[]), None);
+    assert_eq!(Class::method_given("operations_peers", &[]), None);
+    let scoped = manager_declared_fns(true);
+    for name in ROLE.iter().chain(ROSTER) {
+        let public = manager_pub_fns_cached().iter().any(|method| method == name);
+        let declared = scoped.iter().any(|method| method == name);
+        assert!(
+            public || !declared || Class::method(name).is_none(),
+            "{name}: a module-private raw method is not counted by name"
+        );
+    }
 }
 
 /// The manager's public surface is read from plurx-core, so a new method is

@@ -451,12 +451,24 @@ from a name:
    - A path segment counts as the raw type only when it does not resolve to
      a crate enum's variant of the same name.
    - Unknown receivers and unresolvable paths remain counted.
-4. **Method classes** (ROLE, ROSTER, manager) stay name-based. A name that
-   collides with an unrelated local method is resolved by moving the caller
-   to a facade method with its own name, not by excluding the name.
-   - The job-gate sites switch to the facade `Jobs` capability.
-   - `Operations::handoff_for_shutdown` becomes a facade name that is not
-     a manager name.
+4. **Method classes** (ROLE, ROSTER, manager) stay name-based.
+   - A ROLE or ROSTER name counts while plurx-core exposes the manager's
+     inherent method of that name to this crate, that is, while it is `pub`.
+     The census reads this visibility from plurx-core on every run.
+   - 7c made those methods `pub(super)`, so the compiler rejects direct calls
+     to them (the E0624 probe). A call by that name can then only reach a
+     trait impl, such as the 25 `ClusterJobAuthority::may_run_cluster_jobs`
+     job-gate calls.
+   - Any raw manager behind such a trait is counted where it is named or
+     held.
+   - If a raw method becomes `pub` again, its callers count again at once.
+     That keeps role and roster detection live after the visibility change.
+   - Renaming the trait method instead would move the formal model's
+     anchors for no gain in what the census can see.
+   - Other manager-method names that collide with an unrelated local method
+     are resolved by moving the caller to a facade name.
+     `Operations::handoff_for_shutdown` becomes a facade name that is not a
+     manager name.
 5. **Negative controls become fixtures.** The census tests must still fail
    for each of these:
    - a renamed raw field;
