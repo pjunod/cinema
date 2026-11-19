@@ -1323,6 +1323,59 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
         fixture.reference.item_id.as_str(),
         fixture.reference.file_id.as_str()
     );
+    if matches!(mode, SourceFixtureMode::NativeEncoded) {
+        // Order a real singleton heartbeat between the native resource's
+        // bound renewal guard and its SQL proposal. The old proposal must
+        // refuse and the same request must still return its actual master.
+        let (bound, propose, refused) =
+            plurx_core::store::HiqliteAuthStore::validation_pause_source_renewal(
+                decoded.incarnation_id(),
+            );
+        recipe["resource"] = json!("master.m3u8?subtitle=0");
+        let request = actual_resource_request(
+            address,
+            true,
+            &url,
+            fixture.headers.clone(),
+            serde_json::to_vec(&recipe).expect("heartbeat collision request"),
+        );
+        let collision = async {
+            let bound = bound.await.expect("actual renewal clock bound");
+            // A heartbeat with the same millisecond would still satisfy the
+            // upper timestamp. Advance only until the real clock moves.
+            while crate::state::clock_ms() <= bound {
+                tokio::task::yield_now().await;
+            }
+            fixture
+                .state
+                .membership
+                .validation_force_heartbeat()
+                .await
+                .expect("commit real same-member heartbeat");
+            propose.send(()).expect("release the guarded proposal");
+            refused.await.expect("original bound SQL refuses");
+        };
+        let (response, ()) = tokio::time::timeout(Duration::from_secs(25), async {
+            tokio::join!(request, collision)
+        })
+        .await
+        .expect("membership collision and resource fit their existing deadline");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "fresh same-owner renewal"
+        );
+        assert_eq!(
+            response.headers()["cinemashare-resource"],
+            "master.m3u8?subtitle=0"
+        );
+        let playlist = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("real master bytes");
+        assert!(std::str::from_utf8(&playlist)
+            .expect("real master text")
+            .contains("subs/1/index.m3u8"));
+    }
     for h2 in [false, true] {
         recipe["resource"] = json!(if native { "video.m3u8" } else { "index.m3u8" });
         let response = actual_resource_request(

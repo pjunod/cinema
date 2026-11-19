@@ -1085,9 +1085,9 @@ impl SourceProducerAuthority {
     /// The Store guard is optimistic: it pins the exact lease revision the
     /// proof observed. Status, resources, control and the actor heartbeat all
     /// renew the same session, so one renewal can lose the race to another by
-    /// this same owner. That is not a loss of authority. Re-observe the owned
-    /// route and retry against the newer lease; a refusal against an
-    /// unchanged lease, or any change of route identity, is a real refusal.
+    /// this same owner. A healthy heartbeat may also commit after the clock
+    /// was sampled for the SQL guard. Re-observe the exact route and retry
+    /// only with proof of a newer lease or a heartbeat on the same floor.
     async fn renew_with(
         &self,
         assignment: &SourceDispatchAssignment,
@@ -1102,7 +1102,9 @@ impl SourceProducerAuthority {
                 return Ok(route);
             }
             let current = self.current_owned(assignment).await?;
-            if !observed.renewed_by_same_owner(&current) {
+            if !observed.renewed_by_same_owner(&current)
+                && !observed.same_lease_after_heartbeat(&current)
+            {
                 tracing::warn!(target: "plurxd::transcode", stage = "source_owner.renew", error_class = "authority_changed_or_unchanged_refusal", "Source admission refused");
                 return Err(SourceWorkerError::Unavailable);
             }

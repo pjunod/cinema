@@ -1981,6 +1981,52 @@ async fn sharing_source_owned_renewal_snapshot_preserves_progress_revision_and_c
         let state_a = renewal_snapshot_state(&store, &assignment).await;
         let state_b = renewal_snapshot_state(&other, &other_assignment).await;
         assert!(owned.renewal_snapshot_for(&other_assignment).is_none());
+        assert!(!owned.same_lease_after_heartbeat(&owned));
+        let captured_now = now_ms().expect("clock");
+        let observed_members = |at| {
+            source_admission_members_with_purpose_for_unit_test(1, &BTreeSet::from([1]), at, &key)
+                .expect("matching member floor")
+        };
+        let mut before_heartbeat = (*owned).clone();
+        before_heartbeat.assignment.members = observed_members(captured_now - 1);
+        let mut after_heartbeat = (*owned).clone();
+        after_heartbeat.assignment.members = observed_members(captured_now);
+        assert!(before_heartbeat.same_lease_after_heartbeat(&after_heartbeat));
+        let mut changed_owner = after_heartbeat.clone();
+        changed_owner.assignment.owner_node_id = "different-owner".into();
+        assert!(!before_heartbeat.same_lease_after_heartbeat(&changed_owner));
+
+        // A consistent read can see a heartbeat newer than the timestamp
+        // bound before the query, but it still cannot mint future authority.
+        let set_heartbeat = |at: i64| {
+            vec![
+                (
+                    "UPDATE cluster_nodes SET last_seen_at=$1 WHERE node_id='voter'".into(),
+                    vec![at.into()],
+                ),
+                (
+                    "UPDATE cluster_node_capabilities SET last_seen_at=$1 WHERE node_id='voter'"
+                        .into(),
+                    vec![at.into()],
+                ),
+            ]
+        };
+        store
+            .sharing_txn(set_heartbeat(captured_now + 60_000))
+            .await
+            .expect("install matching but future heartbeat");
+        assert!(matches!(
+            store
+                .prepare_source_owned_route_authority(&assignment, &key, &proof())
+                .await
+                .expect("future read refusal"),
+            SourceOwnedRouteAuthorityRead::Unavailable
+        ));
+        store
+            .sharing_txn(set_heartbeat(now_ms().expect("clock")))
+            .await
+            .expect("restore real heartbeat time");
+
         let mut mismatched = owned
             .renewal_snapshot_for(&assignment)
             .expect("matching dispatch");

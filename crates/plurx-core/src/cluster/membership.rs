@@ -1938,7 +1938,7 @@ async fn bootstrap_purpose_admission_schema(
     };
     let now = unix_ms()?;
     let (guard, roster, cutoff, observed) =
-        observation.write_guard_for(SharingMemberFloor::PurposeKeys, now, 1, 2, 3)?;
+        observation.write_guard_for(SharingMemberFloor::PurposeKeys, now, 1, 2, 3, false)?;
     let fingerprint = master.sharing_purpose_master_fingerprint();
     let master_guard = purpose_master_proof_predicate(&fingerprint)?;
     let exact_roster = purpose_roster_predicate(1);
@@ -3612,6 +3612,7 @@ pub struct SourceAdmissionMembers {
     membership_log_json: String,
     query_at_ms: i64,
     completed_at_ms: i64,
+    newest_heartbeat_ms: i64,
     membership_generation: i64,
     purpose_master_fingerprint: Option<String>,
 }
@@ -3621,6 +3622,28 @@ impl SourceAdmissionMembers {
     /// Source assignment still correlates this identity in its committing SQL.
     pub(crate) fn actual_local_raft_id(&self) -> u64 {
         self.local_raft_id
+    }
+
+    pub(crate) fn route_read_heartbeats_current(
+        oldest: i64,
+        newest: i64,
+        completed_at_ms: i64,
+    ) -> bool {
+        oldest >= completed_at_ms.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS)
+            && oldest <= newest
+            && newest <= completed_at_ms
+    }
+
+    /// A validated observation of the same floor can include a heartbeat
+    /// that had not happened when the previous observation finished.
+    pub(crate) fn refreshed_after_heartbeat(&self, fresh: &Self) -> bool {
+        self.local_raft_id == fresh.local_raft_id
+            && self.members_json == fresh.members_json
+            && self.membership_log_json == fresh.membership_log_json
+            && self.membership_generation == fresh.membership_generation
+            && self.purpose_master_fingerprint == fresh.purpose_master_fingerprint
+            && fresh.newest_heartbeat_ms > self.completed_at_ms
+            && fresh.newest_heartbeat_ms <= fresh.completed_at_ms
     }
 
     /// Return the closed SQL predicate and its three numbered bindings. The
@@ -3633,6 +3656,32 @@ impl SourceAdmissionMembers {
         cutoff_parameter: usize,
         observed_at_parameter: usize,
     ) -> Result<(String, String, i64, i64), MembershipError> {
+        self.admission_guard(
+            now_ms,
+            members_parameter,
+            cutoff_parameter,
+            observed_at_parameter,
+            false,
+        )
+    }
+
+    /// A route read validates its exact heartbeat snapshot after the read
+    /// completes. The write version must keep its bound SQL upper timestamp.
+    pub(crate) fn route_read_guard(
+        &self,
+        now_ms: i64,
+    ) -> Result<(String, String, i64, i64), MembershipError> {
+        self.admission_guard(now_ms, 1, 2, 3, true)
+    }
+
+    fn admission_guard(
+        &self,
+        now_ms: i64,
+        members_parameter: usize,
+        cutoff_parameter: usize,
+        observed_at_parameter: usize,
+        check_heartbeat_after_read: bool,
+    ) -> Result<(String, String, i64, i64), MembershipError> {
         let required = if self.purpose_master_fingerprint.is_some() {
             SharingMemberFloor::AllSharing
         } else {
@@ -3644,6 +3693,7 @@ impl SourceAdmissionMembers {
             members_parameter,
             cutoff_parameter,
             observed_at_parameter,
+            check_heartbeat_after_read,
         )?;
         let purpose = match &self.purpose_master_fingerprint {
             Some(fingerprint) => format!(
@@ -3668,6 +3718,7 @@ impl SourceAdmissionMembers {
         members_parameter: usize,
         cutoff_parameter: usize,
         observed_at_parameter: usize,
+        check_heartbeat_after_read: bool,
     ) -> Result<(String, String, i64, i64), MembershipError> {
         let indices = [members_parameter, cutoff_parameter, observed_at_parameter];
         if self.local_raft_id == 0
@@ -3685,11 +3736,11 @@ impl SourceAdmissionMembers {
         Ok((
             format!(
                 "({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_sharing_membership_generation WHERE singleton=1 AND generation={})",
-                sharing_member_guard_predicate(
+                sharing_member_guard_with_freshness(
                     required,
                     members_parameter,
                     cutoff_parameter,
-                    observed_at_parameter,
+                    (!check_heartbeat_after_read).then_some(observed_at_parameter),
                 ),
                 sharing_member_transition_absence_predicate(),
                 sharing_membership_generation_shape_predicate(),
@@ -3722,6 +3773,7 @@ impl IngressCustodyMembers {
             members_parameter,
             cutoff_parameter,
             observed_at_parameter,
+            false,
         )
     }
 }
@@ -3755,6 +3807,7 @@ impl PurposeKeyMembers {
             members_parameter,
             cutoff_parameter,
             observed_at_parameter,
+            false,
         )?;
         Ok((
             format!(
@@ -3940,6 +3993,7 @@ async fn sharing_member_floor_observation(
             .map_err(|_| MembershipError::Incompatible)?,
         query_at_ms: now,
         completed_at_ms,
+        newest_heartbeat_ms: row.newest_heartbeat.ok_or(MembershipError::Incompatible)?,
         membership_generation: row.generation.ok_or(MembershipError::Incompatible)?,
         purpose_master_fingerprint: None,
     }))
@@ -4096,6 +4150,7 @@ pub(crate) fn source_admission_members_for_unit_test(
         membership_log_json: "{\"unit_fixture\":true}".into(),
         query_at_ms: now_ms,
         completed_at_ms: now_ms,
+        newest_heartbeat_ms: now_ms,
         membership_generation: 0,
         purpose_master_fingerprint: None,
     })
@@ -7215,9 +7270,9 @@ impl MembershipManager {
             .map(|_| ())
     }
 
-    /// Submit a heartbeat without the duplicate gate so the separate-process
-    /// fault harness can prove tombstone SQL is actually exercised.
-    #[cfg(feature = "cluster-validation")]
+    /// Submit a real heartbeat without the duplicate gate for tests that
+    /// order its replicated write against another guarded transaction.
+    #[cfg(any(feature = "cluster-validation", feature = "fixtures"))]
     #[doc(hidden)]
     pub async fn validation_force_heartbeat(&self) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;

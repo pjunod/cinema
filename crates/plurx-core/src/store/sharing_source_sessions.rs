@@ -748,9 +748,23 @@ fn route_condition(
     phase: SourcePublicationPhase,
     now: i64,
 ) -> Result<Option<Statement>, StoreError> {
+    route_condition_with_floor(authority, phase, now, false)
+}
+
+fn route_condition_with_floor(
+    authority: &SourceOwnedRouteAuthority,
+    phase: SourcePublicationPhase,
+    now: i64,
+    check_heartbeat_after_read: bool,
+) -> Result<Option<Statement>, StoreError> {
     let assignment = &authority.assignment;
     let members = &assignment.members;
-    let Ok((floor, roster, cutoff, observed)) = members.write_guard(now, 1, 2, 3) else {
+    let floor = if check_heartbeat_after_read {
+        members.route_read_guard(now)
+    } else {
+        members.write_guard(now, 1, 2, 3)
+    };
+    let Ok((floor, roster, cutoff, observed)) = floor else {
         return Ok(None);
     };
     let Ok(raft) = i64::try_from(members.actual_local_raft_id()) else {
@@ -949,16 +963,48 @@ async fn prepare_publication_route<T: Backend>(
         } else {
             SourcePublicationPhase::Published
         };
-        let Some((condition, values)) = route_condition(&authority, phase, now_ms()?)? else {
+        let Some((condition, values)) =
+            route_condition_with_floor(&authority, phase, now_ms()?, true)?
+        else {
             return Ok(SourcePublicationAuthorityRead::Unavailable);
         };
+        // The read's timestamp cannot precede the snapshot it verifies. A
+        // healthy heartbeat can commit while this consistent query waits.
         let rows = backend
             .sharing_read(
-                &format!("SELECT json_quote(CASE WHEN {condition} THEN 1 ELSE 0 END) AS payload"),
+                &format!("SELECT json_object('ready',CASE WHEN {condition} THEN 1 ELSE 0 END,'oldest',MIN(last_seen_at),'newest',MAX(last_seen_at)) AS payload FROM cluster_nodes WHERE removed_at IS NULL"),
                 values,
             )
             .await?;
-        if rows.first().map(String::as_str) != Some("1") {
+        let completed_at_ms = now_ms()?;
+        #[derive(Deserialize)]
+        struct RouteSnapshot {
+            ready: i64,
+            oldest: Option<i64>,
+            newest: Option<i64>,
+        }
+        let [row] = rows.as_slice() else {
+            return Ok(SourcePublicationAuthorityRead::Unavailable);
+        };
+        let snapshot: RouteSnapshot = serde_json::from_str(row).map_err(|_| invalid())?;
+        if !snapshot
+            .oldest
+            .zip(snapshot.newest)
+            .is_some_and(|(oldest, newest)| {
+                SourceAdmissionMembers::route_read_heartbeats_current(
+                    oldest,
+                    newest,
+                    completed_at_ms,
+                )
+            })
+            || authority
+                .validate_observation_freshness(completed_at_ms)
+                .is_err()
+            || authority.lease_expires_at_ms <= completed_at_ms
+        {
+            return Ok(SourcePublicationAuthorityRead::Unavailable);
+        }
+        if snapshot.ready != 1 {
             attempts += 1;
             if attempts < 4
                 && lease_revision_moved(backend, binding.incarnation_id, authority.lease_revision)

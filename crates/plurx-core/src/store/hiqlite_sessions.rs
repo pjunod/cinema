@@ -165,6 +165,49 @@ impl HiqliteAuthStore {
     }
 }
 
+#[cfg(feature = "fixtures")]
+struct SourceRenewalPause {
+    reached: tokio::sync::oneshot::Sender<i64>,
+    propose: tokio::sync::oneshot::Receiver<()>,
+    refused: tokio::sync::oneshot::Sender<()>,
+}
+
+#[cfg(feature = "fixtures")]
+static SOURCE_RENEWAL_PAUSES: std::sync::Mutex<
+    std::collections::BTreeMap<uuid::Uuid, SourceRenewalPause>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+#[cfg(feature = "fixtures")]
+impl HiqliteAuthStore {
+    /// Order a real competing write after this incarnation's SQL guard was
+    /// bound, then observe whether the guarded renewal refused.
+    #[doc(hidden)]
+    pub fn validation_pause_source_renewal(
+        incarnation: uuid::Uuid,
+    ) -> (
+        tokio::sync::oneshot::Receiver<i64>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (reached, bound) = tokio::sync::oneshot::channel();
+        let (release, propose) = tokio::sync::oneshot::channel();
+        let (refused, refusal) = tokio::sync::oneshot::channel();
+        assert!(SOURCE_RENEWAL_PAUSES
+            .lock()
+            .expect("Source renewal fixtures")
+            .insert(
+                incarnation,
+                SourceRenewalPause {
+                    reached,
+                    propose,
+                    refused,
+                },
+            )
+            .is_none());
+        (bound, release, refusal)
+    }
+}
+
 const MAX_IN_FLIGHT_PER_USER: i64 = 32;
 const MAX_CURRENT_PER_USER: i64 = 64;
 const MAX_REQUEST_ROWS_PER_USER: i64 = 4_096;
@@ -7124,6 +7167,8 @@ async fn renew_with_authority(
     };
     let owner_fence_key = removed_job_owner_key(owner_node_id);
     let mut statements = Vec::with_capacity(renewals.len().saturating_mul(3));
+    #[cfg(feature = "fixtures")]
+    let mut validation_refused = None;
     if let Some(authority) = authority {
         if renewals.len() != 1 {
             return Ok(Vec::new());
@@ -7137,6 +7182,23 @@ async fn renew_with_authority(
         else {
             return Ok(Vec::new());
         };
+        #[cfg(feature = "fixtures")]
+        {
+            let pause = SOURCE_RENEWAL_PAUSES
+                .lock()
+                .expect("Source renewal fixtures")
+                .remove(&authority.assignment.binding.incarnation_id());
+            if let Some(pause) = pause {
+                // The third bound value is both the guard's heartbeat upper
+                // timestamp and its exact route observation time.
+                let super::sharing::Value::Integer(observed_at_ms) = &guard.1[2] else {
+                    unreachable!("Source renewal clock binding");
+                };
+                let _ = pause.reached.send(*observed_at_ms);
+                let _ = pause.propose.await;
+                validation_refused = Some(pause.refused);
+            }
+        }
         statements.push(source_statement(guard)?);
     }
     for renewal in renewals {
@@ -7275,6 +7337,10 @@ async fn renew_with_authority(
         Err(error) => {
             let error = database_error(error);
             if authority.is_some() && super::sharing_source_sessions::source_write_refused(&error) {
+                #[cfg(feature = "fixtures")]
+                if let Some(refused) = validation_refused {
+                    let _ = refused.send(());
+                }
                 return Ok(Vec::new());
             }
             return Err(error);
@@ -7289,6 +7355,10 @@ async fn renew_with_authority(
                 if authority.is_some()
                     && super::sharing_source_sessions::source_write_refused(&error) =>
             {
+                #[cfg(feature = "fixtures")]
+                if let Some(refused) = validation_refused {
+                    let _ = refused.send(());
+                }
                 return Ok(Vec::new());
             }
             Err(error) => return Err(error),

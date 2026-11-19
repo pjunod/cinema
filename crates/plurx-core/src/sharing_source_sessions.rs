@@ -24,6 +24,18 @@ impl SourceAdmissionMembers {
     pub(crate) fn actual_local_raft_id(&self) -> u64 {
         match *self {}
     }
+    pub(crate) fn route_read_guard(
+        &self,
+        _now_ms: i64,
+    ) -> Result<(String, String, i64, i64), SourceAdmissionError> {
+        match *self {}
+    }
+    pub(crate) fn route_read_heartbeats_current(_: i64, _: i64, _: i64) -> bool {
+        false
+    }
+    pub(crate) fn refreshed_after_heartbeat(&self, _fresh: &Self) -> bool {
+        match *self {}
+    }
 }
 
 use crate::{
@@ -385,12 +397,26 @@ impl SourceOwnedRouteAuthority {
     /// Whether `fresh` is this same owned route after another renewal by the
     /// same owner advanced its lease revision. The renewal guard pins the
     /// exact lease a proof observed, so two renewals by one owner race; the
-    /// loser may retry against `fresh`. Any other difference is a real change
-    /// of authority and must not be retried.
+    /// loser may retry against `fresh`.
     pub fn renewed_by_same_owner(&self, fresh: &Self) -> bool {
         self.assignment.same_identity(&fresh.assignment)
             && self.session_id == fresh.session_id
             && fresh.lease_revision > self.lease_revision
+    }
+
+    /// A heartbeat can commit after the old observation without changing this
+    /// route or lease. Only a fresh proof of the same healthy floor can then
+    /// authorize another guarded renewal.
+    pub fn same_lease_after_heartbeat(&self, fresh: &Self) -> bool {
+        self.assignment.same_identity(&fresh.assignment)
+            && self.session_id == fresh.session_id
+            && self.lease_revision == fresh.lease_revision
+            && self.lease_expires_at_ms == fresh.lease_expires_at_ms
+            && self.renewal.owner_epoch == fresh.renewal.owner_epoch
+            && self
+                .assignment
+                .members
+                .refreshed_after_heartbeat(&fresh.assignment.members)
     }
 }
 pub enum SourceOwnedRouteAuthorityRead {
