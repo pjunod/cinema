@@ -83,3 +83,37 @@ build or regression execution is claimed. Linux compile qualification is
 being established. Peer-authorizer reuse, outcome health and token-proof
 caching remain unimplemented; this bounded hydration change does not close
 B5 or B3a by itself.
+
+## 7. General token proof admission
+
+`UserStore::authenticate_token_proof_for` will default to a normal
+Store-backed authentication with no reusable witness. SQLite and Hiqlite
+will return a committed token/policy witness from their existing joint
+statement. Its wall-clock expiry is the earlier of the policy's exact idle
+expiry and the next activity-refresh boundary (at most sixty seconds).
+Monotonic cache age also caps that lifetime, and a backwards wall clock
+refuses reuse. Playback handoff tokens retain their own path and no cache.
+Audience is part of the key; native and compatibility proofs never cross.
+
+The existing cache-state mutex/generation/revocation guards will own a
+separate bounded general-token map. Every global, digest, user, ambiguity,
+capability-loss, timeout and peer begin/end invalidation applies to both
+maps. Only fresh Store authentication publishes a recovery-admin proof;
+a general-token cache hit cannot renew its five-minute lifetime.
+
+The running capability becomes `cache_admin_revocation_v5`. A mixed or
+rolled-back roster cannot admit general cache hits. Policy writes to the
+three `auth.token_*` settings must use a global claim-bound revocation and
+a transaction-local credential intent. Replicated INSERT/UPDATE/DELETE
+triggers protect those keys after permanent guard activation, preventing an
+older binary's plain settings SQL from bypassing invalidation. The existing
+activation/intent/lease tables are reused; no table-watch width is added.
+The ordinary settings API refuses guarded policy mutations once active;
+the explicit policy API checks the exact live claim in each statement.
+SQLite uses the local revocation guard and atomic settings transaction.
+
+Policy writers are the settings save in `http/system.rs` and the initial
+clock in `http/users.rs`; the latter initializes an absent clock before
+admission and cannot revoke an existing active cache. Tests must cover a
+policy tightening, stale authentication publication, mixed v4/v5 members,
+legacy raw policy SQL, audience separation and expiry at the exact boundary.
