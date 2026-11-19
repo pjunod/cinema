@@ -3358,7 +3358,7 @@ separate placement cohorts. Build skew alone does not prevent placement.
 Strict media-pool envelope changes require a protocol bump and dated note
 here (`make paperwork` checks this). Newest first:
 
-- 2026-11-18: Protocol 12 adds the `processed_upgrade` request to
+- 2026-11-18: protocol 12 — optional `processed_upgrade` on
   `RemoteStartRequest`. Follow the cohort and drain steps above.
 - 2026-11-13: protocol 11 — a server-selected F+ curve digest on the strict
   `SessionRequest` media-worker envelope, combined with protocol 10 catalog
