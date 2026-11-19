@@ -55,6 +55,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Main Python test receipts bind reviewed production-data inputs before reusing
+  a pass; unchanged authenticated legacy inputs remain reusable.
 - Shared Source resource requests distinguish a legitimate concurrent heartbeat
   from lost ownership, retaining the existing guarded-write checks and retry bound.
 - Paused process budgets sample elapsed time and verified hold credit together,

@@ -133,9 +133,19 @@ Adopted records then pass the source-applicability check
 - **Comparison:** the recorded commit's immutable blob against the current
   commit's, read from the full-history checkout. The current worktree must
   equal the dispatched source.
-- **Main lane only:** each ID also binds the declared production inputs in
-  [`main-preflight-inputs.json`](../../validation/main-preflight-inputs.json).
-  An ID with no reviewed witness row, or whose inputs changed, runs.
+- **Main lane only:** IDs with a reviewed row also bind the production inputs
+  in [`main-preflight-inputs.json`](../../validation/main-preflight-inputs.json).
+  Original and current witness identity, patterns, expanded paths and contents
+  must match. Fresh successes record a digest beside their immutable PASS
+  provenance; inheritance cannot add or change that binding. Restore and the
+  immediate pre-execution recheck use the same comparison. A missing current
+  row cannot turn an earlier reviewed pass into an unreviewed one. IDs with
+  neither original nor current row retain ordinary source applicability.
+- **Legacy main journals:** only the exact known pre-schema producer blob may
+  reconstruct an absent digest from authenticated original and current source.
+  Identical inputs retain the original record without inventing metadata.
+  Unknown markerless producers, new producers missing a digest, removed or
+  ambiguous witnesses and changed inputs make that ID due.
 - **Undecidable cases:** unavailable historical source, unsupported dynamic
   constructs, and a current source that cannot be fingerprinted all mean the
   same thing. No candidate proves the ID, it is listed as not adopted, and
@@ -150,8 +160,9 @@ Adopted records then pass the source-applicability check
 - fingerprints ≤40,000;
 - five-second timeout per local Git read.
 
-These protect the runner; they are not a semantic cache of imported product
-code, scanned files or environment.
+These protect the runner. The AST fingerprint alone is not a semantic cache
+of imported product code, scanned files or environment; reviewed rows supply
+the explicit production-data binding separately.
 
 ## Local receipts (effort lane)
 
