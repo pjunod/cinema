@@ -1490,7 +1490,13 @@ fn delivered_rpus(init: &[u8], segment: &[u8]) -> Vec<Vec<Vec<u8>>> {
 }
 async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
     use std::time::{Duration, Instant};
-    let fixture = real_source_start_fixture_with(mode, None).await;
+    let mut fixture = real_source_start_fixture_with(mode, None).await;
+    if matches!(
+        mode,
+        SourceFixtureMode::BurnBitmap | SourceFixtureMode::DolbyVisionProfile5Encoded
+    ) {
+        fixture.keep_fixture_membership_stable().await;
+    }
     let native = matches!(
         mode,
         SourceFixtureMode::NativeCopy
