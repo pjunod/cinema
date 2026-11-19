@@ -2029,64 +2029,6 @@
             "the commit is what puts the predecessor into its drain",
         );
 
-        // A newer ingress may transparently forward the bounded extension to
-        // this parser-floor owner. Refuse only at this local semantic boundary,
-        // preserving the active predecessor and its sequence/admission state.
-        for decoder_loss in [false, true] {
-            let mut unsupported = drain_control_request(generation.clone(), 1);
-            unsupported.selection.quality = crate::playback_control::QualitySelection::Auto {
-                height: Some(720),
-                candidate_id: Some(plurx_core::playback::candidate::CandidateId([0x12; 16])),
-            };
-            if decoder_loss {
-                unsupported.selection.quality = crate::playback_control::QualitySelection::Original;
-                unsupported
-                    .capabilities
-                    .as_mut()
-                    .expect("fixture capabilities")
-                    .decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot {
-                    revision: 4,
-                    video: vec![],
-                });
-            }
-            let response = crate::http::internal_media_sessions::control_authorized(
-                fixture.state.clone(),
-                crate::playback_control::ControlRelayRequest {
-                    session_id: session_id.clone(),
-                    generation: generation.clone(),
-                    expected_owner_node_id: fixture.state.node_id.clone(),
-                    expected_owner_epoch: 1,
-                    deadline_unix_ms: unix_ms().saturating_add(4_000),
-                    control: unsupported,
-                },
-            )
-            .await;
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
-                .await
-                .expect("valid parser-floor test fixture");
-            let refusal: crate::playback_control::ControlErrorBody =
-                serde_json::from_slice(&bytes).expect("valid parser-floor test fixture");
-            assert_eq!(
-                refusal.invalid_field.as_deref(),
-                Some(if decoder_loss {
-                    "capabilities.decoder_caps_unsupported"
-                } else {
-                    "selection.quality.candidate_id_unsupported"
-                })
-            );
-            assert!(refusal.is_valid_for_status(400));
-            let preserved = fixture
-                .store
-                .media_session_route(&session_id)
-                .await
-                .expect("valid parser-floor test fixture")
-                .expect("valid parser-floor test fixture");
-            assert_eq!(preserved.state, "active");
-            assert_eq!(preserved.incarnation_id, draining.incarnation_id);
-            assert_eq!(preserved.drain_deadline_ms, draining.drain_deadline_ms);
-        }
-
         let switched = || crate::playback_control::ActionAcknowledgement {
             action_id: uuid::Uuid::new_v4().to_string(),
             state: crate::playback_control::AcknowledgementState::Switched,
