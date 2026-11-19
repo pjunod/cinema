@@ -2377,7 +2377,10 @@ pattern = "MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS"
 # fixture cannot drift away from the window it is meant to represent.
 # 5 -> 6 with the control plane's owner-loss answer: its publication-fence test
 # builds the same fixture from the same constant rather than a literal.
-expected_occurrences = 8
+# Final cluster/main union: 8 -> 7 in media_sessions.rs. The production
+# terminal window now aliases timing::media; its old domain-constant use is
+# removed while the cfg(test) import remains. The safety boundary is unchanged.
+expected_occurrences = 7
 
 [[module_symbols]]
 id = "m4-durable-publication-blocked-sentinel"
@@ -2438,7 +2441,9 @@ expected_occurrences = 61
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
 pattern = "TERMINAL_PROJECTION_SAFETY_WINDOW"
-expected_occurrences = 13
+# Final cluster/main union: +1 RHS name in the shared timing::media alias;
+# the existing terminal projection owner and safety-window value are unchanged.
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "m4-cluster-make-before-break"
@@ -2495,7 +2500,9 @@ pattern = "(?:MAX_ADMITTED_MEDIA_BODY_LIFETIME|MEDIA_BODY_NO_PROGRESS_TIMEOUT)"
 # Promotion union: separate Local and Source preparation/commit wrappers retain
 # the same admitted response-owner lifetimes. Four extra references expose
 # those existing guards without creating another body or settlement owner.
-expected_occurrences = 21
+# Final cluster/main union: +2 RHS names for the body-lifetime and no-progress
+# timing::media aliases. These preserve the existing response-body bounds.
+expected_occurrences = 23
 
 [[module_symbols]]
 id = "m4-bounded-prepared-body-owner"
@@ -2641,7 +2648,9 @@ expected_occurrences = 9
 [[module_symbols]]
 id = "m4-release-terminal-store-deadlines"
 pattern = "(?:REMOTE_ABORT_WAIT|ABORT_DEADLINE|TERMINAL_COMMIT_RETRY_(?:BUDGET|MIN|MAX)|REMOTE_RELEASE_(?:ATTEMPTS|RETRY_DELAY))"
-expected_occurrences = 17
+# Final cluster/main union: +1 RHS ABORT_DEADLINE name in its shared alias.
+# The same release/abort owner retains the unchanged Store deadline.
+expected_occurrences = 18
 
 [[module_symbols]]
 id = "m4-release-proof-relative-projection-deadline"
@@ -2694,7 +2703,9 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-takeover-bootstrap-lease"
 pattern = "TAKEOVER_CLAIM_LEASE_TTL_MS"
-expected_occurrences = 6
+# Final cluster/main union: +1 RHS name in the shared takeover lease alias;
+# neither lease authority nor its lifetime changes.
+expected_occurrences = 7
 
 [[module_symbols]]
 id = "m4-stale-end-lease-boundary"
@@ -2716,7 +2727,10 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-takeover-reconciliation-bounds"
 pattern = "TAKEOVER_RECONCILIATION_"
-expected_occurrences = 7
+# Final cluster/main union: two shared reconciliation aliases add two names;
+# the shared publication-runway expression removes one local reference: net +1.
+# The existing reconciliation owner and deadline/backoff values remain.
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-takeover-fixed-lease-retention"
@@ -2779,7 +2793,9 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-bounded-session-release-reconciliation"
 pattern = "RELEASE_RECONCILIATION_(?:FANOUT|RETRY_BACKOFF|MAX_BACKOFF)"
-expected_occurrences = 10
+# Final cluster/main union: +2 RHS names in the shared retry/max-backoff
+# aliases. Fanout and the existing release reconciliation owner are unchanged.
+expected_occurrences = 12
 
 [[module_symbols]]
 id = "m4-remote-abort-settlement-capacity"
@@ -4107,7 +4123,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # held by discovery::Owner (shared cancellation and joined shutdown), plus one
 # test-only already-stopped advertiser owner. Net +2; no media producer.
 # Merged effort and main: 1166 base + 2 (learner discovery) + 15 (main) = 1183.
-expected_occurrences = 1183
+# Final cluster/main union: +2 test-only spawns retained from the effort:
+# cluster.rs starts its stalled-response TCP fixture and aborts it after the
+# bounded request; serving_fence.rs stops and joins its monitor fixture.
+# Neither site adds a production owner or supplies settlement authority.
+expected_occurrences = 1185
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -6089,7 +6109,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Three test-only timer shapes: two await artwork identity and one observes probe startup.
 # The offline fixture waits on the durable state with one timeout and one poll.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 2287
+# Final cluster/main union over parent d1ccc110: +4, measured unchanged roots.
+# cluster.rs adds the production holder-race absolute deadline plus two test
+# timeouts (+3); publication reconciliation factors its existing bounds into
+# one absolute phase deadline (media_sessions.rs, net -2). The paused-clock
+# lease inventory regression adds two simulated work sleeps and one canceled
+# candidate sleep (+3). Timeout never proves publication or physical settlement.
+expected_occurrences = 2291
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -7386,7 +7412,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Merged effort and learner discovery: 927 + 5 (learner discovery, above) = 932.
 # Merged effort and main: 937 base - 5 (facade and discovery) + 8 (main) = 940.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 941
+# Final cluster/main union: +5 cluster.rs HTTP Response.status() observations
+# for the bounded refusal adapter, call receipts and its response assertion.
+# These read HTTP status; they launch no child. Keep the broad matcher unchanged.
+expected_occurrences = 946
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7708,7 +7737,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # connection monitor's one-second floor wait, beside its change wait. No
 # process is involved.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 402
+# Final cluster/main union: +1 cluster.rs Barrier.wait() in the concurrent
+# refusal-isolation regression. Both requests are joined; this is not a process
+# wait, reap acknowledgement or new production lifecycle owner.
+expected_occurrences = 403
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
