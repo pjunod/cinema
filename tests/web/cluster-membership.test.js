@@ -2882,14 +2882,14 @@ test("the replicated database is its own section with the store's own readings",
   assert.match(html, /<h3>Replicated database<\/h3>/);
   assert.match(html, /id="cluster-database"/);
   assert.match(html, /<dt>Quorum commit<\/dt><dd class="num">482191<\/dd>/);
-  assert.match(html, /<dt>Term<\/dt><dd class="num">81<\/dd>/);
-  assert.match(html, /<dt>Apply lag<\/dt><dd class="num">0 entries<\/dd>/);
+  assert.match(html, /<dt>Leader · term<\/dt><dd class="num">node-a <span class="muted">this node<\/span> · 81<\/dd>/);
   assert.match(html, /<dt>Protocol<\/dt><dd class="num">5–6<\/dd>/);
-  assert.match(html, /<dt>Snapshots<\/dt><dd class="num">build 9 ok \/ 0 error · install 2 ok \/ 0 error · DB 2\.1 MB<\/dd>/);
+  assert.match(html, /<dt>Snapshots<\/dt><dd class="num">build 9 ok \/ 0 error · install 2 ok \/ 0 error<\/dd>/);
+  assert.match(html, /<dt>Database size<\/dt><dd class="num">2\.1 MB<\/dd>/);
   // The watermark and the applied index have to come from one sample or their
   // difference is not a lag, so both are the direct status's, not the
   // membership projection's separately-fetched index.
-  assert.match(html, /<dt>Applied here<\/dt><dd class="num">482191<\/dd>/);
+  assert.match(html, /<dt>Applied on this node<\/dt><dd class="num">482191 · lag 0<\/dd>/);
   // The store's facts sit in the store's column: watch state must reach the
   // page before the node roster, not inside it.
   assert.ok(
@@ -2942,8 +2942,7 @@ test("the quorum watermark is the quorum's, not this node's applied index", () =
       .map((row) => [row[0], row[1]]),
   );
   assert.equal(rows.get("Quorum commit"), "482195");
-  assert.match(rows.get("Applied here"), /^482191/);
-  assert.equal(rows.get("Apply lag"), "4 entries");
+  assert.equal(rows.get("Applied on this node"), "482191 · lag 4");
   assert.equal(rows.get("Behind by"), "4 changes");
 });
 
@@ -2969,25 +2968,25 @@ test("the database reports this machine's store, not the leader's", () => {
     row.status.protocol_max = local ? 6 : 9;
   });
   const rows = new Map(ui.clusterDatabaseRows(ui.env, cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
-  assert.equal(rows.get("Applied here"), "482100");
-  assert.equal(rows.get("Apply lag"), "91 entries");
+  assert.equal(rows.get("Applied on this node"), "482100 · lag 91");
   assert.equal(rows.get("Protocol"), "5–6");
   // The leader row is still the leader's: naming the elected leader is a
   // membership fact, and it must not drag its readings along with it.
-  assert.match(rows.get("Leader"), /node-b/);
+  assert.match(rows.get("Leader · term"), /^node-b · 81$/);
 });
 
 test("database readings say unknown instead of inventing a number", () => {
   const ui = sandbox();
   const cluster = status("high_availability", [node("node-a", 1, "voter", { is_leader: true })]);
   const rows = new Map(ui.clusterDatabaseRows(ui.env, cluster, REPLICATION, null).map((row) => [row[0], row[1]]));
-  assert.equal(rows.get("Term"), "unknown");
+  assert.match(rows.get("Leader · term"), / · unknown$/);
   assert.equal(rows.get("Quorum commit"), "unknown");
-  assert.equal(rows.get("Apply lag"), "unknown");
+  assert.match(rows.get("Applied on this node"), / · lag unknown$/);
   assert.equal(rows.get("Protocol"), "unknown");
+  assert.equal(rows.get("Database size"), "unknown");
   // The membership projection is a different source and is still present, so
   // the applied index must not be blanked along with the direct sample.
-  assert.match(rows.get("Applied here"), /^912/);
+  assert.match(rows.get("Applied on this node"), /^912/);
   assert.equal(rows.get("Reading age"), "unknown");
   // The counting rows are the tempting ones: `build 0 ok / 0 error` reads as a
   // measurement, and "0 changes behind" beside a degraded pill is a claim.
@@ -4740,6 +4739,344 @@ test("standalone Settings never polls cluster status even with a cached roster",
   const h=tickHarness({clustered:false,cluster:{nodes:[{node_id:"local",maintenance:true}]},ops:{},now:{value:100000}});
   await h.harness.settingsTick(1,"cluster");
   assert.deepEqual(h.requests,[]);
+});
+
+// ---- the page's summary readings (status strip, node table, chips) ----------
+// These pin the derivations the new layout paints from. Each fixture is built
+// so the wrong source gives a visibly different answer: hostnames differ from
+// node ids, the roster and the direct status disagree where it matters.
+
+function labCluster(extra = {}) {
+  const nodes = [
+    node("node-1", 1, "voter", { hostname: "lab1", is_leader: true, active_media_sessions: 2 }),
+    node("node-2", 2, "voter", { hostname: "lab2" }),
+    node("node-3", 3, "voter", { hostname: "lab3" }),
+    node("node-4", 4, "voter", { hostname: "lab4" }),
+    node("node-5", 5, "learner", { hostname: "lab5", bounded_read_ready: true }),
+  ];
+  return Object.assign(status("high_availability", nodes), extra);
+}
+function stripMap(cells) {
+  return new Map(cells.map((cell) => [cell.key, cell]));
+}
+
+test("the status strip states the healthy cluster from roster and direct status", () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const cells = PANEL.clusterStripCells(sandbox().env, cluster, ops);
+  assert.deepEqual(cells.map((cell) => cell.label),
+    ["Cluster", "Leader", "Nodes reachable", "Replication", "Build", "Rolling restart"]);
+  const s = stripMap(cells);
+  assert.equal(s.get("cluster").value, "Healthy");
+  assert.equal(s.get("cluster").tone, "good");
+  assert.equal(s.get("cluster").sub, "4 voters · quorum 3 · tolerates 1 failure");
+  assert.equal(s.get("leader").value, "lab1");
+  assert.equal(s.get("leader").sub, "term 81");
+  assert.equal(s.get("reachable").value, "5 / 5");
+  assert.equal(s.get("reachable").sub, "4 voters · 1 learner");
+  assert.equal(s.get("replication").value, "In sync");
+  assert.equal(s.get("replication").sub, "max apply lag 0");
+  assert.equal(s.get("build").value, "v0.2.7-operations");
+  assert.equal(s.get("build").sub, "all 5 nodes match");
+  // The candidate is named by hostname: the old card printed the node id.
+  assert.equal(s.get("restart").value, "Safe");
+  assert.equal(s.get("restart").sub, "next: lab2");
+});
+
+test("the strip's leader and lag cells read the direct status, not the roster", () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  ops.nodes[2].status.raft.current_term = 82;
+  ops.nodes[3].status.raft.apply_lag_entries = 17;
+  const s = stripMap(PANEL.clusterStripCells(sandbox().env, cluster, ops));
+  assert.equal(s.get("leader").sub, "term disagreement");
+  assert.equal(s.get("leader").tone, "warn");
+  assert.equal(s.get("replication").sub, "max apply lag 17");
+});
+
+test("a down voter degrades the strip, names the host, and the server's blocker", () => {
+  const cluster = labCluster();
+  cluster.nodes[3].reachable = false;
+  const ops = operationStatus(cluster);
+  ops.nodes[3] = { membership: cluster.nodes[3], observation: "timeout", error_class: "timeout", sample_age_ms: 900, status: null };
+  ops.verdict = { safe_to_restart_one: false, candidate_node_id: null, warnings: [],
+    blockers: [{ code: "voter_unreachable", node_id: "node-4", message: "no answer" }] };
+  const s = stripMap(PANEL.clusterStripCells(sandbox().env, cluster, ops));
+  assert.equal(s.get("cluster").value, "Degraded");
+  assert.equal(s.get("cluster").tone, "warn");
+  assert.equal(s.get("cluster").sub, "3 of 4 voters reachable · tolerates 0 more");
+  assert.equal(s.get("reachable").value, "4 / 5");
+  assert.equal(s.get("reachable").sub, "lab4 unreachable");
+  assert.equal(s.get("build").sub, "4 of 5 answered");
+  assert.equal(s.get("restart").value, "Blocked");
+  assert.equal(s.get("restart").sub, "voter unreachable on lab4");
+});
+
+test("two voters are reconfiguring in the strip, never healthy", () => {
+  const cluster = status("degraded_reconfiguration", [
+    node("node-1", 1, "voter", { is_leader: true }),
+    node("node-2", 2, "voter"),
+  ]);
+  const cell = PANEL.clusterStripCells(sandbox().env, cluster, null)[0];
+  assert.equal(cell.value, "Reconfiguring");
+  assert.equal(cell.tone, "warn");
+  assertNoRedundancyClaim(`${cell.value} ${cell.sub}`, "two-voter strip cell");
+  assert.match(cell.sub, /survives no failure/);
+});
+
+test("maintenance and recovery outrank a healthy availability in the strip", () => {
+  const fenced = labCluster();
+  fenced.nodes[0].maintenance = true;
+  const ops = maintenanceOps("node-1", { drained: false });
+  const m = PANEL.clusterStripCells(sandbox().env, fenced, ops)[0];
+  assert.equal(m.value, "Maintenance");
+  assert.equal(m.sub, "lab1 fenced · draining 1 stream");
+  const lost = labCluster();
+  lost.recovery = { required: true, quorum_available: false, reachable_voters: 2, required_voters: 3, leader_elected: false };
+  const r = PANEL.clusterStripCells(sandbox().env, lost, null)[0];
+  assert.equal(r.value, "Recovery required");
+  assert.equal(r.tone, "bad");
+  assert.equal(r.sub, "2 of 3 voters needed for quorum reachable");
+});
+
+test("build skew and protocol skew are visible in the strip", () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  ops.nodes[1].status.build = "v0.2.8";
+  const s = stripMap(PANEL.clusterStripCells(sandbox().env, cluster, ops));
+  assert.equal(s.get("build").value, "2 builds");
+  assert.equal(s.get("build").tone, "warn");
+  ops.nodes[1].status.media_protocol = 10;
+  ops.nodes[2].status.media_protocol = 11;
+  const skewed = stripMap(PANEL.clusterStripCells(sandbox().env, cluster, ops));
+  assert.equal(skewed.get("build").tone, "bad");
+  assert.match(skewed.get("build").sub, /^protocol skew 10 \/ 11/);
+});
+
+test("the strip says collecting and unavailable rather than guessing a verdict", () => {
+  const cluster = labCluster();
+  const collecting = stripMap(PANEL.clusterStripCells(sandbox().env, cluster, null));
+  assert.equal(collecting.get("restart").value, "Collecting…");
+  assert.equal(collecting.get("build").value, "—");
+  assert.equal(collecting.get("leader").sub, "term unknown");
+  const failed = stripMap(PANEL.clusterStripCells(sandbox().env, cluster, { unavailable: true, message: "x" }));
+  assert.equal(failed.get("restart").value, "Unavailable");
+  const roster = PANEL.clusterStripCells(sandbox().env, { unavailable: true, code: "cluster_unavailable" }, null);
+  assert.equal(roster[0].value, "Status unavailable");
+  assert.ok(roster.slice(1).every((cell) => cell.value === "—"));
+});
+
+test("a node row reads the direct status, and a dash where there is none", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const ready = PANEL.clusterNodeCells(env, cluster.nodes[0], ops);
+  assert.deepEqual(ready.status, { label: "Ready", tone: "good" });
+  assert.equal(ready.role, "voter");
+  assert.equal(ready.raft.text, "leader · lag 0");
+  assert.equal(ready.wal.text, "open · 6.3 MB");
+  assert.equal(ready.database.text, "2.1 MB");
+  assert.equal(ready.build.text, "v0.2.7-operations");
+  // The direct status is the source for streams, not the roster's count.
+  assert.equal(ready.streams.text, "0");
+  const follower = PANEL.clusterNodeCells(env, cluster.nodes[1], ops);
+  assert.equal(follower.raft.text, "follower · lag 0");
+  // Unreachable: stale heartbeat in bad tone, and every sampled cell a dash —
+  // never filled in from the roster's heartbeat.
+  cluster.nodes[3].reachable = false;
+  cluster.nodes[3].last_seen_at = Date.now() - 14 * 60 * 1000;
+  ops.nodes[3] = { membership: cluster.nodes[3], observation: "timeout", status: null };
+  const down = PANEL.clusterNodeCells(env, cluster.nodes[3], ops);
+  assert.deepEqual(down.status, { label: "Unreachable", tone: "bad" });
+  assert.equal(down.heartbeat.text, "14m ago");
+  assert.equal(down.heartbeat.tone, "bad");
+  for (const cell of ["raft", "wal", "database", "streams", "build"]) assert.equal(down[cell].text, "—", cell);
+});
+
+test("a node row's status follows the badge logic", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  ops.nodes[1] = { membership: cluster.nodes[1], observation: "refused", error_class: "refused", status: null };
+  const refused = PANEL.clusterNodeCells(env, cluster.nodes[1], ops);
+  assert.equal(refused.status.label, "Not observed");
+  assert.match(refused.status.why, /answered and refused/);
+  ops.nodes[2].status.wal.snapshot.last_error = { message: "fsync failed" };
+  const wal = PANEL.clusterNodeCells(env, cluster.nodes[2], ops);
+  assert.deepEqual(wal.status, { label: "Needs attention", tone: "warn" });
+  assert.equal(wal.wal.tone, "bad");
+  ops.nodes[3].status.raft.watermark_valid = false;
+  const stale = PANEL.clusterNodeCells(env, cluster.nodes[3], ops);
+  assert.equal(stale.status.label, "Needs attention");
+  assert.equal(stale.raft.text, "follower · stale proof");
+  cluster.nodes[4].bounded_read_ready = false;
+  assert.equal(PANEL.clusterNodeCells(env, cluster.nodes[4], ops).status.label, "Catching up");
+  cluster.nodes[0].maintenance = true;
+  assert.equal(PANEL.clusterNodeCells(env, cluster.nodes[0], ops).status.label, "Maintenance");
+  assert.equal(PANEL.clusterNodeCells(env, cluster.nodes[1], null).status.label, "Collecting…");
+  const joining = node("node-6", 6, "voter", { is_voter: false });
+  assert.equal(PANEL.clusterNodeCells(env, joining, ops).role, "joining voter");
+});
+
+test("a readiness chip counts only what the server reported", () => {
+  assert.deepEqual(PANEL.clusterReadinessChip(null, [null]), { tone: "", label: "checking…" });
+  assert.deepEqual(PANEL.clusterReadinessChip({ unavailable: "boom" }, [{ status: "met" }]),
+    { tone: "warn", label: "checks unavailable" });
+  assert.deepEqual(PANEL.clusterReadinessChip({}, [{ status: "met" }, null, { status: "met" }]),
+    { tone: "ok", label: "2 of 2 checks" });
+  assert.deepEqual(PANEL.clusterReadinessChip({}, [{ status: "met" }, { status: "unobservable" }, { status: "unmet" }]),
+    { tone: "warn", label: "1 of 3 checks" });
+  assert.deepEqual(PANEL.clusterReadinessChip({}, [null, null]), { tone: "", label: "not reported" });
+});
+
+test("alerts are empty when healthy and most severe first otherwise", () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  assert.deepEqual(PANEL.clusterAlertKinds(cluster, ops, {}), []);
+  cluster.nodes[3].reachable = false;
+  cluster.availability = "degraded_reconfiguration";
+  const kinds = PANEL.clusterAlertKinds(cluster, { unavailable: true }, { refusal: true }).map((k) => k.kind);
+  assert.deepEqual(kinds, ["refusal", "voter_down", "ops_unavailable", "reconfiguration"]);
+  // Recovery carries the maintenance target and the down voters inside it.
+  cluster.nodes[0].maintenance = true;
+  cluster.recovery = { required: true, quorum_available: false, reachable_voters: 2, required_voters: 3 };
+  assert.deepEqual(PANEL.clusterAlertKinds(cluster, null, {}).map((k) => k.kind), ["recovery", "reconfiguration"]);
+  cluster.recovery.required = false;
+  assert.deepEqual(PANEL.clusterAlertKinds(cluster, null, {}).map((k) => k.kind),
+    ["maintenance", "voter_down", "reconfiguration"]);
+  assert.deepEqual(PANEL.clusterAlertKinds({ unavailable: true, code: "cluster_unavailable" }, null, {}).map((k) => k.kind),
+    ["roster_failed"]);
+  assert.deepEqual(PANEL.clusterAlertKinds({ unavailable: true, code: "membership_unavailable" }, null, {}), []);
+});
+
+test("restart preparation on this node raises an alert with the drain tone", () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  ops.nodes[0].status.media = { local_active_sessions: 1, drained: false, new_admissions_blocked: true };
+  assert.deepEqual(PANEL.clusterAlertKinds(cluster, ops, {}), [{ kind: "restart", tone: "warn" }]);
+  ops.nodes[0].status.media = { local_active_sessions: 0, drained: true, new_admissions_blocked: true };
+  assert.deepEqual(PANEL.clusterAlertKinds(cluster, ops, {}), [{ kind: "restart", tone: "good" }]);
+});
+
+test("the voter-down sentence names the host, the quorum left, and only the server's blocker", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  cluster.nodes[3].reachable = false;
+  cluster.nodes[3].last_seen_at = Date.now() - 14 * 60 * 1000;
+  const safe = PANEL.clusterVoterDownText(env, cluster, operationStatus(cluster));
+  assert.match(safe, /lab4 \(last heartbeat 14m ago\)/);
+  assert.match(safe, /Quorum holds at 3 of 4; one more voter failure stops writes\./);
+  assert.doesNotMatch(safe, /blocked/, "no blocked claim without the server's verdict");
+  const ops = operationStatus(cluster);
+  ops.verdict = { safe_to_restart_one: false, blockers: [{ code: "voter_unreachable", node_id: "node-4" }] };
+  assert.match(PANEL.clusterVoterDownText(env, cluster, ops), /Rolling restart is blocked: voter unreachable on lab4\./);
+  cluster.nodes[3].reachable = true;
+  assert.equal(PANEL.clusterVoterDownText(env, cluster, ops), "");
+});
+
+test("the header's sample age is the oldest sample, aged since the aggregate", () => {
+  const ops = { observed_at_unix_ms: Date.now() - 5000, nodes: [{ sample_age_ms: 1000 }, { sample_age_ms: 3000 }, { sample_age_ms: null }] };
+  assert.equal(PANEL.clusterSampledText(ops), "sampled 8s ago");
+  assert.equal(PANEL.clusterSampledText(null), "collecting status");
+  assert.equal(PANEL.clusterSampledText({ unavailable: true }), "status unavailable");
+});
+
+test("this node's drawer carries maintenance, restart preparation and leave", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const actions = new Map(PANEL.clusterNodeActions(env, cluster, ops, cluster.nodes[0]).map((a) => [a.id, a]));
+  assert.deepEqual([...actions.keys()], ["maintenance", "restart", "leave"]);
+  assert.equal(actions.get("maintenance").blocked, false);
+  assert.match(actions.get("maintenance").html, /onclick='setNodeMaintenance\(&quot;node-1&quot;,true\)'/);
+  // The verdict names lab2 as the candidate, so this node may not prepare.
+  assert.equal(actions.get("restart").blocked, true);
+  assert.match(actions.get("restart").reason, /The safe candidate is lab2/);
+  assert.match(actions.get("restart").html, /disabled/);
+  assert.equal(actions.get("leave").blocked, false);
+  assert.equal(actions.get("leave").expand, "leave");
+  ops.verdict.candidate_node_id = "node-1";
+  const prepare = PANEL.clusterNodeActions(env, cluster, ops, cluster.nodes[0]).find((a) => a.id === "restart");
+  assert.equal(prepare.blocked, false);
+  assert.match(prepare.html, /prepareLocalRestart\(this,&quot;node-1&quot;\)/);
+  ops.maintenance[0] = { node_id: "node-1", safe_to_enter: false, blockers: [{ code: "leader_transfer_pending", node_id: "node-2" }] };
+  const fence = PANEL.clusterNodeActions(env, cluster, ops, cluster.nodes[0])[0];
+  assert.equal(fence.blocked, true);
+  assert.equal(fence.reason, "leader transfer pending on lab2.");
+});
+
+test("another member's drawer offers removal, and promotion only to a learner", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const voter = PANEL.clusterNodeActions(env, cluster, ops, cluster.nodes[1]);
+  assert.deepEqual(voter.map((a) => a.id), ["remove"]);
+  assert.match(voter[0].html, /onclick='removeNode\(&quot;node-2&quot;\)'/);
+  cluster.nodes[4].voter_storage_ready = false;
+  cluster.nodes[4].storage_headroom_bytes = 21e9;
+  const learner = PANEL.clusterNodeActions(env, cluster, ops, cluster.nodes[4]);
+  assert.deepEqual(learner.map((a) => a.id), ["promote", "remove"]);
+  assert.equal(learner[0].blocked, true);
+  assert.match(learner[0].reason, /durable free-space reserve a voter must hold \(21 GB free\)/);
+  cluster.nodes[4].voter_storage_ready = true;
+  assert.equal(PANEL.clusterNodeActions(env, cluster, ops, cluster.nodes[4])[0].blocked, false);
+});
+
+test("removal keeps the voter arithmetic per node and allows retrying its own pending removal", () => {
+  const env = sandbox().env;
+  const two = status("degraded_reconfiguration", [
+    node("node-1", 1, "voter", { is_leader: true }),
+    node("node-2", 2, "voter"),
+    node("node-3", 3, "learner"),
+  ]);
+  const remove = (cluster, n) => PANEL.clusterNodeActions(env, cluster, null, n).find((a) => a.id === "remove");
+  assert.equal(remove(two, two.nodes[1]).blocked, true);
+  assert.match(remove(two, two.nodes[1]).reason, /needs at least three voters and this cluster has 2/);
+  assert.equal(remove(two, two.nodes[2]).blocked, false, "a learner is not held to the voter arithmetic");
+  const pending = labCluster();
+  pending.nodes[1].removal_pending = true;
+  assert.equal(remove(pending, pending.nodes[1]).blocked, false);
+  assert.match(remove(pending, pending.nodes[1]).html, />Retry removal</);
+  assert.equal(remove(pending, pending.nodes[2]).blocked, true);
+  assert.match(remove(pending, pending.nodes[2]).reason, /in flight on lab2/);
+  pending.nodes[1].removal_pending = false;
+  pending.nodes[0].maintenance = true;
+  assert.equal(remove(pending, pending.nodes[2]).reason, "Finish maintenance before changing membership.");
+});
+
+test("adding a node is blocked by recovery and by an in-flight membership change", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  assert.equal(PANEL.clusterAddNodeAction(env, cluster).blocked, false);
+  cluster.nodes[2].removal_pending = true;
+  assert.match(PANEL.clusterAddNodeAction(env, cluster).reason, /in flight on lab3/);
+  cluster.recovery = { required: true, quorum_available: false, reachable_voters: 1, required_voters: 3 };
+  assert.match(PANEL.clusterAddNodeAction(env, cluster).reason, /membership change cannot commit/);
+});
+
+test("the maintenance card's rows are cluster-wide and carry the server's verdict", () => {
+  const env = sandbox().env;
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  const rows = new Map(PANEL.clusterMaintenanceRows(env, cluster, ops).map((row) => [row.id, row]));
+  assert.deepEqual([...rows.keys()], ["restart", "election", "diagnostics"]);
+  assert.match(rows.get("restart").text, /Prepare only <b>lab2<\/b>/);
+  assert.match(rows.get("restart").action, /Open lab2 to prepare it/);
+  assert.doesNotMatch(rows.get("restart").action, /<button/);
+  assert.match(rows.get("election").action, /onclick="openElectionDialog\(\)"/);
+  assert.doesNotMatch(rows.get("election").action, /disabled/);
+  ops.verdict = { safe_to_restart_one: false, blockers: [{ code: "voter_unreachable", node_id: "node-4", message: "no answer" }],
+    warnings: [{ code: "build_skew", node_id: null, message: "two builds" }] };
+  const blocked = PANEL.clusterMaintenanceRows(env, cluster, ops)[0];
+  assert.match(blocked.text, /Blocked<\/span> — voter unreachable on lab4\./);
+  assert.match(blocked.text, /<li><b>voter unreachable<\/b> on lab4: no answer<\/li><li><b>build skew<\/b>: two builds<\/li>/);
+  assert.match(blocked.action, /disabled/);
+  cluster.nodes[2].removal_pending = true;
+  const election = PANEL.clusterMaintenanceRows(env, cluster, ops).find((row) => row.id === "election");
+  assert.match(election.text, /in flight on lab3/);
+  assert.match(election.action, /disabled/);
+  const single = status("single_node", [node("node-1", 1, "voter", { is_leader: true })]);
+  assert.deepEqual(PANEL.clusterMaintenanceRows(env, single, null).map((row) => row.id), ["restart", "diagnostics"]);
 });
 
 main().catch((error) => {
