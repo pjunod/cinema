@@ -3,6 +3,8 @@
 Run: python m7_pair_compare.py REQUEST.json REQUEST_SHA256 NEW_RESULT.json
 Schema 1 request artifacts are absolute {path, sha256} references. See ARTIFACTS
 for exact names. The decode receipt contract is specified in validate_candidate.
+rate_proposal binds the guarded pre-encode policy and target used by the Rust
+author resolver. encode_recipe binds the completed encoder output separately.
 Only the new arm and paired error differences are scored. Retained F+ summaries
 are the authority for the margin and tail gates. A result is fixture evidence.
 """
@@ -22,7 +24,7 @@ HERE = Path(__file__).resolve().parent
 PROTOCOL_SHA = "9fa874faf2ac48c928bf6dbadf86528b7922061179c041e1ea084a5b93db05f3"
 ARTIFACTS = {
     "protocol", "baseline_request", "baseline_result", "run_request", "run_terminal", "run_landing",
-    "encode_recipe", "encoded", "authored", "author_request", "author_receipt", "author_protocol",
+    "rate_proposal", "encode_recipe", "encoder_log", "roi_map", "encoded", "authored", "author_request", "author_receipt", "author_protocol",
     "decode_receipt", "decoder", "decode_tool", "candidate_planes", "encoder_input_raw",
     "encoded_sps_trace", "authored_sps_trace", "source_rpu_trace", "authored_rpu_trace",
     "encoded_probe", "authored_probe",
@@ -34,6 +36,15 @@ CODED_FORMAT = {
     "chroma_sample_loc_type_top_field": 2, "chroma_sample_loc_type_bottom_field": 2,
 }
 FRAME_BYTES = baseline.WIDTH * baseline.HEIGHT * 3
+
+
+class EncoderNotAdmitted(ValueError):
+    """Actual encoder artifacts do not establish the frozen NP1 arm."""
+
+
+def encoder_check(condition, reason):
+    if not condition:
+        raise EncoderNotAdmitted(reason)
 
 
 def read(path):
@@ -161,6 +172,63 @@ def validate_baseline(paths, protocol, run_refs):
     return result, source_paths, metadata, curves, publication
 
 
+def validate_encoder(paths, refs, folder, chosen, recipe):
+    """Confirm actual x265 settings, effective coded QG, and submitted ROI."""
+    encoder_check(paths["encoder_log"] == folder / f"{chosen}-encode.log"
+                  and paths["roi_map"] == folder / f"{chosen}-map.json"
+                  and Path(recipe["argv"][3]).resolve() == paths["roi_map"]
+                  and recipe["map_sha256"] == refs["roi_map"]["sha256"],
+                  "encoder log or map does not belong to the selected attempt")
+    roi = read(paths["roi_map"])
+    encoder_check(roi == recipe["map"], "ROI map differs from the encoder recipe")
+    expected = {"mode": "lumazfsp", "grid": 16, "threshold_nits": 1,
+                "qp_offset": -6, "qp_range": 63, "flat": "kept", "span_octaves": 0.5,
+                "encoded_frames": 48, "packets": 48}
+    encoder_check(all(roi.get(key) == value for key, value in expected.items()),
+                  "ROI map parameters or coverage differ")
+    frames = roi["frames"]
+    encoder_check(len(frames) == 48, "ROI map must cover all 48 frames")
+    nonzero = 0
+    for index, frame in enumerate(frames):
+        counts = [frame[key] for key in ("selected_zero_offset_blocks", "selected_blocks", "blocks")]
+        encoder_check(all(type(value) is int for value in counts)
+                      and frame["frame"] == index and frame["zero_offset_blocks_coded_at"] == "balance"
+                      and 0 <= counts[0] <= counts[1] <= counts[2] == (3840 // 16) * (2160 // 16),
+                      f"ROI map frame {index} has inconsistent coverage")
+        nonzero += counts[1] - counts[0]
+    encoder_check(nonzero > 0, "ROI map contains no selected nonzero offsets")
+
+    log = paths["encoder_log"].read_text()
+    encoder_check(not re.search(r"\bskipping ROI\b", log, re.IGNORECASE),
+                  "FFmpeg reported skipping ROI")
+    aq = re.findall(r"AQ: mode / str / qg-size / cu-tree\s*:\s*(\d+)\s*/\s*([0-9.]+)\s*/\s*(\d+)\s*/\s*(\d+)", log)
+    encoder_check(len(aq) == 1 and tuple(map(Fraction, aq[0])) == (2, 0, 32, 1),
+                  f"x265 actual AQ tuple differs: {aq}")
+    tool_lines = "\n".join(line for line in log.splitlines() if "tools:" in line)
+    psycho = {}
+    for key, want in (("psy-rd", 2), ("rdoq", 2), ("psy-rdoq", 1)):
+        values = re.findall(rf"(?<![-\w]){key}=([0-9.]+)(?=\s|$)", tool_lines)
+        encoder_check(len(values) == 1 and Fraction(values[0]) == want,
+                      f"x265 actual {key} differs: {values}")
+        psycho[key] = want
+
+    trace = paths["encoded_sps_trace"].read_text()
+    syntax = {}
+    for key in ("log2_min_luma_coding_block_size_minus3", "log2_diff_max_min_luma_coding_block_size",
+                "cu_qp_delta_enabled_flag", "diff_cu_qp_delta_depth"):
+        observed = re.findall(rf"\b{key}\s+[01]+\s*=\s*(\d+)\s*$", trace, re.MULTILINE)
+        encoder_check(observed and len(set(observed)) == 1, f"absent or conflicting SPS/PPS {key}")
+        syntax[key] = int(observed[0])
+    ctu = 3 + syntax["log2_min_luma_coding_block_size_minus3"] + syntax["log2_diff_max_min_luma_coding_block_size"]
+    encoder_check(syntax["cu_qp_delta_enabled_flag"] == 1
+                  and ctu - syntax["diff_cu_qp_delta_depth"] == 5,
+                  "coded QP deltas are disabled or effective QG is not 32")
+    return {"aq_mode_strength_qg_cutree": [2, 0, 32, 1], "psy": psycho,
+            "effective_qp_group_size": 32, "sps_pps": syntax,
+            "selected_nonzero_offset_blocks": nonzero, "roi_skip_warning": False,
+            "scope": "Map construction and encoder admission do not prove each coded block used its requested offset."}
+
+
 def validate_candidate(paths, refs, protocol, result, metadata):
     """Decode receipt schema 1 owns software decoding, trace parsing and AU audit.
 
@@ -190,6 +258,15 @@ def validate_candidate(paths, refs, protocol, result, metadata):
     matches = [row for row in landing["attempts"] if row["prefix"] == chosen and row.get("in_band") is True]
     require(len(matches) == 1 and type(matches[0]["b_kbps"]) is int, "selected rate entry differs")
     target = matches[0]["b_kbps"]
+    attempt = int(chosen[-1])
+    require(paths["rate_proposal"] == folder.parent / f"proposal-{attempt}.json",
+            "rate proposal is not the selected attempt")
+    proposal = read(paths["rate_proposal"])
+    baseline.require_fields(proposal, {"target_kbps": target,
+                                        "request_sha256": refs["run_request"]["sha256"]},
+                            "selected rate proposal")
+    require(proposal["driver_argv"][-4:] == ["--prefix", chosen, "--override", f"b={target}k"],
+            "rate proposal argv differs from the selected attempt")
     require(83334 <= target <= 125000
             and recipe["overrides"] == ["x265-params+=cbqpoffs=-9:crqpoffs=-12:aq-strength=0", f"b={target}k"],
             "candidate differs from sealed NP1 override policy")
@@ -203,10 +280,10 @@ def validate_candidate(paths, refs, protocol, result, metadata):
                                        "protocol_sha256": refs["author_protocol"]["sha256"]}, "author receipt")
     runtime = read(paths["author_protocol"])
     require(runtime["comparison_protocol_sha256"] == PROTOCOL_SHA
-            and runtime["recipe_sha256"] == refs["encode_recipe"]["sha256"]
+            and runtime["recipe_sha256"] == refs["rate_proposal"]["sha256"]
             and runtime["input_representation_sha256"] == run["artifacts"]["input"]["sha256"]
             and runtime["author_plan_sha256"] == terminal["author_plan_sha256"],
-            "author runtime protocol differs from the frozen comparison or selected recipe")
+            "author runtime protocol differs from the frozen comparison or guarded rate proposal")
     author_request = read(paths["author_request"])
     require(author_request["protocol"]["sha256"] == refs["author_protocol"]["sha256"]
             and author_request["encoded_mp4"]["sha256"] == refs["encoded"]["sha256"]
@@ -284,9 +361,10 @@ def validate_candidate(paths, refs, protocol, result, metadata):
                     and authored_packets[index] == (row["authored_packet_bytes"], signed["authored_payload_sha256"])
                     and type(row["authored_packet_bytes"]) is int, "raw packet proof differs")
         require(not stream.read(1) and not raw.read(1), "raw video has extra bytes")
+    encoder = validate_encoder(paths, refs, folder, chosen, recipe)
     actual_rate = Fraction(sum(size for size, _ in authored_packets) * 8 * 24000,
                            48 * 1001 * 1_000_000)
-    return frames, actual_rate
+    return frames, actual_rate, encoder
 
 
 def packet_probe(path, media):
@@ -480,10 +558,10 @@ def evaluate(request, expected):
     require(run_refs["decode_collector"]["sha256"] == refs["decode_tool"]["sha256"],
             "decoder collector differs from pre-encode seal")
     result, source, metadata, curves, publication = validate_baseline(paths, protocol, run_refs)
-    frames, rate = validate_candidate(paths, refs, protocol, result, metadata)
+    frames, rate, encoder = validate_candidate(paths, refs, protocol, result, metadata)
     output = {"schema": 1, "kind": "m7_np1_served_fplus_pair", "request_sha256": expected,
               "artifacts": refs, "scorer_sha256": sha(Path(__file__)), "window": result["window"],
-              "sampling": result["sampling"], "served_publication": publication,
+              "sampling": result["sampling"], "served_publication": publication, "encoder_admission": encoder,
               "authored_video_packet_mbps": float(rate),
               "authored_video_packet_mbps_exact": str(rate),
               "scope": "offline single-fixture experimental comparison"}
@@ -505,6 +583,9 @@ def main():
     require(not args.output.exists(), "output already exists")
     try:
         result = evaluate(args.request, args.request_sha256)
+    except EncoderNotAdmitted as error:
+        result = {"schema": 1, "status": "inconclusive", "request_sha256": args.request_sha256,
+                  "reason": str(error), "stage": "encoder_admission"}
     except (ValueError, KeyError, TypeError, OSError) as error:
         result = {"schema": 1, "status": "refused", "request_sha256": args.request_sha256,
                   "reason": str(error)}
