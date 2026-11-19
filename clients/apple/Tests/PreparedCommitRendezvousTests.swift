@@ -393,7 +393,7 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         for invalid in [
             (staged: -1, current: 10_000, origin: 0),
             (staged: 0, current: -1, origin: 0),
-            (staged: 0, current: 10_000, origin: -1),
+            (staged: 0, current: 10_000, origin: -PlaybackControl.maximumMediaMs - 1),
             (staged: 0, current: Int.max, origin: 0)
         ] {
             XCTAssertNil(PreparedCommitRendezvous.planLoaded(
@@ -725,7 +725,10 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         let prime = source[start.lowerBound..<end.lowerBound]
         XCTAssertFalse(prime.contains("await item.seek"), "AVFoundation completion is not a readiness bound")
         XCTAssertTrue(prime.contains("coordinator.readinessRemainingMs()"))
-        XCTAssertTrue(prime.contains("guard await alignPrepared(item, to: preparedFilmPositionMs, boundMs: remaining)"))
+        XCTAssertTrue(prime.contains(
+            "guard await alignPrepared(item, to: preparedTimeline.itemPositionMs(filmPositionMs: preparedFilmPositionMs), " +
+            "boundMs: remaining)"
+        ))
         XCTAssertTrue(prime.contains("coordinator.abandonWithoutFallback(.aborted)"))
         XCTAssertTrue(prime.contains("coordinator.abandon(.failed)"))
         let alignment = try XCTUnwrap(source.range(of: "private func alignPrepared(_ item:"))
