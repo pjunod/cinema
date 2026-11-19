@@ -937,6 +937,91 @@ pub struct TranscodeManager {
     /// never waits on the catalog rebuild, source fences or replicated
     /// enqueue; [`TranscodeManager::output_enqueue_loop`] owns them.
     output_enqueue: OutputEnqueueQueue,
+    /// The viewer's mid-playback "stop retaining output" choices and the
+    /// complete-output rows each session's own start created, so turning it
+    /// off can cancel exactly that session's work. Process-local, like the
+    /// sessions it describes.
+    retain_output: std::sync::Mutex<RetainOutputLedger>,
+}
+
+/// How long a mid-playback retention choice or a queued-row record is kept.
+/// Longer than any one playback; bounded so the ledger cannot grow forever.
+const RETAIN_OUTPUT_LEDGER_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+/// Hard bound on each ledger map, whatever the TTL leaves.
+const RETAIN_OUTPUT_LEDGER_MAX: usize = 4096;
+
+/// See [`TranscodeManager::stop_output_retention`].
+#[derive(Default)]
+pub(crate) struct RetainOutputLedger {
+    /// Sessions whose viewer turned output retention off.
+    refused: HashMap<String, Instant>,
+    /// The complete-output job a session's start created (never a dedup hit).
+    queued: HashMap<String, (String, Instant)>,
+}
+
+impl RetainOutputLedger {
+    fn prune(&mut self, now: Instant) {
+        self.refused
+            .retain(|_, at| now.duration_since(*at) < RETAIN_OUTPUT_LEDGER_TTL);
+        self.queued
+            .retain(|_, (_, at)| now.duration_since(*at) < RETAIN_OUTPUT_LEDGER_TTL);
+        if self.refused.len() > RETAIN_OUTPUT_LEDGER_MAX {
+            self.refused.clear();
+        }
+        if self.queued.len() > RETAIN_OUTPUT_LEDGER_MAX {
+            self.queued.clear();
+        }
+    }
+
+    /// Record the refusal; returns the job this session queued, if any.
+    fn refuse(&mut self, session_id: &str) -> Option<String> {
+        let now = Instant::now();
+        self.prune(now);
+        self.refused.insert(session_id.to_owned(), now);
+        self.queued.remove(session_id).map(|(job, _)| job)
+    }
+
+    fn refused(&self, session_id: &str) -> bool {
+        self.refused.contains_key(session_id)
+    }
+
+    /// Record a row this session's start created. `false` when the session
+    /// already refused retention, so the caller cancels it instead.
+    fn record_queued(&mut self, session_id: &str, job_id: String) -> bool {
+        let now = Instant::now();
+        self.prune(now);
+        if self.refused.contains_key(session_id) {
+            return false;
+        }
+        self.queued.insert(session_id.to_owned(), (job_id, now));
+        true
+    }
+}
+
+#[cfg(test)]
+mod retain_output_ledger_tests {
+    use super::RetainOutputLedger;
+
+    #[test]
+    fn refusing_hands_back_only_this_sessions_own_row_and_blocks_later_ones() {
+        let mut ledger = RetainOutputLedger::default();
+        assert!(ledger.record_queued("a", "job-a".into()));
+        assert!(ledger.record_queued("b", "job-b".into()));
+        assert!(!ledger.refused("a"));
+        assert_eq!(ledger.refuse("a").as_deref(), Some("job-a"));
+        assert!(ledger.refused("a"));
+        assert!(!ledger.refused("b"), "another session is untouched");
+        assert_eq!(
+            ledger.refuse("a"),
+            None,
+            "idempotent: the row was handed back once"
+        );
+        assert!(
+            !ledger.record_queued("a", "job-late".into()),
+            "a row created after the refusal is the caller's to cancel"
+        );
+        assert_eq!(ledger.refuse("b").as_deref(), Some("job-b"));
+    }
 }
 
 /// Starts that may hand off before the owned worker drains. Beyond this a
@@ -1015,15 +1100,6 @@ const QUALIFICATION_PIPELINES: [Pipeline; 18] = [
 mod terminal_admission;
 use terminal_admission::*;
 // split: end terminal-admission
-
-/// Rolling retention as this node sees it, for the Developer card.
-pub(crate) struct RollingRetentionFacts {
-    pub(crate) same_filesystem: Option<bool>,
-    pub(crate) slack: Option<i64>,
-    pub(crate) admits: Result<(), &'static str>,
-    pub(crate) rows: Vec<crate::vodserve::retained::RetainedOutputRow>,
-    pub(crate) cleanup_pending: usize,
-}
 
 // split: begin manager
 #[path = "transcode/manager/cache.rs"]

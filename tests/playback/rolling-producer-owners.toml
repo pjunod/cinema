@@ -1693,9 +1693,8 @@ pattern = "HlsPresentationResolution"
 # adds a worker; both retain the VOD response owner attached to those bytes.
 # S10 public wire: +1 read-only match on the actual public session context;
 # no mocked presentation or new response authority.
-# Architecture close-out (#814): +1 test-only match —
-# sdr_master_codecs_is_frozen_when_the_session_is_created reads the created
-# session's ready context; no new owner.
+# Architecture close-out (#814) added a test-only match that the Developer
+# tab cleanup (2026-11-18) removed with SDR master CODECS: -1.
 # Processed Dolby Vision signaling (#1257): +1 test-only match in
 # processed_profile81_master_declares_hdr10_compatibility reads the admitted
 # session's ready context; no new response owner or worker.
@@ -1703,7 +1702,7 @@ pattern = "HlsPresentationResolution"
 # transcode/manager/processed_reuse_tests.rs:1955, assert_admitted_delivery.
 # It reads the admitted successor's frozen HLS context before/after replay;
 # the existing VOD response owner remains authoritative. No worker is added.
-expected_occurrences = 27
+expected_occurrences = 26
 
 [[module_symbols]]
 id = "m4-executor-registration"
@@ -6016,7 +6015,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # source_probe/title_work_tests.rs +8 and transcode/manager/construct.rs +1 (the bounded
 # production qualification-admission timeout, QUEUE_WAIT in admit_dv_title).
 # Union 2212 + 20 + 39 = 2271, less those 11 counted twice = 2260.
-expected_occurrences = 2260
+# Developer tab cleanup (2026-11-18): -4 test timers. Network priors are
+# always on, so the priors-off client-log barriers and their timeouts in
+# link_receipts tests are gone; no production timer changed.
+expected_occurrences = 2256
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -7285,7 +7287,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Prepared delivery (#1736/#1752) contributes main's additional test-only
 # `.vod.status()` snapshot observation. It launches no child and transfers no
 # ownership. Preserve both reviewed contributions: main 937 + F+ 5 = 942.
-expected_occurrences = 942
+# Developer tab cleanup (2026-11-18): +3 net lexical `.status(` matches in
+# the retain-output route tests (HTTP response status reads); no process.
+expected_occurrences = 945
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

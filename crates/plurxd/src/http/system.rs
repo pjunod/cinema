@@ -72,16 +72,6 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
     let name = configured_server_name(&state).await?;
     let setup_required = state.store.count_users().await? == 0;
     let android_app = super::web::android_apk_path(&state.system.data_dir).is_some();
-    let playback_auto_abr = state
-        .applied
-        .setting(keys::PLAYBACK_AUTO_ABR)
-        .await?
-        .is_some_and(|value| value.trim() == "1");
-    let playback_display_aware_auto = state
-        .applied
-        .setting(keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-        .await?
-        .is_some_and(|value| value.trim() == "1");
     let display_mode_match = state
         .applied
         .setting(keys::PLAYBACK_DISPLAY_MODE_MATCH)
@@ -103,8 +93,9 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         uptime_seconds: state.started_at.elapsed().as_secs(),
         setup_required,
         android_app,
-        playback_auto_abr,
-        playback_display_aware_auto,
+        // Always on. Still emitted so shipped clients keep their Auto path.
+        playback_auto_abr: true,
+        playback_display_aware_auto: true,
         display_mode_match,
     }))
 }
@@ -1334,41 +1325,6 @@ pub(super) fn pause_next_client_log_after_capture(
     (captured_rx, release_tx)
 }
 
-#[cfg(test)]
-static CLIENT_LOG_DETACHED_HOOK: std::sync::Mutex<
-    Option<(&'static str, tokio::sync::oneshot::Sender<()>)>,
-> = std::sync::Mutex::new(None);
-
-/// Fires its sender when the last holder drops it: the handler and every
-/// detached task it spawned for one client-log request.
-#[cfg(test)]
-struct ClientLogDetachedDone(Option<tokio::sync::oneshot::Sender<()>>);
-
-#[cfg(test)]
-impl Drop for ClientLogDetachedDone {
-    fn drop(&mut self) {
-        if let Some(done) = self.0.take() {
-            let _ = done.send(());
-        }
-    }
-}
-
-/// Resolves once the next client-log request whose message is `message` has
-/// returned AND every detached task it spawned (the link-sample claim, the
-/// measured-Link fold, the playback-event emit) has finished. A test that
-/// asserts something durable was *not* written awaits this instead of
-/// yielding and hoping, so a late write is caught rather than raced.
-#[cfg(test)]
-pub(super) fn notify_when_client_log_detached_work_finishes(
-    message: &'static str,
-) -> tokio::sync::oneshot::Receiver<()> {
-    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-    *CLIENT_LOG_DETACHED_HOOK
-        .lock()
-        .expect("client-log detached hook lock") = Some((message, done_tx));
-    done_rx
-}
-
 /// POST /api/v1/client-log — any signed-in user. Records one browser playback
 /// error into the server log ring so it surfaces in `Settings → Logs`. Bounded
 /// by per-field clipping and by a global rate limit (this is diagnostics, not an
@@ -1392,21 +1348,6 @@ pub async fn client_log(
         return StatusCode::NO_CONTENT.into_response();
     };
     let line = client_log_line(&ev, suppressed);
-    #[cfg(test)]
-    let detached_done = {
-        let mut hook = CLIENT_LOG_DETACHED_HOOK
-            .lock()
-            .expect("client-log detached hook lock");
-        if hook
-            .as_ref()
-            .is_some_and(|(message, _)| *message == ev.message)
-        {
-            hook.take()
-                .map(|(_, done)| Arc::new(ClientLogDetachedDone(Some(done))))
-        } else {
-            None
-        }
-    };
 
     // Both WARN and ERROR clear the default `info` filter, so either shows in
     // the admin log without the operator touching PLURX_LOG.
@@ -1523,15 +1464,11 @@ pub async fn client_log(
     if let Some(identity) = network.clone().filter(|_| link_sample.is_some()) {
         let proof_state = state.clone();
         let proof_session = ev.session_id.clone();
-        #[cfg(test)]
-        let detached_done = detached_done.clone();
         tokio::spawn(async move {
-            #[cfg(test)]
-            let _detached_done = detached_done;
-            // The claim itself is the owner's in-memory receipt and needs no
-            // opt-in: it is what later proves a fresh transfer (an upgrade)
-            // or backs a Link negative's acknowledgement (D6). Only keeping
-            // it as per-network history is `playback.network_priors`.
+            // The claim itself is the owner's in-memory receipt: it is what
+            // later proves a fresh transfer (an upgrade) or backs a Link
+            // negative's acknowledgement (D6). It is also kept as
+            // per-network history.
             let Some(sample) = link_sample else {
                 return;
             };
@@ -1542,21 +1479,19 @@ pub async fn client_log(
             else {
                 return;
             };
-            if super::hls::link_receipts::network_priors_enabled(&proof_state).await {
-                // A client-reported link sample is a prior, not a
-                // record anything waits on: losing one costs a
-                // slightly staler estimate, so the failure is counted
-                // and rate-limit logged rather than propagated to a
-                // detached task nobody joins.
-                crate::store_result::observe(
-                    crate::store_result::Operation::ObserveCandidateLink,
-                    crate::store_result::Discard::BestEffort,
-                    proof_state
-                        .store
-                        .observe_candidate_link(&value, crate::media_sessions::unix_ms())
-                        .await,
-                );
-            }
+            // A client-reported link sample is a prior, not a
+            // record anything waits on: losing one costs a
+            // slightly staler estimate, so the failure is counted
+            // and rate-limit logged rather than propagated to a
+            // detached task nobody joins.
+            crate::store_result::observe(
+                crate::store_result::Operation::ObserveCandidateLink,
+                crate::store_result::Discard::BestEffort,
+                proof_state
+                    .store
+                    .observe_candidate_link(&value, crate::media_sessions::unix_ms())
+                    .await,
+            );
         });
     }
     #[cfg(test)]
@@ -1590,11 +1525,7 @@ pub async fn client_log(
     let transcode = Arc::clone(&state.transcode);
     let store = Arc::clone(&state.store);
     let user_id = user.id;
-    #[cfg(test)]
-    let emit_done = detached_done.clone();
     tokio::spawn(async move {
-        #[cfg(test)]
-        let _detached_done = emit_done;
         if let Some(observation) = measured_link_prior {
             crate::store_result::observe(
                 crate::store_result::Operation::ObserveMeasuredLinkPrior,
@@ -2475,7 +2406,8 @@ pub struct SettingsDto {
     /// may still be VBR when a family refuses quality mode; `/system`
     /// capabilities and boot logs carry that validation result.
     pub transcode_rate_mode: Option<String>,
-    /// Requested content-aware encoding and its advisory scorer applicability.
+    /// Content-aware encoding is always on; kept as constant `true` for
+    /// clients that still read it. Its advisory scorer applicability follows.
     pub content_aware_encoding: bool,
     pub content_encoding_scorer_ready: Option<bool>,
     pub content_encoding_applicability: serde_json::Value,
@@ -2538,11 +2470,6 @@ pub struct SettingsDto {
     pub decoder_health_qualified_artifacts: bool,
     /// Explicit operator override, applied to new copy starts.
     pub hevc_unverified_copy: bool,
-    /// Print `CODECS` on SDR HLS master variants (S-10). Off by default, which
-    /// is the pre-S-10 master. Fixed when a session is created; a session
-    /// rebuilt after an owner takeover or VOD resurrection reads the current
-    /// value. Developer readiness is advisory only.
-    pub playback_sdr_master_codecs: bool,
     /// Advisory engine observation, never used to authorize a settings save.
     pub hevc_header_trace_available: Option<bool>,
     /// What this node measured about itself, and the identity it therefore
@@ -2628,8 +2555,9 @@ pub struct SettingsDto {
     /// Developer switch: which complete-output preparation a VOD start may
     /// queue — `off` (the default), `copy`, or `copy_and_encoded`.
     pub vod_output_preparation: &'static str,
-    /// Developer switch: retain a rolling session's complete output as a
-    /// reusable artifact. Off by default.
+    /// Rolling retention is always on; kept as constant `true` for clients
+    /// that still read it. A playback can opt out with
+    /// `CreateOverrides::retain_output`.
     pub vod_rolling_retention: bool,
     /// Server-wide scheduled maintenance, in minutes; 0 is off (the default).
     /// Per-library scan/refresh intervals are on the library, not here.
@@ -2649,11 +2577,9 @@ pub struct SettingsDto {
     pub cache_used_bytes: i64,
     /// Node-local playback event retention. Default 30 days; 0 is fully off.
     pub telemetry_retain_days: i64,
-    /// Use coarse, node-local playback history to seed Auto quality.
-    /// Explicit opt-in; missing is false.
+    /// Network priors, adaptive Auto and display-aware Auto are always on;
+    /// kept as constant `true` for clients that still read them.
     pub playback_network_priors: bool,
-    /// Let the web client's Auto controller change rungs after playback starts.
-    /// Explicit opt-in; missing is false.
     pub playback_auto_abr: bool,
     pub playback_display_aware_auto: bool,
     /// Android television same-resolution refresh matching. The Developer
@@ -2856,12 +2782,6 @@ async fn settings_dto(
         .and_then(|value| value.trim().parse::<i64>().ok())
         .unwrap_or(keys::TELEMETRY_RETAIN_DEFAULT_DAYS)
         .max(0);
-    let playback_network_priors =
-        setting(keys::PLAYBACK_NETWORK_PRIORS).is_some_and(|value| value.trim() == "1");
-    let playback_auto_abr =
-        setting(keys::PLAYBACK_AUTO_ABR).is_some_and(|value| value.trim() == "1");
-    let playback_display_aware_auto =
-        setting(keys::PLAYBACK_DISPLAY_AWARE_AUTO).is_some_and(|value| value.trim() == "1");
     let playback_display_mode_match =
         setting(keys::PLAYBACK_DISPLAY_MODE_MATCH).is_some_and(|value| value.trim() == "1");
     // One parser owns the stored string. Three copies of this negated match
@@ -2930,8 +2850,6 @@ async fn settings_dto(
     let vod_output_preparation =
         crate::vodserve::OutputPreparation::parse(setting(keys::VOD_OUTPUT_PREPARATION).as_deref())
             .as_str();
-    let vod_rolling_retention =
-        plurx_core::store::stored_switch(setting(keys::VOD_ROLLING_RETENTION).as_deref(), false);
     let analysis_max_attempts = plurx_core::store::bounded_analysis_max_attempts(
         setting(keys::ANALYSIS_MAX_ATTEMPTS).as_deref(),
     );
@@ -3001,7 +2919,7 @@ async fn settings_dto(
         default_sub_lang: prefs.sub_lang,
         sub_mode: prefs.sub_mode.as_str().to_owned(),
         stream_readrate,
-        content_aware_encoding: setting(keys::CONTENT_AWARE_ENCODING).as_deref() == Some("1"),
+        content_aware_encoding: true,
         content_encoding_scorer_ready: state.transcode.content_encoding_scorer_ready(),
         content_encoding_applicability: state
             .transcode
@@ -3052,10 +2970,6 @@ async fn settings_dto(
         decoder_health_qualified_artifacts: decoder_health_requested,
         hevc_unverified_copy: plurx_core::store::stored_switch(
             setting(keys::HEVC_UNVERIFIED_COPY).as_deref(),
-            false,
-        ),
-        playback_sdr_master_codecs: plurx_core::store::stored_switch(
-            setting(keys::PLAYBACK_SDR_MASTER_CODECS).as_deref(),
             false,
         ),
         hevc_header_trace_available: crate::ffmpeg::hevc_header_trace_available().await,
@@ -3150,7 +3064,7 @@ async fn settings_dto(
         cluster_session_takeover_enabled,
         cluster_clock_guard_enforced,
         vod_output_preparation,
-        vod_rolling_retention,
+        vod_rolling_retention: true,
         probe_retry_mins,
         artwork_retry_mins,
         transcode_cleanup_mins,
@@ -3158,9 +3072,9 @@ async fn settings_dto(
         cache_max_gb,
         cache_used_bytes,
         telemetry_retain_days,
-        playback_network_priors,
-        playback_auto_abr,
-        playback_display_aware_auto,
+        playback_network_priors: true,
+        playback_auto_abr: true,
+        playback_display_aware_auto: true,
         playback_display_mode_match,
         transcode_max_hw_sessions,
         transcode_software_pool_threads,
@@ -3383,7 +3297,6 @@ pub struct UpdateSettings {
     pub macos_hevc_output_enabled: Option<bool>,
     pub decoder_health_qualified_artifacts: Option<bool>,
     pub hevc_unverified_copy: Option<bool>,
-    pub playback_sdr_master_codecs: Option<bool>,
     pub pgs_overlay: Option<bool>,
     pub dolby_vision_convert: Option<bool>,
     pub dolby_vision_hdr_processing: Option<bool>,
@@ -3424,8 +3337,7 @@ pub struct UpdateSettings {
     /// back to each encoder family's code default (absent = unchanged).
     #[serde(default, deserialize_with = "deserialize_nullable")]
     pub transcode_rate_mode: Option<Option<String>>,
-    /// Content-aware and reorder requests retain their independent validation.
-    pub content_aware_encoding: Option<bool>,
+    /// Reorder requests retain their independent validation.
     pub vod_reorder_frames: Option<u8>,
     /// JSON null clears the override back to the family-tuned default.
     #[serde(default, deserialize_with = "deserialize_nullable")]
@@ -3453,7 +3365,6 @@ pub struct UpdateSettings {
     /// `off`, `copy` or `copy_and_encoded`. Never refused by readiness;
     /// turning it off cancels queued rows of the kinds it no longer admits.
     pub vod_output_preparation: Option<String>,
-    pub vod_rolling_retention: Option<bool>,
     /// Server-wide job intervals in minutes; 0 turns one off.
     pub probe_retry_mins: Option<i64>,
     pub artwork_retry_mins: Option<i64>,
@@ -3461,9 +3372,6 @@ pub struct UpdateSettings {
     pub cache_produce_mins: Option<i64>,
     pub cache_max_gb: Option<i64>,
     pub telemetry_retain_days: Option<i64>,
-    pub playback_network_priors: Option<bool>,
-    pub playback_auto_abr: Option<bool>,
-    pub playback_display_aware_auto: Option<bool>,
     pub playback_display_mode_match: Option<bool>,
     /// Encoder capacity. Bounded rather than free-form, because both numbers
     /// buy hardware that does not exist if they are wrong: a hardware cap
@@ -3563,7 +3471,6 @@ impl UpdateSettings {
             || self.macos_hevc_output_enabled.is_some()
             || self.decoder_health_qualified_artifacts.is_some()
             || self.hevc_unverified_copy.is_some()
-            || self.playback_sdr_master_codecs.is_some()
             || self.pgs_overlay.is_some()
             || self.dolby_vision_convert.is_some()
             || self.dolby_vision_hdr_processing.is_some()
@@ -3594,7 +3501,6 @@ impl UpdateSettings {
             || self.default_sub_lang.is_some()
             || self.sub_mode.is_some()
             || self.stream_readrate.is_some()
-            || self.content_aware_encoding.is_some()
             || self.vod_reorder_frames.is_some()
             || self.transcode_rate_mode.is_some()
             || self.transcode_quality.is_some()
@@ -3608,16 +3514,12 @@ impl UpdateSettings {
             || self.cluster_session_takeover_enabled.is_some()
             || self.cluster_clock_guard_enforced.is_some()
             || self.vod_output_preparation.is_some()
-            || self.vod_rolling_retention.is_some()
             || self.probe_retry_mins.is_some()
             || self.artwork_retry_mins.is_some()
             || self.transcode_cleanup_mins.is_some()
             || self.cache_produce_mins.is_some()
             || self.cache_max_gb.is_some()
             || self.telemetry_retain_days.is_some()
-            || self.playback_network_priors.is_some()
-            || self.playback_auto_abr.is_some()
-            || self.playback_display_aware_auto.is_some()
             || self.playback_display_mode_match.is_some()
             || self.transcode_max_hw_sessions.is_some()
             || self.transcode_software_pool_threads.is_some()
@@ -4240,15 +4142,6 @@ pub async fn update_settings(
             }
         }
     }
-    if let Some(enabled) = req.content_aware_encoding {
-        state
-            .store
-            .put_setting(
-                keys::CONTENT_AWARE_ENCODING,
-                if enabled { "1" } else { "0" },
-            )
-            .await?;
-    }
     if let Some(frames) = req.vod_reorder_frames {
         state
             .store
@@ -4566,15 +4459,6 @@ pub async fn update_settings(
             .put_setting(keys::HEVC_UNVERIFIED_COPY, if on { "1" } else { "0" })
             .await?;
     }
-    if let Some(on) = req.playback_sdr_master_codecs {
-        // Saved unconditionally: the device re-qualification row on the
-        // Developer card is advice, not a precondition. New sessions read the
-        // value at create; running sessions keep the master they started with.
-        state
-            .store
-            .put_setting(keys::PLAYBACK_SDR_MASTER_CODECS, if on { "1" } else { "0" })
-            .await?;
-    }
     if let Some(on) = req.decoder_health_qualified_artifacts {
         state
             .store
@@ -4737,12 +4621,6 @@ pub async fn update_settings(
             .put_setting(keys::VOD_OUTPUT_PREPARATION, mode)
             .await?;
     }
-    if let Some(enabled) = req.vod_rolling_retention {
-        state
-            .store
-            .put_setting(keys::VOD_ROLLING_RETENTION, if enabled { "1" } else { "0" })
-            .await?;
-    }
     if let Some(enabled) = req.cluster_clock_guard_enforced {
         state
             .store
@@ -4793,32 +4671,8 @@ pub async fn update_settings(
             .put_setting(keys::TELEMETRY_RETAIN_DAYS, &days.to_string())
             .await?;
     }
-    if let Some(enabled) = req.playback_network_priors {
-        state
-            .store
-            .put_setting(
-                keys::PLAYBACK_NETWORK_PRIORS,
-                if enabled { "1" } else { "0" },
-            )
-            .await?;
-    }
-    if req.telemetry_retain_days.is_some() || req.playback_network_priors.is_some() {
+    if req.telemetry_retain_days.is_some() {
         crate::telemetry::invalidate_settings(&state.store);
-    }
-    if let Some(enabled) = req.playback_display_aware_auto {
-        state
-            .store
-            .put_setting(
-                keys::PLAYBACK_DISPLAY_AWARE_AUTO,
-                if enabled { "1" } else { "0" },
-            )
-            .await?;
-    }
-    if let Some(enabled) = req.playback_auto_abr {
-        state
-            .store
-            .put_setting(keys::PLAYBACK_AUTO_ABR, if enabled { "1" } else { "0" })
-            .await?;
     }
     if let Some(enabled) = req.playback_display_mode_match {
         state

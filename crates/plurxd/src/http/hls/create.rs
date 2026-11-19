@@ -695,7 +695,9 @@ impl CreateSession {
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            // The player's per-playback choice; `SessionRequest` never
+            // serializes it.
+            retain_output: self.overrides.as_ref().and_then(|o| o.retain_output),
             dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
@@ -810,6 +812,14 @@ pub struct CreateOverrides {
     /// badge deserves to see the two facts next to each other.
     #[serde(default)]
     pub force: Option<String>,
+    /// The player's per-playback output-retention choice. `Some(false)`
+    /// turns it off for this playback only: no complete-output preparation
+    /// is queued and the rolling producer retains nothing. `None` or
+    /// `Some(true)` follows the server's settings. Read from the create body
+    /// only: never serialized into the durable planning overrides, so a
+    /// takeover or resurrected session falls back to the server setting.
+    #[serde(default, skip_serializing)]
+    pub retain_output: Option<bool>,
 }
 
 /// What create decided about the plan the client echoed, and what to say
@@ -2107,20 +2117,6 @@ async fn resolve_plan_for_principal_with_local_evidence(
         let prefer_hevc = continuous.is_none()
             && state.transcode.macos_hevc_output_enabled()
             && explicit_hls_hevc_claim(caps);
-        let enabled = continuous.is_some()
-            || prefer_hevc
-            || if let Some(snapshot) = snapshot {
-                snapshot
-                    .settings
-                    .get(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-                    .is_some_and(|value| value.trim() == "1")
-            } else {
-                state
-                    .applied
-                    .setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-                    .await?
-                    .is_some_and(|value| value.trim() == "1")
-            };
         let intent_candidate =
             body.intent
                 .as_ref()
@@ -2138,14 +2134,10 @@ async fn resolve_plan_for_principal_with_local_evidence(
         let requested = continuous
             .map(|family| family.primary_candidate_id)
             .or(intent_candidate);
-        if requested.is_some() && !enabled {
-            return Err(ApiError::BadRequest("candidate_route_disabled".to_owned()));
-        }
-        if enabled
-            && (auto_bootstrap_ceiling.is_some()
-                || requested.is_some()
-                || body.height == Some(1440)
-                || (body.quality_auto == Some(true) && body.copy != Some(true)))
+        if auto_bootstrap_ceiling.is_some()
+            || requested.is_some()
+            || body.height == Some(1440)
+            || (body.quality_auto == Some(true) && body.copy != Some(true))
         {
             if requested.is_none() && body.candidate_auto_policy() {
                 // The fallback belongs to the actual negotiated catalog, not
@@ -2542,18 +2534,6 @@ async fn resolve_plan_for_principal_with_local_evidence(
     request.quality_catalog = retained_catalog
         .as_ref()
         .map(|catalog| Arc::new(catalog.clone()));
-    // Frozen here, from the planning snapshot this create already holds, so
-    // the rolling start pays no extra Store read for it. Without a snapshot
-    // the start reads the switch itself.
-    request.sdr_master_codecs = snapshot.map(|snapshot| {
-        plurx_core::store::stored_switch(
-            snapshot
-                .settings
-                .get(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS)
-                .map(String::as_str),
-            false,
-        )
-    });
     if request
         .request_id
         .as_ref()
@@ -3542,15 +3522,12 @@ async fn create_with_purpose_attempt(
             &user.password_hash,
         ));
     }
-    let network_prior = super::super::network::stored_prior(
-        state.store.as_ref(),
-        &state.applied,
-        identity.as_ref(),
-    )
-    .await
-    .map_err(|error| {
-        ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
-    })?;
+    let network_prior =
+        super::super::network::stored_prior(state.store.as_ref(), identity.as_ref())
+            .await
+            .map_err(|error| {
+                ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
+            })?;
     crate::media_pool::mark_create_phase("settings");
     let resolved = resolve_plan_with_continuous(
         PlanInputs {
@@ -4154,15 +4131,7 @@ async fn create_with_purpose_attempt(
         request.source_telemetry = None;
     }
 
-    let quality_enabled = continuous.is_some()
-        || planning_snapshot
-            .and_then(|snapshot| {
-                snapshot
-                    .settings
-                    .get(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-            })
-            .is_some_and(|value| value.trim() == "1");
-    if quality_enabled && candidate_decoder_caps.is_some() && quality_catalog.is_none() {
+    if candidate_decoder_caps.is_some() && quality_catalog.is_none() {
         if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
             quality_catalog = Some(
                 state
@@ -4755,7 +4724,7 @@ async fn create_with_purpose_attempt(
     remote_request.retained_output = info.retained_output.clone();
     recipe_json = serde_json::to_string(&remote_request)?;
     let measured_candidate_outputs = if let (true, Some(source), Some(caps), Some(catalog)) = (
-        quality_enabled && quality_negotiated,
+        quality_negotiated,
         source.as_ref(),
         candidate_decoder_caps.as_ref(),
         quality_catalog.as_ref(),

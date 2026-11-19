@@ -23,13 +23,6 @@ impl RollingStartInputs {
             .cloned()
             .unwrap_or_default()
     }
-
-    pub(super) fn content_aware_encoding(&self) -> bool {
-        self.settings
-            .get(keys::CONTENT_AWARE_ENCODING)
-            .map(String::as_str)
-            == Some("1")
-    }
 }
 
 impl TranscodeManager {
@@ -80,22 +73,12 @@ impl TranscodeManager {
     }
 
     /// The rolling-retention budget from settings already read: a pure
-    /// parse, never a Store read. `None` is off. Retention is enabled by its
-    /// Developer switch (`vod.rolling_retention`, absent = off), not by the
-    /// cache key's presence; its budget is `cache.max_gb` under the one
-    /// unset rule ([`crate::cachekeep::cache_budget`]).
+    /// parse, never a Store read. `None` is off. Rolling retention is always
+    /// on; its budget is `cache.max_gb` under the one unset rule
+    /// ([`crate::cachekeep::cache_budget`]).
     pub(super) fn rolling_retained_budget_from(
         settings: &std::collections::BTreeMap<String, String>,
     ) -> Option<u64> {
-        let enabled = plurx_core::store::stored_switch(
-            settings
-                .get(plurx_core::store::keys::VOD_ROLLING_RETENTION)
-                .map(String::as_str),
-            false,
-        );
-        if !enabled {
-            return None;
-        }
         crate::cachekeep::cache_budget(
             settings
                 .get(plurx_core::store::keys::CACHE_MAX_GB)
@@ -658,7 +641,7 @@ impl TranscodeManager {
         priority: Priority,
         audio_claim: Option<&plurx_core::playback::audio::AudioClaim>,
         retained_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
-        sdr_master_codecs: Option<bool>,
+        retain_output: Option<bool>,
         source_telemetry: bool,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<StartInfo, String> {
@@ -678,14 +661,20 @@ impl TranscodeManager {
             .rolling_start_inputs(file_id, candidate_context, plan)
             .await?;
         let preference = inputs.encoder_preference();
-        let content_aware = inputs.content_aware_encoding();
         let RollingStartInputs {
             mut file,
             probe_json,
             settings,
             item_title,
         } = inputs;
-        let retained_budget = Self::rolling_retained_budget_from(&settings);
+        // `retain_output: Some(false)` is the viewer's per-playback opt-out
+        // (`SessionRequest::retain_output`); anything else follows the
+        // server's cache budget.
+        let retained_budget = if retain_output == Some(false) {
+            None
+        } else {
+            Self::rolling_retained_budget_from(&settings)
+        };
         let pacing = Self::pacing_from_settings(&settings, false).await;
         let sw_budget = Self::num_from(
             &settings,
@@ -765,15 +754,6 @@ impl TranscodeManager {
             self.resolve_movie_plan_from_probe(&file, &opts, encoder, probe_json.as_deref())?;
         opts.pipeline = plan.options().pipeline;
         opts.strict_dolby = plan.options().strict_dolby.clone();
-        // Freeze the master shape from the same settings read as the plan.
-        let sdr_master_codecs = sdr_master_codecs.unwrap_or_else(|| {
-            plurx_core::store::stored_switch(
-                settings
-                    .get(keys::PLAYBACK_SDR_MASTER_CODECS)
-                    .map(String::as_str),
-                false,
-            )
-        });
         if takeover.is_none() {
             if let Some(info) = self
                 .serve_cached(
@@ -786,7 +766,6 @@ impl TranscodeManager {
                         supersession_user,
                         playback_id,
                         automatic,
-                        sdr_master_codecs,
                     },
                 )
                 .await
@@ -882,10 +861,7 @@ impl TranscodeManager {
                         let frozen = FrozenHlsPresentation::from_contract(
                             file.clone(),
                             HlsContext {
-                                codec_facts: Some(
-                                    FrozenHlsCodecFacts::encoded(&retained_plan)
-                                        .with_sdr_master_codecs(sdr_master_codecs),
-                                ),
+                                codec_facts: Some(FrozenHlsCodecFacts::encoded(&retained_plan)),
                                 bandwidth: None,
                                 file_id,
                                 start_seconds,
@@ -931,13 +907,7 @@ impl TranscodeManager {
         // recipe and must never be redirected to a different one.
         if takeover.is_none() && candidate_context.is_none() {
             if let Some(mut cached_options) = self
-                .measured_content_cache_options_from(
-                    &file,
-                    &opts,
-                    encoder,
-                    content_aware,
-                    probe_json.as_deref(),
-                )
+                .measured_content_cache_options_from(&file, &opts, encoder, probe_json.as_deref())
                 .await
             {
                 // Resolution reads stored decoder facts; it does not probe or
@@ -962,7 +932,6 @@ impl TranscodeManager {
                                 supersession_user,
                                 playback_id,
                                 automatic,
-                                sdr_master_codecs,
                             },
                         )
                         .await
@@ -1203,9 +1172,7 @@ impl TranscodeManager {
         let frozen_presentation = FrozenHlsPresentation::from_contract(
             file.clone(),
             HlsContext {
-                codec_facts: Some(
-                    FrozenHlsCodecFacts::encoded(&plan).with_sdr_master_codecs(sdr_master_codecs),
-                ),
+                codec_facts: Some(FrozenHlsCodecFacts::encoded(&plan)),
                 bandwidth: None,
                 file_id,
                 start_seconds,
@@ -1828,7 +1795,7 @@ impl TranscodeManager {
         playback_id: &str,
         automatic: bool,
         audio_delivery: Option<&plurx_core::playback::audio::AudioDelivery>,
-        sdr_master_codecs: Option<bool>,
+        retain_output: Option<bool>,
         source_telemetry: bool,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<StartInfo, String> {
@@ -1840,7 +1807,14 @@ impl TranscodeManager {
             settings,
             item_title,
         } = self.rolling_start_inputs(file_id, None, plan).await?;
-        let retained_budget = Self::rolling_retained_budget_from(&settings);
+        // `retain_output: Some(false)` is the viewer's per-playback opt-out
+        // (`SessionRequest::retain_output`); anything else follows the
+        // server's cache budget.
+        let retained_budget = if retain_output == Some(false) {
+            None
+        } else {
+            Self::rolling_retained_budget_from(&settings)
+        };
         // Same make-before-break rule as the transcode path. A takeover
         // continues an existing incarnation and supersedes nothing.
         if replacement_deadline.is_none() && takeover.is_none() {
@@ -2087,27 +2061,14 @@ impl TranscodeManager {
             convert_dolby_vision: served.convert_dolby_vision,
             dual_layer_as_copied: served.dual_layer_as_copied,
         };
-        // Frozen with the rest of the presentation: this session's master
-        // keeps one shape whatever the setting does later.
-        let sdr_master_codecs = sdr_master_codecs.unwrap_or_else(|| {
-            plurx_core::store::stored_switch(
-                settings
-                    .get(keys::PLAYBACK_SDR_MASTER_CODECS)
-                    .map(String::as_str),
-                false,
-            )
-        });
         let frozen_presentation = FrozenHlsPresentation::new(
             file.clone(),
             HlsContext {
-                codec_facts: Some(
-                    FrozenHlsCodecFacts::audio(
-                        audio_delivery,
-                        !file.audio_streams.is_empty(),
-                        served.transcode_audio,
-                    )
-                    .with_sdr_master_codecs(sdr_master_codecs),
-                ),
+                codec_facts: Some(FrozenHlsCodecFacts::audio(
+                    audio_delivery,
+                    !file.audio_streams.is_empty(),
+                    served.transcode_audio,
+                )),
                 bandwidth: None,
                 file_id,
                 start_seconds,

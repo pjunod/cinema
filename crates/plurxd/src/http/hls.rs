@@ -221,5 +221,9 @@ mod tests;
 mod quality_schedule;
 pub(crate) use quality_schedule::*;
 
+#[path = "hls/retain_output.rs"]
+mod retain_output;
+pub(crate) use retain_output::*;
+
 #[path = "hls/fence.rs"]
 pub(crate) mod fence;
