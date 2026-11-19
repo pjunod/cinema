@@ -3157,7 +3157,11 @@ mod tests {
         row.candidates[0].binding = None;
         invalid.push(row);
         let mut row = good.clone();
-        row.candidates[0].binding.as_mut().unwrap().generation += 1;
+        row.candidates[0]
+            .binding
+            .as_mut()
+            .expect("catalogue fixture carries its original planning binding")
+            .generation += 1;
         invalid.push(row);
         let mut row = good.clone();
         row.candidates[0].candidate.recipe_digest = [8; 32];
