@@ -5207,6 +5207,14 @@ test("a safe verdict that names no candidate prints no empty name", () => {
   assert.equal(restart.reason, "The direct rollout verdict names no candidate.");
 });
 
+test("the strip's build breaks after its plus sign, not inside the hash", () => {
+  const cluster = labCluster();
+  const ops = operationStatus(cluster);
+  ops.nodes.forEach((row) => { row.status.build = "0.71.2+8630ee43"; });
+  assert.equal(stripMap(PANEL.clusterStripCells(sandbox().env, cluster, ops)).get("build").value, "0.71.2+<wbr>8630ee43");
+  assert.equal(PANEL.clusterNodeCells(sandbox().env, cluster.nodes[0], ops).build.text, "0.71.2+<wbr>8630ee43");
+});
+
 test("a learner with a fault reads Needs attention, not Catching up", () => {
   const env = sandbox().env;
   const cluster = labCluster();

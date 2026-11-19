@@ -746,6 +746,8 @@
     const lags=answered.map(row=>row.status.raft&&row.status.raft.apply_lag_entries)
       .filter(value=>value!==null&&value!==undefined);
 
+    // A build string breaks after its "+" before it breaks anywhere else, so
+    // a narrow cell keeps the version and the commit hash whole.
     let build;
     if(!ops) build={value:dash,sub:"collecting",tone:""};
     else if(ops.unavailable) build={value:dash,sub:"status unavailable",tone:"warn"};
@@ -755,7 +757,7 @@
       const counted=answered.length===nodes.length?`all ${plural(nodes.length,"node","nodes")} match`
         :`${answered.length} of ${nodes.length} answered`;
       build=!builds.length?{value:dash,sub:`0 of ${nodes.length} answered`,tone:"warn"}
-        :builds.length===1?{value:esc(builds[0]),sub:counted,tone:answered.length===nodes.length?"":"warn"}
+        :builds.length===1?{value:esc(builds[0]).replace(/\+/g,"+<wbr>"),sub:counted,tone:answered.length===nodes.length?"":"warn"}
         :{value:`${builds.length} builds`,sub:`${answered.length} of ${nodes.length} answered`,tone:"warn"};
       if(skew.protocolSkew) build=Object.assign(build,{tone:"bad",sub:`protocol skew ${esc(skew.protocols.join(" / "))}`});
     }
@@ -824,7 +826,7 @@
       database:{text:snap&&snap.db_bytes!==null&&snap.db_bytes!==undefined?esc(fmtBytes(snap.db_bytes)||"0 B"):dash,tone:""},
       streams:{text:s&&s.media?esc(String(Number(s.media.local_active_sessions||0)))
         :n.reachable?esc(String(Number(n.active_media_sessions||0))):dash,tone:""},
-      build:{text:s?esc(String(s.build)):dash,tone:""},
+      build:{text:s?esc(String(s.build)).replace(/\+/g,"+<wbr>"):dash,tone:""},
     };
   }
   // A readiness chip counts only the requirements the server reported a
