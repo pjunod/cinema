@@ -342,3 +342,102 @@ jobs:
           name: compare-receipt
           path: ab-receipt/
           retention-days: 3
+
+  test-archive:
+    name: test candidate ${{ matrix.slot }}
+    if: inputs.phase == 'test-archive'
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3]
+    runs-on: [ci-nonvoter-compile-amd64, incus]
+    # The same private CI image as ci.yml's full Rust lane: Rust 1.97.1, the
+    # Jellyfin FFmpeg 8 build and the native libraries. Its digest is part of
+    # every crate's key through this file.
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    timeout-minutes: 300
+    steps:
+      - name: Confirm physically distinct receiving runner
+        run: |
+          stage=/opt/forgejo-plurx-heavy/tool-cache/archive-ab-neutral-20261120
+          if [ ! -f "$stage/child-control.tar.zst" ]; then sleep 12; exit 1; fi
+          mkdir "$stage/test-claim-$GITHUB_RUN_ID"
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          ref: 60443f341dc9ca3a743737d845eae0799803608d
+      - name: Prepare the CI test runtime
+        run: |
+          if ! command -v dbus-run-session >/dev/null 2>&1; then
+            apt-get -o Acquire::Retries=3 update
+            DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends dbus-daemon
+          fi
+          command -v dbus-run-session
+      - uses: ./.github/actions/ffmpeg
+        with:
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
+      - name: Install the pinned cargo-nextest
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/nextest-$NEXTEST_VERSION"
+          mkdir -p "$dir"
+          curl -q --fail --location --proto '=https' --proto-redir '=https' --retry 3 \
+            --connect-timeout 20 --max-time 180 --max-filesize 33554432 \
+            --output "$dir/nextest.tar.gz" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          printf '%s  %s\n' "$NEXTEST_SHA256" "$dir/nextest.tar.gz" | sha256sum --check --status
+          tar -xzf "$dir/nextest.tar.gz" -C "$dir"
+          rm -- "$dir/nextest.tar.gz"
+          "$dir/cargo-nextest" nextest --version | grep -F "cargo-nextest $NEXTEST_VERSION"
+          echo "$dir" >> "$GITHUB_PATH"
+
+      - name: Run the saved archive once
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 60443f341dc9ca3a743737d845eae0799803608d
+          archive=/opt/forgejo-plurx-heavy/tool-cache/archive-ab-neutral-20261120/child-control.tar.zst
+          printf '%s  %s\n' 'e24a399e7453c9ebad605307b2bbd46e6ccaf09750dd7cfc016ed434665b5aec' "$archive" | sha256sum -c -
+          cargo-nextest nextest run --archive-file "$archive" --workspace-remap "$PWD" \
+            --extract-to "$PWD/target/archive-ab-test" --profile ci --no-fail-fast --test-threads 2 \
+            --status-level fail --final-status-level fail 2>&1 | tee archive-test.log
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
+        if: always()
+        with:
+          name: archive-test-receipt
+          path: archive-test.log
+          retention-days: 7
