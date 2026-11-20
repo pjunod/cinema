@@ -113,7 +113,7 @@ class SelectedPrAndroidCaptureTests(unittest.TestCase):
         proof,record,raw,source,digest=self.capture()
         universe={'tv.plurx.app.player.Fixture/alpha','tv.plurx.app.player.Fixture/beta'}
         with patch.object(selected,'CUSTODY_SHA256',digest), \
-             patch('validation.retained_lane_commands.tree_id',side_effect=['old','changed']):
+             patch.object(selected,'android_sources_compatible',return_value=False):
             with self.assertRaises(receipts.ReceiptError):
                 selected.outcomes(proof,record,raw,universe,'b'*40,True,lambda s:s)
         custody_ref=record['origin']['execution']['selected_pr_local']['custody']['sha256_ref']
@@ -198,3 +198,50 @@ class SelectedPrAndroidCaptureTests(unittest.TestCase):
              patch.object(cohort.retention,'git_bytes',return_value=b'changed toolchain'):
             with self.assertRaises(receipts.ReceiptError):
                 cohort.require_jvm_build_inputs('a'*40,True)
+
+    def counter_sources(self, mutation=None):
+        build='clients/android/app/build.gradle.kts';readme='clients/android/README.md'
+        before={build:b'android {\n    versionCode = 209\n    versionName = "0.8.0"\n}\n',
+                readme:b'> Status: **v0.8.0**, build `209` - same behavior.\n'}
+        after={path:raw.replace(b'209',b'210') for path,raw in before.items()}
+        if mutation:mutation(after)
+        return before,after
+
+    def counter_compatible(self,before,after,paths=None,mode='100644'):
+        build='clients/android/app/build.gradle.kts'
+        with patch('validation.retained_lane_commands.tree_id',side_effect=lambda revision,path:revision), \
+             patch.object(selected.retention,'changed',return_value=set(before) if paths is None else paths), \
+             patch.object(selected.retention,'git_bytes',side_effect=lambda revision,path:(before if revision=='a'*40 else after)[path]), \
+             patch.object(selected,'_android_file_mode',return_value=mode), \
+             patch.object(selected,'ANDROID_209_BUILD_SHA256',selected.retention.digest(before[build])), \
+             patch.object(selected,'BUILD_INPUTS',{build:selected.retention.digest(after[build])}):
+            return selected.android_sources_compatible('a'*40,'b'*40)
+
+    def test_counter_projection_preserves_actual_209_provenance_only_for_the_two_210_literals(self):
+        before,after=self.counter_sources()
+        self.assertTrue(self.counter_compatible(before,after))
+        self.assertIn(b'209',before['clients/android/app/build.gradle.kts'])
+        self.assertNotEqual(before,after)
+
+    def test_counter_projection_refuses_build_flags_source_or_unrelated_readme_changes(self):
+        build='clients/android/app/build.gradle.kts';readme='clients/android/README.md'
+        for mutation in (lambda rows:rows.update({build:rows[build]+b'tasks.test { enabled=false }\n'}),
+                         lambda rows:rows.update({readme:rows[readme]+b'Other behavior changed.\n'}),
+                         lambda rows:rows.update({build:rows[build].replace(b'210',b'211')})):
+            before,after=self.counter_sources(mutation)
+            with self.assertRaises(receipts.ReceiptError):
+                self.counter_compatible(before,after)
+        before,after=self.counter_sources()
+        with self.assertRaises(receipts.ReceiptError):
+            self.counter_compatible(before,after,paths=set(before)|{'clients/android/app/src/main/Changed.kt'})
+
+    def test_counter_projection_refuses_type_modes_missing_or_duplicate_counter_fields(self):
+        before,after=self.counter_sources()
+        with self.assertRaises(receipts.ReceiptError):
+            self.counter_compatible(before,after,mode='100755')
+        for extra in (b'\n    versionCode = 210\n',b''):
+            before,after=self.counter_sources()
+            path='clients/android/app/build.gradle.kts'
+            after[path]=after[path]+extra if extra else after[path].replace(b'    versionCode = 210\n',b'')
+            with self.assertRaises(receipts.ReceiptError):
+                self.counter_compatible(before,after)

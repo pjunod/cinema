@@ -36,7 +36,9 @@ TEST_INPUTS = {
     'crates/plurxd/src/transcode/tests/chunk_05.rs',
 }
 # Reviewed clock/quality inputs still require exact hashes and affected-body witnesses.
-RUNTIME_INPUTS = {'clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt',
+RUNTIME_INPUTS = {'clients/android/app/build.gradle.kts',
+ 'clients/android/README.md',
+ 'clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt',
  'clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt',
  'clients/android/app/src/test/java/tv/plurx/app/player/PreparedSwitchMeasurementTest.kt',
  'crates/plurx-core/src/segplan.rs',

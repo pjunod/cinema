@@ -16,12 +16,58 @@ POLICY = 'selected-pr-android-local-v1'
 BUILD_INPUTS = {
     'clients/android/gradle/wrapper/gradle-wrapper.properties': 'd01b41913834fb3cb14e71f69a08898e6a47e663b08f5c9b8c7e0772c38889d2',
     'clients/android/gradle/libs.versions.toml': '8ae430e1f8c2f24eaa467c5a0357dbc53191dacad25aff54effa8f31805210dc',
-    'clients/android/app/build.gradle.kts': '6f6047608820e873d944ab72e74031f63631a05c9ff3933d23ca4235752a1ba4',
+    'clients/android/app/build.gradle.kts': '453e238fa5646b194c4d9aa20ff0a16ed0d3b1aeeba7c796992b0edb6caee276',
     'clients/android/build.gradle.kts': '0aec8d2e01e88e3abdd6b4690201ddd107b10c05b6e86a4014315cc4ab64fd46',
     'clients/android/settings.gradle.kts': '5891ed8c25e4412da6dd0fff31d21626fa2bb3dde4cc6326e62d39eb9db79055',
 }
 # Reviewed original tool custody, not an asserted new execution.
 CUSTODY_SHA256 = '3c093595d9189b47de70cf07d7b9c99406fd7b4ebc3937be1d0b1c99f841b3c8'
+
+
+ANDROID_COUNTER_POLICY = 'selected-pr-android-209-to-210-counter-v1'
+ANDROID_COUNTER_PATHS = {'clients/android/app/build.gradle.kts', 'clients/android/README.md'}
+ANDROID_209_BUILD_SHA256 = '6f6047608820e873d944ab72e74031f63631a05c9ff3933d23ca4235752a1ba4'
+
+
+def _android_file_mode(source, path):
+    import subprocess
+    row = subprocess.check_output(['git', 'ls-tree', r.sha(source), '--', path], text=True).strip().split()
+    r.require(len(row) >= 3 and row[1] == 'blob', 'Missing regular Android counter input')
+    return row[0]
+
+
+def _counter_literal_projection(before, after, pattern):
+    old, new = list(re.finditer(pattern, before)), list(re.finditer(pattern, after))
+    r.require(len(old) == len(new) == 1 and old[0][2] == b'209' and new[0][2] == b'210',
+              'Counter projection is only the reviewed literal209 to210 transition')
+    def projected(raw, match):
+        return raw[:match.start(2)] + b'<reviewed-counter>' + raw[match.end(2):]
+    r.require(projected(before, old[0]) == projected(after, new[0]),
+              'Counter input changes execution configuration or unrelated documentation')
+
+
+def android_sources_compatible(source, candidate):
+    """Preserve209 execution provenance; never claim identical BuildConfig210."""
+    from validation.retained_lane_commands import tree_id
+    if tree_id(source, 'clients/android') == tree_id(candidate, 'clients/android'):
+        return True
+    changed = {path for path in retention.changed(source, candidate) if path.startswith('clients/android/')}
+    r.require(changed == ANDROID_COUNTER_PATHS, 'Android source changed beyond the two counter literals')
+    before = {path: retention.git_bytes(source, path) for path in changed}
+    after = {path: retention.git_bytes(candidate, path) for path in changed}
+    r.require(all(before[path] is not None and after[path] is not None
+                  and _android_file_mode(source, path) == _android_file_mode(candidate, path) == '100644'
+                  for path in changed), 'Android counter inputs changed type or executable mode')
+    build = 'clients/android/app/build.gradle.kts'
+    r.require(retention.digest(before[build]) == ANDROID_209_BUILD_SHA256
+              and retention.digest(after[build]) == BUILD_INPUTS[build],
+              'Counter projection changed the reviewed Gradle recipe')
+    _counter_literal_projection(before[build], after[build],
+        rb'(?m)^([ \t]+versionCode[ \t]*=[ \t]*)([0-9]+)([ \t]*)$')
+    readme = 'clients/android/README.md'
+    _counter_literal_projection(before[readme], after[readme],
+        rb'(?m)^(> Status: \*\*v[^\n]+?\*\*, build `)([0-9]+)(`[^\n]*)$')
+    return True
 
 
 def source_methods(raw, klass):
@@ -40,7 +86,6 @@ def source_methods(raw, klass):
 
 def outcomes(proof, record, raw, universe, candidate, selected_pr, clean_log):
     from validation import nonrust_unit_cohort as cohort
-    from validation.retained_lane_commands import tree_id
     r.require(selected_pr is True and record['origin']['kind'] == 'attested-local',
               'Local selected capture is only ordinary-PR source-gate evidence')
     execution = record['origin']['execution']
@@ -66,7 +111,7 @@ def outcomes(proof, record, raw, universe, candidate, selected_pr, clean_log):
               and custody['archive_sha256'] is None and custody['source_clean_start']['value'] is True
               and custody['source_head_end']['value'] == custody['source_commit']
               and custody['source_clean_end']['value'] is True
-              and tree_id(custody['source_commit'], 'clients/android') == tree_id(candidate, 'clients/android'),
+              and android_sources_compatible(custody['source_commit'], candidate),
               'Selected Android source changed since actual execution')
     # The version/binary post-observation is explicit in the immutable custody;
     # its hash is not converted to a historical measured runtime assertion.
@@ -123,7 +168,6 @@ def measured_outcomes(proof, record, raw, universe, candidate, selected_pr, clea
     """New captures measure archive and executable bytes before AND after."""
     from validation import nonrust_unit_cohort as cohort
     from validation.qualification_unit_continuation import source_archive_digest
-    from validation.retained_lane_commands import tree_id
     r.require(selected_pr is True and record['origin']['kind'] == 'attested-local',
               'Measured local capture is only ordinary-PR source-gate evidence')
     execution = record['origin']['execution']
@@ -145,7 +189,7 @@ def measured_outcomes(proof, record, raw, universe, candidate, selected_pr, clea
     r.require(binding['source_commit'] == binding['source_head_start'] == binding['source_head_end'] == source
               and binding['source_clean_start'] is True and binding['source_clean_end'] is True
               and binding['source_archive_sha256'] == source_archive_digest(source)
-              and tree_id(source, 'clients/android') == tree_id(candidate, 'clients/android')
+              and android_sources_compatible(source, candidate)
               and binding['exit_code'] == record['exit_code']
               and type(binding['exit_code']) is int and binding['exit_code'] in {0, 1}
               and binding['log_sha256'] == retention.digest(raw),

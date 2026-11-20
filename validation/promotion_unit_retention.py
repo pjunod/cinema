@@ -43,6 +43,7 @@ PROTOCOL_PATHS = {
     'tests/validation/test_workspace_rust_continuation.py',
     'tests/validation/test_qualification.py',
     'docs/ci/RUST-UNIT-FANOUT.md',
+    'docs/streaming/FEL-RPU-REFIT-GRADUATION-AND-M7.md',
     'docs/ci/README.md',
     '.github/workflows/ci.yml', 'validation/qualification.py',
     'validation/promotion_unit_retention.py',
