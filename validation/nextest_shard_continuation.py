@@ -276,6 +276,53 @@ def compile_only_ignored(path, witness, before, after, universe, *, prior, run):
 
 
 
+
+# Finite reviewed add-only test regions; existing body/helper bytes stay intact.
+# The retained-recovery region also adds one helper used only by its new tests.
+REVIEWED_TEST_ADDITIONS = {'crates/plurx-core/tests/store_contract/dv_title_jobs.rs': ('9b2c9464592471fe80110c70c12ca34da03c6aaebcf7c67fc87ae78ad9e413a2',
+                                                             '5bcf53c4f3bd8a98b21c6940a102b7c80e8ace99524c07f8d47780ea3bc79bcc',
+                                                             ['plurx-core::store_contract '
+                                                              'dv_title_jobs::fel_head_rebuild_reopens_exact_settled_title_without_remeasurement']),
+ 'crates/plurxd/src/transcode/manager/processed_reuse_tests.rs': ('a06ff694f6045a785ab7cd1d69c2ab24d8573cfd7f99d00b1957244ffe03448a',
+                                                                  '3aad281fcdf6ce36710e84d886b1ec0670c8ba38e3c72d902177737b2453c409',
+                                                                  ['plurxd::bin/plurxd '
+                                                                   'transcode::manager_create::processed_reuse_tests::native_fel_window_requires_reaped_success_and_keeps_verified_evidence',
+                                                                   'plurxd::bin/plurxd '
+                                                                   'transcode::manager_create::processed_reuse_tests::prepared_fel_batch_is_bound_to_first_snapshot_and_attempt']),
+ 'crates/plurxd/src/transcode/manager/retained_recovery_tests.rs': ('ce2e4b93fb318ecb6d8365e84ffbed47b41305c9a98f544fa81aac71fafbd42e',
+                                                                    'c6e06af4c6cc17ef167feda2ad17b9a4106eb618de8eb309935405cb4983610a',
+                                                                    ['plurxd::bin/plurxd '
+                                                                     'transcode::manager_create::retained_recovery_tests::ready_native_fel_admission_is_limited_to_the_original_auto_copy',
+                                                                     'plurxd::bin/plurxd '
+                                                                     'transcode::manager_create::retained_recovery_tests::clustered_initial_vod_start_primes_a_cold_native_fel_head']),
+ 'crates/plurxd/src/transcode/tests/chunk_03.rs': ('6327189e8151f4a38d4ae10174d641a0f8fb834a0f89dc332a9b712850f0783a',
+                                                   'ba4ed0fee02bed2ea5f7534d311648074ef2b9ef11c553b1e18595960c6b4fa7',
+                                                   ['plurxd::bin/plurxd '
+                                                    'transcode::tests::pending_fel_head_only_defers_the_first_playable_snapshot'])}
+
+DEFAULT_NONE_TARGET_PATH = 'crates/plurxd/src/source_probe/title_work_tests.rs'
+DEFAULT_NONE_TARGET_PAIR = ('31941684250ecddad9e46c29d7f4394723a45c896692870b6d0d5fd985ca18ee',
+                            'f4953d7e3de3aa4ab6adcf9d16c36e0f3283500afecec5b36e5e17acd1bf4409')
+
+def compile_only_test_additions(path, witness, before, after, universe):
+    contract = witness['compile_only']
+    if contract.get('kind') == 'default-none-title-target':
+        r.require(path == DEFAULT_NONE_TARGET_PATH and contract == {'kind': 'default-none-title-target'}
+                  and not witness['affected']
+                  and (retention.digest(before), retention.digest(after)) == DEFAULT_NONE_TARGET_PAIR
+                  and after.count(b'        fel_head_target: None,\n') == 1
+                  and after.replace(b'        fel_head_target: None,\n', b'', 1) == before,
+                  'Unreviewed default title target fixture')
+        return
+    pair = REVIEWED_TEST_ADDITIONS.get(path)
+    r.require(pair is not None and not witness['affected']
+              and contract == {'kind': 'reviewed-test-additions', 'new_ids': pair[2]}
+              and (retention.digest(before), retention.digest(after)) == pair[:2]
+              and not set(pair[2]) & universe
+              and all(identity.split('::')[-1].encode() not in before for identity in pair[2]),
+              'Unreviewed new-only test source or historical body overlap')
+
+
 RETIRED_FEL_PATH = 'crates/plurxd/src/source_probe/fel_qualification.rs'
 RETIRED_FEL_ID = 'plurxd::bin/plurxd source_probe::fel_qualification::tests::a_foreign_backend_recipe_request_stays_pending_without_measurement'
 FEL_SUCCESSOR_ID = 'plurxd::bin/plurxd source_probe::fel_qualification::tests::foreign_pending_recipe_does_not_block_current_background_qualification'
@@ -334,6 +381,8 @@ def reviewed_changes(record, candidate, universe):
         if 'compile_only' in witness:
             if witness['compile_only'].get('kind') == 'ignored-test-only':
                 compile_only_ignored(path, witness, before, after, universe, prior=prior, run=record['run'])
+            elif witness['compile_only'].get('kind') in {'reviewed-test-additions', 'default-none-title-target'}:
+                compile_only_test_additions(path, witness, before, after, universe)
             else:
                 compile_only_none(path, witness, before, after)
         else:
@@ -474,6 +523,8 @@ def authenticate(api, record, binding, candidate, repository, *, current_run=Non
             'selection_projection': current['projection'], 'selected': sorted(selected), 'universe': sorted(universe), 'retained_ids': retained,
             'must_pass_ids': sorted(universe - set(retained) - set(retired)),
             'retired_ids': retired,
+            'mandatory_new_ids': sorted(identity for row in record['changes'].values()
+                for identity in row.get('compile_only', {}).get('new_ids', [])),
             'serial_ids': sorted(test for row in plan['crates'].values() for test in row['serial']),
             'outcomes': outcomes, 'root_ownership_passed': False,
             'compile_only_ignored_ids': [IGNORED_COMPILE_ID] if any(
@@ -527,6 +578,9 @@ def current_census(proof, listing, config):
         r.require(identity == IGNORED_COMPILE_ID and case.get('ignored') is True
                   and identity not in current and identity not in serial,
                   'Compile-only physical test entered current selected or serial bodies')
+    mandatory = set(proof.get('mandatory_new_ids', []))
+    r.require(mandatory <= current and not mandatory & (serial | set(proof['universe']) | set(proof['retained_ids'])),
+              'New-only source lacks its mandatory ordinary current bodies')
     retained = set(proof['retained_ids'])
     r.require(retained <= current, 'Retained nextest body disappeared')
     return current, current - retained, serial

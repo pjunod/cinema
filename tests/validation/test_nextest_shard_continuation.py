@@ -12,6 +12,36 @@ from validation import qualification
 
 
 class NextestShardContinuationTests(unittest.TestCase):
+    def test_new_only_source_requires_closed_bytes_names_and_empty_old_impact(self):
+        path = next(iter(proof.REVIEWED_TEST_ADDITIONS))
+        ids = proof.REVIEWED_TEST_ADDITIONS[path][2]
+        before, after = b'old source', b'old source plus new tests'
+        pair = (proof.retention.digest(before), proof.retention.digest(after), ids)
+        witness = {'affected': [], 'compile_only': {'kind': 'reviewed-test-additions', 'new_ids': ids}}
+        with patch.dict(proof.REVIEWED_TEST_ADDITIONS, {path: pair}):
+            proof.compile_only_test_additions(path, witness, before, after, set())
+            for source_path, row, old, current, universe in (
+                    ('unreviewed.rs', witness, before, after, set()),
+                    (path, witness, before, after + b'changed', set()),
+                    (path, {**witness, 'affected': ['unrelated old']}, before, after, set()),
+                    (path, witness, before, after, set(ids)),
+                    (path, {**witness, 'compile_only': {'kind': 'reviewed-test-additions', 'new_ids': []}}, before, after, set())):
+                with self.subTest(path=source_path, row=row, universe=universe), self.assertRaises(r.ReceiptError):
+                    proof.compile_only_test_additions(source_path, row, old, current, universe)
+
+    def test_new_only_cases_must_appear_in_current_ordinary_discovery_without_retained_credit(self):
+        name = 'new_body'
+        identity = 'plurxd::bin/plurxd ' + name
+        record = {'selected': ['plurxd'], 'universe': [], 'serial_ids': [], 'retained_ids': [],
+                  'mandatory_new_ids': [identity]}
+        config = type('Config', (), {'serial_ignored': {}})()
+        _, due, _ = proof.current_census(record, self.listing({name: False}), config)
+        self.assertEqual(due, {identity})
+        for listing, retained in ((self.listing({}), []), (self.listing({name: True}), []),
+                                  (self.listing({name: False}), [identity])):
+            with self.subTest(listing=listing, retained=retained), self.assertRaises(r.ReceiptError):
+                proof.current_census({**record, 'retained_ids': retained}, listing, config)
+
     def retirement_record(self):
         return {'changes': {proof.RETIRED_FEL_PATH: {
             'before': proof.RETIRED_FEL_SOURCE[0], 'after': proof.RETIRED_FEL_SOURCE[1],
