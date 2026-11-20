@@ -21,6 +21,8 @@ use super::{
     dv_refit_serve::written_curves,
 };
 
+pub mod aggregation;
+
 const MAX_RPU_BYTES: usize = 4098;
 const RPU_NAL_HEADER: [u8; 2] = [0x7c, 0x01];
 const HPE_INVERSE: [[f64; 3]; 3] = [
