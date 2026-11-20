@@ -1034,7 +1034,7 @@ async fn native_fel_window_requires_reaped_success_and_keeps_verified_evidence()
                     .into_native_fel_window()
                     .err()
                     .as_deref(),
-                Some("FEL splice window has no processing receipt"),
+                Some("FEL splice has no processing receipt"),
             );
             assert_eq!(
                 make_window(registration, true, false)
