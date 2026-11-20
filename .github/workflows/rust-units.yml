@@ -171,7 +171,7 @@ jobs:
     timeout-minutes: 300
     steps:
       - name: Confirm physically distinct receiving runner
-        run: test -f "$RUNNER_TOOL_CACHE/archive-ab-neutral-20261120/parent.sha256"
+        run: test -f "/opt/forgejo-plurx-heavy/tool-cache/archive-ab-neutral-20261120/parent.sha256"
       - name: Verify effective nonvoter resource bounds
         shell: sh
         run: |
@@ -243,10 +243,14 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/ab-receipt"
           date +%s.%N > "$GITHUB_WORKSPACE/ab-receipt/prep-start"
           mkdir -p /archive-ab/cargo-home
-          cp -a --reflink=auto "$CARGO_HOME/registry" /archive-ab/cargo-home/
+          if [ -d "$CARGO_HOME/registry" ]; then
+            cp -a --reflink=auto "$CARGO_HOME/registry" /archive-ab/cargo-home/
+          fi
           echo "CARGO_HOME=/archive-ab/cargo-home" >> "$GITHUB_ENV"
           mkdir /archive-ab/parent-target
-          cp -a --reflink=auto "$CARGO_TARGET_DIR/." /archive-ab/parent-target/
+          if [ -d "$CARGO_TARGET_DIR" ]; then
+            cp -a --reflink=auto "$CARGO_TARGET_DIR/." /archive-ab/parent-target/
+          fi
           echo "BENCH_LOCAL_TARGET=/archive-ab/parent-target" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_DIR=/archive-ab/target" >> "$GITHUB_ENV"
           echo "SCCACHE_DIR=/archive-ab/compiler-objects" >> "$GITHUB_ENV"
@@ -295,7 +299,7 @@ jobs:
       - name: Verify and restore complete parent cache
         run: |
           set -eu
-          cd "$RUNNER_TOOL_CACHE/archive-ab-neutral-20261120"
+          cd "/opt/forgejo-plurx-heavy/tool-cache/archive-ab-neutral-20261120"
           sha256sum -c parent.sha256
           tar -C /archive-ab -xf parent.tar
           date +%s.%N > "$GITHUB_WORKSPACE/ab-receipt/restore-end"
