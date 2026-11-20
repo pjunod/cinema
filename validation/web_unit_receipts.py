@@ -7,16 +7,18 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
 import subprocess
+import zipfile
 
 from validation.main_preflight_adoption import (
     UNADOPTABLE, api_context, bind_event, commit_available, git, journal_key,
     reason, terminal_status,
 )
-from validation.python_unit_receipts import IntegrityError, atomic_json, positive, require
+from validation.python_unit_receipts import IntegrityError, atomic_json, bounded_json, positive, require
 
 WORKFLOW = '.github/workflows/main-fast-lane.yml'
 JOB = 'fast web syntax gate'
@@ -150,6 +152,56 @@ def candidate_runs(api, scope, current_run):
     return sorted(found, reverse=True)[:MAX_CANDIDATES]
 
 
+def original_report(api, scope, rid, commit, command, node, lines):
+    """Bind the wrapped producer's original report, never an adopted pass."""
+    name = f'web-unit-adoption-{rid}-1'
+    artifacts = [artifact for artifact in api.pages('/actions/artifacts', {'name': name})
+                 if artifact.get('name') == name and artifact.get('run_id') == rid]
+    require(len(artifacts) == 1, 'Missing or ambiguous web original artifact')
+    artifact = artifacts[0]
+    size = artifact.get('size_in_bytes')
+    require(artifact.get('expired') is False and type(size) is int and 0 < size <= 65_536,
+            'Expired or oversized web original artifact')
+    aid = positive(artifact['id'])
+    publication = (f'Artifact {name} has been successfully uploaded! '
+                   f'Final size is {size} bytes. Artifact ID is {aid}')
+    require(lines.count(publication) == 1, 'Web original artifact publication unavailable')
+    raw = api.bytes(f'/actions/artifacts/{aid}/zip')
+    require(len(raw) == size, 'Web original artifact size mismatch')
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        members = archive.infolist()
+        expected = {key + '.json' for key in COMMANDS}
+        require(len(members) == len(expected)
+                and {member.filename for member in members} == expected,
+                'Unexpected or duplicate web original archive members')
+        for member in members:
+            require(not member.is_dir() and not member.flag_bits & 1
+                    and (member.external_attr >> 16) & 0o170000 != 0o120000
+                    and 0 < member.file_size <= 16_384,
+                    'Unsafe web original archive member')
+        # Reading every member verifies CRCs, including unselected reports.
+        contents = {member.filename: archive.read(member) for member in members}
+        reports = {name: bounded_json(data) for name, data in contents.items()}
+    report = reports[command + '.json']
+    require(isinstance(report, dict) and set(report) == {
+                'version', 'scope', 'current_commit', 'current_run', 'disposition',
+                'command', 'returncode', 'source_unchanged', 'node'}
+            and type(report['version']) is int and report['version'] == 1
+            and report['scope'] == scope
+            and all(type(report['scope'].get(key)) is int for key in ('repository', 'pr'))
+            and report['current_commit'] == commit
+            and type(report['current_run']) is int and report['current_run'] == rid
+            and report['disposition'] == 'executed'
+            and report['command'] == COMMANDS[command]
+            and type(report['returncode']) is int and report['returncode'] == 0
+            and report['source_unchanged'] is True
+            and isinstance(node, str) and re.fullmatch(r'v22\.[0-9]+\.[0-9]+', node)
+            and report['node'] == node,
+            'Web original report identity/execution/toolchain mismatch')
+    return {'artifact': aid, 'artifact_sha256': hashlib.sha256(raw).hexdigest(),
+            'report_sha256': hashlib.sha256(contents[command + '.json']).hexdigest()}
+
+
 def authenticate(api, scope, current, current_run, rid, command, node):
     require(type(rid) is int and 0 < rid < current_run, 'Invalid web origin run')
     run = api.get(f'/actions/runs/{rid}')
@@ -172,7 +224,7 @@ def authenticate(api, scope, current, current_run, rid, command, node):
     lines = [re.sub(r'^\d{4}-\d\d-\d\dT[^ ]+ ', '', line) for line in raw.decode().splitlines()]
     log = '\n'.join(lines)
     versions = re.findall(r'^node: (v22\.[0-9]+\.[0-9]+)$', log, re.MULTILINE)
-    require(versions == [node] and commit + f":refs/remotes/pull/{scope['pr']}/head" in log
+    require(commit + f":refs/remotes/pull/{scope['pr']}/head" in log
             and lines[-1:] == ['🏁  Job succeeded']
             and re.search(r'^# tests [1-9][0-9]*$', log, re.MULTILINE)
             and re.search(r'^# fail 0$', log, re.MULTILINE)
@@ -181,12 +233,16 @@ def authenticate(api, scope, current, current_run, rid, command, node):
     # The exact legacy block executes all three commands unconditionally.
     # A newer wrapper may have adopted a command; only its own post-execution
     # marker can authenticate that command as a new original pass.
+    artifact_proof = {}
     if kind == 'wrapped':
         marker = f'WEB-UNIT-ORIGINAL-PASS {command} {commit}'
         require(lines.count(marker) == 1, 'Adopted web wrapper is not original execution evidence')
+        artifact_proof = original_report(api, scope, rid, commit, command, node, lines)
+    else:
+        require(versions == [node], 'Legacy web Node toolchain proof unavailable')
     return {'repository': scope['repository'], 'pr': scope['pr'], 'run': rid,
             'job': job['id'], 'attempt': 1, 'commit': commit, 'command': COMMANDS[command],
-            'node': node, 'log_sha256': hashlib.sha256(raw).hexdigest(), **inputs}
+            'node': node, 'log_sha256': hashlib.sha256(raw).hexdigest(), **artifact_proof, **inputs}
 
 
 def write_report(command, report):
