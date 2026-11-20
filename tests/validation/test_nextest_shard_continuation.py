@@ -257,3 +257,18 @@ class NextestShardContinuationTests(unittest.TestCase):
                 self.assertRaises(r.ReceiptError):
             proof._pidfd_observe(101, 777, proof.os.WSTOPPED, proof.os.CLD_STOPPED,
                                  proof.signal.SIGSTOP, proof.time.monotonic() + 1.0)
+
+    def test_compile_only_none_witness_refuses_nonliteral_production_changes_or_false_runtime_ids(self):
+        path='crates/plurxd/src/prodsched.rs'
+        before=b'fn row() {\n    Row { x: true, }\n}\n'
+        after=b'fn row() {\n    first_cto: None,\n    Row { x: true, }\n}\n'
+        witness={'affected':[],'compile_only':{'kind':'none-row-field-initializer'}}
+        proof.compile_only_none(path,witness,before,after)
+        cases=[('crates/plurxd/src/vodgen.rs',witness,after),
+               (path,{**witness,'affected':['bin body']},after),
+               (path,witness,after.replace(b'None',b'Some(7)')),
+               (path,witness,after.replace(b'true',b'false')),
+               (path,witness,after.replace(b'    first_cto: None,\n',b'    first_cto: None,\n    first_cto: None,\n'))]
+        for candidate,row,changed in cases:
+            with self.subTest(candidate=candidate,changed=changed),self.assertRaises(r.ReceiptError):
+                proof.compile_only_none(candidate,row,before,changed)

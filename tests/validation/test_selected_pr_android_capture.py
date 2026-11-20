@@ -127,3 +127,59 @@ class SelectedPrAndroidCaptureTests(unittest.TestCase):
              patch('validation.retained_lane_commands.tree_id',return_value='tree'):
             with self.assertRaises(receipts.ReceiptError):
                 selected.outcomes(proof,record,raw,universe,'b'*40,True,lambda s:s)
+
+    def measured_capture(self):
+        import base64
+        proof,record,raw,source,_=self.capture()
+        universe={'tv.plurx.app.player.Fixture/alpha','tv.plurx.app.player.Fixture/beta'}
+        ref=record['coverage']['xml_archive']['sha256_ref']
+        envelope=json.loads(base64.b64decode(proof['logs'][ref]['base64']))
+        argv=['./gradlew','--no-daemon','--offline','--max-workers=2',':app:testDebugUnitTest']
+        for ident in sorted(universe):argv+=['--tests',ident.replace('/','.')]
+        binding={'schema':selected.MEASURED_POLICY,'source_commit':'a'*40,'source_archive_sha256':'archive',
+            'argv':argv,'source_head_start':'a'*40,'source_head_end':'a'*40,'source_clean_start':True,'source_clean_end':True,
+            'started_utc':'2026-11-20T20:00:00Z','finished_utc':'2026-11-20T20:00:01Z','exit_code':0,
+            'log_sha256':selected.retention.digest(raw),'xml_archive_sha256':envelope['sha256'],
+            'java_version_before':'openjdk version "25.0.4" observed','java_version_after':'openjdk version "25.0.4" observed',
+            'java_binary_sha256_before':'814dc07211a49b57d8911d6e95fb8c8882ebbd1860dbee910b2f38390c2d4014',
+            'java_binary_sha256_after':'814dc07211a49b57d8911d6e95fb8c8882ebbd1860dbee910b2f38390c2d4014',
+            'platform':'darwin-arm64','gradle_semantic_environment':{},'gradle_init_scripts':[],
+            'ids_sha256':selected.retention.digest(json.dumps(sorted(universe),separators=(',',':')).encode())}
+        record['origin']['command']=argv
+        record['origin']['execution']['selected_pr_local']={'version':selected.MEASURED_POLICY}
+        return proof,record,raw,universe,binding
+
+    def measured_result(self, proof,record,raw,universe,binding,selected_pr=True):
+        import base64
+        content=json.dumps(binding).encode();digest=selected.retention.digest(content)
+        proof['logs'][digest]={'sha256':digest,'base64':base64.b64encode(content).decode()}
+        record['origin']['execution']['selected_pr_local']['binding']={'sha256_ref':digest}
+        with patch('validation.qualification_unit_continuation.source_archive_digest',return_value='archive'), \
+             patch('validation.retained_lane_commands.tree_id',return_value='tree'):
+            return selected.measured_outcomes(proof,record,raw,universe,'b'*40,selected_pr,lambda s:s)
+
+    def test_measured_exact_method_capture_admits_only_its_native_current_rows(self):
+        proof,record,raw,universe,binding=self.measured_capture()
+        self.assertEqual(self.measured_result(proof,record,raw,universe,binding),{key:'pass' for key in universe})
+
+    def test_measured_capture_refuses_class_prefix_duplicate_and_missing_method_outcomes(self):
+        for selectors in (['tv.plurx.app.player.Fixture'],['tv.plurx.app.player.Fixture.alpha']*2,
+                          ['tv.plurx.app.player.Fixture.alpha']):
+            proof,record,raw,universe,binding=self.measured_capture()
+            argv=binding['argv'][:5]
+            for name in selectors:argv+=['--tests',name]
+            binding['argv']=argv;record['origin']['command']=argv
+            with self.subTest(selectors=selectors),self.assertRaises(receipts.ReceiptError):
+                self.measured_result(proof,record,raw,universe,binding)
+
+    def test_measured_capture_requires_pre_and_post_source_binary_inventory_and_recipe_bindings(self):
+        mutations={'java_binary_sha256_after':'0'*64,'source_head_end':'b'*40,'source_clean_end':False,
+                   'source_archive_sha256':'forged','ids_sha256':'forged','gradle_init_scripts':['evil'],
+                   'gradle_semantic_environment':{'JAVA_TOOL_OPTIONS':'-javaagent:evil'},'platform':'linux-x64'}
+        for field,value in mutations.items():
+            proof,record,raw,universe,binding=self.measured_capture();binding[field]=value
+            with self.subTest(field=field),self.assertRaises(receipts.ReceiptError):
+                self.measured_result(proof,record,raw,universe,binding)
+        proof,record,raw,universe,binding=self.measured_capture()
+        with self.assertRaises(receipts.ReceiptError):
+            self.measured_result(proof,record,raw,universe,binding,False)

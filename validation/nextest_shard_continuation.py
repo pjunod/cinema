@@ -172,6 +172,28 @@ def artifact(api, metadata, member):
         return r.bounded_json(archive.read(entries[0]))
 
 
+COMPILE_ONLY_NONE_PATHS = {
+    'crates/plurx-core/src/segplan/copy_cursor.rs',
+    'crates/plurx-core/src/segplan/ranges.rs',
+    'crates/plurxd/src/prodsched.rs',
+    'crates/plurxd/src/renditiondir.rs',
+    'crates/plurxd/src/titlestore.rs',
+    'crates/plurxd/src/vod/tests/chunk_01.rs',
+    'crates/plurxd/src/vod/serve/construct.rs',
+}
+
+
+def compile_only_none(path, witness, before, after):
+    """A literal absent row field changes compilation, with no runtime value."""
+    r.require(path in COMPILE_ONLY_NONE_PATHS and witness['affected'] == []
+              and witness.get('compile_only') == {'kind': 'none-row-field-initializer'}
+              and before is not None and after is not None,
+              'Unknown empty Rust impact witness')
+    insertions = list(re.finditer(rb'(?m)^[ \t]+first_cto: None,\r?\n', after))
+    r.require(any(after[:m.start()] + after[m.end():] == before for m in insertions),
+              'Compile-only witness changes more than one literal None initializer')
+
+
 def reviewed_changes(record, candidate, universe):
     prior = r.sha(record['prior'])
     changes = record['changes']
@@ -183,7 +205,8 @@ def reviewed_changes(record, candidate, universe):
                   and (not path.startswith('.github/') or path in {'.github/workflows/ci.yml', '.github/workflows/main-fast-lane.yml'}),
                   'Changed protected or unreviewed nextest input')
         r.require(isinstance(witness, dict)
-                  and set(witness) == {'before', 'after', 'affected', 'reason'}
+                  and set(witness) in ({'before', 'after', 'affected', 'reason'},
+                                       {'before', 'after', 'affected', 'reason', 'compile_only'})
                   and isinstance(witness['reason'], str) and 0 < len(witness['reason'].strip()) <= 2048,
                   'Missing nextest source applicability reason')
         before, after = retention.git_bytes(prior, path), retention.git_bytes(candidate, path)
@@ -201,8 +224,11 @@ def reviewed_changes(record, candidate, universe):
         r.require(isinstance(affected, list) and len(affected) == len(set(affected))
                   and set(affected) <= universe, 'Unknown nextest affected body')
         r.require(path not in TEST_INPUTS or bool(affected), 'Changed test input has no affected bodies')
-        r.require(path not in RUNTIME_INPUTS or bool(affected) or not path.startswith('crates/'),
-                  'Changed Rust runtime input has no affected bodies')
+        if 'compile_only' in witness:
+            compile_only_none(path, witness, before, after)
+        else:
+            r.require(path not in RUNTIME_INPUTS or bool(affected) or not path.startswith('crates/'),
+                      'Changed Rust runtime input has no affected bodies')
         invalidated.update(affected)
     return invalidated
 

@@ -927,7 +927,10 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
         if 'selected_pr_local' in execution:
             from validation import selected_pr_android_capture as selected
             receipts.require(kind == 'android_jvm', 'Selected JVM capture cannot authorize another kind')
-            actual = selected.outcomes(proof, record, raw, universe, candidate, selected_pr, clean_log)
+            if execution['selected_pr_local'].get('version') == selected.MEASURED_POLICY:
+                actual = selected.measured_outcomes(proof, record, raw, universe, candidate, selected_pr, clean_log)
+            else:
+                actual = selected.outcomes(proof, record, raw, universe, candidate, selected_pr, clean_log)
         elif legacy in INCOMING_PYTHON_FULL:
             receipts.require(legacy not in incoming_full_sequences, 'Incoming full capture enrolled twice')
             incoming_full_sequences.add(legacy)
@@ -1110,7 +1113,7 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
     require_source_bound_repairs(source_failures, source_repairs)
     receipts.require(all(test_id in passes for test_id in original_jvm_failures),
                      'Original named JVM failure lacks a current-applicable native pass')
-    if kind == 'android_jvm':
+    if kind == 'android_jvm' and (legacy_sequences or not selected_pr):
         require_legacy_chronology(legacy_sequences)
     if selection:
         receipts.require(kind in {'validation', 'operations'}, 'Partial execution is Python-only')
