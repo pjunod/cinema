@@ -22,20 +22,20 @@ env:
 jobs:
   compare:
     if: inputs.phase == 'compare'
-    runs-on: [ci-nonvoter-compile-amd64]
+    runs-on: [ci-nonvoter-compile-amd64, incus]
     # The same private CI image as ci.yml's full Rust lane: Rust 1.97.1, the
     # Jellyfin FFmpeg 8 build and the native libraries. Its digest is part of
     # every crate's key through this file.
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
-      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096 --mount type=volume,destination=/opt/forgejo-plurx-heavy/tool-cache/plurx-ci/cargo/gha-lab1-plurx-heavy-01-uid0,volume-nocopy
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 300
     steps:
       - name: Confirm physically distinct receiving runner
-        run: grep -q 'Ultra 9 185H' /proc/cpuinfo
+        run: test -f "$RUNNER_TOOL_CACHE/archive-ab-lab2-20261120/parent.sha256"
       - name: Verify effective nonvoter resource bounds
         shell: sh
         run: |
@@ -106,6 +106,9 @@ jobs:
           tar -xzf sccache.tar.gz --strip-components=1 sccache-v0.12.0-x86_64-unknown-linux-musl/sccache
           mkdir -p "$GITHUB_WORKSPACE/ab-receipt"
           donor="/opt/forgejo-plurx-heavy/tool-cache/plurx-ci/cargo/gha-lab1-plurx-heavy-01-uid0/rust-1.97.1"
+          test "$CARGO_HOME" = "/opt/forgejo-plurx-heavy/tool-cache/plurx-ci/cargo/gha-lab2-plurx-heavy-01-uid0/rust-1.97.1/cargo-home"
+          mountpoint -q "${donor%/*}"
+          test ! -e "$donor"
           mkdir -p "$donor/cargo-home" "$donor/rust-units/target"
           # Reproduce the donor layout inside this disposable container. Only the
           # registry and compiled files are copied, so no login material is needed.
@@ -161,7 +164,7 @@ jobs:
       - name: Verify and restore complete parent cache
         run: |
           set -eu
-          cd "$RUNNER_TOOL_CACHE/archive-ab-paths-20261120"
+          cd "$RUNNER_TOOL_CACHE/archive-ab-lab2-20261120"
           sha256sum -c parent.sha256
           tar -C /archive-ab -xf parent.tar
           date +%s.%N > "$GITHUB_WORKSPACE/ab-receipt/restore-end"
