@@ -423,10 +423,10 @@ static int configuration(const AVCodecParameters *par) {
 }
 
 int main(int argc, char **argv) {
-  bool census = argc >= 7 && strcmp(argv[3], "--m7-window-census-v1") == 0;
+  bool census = argc >= 7 && strcmp(argv[3], "--m7-window-census-v2") == 0;
   need(argc == 3 || census || (argc == 5 && strcmp(argv[3], "--rpu-timeline") == 0),
        "usage: scan_title HELD_SOURCE VIDEO_INDEX "
-       "[--rpu-timeline OUTPUT | --m7-window-census-v1 OUTPUT FIRST_PTS END_PTS ...]");
+       "[--rpu-timeline OUTPUT | --m7-window-census-v2 OUTPUT FIRST_PTS END_PTS ...]");
   if (census) m7_title_select_windows(argc - 5, argv + 5);
   char *end;
   errno = 0;
@@ -484,7 +484,14 @@ int main(int argc, char **argv) {
   while ((ret = av_read_frame(input, packet)) >= 0) {
     if (packet->stream_index == index) {
       need(!(packet->flags & AV_PKT_FLAG_CORRUPT), "corrupt demux packet");
+      if (census)
+        need(packet->size > 0 && packet->size <= M7_TITLE_MAX_PACKET_BYTES,
+             "bounded positive M7 selected video packet size");
+      const uint64_t previous_frames = stats.frames;
       observe_unit(packet, length_size);
+      // Each packet in the M7 rate numerator must supply its own picture.
+      need(!census || stats.frames == previous_frames + 1,
+           "one admitted display picture per M7 selected video packet");
     }
     av_packet_unref(packet);
   }
@@ -495,13 +502,14 @@ int main(int argc, char **argv) {
   // Pictures leave the decoder in presentation order; prove that order is
   // contiguous, allowing one source tick of packet-clock rounding per step.
   qsort(times, stats.frames, sizeof(*times), by_pts);
-  int64_t first_pts = times[0].pts, last_end = times[0].pts;
+  int64_t first_pts = times[0].pts, last_end = times[0].pts, max_end = times[0].pts;
   for (uint64_t i = 0; i < stats.frames; i++) {
     need(i == 0 || (times[i].pts >= last_end - 1 && times[i].pts <= last_end + 1),
          "contiguous decoded title coverage");
     need(!census || i == 0 || times[i].pts > times[i - 1].pts,
          "unique M7 title presentation time");
     last_end = times[i].pts + times[i].duration;
+    if (last_end > max_end) max_end = last_end;
   }
   need(stream->start_time != AV_NOPTS_VALUE && first_pts == stream->start_time &&
        last_end < INT64_MAX, "observed declared video origin");
@@ -532,7 +540,7 @@ int main(int argc, char **argv) {
     endpoint_known = true;
   }
   need(endpoint_known, "independent complete selected-video endpoint unavailable");
-  if (census_output) m7_title_write_windows(census_output, stream, index);
+  if (census_output) m7_title_write_windows(census_output, stream, index, first_pts, max_end);
   // `decoded_frames` keeps its schema-1 name: it counts the pictures the
   // decoder would output, established here without decoding them.
   printf("{\"schema\":1,\"complete\":true,\"decoded_frames\":%"PRIu64
