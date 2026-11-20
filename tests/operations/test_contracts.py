@@ -2862,7 +2862,7 @@ assert.equal(context.ACT_TIMER, null);
             cluster_point["paths"],
         )
         self.assertIn("run: make apple-build", effort)
-        self.assertIn("run: make android", effort)
+        self.assertIn("run: ./gradlew --no-daemon --max-workers=2 :app:assembleDebug", effort)
         self.assertIn("run: make effort-web-static-check", effort)
         web_check = makefile.split(".PHONY: web-check", 1)[1].split(".PHONY:", 1)[0]
         self.assertIn("web-check: web-unit-check ", web_check)
@@ -3895,24 +3895,29 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('test -x "$chromium"', action)
         self.assertNotIn("exit 0", action)
 
-        # Both Android jobs reuse the Forgejo toolchain image keyed on the
-        # Dockerfile hash, and the Makefile honors the pre-pull instead of
-        # rebuilding the SDK image from scratch.
-        self.assertEqual(
-            workflow.count("sha256sum clients/android/Dockerfile"), 2
-        )
-        self.assertEqual(
-            sum(
-                jobs[name].count("secrets.LOCAL_REGISTRY_TOKEN")
-                for name in ("android_jvm", "android_apks")
-            ),
-            2,
-        )
-        self.assertEqual(
-            jobs["publish_main"].count("secrets.LOCAL_REGISTRY_TOKEN"), 1
-        )
-        self.assertIn(FLEET_REGISTRY_EXPR + "/noirr/android-build", workflow)
-        self.assertEqual(workflow.count("PLURX_ANDROID_IMAGE_READY=1"), 4)
+        # Android builds use the qualified toolchain as the job container.
+        android_jobs = {
+            ".github/workflows/ci.yml": ("android_jvm", "android_apks"),
+            ".github/workflows/effort-ci.yml": ("android_compile",),
+            ".github/workflows/main-fast-lane.yml": ("android_compile",),
+        }
+        android_images = set()
+        for path, names in android_jobs.items():
+            for name in names:
+                block = workflow_job_blocks(path)[name]
+                self.assertIn("runs-on: [self-hosted, Linux, X64, lab, general, incus]", block)
+                self.assertIn("--memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096", block)
+                self.assertIn("secrets.CI_REGISTRY_PULL_TOKEN", block)
+                self.assertNotIn("LOCAL_REGISTRY_TOKEN", block)
+                self.assertNotRegex(block, r"\bdocker (?:run|build|login|pull|push)\b")
+                self.assertIn("Cache Gradle dependencies", block)
+                self.assertIn("Restore persistent runner workspace ownership", block)
+                image = re.search(r"(?m)^      image: (.+)$", block)
+                self.assertIsNotNone(image)
+                self.assertRegex(image.group(1), re.escape(FLEET_REGISTRY_EXPR) + r"/noirr/android-build@sha256:[0-9a-f]{64}$")
+                android_images.add(image.group(1))
+        self.assertEqual(1, len(android_images))
+        self.assertEqual(jobs["publish_main"].count("secrets.LOCAL_REGISTRY_TOKEN"), 1)
         makefile = read("Makefile")
         self.assertIn('if [ "$${PLURX_ANDROID_IMAGE_READY:-}" = "1" ]', makefile)
 
@@ -3941,7 +3946,7 @@ assert.equal(context.ACT_TIMER, null);
             2,
         )
         apk_build = jobs["android_apks"]
-        self.assertIn("run: make android-instrumentation-build", apk_build)
+        self.assertIn("assembleDebug assembleDebugAndroidTest", apk_build)
         self.assertIn("name: android-tv-instrumentation-apks", apk_build)
         self.assertIn("name: android-tv-instrumentation-apks", android_device)
         self.assertIn('ANDROID_ADB_SERVER_PORT: "5138"', android_device)
@@ -4725,7 +4730,7 @@ assert.equal(context.ACT_TIMER, null);
         high_cpu_ffmpeg6 = local(
             "Linux", "X64", "lab", "general", "high-cpu", "ffmpeg-6"
         )
-        android = local("Linux", "X64", "lab", "android-kvm")
+        android = local("Linux", "X64", "lab", "general", "incus")
         android_tv = local("macOS", "ARM64", "lab", "apple", "primary")
         apple = local("macOS", "ARM64", "lab", "apple", "xcode-27.2")
         ci_store = "    runs-on: [ci-nonvoter-store]"

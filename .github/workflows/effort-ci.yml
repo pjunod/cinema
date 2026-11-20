@@ -382,26 +382,31 @@ jobs:
     name: effort Android compile
     needs: [scope, preflight]
     if: needs.scope.outputs.android_jvm == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, android-kvm]
+    runs-on: [self-hosted, Linux, X64, lab, general, incus]
     timeout-minutes: 10
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/android-build@sha256:42e42068b13e991882ee02f64b49a9517613129c66a99c6ecb579419e7a15239
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     steps:
+      - name: Prepare Git and Node for Forgejo actions
+        run: |
+          apt-get -qq update
+          apt-get -qq install -y --no-install-recommends git xz-utils
+          node_dir=$(mktemp -d "$RUNNER_TEMP/android-node.XXXXXXXX")
+          archive="$node_dir/node.tar.xz"
+          curl -fsSL --retry 2 --proto '=https' https://nodejs.org/dist/v24.22.1/node-v24.22.1-linux-x64.tar.xz -o "$archive"
+          printf '%s  %s\n' 6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6 "$archive" | sha256sum -c -
+          tar -xJf "$archive" -C "$node_dir" --strip-components=1
+          echo "$node_dir/bin" >> "$GITHUB_PATH"
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Reuse the pinned Android toolchain image from Forgejo
-        env:
-          REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
-        run: |
-          tag="${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
-          echo "$REGISTRY_TOKEN" | docker login ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }} -u fleet --password-stdin || true
-          if docker pull "$tag"; then
-            docker tag "$tag" plurx-android-build
-          else
-            make android-image \
-              && docker tag plurx-android-build "$tag" \
-              && docker push "$tag" || true
-          fi
-          echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
       - name: Cache Gradle dependencies
         uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -411,7 +416,15 @@ jobs:
           key: effort-gradle-${{ hashFiles('clients/android/build.gradle.kts', 'clients/android/settings.gradle.kts', 'clients/android/app/build.gradle.kts', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: effort-gradle-
       - name: Compile the Android debug application without running tests
-        run: make android
+        working-directory: clients/android
+        env:
+          GRADLE_USER_HOME: ${{ github.workspace }}/clients/android/.gradle-docker
+        run: ./gradlew --no-daemon --max-workers=2 :app:assembleDebug
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   effort_gate:
     name: Effort development gate

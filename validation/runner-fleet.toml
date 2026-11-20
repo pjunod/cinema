@@ -222,9 +222,8 @@ name = "gha-lab6-general-02"
 host = "lab6"
 os = "Linux"
 arch = "X64"
-# Reserved diagnostic VM. No general/high-cpu label: coverage never occupies
-# a merge slot. One daemon per 8 GiB guest; duplicate services are disabled.
-labels = ["lab", "incus", "ubuntu-24.04", "ci-coverage"]
+# One bounded general slot. Qualified Android APK, JVM and lint in run 8482.
+labels = ["lab", "incus", "ubuntu-24.04", "general"]
 
 # lab3 runners are retired (2026-10-11): observability and production share
 # its disk. boot.autostart=false and no recovery allowlist entry keep them off.
