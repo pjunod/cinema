@@ -185,9 +185,18 @@ class NextestShardContinuationTests(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(r.ReceiptError):
                 proof.environment_witness(raw.encode(), archive=archive)
 
+    def _pidfd_constants(self):
+        # Exercise the Linux contract on every development host without skips
+        # or any actual kernel/process operation in these source regressions.
+        return patch.multiple(proof.os, create=True, P_PIDFD=3, WNOWAIT=0x1000000,
+                              WNOHANG=1, WSTOPPED=2, WCONTINUED=8, WEXITED=4,
+                              CLD_STOPPED=5, CLD_CONTINUED=6, CLD_KILLED=2, waitid=None)
+
     def test_pidfd_capability_refuses_enosys_before_any_body(self):
         import errno
-        with patch.object(proof.os, 'pidfd_open', create=True, side_effect=OSError(errno.ENOSYS, 'unavailable')), \
+        with self._pidfd_constants(), \
+                patch.object(proof.signal, 'pidfd_send_signal', create=True), \
+                patch.object(proof.os, 'pidfd_open', create=True, side_effect=OSError(errno.ENOSYS, 'unavailable')), \
                 patch.object(proof.subprocess, 'Popen') as child, self.assertRaises(r.ReceiptError):
             proof.require_pidfd_environment()
         child.assert_not_called()
@@ -198,9 +207,9 @@ class NextestShardContinuationTests(unittest.TestCase):
         child = Mock(pid=777)
         child.poll.return_value = 0
         events = [SimpleNamespace(si_pid=777, si_code=code, si_status=status) for code, status in (
-            (proof.os.CLD_STOPPED, proof.signal.SIGSTOP), (proof.os.CLD_CONTINUED, proof.signal.SIGCONT),
-            (proof.os.CLD_KILLED, proof.signal.SIGTERM))]
-        with patch.object(proof.os, 'pidfd_open', create=True, side_effect=[100, 101]) as opened, \
+            (5, proof.signal.SIGSTOP), (6, proof.signal.SIGCONT), (2, proof.signal.SIGTERM))]
+        with self._pidfd_constants(), \
+                patch.object(proof.os, 'pidfd_open', create=True, side_effect=[100, 101]) as opened, \
                 patch.object(proof.os, 'close') as closed, \
                 patch.object(proof.os, 'waitid', side_effect=events), \
                 patch.object(proof.signal, 'pidfd_send_signal', create=True) as sent, \
@@ -218,7 +227,8 @@ class NextestShardContinuationTests(unittest.TestCase):
         from unittest.mock import Mock, call
         child = Mock(pid=777)
         child.poll.return_value = None
-        with patch.object(proof.os, 'pidfd_open', create=True, side_effect=[100, 101]), \
+        with self._pidfd_constants(), \
+                patch.object(proof.os, 'pidfd_open', create=True, side_effect=[100, 101]), \
                 patch.object(proof.os, 'close') as closed, \
                 patch.object(proof.signal, 'pidfd_send_signal', create=True,
                              side_effect=OSError(errno.ENOSYS, 'unavailable')), \
@@ -236,3 +246,14 @@ class NextestShardContinuationTests(unittest.TestCase):
         for bad in (after + b'changed runtime', after.replace(b'retention-days: 14', b'retention-days: 1'),
                     after + workspace.SOURCE_GATE_UPLOAD.encode()):
             self.assertFalse(workspace.metadata_only_workflow(before, bad))
+
+    def test_pidfd_wait_deadline_and_foreign_lifecycle_never_succeed(self):
+        from types import SimpleNamespace
+        with self._pidfd_constants(), patch.object(proof.os, 'waitid') as waited, self.assertRaises(r.ReceiptError):
+            proof._pidfd_observe(101, 777, proof.os.WSTOPPED, proof.os.CLD_STOPPED, proof.signal.SIGSTOP, -1.0)
+        waited.assert_not_called()
+        event = SimpleNamespace(si_pid=778, si_code=5, si_status=proof.signal.SIGSTOP)
+        with self._pidfd_constants(), patch.object(proof.os, 'waitid', return_value=event), \
+                self.assertRaises(r.ReceiptError):
+            proof._pidfd_observe(101, 777, proof.os.WSTOPPED, proof.os.CLD_STOPPED,
+                                 proof.signal.SIGSTOP, proof.time.monotonic() + 1.0)
