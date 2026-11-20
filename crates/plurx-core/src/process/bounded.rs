@@ -903,6 +903,7 @@ mod tests {
         async fn wait_for_fixture(
             label: &str,
             bound: Duration,
+            failure_context: &impl Fn() -> String,
             mut observed: impl AsyncFnMut() -> bool,
         ) {
             let deadline = std::time::Instant::now() + bound;
@@ -931,7 +932,11 @@ mod tests {
             };
             drop(cancel);
             timer.await.expect("join wall observation timer");
-            assert!(reached, "{label} was not observed within {bound:?}");
+            assert!(
+                reached,
+                "{label} was not observed within {bound:?}; {}",
+                failure_context()
+            );
         }
 
         const ACTIVE_BUDGET: Duration = Duration::from_secs(2);
@@ -965,13 +970,44 @@ mod tests {
             )
             .await
         });
-        wait_for_fixture("owned group progress", Duration::from_secs(5), async || {
-            tokio::fs::try_exists(&leader).await.expect("leader path")
-                && tokio::fs::try_exists(&helper).await.expect("helper path")
-                && tokio::fs::try_exists(&progress)
-                    .await
-                    .expect("progress path")
-        })
+        let failure_context = || {
+            let process_state = |pid_file: &std::path::Path| {
+                let announced = std::fs::read_to_string(pid_file);
+                let stat = announced.as_ref().ok().and_then(|pid| {
+                    pid.trim()
+                        .parse::<u32>()
+                        .ok()
+                        .map(|pid| std::fs::read_to_string(format!("/proc/{pid}/stat")))
+                });
+                format!("announced={announced:?}, stat={stat:?}")
+            };
+            let group = std::fs::read_to_string(&leader)
+                .ok()
+                .and_then(|pid| pid.trim().parse::<i32>().ok())
+                .map(pause::group_failure_snapshot);
+            format!(
+                "control={:?}, elapsed={:?}, credit={:?}, active_timeouts={:?}, child_finished={}, leader=[{}], helper=[{}], group_snapshot={group:?}",
+                control.observation(),
+                started.elapsed(),
+                control.paused_duration(),
+                control.test_child_active_timeouts(),
+                child.is_finished(),
+                process_state(&leader),
+                process_state(&helper),
+            )
+        };
+        wait_for_fixture(
+            "owned group progress",
+            Duration::from_secs(5),
+            &failure_context,
+            async || {
+                tokio::fs::try_exists(&leader).await.expect("leader path")
+                    && tokio::fs::try_exists(&helper).await.expect("helper path")
+                    && tokio::fs::try_exists(&progress)
+                        .await
+                        .expect("progress path")
+            },
+        )
         .await;
         let pid: i32 = tokio::fs::read_to_string(&leader)
             .await
@@ -982,19 +1018,25 @@ mod tests {
         let verified_pause = async |revision| {
             let bound = Duration::from_secs(5);
             let began = std::time::Instant::now();
-            wait_for_fixture("physical group stop", bound, async || {
-                source_group_quiescent(pid, true)
-                    .await
-                    .expect("whole group observation")
-            })
+            wait_for_fixture(
+                &format!("physical group stop revision {revision}"),
+                bound,
+                &failure_context,
+                async || {
+                    source_group_quiescent(pid, true)
+                        .await
+                        .expect("whole group observation")
+                },
+            )
             .await;
             // Once the real group has stopped, give the owner three of its
             // 100 ms poll ticks. A scan already in flight may have seen the
             // stop in progress. The owner still needs two stopped observations.
             tokio::time::advance(Duration::from_millis(300)).await;
             wait_for_fixture(
-                "owned pause acknowledgement",
+                &format!("owned pause acknowledgement revision {revision}"),
                 bound.saturating_sub(began.elapsed()),
+                &failure_context,
                 async || {
                     let observation = control.observation();
                     observation.phase == SourcePausePhase::Paused
@@ -1036,6 +1078,7 @@ mod tests {
         wait_for_fixture(
             "same helper resumes progress",
             Duration::from_secs(2),
+            &failure_context,
             async || {
                 tokio::fs::metadata(&progress)
                     .await

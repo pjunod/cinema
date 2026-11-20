@@ -627,6 +627,58 @@ fn group_quiescent(group: i32, stopped: bool) -> io::Result<bool> {
     Ok(!stopped || members > 0)
 }
 
+/// Failure-only context uses the same group parser as physical verification.
+/// Keep both the inventory and output bounded even on a crowded test host.
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn group_failure_snapshot(group: i32) -> String {
+    use std::io::Read;
+    const LIMIT: usize = 256;
+    let mut records = Vec::new();
+    fn record(records: &mut Vec<String>, path: std::path::PathBuf) {
+        let stat = std::fs::File::open(&path).and_then(|file| {
+            let mut text = String::new();
+            file.take(1024).read_to_string(&mut text)?;
+            Ok(text)
+        });
+        records.push(format!("{}={stat:?}", path.display()));
+    }
+    let inventory = (|| -> io::Result<()> {
+        for (index, entry) in std::fs::read_dir("/proc")?.enumerate() {
+            if index >= 131_072 {
+                return Err(io::Error::other("diagnostic inventory truncated"));
+            }
+            let entry = entry?;
+            if !entry
+                .file_name()
+                .as_encoded_bytes()
+                .iter()
+                .all(u8::is_ascii_digit)
+            {
+                continue;
+            }
+            let path = entry.path();
+            match stat_group_and_state(&path.join("stat")) {
+                Ok((observed, _)) if observed == group => {}
+                Ok(_) => continue,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            }
+            if records.len() >= LIMIT {
+                return Err(io::Error::other("diagnostic group records truncated"));
+            }
+            record(&mut records, path.join("stat"));
+            for thread in std::fs::read_dir(path.join("task"))? {
+                if records.len() >= LIMIT {
+                    return Err(io::Error::other("diagnostic group records truncated"));
+                }
+                record(&mut records, thread?.path().join("stat"));
+            }
+        }
+        Ok(())
+    })();
+    format!("group={group}, inventory={inventory:?}, records={records:?}")
+}
+
 /// Observe all processes/threads in an owned Linux process group. `stopped`
 /// admits T/t only after the caller requested a stop; false requires every
 /// thread dead/gone. A caller must retain the exact child/group generation.
