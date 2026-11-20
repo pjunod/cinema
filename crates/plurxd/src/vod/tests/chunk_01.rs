@@ -2726,6 +2726,7 @@ async fn ordinary_cold_hardware_admission_is_owned_by_the_first_original_reader(
     assert!(hardware.resources.hardware_slot);
     hardware.store = Arc::clone(&store) as Arc<dyn Store>;
     let serve = local_serve(base.path().join("hardware-start"), store);
+    let _driver_control = serve.control_driver_for_test(&encoding);
     let active = encoding
         .admissions
         .try_admit_bundle(1, 64, &encoding.resources, crate::admission::Priority::Live)

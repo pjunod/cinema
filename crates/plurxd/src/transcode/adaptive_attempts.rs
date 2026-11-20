@@ -3243,18 +3243,23 @@ impl super::TranscodeManager {
         {
             return Ok(());
         }
-        let mut status = self
-            .store
-            .adaptive_request_status(&failed.claim.binding.key, &failed.claim.binding.principal)
-            .await
-            .map_err(|error| format!("reading failed adaptive planning row: {error}"))?
-            .ok_or("failed adaptive planning row disappeared")?;
-        status
-            .validate()
-            .map_err(|error| format!("invalid failed adaptive planning row: {error}"))?;
-        if status.binding != failed.claim.binding {
-            return Err("failed adaptive planning binding changed".into());
-        }
+        let claim = &failed.claim;
+        let read_status = || async {
+            let status = self
+                .store
+                .adaptive_request_status(&claim.binding.key, &claim.binding.principal)
+                .await
+                .map_err(|error| format!("reading failed adaptive planning row: {error}"))?
+                .ok_or("failed adaptive planning row disappeared")?;
+            status
+                .validate()
+                .map_err(|error| format!("invalid failed adaptive planning row: {error}"))?;
+            if status.binding != claim.binding {
+                return Err("failed adaptive planning binding changed".into());
+            }
+            Ok::<_, String>(status)
+        };
+        let mut status = read_status().await?;
         let attempt = status
             .attempts
             .iter()
@@ -3305,12 +3310,24 @@ impl super::TranscodeManager {
                     })?;
                     status = committed;
                 }
-                Ok(_) => {
-                    return Err(
-                        "failed-planning Fence was refused; original owner remains held".into(),
-                    )
+                reply => {
+                    // Ingress may already have committed this Fence after the
+                    // scalar Cancel reply. Read the exact durable row again;
+                    // the failed RPC itself can never authorize Close.
+                    status = read_status().await?;
+                    if !status.attempts.iter().any(|row| {
+                        row.key == failed.claim.key
+                            && matches!(row.phase, AttemptPhase::Cleanup | AttemptPhase::Losing)
+                    }) {
+                        return Err(match reply {
+                            Ok(_) => {
+                                "failed-planning Fence was refused; original owner remains held"
+                                    .into()
+                            }
+                            Err(error) => format!("failed-planning Fence is unknown: {error}"),
+                        });
+                    }
                 }
-                Err(error) => return Err(format!("failed-planning Fence is unknown: {error}")),
             }
         }
         let attempt = status
@@ -5253,7 +5270,25 @@ impl super::TranscodeManager {
         release_tx.send(()).expect("release same original frame");
         drop(escaped);
         drop(entry);
-        self.shutdown_adaptive_attempt_root(&mut attempt_root, deadline)
+        let terminal = crate::vodserve::Terminal::AdminStop;
+        let ended = self
+            .store
+            .end_media_session_if_owner(&plurx_core::domain::MediaSessionEnd {
+                incarnation_id: ingress.incarnation_id,
+                session_id: ingress.session_id.clone(),
+                expected_owner_node_id: ingress.owner_node_id,
+                expected_owner_epoch: ingress.owner_epoch,
+                expected_lease_expires_at_ms: ingress.lease_expires_at_ms,
+                terminal_reason: terminal.durable_reason().to_owned(),
+                now_ms: crate::media_sessions::unix_ms(),
+            })
+            .await
+            .expect("end the exactly published durable route")
+            .expect("same adopted owner is still current");
+        assert_eq!(ended.state, "ended");
+        assert!(self.vod.end(&ingress.session_id, terminal).await);
+        let cleanup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        self.shutdown_adaptive_attempt_root(&mut attempt_root, cleanup_deadline)
             .await
             .expect("actual adopted entry/root destruction after original joins");
     }

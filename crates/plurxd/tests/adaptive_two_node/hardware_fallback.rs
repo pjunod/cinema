@@ -1,7 +1,8 @@
 use super::*;
 
 const RELAY_PATH: &str = "/internal/cluster/media/sessions/relay";
-const AUDIO_INDEX: i64 = 1;
+// Playback exposes per-kind track ordinals.
+const AUDIO_INDEX: i64 = 0;
 
 fn caps() -> Value {
     json!({
@@ -25,7 +26,7 @@ async fn hardware_slots(cluster: &Cluster, base: &str) -> (u64, u64) {
 }
 
 async fn start_hardware(cluster: &Cluster, file: i64, height: i64, playback: &str) -> Value {
-    let decision = cluster
+    let response = cluster
         .client
         .post(format!("{}/api/v1/files/{file}/decision", cluster.a_base))
         .query(&[("audio", AUDIO_INDEX), ("subtitle", -1)])
@@ -33,12 +34,11 @@ async fn start_hardware(cluster: &Cluster, file: i64, height: i64, playback: &st
         .json(&json!({"caps": caps()}))
         .send()
         .await
-        .expect("decision request")
-        .error_for_status()
-        .expect("decision status")
-        .json::<Value>()
-        .await
-        .expect("decision JSON");
+        .expect("decision request");
+    let status = response.status();
+    let body = response.text().await.expect("decision body");
+    assert_eq!(status, StatusCode::OK, "{body}{}", cluster.logs());
+    let decision: Value = serde_json::from_str(&body).expect("decision JSON");
     let candidate = decision["quality_candidates"]
         .as_array()
         .expect("quality catalog")

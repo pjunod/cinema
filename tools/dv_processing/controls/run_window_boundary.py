@@ -31,7 +31,7 @@ def author_gops(root, work, ffmpeg, cases, raster='64x64'):
         subprocess.run([str(root / 'make_movie'), str(work / 'bl.mkv'),
                         str(work / 'el.mkv'), str(root / case / 'rpus'),
                         str(work / f'{case}.mkv'), 'normal'],
-                       check=True, timeout=30, capture_output=True)
+                       check=True, timeout=30, stdout=subprocess.DEVNULL)
 
 
 def author_valid_source(root, work, ffmpeg_binary, ffprobe, mkvmerge):

@@ -34,8 +34,10 @@ static struct input open_input(const char *path)
     require(stream >= 0, "video stream");
     input.stream = input.format->streams[stream];
     AVCodecParameters *par = input.stream->codecpar;
-    require(par->codec_id == AV_CODEC_ID_HEVC && par->width == 64 && par->height == 64,
-            "bounded 64x64 HEVC input");
+    bool small_control = par->width == 64 && par->height == 64;
+    bool playback_control = par->width == 640 && par->height == 360;
+    require(par->codec_id == AV_CODEC_ID_HEVC && (small_control || playback_control),
+            "bounded 64x64 or 640x360 HEVC fixture input");
     require(par->extradata_size >= 23 && par->extradata[0] == 1 &&
             (par->extradata[21] & 3) == 3, "four-byte length-prefixed HEVC");
     int count = 0;
@@ -105,6 +107,9 @@ int main(int argc, char **argv)
     }
     require(!strcmp(mode,"normal") || !strcmp(mode,"missing-el") || !strcmp(mode,"swapped-rpu") || !strcmp(mode,"swapped-el") || !strcmp(mode,"missing-rpu"), "known control mode");
     struct input bl = open_input(argv[1]), el = open_input(argv[2]);
+    require(bl.stream->codecpar->width == el.stream->codecpar->width &&
+            bl.stream->codecpar->height == el.stream->codecpar->height,
+            "matching fixture BL/EL raster");
     require(bl.stream->avg_frame_rate.num > 0 && bl.stream->avg_frame_rate.den > 0 &&
             el.stream->avg_frame_rate.num > 0 && el.stream->avg_frame_rate.den > 0 &&
             av_cmp_q(bl.stream->avg_frame_rate, el.stream->avg_frame_rate) == 0,
