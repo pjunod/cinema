@@ -3380,15 +3380,22 @@ for last do :; done
             );
             let admission = Arc::new(manager.admit_fragment().await.expect("idle capacity"));
             let config = Settings {
+                enabled: true,
                 model_path: root.path().join("model.bin").to_string_lossy().into_owned(),
                 ..Settings::default()
             };
+            let saved = serde_json::to_string(&config).expect("serialize enabled settings");
+            store
+                .put_settings(&[("subtitles.transcription.config", &saved)])
+                .await
+                .expect("enable advanced transcription for public queue admission");
             let request = enqueue_request(&file, &config, &model, &whisper).expect("recipe");
             let id = request.id.clone();
-            assert!(matches!(
-                store.enqueue_job(request).await.expect("enqueue"),
-                EnqueueOutcome::Accepted { .. }
-            ));
+            let outcome = store.enqueue_job(request).await.expect("enqueue");
+            assert!(
+                matches!(outcome, EnqueueOutcome::Accepted { .. }),
+                "enabled advanced job was not admitted: {outcome:?}"
+            );
             let candidate = store
                 .background_job(&id)
                 .await
