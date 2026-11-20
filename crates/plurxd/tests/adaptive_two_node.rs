@@ -48,6 +48,8 @@ const ADOPT_PATH: &str = "/internal/cluster/media/adaptive-attempts/adopt";
 const CANCEL_PATH: &str = "/internal/cluster/media/adaptive-attempts/cancel";
 const SNAPSHOT_PATH: &str = "/internal/v1/media/snapshot";
 const OFFERS_PATH: &str = "/internal/v1/media/offers";
+#[cfg(target_os = "linux")]
+const START_PATH: &str = "/internal/cluster/media/sessions/start";
 // Canonical ladder rungs. Arbitrary requested heights can resolve to the same
 // rendition key, so distinct wire heights do not establish distinct owners.
 const HEIGHTS: [i64; 3] = [240, 360, 480];
@@ -182,7 +184,16 @@ struct ProxyState {
     prefer_worker: bool,
     block_clock: Arc<AtomicBool>,
     hits: Arc<Mutex<HashMap<String, u64>>>,
+    #[cfg(target_os = "linux")]
+    hardware_start: Arc<Mutex<Option<HardwareStartObservation>>>,
     client: reqwest::Client,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct HardwareStartObservation {
+    session_id: String,
+    cutoff_unix_ms: i64,
 }
 
 struct PeerProxy {
@@ -203,6 +214,8 @@ impl PeerProxy {
             prefer_worker,
             block_clock: Arc::new(AtomicBool::new(false)),
             hits: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(target_os = "linux")]
+            hardware_start: Arc::new(Mutex::new(None)),
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(60))
@@ -263,6 +276,12 @@ async fn forward(State(state): State<ProxyState>, request: Request<Body>) -> Res
     let Ok(body) = to_bytes(body, 64 * 1024 * 1024).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
+    #[cfg(target_os = "linux")]
+    let hardware_cutoff = (path == START_PATH)
+        .then(|| serde_json::from_slice::<Value>(&body).ok())
+        .flatten()
+        .and_then(|value| value["cutoff_unix_ms"].as_i64())
+        .filter(|cutoff| *cutoff > 0);
     parts.headers.remove("host");
     parts.headers.remove("content-length");
     let Ok(upstream) = state
@@ -282,6 +301,23 @@ async fn forward(State(state): State<ProxyState>, request: Request<Body>) -> Res
     let Ok(bytes) = upstream.bytes().await else {
         return StatusCode::BAD_GATEWAY.into_response();
     };
+    #[cfg(target_os = "linux")]
+    if let Some(observation) =
+        hardware_cutoff
+            .filter(|_| status.is_success())
+            .and_then(|cutoff_unix_ms| {
+                let value: Value = serde_json::from_slice(&bytes).ok()?;
+                Some(HardwareStartObservation {
+                    session_id: value["session_id"].as_str()?.to_owned(),
+                    cutoff_unix_ms,
+                })
+            })
+    {
+        *state
+            .hardware_start
+            .lock()
+            .expect("hardware Start evidence") = Some(observation);
+    }
     if status.is_success() && state.prefer_worker {
         // Isolate the clock/ownership scenarios from this shared host's I/O
         // timing. These are synthetic advisory measurements only: no quote,
@@ -697,6 +733,11 @@ impl Cluster {
             started["height"], height,
             "scenario must use its own canonical rung"
         );
+        self.play_created(&started, playback).await;
+        Ok(started)
+    }
+
+    async fn play_created(&mut self, started: &Value, playback: &str) {
         let playlist = started["playlist_url"].as_str().expect("playlist URL");
         let failures = self.producer_failures();
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -759,7 +800,7 @@ impl Cluster {
                     "a producer died while segment {segment} of {playback} was served{}",
                     self.logs()
                 );
-                return Ok(started);
+                return;
             }
             assert!(
                 Instant::now() < deadline,
@@ -1150,3 +1191,7 @@ mod hdhomerun_fixture;
 #[cfg(target_os = "linux")]
 #[path = "adaptive_two_node/cold_fel.rs"]
 mod cold_fel;
+
+#[cfg(target_os = "linux")]
+#[path = "adaptive_two_node/hardware_fallback.rs"]
+mod hardware_fallback;
