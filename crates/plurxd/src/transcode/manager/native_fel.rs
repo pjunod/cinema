@@ -343,6 +343,10 @@ impl TranscodeManager {
                 + if plan.options().input_has_audio { 5 } else { 3 },
             decoder_threads: Some(crate::dv_segment::STREAMING_DECODER_THREADS),
         };
+        use plurx_core::transcode::dv_processing::{
+            source_master_metadata, source_mastering_metadata, source_mastering_minimum,
+        };
+
         let runtime = RuntimeRecipe {
             tools,
             source,
@@ -356,11 +360,9 @@ impl TranscodeManager {
             display_target: None,
             display: None,
             display_target_note: None,
-            source_mastering: crate::decode_facts::mastering::source_mastering_metadata(stream),
-            source_mastering_minimum: crate::decode_facts::mastering::source_mastering_minimum(
-                stream,
-            ),
-            source_master_metadata: crate::decode_facts::mastering::source_master_metadata(stream),
+            source_mastering: source_mastering_metadata(stream),
+            source_mastering_minimum: source_mastering_minimum(stream),
+            source_master_metadata: source_master_metadata(stream),
             destination,
             mode,
             decode,
@@ -382,6 +384,7 @@ impl TranscodeManager {
             preparation_budget: Duration::from_secs(30),
             report_revision: std::sync::atomic::AtomicU64::new(0),
             published_receipt: std::sync::Mutex::new(None),
+            adaptive_terminal: std::sync::OnceLock::new(),
         };
         Ok(HeadRenderRecipe {
             runtime,
