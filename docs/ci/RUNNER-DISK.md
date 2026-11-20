@@ -55,7 +55,7 @@ general/high-cpu pool while six more measurements waited behind it.
 | Host user workloads | `user-1000.slice`: `MemoryHigh=4G`, `MemoryMax=6G`, `MemorySwapMax=4G`; this limits all operator processes in that slice, including direct compiles. On `lab4`, `MemoryHigh=3G`, `MemoryMax=4G` leaves room for its separate image builder. Docker production services have separate cgroups. |
 | `lab4` swap | The existing 8 GiB swap file is activated and restored in fstab; no new disk allocation. |
 | General VM jobs | Runner container options: `--cpus 3 --memory 7g --memory-swap 14g --pids-limit 4096`; one Cargo job and two Rust test threads. Host-mode runner services also have a 7 GiB cgroup cap and 300% CPU quota. |
-| Former coverage VM | The second `lab6` guest is intended for the standard `general` profile above. Keep it drained until the profile is reconciled. The current manual coverage workflow uses `unit-memory-16g`. |
+| Former coverage VM | The second `lab6` guest passed qualification on the standard `general` profile above. The current manual coverage workflow uses `unit-memory-16g`. |
 | `lab3` | Both runner VMs retired, `boot.autostart=false`; neither belongs to a recovery allowlist. Production and observability retain its disk. |
 | Apple janitor | Fixed 25 GiB job reserve, no reset for a cache below 1 GiB, verified bounded bootstrap retries, unloaded-daemon recovery before cache inspection, five-minute checks. Intentional `launchctl disable` is respected. |
 

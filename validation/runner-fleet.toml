@@ -182,8 +182,7 @@ name = "gha-lab6-general-02"
 host = "lab6"
 os = "Linux"
 arch = "X64"
-# General work in the existing 8 GiB guest uses the 7 GiB / three-CPU
-# profile. Keep the guest drained until that profile is reconciled.
+# The 8 GiB guest passed the 7 GiB / three-CPU general job profile.
 labels = ["lab", "incus", "ubuntu-24.04", "general"]
 
 # lab3 runners are retired (2026-10-11): observability and production share
