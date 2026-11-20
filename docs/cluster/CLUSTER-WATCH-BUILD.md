@@ -1,6 +1,11 @@
 # General cluster change feed
 
-**Status:** open; implementation prepared, final qualification pending · **Executes:** B4 from [cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md) · **Written:** 2026-11-19
+**Status:** built — implemented and independently reviewed · **Executes:** B4 from [cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md) · **Written:** 2026-11-19
+
+Delivery and qualification evidence is tracked in
+[promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811). Earlier branch
+names and checkpoint receipts below are historical. Fleet acceptance remains
+after Paul’s deployment.
 
 ## 1. Objective
 

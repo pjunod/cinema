@@ -1,7 +1,12 @@
 # Cluster timing — one budget table and explicit remaining decisions
 
-**Status:** implemented; final integration qualification remains · **Executes:** C3 and C5 from
+**Status:** built — implemented and independently reviewed · **Executes:** C3 and C5 from
 [the cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md) · **Written:** 2026-11-19
+
+Delivery and qualification evidence is tracked in
+[promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811). Earlier branch
+names and checkpoint receipts below are historical. Fleet acceptance remains
+after Paul’s deployment.
 
 Companion to [the facade contract](CLUSTER-FACADE-BUILD.md). This lane starts
 from the qualified-promotion candidate `09d4d9502`; it does not modify the

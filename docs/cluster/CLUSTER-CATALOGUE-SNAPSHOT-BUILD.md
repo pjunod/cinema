@@ -1,7 +1,12 @@
 # Peer catalogue snapshots
 
-**Status:** open; implementation prepared, qualification pending · **Executes:** B6 of the
+**Status:** built — implemented and independently reviewed · **Executes:** B6 of the
 [cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md) · **Written:** 2026-11-19
+
+Delivery and qualification evidence is tracked in
+[promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811). Earlier branch
+names and checkpoint receipts below are historical. Fleet acceptance remains
+after Paul’s deployment.
 
 The [facade contract](CLUSTER-FACADE-BUILD.md) owns the directory and peer
 transport. This plan owns descriptive catalogue reuse in `media_pool.rs`.

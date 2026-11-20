@@ -1,6 +1,11 @@
 # Passive voter timing observations
 
-**Status:** implemented; qualification pending · **Executes:** C4 preparation from the cluster audit · **Written:** 2026-11-19
+**Status:** open — passive instrumentation built and independently reviewed · **Executes:** C4 preparation from the cluster audit · **Written:** 2026-11-19
+
+Delivery and qualification evidence is tracked in
+[promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811).
+Actual post-deployment voter observations and the measured election-floor
+decision remain open; Paul owns deployment and fleet acceptance.
 
 ## 1. Objective and boundary
 

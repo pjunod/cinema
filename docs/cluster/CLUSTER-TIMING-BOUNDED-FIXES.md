@@ -1,7 +1,12 @@
 # Bounded timing corrections — one activation lease and renewal priority
 
-**Status:** implemented in source; combined validation pending · **Executes:** C3 relationship decisions in
+**Status:** built — implemented and independently reviewed · **Executes:** C3 relationship decisions in
 [the timing ledger](CLUSTER-TIMING-BUILD.md) · **Written:** 2026-11-19
+
+Delivery and qualification evidence is tracked in
+[promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811). Earlier branch
+names and checkpoint receipts below are historical. Fleet acceptance remains
+after Paul’s deployment.
 
 Build from integration `be88b1b4dc531808559fc628aa537e66760234d2` in an
 owned external worktree. Root owns the working pinned source-only compiler
