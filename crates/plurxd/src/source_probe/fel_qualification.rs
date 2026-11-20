@@ -28,7 +28,7 @@ const YUV420P10_EXPORT: &str = q::FelRecipeOutput::EXPORT;
 /// One render, encode or decode of one 2 s window. A 4K FEL window renders in
 /// well under 30 s on the measured worker; a stuck child must not hold the
 /// node's reconstruction slot for the job's whole lease.
-const STAGE_DEADLINE: Duration = Duration::from_secs(240);
+const STAGE_DEADLINE: Duration = super::FEL_WINDOW_STAGE_DEADLINE;
 /// The helper's bounded seek preroll, as in the streaming route.
 const MAX_PREROLL: u16 = 512;
 /// CPU threads one window stage's FFmpeg child runs, debited with the

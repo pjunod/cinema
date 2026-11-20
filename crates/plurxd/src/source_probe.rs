@@ -6,12 +6,18 @@ mod dv_title;
 #[cfg(target_os = "linux")]
 pub(crate) mod fel_qualification;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod m7_comparison;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod refit_work;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod title_work;
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) use refit_work::seed_preparation_refit;
+
+/// The established qualification limit for one bounded window stage.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const FEL_WINDOW_STAGE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(240);
 
 /// The F+ statistics spool under a node's runtime cache (decision A):
 /// node-local, never replicated, listed and deleted from Developer.
