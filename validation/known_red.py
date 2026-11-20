@@ -16,6 +16,7 @@ import tomllib
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RULES = ROOT / "validation/known-red.toml"
 IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+RAW_STRING_RE = re.compile(r"(?P<prefix>br|cr|r)(?P<hashes>#{0,255})\"")
 OPTIONAL_CARGO_IDENTITIES = frozenset(
     {
         # The explicit Metal control exists only on macOS. Its exact source
@@ -123,13 +124,11 @@ def _lex_rust(text: str, source: str) -> tuple[_Token, ...]:
             advance(end)
             continue
 
-        raw = re.match(
-            r"(?P<prefix>br|cr|r)(?P<hashes>#{0,255})\"", text[index:]
-        )
+        raw = RAW_STRING_RE.match(text, index)
         if raw:
             start_line = line
             hashes = raw.group("hashes")
-            content_start = index + raw.end()
+            content_start = raw.end()
             terminator = '"' + hashes
             end = text.find(terminator, content_start)
             if end < 0:
