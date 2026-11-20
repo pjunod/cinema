@@ -413,7 +413,8 @@ exec /usr/bin/curl --noproxy '*' -fsS "$1"
         let held = std::fs::File::open(&path).expect("hold source");
 
         let (_store, _id, active) = crate::background_jobs::tests::active().await;
-        lifetime::set_daemon_roots(&[runtime.clone()], &[tools]).expect("source-policy roots");
+        lifetime::set_daemon_roots(std::slice::from_ref(&runtime), &[tools])
+            .expect("source-policy roots");
         lifetime::install_observer(observe).expect("isolated observer");
         let input = SourceInput::open_background_held(
             crate::fragment_index_cluster::SourceFence::clone_current_held(&held).expect("source"),
