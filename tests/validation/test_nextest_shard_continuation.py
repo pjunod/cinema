@@ -303,6 +303,9 @@ class NextestShardContinuationTests(unittest.TestCase):
             with patch.object(proof,'PRIOR_LISTING_SHA256',digest):
                 if ignored and not included and not forged:
                     proof.compile_only_ignored(proof.IGNORED_COMPILE_PATH,witness,self.ignored_source(),self.ignored_source(),universe,prior=proof.PRIOR_LISTING_SOURCE,run=proof.PRIOR_LISTING_RUN)
+                    for prior,run in [('0'*40,proof.PRIOR_LISTING_RUN),(proof.PRIOR_LISTING_SOURCE,1)]:
+                        with self.subTest(prior=prior,run=run),self.assertRaises(r.ReceiptError):
+                            proof.compile_only_ignored(proof.IGNORED_COMPILE_PATH,witness,self.ignored_source(),self.ignored_source(),universe,prior=prior,run=run)
                 else:
                     with self.subTest(ignored=ignored,included=included,forged=forged),self.assertRaises(r.ReceiptError):
                         proof.compile_only_ignored(proof.IGNORED_COMPILE_PATH,witness,self.ignored_source(),self.ignored_source(),universe,prior=proof.PRIOR_LISTING_SOURCE,run=proof.PRIOR_LISTING_RUN)
