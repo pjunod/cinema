@@ -610,6 +610,73 @@ pub(super) async fn background_may_continue<T: QueueSql>(
         .map(|value| value.unwrap_or(false))
 }
 
+const APPLIED_SOURCE_KEYS_FOR_FILE: &str = r#"
+    SELECT DISTINCT COALESCE('source_io:'||mapping.domain_id,'source_io') AS resource_key
+    FROM files file JOIN items item ON item.id=file.item_id JOIN libraries library ON library.id=item.library_id
+    LEFT JOIN json_each(CASE WHEN json_valid(library.paths) THEN library.paths ELSE '[]' END) root
+    LEFT JOIN background_storage_domains mapping ON mapping.library_id=library.id AND mapping.root_path=root.value
+    WHERE file.id=json_extract($1,'$.file_id')
+"#;
+
+/// Positive evidence of a common source constraint in the current arbiter.
+/// Unknown includes an uncovered owner path or silence in this snapshot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourcePlacementPressure {
+    #[default]
+    Unknown,
+    ForegroundWindowProtected,
+    BackgroundReaderSlotsHeld,
+}
+
+pub(super) async fn placement_source_pressure<T: QueueSql>(
+    store: &T,
+    file_id: i64,
+    source_size: i64,
+    source_mtime: i64,
+    now_ms: i64,
+) -> Result<SourcePlacementPressure, StoreError> {
+    if file_id <= 0 || source_size < 0 || source_mtime < 0 || now_ms <= 0 {
+        return Err(StoreError::Task(
+            "invalid placement source observation".into(),
+        ));
+    }
+    let now = "json_extract($1,'$.now_ms')";
+    let blocked = foreground_blocks("required.resource_key", now);
+    // This is the existing two-holder source limit for background claims.
+    // Count distinct owners because one holder may cover several aliases.
+    let sql = format!(
+        r#"WITH required AS ({APPLIED_SOURCE_KEYS_FOR_FILE}
+          AND file.size=json_extract($1,'$.source_size') AND file.mtime=json_extract($1,'$.source_mtime'))
+        SELECT json_quote(CASE
+          WHEN EXISTS(SELECT 1 FROM required WHERE {blocked})
+            THEN 'foreground_window_protected'
+          WHEN EXISTS(SELECT 1 FROM required WHERE EXISTS(
+            SELECT DISTINCT held.owner_kind,held.work_id,held.fence FROM source_io_occupancy held
+            WHERE (held.resource_key=required.resource_key OR held.resource_key='source_io'
+                OR (required.resource_key='source_io' AND held.resource_key GLOB 'source_io:*'))
+              AND held.active_occupancy=1 AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL)
+            LIMIT 1 OFFSET 1))
+            THEN 'background_reader_slots_held'
+          ELSE 'unknown' END) AS result_json"#
+    );
+    let rows = store
+        .queue_sql(
+            sql,
+            encode(&serde_json::json!({
+                "file_id":file_id,"source_size":source_size,
+                "source_mtime":source_mtime,"now_ms":now_ms
+            }))?,
+            false,
+            true,
+        )
+        .await?;
+    rows.first()
+        .map(|row| decode(row))
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
 pub(super) async fn foreground_pressure<T: QueueSql>(
     store: &T,
     file_id: i64,
@@ -620,12 +687,8 @@ pub(super) async fn foreground_pressure<T: QueueSql>(
     }
     let blocked = foreground_blocks("required.resource_key", "json_extract($1,'$.now_ms')");
     let sql = format!(
-        r#"SELECT CASE WHEN EXISTS(SELECT 1 FROM (
-      SELECT DISTINCT COALESCE('source_io:'||mapping.domain_id,'source_io') AS resource_key
-      FROM files file JOIN items item ON item.id=file.item_id JOIN libraries library ON library.id=item.library_id
-      LEFT JOIN json_each(CASE WHEN json_valid(library.paths) THEN library.paths ELSE '[]' END) root
-      LEFT JOIN background_storage_domains mapping ON mapping.library_id=library.id AND mapping.root_path=root.value
-      WHERE file.id=json_extract($1,'$.file_id')) required WHERE {blocked}) THEN 'true' ELSE 'false' END AS result_json"#
+        "SELECT CASE WHEN EXISTS(SELECT 1 FROM ({APPLIED_SOURCE_KEYS_FOR_FILE}) required \
+         WHERE {blocked}) THEN 'true' ELSE 'false' END AS result_json"
     );
     let rows = store
         .queue_sql(
@@ -728,6 +791,79 @@ mod source_tests {
             .expect("metadata role protocol");
         SourceSql(Mutex::new(connection))
     }
+    #[tokio::test]
+    async fn placement_source_pressure_requires_a_matching_stamp_and_distinct_common_holders() {
+        use SourcePlacementPressure::{
+            BackgroundReaderSlotsHeld, ForegroundWindowProtected, Unknown,
+        };
+
+        let store = fixture();
+        {
+            let connection = store.0.lock().expect("connection");
+            connection
+                .execute_batch(
+                    "INSERT INTO background_storage_domains VALUES(1,'/media','disk-a');
+                     INSERT INTO background_job_reservations VALUES('source_io:disk-a',0,'same',1,2000);
+                     INSERT INTO background_job_reservations VALUES('source_io',0,'same',1,2000);
+                     INSERT INTO background_job_reservations VALUES('source_io:other',0,'separate',1,2000);",
+                )
+                .expect("one distinct matching owner despite aliases");
+        }
+        assert_eq!(
+            placement_source_pressure(&store, 1, 100, 1, 1000)
+                .await
+                .expect("current requested source pressure"),
+            Unknown
+        );
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute(
+                "INSERT INTO background_job_reservations VALUES('source_io',1,'shared',1,2000)",
+                [],
+            )
+            .expect("other shared owner");
+        assert_eq!(
+            placement_source_pressure(&store, 1, 100, 1, 1000)
+                .await
+                .expect("current requested source pressure"),
+            BackgroundReaderSlotsHeld,
+        );
+        assert_eq!(
+            placement_source_pressure(&store, 1, 100, 2, 1000)
+                .await
+                .expect("current requested source pressure"),
+            Unknown
+        );
+        assert_eq!(
+            placement_source_pressure(&store, 1, 100, 1, 2001)
+                .await
+                .expect("current requested source pressure"),
+            Unknown
+        );
+
+        let token = register_foreground(&store, owner(ForegroundSourcePolicy::Rolling), 2001, 3000)
+            .await
+            .expect("register foreground source")
+            .expect("original owner");
+        assert_eq!(
+            placement_source_pressure(&store, 1, 100, 1, 2002)
+                .await
+                .expect("current requested source pressure"),
+            ForegroundWindowProtected,
+        );
+        assert!(release_foreground(&store, token, 2003)
+            .await
+            .expect("retire unused source owner"));
+        assert_eq!(
+            placement_source_pressure(&store, 1, 100, 1, 2004)
+                .await
+                .expect("current requested source pressure"),
+            Unknown
+        );
+    }
+
     fn coordinator_fixture() -> (
         SourceSql,
         super::super::analysis_coordination::AnalysisCoordinationSource,

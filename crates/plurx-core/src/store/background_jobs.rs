@@ -3355,6 +3355,13 @@ pub trait BackgroundJobStore: Send + Sync {
         file_id: i64,
         now_ms: i64,
     ) -> Result<bool, StoreError>;
+    async fn placement_source_pressure(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        now_ms: i64,
+    ) -> Result<super::background_jobs_resources::SourcePlacementPressure, StoreError>;
     async fn list_foreground_source_owners(
         &self,
         node_id: &str,
@@ -5684,6 +5691,22 @@ LIMIT 1
         now_ms: i64,
     ) -> Result<bool, StoreError> {
         super::background_jobs_resources::foreground_pressure(self, file_id, now_ms).await
+    }
+    async fn placement_source_pressure(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        now_ms: i64,
+    ) -> Result<super::background_jobs_resources::SourcePlacementPressure, StoreError> {
+        super::background_jobs_resources::placement_source_pressure(
+            self,
+            file_id,
+            source_size,
+            source_mtime,
+            now_ms,
+        )
+        .await
     }
     async fn list_foreground_source_owners(
         &self,

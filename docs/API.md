@@ -3875,6 +3875,14 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 | POST | `/api/v1/cluster/learner/join/{redeem,finalize}` | **learner token digest** | The same on the learner path |
 | GET | `/api/v1/cluster/artwork/{filename}` | **cluster HMAC** | Serves node-local artwork to a peer |
 
+`POST /api/v1/cluster/media/offers` reports `shared_source_pressure` once for
+the requested file. `foreground_window_protected` means the storage arbiter
+is protecting a foreground reader's window. `background_reader_slots_held`
+means two distinct background holders use the same applied domain.
+`unknown` covers unavailable or incomplete evidence. These are advisory
+facts about existing commitments. The worker still checks source access and
+admission when it prepares playback.
+
 A fragment job retry retains its exact copy-video variant. If the source or
 pipeline changed so that variant cannot be resolved, it returns conflict; use
 the media detail analysis action to request a new current generation.

@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::membership::{ActivityPeer, MembershipManager};
 use plurx_core::domain::MediaFile;
+use plurx_core::store::background_jobs_resources::SourcePlacementPressure;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
@@ -1434,6 +1435,7 @@ pub(crate) struct PlacementDiagnostics {
     pub request_fingerprint: String,
     pub budget_ms: u64,
     pub selected_node_id: Option<String>,
+    pub shared_source_pressure: SourcePlacementPressure,
     pub offers: Vec<MediaOffer>,
 }
 
@@ -2435,14 +2437,77 @@ impl MediaPool {
                     u64::try_from(OFFER_DEADLINE.as_millis()).unwrap_or(u64::MAX)
                 },
                 selected_node_id: None,
+                shared_source_pressure: SourcePlacementPressure::Unknown,
                 offers: Vec::new(),
             };
         }
+        // All offers name the same scanner stamp. Read its common source
+        // commitments once at ingress while the ordinary offers are collected.
+        // A slow observation cannot delay a usable offer or its activation.
+        let (collected, mut shared_source_pressure) = {
+            let pressure = tokio::time::timeout_at(
+                deadline,
+                state.store.placement_source_pressure(
+                    request.file_id,
+                    request.source_size,
+                    request.source_mtime,
+                    unix_ms(),
+                ),
+            );
+            let collection = self.collect_offers(state, &request, deadline);
+            tokio::pin!(pressure, collection);
+            tokio::select! {
+               biased;
+               observed = &mut pressure => (
+                   collection.await,
+                   observed.ok().and_then(Result::ok).unwrap_or_default(),
+               ),
+               collected = &mut collection => (collected, SourcePlacementPressure::Unknown),
+            }
+        };
+        let Some((mut offers, ranking_snapshots)) = collected else {
+            return PlacementDiagnostics {
+                request_fingerprint: request.request_fingerprint,
+                budget_ms: 0,
+                selected_node_id: None,
+                shared_source_pressure: SourcePlacementPressure::Unknown,
+                offers: Vec::new(),
+            };
+        };
+        if tokio::time::Instant::now() >= deadline {
+            shared_source_pressure = SourcePlacementPressure::Unknown;
+        }
+        rank_offers(
+            &mut offers,
+            &ranking_snapshots,
+            &request.request_fingerprint,
+            &state.node_id,
+            shared_source_pressure,
+        );
+        let selected_node_id = offers
+            .first()
+            .filter(|offer| offer.eligible)
+            .map(|offer| offer.node_id.clone());
+        PlacementDiagnostics {
+            request_fingerprint: request.request_fingerprint,
+            budget_ms: u64::try_from(OFFER_DEADLINE.as_millis()).unwrap_or(u64::MAX),
+            selected_node_id,
+            shared_source_pressure,
+            offers,
+        }
+    }
+
+    async fn collect_offers(
+        &self,
+        state: &AppState,
+        request: &MediaOfferRequest,
+        deadline: tokio::time::Instant,
+    ) -> Option<(Vec<MediaOffer>, HashMap<String, MediaNodeSnapshot>)> {
         let evidence_exchange = request
             .finite_service
             .as_ref()
             .and_then(|_| state.membership.clock_guard().capture_continuous().ok());
-        let snapshots = match tokio::time::timeout_at(deadline, async {
+        let snapshots = tokio::time::timeout_at(deadline, async {
             self.expire().await;
             self.snapshots
                 .read()
@@ -2452,19 +2517,9 @@ impl MediaPool {
                 .collect::<HashMap<_, _>>()
         })
         .await
-        {
-            Ok(snapshots) => snapshots,
-            Err(_) => {
-                return PlacementDiagnostics {
-                    request_fingerprint: request.request_fingerprint,
-                    budget_ms: 0,
-                    selected_node_id: None,
-                    offers: Vec::new(),
-                }
-            }
-        };
+        .ok()?;
         let (mut offers, local_snapshot) = match tokio::time::timeout_at(deadline, async {
-            tokio::join!(local_offer(state, &request), local_snapshot(state))
+            tokio::join!(local_offer(state, request), local_snapshot(state))
         })
         .await
         {
@@ -2482,12 +2537,12 @@ impl MediaPool {
                     && peer.http_base.is_some()
                     && snapshots
                         .get(&peer.node_id)
-                        .is_some_and(|snapshot| snapshot_can_answer(snapshot, &request))
+                        .is_some_and(|snapshot| snapshot_can_answer(snapshot, request))
             })
             .take(MAX_PEERS)
             .collect::<Vec<_>>();
         if !peers.is_empty() && tokio::time::Instant::now() < deadline {
-            let body = serde_json::to_vec(&request).unwrap_or_default();
+            let body = serde_json::to_vec(request).unwrap_or_default();
             let transport = self.transport.clone();
             let remote = stream::iter(peers.into_iter().map(|peer| {
                 let transport = transport.clone();
@@ -2525,22 +2580,7 @@ impl MediaPool {
                 .zip(evidence_window)
                 .and_then(|(evidence, (digest, exchange))| evidence.age_at(digest, exchange));
         }
-        rank_offers(
-            &mut offers,
-            &ranking_snapshots,
-            &request.request_fingerprint,
-            &state.node_id,
-        );
-        let selected_node_id = offers
-            .first()
-            .filter(|offer| offer.eligible)
-            .map(|offer| offer.node_id.clone());
-        PlacementDiagnostics {
-            request_fingerprint: request.request_fingerprint,
-            budget_ms: u64::try_from(OFFER_DEADLINE.as_millis()).unwrap_or(u64::MAX),
-            selected_node_id,
-            offers,
-        }
+        Some((offers, ranking_snapshots))
     }
 }
 
@@ -3346,10 +3386,19 @@ fn rank_offers(
     snapshots: &HashMap<String, MediaNodeSnapshot>,
     fingerprint: &str,
     local_node_id: &str,
+    shared_source_pressure: SourcePlacementPressure,
 ) {
+    let common_source_held = shared_source_pressure != SourcePlacementPressure::Unknown;
     offers.sort_by(|left, right| {
-        compare_offer(right, left, snapshots, fingerprint, local_node_id)
-            .then_with(|| left.node_id.cmp(&right.node_id))
+        compare_offer(
+            right,
+            left,
+            snapshots,
+            fingerprint,
+            local_node_id,
+            common_source_held,
+        )
+        .then_with(|| left.node_id.cmp(&right.node_id))
     });
 }
 
@@ -3359,6 +3408,7 @@ fn compare_offer(
     snapshots: &HashMap<String, MediaNodeSnapshot>,
     fingerprint: &str,
     local_node_id: &str,
+    common_source_held: bool,
 ) -> Ordering {
     let left_snapshot = snapshots.get(&left.node_id);
     let right_snapshot = snapshots.get(&right.node_id);
@@ -3368,8 +3418,13 @@ fn compare_offer(
         .cmp(&right.eligible)
         .then_with(|| left.cache_hit.cmp(&right.cache_hit))
         .then_with(|| left_can_start.cmp(&right_can_start))
-        .then_with(|| pressure_score(left).cmp(&pressure_score(right)))
         .then_with(|| {
+            pressure_score(left, common_source_held).cmp(&pressure_score(right, common_source_held))
+        })
+        .then_with(|| {
+            if common_source_held {
+                return Ordering::Equal;
+            }
             match (
                 left_snapshot.and_then(|node| node.io.storage_read_micros),
                 right_snapshot.and_then(|node| node.io.storage_read_micros),
@@ -3384,7 +3439,11 @@ fn compare_offer(
             let measured = |offer: &MediaOffer| {
                 offer.finite_service.map(|evidence| {
                     (
-                        std::cmp::Reverse(evidence.elapsed_ns_per_unit),
+                        std::cmp::Reverse(if common_source_held {
+                            0
+                        } else {
+                            evidence.elapsed_ns_per_unit
+                        }),
                         std::cmp::Reverse(evidence.cpu_ns_per_unit),
                         evidence.completed_units,
                     )
@@ -3392,7 +3451,13 @@ fn compare_offer(
             };
             measured(left).cmp(&measured(right))
         })
-        .then_with(|| compare_speed(left.recent_speed, right.recent_speed))
+        .then_with(|| {
+            if common_source_held {
+                Ordering::Equal
+            } else {
+                compare_speed(left.recent_speed, right.recent_speed)
+            }
+        })
         .then_with(|| compare_spare(left, right, left_snapshot, right_snapshot))
         .then_with(|| {
             rendezvous(fingerprint, &left.node_id).cmp(&rendezvous(fingerprint, &right.node_id))
@@ -3406,10 +3471,16 @@ fn can_start_now(offer: &MediaOffer, snapshot: Option<&MediaNodeSnapshot>) -> bo
             && snapshot.is_none_or(|snapshot| !snapshot.background_active)
 }
 
-fn pressure_score(offer: &MediaOffer) -> (u8, u8, u8) {
+fn pressure_score(offer: &MediaOffer, common_source_held: bool) -> (u8, u8, u8) {
     (
         capacity_pressure(offer.scratch_bytes_free, offer.scratch_bytes_required).preference(),
-        offer.source_io_pressure.preference(),
+        // A quieter worker's read-job semaphore cannot clear the same
+        // requested source's shared constraint.
+        if common_source_held {
+            0
+        } else {
+            offer.source_io_pressure.preference()
+        },
         offer.egress_pressure.preference(),
     )
 }
@@ -4399,7 +4470,13 @@ mod tests {
         cached.source_io_pressure = PressureBand::High;
         let idle = offer("idle");
         let mut offers = vec![idle, cached];
-        rank_offers(&mut offers, &HashMap::new(), &"a".repeat(64), "idle");
+        rank_offers(
+            &mut offers,
+            &HashMap::new(),
+            &"a".repeat(64),
+            "idle",
+            SourcePlacementPressure::Unknown,
+        );
         assert_eq!(offers[0].node_id, "cache");
     }
 
@@ -4414,7 +4491,13 @@ mod tests {
         saturated.eligible = false;
         saturated.egress_pressure = PressureBand::Unavailable;
         let mut offers = vec![saturated, stale, healthy];
-        rank_offers(&mut offers, &HashMap::new(), &"a".repeat(64), "healthy");
+        rank_offers(
+            &mut offers,
+            &HashMap::new(),
+            &"a".repeat(64),
+            "healthy",
+            SourcePlacementPressure::Unknown,
+        );
         assert_eq!(offers[0].node_id, "healthy");
     }
 
@@ -4468,7 +4551,13 @@ mod tests {
         saturated.egress_pressure = PressureBand::Unavailable;
         saturated.cache_hit = true;
         let mut offers = vec![scratch_full, stale, saturated, healthy];
-        rank_offers(&mut offers, &HashMap::new(), &"a".repeat(64), "healthy");
+        rank_offers(
+            &mut offers,
+            &HashMap::new(),
+            &"a".repeat(64),
+            "healthy",
+            SourcePlacementPressure::Unknown,
+        );
         assert_eq!(offers[0].node_id, "healthy");
     }
 
@@ -4728,7 +4817,13 @@ mod tests {
         assert!(legacy.eligible && legacy.finite_service.is_none());
 
         let mut candidates = vec![slow, fast, busy, unavailable, legacy];
-        rank_offers(&mut candidates, &HashMap::new(), "request", "slow");
+        rank_offers(
+            &mut candidates,
+            &HashMap::new(),
+            "request",
+            "slow",
+            SourcePlacementPressure::Unknown,
+        );
         let order = candidates
             .iter()
             .map(|offer| offer.node_id.as_str())
@@ -4744,7 +4839,13 @@ mod tests {
         fast.io.storage_read_micros = Some(1000);
         let snapshots = HashMap::from([("slow".into(), slow), ("fast".into(), fast)]);
         let mut candidates = vec![offer("slow"), offer("fast")];
-        rank_offers(&mut candidates, &snapshots, "request", "slow");
+        rank_offers(
+            &mut candidates,
+            &snapshots,
+            "request",
+            "slow",
+            SourcePlacementPressure::Unknown,
+        );
         assert_eq!(candidates[0].node_id, "fast");
         let unknown = offer("unknown");
         assert!(unknown.eligible);
@@ -4754,6 +4855,51 @@ mod tests {
             &"a".repeat(64),
             unknown.scratch_bytes_required
         ));
+    }
+
+    #[test]
+    fn common_source_pressure_preserves_cache_and_worker_headroom() {
+        let mut roomy = offer("roomy");
+        roomy.free_software_threads = 8;
+        roomy.source_io_pressure = PressureBand::High;
+        roomy.recent_speed = Some(1.0);
+        let mut fast = offer("fast-storage");
+        fast.free_software_threads = 2;
+        fast.recent_speed = Some(6.0);
+        let mut cache = offer("cache");
+        cache.cache_hit = true;
+        let mut slower_disk = snapshot("roomy", &["h264"], 1080);
+        slower_disk.io.storage_read_micros = Some(50_000);
+        let mut faster_disk = snapshot("fast-storage", &["h264"], 1080);
+        faster_disk.io.storage_read_micros = Some(1_000);
+        let snapshots = HashMap::from([
+            ("roomy".into(), slower_disk),
+            ("fast-storage".into(), faster_disk),
+        ]);
+        let mut candidates = vec![roomy, fast, cache];
+        rank_offers(
+            &mut candidates,
+            &snapshots,
+            "same-requested-file",
+            "roomy",
+            SourcePlacementPressure::BackgroundReaderSlotsHeld,
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|offer| offer.node_id.as_str())
+                .collect::<Vec<_>>(),
+            ["cache", "roomy", "fast-storage"]
+        );
+        assert!(candidates.iter().all(|offer| offer.eligible));
+        rank_offers(
+            &mut candidates,
+            &snapshots,
+            "same-requested-file",
+            "roomy",
+            SourcePlacementPressure::Unknown,
+        );
+        assert_eq!(candidates[1].node_id, "fast-storage");
     }
 
     #[tokio::test(start_paused = true)]
