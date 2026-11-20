@@ -14,9 +14,12 @@ use std::{
     path::Path,
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{Model, ModelSampleScore, LUMINANCE_BAND_UPPER_NITS};
+
+/// Version of the exact-rank, compensated-mean managed Rust contract.
+pub const AGGREGATION_REVISION: u32 = 1;
 
 const MODELS: usize = Model::ALL.len();
 const BANDS: usize = LUMINANCE_BAND_UPPER_NITS.len() + 1;
@@ -71,9 +74,13 @@ impl FrozenMargin {
             Err(AggregationError::InvalidMargin)
         }
     }
+
+    pub fn value(self) -> f64 {
+        self.0
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Distribution {
     pub count: usize,
     pub mean: f64,
@@ -83,14 +90,14 @@ pub struct Distribution {
     pub max: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BandedDistribution {
     pub full: Distribution,
     /// An empty reference band has no statistics and a sample count of zero.
     pub bands: [Option<Distribution>; BANDS],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PairedDistribution {
     pub advantage: Distribution,
     pub candidate_closer_count: usize,
@@ -98,14 +105,14 @@ pub struct PairedDistribution {
     pub ties: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelStatistics {
     pub served_fplus: BandedDistribution,
     pub candidate: BandedDistribution,
     pub paired: PairedDistribution,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Check {
     Passed,
@@ -123,13 +130,13 @@ impl Check {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MeanGain {
     pub delta_e_itp: f64,
     pub check: Check,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowChecks {
     pub mean_gain: MeanGain,
     pub shadow_mean: Check,
@@ -152,7 +159,7 @@ impl WindowChecks {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Disposition {
     Refused,

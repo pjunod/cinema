@@ -24,6 +24,9 @@ use super::{
 pub mod aggregation;
 pub mod capture;
 
+/// Version of the managed Rust RGB16 and Delta E ITP sample contract.
+pub const SCORING_REVISION: u32 = 1;
+
 const MAX_RPU_BYTES: usize = 4098;
 const RPU_NAL_HEADER: [u8; 2] = [0x7c, 0x01];
 const HPE_INVERSE: [[f64; 3]; 3] = [
