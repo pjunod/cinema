@@ -302,10 +302,10 @@ class NextestShardContinuationTests(unittest.TestCase):
             universe={binary+' green'}|({proof.IGNORED_COMPILE_ID} if included else set())
             with patch.object(proof,'PRIOR_LISTING_SHA256',digest):
                 if ignored and not included and not forged:
-                    proof.compile_only_ignored(proof.IGNORED_COMPILE_PATH,witness,self.ignored_source(),self.ignored_source(),universe)
+                    proof.compile_only_ignored(proof.IGNORED_COMPILE_PATH,witness,self.ignored_source(),self.ignored_source(),universe,prior=proof.PRIOR_LISTING_SOURCE,run=proof.PRIOR_LISTING_RUN)
                 else:
                     with self.subTest(ignored=ignored,included=included,forged=forged),self.assertRaises(r.ReceiptError):
-                        proof.compile_only_ignored(proof.IGNORED_COMPILE_PATH,witness,self.ignored_source(),self.ignored_source(),universe)
+                        proof.compile_only_ignored(proof.IGNORED_COMPILE_PATH,witness,self.ignored_source(),self.ignored_source(),universe,prior=proof.PRIOR_LISTING_SOURCE,run=proof.PRIOR_LISTING_RUN)
 
     def test_current_listing_cannot_promote_the_compile_only_ignored_case_into_runtime_coverage(self):
         binary,name=proof.IGNORED_COMPILE_ID.split(' ',1)

@@ -199,6 +199,8 @@ IGNORED_COMPILE_PATH = 'crates/plurxd/src/fragindex/refit_acceptance_tests.rs'
 IGNORED_COMPILE_ID = 'plurxd::bin/plurxd fragindex::refit_acceptance_tests::real_fitted_index_and_seek_publish_stored_curves'
 # Actual metadata-only list of authenticated original archive12386, pinned
 # nextest0.9.151/image/Rust1.97.1 on qualified Linux5.15, zero test bodies.
+PRIOR_LISTING_SOURCE = '9ab3590df2d9513fa73997dbdad6887038b97f84'
+PRIOR_LISTING_RUN = 8687
 PRIOR_LISTING_SHA256 = 'f6caa6f7b81d1ab9500358bae8b4867a86f4273664a1017aea0ac3301bbe8abd'
 
 
@@ -217,7 +219,9 @@ def ignored_source_projection(raw):
     return text
 
 
-def compile_only_ignored(path, witness, before, after, universe):
+def compile_only_ignored(path, witness, before, after, universe, *, prior, run):
+    r.require(prior == PRIOR_LISTING_SOURCE and run == PRIOR_LISTING_RUN,
+              'Sealed original ignored discovery belongs to another source/run')
     item = witness.get('compile_only')
     r.require(path == IGNORED_COMPILE_PATH and witness['affected'] == []
               and isinstance(item, dict) and set(item) == {'kind', 'test', 'prior_listing'}
@@ -237,8 +241,8 @@ def compile_only_ignored(path, witness, before, after, universe):
     r.require(case.get('ignored') is True, 'Original physical test was not ignored')
     suites = units.nextest_suites(listing)
     ordinary = {b + ' ' + n for b, cases in suites.items() for n, ignored in cases.items() if not ignored}
-    r.require(ordinary <= universe and all(b + ' ' + n in universe or ignored
-              for b, cases in suites.items() for n, ignored in cases.items()),
+    all_cases = {b + ' ' + n for b, cases in suites.items() for n in cases}
+    r.require(ordinary <= universe and universe <= all_cases,
               'Original compiled listing contradicts selected body census')
     r.require(ignored_source_projection(before) == ignored_source_projection(after),
               'Empty ignored witness changes selected source outside its isolated functions')
@@ -276,7 +280,7 @@ def reviewed_changes(record, candidate, universe):
         r.require(path not in TEST_INPUTS or bool(affected), 'Changed test input has no affected bodies')
         if 'compile_only' in witness:
             if witness['compile_only'].get('kind') == 'ignored-test-only':
-                compile_only_ignored(path, witness, before, after, universe)
+                compile_only_ignored(path, witness, before, after, universe, prior=prior, run=record['run'])
             else:
                 compile_only_none(path, witness, before, after)
         else:
