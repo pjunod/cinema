@@ -6210,10 +6210,16 @@ impl HiqliteAuthStore {
             ("DELETE FROM media_session_requests".to_owned(), params!()),
             ("DELETE FROM job_leases".to_owned(), params!()),
             ("DELETE FROM pretranscode_jobs".to_owned(), params!()),
-            ("DELETE FROM offline_source_probes".to_owned(), params!()),
+            (
+                "DELETE FROM offline_source_probes WHERE true".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM offline_lease_guards".to_owned(), params!()),
             ("DELETE FROM offline_package_leases".to_owned(), params!()),
-            ("DELETE FROM offline_packages".to_owned(), params!()),
+            (
+                "DELETE FROM offline_packages WHERE true".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM cache_consumer_pins".to_owned(), params!()),
             ("DELETE FROM cache_storage_members".to_owned(), params!()),
             (
