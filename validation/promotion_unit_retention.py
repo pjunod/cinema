@@ -268,7 +268,7 @@ def shared_blob(document, item):
     return logs[value]
 
 
-def expanded_document(document, objects=None):
+def expanded_document(document, objects=None, *, selected_pr=False):
     """Authenticate and validate one bounded view of the original signed bytes."""
     if document.get('version') != 2:
         return document
@@ -276,7 +276,8 @@ def expanded_document(document, objects=None):
     from validation import qualification_unit_continuation as commands
     lanes = document['lanes']
     units = document['command_units']
-    r.require(isinstance(lanes, dict) and lanes and set(lanes) <= LANES
+    r.require(isinstance(lanes, dict) and (lanes or (selected_pr is True and isinstance(units, dict)
+              and isinstance(units.get('commands'), list) and bool(units['commands']))) and set(lanes) <= LANES
               and all(isinstance(slots, list) for slots in lanes.values())
               and sum(len(slots) for slots in lanes.values()) <= 8,
               'Unknown or oversized structural suite slots')
@@ -517,12 +518,15 @@ def validate(document, candidate, source=git_bytes, differences=changed, *, sele
         keys.add('command_units')
     r.require(set(document) == keys, 'Unknown retention proof fields')
     r.require(document['version'] in {1, 2} and isinstance(document['lanes'], dict)
-              and document['lanes'] and set(document['lanes']) <= LANES,
+              and (document['lanes'] or (selected_pr is True and document['version'] == 2
+                   and isinstance(document.get('command_units'), dict)
+                   and isinstance(document['command_units'].get('commands'), list)
+                   and bool(document['command_units']['commands']))) and set(document['lanes']) <= LANES,
               'Invalid retained lane inventory')
     frozen = r.sha(document['source_commit'])
     if document['version'] == 2:
         r.require(frozen == candidate, 'Command adoption binds the exact candidate')
-        document = expanded_document(document)
+        document = expanded_document(document, selected_pr=selected_pr)
     protocol_paths = set(PROTOCOL_PATHS)
     r.require(differences(frozen, candidate) <= protocol_paths,
               'Candidate changed beyond reviewed retention protocol')
@@ -855,7 +859,8 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
            *, objects=None, live_logs=None):
     document, pull, repository, attested = verify_identity(
         api, raw, expected_digest, binding, candidate, attachment_id, attachment_uuid)
-    document = expanded_document(document) if objects is None else expanded_document(document, objects)
+    selected_pr = binding.get('schema') == 2 and 'landing_sha' not in binding
+    document = expanded_document(document, objects, selected_pr=selected_pr)
     # Evidence targets the declared commit. Earlier dispatches ran under this
     # authenticated promotion PR's original head ref, even after the PR merged.
     dispatch_context = {**document, 'branch': binding['head_ref']}
@@ -907,7 +912,7 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
     if document.get('version') == 2:
         from validation import qualification_unit_continuation as commands
         commands.authenticate(api, document['command_units'], dispatch_context, repository, live_logs=live_logs)
-        adopted, command_units = validate(document, candidate, selected_pr=binding.get('schema') == 2 and 'landing_sha' not in binding)
+        adopted, command_units = validate(document, candidate, selected_pr=selected_pr)
     else:
         adopted = validate(document, candidate)
     proof = {'version': 1, 'candidate_sha': candidate, 'base_sha': binding['base_sha'],

@@ -878,6 +878,14 @@ def require_legacy_chronology(legacy_sequences):
                      'Original JVM negative/clock/Main repair chronology incomplete or reordered')
 
 
+def require_jvm_build_inputs(candidate, selected_pr=False):
+    from validation.selected_pr_android_capture import BUILD_INPUTS
+    inputs = BUILD_INPUTS if selected_pr is True else CURRENT_JVM_BUILD_INPUTS
+    receipts.require(all(retention.digest(retention.git_bytes(candidate, path) or b'') == digest
+                         for path, digest in inputs.items()),
+                     'Current JVM toolchain, dependency or discovery configuration differs')
+
+
 def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archive_digest, *, selection=False, selected_pr=False):
     receipts.require(set(item) == {'name', 'invocation', 'protocol', 'contract', 'inventory', 'records', 'obligations'}
                      and item['protocol'] == 'source-cohort-v1' and item['name'] in KINDS
@@ -885,9 +893,7 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
                      'Unknown source-cohort command fields or runtime contract')
     kind = item['name']
     if kind == 'android_jvm':
-        receipts.require(all(retention.digest(retention.git_bytes(candidate, path) or b'') == digest
-                             for path, digest in CURRENT_JVM_BUILD_INPUTS.items()),
-                         'Current JVM toolchain, dependency or discovery configuration differs')
+        require_jvm_build_inputs(candidate, selected_pr)
         receipts.require(set(item['inventory']) == {'metadata'}, 'Unknown JVM inventory fields')
         ids = jvm_metadata(proof, item['inventory']['metadata'], candidate)
     else:

@@ -183,3 +183,18 @@ class SelectedPrAndroidCaptureTests(unittest.TestCase):
         proof,record,raw,universe,binding=self.measured_capture()
         with self.assertRaises(receipts.ReceiptError):
             self.measured_result(proof,record,raw,universe,binding,False)
+
+    def test_current_build_recipe_pins_apply_only_to_selected_gate_and_refuse_changed_inputs(self):
+        from validation import nonrust_unit_cohort as cohort
+        current=selected.retention.digest(b'current')
+        legacy=selected.retention.digest(b'legacy')
+        with patch.object(selected,'BUILD_INPUTS',{'config':current}), \
+             patch.object(cohort,'CURRENT_JVM_BUILD_INPUTS',{'config':legacy}), \
+             patch.object(cohort.retention,'git_bytes',return_value=b'current'):
+            cohort.require_jvm_build_inputs('a'*40,True)
+            with self.assertRaises(receipts.ReceiptError):
+                cohort.require_jvm_build_inputs('a'*40)
+        with patch.object(selected,'BUILD_INPUTS',{'config':current}), \
+             patch.object(cohort.retention,'git_bytes',return_value=b'changed toolchain'):
+            with self.assertRaises(receipts.ReceiptError):
+                cohort.require_jvm_build_inputs('a'*40,True)

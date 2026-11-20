@@ -13,6 +13,13 @@ from validation import python_unit_receipts as r
 from validation import promotion_unit_retention as retention
 
 POLICY = 'selected-pr-android-local-v1'
+BUILD_INPUTS = {
+    'clients/android/gradle/wrapper/gradle-wrapper.properties': 'd01b41913834fb3cb14e71f69a08898e6a47e663b08f5c9b8c7e0772c38889d2',
+    'clients/android/gradle/libs.versions.toml': '8ae430e1f8c2f24eaa467c5a0357dbc53191dacad25aff54effa8f31805210dc',
+    'clients/android/app/build.gradle.kts': '6f6047608820e873d944ab72e74031f63631a05c9ff3933d23ca4235752a1ba4',
+    'clients/android/build.gradle.kts': '0aec8d2e01e88e3abdd6b4690201ddd107b10c05b6e86a4014315cc4ab64fd46',
+    'clients/android/settings.gradle.kts': '5891ed8c25e4412da6dd0fff31d21626fa2bb3dde4cc6326e62d39eb9db79055',
+}
 # Reviewed original tool custody, not an asserted new execution.
 CUSTODY_SHA256 = '3c093595d9189b47de70cf07d7b9c99406fd7b4ebc3937be1d0b1c99f841b3c8'
 
