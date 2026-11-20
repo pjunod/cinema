@@ -441,3 +441,25 @@ decode and process startup. Candidate times stay close to baseline, but this
 campaign establishes neither general real-time delivery nor production
 resource headroom. The unchanged rate limit must not be mistaken for a
 throughput measurement.
+
+## Regression coverage from the HDR research audit
+
+The bounded score consumer already rejects a mismatched decoded grade, frame
+count/grid, mastering/light metadata, residual Dolby data and source geometry.
+The tone-map segment qualifier separately compares exact raw frame hashes and
+rational presentation timestamps through filter restarts. These contracts are
+retained; no new scorer, codec, dither or LUT policy is introduced.
+
+The authored score regressions also exercise a 61-frame 60000/1001 grid, with
+presentation ordinals 30 and 60 at 0.5005 and 1.001 seconds. A nominal 60 Hz
+substitution, a single mid-stream pairing error, same-count dropped/duplicated
+frames and invalid shared grids refuse before any metric or census invocation.
+Mid-stream/end-frame transfer, range, primaries, matrix, depth and subsampling
+changes, missing decoded interpretation and a late residual RPU also refuse.
+A correct stream and missing optional container tags remain positive controls
+when decoded frames supply the complete required interpretation.
+
+These are synthetic ffprobe payloads through the real score admission path,
+with native scoring mocked. They qualify admission regressions, not fresh
+FFmpeg decoding, optical HDR accuracy or physical Dolby Vision acceptance.
+The already-parked research algorithms and observer study remain untouched.
