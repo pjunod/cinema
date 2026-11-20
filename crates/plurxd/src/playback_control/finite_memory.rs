@@ -773,6 +773,7 @@ impl crate::transcode::SessionInfo {
             pending_fetched_segment: _,
             speed: _,
             recent_speed: _,
+            resource_service: _,
             out_time_ms: _,
             progress_idle_ms: _,
             producer_exit_success: _,

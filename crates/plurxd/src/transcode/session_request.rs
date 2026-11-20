@@ -154,6 +154,8 @@ pub struct SessionInfo {
     /// behind a fast start, which is exactly the shape a session takes when
     /// its burst has ended and the encoder can't hold realtime.
     pub recent_speed: Option<f64>,
+    /// Attempt-bound progress from an actual producer's completed media.
+    pub resource_service: Option<plurx_core::resource_observation::ServiceObservation>,
     /// Content produced so far, in ms from this session's start offset.
     pub out_time_ms: Option<i64>,
     /// Wall time since ffmpeg's output timestamp last advanced. Unlike

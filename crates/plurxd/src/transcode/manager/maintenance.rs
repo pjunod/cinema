@@ -313,6 +313,19 @@ impl TranscodeManager {
                 let _ = observer.rolling(lead, low, high, held, fresh).await;
             }
         }
+        if session.observes_rolling_encoder() {
+            use plurx_core::resource_observation::WorkPhase;
+            let phase = want_suspend.then(|| {
+                if hold.is_some_and(|hold| hold.reason == AheadHoldReason::Demand) {
+                    WorkPhase::Paused
+                } else {
+                    WorkPhase::BufferPaced
+                }
+            });
+            session
+                .progress
+                .note_rolling_flow(producer_attempt, phase, Instant::now());
+        }
         if !want_suspend {
             // Before the flag flips, so the actor can never observe
             // "running" beside a motion clock that still spans the suspension

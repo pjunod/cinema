@@ -2629,6 +2629,10 @@ impl Session {
         self.refresh_segments_inner().await;
     }
 
+    pub(super) fn observes_rolling_encoder(&self) -> bool {
+        self.method == crate::delivery::Method::Transcode && !self.cached && self.upload.is_some()
+    }
+
     async fn refresh_segments_inner(&self) {
         let _ = self.refresh_scratch_bytes().await;
         // Actor admission deliberately precedes predecessor teardown. During
@@ -2639,6 +2643,10 @@ impl Session {
         let Some(producer_attempt) = self.coherent_path_producer_attempt().await else {
             return;
         };
+        let service_flow_revision = self
+            .observes_rolling_encoder()
+            .then(|| self.progress.rolling_flow_revision(producer_attempt))
+            .flatten();
         // Capture the catalog generation before starting any storage work.
         // Capturing it after the playlist read gives an old read a new token
         // when another refresh lands during that read, allowing stale bytes
@@ -2808,6 +2816,19 @@ impl Session {
                 // discarded read still has to add.
                 return;
             };
+            // The encoder's PutSink only exposes a playlist after its named
+            // objects commit. The measured prefix also needs positive file
+            // lengths under this same attempt and index revision.
+            if let Some(flow_revision) = service_flow_revision {
+                self.progress.note_rolling_segments(
+                    producer_attempt,
+                    flow_revision,
+                    &index,
+                    rebuilt,
+                    self.readrate > 0.0,
+                    Instant::now(),
+                );
+            }
             if rebuilt {
                 tracing::debug!(
                     target: "plurxd::transcode",
@@ -3317,6 +3338,15 @@ pub(super) async fn session_info_owned(
         pending_fetched_segment: delivery.and_then(|delivery| delivery.pending_fetched_segment),
         speed: cumulative_speed,
         recent_speed,
+        resource_service: (child_is_running
+            && lease
+                .as_deref()
+                .is_some_and(|lease| !lease.retired && lease.terminal.is_none()))
+        .then(|| {
+            s.progress
+                .rolling_resource_service(status_owner_attempt, Instant::now())
+        })
+        .flatten(),
         out_time_ms: delivery.and_then(|delivery| delivery.producer_out_time_ms),
         progress_idle_ms: delivery.map_or(-1, |delivery| delivery.producer_progress_idle_ms),
         producer_exit_success: producer_exit.as_ref().map(|exit| exit.success),
@@ -3439,6 +3469,7 @@ pub(super) fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) 
         pending_fetched_segment: None,
         speed: None,
         recent_speed: None,
+        resource_service: None,
         out_time_ms: None,
         progress_idle_ms: 0,
         producer_exit_success: None,

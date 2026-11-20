@@ -1,6 +1,10 @@
 use super::*;
+use plurx_core::process::observation::{Metric, UnknownReason};
+use plurx_core::resource_observation::{
+    ServiceObservation, ServiceUnit, ServiceWindow, WorkPhase, WorkSample,
+};
 
-/// Live encode telemetry for one session, fed by ffmpeg's `-progress` stream.
+/// Live encode telemetry from FFmpeg motion and completed rolling output.
 ///
 /// Without it, "slow" and "stalled" are the same observation. The only signal
 /// the session machinery had was whether a finished segment was listed yet —
@@ -45,6 +49,53 @@ pub struct Progress {
     pub(super) sample_out_ms: AtomicI64,
     /// Smoothed recent rate x1000; `-1` until two usable samples exist.
     pub(super) recent_milli: AtomicI64,
+    rolling_service: std::sync::Mutex<RollingService>,
+}
+
+#[derive(Debug, Default)]
+struct RollingService {
+    generation: u64,
+    flow_revision: u64,
+    held: Option<WorkPhase>,
+    /// The rolling index keeps historical entries after pruning their files.
+    verified_segments: usize,
+    verified_end_ms: u64,
+    window: ServiceWindow,
+}
+
+impl RollingService {
+    fn observe(&mut self, phase: WorkPhase, at: Instant) {
+        self.window.observe(WorkSample {
+            generation: self.generation,
+            phase,
+            unit: ServiceUnit::MediaMilliseconds,
+            completed: self.verified_end_ms,
+            deadline_slack_ms: Metric::Unknown(UnknownReason::InsufficientEvidence),
+            queued_bytes: Metric::Unknown(UnknownReason::InsufficientEvidence),
+            at,
+        });
+    }
+
+    fn extend(&mut self, index: &SegmentIndex) -> bool {
+        let start = self.verified_segments;
+        let mut previous = start.checked_sub(1).and_then(|i| index.segs.get(i));
+        for segment in index.segs.get(start..).into_iter().flatten() {
+            if segment.bytes <= 0
+                || !segment.visibility.is_advertised()
+                || segment.end_ms <= segment.start_ms
+                || previous.map_or(segment.start_ms != 0, |earlier| {
+                    earlier.index.checked_add(1) != Some(segment.index)
+                        || earlier.end_ms != segment.start_ms
+                })
+            {
+                break;
+            }
+            self.verified_segments += 1;
+            self.verified_end_ms = segment.end_ms as u64;
+            previous = Some(segment);
+        }
+        self.verified_segments > start
+    }
 }
 
 /// One exponential-moving-average step over a progress sample, or `None` when
@@ -81,6 +132,7 @@ impl Progress {
             sample_wall_ms: AtomicI64::new(SAMPLE_UNSET),
             sample_out_ms: AtomicI64::new(SAMPLE_UNSET),
             recent_milli: AtomicI64::new(-1),
+            rolling_service: std::sync::Mutex::new(RollingService::default()),
         }
     }
 
@@ -105,6 +157,75 @@ impl Progress {
     pub(super) fn begin_fenced_attempt(&self, generation: u64) {
         self.generation.store(generation, Relaxed);
         self.reset_attempt(generation);
+        if let Ok(mut service) = self.rolling_service.lock() {
+            *service = RollingService {
+                generation,
+                ..RollingService::default()
+            };
+        }
+    }
+
+    pub(super) fn rolling_flow_revision(&self, generation: u64) -> Option<u64> {
+        let service = self.rolling_service.lock().ok()?;
+        (generation != 0 && service.generation == generation).then_some(service.flow_revision)
+    }
+
+    /// An applied signal breaks the output rate interval before another
+    /// index refresh can commit. A resume waits for a new output baseline.
+    pub(super) fn note_rolling_flow(&self, generation: u64, held: Option<WorkPhase>, at: Instant) {
+        let Ok(mut service) = self.rolling_service.lock() else {
+            return;
+        };
+        if generation == 0 || service.generation != generation {
+            return;
+        }
+        service.flow_revision = service.flow_revision.wrapping_add(1);
+        service.held = held;
+        service.window = ServiceWindow::default();
+        if let Some(phase) = held {
+            service.observe(phase, at);
+        }
+    }
+
+    pub(super) fn note_rolling_segments(
+        &self,
+        generation: u64,
+        flow_revision: u64,
+        index: &SegmentIndex,
+        rebuilt: bool,
+        input_paced: bool,
+        at: Instant,
+    ) {
+        let Ok(mut service) = self.rolling_service.lock() else {
+            return;
+        };
+        if service.generation != generation {
+            return;
+        }
+        if rebuilt {
+            service.verified_segments = 0;
+            service.verified_end_ms = 0;
+            service.window = ServiceWindow::default();
+        }
+        if service.flow_revision == flow_revision && service.extend(index) {
+            let phase = service.held.unwrap_or(if input_paced {
+                WorkPhase::InputPaced
+            } else {
+                WorkPhase::Producing
+            });
+            service.observe(phase, at);
+        }
+    }
+
+    pub(super) fn rolling_resource_service(
+        &self,
+        generation: u64,
+        now: Instant,
+    ) -> Option<ServiceObservation> {
+        let service = self.rolling_service.lock().ok()?;
+        (service.generation == generation)
+            .then(|| service.window.snapshot(now))
+            .flatten()
     }
 
     pub(super) fn reset_attempt(&self, generation: u64) {
@@ -208,5 +329,84 @@ impl Progress {
     pub(super) fn touch(&self) {
         self.moved_at_ms
             .store(self.started.elapsed().as_millis() as i64, Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod rolling_service_tests {
+    use super::*;
+
+    #[test]
+    fn rolling_verified_service_excludes_uncommitted_tail_and_fences_flow_and_replacement() {
+        let progress = Progress::new();
+        progress.begin_fenced_attempt(7);
+        let now = Instant::now();
+        let at = |seconds| now + Duration::from_secs(seconds);
+        let first_flow = progress.rolling_flow_revision(7).expect("original flow");
+        let mut index = SegmentIndex {
+            segs: parse_playlist(concat!(
+                "#EXTM3U\n#EXTINF:1,\nseg00017.ts\n#EXTINF:1,\nseg00018.ts\n",
+                "#EXTINF:1,\nseg00019.ts\n#EXTINF:1,\nseg00020.ts\n",
+            )),
+            revision: 0,
+        };
+        assert_eq!(index.segs.len(), 4);
+        let note_original = |index: &SegmentIndex, rebuilt, seconds| {
+            progress.note_rolling_segments(7, first_flow, index, rebuilt, false, at(seconds));
+        };
+        let observe_original = |seconds| progress.rolling_resource_service(7, at(seconds));
+
+        index.segs[0].bytes = 128;
+        index.segs[2].bytes = 128;
+        note_original(&index, false, 0);
+        let baseline = observe_original(0).expect("first complete segment");
+        assert_eq!(baseline.completed, 1000);
+        assert_eq!(
+            baseline.units_per_second,
+            Metric::Unknown(UnknownReason::InsufficientEvidence)
+        );
+
+        note_original(&index, false, 3);
+        assert_eq!(
+            observe_original(16)
+                .expect("stale original sample")
+                .units_per_second,
+            Metric::Unknown(UnknownReason::Stale)
+        );
+
+        index.segs[1].bytes = 128;
+        note_original(&index, false, 4);
+        index.segs[3].bytes = 128;
+        note_original(&index, false, 5);
+        let produced = observe_original(5).expect("sustained original output");
+        assert_eq!(produced.completed, 4000);
+        assert_eq!(produced.units_per_second, Metric::Known(600));
+
+        progress.note_rolling_flow(7, Some(WorkPhase::Paused), at(6));
+        let held = observe_original(6).expect("applied hold");
+        assert_eq!(held.phase, WorkPhase::Paused);
+        assert_eq!(
+            held.units_per_second,
+            Metric::Unknown(UnknownReason::InsufficientEvidence)
+        );
+
+        progress.note_rolling_flow(7, None, at(7));
+        note_original(&index, true, 8);
+        assert!(observe_original(8).is_none());
+
+        progress.begin_fenced_attempt(8);
+        note_original(&index, false, 9);
+        assert!(observe_original(9).is_none());
+        let next_flow = progress.rolling_flow_revision(8).expect("replacement flow");
+        progress.note_rolling_segments(8, next_flow, &index, false, true, at(10));
+        let paced = progress
+            .rolling_resource_service(8, at(10))
+            .expect("replacement only");
+        assert_eq!(paced.phase, WorkPhase::InputPaced);
+        assert_eq!(paced.advancing_samples, 0);
+        assert_eq!(
+            paced.units_per_second,
+            Metric::Unknown(UnknownReason::InsufficientEvidence)
+        );
     }
 }

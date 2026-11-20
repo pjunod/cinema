@@ -1521,6 +1521,7 @@ async fn client_event_joins_and_persists_every_live_session_measurement() {
         pending_fetched_segment: None,
         speed: Some(2.0),
         recent_speed: Some(1.7),
+        resource_service: None,
         out_time_ms: Some(10_000),
         progress_idle_ms: 15,
         producer_exit_success: Some(false),
