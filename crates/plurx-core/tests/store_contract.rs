@@ -29702,6 +29702,10 @@ async fn replicated_analysis_admission_reports_fences_and_drains_at_capacity() {
         store.enqueue_analysis_request(&next).await,
         Err(AnalysisAdmission(QueueFull))
     ));
+    assert!(matches!(
+        store.enqueue_analysis_request(&conflict).await,
+        Err(AnalysisAdmission(GenerationConflict))
+    ));
     let viewer = store
         .claim_analysis_request_compatible("node-a", Some("engine-a"), 12, 1000)
         .await

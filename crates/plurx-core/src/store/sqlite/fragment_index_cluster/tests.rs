@@ -2372,7 +2372,7 @@ async fn stranded_backlog_does_not_hold_the_ceiling_against_runnable_work() {
 /// can still join and settle admitted work, making space for the next request.
 #[tokio::test]
 async fn saturated_queue_drains_without_rewriting_copy_coordinators() {
-    use crate::error::AnalysisAdmissionRefusal::{QueueFull, SourceChanged};
+    use crate::error::AnalysisAdmissionRefusal::{GenerationConflict, QueueFull, SourceChanged};
     use crate::store::LiveAnalysisEngines;
     let store = SqliteStore::open_in_memory().expect("store");
     seed_files(&store).await;
@@ -2381,6 +2381,22 @@ async fn saturated_queue_drains_without_rewriting_copy_coordinators() {
         engines: [("node-a".to_owned(), engine.clone())].into(),
         members: None,
     };
+    let mut historical = request("historical", false, 1);
+    historical.pipeline_version.clone_from(&engine);
+    store
+        .enqueue_analysis_request(&historical)
+        .await
+        .expect("admit historical request");
+    let claim = store
+        .claim_analysis_request_compatible("node-a", Some(&engine), 2, 1000)
+        .await
+        .expect("claim historical request")
+        .expect("historical request");
+    assert!(store
+        .complete_analysis_request(&claim, "historical-result", 3)
+        .await
+        .expect("settle historical request"));
+
     fill_backlog(&store, MAX_ACTIVE_JOBS - 1, engine.clone(), "active-").await;
     let mut copy = request("copy", false, 1);
     copy.pipeline_version = format!("{}3", crate::store::analysis_coordination::PIPELINE_PREFIX);
@@ -2410,6 +2426,22 @@ async fn saturated_queue_drains_without_rewriting_copy_coordinators() {
         .await
         .expect("join without another slot");
     assert_eq!(joined.request_id, coordinator.request_id);
+    copy.request_id.clone_from(&historical.request_id);
+    let joined = store
+        .enqueue_analysis_request_with(&copy, Some(&inventory))
+        .await
+        .expect("join eligible work even with a reused request ID");
+    assert_eq!(joined.request_id, coordinator.request_id);
+    let collision = NewAnalysisRequest {
+        request_id: historical.request_id,
+        ..next.clone()
+    };
+    assert!(matches!(
+        store
+            .enqueue_analysis_request_with(&collision, Some(&inventory))
+            .await,
+        Err(StoreError::AnalysisAdmission(GenerationConflict))
+    ));
     let running = store
         .claim_analysis_request_compatible("node-a", Some(&engine), 10, 1000)
         .await

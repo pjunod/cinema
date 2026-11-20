@@ -2080,8 +2080,8 @@ pub(crate) fn analysis_request_stranded_sql(live: &str) -> String {
 }
 
 /// Diagnose an insert refusal within the transaction that took the admission
-/// decision. Both stores return a matching generation in preference to a cap
-/// refusal, so retries join admitted work even at the hard bound.
+/// decision. Both stores return a matching generation before any refusal.
+/// A reused ID without a matching generation cannot succeed when capacity returns.
 pub(crate) fn analysis_admission_refusal_sql() -> String {
     let stranded = analysis_request_stranded_sql("input.engines");
     format!(
@@ -2100,6 +2100,8 @@ pub(crate) fn analysis_admission_refusal_sql() -> String {
                AND json_extract(request_json,'$.pipeline_version') = json_extract(req,'$.pipeline_version')
                AND json_extract(request_json,'$.target_node_id') = json_extract(req,'$.target_node_id'))
              THEN 2
+           WHEN EXISTS (SELECT 1 FROM analysis_requests WHERE request_id = json_extract(req,'$.request_id'))
+             THEN 5
            WHEN (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted'))
                   >= {MAX_ACTIVE_ANALYSIS_REQUESTS} * {ANALYSIS_BACKLOG_BOUND_FACTOR} + headroom THEN 3
            WHEN (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted')
