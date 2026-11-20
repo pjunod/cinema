@@ -20,9 +20,9 @@ def control_ffmpeg(binary, *args):
                     *map(str, args)], check=True, timeout=60)
 
 
-def author_gops(root, work, ffmpeg, cases):
+def author_gops(root, work, ffmpeg, cases, raster='64x64'):
     for layer, color in [('bl', 'gray'), ('el', 'black')]:
-        ffmpeg('-f', 'lavfi', '-i', f'color=c={color}:s=64x64:r=24',
+        ffmpeg('-f', 'lavfi', '-i', f'color=c={color}:s={raster}:r=24',
                '-frames:v', '18', '-pix_fmt', 'yuv420p10le', '-c:v', 'libx265',
                '-x265-params',
                'pools=none:frame-threads=1:bframes=0:keyint=18:log-level=error',
@@ -40,7 +40,8 @@ def author_valid_source(root, work, ffmpeg_binary, ffprobe, mkvmerge):
     def ffmpeg(*args):
         control_ffmpeg(ffmpeg_binary, *args)
 
-    author_gops(root, work, ffmpeg, ['valid'])
+    # The playback fixture must offer a real Auto encode rung.
+    author_gops(root, work, ffmpeg, ['valid'], raster='640x360')
     # Append complete GOPs without losing the Matroska Profile 7 mapping.
     # The clip retains an exclusive boundary after the last 48-picture window.
     source = work / 'source.mkv'

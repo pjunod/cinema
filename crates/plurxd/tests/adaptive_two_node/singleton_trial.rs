@@ -313,7 +313,7 @@ async fn run_singleton_trial(with_capture: bool) {
     write_fixture(
         ffmpeg.to_str().expect("FFmpeg path"),
         &media.join("Singleton VOD Trial (2024).mkv"),
-        "testsrc2=size=1280x720:rate=24:duration=90",
+        "testsrc=size=1280x720:rate=24:duration=90",
         "sine=frequency=440:sample_rate=48000:duration=90",
         "48",
     );
