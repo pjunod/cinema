@@ -4141,7 +4141,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # cluster.rs starts its stalled-response TCP fixture and aborts it after the
 # bounded request; serving_fence.rs stops and joins its monitor fixture.
 # Neither site adds a production owner or supplies settlement authority.
-expected_occurrences = 1185
+expected_occurrences = 1186
+# The scanner deadline fixture owns a task so it can observe the actual probe child.
+# Main f771 integration: measured combined task count 1185 + 1 = 1186.
+# The same fixture adds one bounded cleanup timeout: 2290 + 1 = 2291.
+# Patterns, roots, exclusions and physical ownership requirements are unchanged.
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -6138,7 +6142,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # publication loop in transcode/manager/publication.rs observes cancellation,
 # inventory changes or one second of lifecycle silence on its existing owned
 # task. Expiry wakes observation; it never proves child or permit settlement.
-expected_occurrences = 2290
+expected_occurrences = 2291
 # Developer tab cleanup (2026-11-18): -4 test timers. Network priors are
 # always on, so the priors-off client-log barriers and their timeouts in
 # link_receipts tests are gone; no production timer changed. Main 2266 - 4 = 2262.
@@ -6147,6 +6151,7 @@ expected_occurrences = 2290
 # The native FEL loop adds the idle lifecycle sleep reviewed under all-async-
 # sleeps above. It wakes the existing splice task.
 # Main adds bounded artwork, offline worker, voter and heartbeat fixture waits.
+# The scanner deadline fixture bounds cleanup after advancing the test clock.
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
