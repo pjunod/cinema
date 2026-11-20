@@ -6,7 +6,6 @@
 #include <libavutil/intreadwrite.h>
 #include <libavutil/mem.h>
 #include <libavutil/sha.h>
-#include <signal.h>
 #include <stdbool.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -71,7 +70,6 @@ enum {
   M7_NP1_MIN_ABR = 83334,
   M7_NP1_PEAK_ABR = 125000,
   M7_NP1_BUF_KBIT = 136000,
-  M7_NP1_DEADLINE_SECONDS = 900,
 };
 
 struct m7_np1_recipe {
@@ -737,8 +735,6 @@ static void m7_np1_receipt(int fd, const struct m7_np1_recipe_read *plan,
 static int m7_np1_main(void) {
   av_log_set_level(AV_LOG_VERBOSE);
   av_max_alloc(M7_NP1_MAX_OUTPUT);
-  m7_np1_need(signal(SIGALRM, SIG_DFL) != SIG_ERR, "bounded encoder deadline");
-  alarm(M7_NP1_DEADLINE_SECONDS);
   struct stat dir;
   m7_np1_need(fstat(M7_NP1_DIRECTORY_FD, &dir) == 0 && S_ISDIR(dir.st_mode),
               "held job-local output directory");
@@ -782,7 +778,6 @@ static int m7_np1_main(void) {
               "complete unchanged input extent and closed MP4");
   m7_np1_receipt(receipt, &plan, cfg);
   m7_np1_need(close(receipt) == 0, "complete closed encoder receipt");
-  alarm(0);
   return 0;
 }
 
