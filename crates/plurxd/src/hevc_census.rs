@@ -7,11 +7,9 @@
 //! budget, then grafted onto the stored probe so every node and every later
 //! copy decides from the same record.
 //!
-//! It runs on the playback copy decision path, the first time a file without a
-//! current record is played, because that is where the answer is needed and
-//! the file is known to be readable. Background index discovery reads the
-//! stored probe without measuring, so the library is never swept; the
-//! preparation a play queues names the identity the census chose. Measured on the NAS-mounted
+//! Index workers resolve this prerequisite only after admission. Foreground
+//! copy can still resolve it when playback races analysis. Both store the
+//! verdict against the same catalog revision. Measured on the NAS-mounted
 //! library: seven samples of a cold 2160p film cost about a second. A census
 //! that fails or overruns records nothing and answers with the stored probe
 //! unchanged, which is the copy path's behaviour before this existed. A run
@@ -20,6 +18,8 @@
 //! that cannot be read does not charge every request for the attempt.
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::io::Seek;
+use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -87,18 +87,20 @@ pub(crate) async fn probe_json_for_copy_from(
     drop(measuring);
     // Nobody else waits on this file's lock: forget it, so the map holds only
     // files being measured rather than every HEVC title ever played.
-    {
-        let mut in_flight = IN_FLIGHT
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if in_flight
-            .get(&file.id)
-            .is_some_and(|held| Arc::ptr_eq(held, &lock) && Arc::strong_count(held) == 2)
-        {
-            in_flight.remove(&file.id);
-        }
-    }
+    forget_census_lock(file.id, &lock);
     answer
+}
+
+fn forget_census_lock(file_id: i64, lock: &Arc<tokio::sync::Mutex<()>>) {
+    let mut in_flight = IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if in_flight
+        .get(&file_id)
+        .is_some_and(|held| Arc::ptr_eq(held, lock) && Arc::strong_count(held) == 2)
+    {
+        in_flight.remove(&file_id);
+    }
 }
 
 async fn measure_and_record(
@@ -115,6 +117,16 @@ async fn measure_and_record(
         note_failure(file);
         return Ok(probe_json);
     };
+    record_census(store, file, probe_json, census, started).await
+}
+
+async fn record_census(
+    store: &dyn Store,
+    file: &MediaFile,
+    probe_json: Option<String>,
+    census: Census,
+    started: Instant,
+) -> Result<Option<String>, StoreError> {
     match store
         .merge_file_probe_hevc_parameter_sets(file.id, file.size, file.mtime, &census.to_json())
         .await
@@ -147,6 +159,185 @@ async fn measure_and_record(
             Ok(probe_json)
         }
     }
+}
+
+/// Resolve the HEVC recipe prerequisite under an admitted index source
+/// owner. A cluster analysis claim already supplies the shared read budget;
+/// the node-local pass supplies its heavy-lane admission and a held source.
+pub(crate) async fn ensure_index_census(
+    store: &dyn Store,
+    file: &MediaFile,
+) -> Result<bool, StoreError> {
+    let probe = store.get_file_probe_json(file.id).await?;
+    if !hevc_census::needs_census(file, probe.as_deref()) {
+        return Ok(true);
+    }
+    // Foreground measurement may be in progress. Let it finish without
+    // holding up its reader or duplicating reads under two owners.
+    if recently_failed(file) {
+        return Ok(false);
+    }
+    let lock = {
+        let mut in_flight = IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        Arc::clone(in_flight.entry(file.id).or_default())
+    };
+    let answer = async {
+        let Ok(_measuring) = lock.try_lock() else {
+            return Ok(false);
+        };
+        let probe = store.get_file_probe_json(file.id).await?;
+        if !hevc_census::needs_census(file, probe.as_deref()) {
+            return Ok(true);
+        }
+        let started = Instant::now();
+        let census = match measure_for_index(file).await {
+            Ok(census) => census,
+            Err(reason) => {
+                tracing::debug!(file_id = file.id, %reason, "index census source unavailable");
+                return Ok(false);
+            }
+        };
+        let Some(census) = census else {
+            if plurx_core::process::bounded::check_cancellation().is_ok() {
+                note_failure(file);
+            }
+            return Ok(false);
+        };
+        let recorded = record_census(store, file, probe, census, started).await?;
+        Ok(!hevc_census::needs_census(file, recorded.as_deref()))
+    }
+    .await;
+    forget_census_lock(file.id, &lock);
+    answer
+}
+
+/// Own one finite census input until its children and queued reads settle.
+/// A study under the shared source budget never exposes a raw descriptor to
+/// the child. The local lane uses the same held-descriptor policy as its
+/// fragment pass.
+async fn measure_for_index(file: &MediaFile) -> Result<Option<Census>, String> {
+    use plurx_core::process::bounded;
+    let object = crate::fragment_index_cluster::inspect_source(file).await?;
+    let source = crate::fragment_index_cluster::open_source_fence(file, Some(&object)).await?;
+    let input = match crate::background_jobs::source_budget() {
+        Some(budget) => {
+            let held = crate::fragment_index_cluster::SourceFence::clone_held(
+                &source.handle,
+                source.object_version(),
+            )?;
+            Some(
+                crate::source_input::SourceInput::open_background_held(
+                    held,
+                    crate::http::stream::file_content_type(&file.path),
+                    budget,
+                )
+                .await?,
+            )
+        }
+        None => None,
+    };
+    let result = async {
+        if let Some(input) = &input {
+            input.seal_read_ceiling(128 * 1024 * 1024)?;
+        }
+        let deadline = Instant::now() + CENSUS_BUDGET;
+        let cancel = bounded::cancellation();
+        let mut observations = Vec::new();
+        let mut failures = Vec::new();
+        let mut timed_out = false;
+        for at in hevc_census::sample_points(file.duration_ms) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || bounded::check_cancellation().is_err() {
+                timed_out = true;
+                break;
+            }
+            match sample_for_index(
+                &source.handle,
+                input.as_ref().map(|source| source.url()),
+                at,
+                remaining.min(SAMPLE_WALL_TIME),
+                cancel.as_ref(),
+            )
+            .await
+            {
+                Ok(sample) => observations.push(sample),
+                Err(reason) => failures.push(reason),
+            }
+        }
+        Ok(
+            if bounded::check_cancellation().is_ok()
+                && source.unchanged()
+                && !input
+                    .as_ref()
+                    .is_some_and(|input| input.source_read_failed())
+            {
+                conclude(file, &observations, &failures, timed_out)
+            } else {
+                None
+            },
+        )
+    }
+    .await;
+    if let Some(input) = input {
+        input
+            .close_and_wait()
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    result
+}
+
+async fn sample_for_index(
+    mut file: &std::fs::File,
+    input_url: Option<&str>,
+    at_seconds: f64,
+    budget: Duration,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<InBandParameterSets, String> {
+    if input_url.is_none() {
+        file.rewind().map_err(|error| error.to_string())?;
+    }
+    #[cfg(unix)]
+    let raw_input = Path::new("/dev/fd/3");
+    #[cfg(windows)]
+    let raw_path;
+    #[cfg(windows)]
+    let raw_input = if input_url.is_some() {
+        Path::new("")
+    } else {
+        raw_path = crate::ffmpeg::windows_source_path(file)?;
+        crate::ffmpeg::verify_windows_source_path(file, &raw_path)?;
+        raw_path.as_path()
+    };
+    let path = input_url.map_or(raw_input, Path::new);
+    let mut command = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
+    command.args(hevc_census::sample_args(path, at_seconds));
+    #[cfg(unix)]
+    let descriptors = crate::producer_spawn::Descriptors::from_files(
+        input_url.is_none().then_some(file),
+        None,
+        None,
+        false,
+    );
+    #[cfg(not(unix))]
+    let descriptors = crate::producer_spawn::Descriptors::default();
+    let pass = crate::ffmpeg::bounded_ffmpeg_output_descriptors_cancellable(
+        command,
+        budget,
+        SAMPLE_MAX_BYTES as u64,
+        "HEVC index census",
+        cancel,
+        plurx_core::process::ChildWork::background("HEVC index census"),
+        descriptors,
+    );
+    let output = if input_url.is_some() {
+        plurx_core::process::source_lifetime::mediated(pass).await
+    } else {
+        pass.await
+    }?;
+    hevc_census::observe(&output.stdout)
 }
 
 fn recently_failed(file: &MediaFile) -> bool {
@@ -228,6 +419,12 @@ async fn sample(args: Vec<OsString>) -> Result<InBandParameterSets, String> {
     )
     .await
     .map_err(|error| error.to_string())?;
+    observe_sample(output)
+}
+
+fn observe_sample(
+    output: plurx_core::process::bounded::Output,
+) -> Result<InBandParameterSets, String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
@@ -356,6 +553,28 @@ mod tests {
             probed: true,
             dolby_vision: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn held_index_census_finds_the_same_varying_recipe_as_playback() {
+        let temp = crate::test_tempdir().expect("tempdir");
+        let (_, path) = changing_pps_fixture(temp.path());
+        let mut file = hevc_file(&path, 4_000);
+        let metadata = std::fs::metadata(&path).expect("source metadata");
+        file.mtime = metadata
+            .modified()
+            .expect("source mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("source epoch")
+            .as_secs() as i64;
+
+        let index = measure_for_index(&file)
+            .await
+            .expect("held index source")
+            .expect("index census");
+        let playback = measure(&file).await.expect("playback census");
+        assert_eq!(index.verdict, hevc_census::Verdict::Varying);
+        assert_eq!(index.to_json(), playback.to_json());
     }
 
     /// Decoded-frame MD5s, in presentation order.

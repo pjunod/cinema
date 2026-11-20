@@ -2629,6 +2629,18 @@ pub(crate) async fn local_index_until_foreground<T>(
     }
 }
 
+async fn admit_local_fragment_work(
+    transcode: &TranscodeManager,
+    took_queued_turn: &mut bool,
+) -> Option<crate::transcode::FragmentAdmission> {
+    if *took_queued_turn {
+        transcode.admit_fragment().await
+    } else {
+        *took_queued_turn = true;
+        transcode.admit_fragment_queued().await
+    }
+}
+
 /// Stable, wrapping order for one bounded pass. The cursor is the last file a
 /// prior pass examined, successful or not; starting after it prevents a few
 /// permanently slow/unsupported rows from starving every later title.
@@ -9232,6 +9244,34 @@ impl JobManager {
                 self.settle_index_priority(&transcode, file_id);
                 continue;
             }
+            let mut admission = None;
+            if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+                let Ok(probe) = self.store.get_file_probe_json(file.id).await else {
+                    self.settle_index_priority(&transcode, file_id);
+                    continue;
+                };
+                if plurx_core::transcode::hevc_census::needs_census(&file, probe.as_deref()) {
+                    let Some(held) =
+                        admit_local_fragment_work(&transcode, &mut took_queued_turn).await
+                    else {
+                        return;
+                    };
+                    let established = local_index_until_foreground(
+                        &transcode,
+                        &held,
+                        crate::hevc_census::ensure_index_census(self.store.as_ref(), &file),
+                    )
+                    .await;
+                    match established {
+                        Some(Ok(true)) => admission = Some(held),
+                        Some(Ok(false) | Err(_)) => {
+                            attempted += 1;
+                            continue;
+                        }
+                        None => return,
+                    }
+                }
+            }
             let videos = match fragment_index_video_identities(
                 self.store.as_ref(),
                 &file,
@@ -9331,11 +9371,9 @@ impl JobManager {
             // (a speech pass waiting goes first). Either is still refused when
             // foreground work holds the pool. Deliberately a return: it skips
             // the cursor stamp, so the file stays due rather than half done.
-            let admission = if took_queued_turn {
-                transcode.admit_fragment().await
-            } else {
-                took_queued_turn = true;
-                transcode.admit_fragment_queued().await
+            let admission = match admission {
+                Some(held) => Some(held),
+                None => admit_local_fragment_work(&transcode, &mut took_queued_turn).await,
             };
             let Some(admission) = admission else {
                 tracing::info!(
@@ -9896,14 +9934,26 @@ impl JobManager {
                     continue;
                 }
             };
-            for (video, fingerprint) in identities {
-                if self
-                    .store
-                    .fragment_index(file_id, &crate::fragindex::identity_for(&file, video))
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some()
+            // A historical index may predate the census. Submit one
+            // prerequisite attempt even if that provisional key is present.
+            let census_pending = if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+                let Ok(probe) = self.store.get_file_probe_json(file.id).await else {
+                    continue;
+                };
+                plurx_core::transcode::hevc_census::needs_census(&file, probe.as_deref())
+            } else {
+                false
+            };
+            let variants = if census_pending { 1 } else { identities.len() };
+            for (video, fingerprint) in identities.into_iter().take(variants) {
+                if !census_pending
+                    && self
+                        .store
+                        .fragment_index(file_id, &crate::fragindex::identity_for(&file, video))
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some()
                 {
                     continue;
                 }
@@ -11095,6 +11145,40 @@ impl JobManager {
                 "pipeline_version_unavailable",
             ));
         }
+        // An analysis request can predate the source census. Resolve it under
+        // the existing analysis read reservation before handing any recipe to
+        // the artifact queue. A foreground viewer can preempt this work.
+        self.admit_background_source(request, lost).await?;
+        let census_cancel = lost.child_token();
+        let census = plurx_core::process::bounded::cancellable(
+            census_cancel.clone(),
+            crate::hevc_census::ensure_index_census(self.store.as_ref(), &file),
+        );
+        tokio::pin!(census);
+        let census_admission = AnalysisAttestationBudget::default();
+        let ready = tokio::select! {
+            result = &mut census => result.map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_catalog_read_failed",
+                charge_attempt: true,
+            })?,
+            () = self.wait_for_cluster_fragment_index_stop(transcode, Some(request), lost, &census_admission) => {
+                census_cancel.cancel();
+                let _ = census.await;
+                if lost.is_cancelled() {
+                    return Err(AnalysisResolutionError::ClaimLost);
+                }
+                return Err(AnalysisResolutionError::Retry {
+                    code: "foreground_preempted",
+                    charge_attempt: false,
+                });
+            }
+        };
+        if !ready {
+            return Err(AnalysisResolutionError::Retry {
+                code: "hevc_census_pending",
+                charge_attempt: true,
+            });
+        }
         let video = match fragment_index_requested_video_options(
             self.store.as_ref(),
             &file,
@@ -11121,7 +11205,47 @@ impl JobManager {
                 });
             }
             Err(StoreError::Task(_)) => {
-                return Err(AnalysisResolutionError::Terminal("pipeline_superseded"))
+                // A persisted census can change variant identities. Schedule
+                // the current missing variants through ordinary discovery
+                // instead of publishing the old request under a different key.
+                self.note_fresh_index_files(vec![file.id]);
+                let identities = fragment_index_video_identity_options(
+                    self.store.as_ref(),
+                    &file,
+                    have_dovi,
+                    transcode.dv_convert_enabled().await,
+                )
+                .await
+                .map_err(|_| AnalysisResolutionError::Retry {
+                    code: "source_catalog_read_failed",
+                    charge_attempt: true,
+                })?;
+                for (video, identity) in identities {
+                    if self
+                        .store
+                        .fragment_index(file.id, &crate::fragindex::identity_for(&file, video))
+                        .await
+                        .map_err(|_| AnalysisResolutionError::Retry {
+                            code: "source_catalog_read_failed",
+                            charge_attempt: true,
+                        })?
+                        .is_none()
+                    {
+                        self.request_file_analysis_for_identity(
+                            file.id,
+                            false,
+                            "fragment_index",
+                            &request.trigger,
+                            &identity,
+                        )
+                        .await
+                        .map_err(|_| AnalysisResolutionError::Retry {
+                            code: "queue_write_failed",
+                            charge_attempt: true,
+                        })?;
+                    }
+                }
+                return Err(AnalysisResolutionError::Terminal("pipeline_superseded"));
             }
             Err(_) => {
                 return Err(AnalysisResolutionError::Retry {
