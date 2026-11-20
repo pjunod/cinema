@@ -714,7 +714,7 @@ impl VodServe {
         &self,
         session_id: &str,
     ) -> Option<VodPublication<VodSessionInfo>> {
-        let (rendition, target_height, owner, delivery, control_snapshot) = {
+        let (rendition, target_height, owner, delivery, control_snapshot, audio_resource_service) = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(session_id)?;
             if session.tombstone.is_some() {
@@ -726,6 +726,17 @@ impl VodServe {
                 session.response_owner(),
                 Arc::clone(&session.delivery),
                 session.last_control_snapshot.clone(),
+                session.children.iter().find_map(|child| {
+                    let rendition = &child.rendition;
+                    let encoding = rendition.recipe.encoding.as_ref()?;
+                    encoding.shared_audio.as_ref()?;
+                    encoding
+                        .resource_service_observation()
+                        .filter(|observation| {
+                            !rendition.closed.load(Acquire)
+                                && observation.generation == rendition.gen_epoch.load(Acquire)
+                        })
+                }),
             )
         };
         let init_present = rendition.dir.has_init().await;
@@ -904,6 +915,7 @@ impl VodServe {
                     .encoding
                     .as_ref()
                     .and_then(|encoding| encoding.resource_service_observation()),
+                audio_resource_service,
                 dolby_vision_refit: rendition.recipe.refit_report(),
                 dv_refit_digest: rendition.recipe.video.dolby_vision_refit().map(hex::encode),
                 dv_refit_identity_reason: (rendition.recipe.video.converts_dolby_vision()

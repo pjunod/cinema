@@ -438,6 +438,7 @@ impl SourceGrowingBacking {
         let complete = files.complete();
         Ok(crate::vodserve::VodSessionInfo {
             resource_service: None,
+            audio_resource_service: None,
             dolby_vision_refit: None,
             dv_refit_digest: None,
             dv_refit_identity_reason: None,

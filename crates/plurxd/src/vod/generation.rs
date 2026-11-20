@@ -2520,7 +2520,10 @@ impl RenditionSink {
                 &self.rendition.recipe.encoding,
                 self.rendition.plan.entry(entry),
             ) {
-                if planned.kind == plurx_core::segplan::PlanEntryKind::Video {
+                use plurx_core::segplan::PlanEntryKind;
+                if planned.kind == PlanEntryKind::Video
+                    || (planned.kind == PlanEntryKind::AudioTail && encoding.shared_audio.is_some())
+                {
                     encoding.note_active_segment(
                         self.epoch,
                         entry,

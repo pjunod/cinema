@@ -2184,6 +2184,9 @@ retained-cache reads do not establish encoder capacity; unknown speed is never
 zero. Media-millisecond rates divided by 1000 give realtime multiples. The web
 player's Producer row displays this diagnostic when present; older responses
 retain their existing display. It conveys no reservation or compatibility proof.
+Continuous VOD may also report `audio_resource_service` with the same shape.
+It comes from the attached shared AAC producer and uses that soundtrack's
+media clock and generation.
 
 `published_end_ms` and `ready_ahead_end_ms` answer different questions.
 `published_end_ms` is how much of the title exists, measured from segment 0;

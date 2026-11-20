@@ -705,6 +705,9 @@ pub struct VodSessionInfo {
     /// separate from production. This diagnostic grants no admission.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_service: Option<plurx_core::resource_observation::ServiceObservation>,
+    /// The attached shared soundtrack's original producer, when observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_resource_service: Option<plurx_core::resource_observation::ServiceObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dolby_vision_refit: Option<crate::transcode::RefitPlaybackReport>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -676,6 +676,120 @@ async fn encoded_identity_never_shares_a_renderer_across_processes() {
 }
 
 #[tokio::test]
+async fn fresh_shared_audio_publication_reports_service_for_its_original_generation() {
+    use crate::vodgen::Sink as _;
+    use plurx_core::resource_observation::{ServiceUnit, WorkPhase};
+
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("shared soundtrack service");
+    let (file, mut encoding) = encoded_fixture(base.path()).await;
+    let audio = Arc::get_mut(&mut encoding).expect("fresh soundtrack recipe");
+    audio.shared_audio = plurx_core::transcode::VodSharedAudioRecipe::from_plan(&audio.plan);
+    assert!(audio.shared_audio.is_some());
+    let serve = local_serve(
+        base.path().to_path_buf(),
+        Arc::new(SqliteStore::open_in_memory().expect("schedule store")),
+    );
+    let (_, first, next) = encoded_pair(&serve, &file, &encoding, 0).await;
+    let encoding = encoding
+        .clone_with_admissions_for_test(encoding.admissions.clone())
+        .await;
+    let mut rendition = synthetic_rendition(&base.path().join("audio-publication")).await;
+    let audio = Arc::get_mut(&mut rendition).expect("unattached soundtrack fixture");
+    audio.key = "a5".repeat(32);
+    audio.plan = encoding.media_plan(file.duration_ms.expect("source duration"));
+    audio.timescale = audio.plan.timescale;
+    audio.manifest = Mutex::new(Manifest::new(audio.plan.clone()));
+    audio.publication_versions = StdMutex::new(vec![None; audio.plan.len()]);
+    audio.recipe.file = file;
+    audio.recipe.encoding = Some(Arc::clone(&encoding));
+    let generation = rendition.gen_epoch.load(Relaxed);
+    encoding.reset_active_production(generation, true);
+    let sink = RenditionSink {
+        retirement: tokio_util::sync::CancellationToken::new(),
+        shared: Arc::clone(&serve.shared),
+        rendition: Arc::clone(&rendition),
+        epoch: generation,
+    };
+    sink.materialize(0, first.clone())
+        .await
+        .expect("fresh AAC publication");
+    let (event, observation) = encoding
+        .resource_service_sample(Instant::now())
+        .expect("AAC service sample");
+    let end = rendition
+        .plan
+        .entry(0)
+        .expect("first AAC interval")
+        .end_ticks();
+    assert_eq!(observation.generation, generation);
+    assert_eq!(observation.phase, WorkPhase::Producing);
+    assert_eq!(observation.unit, ServiceUnit::MediaMilliseconds);
+    assert_eq!(
+        observation.completed,
+        ticks_to_ms(end, rendition.timescale) as u64
+    );
+    assert!(encoding.active_production_evidence().is_none());
+
+    let parent = uuid::Uuid::new_v4().to_string();
+    let primary = synthetic_rendition(&base.path().join("audio-parent")).await;
+    insert_control_session(&serve, &parent, primary, Instant::now()).await;
+    serve
+        .shared
+        .sessions
+        .lock()
+        .await
+        .get_mut(&parent)
+        .expect("parent fixture")
+        .children
+        .push(ParentMediaReader {
+            versioned_family: true,
+            companion_bootstrap: false,
+            controlled: false,
+            candidate_id: None,
+            reader_id: uuid::Uuid::new_v4().to_string(),
+            rendition: Arc::clone(&rendition),
+            _reservation: None,
+        });
+    let status = serve.status(&parent).await.expect("parent status");
+    assert_eq!(status.audio_resource_service, Some(observation));
+    assert!(status.resource_service.is_none());
+
+    sink.materialize(0, first)
+        .await
+        .expect("retained AAC replay");
+    assert_eq!(
+        encoding
+            .resource_service_sample(Instant::now())
+            .expect("unchanged service sample")
+            .0
+            .at,
+        event.at
+    );
+    rendition.gen_epoch.fetch_add(1, Relaxed);
+    let stale = sink
+        .materialize(1, next)
+        .await
+        .expect_err("stale producer cannot publish");
+    assert_eq!(stale.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(
+        encoding
+            .resource_service_sample(Instant::now())
+            .expect("unchanged service sample")
+            .0
+            .at,
+        event.at
+    );
+    assert!(serve
+        .status(&parent)
+        .await
+        .expect("parent status")
+        .audio_resource_service
+        .is_none());
+    assert!(serve.end(&parent, Terminal::Deleted).await);
+}
+
+#[tokio::test]
 async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("shared soundtrack");
