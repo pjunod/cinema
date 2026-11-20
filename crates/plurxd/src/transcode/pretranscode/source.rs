@@ -665,7 +665,7 @@ pub(crate) struct FragmentAdmission {
 pub(crate) struct FragmentExtension {
     pub(super) hardware: usize,
     pub(super) threads: usize,
-    pub(super) _permit: crate::admission::TranscodePermit,
+    pub(super) _permit: crate::vodencode::EncodePermit,
 }
 
 impl FragmentAdmission {
@@ -722,24 +722,30 @@ impl FragmentAdmission {
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) fn install_extension(&self, permit: crate::admission::TranscodePermit) -> bool {
+    pub(super) fn install_extension(
+        &self,
+        permit: crate::admission::TranscodePermit,
+    ) -> Option<crate::vodencode::EncodePermit> {
         let resources = permit.retained_resources();
+        let hardware = usize::from(resources.hardware.is_some());
+        let threads = resources
+            .software
+            .map_or(0, crate::admission::SwPermit::threads);
+        let permit_handle = crate::vodencode::EncodePermit::from(permit);
         let extension = FragmentExtension {
-            hardware: usize::from(resources.hardware.is_some()),
-            threads: resources
-                .software
-                .map_or(0, crate::admission::SwPermit::threads),
-            _permit: permit,
+            hardware,
+            threads,
+            _permit: permit_handle.clone(),
         };
         let mut slot = self
             .extension
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if slot.is_some() {
-            return false;
+            return None;
         }
         *slot = Some(extension);
-        true
+        Some(permit_handle)
     }
 
     /// Release the extension's capacity (the job's heavier step is over).

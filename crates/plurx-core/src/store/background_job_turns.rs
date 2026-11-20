@@ -153,6 +153,13 @@ mod tests {
         .expect("expire interest");
         assert_eq!(claim(), 0, "maintenance still waits after viewer expiry");
         db.execute(
+            "INSERT INTO background_job_waiters(request_scope,request_id,request_digest,job_id,consumer_kind,consumer_ref,target_node_id,priority,state,receipt_expires_ms,created_at_ms,updated_at_ms,deadline_ms)
+             VALUES('dv-native-fel-head','native-head','native-digest','title','native_fel_head','recipe','node',0,'pending',9999,0,0,2000)",
+            [],
+        )
+        .expect("add live targeted native head rebuild");
+        assert_eq!(claim(), 0, "targeted head rebuild remains ordinary work");
+        db.execute(
             "UPDATE background_job_waiters SET deadline_ms=2000 WHERE request_id='viewer'",
             [],
         )
