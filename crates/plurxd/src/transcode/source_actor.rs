@@ -365,7 +365,7 @@ struct SourceViewerState {
     native: Option<Arc<super::source_subtitles::SourceNativeTracks>>,
     start: Option<Result<crate::http::hls::StartResponse, SourceWorkerError>>,
     #[cfg(test)]
-    startup_failure: Option<(&'static str, SourceWorkerError)>,
+    startup_failure: Option<(&'static str, SourceWorkerError, Option<String>)>,
     retirement_requested: bool,
     retirement_mode: crate::sharing_connection_custody::DriverCloseMode,
     settled: Option<Result<(), SourceWorkerError>>,
@@ -508,8 +508,8 @@ impl SourceViewerActor {
     pub(crate) fn startup_diagnostic(&self) -> serde_json::Value {
         let state = self.0.state.lock().expect("Source worker diagnostic");
         serde_json::json!({
-            "startup_failure": state.startup_failure.map(|(stage, error)| {
-                serde_json::json!({"stage": stage, "error": format!("{error:?}")})
+            "startup_failure": state.startup_failure.as_ref().map(|(stage, error, detail)| {
+                serde_json::json!({"stage": stage, "error": format!("{error:?}"), "detail": detail})
             }),
             "start": match &state.start {
                 None => "pending".to_owned(),
@@ -1545,7 +1545,7 @@ impl TranscodeManager {
                     #[cfg(test)]
                     {
                         current.startup_failure =
-                            Some(("preparation_custody", SourceWorkerError::Unavailable));
+                            Some(("preparation_custody", SourceWorkerError::Unavailable, None));
                     }
                     current.start = Some(Err(SourceWorkerError::Unavailable));
                     current.settled = Some(Err(SourceWorkerError::Unavailable));
@@ -1562,6 +1562,8 @@ impl TranscodeManager {
         let mut probe_work = None;
         let mut unowned_existing = true;
         let mut startup_stage = "deadline";
+        #[cfg(test)]
+        let mut startup_failure_detail: Option<String> = None;
         // Retirement (a Source End, a drain, a revocation) ends a start that
         // has not published at its next stage boundary: after the route
         // proof, after native tracks, after recipe preparation, and after
@@ -1683,7 +1685,13 @@ impl TranscodeManager {
                     encoding,
                 ))
                 .await
-                .map_err(|_| SourceWorkerError::Unavailable)?;
+                .map_err(|_error| {
+                    #[cfg(test)]
+                    {
+                        startup_failure_detail = Some(_error);
+                    }
+                    SourceWorkerError::Unavailable
+                })?;
                 startup_stage = "vod_reservation";
                 reserved = Some(
                     self.vod
@@ -1794,7 +1802,13 @@ impl TranscodeManager {
                 startup_stage = "physical_readiness";
                 let physical = Box::pin(reservation.wait_ready(&self.vod, deadline))
                     .await
-                    .map_err(|_| SourceWorkerError::Unavailable)?;
+                    .map_err(|_error| {
+                        #[cfg(test)]
+                        {
+                            startup_failure_detail = Some(_error);
+                        }
+                        SourceWorkerError::Unavailable
+                    })?;
                 if !physical.matches(&owner.assignment) {
                     return Err(SourceWorkerError::Conflict);
                 }
@@ -1859,7 +1873,7 @@ impl TranscodeManager {
                 .state
                 .lock()
                 .expect("Source worker diagnostic")
-                .startup_failure = Some((startup_stage, *error));
+                .startup_failure = Some((startup_stage, *error, startup_failure_detail));
         }
         owner.state.lock().expect("Source worker state").start = Some(start.clone());
         owner.changed.notify_waiters();
