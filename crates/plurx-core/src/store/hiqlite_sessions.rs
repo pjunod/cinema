@@ -4454,8 +4454,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                     SET expires_at_ms = $1, revision = revision + 1, updated_at_ms = $2
                   WHERE resource = $3 AND revision < 9223372036854775807
                     AND EXISTS (SELECT 1 FROM media_sessions successor
-                      WHERE successor.incarnation_id = $6 AND successor.{owner_4}
-                        AND successor.playback_id = $5 AND successor.state = 'active'
+                      WHERE successor.{owner_4} AND successor.playback_id = $5
+                        AND successor.incarnation_id = $6 AND successor.state = 'active'
                         AND successor.owner_node_id = job_leases.owner_node_id
                         AND successor.owner_epoch = job_leases.fence)
                     AND EXISTS (SELECT 1 FROM media_playback_pointers

@@ -830,7 +830,11 @@ async fn ready_staged_adoption(
         key: activation.key.clone(),
         worker: activation.worker.clone(),
         preparation: plurx_core::domain::MediaSessionPreparation {
-            quality_cancellation_key: Some("e".repeat(64)),
+            quality_cancellation_key: Some(format!(
+                "{}{}",
+                fixture.claim.key.attempt_id.simple(),
+                fixture.claim.key.route_incarnation_id.simple()
+            )),
             incarnation_id: activation.activation.incarnation_id.clone(),
             session_id: activation.activation.session_id.clone(),
             principal: incumbent.principal.clone(),
