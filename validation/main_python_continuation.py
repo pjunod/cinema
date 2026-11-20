@@ -98,7 +98,7 @@ def prepare(api, record, binding, candidate, repository):
     r.require(set(record['changes']) == changed, 'Every changed Python input needs reviewed classification')
     invalidated = set()
     for path, witness in record['changes'].items():
-        r.require(path in nextest.TEST_INPUTS or path in retention.PROTOCOL_PATHS,
+        r.require(path in nextest.TEST_INPUTS or path in nextest.RUNTIME_INPUTS or path in retention.PROTOCOL_PATHS,
                   'Unreviewed Python implementation input')
         r.require(set(witness) == {'before', 'after', 'affected', 'reason'}
                   and isinstance(witness['reason'], str) and witness['reason'].strip(),

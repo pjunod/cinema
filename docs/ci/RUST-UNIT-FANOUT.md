@@ -37,9 +37,10 @@ The `workspace_rust_evidence` input remains an attachment descriptor with
 selected crate and every original shard index. Each changed path has its exact
 `before`/`after` SHA256, `affected` nextest IDs (`<binary-id> <test-path>`), and
 reviewed `reason`. The authenticated writer attests that dependency
-classification. Cargo, compiler, workflow, feature, image, and selector
-changes are refused; the adapter admits only its reviewed test-input paths
-and audited protocol paths.
+classification. Cargo, compiler, feature, image and test-recipe changes are refused. The
+adapter admits only explicitly reviewed test/runtime inputs and audited
+protocol paths, with exact hashes and affected-body obligations. Runtime
+changes do not automatically invalidate or retain unrelated bodies.
 
 The provider independently authenticates the original repository, PR, run,
 source, complete plan, all shard jobs and raw status logs, uploaded JSON
@@ -72,8 +73,9 @@ an attachment. Review new adoption code independently before executing it.
 `scripts/land --source-gate-run <actual-ci-run>` verifies actual manual CI
 provenance, every required CI surface, enrolled per-body Rust coverage and
 creator-bound completion artifacts; no status alias or untested acceptance is
-used. The fast-lane-only worker proof is retained only across the closed
-reviewed test/protocol manifest. Gate-local paperwork binds the current PR
+used. The fast-lane-only worker proof is retained only when its complete governed staged-source,
+library-binding, manifest and tool inputs are byte-identical to both current
+main and its authenticated origin. Gate-local paperwork binds the current PR
 body/title. Release publishers still reject schema2 source-gate receipts.
 
 Before any Rust body, a bounded owned-child capability probe logs the kernel,

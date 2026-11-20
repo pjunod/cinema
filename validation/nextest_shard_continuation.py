@@ -34,6 +34,34 @@ TEST_INPUTS = {
     'crates/plurxd/src/http/stream/tests.rs',
     'crates/plurxd/src/transcode/tests/chunk_05.rs',
 }
+# Reviewed clock/quality inputs still require exact hashes and affected-body witnesses.
+RUNTIME_INPUTS = {'clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt',
+ 'clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt',
+ 'clients/android/app/src/test/java/tv/plurx/app/player/PreparedSwitchMeasurementTest.kt',
+ 'crates/plurx-core/src/segplan.rs',
+ 'crates/plurx-core/src/segplan/copy_cursor.rs',
+ 'crates/plurx-core/src/segplan/ranges.rs',
+ 'crates/plurx-core/src/store/fragindex.rs',
+ 'crates/plurx-core/src/store/fragment_index_cluster.rs',
+ 'crates/plurx-core/src/store/telemetry.rs',
+ 'crates/plurx-core/tests/store_contract.rs',
+ 'crates/plurxd/src/copy_analysis/quarantine_tests.rs',
+ 'crates/plurxd/src/copy_index_v3/tests.rs',
+ 'crates/plurxd/src/fragindex.rs',
+ 'crates/plurxd/src/fragindex/refit_acceptance_tests.rs',
+ 'crates/plurxd/src/fragment_index_cluster.rs',
+ 'crates/plurxd/src/http/browse.rs',
+ 'crates/plurxd/src/prodsched.rs',
+ 'crates/plurxd/src/renditiondir.rs',
+ 'crates/plurxd/src/subtitle_source.rs',
+ 'crates/plurxd/src/titlestore.rs',
+ 'crates/plurxd/src/vod/generation.rs',
+ 'crates/plurxd/src/vod/serve/construct.rs',
+ 'crates/plurxd/src/vod/session.rs',
+ 'crates/plurxd/src/vod/tests/chunk_01.rs',
+ 'crates/plurxd/src/vod/tests/chunk_03.rs',
+ 'crates/plurxd/src/vodgen.rs'}
+
 # Reviewed recipes, not a source-commit or pull-request exception. Different
 # workflow, selector, feature, image or nextest contracts need a new review.
 HARNESS = {'.config/nextest.toml': 'b68e6d071b1e441727237de221cb60ac32e78f0ddff3d9636d9004f1e8d38c81',
@@ -151,7 +179,7 @@ def reviewed_changes(record, candidate, universe):
               'Every nextest source change needs a reviewed witness')
     invalidated = set()
     for path, witness in changes.items():
-        r.require((path in TEST_INPUTS or path in retention.PROTOCOL_PATHS)
+        r.require((path in TEST_INPUTS or path in RUNTIME_INPUTS or path in retention.PROTOCOL_PATHS)
                   and (not path.startswith('.github/') or path in {'.github/workflows/ci.yml', '.github/workflows/main-fast-lane.yml'}),
                   'Changed protected or unreviewed nextest input')
         r.require(isinstance(witness, dict)
@@ -173,6 +201,8 @@ def reviewed_changes(record, candidate, universe):
         r.require(isinstance(affected, list) and len(affected) == len(set(affected))
                   and set(affected) <= universe, 'Unknown nextest affected body')
         r.require(path not in TEST_INPUTS or bool(affected), 'Changed test input has no affected bodies')
+        r.require(path not in RUNTIME_INPUTS or bool(affected) or not path.startswith('crates/'),
+                  'Changed Rust runtime input has no affected bodies')
         invalidated.update(affected)
     return invalidated
 

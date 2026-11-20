@@ -67,3 +67,14 @@ class SourceGateLandingTests(unittest.TestCase):
         self.assertEqual(source.semantic_pr_title('fix(ci): changed subject'), 'fix(ci): changed subject')
         self.assertNotEqual(source.semantic_pr_title('WIP: fix(ci): verified'),
                             source.semantic_pr_title('fix(ci): another subject'))
+
+    def test_changed_worker_binding_or_controller_source_cannot_retain_old_surface(self):
+        from types import SimpleNamespace
+        entries = {path: ('100644', 'a' * 40) for path in source.WORKER_REQUIRED_PATHS}
+        entries['crates/plurx-worker-control/src/library_lifecycle.rs'] = ('100644', 'b' * 40)
+        original = source.worker_input_identity(SimpleNamespace(entries=entries))
+        changed = dict(entries)
+        changed['crates/plurx-worker-control/src/library_lifecycle.rs'] = ('100644', 'c' * 40)
+        self.assertNotEqual(original, source.worker_input_identity(SimpleNamespace(entries=changed)))
+        with self.assertRaises(r.ReceiptError):
+            source.worker_input_identity(SimpleNamespace(entries={}))

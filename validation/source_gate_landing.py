@@ -39,6 +39,34 @@ def semantic_pr_title(title):
     return re.sub(r'^\s*(?:WIP:|\[WIP\])\s*', '', title, count=1, flags=re.I)
 
 
+
+WORKER_REQUIRED_PATHS = (
+    'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/plurxd/Cargo.toml',
+    'crates/plurxd/src/library_work.rs', 'crates/plurxd/src/library_work/env.rs',
+    'scripts/check-worker-control', 'validation/worker_control_resume.py',
+    'tests/operations/test_worker_control_runner.py',
+)
+
+
+def worker_input_identity(tree):
+    governed = set(WORKER_REQUIRED_PATHS)
+    governed.update(path for path in tree.entries if path.startswith(
+        ('crates/plurx-worker-control/', 'verification/worker-control/')))
+    r.require(all(path in tree.entries for path in governed), 'Missing governed worker proof input')
+    return {path: tree.entries[path] for path in sorted(governed)}
+
+
+def require_unchanged_worker_inputs(candidate, base, prior, root):
+    trees = [nextest.units.Tree(revision, root) for revision in (candidate, base, prior)]
+    identities = [worker_input_identity(tree) for tree in trees]
+    r.require(identities[0] == identities[1] == identities[2],
+              'Worker controller proof source changed and requires actual current qualification')
+    recipes = [nextest.projected_main_workflow(tree.text('.github/workflows/main-fast-lane.yml').encode())
+               for tree in trees]
+    r.require(recipes[0] == recipes[1] == recipes[2], 'Worker proof invocation recipe changed')
+    return retention.digest(json.dumps(identities[0], sort_keys=True).encode())
+
+
 def one_job(jobs, name, run, repository, owner):
     found = [job for job in jobs if job['name'] == name]
     r.require(len(found) == 1, 'Missing or ambiguous required source-gate surface: ' + name)
@@ -177,8 +205,9 @@ def verify(api, number, head, main, root, run_id):
         environment['PLURX_RETAINED_UNITS'] = json.dumps(refreshed)
     require_surfaces(jobs, record, run_id, repository, owner, retained)
     # Full ci.yml covers compiled web/native clients and their tests. The one
-    # fast-lane-only surface is the worker proof: retain it only across this
-    # adapter's closed test/protocol-only source manifest, authenticated above.
+    # fast-lane-only worker proof requires identical complete governed inputs
+    # against both current main and its actual authenticated origin.
+    worker_inputs_sha256 = require_unchanged_worker_inputs(head, main, proof['prior'], root)
     previous_jobs = api.pages(f"/actions/runs/{proof['run']}/jobs")
     worker = one_job(previous_jobs, 'production worker controller proof', proof['run'], repository, owner)
     r.require(worker['status'] == 'success', 'Missing applicable production worker controller proof')
@@ -198,6 +227,7 @@ def verify(api, number, head, main, root, run_id):
     r.require(qualification.build_receipt(environment, record['jobs'], head, tree) == record,
               'Source-gate qualification record contradicts actual provenance')
     return {'run': run_id, 'job': gate['id'], 'base': main, 'head': head,
+            'worker_inputs_sha256': worker_inputs_sha256,
             'url': api.root.split('/api/v1/repos/')[0] + '/' + repo['full_name'] + '/actions/runs/' + str(run_id)}
 
 
