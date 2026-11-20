@@ -1393,7 +1393,8 @@ mod tests {
             assert_eq!(pool.software_used, 1);
             assert!(heavy);
             let permits = state.transcode.admissions();
-            let live = permits.wait_for_capacity();
+            let mut live = permits.software_pool().queue_for_capacity();
+            live.mark_capacity_blocked();
             assert!(matches!(
                 live.request_disposable_background_yield(),
                 crate::admission::BackgroundYield::Requested

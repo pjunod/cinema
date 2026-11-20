@@ -1992,6 +1992,7 @@ impl TranscodeManager {
                             input,
                             None,
                             None,
+                            None, // The splice has no adaptive terminal owner.
                         )
                         .await?;
                     let WindowOutcome::Completed((window, decision)) = outcome else {
