@@ -231,6 +231,7 @@ function rowPreview(){
 }
 async function saveRow(){
   const d=dialogById("row-editor"),edit=ROW_EDIT,home=HOME_EDIT;
+  const homeDialog=dialogById("customize-home"),route=location.hash;
   if(!d?.open||!edit||edit.saving)return;
   edit.saving=true;
   const button=inputIn(d,"#row-save");
@@ -240,7 +241,7 @@ async function saveRow(){
     const row=edit.id?await api(`/rows/${edit.id}`,{method:"PATCH",body})
       :await api("/rows",{method:"POST",body:{...body,scope:edit.scope}});
     d.close();
-    if(HOME_EDIT===home&&home){
+    if(home&&HOME_EDIT===home&&homeDialog?.open&&dialogById("customize-home")===homeDialog&&location.hash===route){
       home.rows=home.rows.filter(r=>r.id!==row.id).concat([row]);
       if(!home.entries.some(e=>e.key===`row:${row.id}`)) home.entries.push({key:`row:${row.id}`,hidden:false});
       paintCustomizeHome();
