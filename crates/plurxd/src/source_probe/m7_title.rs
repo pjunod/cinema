@@ -359,7 +359,10 @@ use plurx_core::transcode::{
     dv_m7_scoring::{
         active_area,
         aggregation::FrozenMargin,
-        capture::{score_baseline_frame, CaptureLayout, CapturePlan, CaptureRole, FrameEvidence},
+        capture::{
+            score_baseline_frame, supported_raster, CaptureLayout, CapturePlan, CaptureRole,
+            FrameEvidence,
+        },
     },
     Rational,
 };
@@ -579,11 +582,7 @@ fn source_plan(
         // readback before any lattice capture or candidate preparation.
         roi: [0, 0, width, height],
     };
-    if !(64..=3840).contains(&width)
-        || !(64..=2160).contains(&height)
-        || !width.is_multiple_of(2)
-        || !height.is_multiple_of(2)
-    {
+    if !supported_raster(layout.raster) {
         return Err("M7 coded raster is outside the managed full-plane recipe".into());
     }
     let (primaries_rgbw, max_1e4_nits, min_1e4_nits) =

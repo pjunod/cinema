@@ -182,6 +182,7 @@ impl FittedPublication {
         let reads = tokio::task::spawn_blocking(move || {
             let whole = read_publication(whole, clock, &frame_clock)?;
             let seek = read_publication(seek, clock, &frame_clock)?;
+            whole.check_decode_durations(&seek)?;
             Ok::<_, String>((whole, seek))
         })
         .await
@@ -435,34 +436,60 @@ struct PublishedRange {
     init_hash: [u8; 32],
 }
 
+struct PublishedPicture {
+    frame: PublicationFrame,
+    decode_duration: u32,
+}
+
 struct PublicationEvidence {
     publication_sha256: [u8; 32],
-    pictures: BTreeMap<i64, PublicationFrame>,
+    timescale: u32,
+    pictures: BTreeMap<i64, PublishedPicture>,
 }
 
 impl PublicationEvidence {
+    fn check_decode_durations(&self, other: &Self) -> Result<(), String> {
+        // Track sample duration describes decode spacing. The demuxer's
+        // source packet duration is independent of that spacing.
+        if self.timescale != other.timescale
+            || self.pictures.len() != other.pictures.len()
+            || self.pictures.iter().any(|(pts, picture)| {
+                other
+                    .pictures
+                    .get(pts)
+                    .is_none_or(|other| other.decode_duration != picture.decode_duration)
+            })
+        {
+            return Err("M7 whole and seek fitted decode durations differ".into());
+        }
+        Ok(())
+    }
+
     fn window(
         &self,
         frames: &[FrameEvidence],
         table: [u8; 32],
     ) -> Result<PublicationReadback, String> {
         let mut digest = Sha256::new();
-        digest.update(b"plurx/m7/fplus-published-readback/v1\0");
+        digest.update(b"plurx/m7/fplus-published-readback/v2\0");
+        digest.update(self.timescale.to_be_bytes());
         let mut output = Vec::with_capacity(frames.len());
         for frame in frames {
             let observed = self
                 .pictures
                 .get(&frame.pts)
                 .ok_or("F+ readback missed an exact source PTS")?;
-            digest.update(observed.source.pts.to_be_bytes());
-            digest.update(observed.source.duration.to_be_bytes());
-            digest.update(observed.bl_vcl_sha256);
-            digest.update(observed.rpu_sha256);
+            let frame = &observed.frame;
+            digest.update(frame.source.pts.to_be_bytes());
+            digest.update(frame.source.duration.to_be_bytes());
+            digest.update(observed.decode_duration.to_be_bytes());
+            digest.update(frame.bl_vcl_sha256);
+            digest.update(frame.rpu_sha256);
             output.push(PublicationFrame {
-                source: observed.source,
-                bl_vcl_sha256: observed.bl_vcl_sha256,
-                rpu_sha256: observed.rpu_sha256,
-                rpu_nal: observed.rpu_nal.clone(),
+                source: frame.source,
+                bl_vcl_sha256: frame.bl_vcl_sha256,
+                rpu_sha256: frame.rpu_sha256,
+                rpu_nal: frame.rpu_nal.clone(),
             });
         }
         Ok(PublicationReadback {
@@ -509,6 +536,7 @@ fn read_publication(
     }
     Ok(PublicationEvidence {
         publication_sha256: pub_hash.finalize().into(),
+        timescale: clock.track_timescale,
         pictures,
     })
 }
@@ -518,7 +546,7 @@ fn extract_pictures(
     init: &Init,
     clock: SourceClock,
     expected: &BTreeMap<i64, FrameEvidence>,
-    pictures: &mut BTreeMap<i64, PublicationFrame>,
+    pictures: &mut BTreeMap<i64, PublishedPicture>,
 ) -> Result<(), String> {
     let video = init.video().ok_or("F+ readback has no video init")?;
     if video.timescale != clock.track_timescale || video.nal_length_size != 4 {
@@ -537,15 +565,12 @@ fn extract_pictures(
             let presentation = decode + i128::from(sample.cto);
             let pts = clock.source_pts(presentation).map_err(|e| e.to_string())?;
             if let Some(source) = expected.get(&pts) {
-                let next = clock
-                    .source_pts(presentation + i128::from(sample.duration))
-                    .map_err(|e| e.to_string())?;
                 let payload = fragment
                     .bytes
                     .get(offset..end)
                     .ok_or("F+ sample exceeds its fragment")?;
                 let (bl_vcl_sha256, rpu_nal) = read_nals(payload)?;
-                if next.checked_sub(pts) != Some(source.duration)
+                if sample.duration == 0
                     || source.bl_vcl_sha256 != bl_vcl_sha256
                     || pictures.contains_key(&pts)
                 {
@@ -553,11 +578,14 @@ fn extract_pictures(
                 }
                 pictures.insert(
                     pts,
-                    PublicationFrame {
-                        source: *source,
-                        bl_vcl_sha256,
-                        rpu_sha256: Sha256::digest(&rpu_nal).into(),
-                        rpu_nal,
+                    PublishedPicture {
+                        frame: PublicationFrame {
+                            source: *source,
+                            bl_vcl_sha256,
+                            rpu_sha256: Sha256::digest(&rpu_nal).into(),
+                            rpu_nal,
+                        },
+                        decode_duration: sample.duration,
                     },
                 );
             }
@@ -610,4 +638,97 @@ fn parse_digest(text: &str) -> Result<[u8; 32], String> {
     hex::decode_to_slice(text, &mut digest)
         .map_err(|_| "invalid fitted table digest".to_owned())?;
     Ok(digest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plurx_core::{
+        fmp4::{Run, Sample, Track, TrackFragment, TrackKind, VideoCodec},
+        transcode::Rational,
+    };
+
+    #[test]
+    fn copy_readback_keeps_source_packets_and_mux_decode_durations_in_their_clocks() {
+        let time_base = Rational::new(1, 1_000).unwrap();
+        let clock = SourceClock {
+            track_timescale: 16_000,
+            track_ticks: 0,
+            source_pts: 0,
+            source_time_base: (1, 1_000),
+        };
+        let init = Init {
+            bytes: Vec::new(),
+            tracks: vec![Track {
+                id: 1,
+                kind: TrackKind::Video,
+                timescale: clock.track_timescale,
+                has_edit_list: false,
+                codec: Some(VideoCodec::Hevc),
+                dolby_vision_config: true,
+                nal_length_size: 4,
+                default_sample_duration: 0,
+                default_sample_size: 0,
+                default_sample_flags: 0,
+            }],
+        };
+        let vcl = [0, 0, 0, 3, 0x02, 0x01, 0x80];
+        let rpu = [0, 0, 0, 3, 0x7c, 0x01, 0x80];
+        let bytes = [vcl, rpu].concat();
+        let source = FrameEvidence {
+            ordinal: 760,
+            pts: 31_906,
+            duration: 41,
+            time_base,
+            access_unit_sha256: [1; 32],
+            rpu_sha256: [2; 32],
+            bl_vcl_sha256: Sha256::digest(vcl).into(),
+        };
+        let expected = BTreeMap::from([(source.pts, source)]);
+        let read = |duration| {
+            let fragment = Fragment {
+                bytes: bytes.clone(),
+                mdat_payload: 0..bytes.len(),
+                tracks: vec![TrackFragment {
+                    track_id: 1,
+                    base_decode_time: 507_168,
+                    runs: vec![Run {
+                        version: 0,
+                        composition_offsets_present: true,
+                        data_offset: 0,
+                        data_offset_at: None,
+                        samples: vec![Sample {
+                            duration,
+                            size: bytes.len() as u32,
+                            size_at: None,
+                            flags: 0,
+                            cto: 3_328,
+                        }],
+                    }],
+                }],
+            };
+            let mut pictures = BTreeMap::new();
+            extract_pictures(&fragment, &init, clock, &expected, &mut pictures).unwrap();
+            PublicationEvidence {
+                publication_sha256: [3; 32],
+                timescale: clock.track_timescale,
+                pictures,
+            }
+        };
+        let whole = read(672);
+        let seek = read(672);
+        whole.check_decode_durations(&seek).unwrap();
+        let window = whole.window(&[source], [4; 32]).unwrap();
+        assert_eq!(window.frames[0].source, source);
+
+        let changed_seek = read(656);
+        assert!(whole.check_decode_durations(&changed_seek).is_err());
+        assert_ne!(
+            window.readback_sha256,
+            changed_seek
+                .window(&[source], [4; 32])
+                .unwrap()
+                .readback_sha256,
+        );
+    }
 }
