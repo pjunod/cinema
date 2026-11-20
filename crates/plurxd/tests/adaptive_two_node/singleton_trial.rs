@@ -307,14 +307,15 @@ async fn run_singleton_trial(with_capture: bool) {
     std::fs::create_dir(&media).expect("singleton media directory");
     drop(SqliteStore::open(&data.join("plurx.db")).expect("legacy activation source"));
 
-    // Long enough that the ordinary run can be stopped after its first
-    // verified segment and the next run can deliver a sustained window.
+    // Leave enough media to stop the original running producer after its
+    // first verified segment. A 24 fps source keeps the test focused on
+    // the supported startup envelope rather than 60 fps encode throughput.
     write_fixture(
         ffmpeg.to_str().expect("FFmpeg path"),
         &media.join("Singleton VOD Trial (2024).mkv"),
-        "testsrc2=size=1920x1080:rate=60:duration=90",
+        "testsrc2=size=1280x720:rate=24:duration=90",
         "sine=frequency=440:sample_rate=48000:duration=90",
-        "120",
+        "48",
     );
     let mut ports = std::array::from_fn::<_, 3, _>(|_| ReservedPort::new());
     let [http, raft, api] = std::array::from_fn(|index| ports[index].port);
