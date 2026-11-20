@@ -22,11 +22,24 @@ def prepare(api, descriptor, binding, candidate):
     attachment = receipts.positive(descriptor['attachment_id'])
     sha, uuid = descriptor['sha256'], descriptor['attachment_uuid']
     raw = retention.attachment_bytes(api, binding['pull_request'], attachment, uuid, sha)
-    document, _, repository, _ = retention.verify_identity(api, raw, sha, binding, candidate, attachment, uuid)
+    document, pull, repository, _ = retention.verify_identity(api, raw, sha, binding, candidate, attachment, uuid)
+    from validation import paperwork_continuation as paperwork
+    enrolled = document.get('version') == 'main-python-journal-continuation-v2' and any(
+        line.startswith(paperwork.PREFIX) for line in (pull.get('body') or '').splitlines())
+    if enrolled:
+        value = paperwork.enrollment(pull['body'])
+        receipts.require(document.get('version') == 'main-python-journal-continuation-v2'
+                         and binding['schema'] == 2 and value['python_unit_evidence'] == descriptor
+                         and value['head'] == candidate and value['base'] == binding['base_sha']
+                         and value['pr'] == binding['pull_request'],
+                         'Typed paperwork selection has another evidence or comparison domain')
     if document.get('version') in {'main-python-journal-continuation-v1', 'main-python-journal-continuation-v2'}:
         from validation import main_python_continuation
         proof = main_python_continuation.prepare(api, document, binding, candidate, repository)
-        return {**proof, 'evidence_sha256': sha}
+        result = {**proof, 'evidence_sha256': sha}
+        if enrolled:
+            result['comparison'] = {'base_sha': binding['base_sha'], 'merge_target': binding['base_sha']}
+        return result
     receipts.require(set(document) == {'version', 'repository', 'pr', 'branch', 'base_sha',
                                        'source_commit', 'command_units'}
                      and document['version'] == 'native-python-continuation-v1'
@@ -84,6 +97,13 @@ def main(kind):
                      'Python selection changed after authentication')
     plan = receipts.bounded_json(raw)
     receipts.require(plan['source_commit'] == candidate, 'Python selection belongs to another source')
+    comparison = plan.get('comparison')
+    if comparison is not None:
+        receipts.require(set(comparison) == {'base_sha', 'merge_target'}
+                         and receipts.sha(comparison['base_sha']) == receipts.sha(comparison['merge_target']),
+                         'Python comparison input differs from exact current main')
+        os.environ['PLURX_VALIDATION_BASE'] = comparison['base_sha']
+        os.environ['PLURX_VALIDATION_MERGE_TARGET'] = comparison['merge_target']
     from validation.paperwork_continuation import marker
     import json
     identity = json.dumps(marker(plan, kind), sort_keys=True, separators=(',', ':'))

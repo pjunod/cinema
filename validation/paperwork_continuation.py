@@ -165,6 +165,7 @@ def prepare(api, value, environment, root, mode):
     r.require(document['version'] == main.MAIN_ANCESTOR_POLICY and document['source_commit'] == candidate,
               'Paperwork needs exact-source authenticated main-Python continuation')
     plan = main.prepare(api, document, bind, candidate, repository)
+    plan['comparison'] = {'base_sha': bind['base_sha'], 'merge_target': bind['base_sha']}
     inventory, retained, due = rule_inventory(plan, root)
     return bind, pull, plan, inventory, retained, due
 
@@ -181,7 +182,8 @@ def marker(plan, kind):
     return {'version': 1, 'kind': kind, 'source_commit': plan['source_commit'],
             'evidence_sha256': plan['evidence_sha256'],
             'inventory_sha256': canonical_digest(suite['inventory']),
-            'selected_sha256': canonical_digest(suite['uncovered'])}
+            'selected_sha256': canonical_digest(suite['uncovered']),
+            'comparison': plan.get('comparison')}
 
 
 def current_outcomes(raw, plan):
@@ -258,7 +260,7 @@ def final_coverage(api, value, environment, root):
     return coverage
 
 
-def check(environment, body, base, root, *, hook=False):
+def check(environment, body, base, root, *, hook=False, merge_target=None):
     """None preserves the ordinary full-rule path; explicit modes fail closed."""
     mode = environment.get('PLURX_PAPERWORK_CONTINUATION')
     if mode is None or (mode == 'preliminary' and not any(
@@ -272,7 +274,9 @@ def check(environment, body, base, root, *, hook=False):
         pull = api.get('/pulls/' + str(pr)); body = pull['body']
     value = enrollment(body)
     r.require(mode != 'publication' or value['pr'] == pr, 'Publication enrollment names another PR')
-    r.require(value['base'] == base, 'Paperwork merge target differs from enrollment')
+    r.require(value['base'] == base
+              and git(root, 'rev-parse', (merge_target or base) + '^{commit}') == base,
+              'Paperwork base or resolved merge target differs from enrollment')
     if mode == 'final':
         return {'complete': True, 'coverage': final_coverage(api, value, environment, root), 'body': body}
     bind, pull, _, inventory, retained, due = prepare(api, value, environment, root, mode)

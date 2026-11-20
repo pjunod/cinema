@@ -218,12 +218,14 @@ def verify(api, number, head, main, root, run_id):
               and worker_task[2] == 'pull_request', 'Worker proof execution identity differs')
     paperwork = record['source_gate_paperwork']
     from validation import paperwork_continuation as pc
-    paperwork_env = {**environment, 'GITHUB_RUN_ID': str(run_id)}
-    unit_coverage = pc.final_coverage(api, pc.enrollment(pull['body']), paperwork_env, root)
-    r.require(paperwork == {'version': 2, 'head': head, 'base': main, 'pr': number, 'passed': True,
+    expected_paperwork = {'version': 1, 'head': head, 'base': main, 'pr': number, 'passed': True,
               'body_sha256': retention.digest((pull.get('body') or '').encode()),
-              'title_sha256': retention.digest(semantic_pr_title(pull['title']).encode()),
-              'unit_coverage': unit_coverage},
+              'title_sha256': retention.digest(semantic_pr_title(pull['title']).encode())}
+    if any(line.startswith(pc.PREFIX) for line in (pull.get('body') or '').splitlines()):
+        paperwork_env = {**environment, 'GITHUB_RUN_ID': str(run_id)}
+        expected_paperwork.update(version=2, unit_coverage=pc.final_coverage(
+            api, pc.enrollment(pull['body']), paperwork_env, root))
+    r.require(paperwork == expected_paperwork,
               'Current PR paperwork/body/title evidence differs')
     environment.update(GITHUB_RUN_ID=str(run_id),
         GITHUB_WORKFLOW_REF=repo['full_name'] + '/.github/workflows/ci.yml@refs/heads/' + branch,
@@ -252,19 +254,24 @@ def paperwork():
     env = {**os.environ, 'GITHUB_EVENT_PATH': str(event.resolve()), 'PR_HEAD_SHA': binding['head_sha']}
     env.pop('PR_BODY', None)
     env.pop('PR_TITLE', None)
-    env['PLURX_PAPERWORK_CONTINUATION'] = 'final'
-    coverage_path = directory / 'unit-coverage.json'
-    env['PLURX_PAPERWORK_COVERAGE_OUTPUT'] = str(coverage_path.resolve())
+    from validation import paperwork_continuation as pc
+    enrolled = any(line.startswith(pc.PREFIX) for line in (pull.get('body') or '').splitlines())
+    env.pop('PLURX_PAPERWORK_CONTINUATION', None)
+    env.pop('PLURX_PAPERWORK_COVERAGE_OUTPUT', None)
+    if enrolled:
+        env['PLURX_PAPERWORK_CONTINUATION'] = 'final'
+        coverage_path = directory / 'unit-coverage.json'
+        env['PLURX_PAPERWORK_COVERAGE_OUTPUT'] = str(coverage_path.resolve())
     subprocess.run([sys.executable, 'scripts/paperwork', '--base', binding['base_sha'],
                     '--merge-target', binding['base_sha'], '--body-env'], env=env, check=True)
-    from validation import paperwork_continuation as pc
-    coverage = r.bounded_json(coverage_path.read_bytes())
-    pc.coverage_shape(coverage, binding, int(os.environ['GITHUB_RUN_ID']))
-    record = {'version': 2, 'head': binding['head_sha'], 'base': binding['base_sha'],
+    record = {'version': 1, 'head': binding['head_sha'], 'base': binding['base_sha'],
               'pr': binding['pull_request'], 'passed': True,
               'body_sha256': retention.digest((pull.get('body') or '').encode()),
-              'title_sha256': retention.digest(semantic_pr_title(pull['title']).encode()),
-              'unit_coverage': coverage}
+              'title_sha256': retention.digest(semantic_pr_title(pull['title']).encode())}
+    if enrolled:
+        coverage = r.bounded_json(coverage_path.read_bytes())
+        pc.coverage_shape(coverage, binding, int(os.environ['GITHUB_RUN_ID']))
+        record.update(version=2, unit_coverage=coverage)
     with open(os.environ['GITHUB_ENV'], 'a') as stream:
         print('PLURX_SOURCE_GATE_PAPERWORK=' + json.dumps(record, separators=(',', ':')), file=stream)
 

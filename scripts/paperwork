@@ -382,7 +382,8 @@ def main(argv: list[str] | None = None) -> int:
     title = pr_event.title() or ""
 
     from validation import paperwork_continuation
-    continuation = paperwork_continuation.check(os.environ, body, base, ROOT, hook=args.hook)
+    continuation = paperwork_continuation.check(os.environ, body, base, ROOT, hook=args.hook,
+                                                    merge_target=args.merge_target)
     if continuation is not None:
         body = continuation['body']
         if args.hook:

@@ -1,6 +1,7 @@
 """Paperwork adopts authentic method coverage and never credits deferred cases."""
 import copy
 import json
+import os
 import tempfile
 from pathlib import Path
 import unittest
@@ -23,7 +24,7 @@ class PaperworkContinuationTests(unittest.TestCase):
     def facts(self):
         repo = {'id': 1, 'full_name': 'owner/repo', 'owner': {'id': 3}}
         pull = {'number': 17, 'state': 'open', 'merged': False, 'draft': True,
-                'body': pc.PREFIX + json.dumps(self.value()),
+                'title': 'fix(ci): fixture', 'body': pc.PREFIX + json.dumps(self.value()),
                 'head': {'repo': repo, 'ref': 'codex/work', 'sha': 'd' * 40},
                 'base': {'repo': repo, 'ref': 'main', 'sha': 'b' * 40}}
         api = Mock()
@@ -131,6 +132,7 @@ class PaperworkContinuationTests(unittest.TestCase):
 
     def plan(self):
         return {'source_commit': 'a' * 40, 'evidence_sha256': 'c' * 64,
+                'comparison': {'base_sha': 'b' * 40, 'merge_target': 'b' * 40},
                 'suites': {kind: {'inventory': ['test_docs_index.Case.test_body'],
                                   'uncovered': ['test_docs_index.Case.test_body'],
                                   'retained_source_records': {}} for kind in ('validation', 'operations')}}
@@ -150,7 +152,7 @@ class PaperworkContinuationTests(unittest.TestCase):
                          {'validation:test_docs_index.Case.test_body', 'operations:test_docs_index.Case.test_body'})
         for changed in (raw.replace(b'... ok', b'... FAIL', 1), raw.replace(b'... ok', b'... skipped', 1),
                         raw.replace(b'Ran 1 test', b'Ran 2 tests', 1),
-                        raw.replace(b'c' * 64, b'd' * 64, 1), raw + raw,
+                        raw.replace(b'c' * 64, b'd' * 64, 1), raw.replace(b'b' * 40, b'e' * 40, 1), raw + raw,
                         raw.replace(b'test_body (test_docs_index.Case.test_body) ... ok\n', b'', 1)):
             with self.subTest(raw=changed), self.assertRaises(r.ReceiptError):
                 pc.current_outcomes(changed, plan)
@@ -195,9 +197,31 @@ class PaperworkContinuationTests(unittest.TestCase):
             with self.assertRaises(r.ReceiptError):
                 pc.rule_inventory(bad, root)
 
+    def test_unenrolled_manual_source_gate_preserves_full_paperwork_v1(self):
+        from validation import source_gate_landing as landing
+        api, pull = self.facts(); pull['head']['sha'] = 'a' * 40; pull['body'] = 'ordinary description'
+        api.get.return_value = pull; api.get.side_effect = None
+        with tempfile.TemporaryDirectory() as temporary:
+            previous = os.getcwd(); os.chdir(temporary)
+            try:
+                output = Path(temporary) / 'environment'
+                env = {'PROMOTION_BINDING': json.dumps(self.scope()), 'GITHUB_ENV': str(output),
+                       'GITHUB_RUN_ID': '9', 'PLURX_PAPERWORK_CONTINUATION': 'preliminary'}
+                with patch.dict(os.environ, env), patch.object(landing.retention, 'runner_api', return_value=api), \
+                        patch.object(landing.subprocess, 'run') as invoke:
+                    landing.paperwork()
+                child = invoke.call_args.kwargs['env']
+                self.assertNotIn('PLURX_PAPERWORK_CONTINUATION', child)
+                self.assertNotIn('PLURX_PAPERWORK_COVERAGE_OUTPUT', child)
+                record = json.loads(output.read_text().split('=', 1)[1])
+                self.assertEqual(record['version'], 1); self.assertNotIn('unit_coverage', record)
+            finally:
+                os.chdir(previous)
+
     def test_preliminary_retained_coverage_never_claims_deferred_methods_passed(self):
         api, pull = self.facts(); value = self.value(); body = pc.PREFIX + json.dumps(value)
         with patch.object(pc.retention, 'runner_api', return_value=api), \
+                patch.object(pc, 'git', return_value='b' * 40), \
                 patch.object(pc, 'prepare', return_value=(self.scope(), pull, {}, {'old', 'new'}, {'old'}, {'new'})):
             result = pc.check({'PLURX_PAPERWORK_CONTINUATION': 'preliminary'}, body, 'b' * 40, '.')
         self.assertFalse(result['complete']); self.assertEqual(result['retained'], 1)
