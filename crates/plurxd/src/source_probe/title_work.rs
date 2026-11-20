@@ -559,16 +559,17 @@ async fn eligible_file(
             file.size,
             file.mtime,
         );
-        if demand.playback_requested && pending.is_empty() {
-            return Ok(None);
-        }
-        if !pending.is_empty()
-            && !pending.iter().any(|request| {
+        // Playback can only satisfy its exact attached recipe. Maintenance
+        // may measure this node's native recipe while foreign requests wait.
+        if demand.playback_requested {
+            let exact = pending.iter().any(|request| {
                 Some(request.backend_identity.as_str()) == fel_backend
-                    && (!demand.playback_requested
-                        || demand.playback_recipes.contains(&request.identity))
-            })
-        {
+                    && demand.playback_recipes.contains(&request.identity)
+            });
+            if !exact {
+                return Ok(None);
+            }
+        } else if fel_backend.is_none() && !pending.is_empty() {
             return Ok(None);
         }
     }
