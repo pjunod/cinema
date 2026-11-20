@@ -1,3 +1,8 @@
+# Leaf MediaProbe reclaim binds the reporter and a single selected work item
+# to the same admitted keeper through cooperative cancellation and joined I/O.
+# The extra command shape selects the existing reaped reporter path. The
+# fixture polls that original claim under foreground pressure.
+
 # Current-main integration source audit (2026-11-19).
 # Counts reflect the resolved source, including both parents' retained test
 # fixtures and the relocated strict parser/VOD engine. Original heartbeat,
@@ -6862,7 +6867,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Union at 0d501cae6: 349 + 13 + 3 = 365, less those 3 counted twice = 362; the spool
 # registration test adds one isolated test image: 363.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 380
+expected_occurrences = 381
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

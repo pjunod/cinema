@@ -70,7 +70,8 @@ use plurx_core::{
     error::{ProbeError, StoreError},
     scan::probe,
     store::background_jobs::{
-        CandidateCursor, CandidateQuery, ClaimJob, JobKind, JobPayload, JobSettlement,
+        CandidateCursor, CandidatePage, CandidateQuery, ClaimJob, JobKind, JobPayload,
+        JobSettlement,
     },
 };
 use std::{path::Path, sync::Arc, time::Duration};
@@ -308,11 +309,53 @@ async fn pass(
         *cursor = page.next;
         return Ok(false);
     }
-    let Some(admission) = state.transcode.admit_fragment().await else {
+    #[cfg(target_os = "linux")]
+    let admission = state.transcode.admit_leaf_media_probe().await;
+    #[cfg(not(target_os = "linux"))]
+    let admission = state.transcode.admit_fragment().await;
+    let Some(admission) = admission.map(Arc::new) else {
         return Ok(false); // Keep the incoming cursor on physical contention.
     };
-    let admission = Arc::new(admission);
-    // Reporter discovery may spawn a child, so it remains physically admitted.
+
+    #[cfg(target_os = "linux")]
+    {
+        let Some(original) =
+            crate::state::OriginalDisposableSourceRead::register(Arc::clone(&admission))
+        else {
+            return Ok(false);
+        };
+        let cancel = original.cancellation();
+        let pass = original.run(plurx_core::process::bounded::cancellable(
+            cancel.clone(),
+            run_admitted_probe_pass(state, boot, cursor, &cancel, authority, page, admission),
+        ));
+        tokio::pin!(pass);
+        tokio::select! {
+            biased;
+            _ = shutdown.run_until_cancelled(state.transcode.playback_qualification_requested()) => {
+                cancel.cancel();
+                pass.await
+            }
+            result = &mut pass => result,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    run_admitted_probe_pass(state, boot, cursor, shutdown, authority, page, admission).await
+}
+
+async fn run_admitted_probe_pass(
+    state: &AppState,
+    boot: &str,
+    cursor: &mut Option<CandidateCursor>,
+    shutdown: &CancellationToken,
+    authority: Arc<dyn plurx_core::cluster::coordination::ClusterJobAuthority>,
+    page: CandidatePage,
+    admission: Arc<crate::transcode::FragmentAdmission>,
+) -> Result<bool, StoreError> {
+    if shutdown.is_cancelled() || !state.transcode.fragment_worker_idle(&admission) {
+        return Ok(false);
+    }
+    // Reporter discovery may spawn a child, so it stays in the original read scope.
     let Some(pipeline) = probe::pipeline_digest().await else {
         return Ok(false);
     };
@@ -320,6 +363,10 @@ async fn pass(
     let mut work = Vec::with_capacity(limit);
     let mut interrupted = false;
     for candidate in page.jobs {
+        if shutdown.is_cancelled() {
+            interrupted = true;
+            break;
+        }
         let Ok(payload @ JobPayload::MediaProbe { .. }) = candidate.supported_payload() else {
             continue;
         };
@@ -345,6 +392,10 @@ async fn pass(
                 break;
             }
         };
+        if shutdown.is_cancelled() {
+            interrupted = true;
+            break;
+        }
         if file.size != source_size
             || file.mtime != source_mtime
             || snapshot(&file.path).await != Some((source_size, source_mtime))
@@ -354,6 +405,7 @@ async fn pass(
         if shutdown.is_cancelled()
             || !state.transcode.fragment_worker_idle(&admission)
             || !authority.may_execute_job(JobKind::MediaProbe).await
+            || shutdown.is_cancelled()
         {
             interrupted = true;
             break;
@@ -454,14 +506,18 @@ async fn execute(
             .jobs
             .start_probe_progress(token, file.id, file.size.max(0) as u64)
     });
-    let source_version = crate::fragment_index_cluster::inspect_source(&file)
-        .await
-        .ok();
+    let source_version = if shutdown.is_cancelled() {
+        None
+    } else {
+        crate::fragment_index_cluster::inspect_source(&file)
+            .await
+            .ok()
+    };
     let probe_digest = match &payload {
         JobPayload::MediaProbe { probe_digest, .. } => probe_digest,
         _ => unreachable!(),
     };
-    let result = run_source_admitted_probe(
+    let work = run_source_admitted_probe(
         &state.transcode,
         &admission,
         &cancel,
@@ -477,6 +533,12 @@ async fn execute(
                 && probe::pipeline_digest().await.as_ref() == Some(probe_digest)
         },
         async {
+            plurx_core::process::bounded::check_cancellation().map_err(|error| {
+                ProbeError::Transient {
+                    path: file.path.display().to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
             let input =
                 crate::source_input::SourceInput::open_background(&file, fence.source_budget())
                     .await
@@ -541,17 +603,29 @@ async fn execute(
                 .map(str::to_lowercase);
             Ok(result)
         },
-    )
-    .await;
-    // Bounded process cancellation kills and reaps before returning above.
+    );
+    #[cfg(target_os = "linux")]
+    let result = {
+        tokio::pin!(work);
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => {
+                cancel.cancel();
+                work.await
+            }
+            result = &mut work => result,
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let result = work.await;
+    // The original child and source bridge have settled before publication or yield.
+    let source_current = !cancel.is_cancelled()
+        && !shutdown.is_cancelled()
+        && snapshot(&file.path).await == Some((source_size, source_mtime));
     let mut published = false;
     let settlement = if cancel.is_cancelled() || shutdown.is_cancelled() {
-        Some(JobSettlement::Yield {
-            error_code: Some("worker_interrupted".into()),
-            not_before_ms: now_ms().saturating_add(5000),
-            checkpoint: None,
-        })
-    } else if snapshot(&file.path).await != Some((source_size, source_mtime)) {
+        None
+    } else if !source_current {
         Some(JobSettlement::Stop {
             error_code: "probe_source_changed".into(),
         })
@@ -612,6 +686,15 @@ async fn execute(
                 })
             }
         }
+    };
+    let settlement = if !published && (cancel.is_cancelled() || shutdown.is_cancelled()) {
+        Some(JobSettlement::Yield {
+            error_code: Some("worker_interrupted".into()),
+            not_before_ms: now_ms().saturating_add(5000),
+            checkpoint: None,
+        })
+    } else {
+        settlement
     };
     if let Some(settlement) = settlement {
         if let Err(error) = fence.settle(settlement).await {
@@ -699,7 +782,8 @@ where
             fence.source_budget().invalidate_grant();
             control.request_pause();
         }
-        let keeper: Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper> = admission.clone();
+        let keeper =
+            plurx_core::process::bounded::original_keeper().unwrap_or_else(|| admission.clone());
         let work = plurx_core::process::bounded::with_original_work_keeper(
             keeper,
             plurx_core::process::bounded::pausable(
@@ -1287,7 +1371,38 @@ mod tests {
             .expect("second page");
         assert!(expected.next.is_some(), "tested page is nonfinal");
         let before = serde_json::to_value(&cursor).expect("cursor");
+        #[cfg(not(target_os = "linux"))]
         let admission = state.transcode.admit_fragment().await.expect("busy slot");
+        #[cfg(target_os = "linux")]
+        let admission = {
+            state
+                .store
+                .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "8")
+                .await
+                .expect("larger software pool");
+            let admission = Arc::new(
+                state
+                    .transcode
+                    .admit_leaf_media_probe()
+                    .await
+                    .expect("idle leaf probe"),
+            );
+            let original = crate::state::OriginalDisposableSourceRead::register(admission)
+                .expect("original leaf");
+            let (pool, heavy) = state.transcode.original_legacy_drain_counts();
+            assert_eq!(pool.software_used, 1);
+            assert!(heavy);
+            let permits = state.transcode.admissions();
+            let live = permits.wait_for_capacity();
+            assert!(matches!(
+                live.request_disposable_background_yield(),
+                crate::admission::BackgroundYield::Requested
+            ));
+            assert!(original.cancellation().is_cancelled());
+            drop(live);
+            assert!(state.transcode.original_legacy_drain_counts().1);
+            original
+        };
         assert!(
             !pass(&state, "boot", &mut cursor, &CancellationToken::new())
                 .await
@@ -1310,7 +1425,23 @@ mod tests {
             .await
             .expect("resume");
         assert_eq!(resumed.jobs[0].id, expected.jobs[0].id);
+        #[cfg(not(target_os = "linux"))]
         assert!(state.transcode.admit_fragment().await.is_some());
+        #[cfg(target_os = "linux")]
+        {
+            state
+                .store
+                .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "0")
+                .await
+                .expect("administrator zero software pool");
+            assert_eq!(state.transcode.software_budget().await, 0);
+            let fallback = state
+                .transcode
+                .admit_leaf_media_probe()
+                .await
+                .expect("idle single-job fallback preserved");
+            assert_eq!(fallback.claimed(), (0, 1));
+        }
     }
 
     #[tokio::test]

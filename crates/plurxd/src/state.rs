@@ -2645,18 +2645,34 @@ fn measured_index_budget_secs(
     )
 }
 
-struct OriginalDisposableSourceRead {
+pub(crate) struct OriginalDisposableSourceRead {
     admission: Arc<crate::transcode::FragmentAdmission>,
     pressure: Arc<crate::admission::DisposableBackground>,
 }
 
 impl OriginalDisposableSourceRead {
-    fn register(admission: Arc<crate::transcode::FragmentAdmission>) -> Option<Arc<Self>> {
+    pub(crate) fn register(
+        admission: Arc<crate::transcode::FragmentAdmission>,
+    ) -> Option<Arc<Self>> {
         let pressure = admission.register_disposable_background()?;
         Some(Arc::new(Self {
             admission,
             pressure,
         }))
+    }
+
+    pub(crate) fn cancellation(&self) -> CancellationToken {
+        self.pressure.cancel.clone()
+    }
+
+    /// The caller must join its original source and children before returning.
+    /// An abandoned scope retains its exact admissions as unknown.
+    pub(crate) async fn run<T>(self: Arc<Self>, work: impl std::future::Future<Output = T>) -> T {
+        let keeper: Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper> = self;
+        let mut close = OriginalSourceReadClose(Some(Arc::clone(&keeper)));
+        let result = plurx_core::process::bounded::with_original_work_keeper(keeper, work).await;
+        close.0 = None;
+        result
     }
 }
 
@@ -2711,10 +2727,8 @@ pub(crate) async fn local_index_until_foreground<T>(
     build: impl std::future::Future<Output = T>,
 ) -> Option<T> {
     let original = OriginalDisposableSourceRead::register(Arc::clone(admission))?;
-    let cancel = original.pressure.cancel.clone();
-    let keeper: Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper> = original;
-    let mut close = OriginalSourceReadClose(Some(Arc::clone(&keeper)));
-    let build = plurx_core::process::bounded::with_original_work_keeper(keeper, build);
+    let cancel = original.cancellation();
+    let build = original.run(build);
     #[cfg(target_os = "linux")]
     let build = plurx_core::process::bounded::pausable(
         plurx_core::process::bounded::SourcePauseController::new(Duration::ZERO),
@@ -2725,7 +2739,7 @@ pub(crate) async fn local_index_until_foreground<T>(
     // child wait, source bridge closure and joined DV companion cleanup.
     let build = plurx_core::process::bounded::cancellable(cancel.clone(), build);
     tokio::pin!(build);
-    let result = tokio::select! {
+    tokio::select! {
         biased;
         () = cancel.cancelled() => {
             let _ = build.await;
@@ -2741,9 +2755,7 @@ pub(crate) async fn local_index_until_foreground<T>(
             None
         },
         result = &mut build => Some(result),
-    };
-    close.0 = None;
-    result
+    }
 }
 
 /// Stable, wrapping order for one bounded pass. The cursor is the last file a

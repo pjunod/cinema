@@ -235,6 +235,25 @@ fn executable_version(bin: &str) -> String {
 /// so it is bounded exactly like every other capability probe this server
 /// spawns: a deadline, a read bound, and a child that dies with its future.
 async fn probe_reporter_identity(bin: &str) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    if crate::process::bounded::original_keeper()
+        .is_some_and(|keeper| keeper.requires_group_quiescence())
+    {
+        let mut command = tokio::process::Command::new(bin);
+        command.arg("-version");
+        // Reporter identity must use the same executable environment as its
+        // existing caller. The original admitted scope owns the complete group.
+        let output = crate::process::bounded::output_command_inherited_env(
+            &mut command,
+            REPORTER_PROBE_TIMEOUT,
+            REPORTER_PROBE_MAX_BYTES as usize,
+            crate::process::ChildWork::background("ffprobe version check"),
+        )
+        .await
+        .ok()?;
+        return reporter_name(std::str::from_utf8(&output.stdout).ok()?);
+    }
+
     use tokio::io::AsyncReadExt;
     let mut command = tokio::process::Command::new(bin);
     command
@@ -262,6 +281,10 @@ async fn probe_reporter_identity(bin: &str) -> Option<String> {
     let _ = child.start_kill();
     let _ = tokio::time::timeout(REPORTER_PROBE_TIMEOUT, child.wait()).await;
     read.ok()?.ok()?;
+    reporter_name(&text)
+}
+
+fn reporter_name(text: &str) -> Option<String> {
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
     Some(line.chars().take(REPORTER_MAX_CHARS).collect::<String>())
 }

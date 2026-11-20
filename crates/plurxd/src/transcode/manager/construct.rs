@@ -1468,6 +1468,13 @@ impl TranscodeManager {
             .await
     }
 
+    /// The queued leaf probe runs one reporter or one single-threaded
+    /// media inspection at a time, under the idle-only source-work lane.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn admit_leaf_media_probe(&self) -> Option<FragmentAdmission> {
+        self.admit_source_work(1).await
+    }
+
     /// The standalone subtitle pass probes and decodes with one configured
     /// codec thread. The same heavy lane and idle policy still cover its
     /// wider source, parser, and native costs.
