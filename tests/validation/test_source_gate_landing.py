@@ -54,9 +54,17 @@ class SourceGateLandingTests(unittest.TestCase):
                 source.completion_census(proof, {**completion, field: value}, listing, config, 'd' * 64)
 
     def test_source_completion_requires_explicit_authenticated_retirement_field(self):
+        proof = {'candidate': 'a' * 40, 'base': 'b' * 40, 'run': 9, 'digest': 'c' * 64,
+                 'selection_projection': {}, 'selected': [], 'retained_ids': [], 'retired_ids': {}}
+        completion = dict(version=source.nextest.POLICY, kind='selected-pr-rust-source-gate',
+            candidate=proof['candidate'], base=proof['base'], source_run=9, enrollment_digest=proof['digest'],
+            selection_projection={}, selected=[], retained=[], executed=[], current_listing_sha256='d' * 64,
+            current_universe=[], historical_retired_passes={}, complete=True)
         with patch.object(source.nextest, 'current_census', return_value=(set(), set(), set())):
+            source.completion_census(proof, completion, {}, None, 'd' * 64)
+            del completion['historical_retired_passes']
             with self.assertRaisesRegex(r.ReceiptError, 'Unknown source-gate completion fields'):
-                source.completion_census({}, {}, {}, None, 'd' * 64)
+                source.completion_census(proof, completion, {}, None, 'd' * 64)
 
     def test_wrong_owner_attempt_or_missing_job_is_not_qualified(self):
         job = dict(name='Main promotion gate', id=20, run_id=10, repo_id=1, owner_id=3, attempt=1)
