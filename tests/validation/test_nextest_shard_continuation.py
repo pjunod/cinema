@@ -12,6 +12,33 @@ from validation import qualification
 
 
 class NextestShardContinuationTests(unittest.TestCase):
+    def test_native_empty_domain_requires_exact_reviewed_source_and_complete_current_additions(self):
+        path = next(iter(proof.REVIEWED_NATIVE_FEL_EMPTY))
+        before, after = b'old native source', b'new native source'
+        witness = {'affected': [], 'compile_only': {'kind': 'reviewed-native-fel-domain',
+                   'new_ids': proof.NATIVE_FEL_CURRENT_ADDITIONS}}
+        pair = (proof.retention.digest(before), proof.retention.digest(after))
+        with patch.dict(proof.REVIEWED_NATIVE_FEL_EMPTY, {path: pair}):
+            proof.compile_only_native_fel(path, witness, before, after, set())
+            for selected_path, row, changed in (
+                    ('unreviewed.rs', witness, after),
+                    (path, witness, after + b'changed'),
+                    (path, {**witness, 'affected': ['unrelated old case']}, after),
+                    (path, {**witness, 'compile_only': {'kind': 'reviewed-native-fel-domain', 'new_ids': []}}, after)):
+                with self.subTest(path=selected_path, row=row), self.assertRaises(r.ReceiptError):
+                    proof.compile_only_native_fel(selected_path, row, before, changed, set())
+
+    def test_native_empty_domain_cannot_relabel_old_cases_as_new_current_obligations(self):
+        path = next(iter(proof.REVIEWED_NATIVE_FEL_EMPTY))
+        before, after = b'old native source', b'new native source'
+        witness = {'affected': [], 'compile_only': {'kind': 'reviewed-native-fel-domain',
+                   'new_ids': proof.NATIVE_FEL_CURRENT_ADDITIONS}}
+        pair = (proof.retention.digest(before), proof.retention.digest(after))
+        with patch.dict(proof.REVIEWED_NATIVE_FEL_EMPTY, {path: pair}):
+            with self.assertRaises(r.ReceiptError):
+                proof.compile_only_native_fel(path, witness, before, after,
+                                               {proof.NATIVE_FEL_CURRENT_ADDITIONS[0]})
+
     def test_new_only_source_requires_closed_bytes_names_and_empty_old_impact(self):
         path = next(iter(proof.REVIEWED_TEST_ADDITIONS))
         ids = proof.REVIEWED_TEST_ADDITIONS[path][2]

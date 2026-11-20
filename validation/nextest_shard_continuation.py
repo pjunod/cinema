@@ -300,6 +300,62 @@ REVIEWED_TEST_ADDITIONS = {'crates/plurx-core/tests/store_contract/dv_title_jobs
                                                    ['plurxd::bin/plurxd '
                                                     'transcode::tests::pending_fel_head_only_defers_the_first_playable_snapshot'])}
 
+
+# Independent source-domain review: no original selected body reaches these
+# new native-FEL branches. Exact bytes close the scope; new cases remain due.
+REVIEWED_NATIVE_FEL_EMPTY = {'crates/plurxd/src/copyseg.rs': ('a0b804b7bdc425920e9eb1dbd7513436a66c4b9782c7bc56004d9e72149efd32',
+                                  '63c528924ef200b9d8a713f5c3b87181cc960c6c8d6dfa988a6ead7dac91ef16'),
+ 'crates/plurxd/src/dv_runtime.rs': ('fe044d8501cc2b914efc38e4fd5258ed6388540c9faba0a1cb77f796900320cc',
+                                     'efcb84a9e6c24e6272f89675d652b5c547119d0478d50c72a5332e67db8a31b0'),
+ 'crates/plurxd/src/http/hls/preparation.rs': ('bd13aa74afef1b5bafdd0e8f59b9deb7eb19477d7dc8f486295c89af26da30ac',
+                                               'b9c1a1ca020674a99bf57ce87f789a7dfea6126d5a274a49fd923bbb582dc0f2'),
+ 'crates/plurxd/src/http/hls/processed_upgrade.rs': ('f38da86d8fa5e3016dccf8328925f769062c5f6f83761cb7715f81d4eee57507',
+                                                     'e70eb713b507365a5084d3490ec6e2b6c41517b84c4c4f9428600a80eb08f553'),
+ 'crates/plurxd/src/transcode/manager/publication.rs': ('06129e18d5c55e0a2876a0cb2cd9bfcab8e3ebc4725052fb28f7ae50d51d6509',
+                                                        '2f70ab1e324eedda8ffcfa68a94d2c356d13827a7541084169bafbd5e5deeba0'),
+ 'crates/plurxd/src/transcode/manager/start.rs': ('0ca9229fe85db24ce05c0cfede2919b1f0613fa97b668c2eaa85c2be4820afa8',
+                                                  '9d5c2895b9fdaf1879afd7d8d4bbbc0275b55a781f4f78bb882717b9751d6c05'),
+ 'crates/plurxd/src/transcode/producer/prepublication_executor.rs': ('d9908acc06e2d99dda60c7beb9f1f68ddf268b7551612a52b94148eb820c5c35',
+                                                                     '12608d59f6bb8a88c5052e87e292c342f7fbf4ea3f582db7003306357e5a2937'),
+ 'crates/plurxd/src/transcode/rolling/retention.rs': ('3319d4ce21002613774a3d0344dabc3908ca5e914a84fe94f798fd1792627ba1',
+                                                      'e07aaae8857271dfd69d44483670c454849b3b49b45b442d8d8883bc48ca206e'),
+ 'crates/plurxd/src/transcode/rolling/session.rs': ('3ebaef95422f3499106a2de248a90f85e87d7b75b4764b369ec27d479b82ad00',
+                                                    '62b2d2a085afb011a66a03eda00956fbb821370f4669e8af759aa09e56f09580')}
+NATIVE_FEL_CURRENT_ADDITIONS = ['plurx-core segplan::tests::reordered_repeated_copy_lands_on_the_measured_rap_presentation_time',
+ 'plurx-core segplan::tests::the_landing_clock_preserves_fractional_index_ticks',
+ 'plurx-core '
+ 'store::fragindex::tests::ordinary_copy_composition_offsets_round_trip_and_require_every_row',
+ 'plurx-core '
+ 'store::fragment_index_cluster::tests::cluster_copy_composition_offsets_round_trip_and_bind_v3_identity',
+ 'plurx-core::store_contract '
+ 'dv_title_jobs::fel_head_rebuild_reopens_exact_settled_title_without_remeasurement',
+ 'plurxd::bin/plurxd copyseg::tests::prepared_fel_defers_first_snapshot_once_and_falls_back',
+ 'plurxd::bin/plurxd '
+ 'copyseg::tests::prepared_native_fel_keeps_the_single_session_when_split_activation_fails',
+ 'plurxd::bin/plurxd '
+ 'source_probe::fel_qualification::tests::foreign_pending_recipe_does_not_block_current_background_qualification',
+ 'plurxd::bin/plurxd '
+ 'transcode::manager_create::processed_reuse_tests::native_fel_window_requires_reaped_success_and_keeps_verified_evidence',
+ 'plurxd::bin/plurxd '
+ 'transcode::manager_create::processed_reuse_tests::prepared_fel_batch_is_bound_to_first_snapshot_and_attempt',
+ 'plurxd::bin/plurxd '
+ 'transcode::manager_create::retained_recovery_tests::clustered_initial_vod_start_primes_a_cold_native_fel_head',
+ 'plurxd::bin/plurxd '
+ 'transcode::manager_create::retained_recovery_tests::ready_native_fel_admission_is_limited_to_the_original_auto_copy',
+ 'plurxd::bin/plurxd '
+ 'transcode::manager_start::prepared_native_fel_requires_the_full_startup_scratch_grant',
+ 'plurxd::bin/plurxd transcode::tests::pending_fel_head_only_defers_the_first_playable_snapshot']
+
+def compile_only_native_fel(path, witness, before, after, universe):
+    pair = REVIEWED_NATIVE_FEL_EMPTY.get(path)
+    r.require(pair is not None and not witness['affected']
+              and witness['compile_only'] == {'kind': 'reviewed-native-fel-domain',
+                                            'new_ids': NATIVE_FEL_CURRENT_ADDITIONS}
+              and (retention.digest(before), retention.digest(after)) == pair
+              and not set(NATIVE_FEL_CURRENT_ADDITIONS) & universe,
+              'Unreviewed native FEL empty historical source domain')
+
+
 DEFAULT_NONE_TARGET_PATH = 'crates/plurxd/src/source_probe/title_work_tests.rs'
 DEFAULT_NONE_TARGET_PAIR = ('31941684250ecddad9e46c29d7f4394723a45c896692870b6d0d5fd985ca18ee',
                             'f4953d7e3de3aa4ab6adcf9d16c36e0f3283500afecec5b36e5e17acd1bf4409')
@@ -381,6 +437,8 @@ def reviewed_changes(record, candidate, universe):
         if 'compile_only' in witness:
             if witness['compile_only'].get('kind') == 'ignored-test-only':
                 compile_only_ignored(path, witness, before, after, universe, prior=prior, run=record['run'])
+            elif witness['compile_only'].get('kind') == 'reviewed-native-fel-domain':
+                compile_only_native_fel(path, witness, before, after, universe)
             elif witness['compile_only'].get('kind') in {'reviewed-test-additions', 'default-none-title-target'}:
                 compile_only_test_additions(path, witness, before, after, universe)
             else:
