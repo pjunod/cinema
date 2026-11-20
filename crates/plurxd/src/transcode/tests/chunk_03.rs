@@ -971,6 +971,132 @@
         assert!(session.publication.lock().await.served.is_none());
     }
 
+    #[tokio::test]
+    async fn rolling_unpaced_bootstrap_requires_fresh_verified_media_for_early_capacity_refusal() {
+        use plurx_core::resource_observation::{WorkPhase, SERVICE_SAMPLE_MAX_AGE};
+
+        let directory = crate::test_tempdir().expect("verified startup inventory");
+        let mut session = test_session(directory.path().to_path_buf());
+        let (control, mut executor) =
+            crate::playback_control::RollingControlHandle::spawn_prepublication_transcode_for_test(
+                "verified-startup-rate",
+            );
+        executor.register().await.expect("original executor");
+        let attempt = control
+            .begin_initial_producer_attempt(crate::playback_control::InitialProducerPolicy::software(
+                "verified-startup-contract".into(),
+                PROGRESS_STALL,
+            ))
+            .await
+            .expect("original producer attempt");
+        session.control = control;
+        session.reset_compatibility_delivery(attempt).await;
+        session.start_seconds = 10.0;
+        session.readrate = 0.0;
+        session
+            .publication
+            .lock()
+            .await
+            .bind_startup_candidate_for_test(RollingStartupPolicy::Conservative);
+
+        const BUDGET: i64 = 1 << 20;
+        let ledger = crate::scratch_ledger::ScratchLedger::new();
+        let permit = ledger.reserve(BUDGET, BUDGET).expect("paid writer");
+        let grants =
+            crate::copyseg::WriteGrants::new(ledger, permit.key(), Arc::new(AtomicI64::new(BUDGET)), 0);
+        let sink = crate::scratch_put::PutSink::bind(directory.path().to_path_buf(), Some(grants))
+            .expect("original PutSink writer");
+        let base = sink.base_url(0);
+        session.upload = Some(sink);
+        session.scratch = Some(permit);
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .expect("fixture client");
+        for index in 0..24 {
+            client
+                .put(format!("{base}/seg{index:05}.ts"))
+                .body("committed segment")
+                .send()
+                .await
+                .expect("actual media PUT")
+                .error_for_status()
+                .expect("accepted media PUT");
+        }
+        client
+            .put(format!("{base}/index.m3u8"))
+            .body(rolling_playlist(&[2.0; 24], false))
+            .send()
+            .await
+            .expect("actual playlist PUT")
+            .error_for_status()
+            .expect("accepted playlist PUT");
+
+        session.progress.recent_milli.store(500, Relaxed);
+        session
+            .publication_cycle("verified-startup-rate")
+            .await
+            .expect("raw deficit without a verified rate is insufficient evidence");
+        assert!(session.publication.lock().await.served.is_none());
+        let verified = session.segments.lock().await.clone();
+        assert_eq!(verified.segs.len(), 24);
+        assert!(verified.segs.iter().all(|segment| segment.bytes > 0));
+
+        // Replay current owner's verified prefix at separable sample instants.
+        // The final accepted sample includes the whole original writer inventory.
+        session.progress.begin_fenced_attempt(attempt);
+        let flow = session
+            .progress
+            .rolling_flow_revision(attempt)
+            .expect("original flow");
+        let sample_at = Instant::now();
+        for (seconds_ago, trim) in [(7, 2), (4, 1), (1, 0)] {
+            let mut prefix = verified.clone();
+            prefix.segs.truncate(verified.segs.len() - trim);
+            session.progress.note_rolling_segments(
+                attempt,
+                flow,
+                &prefix,
+                false,
+                false,
+                sample_at - Duration::from_secs(seconds_ago),
+            );
+        }
+
+        session.progress.recent_milli.store(1_200, Relaxed);
+        session
+            .publication_cycle("verified-startup-rate")
+            .await
+            .expect("delayed completed-media cadence alone cannot add a refusal");
+        session.progress.recent_milli.store(500, Relaxed);
+        let refusal = session
+            .publication_cycle("verified-startup-rate")
+            .await
+            .expect_err("both current rates are below the existing startup margin");
+        assert!(refusal.starts_with("rolling_insufficient_capacity:"));
+        assert!(refusal.contains("0.666x"), "{refusal}");
+
+        session
+            .publication_cycle_at("verified-startup-rate", sample_at + SERVICE_SAMPLE_MAX_AGE)
+            .await
+            .expect("the original sample has aged out");
+        session
+            .progress
+            .note_rolling_flow(attempt, Some(WorkPhase::Paused), Instant::now());
+        session
+            .publication_cycle("verified-startup-rate")
+            .await
+            .expect("held phase never corroborates the raw deficit");
+        assert!(session.publication.lock().await.served.is_none());
+        session
+            .upload
+            .as_ref()
+            .expect("original writer")
+            .drain()
+            .await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn rolling_web_low_reserve_keeps_all_completed_media_for_thirty_minutes() {
         let directory = crate::test_tempdir().expect("low reserve continuity");

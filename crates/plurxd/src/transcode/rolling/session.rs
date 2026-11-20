@@ -1135,21 +1135,33 @@ impl Session {
                     clock.hard_deadline.is_some_and(|deadline| now >= deadline)
                         && end_ms <= served.end_ms
                 });
-            let insufficient = !end_list
-                && rolling_insufficient_capacity(playback_rate, producer_speed)
-                && match clock.served.as_ref() {
-                    // Before the first snapshot there is no deadline to
-                    // restart, and a held producer's recent speed is the last
-                    // one it measured before the stop, not a capacity reading.
-                    // Capacity becomes measurable at the fixed initial runway,
-                    // independently of the publication frontier advancing with
-                    // elapsed time. Clearing a hold must not defer rejection.
-                    None => !held_for_scratch && end_ms >= rolling_initial_runway_ms(playback_rate),
-                    Some(served) => {
-                        clock.hard_deadline.is_some_and(|deadline| now >= deadline)
-                            && end_ms <= served.end_ms
+            let insufficient = producer_speed
+                .filter(|speed| {
+                    !end_list && rolling_insufficient_capacity(playback_rate, Some(*speed))
+                })
+                .and_then(|speed| match clock.served.as_ref() {
+                    None if !held_for_scratch
+                        && end_ms >= rolling_initial_runway_ms(playback_rate) =>
+                    {
+                        // Keep the existing startup runway and raw deficit predicate.
+                        // An unpaced owned encoder also owes verified media evidence
+                        // before an in-flight progress estimate can reject startup.
+                        if self.readrate == 0.0 && self.observes_rolling_encoder() {
+                            self.verified_unpaced_startup_speed(
+                                producer_attempt,
+                                lease.as_ref(),
+                                now,
+                            )
+                            .filter(|speed| {
+                                rolling_insufficient_capacity(playback_rate, Some(*speed))
+                            })
+                        } else {
+                            Some(speed)
+                        }
                     }
-                };
+                    Some(_) if expired => Some(speed),
+                    _ => None,
+                });
             (
                 publish,
                 expired,
@@ -1158,10 +1170,9 @@ impl Session {
                 budget,
             )
         };
-        if insufficient {
+        if let Some(speed) = insufficient {
             return Err(format!(
-                "rolling_insufficient_capacity: playback rate {playback_rate:.2}x requires at least {playback_rate:.2}x production; measured {}x",
-                producer_speed.unwrap_or(0.0)
+                "rolling_insufficient_capacity: playback rate {playback_rate:.2}x requires at least {playback_rate:.2}x production; measured {speed}x"
             ));
         }
         if expired {
@@ -2635,6 +2646,52 @@ impl Session {
 
     pub(super) fn observes_rolling_encoder(&self) -> bool {
         self.method == crate::delivery::Method::Transcode && !self.cached && self.upload.is_some()
+    }
+
+    fn verified_unpaced_startup_speed(
+        &self,
+        producer_attempt: u64,
+        lease: Option<&crate::playback_control::RollingLeaseSnapshot>,
+        now: Instant,
+    ) -> Option<f64> {
+        use plurx_core::process::observation::Metric;
+        use plurx_core::resource_observation::{ServiceUnit, WorkPhase};
+
+        let lease = lease?;
+        if lease.retired
+            || lease.terminal.is_some()
+            || lease.delivery.producer_attempt != producer_attempt
+            || lease.delivery.producer_exit.is_some()
+            || lease.delivery.published_segment.is_some()
+            || lease.delivery.first_media_committed_at.is_some()
+            || lease.producer_control.producer_media_published
+        {
+            return None;
+        }
+
+        // The publication clock is already held. Do not wait behind the
+        // inverse lock order used by replacement and response publication.
+        let _transition = self.child_transition.try_lock().ok()?;
+        if self.control.is_retired()
+            || self.replacing_child.load(Acquire)
+            || self.suspended.load(Acquire)
+            || self.playlist_published.load(Acquire)
+            || self.control.current_producer_attempt() != producer_attempt
+            || self.compatibility_producer_attempt() != producer_attempt
+        {
+            return None;
+        }
+
+        // The refresh can have committed a sample after the cycle began.
+        let service = self
+            .progress
+            .rolling_resource_service(producer_attempt, now.max(Instant::now()))?;
+        match (service.phase, service.unit, service.units_per_second) {
+            (WorkPhase::Producing, ServiceUnit::MediaMilliseconds, Metric::Known(rate)) => {
+                Some(rate as f64 / 1_000.0)
+            }
+            _ => None,
+        }
     }
 
     async fn refresh_segments_inner(&self) {

@@ -883,7 +883,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # allowance and retained CPU reservation; it creates no new timer or owner.
 # PR1341 (quorum gaps): +1 test-only, chunk_06.rs, where an M5 init-wait
 # test names the stall budget it must finish well inside; no new stall owner.
-expected_occurrences = 14
+expected_occurrences = 15
 kind = "recovery_timer"
 replacement = "the sole actor-owned rolling producer progress budget before and after first media"
 
@@ -919,7 +919,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # S10 rolling retained attachment: one false initializer, not a replacement election.
 # The native FEL publisher reads the mask under the existing transition lock
 # before selecting an unpublished video object.
-expected_occurrences = 39
+expected_occurrences = 40
 kind = "recovery_election"
 replacement = "retained process-replacement serialization projection; actor decisions and exact attempts own transcode prepublication"
 
@@ -950,7 +950,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # failure message. A test-only, non-blocking probe whose guard drops at once; no transition owner.
 # The native FEL publisher shares this lock for the final exact-attempt video
 # choice.
-expected_occurrences = 22
+expected_occurrences = 23
 kind = "mixed_ownership_lock"
 replacement = "specific attempt, response-admission, copy replacement, published cleanup, retirement, resource, or catalog-revision fences"
 
@@ -1612,7 +1612,7 @@ pattern = "PROGRESS_STALL"
 # 12 -> 13 for the same Pi startup-policy regression documented under
 # `advancing-progress-stall`; the production timer ownership is unchanged.
 # PR1341: +1 test-only (chunk_06.rs), same as advancing-progress-stall.
-expected_occurrences = 14
+expected_occurrences = 15
 
 [[module_symbols]]
 id = "legacy-watchdog-poll"
@@ -1637,7 +1637,7 @@ pattern = "child_transition"
 # 36 -> 38 with bee39df0e: the same test-only debug helper names `child_transition` twice
 # (its `child_transition_available` label and the `try_lock()` probe above). No new owner.
 # The native FEL publication guard is the same lock use reviewed above.
-expected_occurrences = 39
+expected_occurrences = 40
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -1656,7 +1656,7 @@ pattern = "replacing_child"
 # test-only stores of the mask in the path-owner position test. No production owner added.
 # S10 retained attachment initializes false; no replacement owner is introduced.
 # The same native FEL commit checks the existing replacement fence.
-expected_occurrences = 39
+expected_occurrences = 40
 
 [[module_symbols]]
 id = "legacy-downgrade-owner"
