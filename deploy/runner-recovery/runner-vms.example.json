@@ -13,7 +13,7 @@
         "lab",
         "incus",
         "ubuntu-24.04",
-        "ci-coverage"
+        "general"
       ]
     }
   ]
