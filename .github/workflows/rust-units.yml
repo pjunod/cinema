@@ -5,6 +5,9 @@ on:
       phase:
         type: string
         required: true
+      test_filter:
+        type: string
+        required: false
 
 env:
   CARGO_TERM_COLOR: never
@@ -423,14 +426,20 @@ jobs:
 
       - name: Run the saved archive once
         shell: bash
+        env:
+          TEST_FILTER: ${{ inputs.test_filter }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = 60443f341dc9ca3a743737d845eae0799803608d
           archive=/opt/forgejo-plurx-heavy/tool-cache/archive-ab-neutral-20261120/child-control.tar.zst
           printf '%s  %s\n' 'e24a399e7453c9ebad605307b2bbd46e6ccaf09750dd7cfc016ed434665b5aec' "$archive" | sha256sum -c -
           mkdir -p "$PWD/target/archive-ab-test"
+          test_args=(--test-threads 2)
+          if [[ -n "$TEST_FILTER" ]]; then
+            test_args=(--test-threads 1 -E "$TEST_FILTER")
+          fi
           cargo-nextest nextest run --archive-file "$archive" --workspace-remap "$PWD" \
-            --extract-to "$PWD/target/archive-ab-test" --profile ci --no-fail-fast --test-threads 2 \
+            --extract-to "$PWD/target/archive-ab-test" --profile ci --no-fail-fast "${test_args[@]}" \
             --status-level fail --final-status-level fail 2>&1 | tee archive-test.log
       - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
         if: always()
