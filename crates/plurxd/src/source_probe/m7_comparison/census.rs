@@ -193,7 +193,7 @@ fn take<'a>(bytes: &mut &'a [u8], count: usize) -> Result<&'a [u8], CaptureError
     Ok(prefix)
 }
 
-fn sha_at(bytes: &[u8], offset: usize) -> Result<[u8; 32], CaptureError> {
+pub(super) fn sha_at(bytes: &[u8], offset: usize) -> Result<[u8; 32], CaptureError> {
     let value = &bytes[offset..offset + 64];
     if !value
         .iter()
@@ -206,7 +206,7 @@ fn sha_at(bytes: &[u8], offset: usize) -> Result<[u8; 32], CaptureError> {
     Ok(digest)
 }
 
-fn u32_at(bytes: &[u8], offset: usize) -> u32 {
+pub(super) fn u32_at(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(
         bytes[offset..offset + 4]
             .try_into()
@@ -214,7 +214,7 @@ fn u32_at(bytes: &[u8], offset: usize) -> u32 {
     )
 }
 
-fn u64_at(bytes: &[u8], offset: usize) -> u64 {
+pub(super) fn u64_at(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(
         bytes[offset..offset + 8]
             .try_into()
@@ -222,7 +222,7 @@ fn u64_at(bytes: &[u8], offset: usize) -> u64 {
     )
 }
 
-fn i64_at(bytes: &[u8], offset: usize) -> i64 {
+pub(super) fn i64_at(bytes: &[u8], offset: usize) -> i64 {
     i64::from_le_bytes(
         bytes[offset..offset + 8]
             .try_into()

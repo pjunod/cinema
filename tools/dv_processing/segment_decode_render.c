@@ -467,65 +467,16 @@ static uint16_t *pack(const AVFrame *frame) {
   }
   return out;
 }
-static void hash_bytes(const uint8_t *bytes, size_t size, char hex[65]) {
-  struct AVSHA *sha = av_sha_alloc();
-  uint8_t out[32];
-  need(sha != NULL && av_sha_init(sha, 256) == 0, "SHA256");
-  av_sha_update(sha, bytes, size);
-  av_sha_final(sha, out);
-  av_free(sha);
-  for (int i = 0; i < 32; i++)
-    snprintf(hex + 2 * i, 3, "%02x", out[i]);
-}
+#include "coded_au.h"
 // Four-byte hvcC packet framing, one first slice per BL/EL picture and one
 // fresh RPU. This independent coded-stage trace predates either decoder or GPU.
 static void inspect_coded_au(const AVPacket *packet, bool in_window, bool trace) {
   struct AVSHA *base_sha = in_window ? av_sha_alloc() : NULL;
   need(!in_window || (base_sha && av_sha_init(base_sha, 256) == 0),
        "base-layer source witness SHA256");
-  int bl = 0, el = 0, rpu = 0;
-  size_t at = 0;
-  const uint8_t *rpu_bytes = NULL;
-  size_t rpu_len = 0;
-  while (at < (size_t)packet->size) {
-    need((size_t)packet->size - at >= 4, "coded NAL length prefix");
-    const uint8_t *p = packet->data + at;
-    uint32_t n = (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 |
-                 (uint32_t)p[2] << 8 | p[3];
-    at += 4;
-    need(n >= 2 && n <= (size_t)packet->size - at, "coded NAL bounds");
-    p = packet->data + at;
-    int type = (p[0] >> 1) & 63;
-    need(((p[0] & 1) << 5 | (p[1] >> 3)) == 0 && (p[1] & 7) != 0,
-         "coded layer/temporal header");
-    if (type < 32) {
-      need(n >= 3, "base slice header");
-      bl += (p[2] & 128) != 0;
-      // The live P8 copy preserves these base-layer VCL units verbatim.
-      // Include each original four-byte length so boundaries are unambiguous.
-      if (base_sha)
-        av_sha_update(base_sha, p - 4, (size_t)n + 4);
-    }
-    if (type == 63) {
-      need(!(refit_mode && base_only), "M7 candidate has no enhancement-layer NAL units");
-      need(n >= 4, "enhancement wrapper");
-      int inner = (p[2] >> 1) & 63;
-      need(((p[2] & 1) << 5 | (p[3] >> 3)) == 0 && (p[3] & 7) != 0,
-           "enhancement layer/temporal header");
-      if (inner < 32) {
-        need(n >= 5, "enhancement slice header");
-        el += (p[4] & 128) != 0;
-      }
-    }
-    if (type == 62) {
-      rpu++;
-      rpu_bytes = p;
-      rpu_len = n;
-    }
-    at += n;
-  }
-  need(bl == 1 && rpu == 1 &&
-           (base_only ? (source_profile == 7 ? el <= 1 : el == 0) : el == 1),
+  struct coded_picture picture = inspect_coded_picture(packet, base_sha, refit_mode && base_only);
+  need(picture.bl == 1 && picture.rpus == 1 &&
+           (base_only ? (source_profile == 7 ? picture.el <= 1 : picture.el == 0) : picture.el == 1),
        "one required source picture and fresh RPU per coded AU");
   if (in_window) {
     need(coded_count < (unsigned)frame_cap && coded_count < 64,
@@ -536,12 +487,8 @@ static void inspect_coded_au(const AVPacket *packet, bool in_window, bool trace)
     input->pts = packet->pts;
     input->duration = packet->duration;
     hash_bytes(packet->data, packet->size, input->packet_sha);
-    hash_bytes(rpu_bytes, rpu_len, input->rpu_sha);
-    uint8_t base_digest[32];
-    av_sha_final(base_sha, base_digest);
-    av_free(base_sha);
-    for (int i = 0; i < 32; i++)
-      snprintf(input->base_vcl_sha + 2 * i, 3, "%02x", base_digest[i]);
+    hash_bytes(picture.rpu, picture.rpu_size, input->rpu_sha);
+    finish_coded_vcl(base_sha, input->base_vcl_sha);
     if (!trace)
       return;
     printf("{\"kind\":\"coded_window_input\",\"pts_ticks\":%lld,\"duration_"
@@ -857,7 +804,8 @@ int main(int argc, char **argv) {
                     !strcmp(argv[1], "--m7-sample-fel-v1") ||
                     !strcmp(argv[1], "--m7-sample-candidate-v1") ||
                     !strcmp(argv[1], "--m7-census-fel-v1") ||
-                    !strcmp(argv[1], "--m7-census-candidate-v1")))
+                    !strcmp(argv[1], "--m7-census-candidate-v1") ||
+                    !strcmp(argv[1], "--m7-export-full-planes-v1")))
     return refit_main(argc, argv);
   bool held_origin = argc >= 3 && !strcmp(argv[argc - 2], "--held-source-origin");
   struct rational supplied_origin = {0, 1};

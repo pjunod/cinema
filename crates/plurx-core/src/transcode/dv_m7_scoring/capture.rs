@@ -425,6 +425,41 @@ impl FplusFrameEvidence<'_> {
     }
 }
 
+/// Sum each model's FEL-versus-served errors in source lattice order during
+/// calibration. The accumulation remains provisional until the capture ends.
+pub fn score_baseline_frame(
+    source: &CapturedFrame,
+    whole: &FplusFrameEvidence<'_>,
+    seek: &FplusFrameEvidence<'_>,
+    pinned: &ServableCurves,
+    cancelled: impl Fn() -> bool,
+) -> Result<([f64; 4], u64), CaptureError> {
+    if source.layout.role != CaptureRole::SourceFel
+        || !whole.matches_source(source.evidence)
+        || !seek.matches_source(source.evidence)
+    {
+        return Err(CaptureError::Readback);
+    }
+    let scorer =
+        FrameScorer::for_calibration(&source.rpu_nal, whole.rpu_nal, seek.rpu_nal, pinned)?;
+    let records = source.records.chunks_exact(CaptureRole::SourceFel.wire().1);
+    let count = records.len() as u64;
+    let mut sums = [0.0; 4];
+    for (i, record) in records.enumerate() {
+        if i.is_multiple_of(1024) && cancelled() {
+            return Err(CaptureError::Cancelled);
+        }
+        let errors = scorer.baseline_errors(codes_at(record, 4), codes_at(record, 10))?;
+        for (sum, error) in sums.iter_mut().zip(errors) {
+            *sum += error;
+        }
+    }
+    if cancelled() {
+        return Err(CaptureError::Cancelled);
+    }
+    Ok((sums, count))
+}
+
 /// Score one bound source/candidate pair in lattice order using actual whole
 /// and seek production readback. The caller still completes both captures
 /// before consuming the accumulator as a comparison report.

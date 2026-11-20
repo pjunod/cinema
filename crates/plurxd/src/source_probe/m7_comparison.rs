@@ -3,7 +3,10 @@
 //! renderer capture can corroborate evidence but cannot supply its own census.
 
 mod census;
+mod full_planes;
+
 pub(super) use census::{observe as observe_census, CensusRequest};
+pub(super) use full_planes::{prepare_planes, PreparedPlanes};
 
 use crate::{
     admission::TranscodeResourceEstimate,
@@ -24,7 +27,7 @@ use plurx_core::{
     },
     transcode::{
         dv_m7_receipt::{
-            CalibrationWindow, M7Binding, M7ReceiptError, M7SourceProbe, WindowBinding,
+            CalibrationWindow, M7Binding, M7Receipt, M7ReceiptError, M7SourceProbe, WindowBinding,
             MODEL_VERSION,
         },
         dv_m7_scoring::{
@@ -103,6 +106,7 @@ pub(super) struct HeldTitle {
     pub source: SourceFence,
     pub content_sha256: Sha256Digest,
     pub probe_sha256: Sha256Digest,
+    pub whole_source_census: Option<super::dv_title::VerifiedSourceCensus>,
 }
 
 /// Frozen before candidate measurements. The candidate preparation receipt
@@ -183,13 +187,17 @@ pub(super) struct Measurement {
     pub measured_at_ms: i64,
 }
 
+pub(super) enum ComparisonRun {
+    Measured(Measurement),
+    Reused(M7Receipt),
+}
+
 /// The maintenance caller keeps the title attempt open and awaits this scope
 /// through cooperative cancellation. No capture can start without evidence.
 pub(super) async fn execute(
-    context: TitleContext<'_>,
-    input: Option<ComparisonInput>,
-) -> Result<Measurement, Error> {
-    let input = input.ok_or(Error::Unsupported("independent title comparison evidence"))?;
+    context: &TitleContext<'_>,
+    input: ComparisonInput,
+) -> Result<ComparisonRun, Error> {
     if context.demand.playback_requested || context.admission.is_probe_only() {
         return Err(Error::Unsupported("maintenance title admission"));
     }
@@ -208,7 +216,7 @@ pub(super) async fn execute(
                     .await
                     .is_ok_and(|source| source == expected_source)
         },
-        execute_owned(&context, input, &cancel),
+        execute_owned(context, input, &cancel),
     )
     .await;
     check_cancel(&cancel)?;
@@ -223,26 +231,9 @@ impl Drop for AdmissionExtension<'_> {
     }
 }
 
-async fn execute_owned(
-    context: &TitleContext<'_>,
-    input: ComparisonInput,
-    cancel: &CancellationToken,
-) -> Result<Measurement, Error> {
-    let token = verify_authority(context, &input.title, cancel).await?;
-    let table = current_table(context, input.frozen.fit_table_sha256).await?;
-    let shapes = validate_plan(&input, &table)?;
-    let spill = Aggregator::required_spill_bytes(&shapes)?;
-    let captures = shapes
-        .iter()
-        .map(|shape| capture_bytes(*shape, 16) + capture_bytes(*shape, 10))
-        .max()
-        .ok_or(Error::Unsupported("evaluation windows"))?;
-    if spill.saturating_add(captures as u64) > input.scratch_bytes {
-        return Err(Error::Busy("admitted M7 scratch is too small".into()));
-    }
-
-    // One title-worker permit already covers the caller or scorer. A FEL
-    // capture can additionally run one frame decoder per software layer.
+async fn admit_renderer<'a>(context: &TitleContext<'a>) -> Result<AdmissionExtension<'a>, Error> {
+    // The title owns one CPU permit. A FEL capture can additionally run one
+    // software frame worker per layer, then scores on one worker.
     let resources = TranscodeResourceEstimate {
         hardware_slot: false,
         cpu_threads: 2,
@@ -254,10 +245,49 @@ async fn execute_owned(
         .extend_fragment_admission(context.admission, &resources, Some(1))
         .await
         .map_err(Error::Busy)?;
-    let _extension = AdmissionExtension(context.admission);
+    Ok(AdmissionExtension(context.admission))
+}
+
+async fn execute_owned(
+    context: &TitleContext<'_>,
+    input: ComparisonInput,
+    cancel: &CancellationToken,
+) -> Result<ComparisonRun, Error> {
+    let token = verify_authority(context, &input.title, cancel).await?;
+    let table = current_table(context, input.frozen.fit_table_sha256).await?;
+    let shapes = validate_plan(&input, &table)?;
     let scorer_sha256 = scorer_identity(cancel).await?;
     let custody = bind_custody(context, &input, &shapes, scorer_sha256)?;
     custody.key()?;
+    let source_probe = M7SourceProbe::from_probe_json(&context.demand.probe_json)?;
+    if let Some(receipt) = context
+        .state
+        .store
+        .dv_m7_receipt(&custody, &source_probe)
+        .await
+        .map_err(execution)?
+    {
+        if input
+            .windows
+            .iter()
+            .any(|window| !window.authored.source.unchanged())
+        {
+            return Err(Error::Authority("authored clip"));
+        }
+        revalidate_comparison(context, &input.title, &token, &table, &custody, cancel).await?;
+        return Ok(ComparisonRun::Reused(receipt));
+    }
+    let spill = Aggregator::required_spill_bytes(&shapes)?;
+    let captures = shapes
+        .iter()
+        .map(|shape| capture_bytes(*shape, 16) + capture_bytes(*shape, 10))
+        .max()
+        .ok_or(Error::Unsupported("evaluation windows"))?;
+    if spill.saturating_add(captures as u64) > input.scratch_bytes {
+        return Err(Error::Busy("admitted M7 scratch is too small".into()));
+    }
+
+    let _extension = admit_renderer(context).await?;
     let scratch = tempfile::Builder::new()
         .prefix("dv-m7-")
         .tempdir_in(&context.state.runtime_cache_dir)
@@ -289,20 +319,32 @@ async fn execute_owned(
     if candidates.iter().any(|held| !held.unchanged()) {
         return Err(Error::Authority("authored clip"));
     }
-    let current = verify_authority(context, &input.title, cancel).await?;
-    if (current.job_id, current.claim_id, current.fence)
-        != (token.job_id, token.claim_id, token.fence)
-        || *current_table(context, custody.fit_table_sha256).await? != *table
-        || scorer_identity(cancel).await? != scorer_sha256
-    {
-        return Err(Error::Authority("title claim, table or scorer"));
-    }
-    check_cancel(cancel)?;
-    Ok(Measurement {
+    revalidate_comparison(context, &input.title, &token, &table, &custody, cancel).await?;
+    Ok(ComparisonRun::Measured(Measurement {
         custody,
         report,
         measured_at_ms: super::now_ms(),
-    })
+    }))
+}
+
+async fn revalidate_comparison(
+    context: &TitleContext<'_>,
+    title: &HeldTitle,
+    token: &plurx_core::store::background_jobs::JobToken,
+    table: &ServedCurveTable,
+    custody: &M7Binding,
+    cancel: &CancellationToken,
+) -> Result<(), Error> {
+    let current = verify_authority(context, title, cancel).await?;
+    if current.job_id != token.job_id
+        || current.claim_id != token.claim_id
+        || current.fence != token.fence
+        || *current_table(context, custody.fit_table_sha256).await? != *table
+        || scorer_identity(cancel).await? != custody.scorer_sha256
+    {
+        return Err(Error::Authority("title claim, table or scorer"));
+    }
+    check_cancel(cancel)
 }
 
 async fn verify_authority(
@@ -556,28 +598,28 @@ async fn capture_window(
     let expected = candidate.authored_sha256;
     let cancel = bounded::cancellation().ok_or(Error::Cancelled)?;
     off_runtime(move || verify_candidate(&held, expected, &cancel)).await?;
-    for (source, plan) in [
-        (
-            &title.source,
-            CapturePlan {
-                layout: window.layout,
-                frames: &window.source_frames,
-            },
-        ),
-        (
-            &candidate.source,
-            CapturePlan {
-                layout: candidate.layout,
-                frames: &candidate.frames,
-            },
-        ),
-    ] {
-        let observed = observe_census(context, source, request(plan)?, scratch).await?;
-        if observed.as_slice() != plan.frames {
-            return Err(Error::Authority(
-                "independent coded census differs from frozen evidence",
-            ));
-        }
+    let plan = CapturePlan {
+        layout: window.layout,
+        frames: &window.source_frames,
+    };
+    verify_source_census(context, title, plan, scratch).await?;
+    let candidate_plan = CapturePlan {
+        layout: candidate.layout,
+        frames: &candidate.frames,
+    };
+    if observe_census(
+        context,
+        &candidate.source,
+        request(candidate_plan)?,
+        scratch,
+    )
+    .await?
+    .as_slice()
+        != candidate_plan.frames
+    {
+        return Err(Error::Authority(
+            "independent candidate census differs from frozen evidence",
+        ));
     }
     let source_status = capture(
         context,
@@ -607,6 +649,88 @@ async fn capture_window(
         source_dir,
         candidate_dir,
     })
+}
+
+async fn verify_source_census(
+    context: &TitleContext<'_>,
+    title: &HeldTitle,
+    plan: CapturePlan<'_>,
+    scratch: &TempDir,
+) -> Result<(), Error> {
+    let request = request(plan)?;
+    if let Some(census) = &title.whole_source_census {
+        if census.window(
+            &title.source,
+            context.tools,
+            request.layout,
+            request.first_pts,
+            request.end_pts,
+        ) != Some(plan.frames)
+        {
+            return Err(Error::Authority(
+                "planned whole-source census differs from frozen evidence",
+            ));
+        }
+    } else if observe_census(context, &title.source, request, scratch)
+        .await?
+        .as_slice()
+        != plan.frames
+    {
+        return Err(Error::Authority(
+            "bounded independent source census differs from frozen evidence",
+        ));
+    }
+    Ok(())
+}
+
+/// Retains a verified source-lattice stream for pre-candidate calibration.
+pub(super) struct PreparedLattice {
+    dir: TempDir,
+    status: ExitStatus,
+}
+
+impl PreparedLattice {
+    pub(super) fn reader<'a>(
+        &self,
+        plan: CapturePlan<'a>,
+    ) -> Result<CaptureReader<'a, BufReader<File>>, Error> {
+        let file = plurx_core::fs_secure::open_read_nofollow_blocking(
+            &self.dir.path().join(CAPTURE_OUTPUT),
+        )
+        .map_err(execution)?;
+        Ok(CaptureReader::new(BufReader::new(file), plan, self.status)?)
+    }
+}
+
+pub(super) async fn capture_source_lattice(
+    context: &TitleContext<'_>,
+    title: &HeldTitle,
+    plan: CapturePlan<'_>,
+    scratch: &TempDir,
+    scratch_bytes: u64,
+) -> Result<PreparedLattice, Error> {
+    if plan.layout.role != CaptureRole::SourceFel {
+        return Err(Error::Unsupported("calibration source layout"));
+    }
+    request(plan)?;
+    let shape = WindowShape {
+        frames: plan.frames.len(),
+        sites_per_frame: plan.layout.sites_per_frame()?,
+    };
+    let limit = capture_bytes(shape, 16);
+    if limit as u64 > scratch_bytes {
+        return Err(Error::Busy(
+            "admitted calibration scratch is too small".into(),
+        ));
+    }
+    let cancel = bounded::cancellation().ok_or(Error::Cancelled)?;
+    verify_authority(context, title, &cancel).await?;
+    let _extension = admit_renderer(context).await?;
+    verify_source_census(context, title, plan, scratch).await?;
+    let dir = tempfile::tempdir_in(scratch.path()).map_err(execution)?;
+    let status = capture(context, &title.source, plan, &dir, limit).await?;
+    verify_authority(context, title, &cancel).await?;
+    Ok(PreparedLattice { dir, status })
 }
 
 async fn capture(

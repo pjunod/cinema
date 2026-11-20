@@ -32,6 +32,7 @@ struct Manifest {
 pub(crate) struct ToolSet {
     pub(crate) renderer: PathBuf,
     pub(crate) scanner: PathBuf,
+    muxer: Option<(PathBuf, String)>,
     pub(crate) renderer_env: Vec<(String, std::ffi::OsString)>,
     pub(crate) identity: DvBackendIdentity,
     /// The scanner executable's own digest. It is statically linked, so this
@@ -55,7 +56,7 @@ pub(crate) const REFIT_MODE_VERSION: &str = "plurx-refit-mode-v2";
 /// Their representations are versioned in `refit_topleft.h` and `m7_sample_v1.h`.
 #[cfg(test)]
 pub(crate) const REFIT_MODE_SOURCES: &str =
-    "f694de1f634c7bea9ece8dcbfb10501ffdd0201af6e74f38c123dca2c299dbf2";
+    "e29781ee0a3d8dc11d5c8f3d7887916e802315e657cc2eba3e5a78a7889fd1a2";
 
 #[cfg(test)]
 impl ToolSet {
@@ -79,6 +80,7 @@ impl ToolSet {
         Self {
             renderer: PathBuf::from("/bin/false"),
             scanner: PathBuf::from("/bin/false"),
+            muxer: None,
             renderer_env: Vec::new(),
             identity,
             scanner_sha256: hash(b"/bin/false"),
@@ -120,6 +122,10 @@ fn renderer_source_identity() -> String {
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
         ),
         (
+            "coded_au.h",
+            include_bytes!("../../../tools/dv_processing/coded_au.h"),
+        ),
+        (
             "display_target.h",
             include_bytes!("../../../tools/dv_processing/display_target.h"),
         ),
@@ -152,8 +158,16 @@ fn renderer_source_identity() -> String {
             include_bytes!("../../../tools/dv_processing/hevc-rasl-frame-thread.patch"),
         ),
         (
+            "m7_np1_encode.h",
+            include_bytes!("../../../tools/dv_processing/m7_np1_encode.h"),
+        ),
+        (
             "m7_sample_v1.h",
             include_bytes!("../../../tools/dv_processing/m7_sample_v1.h"),
+        ),
+        (
+            "m7_title_census.h",
+            include_bytes!("../../../tools/dv_processing/m7_title_census.h"),
         ),
         (
             "movie_source_io.h",
@@ -267,11 +281,37 @@ impl ToolSet {
     pub(crate) fn executable_directories(&self) -> Vec<PathBuf> {
         let mut directories: Vec<_> = [&self.renderer, &self.scanner]
             .into_iter()
+            .chain(self.muxer.iter().map(|(path, _)| path))
             .filter_map(|path| path.parent().map(Path::to_path_buf))
             .collect();
         directories.sort();
         directories.dedup();
         directories
+    }
+
+    /// The optional, manifest-verified executable for the bounded M7 encoder.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn muxer(&self) -> Option<(&Path, &str)> {
+        self.muxer
+            .as_ref()
+            .map(|(path, sha)| (path.as_path(), sha.as_str()))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn muxer_is_current(&self) -> bool {
+        let Some((path, expected)) = self.muxer.clone() else {
+            return false;
+        };
+        tokio::task::spawn_blocking(move || hash_file(&path).is_ok_and(|actual| actual == expected))
+            .await
+            .unwrap_or(false)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn verified_artifact(&self, canonical_path: &Path) -> Option<&str> {
+        self.artifacts
+            .iter()
+            .find_map(|(path, sha)| (path.as_path() == canonical_path).then_some(sha.as_str()))
     }
 
     /// The whole processing backend: renderer, libraries, parser and helper
@@ -364,6 +404,13 @@ impl ToolSet {
                 tools.insert(name.clone(), path.clone());
                 artifacts.push((path, actual));
             }
+            // Leave ordinary renderer/scanner eligibility independent of the
+            // optional encoder. Its own caller checks this artifact on use.
+            let muxer = manifest.tools.get("muxer").and_then(|artifact| {
+                let path = contained(&root, &artifact.path).ok()?;
+                let actual = hash_file(&path).ok()?;
+                (actual == artifact.sha256).then_some((path, actual))
+            });
             let mut library_identity = Vec::new();
             for artifact in &manifest.libraries {
                 let path = contained(&root, &artifact.path)?;
@@ -432,6 +479,7 @@ impl ToolSet {
             Ok(Some(Arc::new(Self {
                 renderer: tools.remove("renderer").ok_or("missing renderer")?,
                 scanner: tools.remove("scanner").ok_or("missing scanner")?,
+                muxer,
                 renderer_env: environment,
                 identity,
                 scanner_sha256,

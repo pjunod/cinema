@@ -7,7 +7,8 @@
 // The little-endian stream starts with PLXM7F01 for calibrated P7 FEL or
 // PLXM7C01 for its separately admitted authored P8.1 candidate. Metadata-only
 // census streams use PLXM7S01 and PLXM7A01 respectively. Their samples/frame,
-// bytes/sample, FRM1 sample count and END1 sample total are all zero.
+// bytes/sample, FRM1 sample count and END1 sample total are all zero. PLXM7P01
+// uses those same zero lattice fields and carries complete source plane pairs.
 // Header: eight magic bytes, then sixteen u32s in this order: video stream
 // index, clock numerator/denominator, BL width/height, half-open ROI x0/y0/x1/y1,
 // stride, phase bitmask (on both axes), samples/frame, bytes/sample, frames,
@@ -23,7 +24,12 @@
 // raw BL Y/Cb/Cr and raw EL Y/Cb/Cr. Candidate records are five u16s: x, y and
 // raw authored BL Y/Cb/Cr. The caller pairs clips through the authoring receipt
 // and compares the same-frame DM and candidate RPU mapping.
-// END1: u64 frame and sample totals. A reader must require exact lengths,
+// PLXM7P01 adds two 64-byte SHA-256 strings (original BL, composed TopLeft)
+// after the three coded digests. Its RPU is followed by two dense planar
+// yuv420p10le frames in that order, each exactly 3*width*height bytes in
+// Y, Cb, Cr order. The ROI binds the subsequent scoring plan, not a crop.
+// END1: u64 frame and sample totals. The plane stream's final u64 instead
+// counts the total payload bytes of both planes of all frames. A reader must require exact lengths,
 // coverage and EOF after END1, plus the successful exit of the writer.
 enum {
   M7_SAMPLE_MAX_FRAMES = 48,
@@ -34,11 +40,13 @@ enum {
   M7_SAMPLE_DIGEST_BYTES = 64,
 };
 
+enum m7_stream_kind { M7_STREAM_LATTICE, M7_STREAM_CENSUS, M7_STREAM_FULL_PLANES };
+
 struct m7_sample_v1 {
   FILE *file;
   int roi[4];
   int64_t end_pts;
-  uint32_t samples_per_frame, record_bytes;
+  uint32_t samples_per_frame, record_bytes, plane_bytes;
 };
 
 static void m7_sample_v1_write(FILE *file, const void *bytes, size_t size) {
@@ -48,16 +56,18 @@ static void m7_sample_v1_write(FILE *file, const void *bytes, size_t size) {
 static void m7_sample_v1_open(struct m7_sample_v1 *sample, const char *path,
                               int stream_index, AVRational clock, int width, int height,
                               int64_t first, int64_t last, int64_t first_pts,
-                              bool candidate, bool census) {
+                              bool candidate, enum m7_stream_kind kind) {
   const int *roi = sample->roi;
   refit_content(roi[2] <= width && roi[3] <= height &&
                     roi[2] - roi[0] >= 2 && roi[3] - roi[1] >= 2,
                 "M7 ROI fits the decoded raster and contains both phases");
   int columns = refit_axis_count(roi[0], roi[2], 0) + refit_axis_count(roi[0], roi[2], 1);
   int rows = refit_axis_count(roi[1], roi[3], 0) + refit_axis_count(roi[1], roi[3], 1);
-  if (!census) {
+  if (kind == M7_STREAM_LATTICE) {
     sample->samples_per_frame = (uint32_t)(columns * rows);
     sample->record_bytes = candidate ? M7_SAMPLE_CANDIDATE_RECORD_BYTES : M7_SAMPLE_FEL_RECORD_BYTES;
+  } else if (kind == M7_STREAM_FULL_PLANES) {
+    sample->plane_bytes = 3 * (uint32_t)width * (uint32_t)height;
   }
 
   int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
@@ -71,8 +81,9 @@ static void m7_sample_v1_open(struct m7_sample_v1 *sample, const char *path,
       (uint32_t)(last - first + 1), (uint32_t)first, (uint32_t)last,
   };
   uint8_t header[88];
-  const char *magic = census ? (candidate ? "PLXM7A01" : "PLXM7S01")
-                             : (candidate ? "PLXM7C01" : "PLXM7F01");
+  const char *magic = kind == M7_STREAM_FULL_PLANES ? "PLXM7P01" :
+      kind == M7_STREAM_CENSUS ? (candidate ? "PLXM7A01" : "PLXM7S01") :
+                                (candidate ? "PLXM7C01" : "PLXM7F01");
   memcpy(header, magic, 8);
   for (size_t i = 0; i < sizeof(fields) / sizeof(*fields); i++)
     AV_WL32(header + 8 + 4 * i, fields[i]);
@@ -81,9 +92,22 @@ static void m7_sample_v1_open(struct m7_sample_v1 *sample, const char *path,
   m7_sample_v1_write(sample->file, header, sizeof(header));
 }
 
+static void m7_pack_original_bl(const AVFrame *bl, uint8_t *out) {
+  for (int plane = 0; plane < 3; plane++) {
+    int width = bl->width / (plane ? 2 : 1);
+    int height = bl->height / (plane ? 2 : 1);
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        AV_WL16(out, refit_code(bl, plane, x, y));
+        out += 2;
+      }
+    }
+  }
+}
+
 static void m7_sample_v1_frame(const struct m7_sample_v1 *sample, const AVFrame *bl,
                                const AVFrame *el, const AVDOVIMetadata *data,
-                               int64_t ordinal, const uint8_t *nalu, size_t nalu_size) {
+                               const struct refit_mapping *mapping, int64_t ordinal, const uint8_t *nalu, size_t nalu_size) {
   refit_content(!el || refit_topleft_mapping(data),
                 "M7 FEL requires identity mapping and calibrated linear NLQ");
   refit_content(refit_topleft_color(av_dovi_get_color(data)),
@@ -140,9 +164,27 @@ static void m7_sample_v1_frame(const struct m7_sample_v1 *sample, const AVFrame 
     need((size_t)(record - refit_records) == bytes, "M7 lattice sample count");
   }
 
+  char original_sha[65], composed_sha[65];
+  if (sample->plane_bytes) {
+    need(el && mapping, "M7 full planes require an admitted FEL pair");
+    bytes = 2 * sample->plane_bytes;
+    if (!refit_records) {
+      refit_records = malloc(bytes);
+      need(refit_records != NULL, "one-frame M7 full-plane pair buffer");
+      refit_records_capacity = bytes;
+    }
+    need(refit_records_capacity == bytes, "stable M7 full-plane raster");
+    uint8_t *composed = refit_records + sample->plane_bytes;
+    m7_pack_original_bl(bl, refit_records);
+    refit_topleft_pixels(bl, el, mapping, av_dovi_get_color(data), composed);
+    hash_bytes(refit_records, sample->plane_bytes, original_sha);
+    hash_bytes(composed, sample->plane_bytes, composed_sha);
+  }
+
   uint8_t frame[8 + M7_SAMPLE_FRAME_FIELDS] = "FRM1";
   AV_WL32(frame + 4, M7_SAMPLE_FRAME_FIELDS + 3 * M7_SAMPLE_DIGEST_BYTES +
-                         (uint32_t)nalu_size + bytes);
+                         (uint32_t)nalu_size + bytes +
+                         (sample->plane_bytes ? 2 * M7_SAMPLE_DIGEST_BYTES : 0));
   AV_WL64(frame + 8, (uint64_t)ordinal);
   AV_WL64(frame + 16, (uint64_t)bl->pts);
   AV_WL64(frame + 24, (uint64_t)bl->duration);
@@ -152,6 +194,10 @@ static void m7_sample_v1_frame(const struct m7_sample_v1 *sample, const AVFrame 
   m7_sample_v1_write(sample->file, coded->packet_sha, M7_SAMPLE_DIGEST_BYTES);
   m7_sample_v1_write(sample->file, coded->rpu_sha, M7_SAMPLE_DIGEST_BYTES);
   m7_sample_v1_write(sample->file, coded->base_vcl_sha, M7_SAMPLE_DIGEST_BYTES);
+  if (sample->plane_bytes) {
+    m7_sample_v1_write(sample->file, original_sha, M7_SAMPLE_DIGEST_BYTES);
+    m7_sample_v1_write(sample->file, composed_sha, M7_SAMPLE_DIGEST_BYTES);
+  }
   m7_sample_v1_write(sample->file, nalu, nalu_size);
   if (bytes)
     m7_sample_v1_write(sample->file, refit_records, bytes);
@@ -165,7 +211,8 @@ static void m7_sample_v1_finish(const struct m7_sample_v1 *sample, int64_t frame
   uint8_t trailer[24] = "END1";
   AV_WL32(trailer + 4, 16);
   AV_WL64(trailer + 8, (uint64_t)frames);
-  AV_WL64(trailer + 16, (uint64_t)frames * sample->samples_per_frame);
+  AV_WL64(trailer + 16, (uint64_t)frames *
+      (sample->plane_bytes ? 2 * sample->plane_bytes : sample->samples_per_frame));
   m7_sample_v1_write(sample->file, trailer, sizeof(trailer));
   need(fclose(sample->file) == 0, "complete M7 sample output close");
 }

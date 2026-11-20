@@ -36,7 +36,9 @@
 // --m7-census-candidate-v1 commands use the same arguments and emit frame
 // identity only. The FEL census verifies absolute presentation ordinals from
 // the start of the held stream, within the finite read and prefix envelope.
-// The M7 header defines the distinct census and sample wire representations.
+// --m7-export-full-planes-v1 uses the same FEL window arguments and writes
+// complete original BL and composed TopLeft planes for the exact candidate
+// crop. The M7 header defines the distinct wire representations.
 //
 // --refit-stats writes JSON lines to stdout: one per pooled scene,
 //   {"kind":"refit_scene","first_frame":N,"frames":K,"first_pts":TICKS,
@@ -89,7 +91,7 @@
 
 #define REFIT_EXIT_CONTENT 3
 
-static bool refit_dump, refit_area_override, refit_topleft, refit_m7, refit_m7_census;
+static bool refit_dump, refit_area_override, refit_topleft, refit_m7, refit_m7_census, refit_m7_planes;
 static FILE *refit_topleft_output;
 // --resume: the resume point, and the preroll decoded before it.
 static int64_t refit_resume_frame = -1, refit_resume_pts, refit_preroll;
@@ -261,6 +263,31 @@ static void refit_sample(const AVFrame *bl, const AVFrame *el, int x, int y,
   enhancement[2] = refit_code(el, 2, sites.el_chroma[0], sites.el_chroma[1]);
 }
 
+static void refit_topleft_pixels(const AVFrame *bl, const AVFrame *el,
+                                 const struct refit_mapping *mapping,
+                                 const AVDOVIColorMetadata *color,
+                                 uint8_t *pixels_out) {
+  size_t pixels = (size_t)bl->width * bl->height;
+  uint8_t *cb = pixels_out + 2 * pixels;
+  uint8_t *cr = cb + pixels / 2;
+  for (int y = 0; y < bl->height; y++) {
+    for (int x = 0; x < bl->width; x++) {
+      uint16_t base[3], enhancement[3], composed[3], rgb[3];
+      refit_sample(bl, el, x, y, base, enhancement);
+      refit_compose(mapping, base, enhancement, composed);
+      refit_topleft_rgb(color, composed, rgb);
+      int64_t luma;
+      uint16_t code = refit_topleft_luma(rgb, &luma);
+      refit_topleft_store(pixels_out, (size_t)y * bl->width + x, code);
+      if (!(x % 2) && !(y % 2)) {
+        size_t chroma = (size_t)(y / 2) * (bl->width / 2) + x / 2;
+        refit_topleft_store(cb, chroma, refit_topleft_chroma(rgb[2], luma, 18814));
+        refit_topleft_store(cr, chroma, refit_topleft_chroma(rgb[0], luma, 14746));
+      }
+    }
+  }
+}
+
 #include "m7_sample_v1.h"
 static struct m7_sample_v1 refit_m7_sample;
 
@@ -279,24 +306,7 @@ static void refit_topleft_frame(const AVFrame *bl, const AVFrame *el,
     refit_records_capacity = bytes;
   }
   need(bytes == refit_records_capacity, "stable TopLeft raster");
-  uint8_t *cb = refit_records + 2 * pixels;
-  uint8_t *cr = cb + pixels / 2;
-  for (int y = 0; y < bl->height; y++) {
-    for (int x = 0; x < bl->width; x++) {
-      uint16_t base[3], enhancement[3], composed[3], rgb[3];
-      refit_sample(bl, el, x, y, base, enhancement);
-      refit_compose(mapping, base, enhancement, composed);
-      refit_topleft_rgb(color, composed, rgb);
-      int64_t luma;
-      uint16_t code = refit_topleft_luma(rgb, &luma);
-      refit_topleft_store(refit_records, (size_t)y * bl->width + x, code);
-      if (!(x % 2) && !(y % 2)) {
-        size_t chroma = (size_t)(y / 2) * (bl->width / 2) + x / 2;
-        refit_topleft_store(cb, chroma, refit_topleft_chroma(rgb[2], luma, 18814));
-        refit_topleft_store(cr, chroma, refit_topleft_chroma(rgb[0], luma, 14746));
-      }
-    }
-  }
+  refit_topleft_pixels(bl, el, mapping, color, refit_records);
   char rpu_sha[65], frame_sha[65];
   hash_bytes(nalu, nalu_size, rpu_sha);
   hash_bytes(refit_records, bytes, frame_sha);
@@ -326,7 +336,7 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
     refit_content(bl->format == AV_PIX_FMT_YUV420P10LE &&
                       bl->linesize[0] >= 2 * w && bl->linesize[1] >= w && bl->linesize[2] >= w,
                   "software-decoded planar ten-bit candidate");
-    m7_sample_v1_frame(&refit_m7_sample, bl, NULL, data, ordinal, nalu, raw->size + 2);
+    m7_sample_v1_frame(&refit_m7_sample, bl, NULL, data, NULL, ordinal, nalu, raw->size + 2);
     refit_end_pts = bl->pts + bl->duration;
     refit_composed++;
     return;
@@ -353,7 +363,7 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
            el->linesize[0] >= 2 * ew && el->linesize[1] >= ew && el->linesize[2] >= ew,
        "software-decoded planar ten-bit layers");
   if (refit_m7) {
-    m7_sample_v1_frame(&refit_m7_sample, bl, el, data, ordinal, nalu, raw->size + 2);
+    m7_sample_v1_frame(&refit_m7_sample, bl, el, data, &mapping, ordinal, nalu, raw->size + 2);
     refit_end_pts = bl->pts + bl->duration;
     refit_composed++;
     return;
@@ -556,14 +566,19 @@ static int refit_main(int argc, char **argv) {
   bool candidate_census = !strcmp(argv[1], "--m7-census-candidate-v1");
   refit_m7_census = candidate_census || !strcmp(argv[1], "--m7-census-fel-v1");
   base_only = candidate_census || !strcmp(argv[1], "--m7-sample-candidate-v1");
-  refit_m7 = base_only || refit_m7_census || !strcmp(argv[1], "--m7-sample-fel-v1");
+  refit_m7_planes = !strcmp(argv[1], "--m7-export-full-planes-v1");
+  refit_m7 = base_only || refit_m7_census || refit_m7_planes || !strcmp(argv[1], "--m7-sample-fel-v1");
   refit_area_override = argc >= 5 && !strcmp(argv[argc - 5], "--area");
   if (refit_area_override) {
     for (int i = 0; i < 4; i++)
       refit_area[i] = number(argv[argc - 4 + i], 0, 4095);
     argc -= 5;
   }
-  if (refit_m7_census)
+  if (refit_m7_planes)
+    need(argc == 13 && !refit_area_override,
+         "usage: segment_decode_render --m7-export-full-planes-v1 SOURCE VIDEO_INDEX "
+         "FIRST LAST FIRST_PTS END_PTS X0 Y0 X1 Y1 NEW_OUTPUT");
+  else if (refit_m7_census)
     need(argc == 13 && !refit_area_override,
          "usage: segment_decode_render --m7-census-{fel,candidate}-v1 SOURCE VIDEO_INDEX "
          "FIRST LAST FIRST_PTS END_PTS X0 Y0 X1 Y1 NEW_OUTPUT");
@@ -596,6 +611,8 @@ static int refit_main(int argc, char **argv) {
     if (refit_m7) {
       frame_cap = (int)(refit_last - refit_first + 1);
       need(frame_cap <= M7_SAMPLE_MAX_FRAMES, "bounded M7 frame count");
+      need(!refit_m7_planes || frame_cap == REFIT_TOPLEFT_FRAMES,
+           "M7 full-plane encoder input requires exactly 48 frames");
       need(!base_only || refit_first == 0, "M7 candidate ordinals start at zero");
       if (refit_m7_census && !base_only)
         need(refit_first <= REFIT_MAX_PREROLL, "bounded absolute M7 source census prefix");
@@ -732,7 +749,8 @@ static int refit_main(int argc, char **argv) {
                   "M7 requires four-byte hvcC NAL framing for coded AU binding");
     m7_sample_v1_open(&refit_m7_sample, argv[12], stream_index, source_time_base,
                       expected_w[0], expected_h[0], refit_first, refit_last, refit_resume_pts,
-                      base_only, refit_m7_census);
+                      base_only, refit_m7_planes ? M7_STREAM_FULL_PLANES :
+                          refit_m7_census ? M7_STREAM_CENSUS : M7_STREAM_LATTICE);
   }
   if (refit_topleft) {
     int fd = open(argv[6], O_WRONLY | O_CREAT | O_EXCL, 0600);

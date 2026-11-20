@@ -7,6 +7,7 @@ from pathlib import Path
 INPUTS = (
     'author_p81.c',
     'base_dv_renderer.h',
+    'coded_au.h',
     'display_target.h',
     'dm_closed_form.h',
     'dm_cm29_gamut_tables.h',
@@ -15,7 +16,9 @@ INPUTS = (
     'dv_trace.h',
     'fel_renderer.h',
     'hevc-rasl-frame-thread.patch',
+    'm7_np1_encode.h',
     'm7_sample_v1.h',
+    'm7_title_census.h',
     'movie_source_io.h',
     'mux_rgb.c',
     'nlq_clipping.h',
