@@ -19,6 +19,7 @@ Two rounds of performance work, each with its plan, review, and response.
 |---|---|---|
 | [ADAPTIVE-PLAYBACK-CONTRACT-HISTORY.md](ADAPTIVE-PLAYBACK-CONTRACT-HISTORY.md) | Accepted bounded copy/M4 design decisions and verbatim original M0 proposals; not implementation or acceptance evidence. | done |
 | [ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) | Original planning/finite output/cache custody and exact compiler evidence; 17 direct application cases pass; full inventory and M0–M7 acceptance remain open. | open |
+| [ADAPTIVE-PLAYBACK-IMPLEMENTATION-HISTORY.md](ADAPTIVE-PLAYBACK-IMPLEMENTATION-HISTORY.md) | Earlier implementation checkpoints and their source-bound evidence. | open |
 | [ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md](ADAPTIVE-PLAYBACK-PRODUCTION-POLICY.md) | Production refusal of speculative growth, original-attempt retry/cleanup, bounded service evidence and remaining trial prerequisites. | open |
 | [ADAPTIVE-PLAYBACK-ORDINARY-COLLECTOR.md](ADAPTIVE-PLAYBACK-ORDINARY-COLLECTOR.md) | Concrete ordinary finite pool, original gate/ticket ownership, structural allowance and combined qualification boundary. | open |
 | [ADAPTIVE-PLAYBACK-RETAINED-EXIT.md](ADAPTIVE-PLAYBACK-RETAINED-EXIT.md) | Original book/imported S handle parking, application aliases, fixed shutdown custody and process-restart qualification. | open |
@@ -28,6 +29,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [ADAPTIVE-PLAYBACK-NATIVE-ENTRY.md](ADAPTIVE-PLAYBACK-NATIVE-ENTRY.md) | Restricted atomic launch and finite fd roles; native qualification active, production integration open. | open |
 | [ADAPTIVE-PLAYBACK-FINALIZATION-SUPPORT.md](ADAPTIVE-PLAYBACK-FINALIZATION-SUPPORT.md) | Proposed independent support custody; fixture-only hold and actual destruction/join boundary, production pool/frame audit and R/S closure still open. | open |
 | [ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md](ADAPTIVE-PLAYBACK-OWNED-CONTAINMENT.md) | Original kernel-domain ownership, atomic entry, scoped direct/static P/M application adapters, original finite-driver joins, opaque build gates, and open complete-inventory/pre-Winner prerequisites for real trials. | open |
+| [ADAPTIVE-PLAYBACK-CONTAINMENT-EVIDENCE.md](ADAPTIVE-PLAYBACK-CONTAINMENT-EVIDENCE.md) | Source and scope for the containment qualification records. | open |
 | [ADAPTIVE-PLAYBACK-DELIVERY.md](ADAPTIVE-PLAYBACK-DELIVERY.md) | Authoritative ordinary VOD V1–V5 OPEN/CLOSED source list; separate R1 recovery, later M0–M7 generality and final acceptance. | open |
 | [ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md](ADAPTIVE-PLAYBACK-COPY-START-REVIEW.md) · [source manifest](ADAPTIVE-PLAYBACK-COPY-START-REVIEW-SOURCE.json) | Accepted Opus copy-start decisions, committed per-state cleanup, emitted task semantics, source pins and remaining unrun coverage. | open |
 | [ADAPTIVE-RESOURCE-CUSTODY.md](ADAPTIVE-RESOURCE-CUSTODY.md) | Local custody storage, live-close restrictions, startup refusal and backup/recovery limits. | open |

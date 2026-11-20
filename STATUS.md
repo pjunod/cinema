@@ -89,19 +89,13 @@ Owner: Sol (source), coordinator (native/publication); [PR #1225](http://forge.l
 
 B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; simulator fix #1215 merged (`7a7d04c6`, lane5601 green). The [handoff](docs/streaming/DV-FOLLOWUPS-HANDOFF.md#processed-root-repair) separates local qualification from Paul's deployment and live verification.
 
-- **2026-10-19 · desktop Compose host controls:** native installer correction is
-  recorded in PR #1226. Linux Docker companion builds only the host tray,
-  pins the selected local deployment, and controls graceful lifecycle and
-  durable startup policy; source/published-image upgrades retain their existing
-  deployment paths. Focused fixture validation is recorded in its PR; real
-  desktop/engine acceptance and custom Pi ownership migration remain open.
-
 ## Older efforts — where each one now lives
 
 Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17, 2026-10-19, 2026-10-26, 2026-11-07, 2026-11-15, 2026-11-18 and 2026-11-19 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-10-19 | Desktop Compose host controls | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
 | Undated | Native server tray, startup policy and release upgrades | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
 | Undated | macOS source installation and the missing tray | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
 | Undated | Playback startup path: the per-read stall and the web scrim | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |

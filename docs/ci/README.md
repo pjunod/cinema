@@ -38,5 +38,6 @@ a document to this folder.
 | [RIPWIRE-IMPLEMENTATION-HANDOFF.md](RIPWIRE-IMPLEMENTATION-HANDOFF.md) | CLI-first build contract for bounded repository navigation, benchmark evidence, validation integration, and rollout limits. | open |
 | [FORGEJO-MAIN-IMAGE-HANDOFF.md](FORGEJO-MAIN-IMAGE-HANDOFF.md) | Publishing the main image from Forgejo. | open |
 | [RUNNER-DISK.md](RUNNER-DISK.md) | What fills a runner, what bounds it, how to reclaim it. | live |
+| [RUNNER-DISK-OPERATIONS.md](RUNNER-DISK-OPERATIONS.md) | How browser deadlines, cache reports, disk floors and operator cleanup work. | live |
 | [MEDIA1-RUNNER-ORPHANED-PROCESSES.md](MEDIA1-RUNNER-ORPHANED-PROCESSES.md) | Why effort preflight leaked stopped children on media1, and how cleanup is proved. | open |
 | [MEDIA1-RUNNER-ORPHANED-SLEEP-PROCESSES.md](MEDIA1-RUNNER-ORPHANED-SLEEP-PROCESSES.md) | Evidence for stopped orphaned sleeps in the media1 runner cgroups and the safe cleanup boundary. | open |
