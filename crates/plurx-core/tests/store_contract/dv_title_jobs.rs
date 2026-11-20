@@ -2052,13 +2052,32 @@ async fn failed_title_revisit_leaves_the_next_discovery_turn_available() {
             .next_page(store.as_ref(), "invalid scanner", 1001)
             .await
             .is_err());
-        let (rows, _) = cursor
+        let (rows, after) = cursor
             .next_page(store.as_ref(), &scanner, 1002)
             .await
             .expect("next turn");
         assert_eq!(
             rows[0].file_id, new.id,
             "{backend}: failed historical read pinned forward discovery"
+        );
+        *after = rows[0].probe_revision;
+        let (rows, after) = cursor
+            .next_page(store.as_ref(), &scanner, 1003)
+            .await
+            .expect("historical turn");
+        assert_eq!(rows[0].file_id, old.id, "{backend}");
+        *after = rows[0].probe_revision;
+        assert!(cursor
+            .next_page(store.as_ref(), "invalid scanner", 1004)
+            .await
+            .is_err());
+        let (rows, _) = cursor
+            .next_page(store.as_ref(), &scanner, 1005)
+            .await
+            .expect("retry historical work");
+        assert_eq!(
+            rows[0].file_id, old.id,
+            "{backend}: failed forward read pinned historical demand"
         );
     })
     .await;

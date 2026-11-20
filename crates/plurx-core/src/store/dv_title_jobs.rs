@@ -77,6 +77,9 @@ impl TitleMaintenanceCursor {
             self.revisit_through = 0;
         }
 
+        // A failed newer page also leaves the previously observed prefix
+        // eligible for its turn. At startup that prefix is still empty.
+        self.revisit_next = self.forward_after > 0;
         let rows = store
             .dv_title_demands(scanner, self.forward_after, now_ms)
             .await?;
