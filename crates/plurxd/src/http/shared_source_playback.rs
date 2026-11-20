@@ -1549,8 +1549,18 @@ struct SourceFileReader {
     guard: std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>,
     _source_custody: Option<crate::source_custody::SourceCustody>,
 }
+const SOURCE_READ_JOB_LIMIT: usize = 8;
 pub(super) static SOURCE_READ_JOBS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
-    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(8)));
+    std::sync::LazyLock::new(|| {
+        std::sync::Arc::new(tokio::sync::Semaphore::new(SOURCE_READ_JOB_LIMIT))
+    });
+
+pub(crate) fn source_read_job_occupancy() -> (usize, usize) {
+    (
+        SOURCE_READ_JOB_LIMIT.saturating_sub(SOURCE_READ_JOBS.available_permits()),
+        SOURCE_READ_JOB_LIMIT,
+    )
+}
 async fn source_file_body(
     file: crate::vodserve::ReadyFile,
     guard: std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>,

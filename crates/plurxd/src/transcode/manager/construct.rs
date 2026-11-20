@@ -809,9 +809,6 @@ impl TranscodeManager {
         let (hardware_slots_used, hardware_slots_max) = self.hardware_slots().await;
         let software_threads_max = self.software_budget().await;
         let software_threads_used = self.admissions.software_in_use();
-        let session_pressure_limit = hardware_slots_max
-            .saturating_add((software_threads_max / 2).max(1))
-            .max(1);
         let mut tone_map_pipelines = if capabilities.tone_map {
             vec![self.pipeline.name().to_owned()]
         } else {
@@ -893,8 +890,6 @@ impl TranscodeManager {
         MediaNodeRuntime {
             scratch_bytes_free: u64::try_from(capabilities.scratch_bytes.max(0)).unwrap_or(0),
             scratch_target_bytes: SCRATCH_TARGET_BYTES,
-            active_sessions: self.active_session_count.load(Relaxed),
-            session_pressure_limit,
             encoder_families: capabilities.encoder_families,
             max_target_height: capabilities.max_target_height,
             decoders: capabilities.decoders,
@@ -999,14 +994,8 @@ impl TranscodeManager {
         let (hardware_used, hardware_max) = self.hardware_slots().await;
         let software_max = self.software_budget().await;
         let software_used = self.admissions.software_in_use();
-        let active_sessions = self.active_session_count.load(Relaxed);
-        let session_pressure_limit = hardware_max
-            .saturating_add((software_max / 2).max(1))
-            .max(1);
         let workload = Workload::of(file, target_height);
         Ok(MediaOfferProbe {
-            active_sessions,
-            session_pressure_limit,
             scratch_bytes_free: u64::try_from(capabilities.scratch_bytes.max(0)).unwrap_or(0),
             decoder_supported,
             target_supported,

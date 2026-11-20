@@ -2933,6 +2933,51 @@ async fn media_offer_reports_resolved_pipeline_without_gating_unresolved_candida
     );
 }
 
+#[tokio::test]
+async fn active_sessions_do_not_refuse_an_eligible_media_offer() {
+    let mut state = crate::http::source_actor_test_state();
+    let root = crate::test_tempdir().expect("offer fixture");
+    let source = root.path().join("source.mkv");
+    std::fs::write(&source, b"source presence fixture").expect("source fixture");
+    let file_id = seed_file_with_probe_at(
+        &state.store,
+        source.to_str().expect("UTF-8 source path"),
+        plurx_core::domain::ProbeResult {
+            container: Some("mkv".into()),
+            video_codec: Some("h264".into()),
+            width: Some(1280),
+            height: Some(720),
+            duration_ms: Some(60_000),
+            ..Default::default()
+        },
+    )
+    .await;
+    let file = state.store.get_file(file_id).await.expect("file read").expect("file");
+    assert!(state.availability.is_present(file_id, &source).await);
+    let manager = TranscodeManager::new(
+        Arc::clone(&state.store),
+        root.path().join("scratch"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    )
+    .with_decoders(vec!["h264".into()]);
+    manager.scratch_bytes_free.store(1_000_000_000, Relaxed);
+    manager.scratch_sampled_at_unix_ms.store(unix_ms(), Relaxed);
+    state.transcode = Arc::new(manager);
+    let request = crate::media_pool::MediaOfferRequest::new(&file, 720, 0, None, None, false)
+        .expect("valid offer request");
+
+    let idle = crate::media_pool::local_offer(&state, &request).await;
+    assert!(idle.eligible, "fixture must offer: {:?}", idle.refusal_code);
+    state.transcode.active_session_count.store(usize::MAX, Relaxed);
+    let occupied = crate::media_pool::local_offer(&state, &request).await;
+    assert!(occupied.eligible, "active sessions refused the offer: {:?}", occupied.refusal_code);
+    assert_eq!(occupied.refusal_code, None);
+    assert_eq!(occupied.io_pressure.expect("worker pressure observation").egress_pressure, None);
+    let snapshot = crate::media_pool::local_snapshot(&state).await;
+    assert_eq!(crate::media_pool::placement_refusal(&snapshot), None);
+}
+
 #[test]
 fn frozen_codec_evidence_changes_identity_without_rewriting_the_legacy_shape() {
     let file = profile5_file();

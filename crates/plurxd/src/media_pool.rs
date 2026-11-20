@@ -75,6 +75,46 @@ impl PressureBand {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct MediaIoPressure {
+    /// Occupancy of the existing direct/shared read-job semaphore. Other
+    /// readers and a shared storage server's capacity are outside this scope.
+    pub source_read_jobs_in_use: u32,
+    pub source_read_job_limit: u32,
+    /// The relay and delivery byte counters measure traffic without a capacity
+    /// denominator. `None` represents unknown egress pressure.
+    pub egress_pressure: Option<PressureBand>,
+}
+
+impl MediaIoPressure {
+    fn local() -> Self {
+        let (used, limit) = crate::http::shared_source_playback::source_read_job_occupancy();
+        Self {
+            source_read_jobs_in_use: bounded_u32(used),
+            source_read_job_limit: bounded_u32(limit),
+            egress_pressure: None,
+        }
+    }
+
+    fn source_pressure(self) -> PressureBand {
+        let used = self.source_read_jobs_in_use;
+        let limit = self.source_read_job_limit;
+        if used.saturating_mul(4) >= limit.saturating_mul(3) {
+            PressureBand::High
+        } else if used.saturating_mul(2) >= limit {
+            PressureBand::Moderate
+        } else {
+            PressureBand::Idle
+        }
+    }
+
+    // The existing wire enum cannot express unknown. Use its middle band so
+    // an older recipient does not claim idle egress or prefilter this worker.
+    fn compatibility_egress_pressure(self) -> PressureBand {
+        self.egress_pressure.unwrap_or(PressureBand::Moderate)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct EncoderOfferCapability {
     pub family: String,
@@ -173,6 +213,8 @@ pub(crate) struct MediaNodeSnapshot {
     pub scratch_pressure: PressureBand,
     pub source_io_pressure: PressureBand,
     pub egress_pressure: PressureBand,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io_pressure: Option<MediaIoPressure>,
     pub live_waiting: bool,
     pub background_active: bool,
     #[serde(default)]
@@ -1375,6 +1417,8 @@ pub(crate) struct MediaOffer {
     pub scratch_bytes_free: u64,
     pub source_io_pressure: PressureBand,
     pub egress_pressure: PressureBand,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io_pressure: Option<MediaIoPressure>,
     pub method: MediaDeliveryMethod,
     pub encoder: String,
     pub pipeline: String,
@@ -2692,7 +2736,7 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
     let adaptive_fel_prepare = false;
     let scratch_pressure =
         capacity_pressure(runtime.scratch_bytes_free, runtime.scratch_target_bytes);
-    let workload_pressure = count_pressure(runtime.active_sessions, runtime.session_pressure_limit);
+    let io_pressure = MediaIoPressure::local();
     MediaNodeSnapshot {
         retained_output_receipts: true,
         prepared_output_capture: true,
@@ -2720,8 +2764,9 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         software_threads_max: bounded_u32(runtime.software_threads_max),
         scratch_bytes_free: runtime.scratch_bytes_free,
         scratch_pressure,
-        source_io_pressure: workload_pressure,
-        egress_pressure: workload_pressure,
+        source_io_pressure: io_pressure.source_pressure(),
+        egress_pressure: io_pressure.compatibility_egress_pressure(),
+        io_pressure: Some(io_pressure),
         live_waiting: runtime.live_waiting,
         background_active: runtime.background_active,
         io: media_io_observation(),
@@ -3040,6 +3085,7 @@ fn finite_service_evidence(
 }
 
 async fn base_local_offer(state: &AppState, request: &MediaOfferRequest) -> MediaOffer {
+    let io_pressure = MediaIoPressure::local();
     let base = || MediaOffer {
         node_id: state.node_id.clone(),
         request_fingerprint: request.request_fingerprint.clone(),
@@ -3049,8 +3095,9 @@ async fn base_local_offer(state: &AppState, request: &MediaOfferRequest) -> Medi
         source_likely_readable: false,
         scratch_bytes_required: request.scratch_bytes_required,
         scratch_bytes_free: 0,
-        source_io_pressure: PressureBand::Idle,
-        egress_pressure: PressureBand::Idle,
+        source_io_pressure: io_pressure.source_pressure(),
+        egress_pressure: io_pressure.compatibility_egress_pressure(),
+        io_pressure: Some(io_pressure),
         method: MediaDeliveryMethod::Transcode,
         encoder: String::new(),
         pipeline: String::new(),
@@ -3134,22 +3181,15 @@ async fn base_local_offer(state: &AppState, request: &MediaOfferRequest) -> Medi
         .await
     {
         Ok(probe) => {
-            let source_io_pressure =
-                count_pressure(probe.active_sessions, probe.session_pressure_limit);
-            let egress_pressure = source_io_pressure;
             let scratch_ok = probe.scratch_bytes_free >= request.scratch_bytes_required;
             let capability_ok = probe.decoder_supported
                 && probe.target_supported
                 && request.output_contract == "hls-mpegts-v1";
-            let pressure_ok = !matches!(egress_pressure, PressureBand::Unavailable);
-            let eligible = capability_ok
-                && pressure_ok
-                && (probe.cache_hit || (source_likely_readable && scratch_ok));
+            let eligible =
+                capability_ok && (probe.cache_hit || (source_likely_readable && scratch_ok));
             let refusal_code = (!eligible).then(|| {
                 if !capability_ok {
                     "incapable"
-                } else if !pressure_ok {
-                    "egress_saturated"
                 } else if !source_likely_readable && !probe.cache_hit {
                     "source_unverified"
                 } else if !scratch_ok && !probe.cache_hit {
@@ -3165,8 +3205,6 @@ async fn base_local_offer(state: &AppState, request: &MediaOfferRequest) -> Medi
                 cache_hit: probe.cache_hit,
                 source_likely_readable,
                 scratch_bytes_free: probe.scratch_bytes_free,
-                source_io_pressure,
-                egress_pressure,
                 encoder: probe.encoder,
                 pipeline: probe.pipeline,
                 free_hardware_slots: bounded_u32(probe.free_hardware_slots),
@@ -3458,18 +3496,6 @@ fn capacity_pressure(free: u64, target: u64) -> PressureBand {
     }
 }
 
-fn count_pressure(used: usize, limit: usize) -> PressureBand {
-    if limit == 0 || used >= limit {
-        PressureBand::Unavailable
-    } else if used.saturating_mul(4) >= limit.saturating_mul(3) {
-        PressureBand::High
-    } else if used.saturating_mul(2) >= limit {
-        PressureBand::Moderate
-    } else {
-        PressureBand::Idle
-    }
-}
-
 fn bounded_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
@@ -3612,6 +3638,7 @@ mod tests {
             scratch_pressure: PressureBand::Idle,
             source_io_pressure: PressureBand::Idle,
             egress_pressure: PressureBand::Idle,
+            io_pressure: None,
             live_waiting: false,
             background_active: false,
             io: MediaIoObservation::default(),
@@ -4158,6 +4185,7 @@ mod tests {
             scratch_bytes_free: 1_000,
             source_io_pressure: PressureBand::Idle,
             egress_pressure: PressureBand::Idle,
+            io_pressure: None,
             method: MediaDeliveryMethod::Transcode,
             encoder: "software".to_owned(),
             pipeline: "cpu".to_owned(),
@@ -4323,6 +4351,44 @@ mod tests {
             &snapshots,
             now
         ));
+    }
+
+    #[test]
+    fn scoped_io_pressure_preserves_legacy_wire_bands() {
+        #[derive(Debug, Deserialize, PartialEq, Eq)]
+        #[serde(rename_all = "snake_case")]
+        enum LegacyBand {
+            Idle,
+            Moderate,
+            High,
+            Unavailable,
+        }
+
+        #[derive(Deserialize)]
+        struct LegacyPressureFields {
+            source_io_pressure: LegacyBand,
+            egress_pressure: LegacyBand,
+        }
+
+        let mut offer = offer("worker");
+        let old_payload = serde_json::to_value(&offer).expect("legacy-shaped offer");
+        assert!(old_payload.get("io_pressure").is_none());
+        let received: MediaOffer = serde_json::from_value(old_payload).expect("accepted old offer");
+        assert!(received.io_pressure.is_none());
+
+        let pressure = MediaIoPressure {
+            source_read_jobs_in_use: 8,
+            source_read_job_limit: 8,
+            egress_pressure: None,
+        };
+        offer.io_pressure = Some(pressure);
+        offer.source_io_pressure = pressure.source_pressure();
+        offer.egress_pressure = pressure.compatibility_egress_pressure();
+        let payload = serde_json::to_value(&offer).expect("new offer");
+        assert!(payload["io_pressure"]["egress_pressure"].is_null());
+        let old: LegacyPressureFields = serde_json::from_value(payload).expect("old parser");
+        assert_eq!(old.source_io_pressure, LegacyBand::High);
+        assert_eq!(old.egress_pressure, LegacyBand::Moderate);
     }
 
     #[test]
@@ -4716,6 +4782,7 @@ mod tests {
                     scratch_pressure: PressureBand::Unavailable,
                     source_io_pressure: PressureBand::Unavailable,
                     egress_pressure: PressureBand::Unavailable,
+                    io_pressure: None,
                     live_waiting: false,
                     background_active: false,
                     io: MediaIoObservation::default(),

@@ -3096,6 +3096,7 @@ fn placement_test_snapshot(node_id: &str) -> crate::media_pool::MediaNodeSnapsho
         scratch_pressure: crate::media_pool::PressureBand::Idle,
         source_io_pressure: crate::media_pool::PressureBand::Idle,
         egress_pressure: crate::media_pool::PressureBand::Idle,
+        io_pressure: None,
         live_waiting: false,
         background_active: false,
         io: MediaIoObservation::default(),

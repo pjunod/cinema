@@ -125,8 +125,6 @@ impl CodecQualificationMetrics {
 pub(crate) struct MediaNodeRuntime {
     pub(crate) scratch_bytes_free: u64,
     pub(crate) scratch_target_bytes: u64,
-    pub(crate) active_sessions: usize,
-    pub(crate) session_pressure_limit: usize,
     pub(crate) encoder_families: Vec<String>,
     pub(crate) max_target_height: i64,
     pub(crate) decoders: Vec<String>,
@@ -142,8 +140,6 @@ pub(crate) struct MediaNodeRuntime {
 /// Node-local answer to a diagnostics-only offer request. Calculating it does
 /// not reserve capacity or open the media source.
 pub(crate) struct MediaOfferProbe {
-    pub(crate) active_sessions: usize,
-    pub(crate) session_pressure_limit: usize,
     pub(crate) scratch_bytes_free: u64,
     pub(crate) decoder_supported: bool,
     pub(crate) target_supported: bool,
