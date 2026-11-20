@@ -45,7 +45,7 @@ decoder change.
 | Web | Safari fitted handoff, 60 ms seek and natural 206.864 s completion | Optical mapping and wider browser coverage |
 | Apple | Physical tvOS fitted handoff and 65 ms seek; physical iPhone fitted handoff, 69 ms seek and natural 206.864 s completion | Optical mapping; native macOS coverage; unresolved tvOS cold-entry failure |
 | Android | Physical Lenovo corrected fitted handoff, 911 ms seek and natural 206.864 s completion, zero interruptions and dropped frames | Optical mapping and wider device coverage |
-| Linux player | Installed Player native P7 control and retained fitted P8.1 renderer control both reach natural EOF with zero drops | Stock launcher's live fitted successor route and optical mapping |
+| Linux player | Installed Player native P7 control and retained fitted P8.1 renderer control both reach natural EOF with zero drops | Bind same-run native FEL composition evidence; optical mapping |
 
 Each run records the server commit/binary and processing bundle, client build,
 physical device/OS/decoder/display, source content hash, session and rendition,
@@ -185,10 +185,17 @@ seconds, resumed a buffered seek in 65 ms and reported zero drops. A separate
 physical renderer control played the exact retained fitted P8.1 init and
 fragments to natural EOF at 130.290 seconds with zero drops; all 19 response
 bodies match their retained hashes. Both controls exposed a PQ BT.2020 target.
-The stock launcher advertises native P7 support and lacks the live fitted
-predecessor/successor route. These controls qualify their recorded paths;
-they do not establish a live Linux F+ handoff. Device viewers and test-owned
-endpoints were disconnected after collection.
+The [Linux Player design](../clients/LINUX-PLAYER-PLAN.md#33-profile-7-fel-in-v1--composed-in-the-player)
+intentionally claims native P7 because the patched player composes the full
+enhancement layer locally. Its ordinary route therefore preserves the original
+stream. The absence of a converted F+ successor does not establish a missing
+Linux feature. Historical Player logs report enhancement-layer composition,
+but that observation keeps its original run scope: this run did not capture
+a composition flag. Its remaining native-path evidence is a same-run binding
+of actual FEL composition. The compiled native-DV marker proves a build
+capability, not per-frame composition. These controls qualify their recorded
+paths and do not establish an in-app fitted F+ session. Device viewers and
+test-owned endpoints were disconnected after collection.
 
 ## Native M5 test-instance prerequisites
 
