@@ -2322,6 +2322,10 @@ pub fn router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route(
+            "/files/{id}/hls/prepare-startup",
+            post(hls::prepare_startup).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
             "/files/{id}/hls/continuous-candidates",
             post(hls::continuous_candidates).layer(DefaultBodyLimit::max(64 * 1024)),
         )

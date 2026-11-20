@@ -2913,64 +2913,100 @@ pub(crate) fn bind_compatibility_vod_policy(
         "plurx/jellyfin/vod-only/passive/v1:{fingerprint}"
     )))
 }
-/// Resolve compatibility negotiation through the same native plan and prerequisites as create.
-/// This does not claim a session, attach a reader, or reserve a producer.
-pub(in crate::http) fn offer_selected_startup(
-    state: AppState,
-    user_id: i64,
-    file_id: i64,
-    position_ms: i64,
-    body: CreateSession,
-) {
+/// Warm the ordinary native recipe without creating or admitting a viewer session.
+pub async fn prepare_startup(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    AxPath(file_id): AxPath<i64>,
+    headers: HeaderMap,
+    super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
+    Json(body): Json<CreateSession>,
+) -> Result<StatusCode, ApiError> {
+    let Some(caps) = body.caps.as_ref() else {
+        return Err(ApiError::BadRequest(
+            "startup preparation requires capabilities".into(),
+        ));
+    };
+    super::super::stream::validate_device_caps(caps)?;
+    let caps = caps.clone();
+    if !valid_playback_id(&body.playback_id)
+        || body.previous_session_id.is_some()
+        || body.reopen_reason.is_some()
+        || body.control_sequence.is_some()
+        || body
+            .presentation
+            .as_deref()
+            .is_some_and(|value| value != "vod")
+    {
+        return Err(ApiError::BadRequest(
+            "startup preparation requires a fresh VOD request".into(),
+        ));
+    }
+    if let Some(intent) = body.intent.as_ref() {
+        intent
+            .validate()
+            .map_err(|error| ApiError::BadRequest(format!("intent: {error}")))?;
+    }
+    let position_ms = body.start.unwrap_or_default() * 1_000.0;
+    if !position_ms.is_finite() || position_ms < 0.0 || position_ms >= i64::MAX as f64 {
+        return Err(ApiError::BadRequest("invalid startup position".into()));
+    }
+    let position_ms = position_ms.round() as i64;
     let Some(slot) = state
         .subtitle_models
         .translation
         .try_borrow_read_preparation_slot()
     else {
-        return;
+        return Ok(StatusCode::ACCEPTED);
     };
     tokio::spawn(async move {
-        let Some(caps) = body.caps.clone() else {
-            return;
-        };
-        let plan = async {
-            let snapshot = state
-                .store
-                .playback_planning_snapshot(file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
+        let budget = crate::media_pool::CreateStartupBudget::new(2_000);
+        let plan = budget.scope(async {
+            let authority = state.serving.authority();
+            let serving_generation = authority.admit()?;
+            let start_plan = super::start_plan::ingress_plan(&state.applied, file_id)
                 .await
                 .ok()??;
+            let _captured_plan = crate::media_pool::capture_create_plan(&start_plan);
+            let snapshot = &start_plan.snapshot;
             let file = &snapshot.file;
-            let review = review_client_plan(
-                &caps,
-                None,
-                file,
-                &super::super::stream::render_caps_from_snapshot(&state, &snapshot),
-                false,
-                false,
-                unix_ms(),
-            );
+            let client_build = client_build_label(body.caps.as_ref(), &headers);
+            let review =
+                native_create_review(&state, &body, file, Some(snapshot), user.id, &client_build)
+                    .await;
+            let identity = native_create_network_identity(&user, &headers, remote);
+            let network_prior =
+                super::super::network::stored_prior(state.store.as_ref(), identity.as_ref())
+                    .await
+                    .ok()?;
             let resolved = resolve_plan_with_scope(
                 PlanInputs {
-                    network_identity: None,
-                    incumbent_receipt: None,
-                    snapshot: Some(&snapshot),
+                    snapshot: Some(snapshot),
                     state: &state,
-                    user_id,
+                    user_id: user.id,
                     file_id,
                     source: Some(file),
-                    network_prior: None,
+                    network_prior: network_prior.as_ref(),
+                    network_identity: identity.as_ref(),
+                    incumbent_receipt: link_receipts::requested_receipt(&headers),
                 },
-                Some(review),
+                review,
                 body,
                 PlanScope::default(),
             )
             .await
             .ok()?;
-            validate_hevc_copy_transport(&state, file, &caps, &resolved.request, None)
-                .await
-                .ok()?;
-            Some((resolved.request, snapshot.file))
-        };
+            validate_hevc_copy_transport_from_probe(
+                file,
+                &caps,
+                &resolved.request,
+                snapshot.probe_json.as_deref(),
+            )
+            .ok()?;
+            authority
+                .is_current(serving_generation)
+                .then(|| (resolved.request, file.clone()))
+        });
         let Some((request, file)) = (tokio::select! {
             _ = state.shutdown.cancelled() => None,
             result = tokio::time::timeout(std::time::Duration::from_secs(2), plan) => result.ok().flatten(),
@@ -2982,13 +3018,57 @@ pub(in crate::http) fn offer_selected_startup(
             .prepare_selected_copy(
                 &request,
                 file,
-                user_id,
+                user.id,
                 position_ms,
                 state.shutdown.clone(),
                 slot,
             )
             .await;
     });
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn native_create_review(
+    state: &AppState,
+    body: &CreateSession,
+    file: &MediaFile,
+    snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
+    user_id: i64,
+    client_build: &str,
+) -> Option<PlanReview> {
+    let render_caps = match snapshot {
+        Some(snapshot) => super::super::stream::render_caps_from_snapshot(state, snapshot),
+        None => super::super::stream::render_caps(state).await,
+    };
+    plan_review_for(
+        body.caps.as_ref(),
+        body.overrides.as_ref(),
+        file,
+        &render_caps,
+        body.preserve_dolby_vision == Some(true),
+        body.hdr10 == Some(true),
+        unix_ms(),
+        &ReviewContext {
+            file_id: file.id,
+            user_id,
+            client_build,
+        },
+    )
+}
+
+fn native_create_network_identity(
+    user: &plurx_core::domain::User,
+    headers: &HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+) -> Option<crate::telemetry::NetworkIdentity> {
+    let mut identity = super::super::network::identity(headers, remote)?;
+    identity.user_id = Some(user.id);
+    identity.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
+        user.id,
+        user.created_at,
+        &user.password_hash,
+    ));
+    Some(identity)
 }
 
 pub(crate) async fn preview_for_compatibility(
@@ -3565,23 +3645,17 @@ async fn create_with_purpose_attempt(
         // This is the one arm that stays here, because it is the only one that
         // must not ask the node what it can render.
         None => None,
-        Some(file) => plan_review_for(
-            req.caps.as_ref(),
-            req.overrides.as_ref(),
-            file,
-            &match planning_snapshot {
-                Some(snapshot) => super::super::stream::render_caps_from_snapshot(&state, snapshot),
-                None => super::super::stream::render_caps(&state).await,
-            },
-            req.preserve_dolby_vision == Some(true),
-            req.hdr10 == Some(true),
-            unix_ms(),
-            &ReviewContext {
-                file_id: id,
-                user_id: user.id,
-                client_build: &client_build,
-            },
-        ),
+        Some(file) => {
+            native_create_review(
+                &state,
+                &req,
+                file,
+                planning_snapshot,
+                user.id,
+                &client_build,
+            )
+            .await
+        }
     };
     let hdr10_requested = review
         .as_ref()
@@ -3608,15 +3682,7 @@ async fn create_with_purpose_attempt(
                 .await
         }
     };
-    let mut identity = super::super::network::identity(&headers, remote);
-    if let Some(ref mut id) = identity {
-        id.user_id = Some(user.id);
-        id.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
-            user.id,
-            user.created_at,
-            &user.password_hash,
-        ));
-    }
+    let identity = native_create_network_identity(&user, &headers, remote);
     let network_prior =
         super::super::network::stored_prior(state.store.as_ref(), identity.as_ref())
             .await

@@ -1483,13 +1483,6 @@ decision logic.
 `force`, `audio` and `subtitle` stay on the query string in both forms,
 because they are request-local choices rather than capabilities.
 
-On a full local login, `POST` accepts an optional `prepare_start_ms` for
-the selected playable file on a playback detail screen. Zero means start
-from the beginning. An eligible indexed copy can prepare a bounded media
-window through the ordinary VOD rendition. This best-effort hint leaves
-the decision response and watch progress alone. A handoff token receives
-the ordinary decision.
-
 The **64 KiB body limit** is the same bound the reading-state route uses. A
 capabilities document is a short list of codecs and a handful of learned
 limits; axum's 2 MiB default is four orders of magnitude of headroom for an
@@ -1900,9 +1893,16 @@ the ffmpeg is taken down.
                   DELETE /hls/{session}   → 204 No Content
 ```
 
+A full login can pass the same fresh VOD request to
+`POST /files/{id}/hls/prepare-startup` before Play. The server resolves
+the ordinary create recipe and returns `202` for the advisory request.
+An eligible indexed copy can then prepare media at `start` under the
+existing cache and source budgets. The hint creates no viewer session.
+
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | POST | `/files/{id}/hls/sessions` | bearer | Creates a session; body ≤ 64 KiB |
+| POST | `/files/{id}/hls/prepare-startup` | full bearer | Accepts fresh VOD create inputs for bounded copy preparation; body ≤ 64 KiB |
 | POST | `/files/{id}/hls/continuous-candidates` | bearer | Read-only continuous-quality pair negotiation; body ≤ 64 KiB (§9.6) |
 | POST | `/files/{id}/hls/continuous-sessions` | bearer | Creates a continuous-quality family session; body ≤ 64 KiB (§9.6) |
 | GET | `/files/{id}/hls/start` | bearer | Deprecated bridge over the same handler |
