@@ -161,21 +161,27 @@ async fn record_census(
     }
 }
 
+pub(crate) enum IndexCensus {
+    Ready,
+    Deferred,
+    Failed,
+}
+
 /// Resolve the HEVC recipe prerequisite under an admitted index source
 /// owner. A cluster analysis claim already supplies the shared read budget;
 /// the node-local pass supplies its heavy-lane admission and a held source.
 pub(crate) async fn ensure_index_census(
     store: &dyn Store,
     file: &MediaFile,
-) -> Result<bool, StoreError> {
+) -> Result<IndexCensus, StoreError> {
     let probe = store.get_file_probe_json(file.id).await?;
     if !hevc_census::needs_census(file, probe.as_deref()) {
-        return Ok(true);
+        return Ok(IndexCensus::Ready);
     }
     // Foreground measurement may be in progress. Let it finish without
     // holding up its reader or duplicating reads under two owners.
     if recently_failed(file) {
-        return Ok(false);
+        return Ok(IndexCensus::Deferred);
     }
     let lock = {
         let mut in_flight = IN_FLIGHT
@@ -185,28 +191,33 @@ pub(crate) async fn ensure_index_census(
     };
     let answer = async {
         let Ok(_measuring) = lock.try_lock() else {
-            return Ok(false);
+            return Ok(IndexCensus::Deferred);
         };
         let probe = store.get_file_probe_json(file.id).await?;
         if !hevc_census::needs_census(file, probe.as_deref()) {
-            return Ok(true);
+            return Ok(IndexCensus::Ready);
         }
         let started = Instant::now();
         let census = match measure_for_index(file).await {
             Ok(census) => census,
             Err(reason) => {
                 tracing::debug!(file_id = file.id, %reason, "index census source unavailable");
-                return Ok(false);
+                return Ok(IndexCensus::Failed);
             }
         };
         let Some(census) = census else {
-            if plurx_core::process::bounded::check_cancellation().is_ok() {
-                note_failure(file);
+            if plurx_core::process::bounded::check_cancellation().is_err() {
+                return Ok(IndexCensus::Deferred);
             }
-            return Ok(false);
+            note_failure(file);
+            return Ok(IndexCensus::Failed);
         };
         let recorded = record_census(store, file, probe, census, started).await?;
-        Ok(!hevc_census::needs_census(file, recorded.as_deref()))
+        Ok(if hevc_census::needs_census(file, recorded.as_deref()) {
+            IndexCensus::Failed
+        } else {
+            IndexCensus::Ready
+        })
     }
     .await;
     forget_census_lock(file.id, &lock);
@@ -575,6 +586,60 @@ mod tests {
         let playback = measure(&file).await.expect("playback census");
         assert_eq!(index.verdict, hevc_census::Verdict::Varying);
         assert_eq!(index.to_json(), playback.to_json());
+    }
+
+    #[tokio::test]
+    async fn index_census_defers_while_another_owner_is_measuring() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+        use plurx_core::store::{LibraryStore, MediaStore, SqliteStore};
+
+        let store = SqliteStore::open_in_memory().expect("store");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Index census".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Index census".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let id = store
+            .upsert_file(
+                item,
+                "/media/census-contention.mkv",
+                4096,
+                2,
+                &ProbeResult {
+                    video_codec: Some("hevc".into()),
+                    raw_json: Some("{}".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("file");
+        let file = store.get_file(id).await.expect("query").expect("source");
+        let lock = {
+            let mut in_flight = IN_FLIGHT.lock().expect("census lock map");
+            Arc::clone(in_flight.entry(id).or_default())
+        };
+        let measuring = lock.lock().await;
+        let result = ensure_index_census(&store, &file).await;
+        drop(measuring);
+        forget_census_lock(id, &lock);
+
+        assert!(matches!(result, Ok(IndexCensus::Deferred)));
     }
 
     /// Decoded-frame MD5s, in presentation order.

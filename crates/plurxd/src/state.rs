@@ -9281,8 +9281,8 @@ impl JobManager {
                     )
                     .await;
                     match established {
-                        Some(Ok(true)) => admission = Some(held),
-                        Some(Ok(false) | Err(_)) => {
+                        Some(Ok(crate::hevc_census::IndexCensus::Ready)) => admission = Some(held),
+                        Some(Ok(_) | Err(_)) => {
                             attempted += 1;
                             continue;
                         }
@@ -11180,7 +11180,7 @@ impl JobManager {
         );
         tokio::pin!(census);
         let census_admission = AnalysisAttestationBudget::default();
-        let ready = tokio::select! {
+        let census = tokio::select! {
             result = &mut census => result.map_err(|_| AnalysisResolutionError::Retry {
                 code: "source_catalog_read_failed",
                 charge_attempt: true,
@@ -11197,10 +11197,10 @@ impl JobManager {
                 });
             }
         };
-        if !ready {
+        if !matches!(census, crate::hevc_census::IndexCensus::Ready) {
             return Err(AnalysisResolutionError::Retry {
                 code: "hevc_census_pending",
-                charge_attempt: true,
+                charge_attempt: matches!(census, crate::hevc_census::IndexCensus::Failed),
             });
         }
         let video = match fragment_index_requested_video_options(
