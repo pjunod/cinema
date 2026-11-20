@@ -160,7 +160,7 @@ async fn real_hardware_busy_uses_one_signed_peer_start_and_releases_its_slot() {
     let start_calls = cluster.proxy_b.hits(START_PATH);
     let relay_calls = cluster.proxy_b.hits(RELAY_PATH);
     let incumbent = start_hardware(&cluster, file, 480, "hardware-slot-incumbent").await;
-    cluster.play_created(&incumbent, "A incumbent").await;
+    cluster.play_created(&incumbent, "A incumbent", true).await;
     assert_eq!(cluster.proxy_b.hits(START_PATH), start_calls);
     assert_eq!(cluster.proxy_b.hits(RELAY_PATH), relay_calls);
     assert_eq!(hardware_slots(&cluster, &a).await, (1, 1));
@@ -209,7 +209,7 @@ async fn real_hardware_busy_uses_one_signed_peer_start_and_releases_its_slot() {
         .expect("successful signed hardware Start");
     assert!(accepted.cutoff_unix_ms > 0);
     assert_eq!(peer["session_id"], accepted.session_id);
-    cluster.play_created(&peer, "B fallback").await;
+    cluster.play_created(&peer, "B fallback", true).await;
     assert!(cluster.proxy_b.hits(RELAY_PATH) > relay_calls);
     assert_eq!(hardware_slots(&cluster, &a).await, (1, 1));
     assert_eq!(hardware_slots(&cluster, &b).await, (1, 1));

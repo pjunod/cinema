@@ -733,11 +733,11 @@ impl Cluster {
             started["height"], height,
             "scenario must use its own canonical rung"
         );
-        self.play_created(&started, playback).await;
+        self.play_created(&started, playback, false).await;
         Ok(started)
     }
 
-    async fn play_created(&mut self, started: &Value, playback: &str) {
+    async fn play_created(&mut self, started: &Value, playback: &str, retry_pending_segment: bool) {
         let playlist = started["playlist_url"].as_str().expect("playlist URL");
         let failures = self.producer_failures();
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -785,6 +785,19 @@ impl Cluster {
                     .unwrap_or_default()
                     .to_owned();
                 let bytes = response.bytes().await.expect("segment body");
+                if retry_pending_segment
+                    && status == StatusCode::SERVICE_UNAVAILABLE
+                    && serde_json::from_slice::<Value>(&bytes)
+                        .is_ok_and(|error| error["code"] == "segment_pending")
+                {
+                    assert!(
+                        Instant::now() < deadline,
+                        "segment {segment} for {playback} stayed pending{}",
+                        self.logs()
+                    );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
                 // A failed segment has a non-empty error body: the status
                 // and type, not the length, say whether media was served.
                 assert!(
