@@ -1,28 +1,8 @@
 //! Replicated installation of the shared dispatch-turn schema.
 use super::{admit_schema_migration, HiqliteAuthStore, RemoteShapeRow, SchemaMigrationAdmission};
 use crate::error::StoreError;
-use crate::store::background_job_turns::SCHEMA;
+use crate::store::background_job_turns::{expected_catalog, CATALOG, LIVE_TITLE_MIGRATION, SCHEMA};
 use hiqlite::macros::params;
-
-const CATALOG: &str =
-    "SELECT name, sql FROM sqlite_master WHERE name GLOB 'dispatch_turn_*' ORDER BY name";
-
-fn expected_catalog() -> Result<Vec<(String, String)>, StoreError> {
-    let connection = rusqlite::Connection::open_in_memory()?;
-    // SQLite requires the subject of an external trigger to exist. Only the
-    // dispatch objects themselves belong to this extension's shape.
-    connection.execute_batch(
-        "CREATE TABLE background_jobs(id TEXT);
-         CREATE TABLE analysis_requests(request_id TEXT);
-         CREATE TABLE background_source_custody(custody_id TEXT);",
-    )?;
-    connection.execute_batch(SCHEMA)?;
-    let mut objects = connection.prepare(CATALOG)?;
-    let rows = objects
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
 
 fn installed_matches(
     installed: &[RemoteShapeRow],
@@ -45,11 +25,8 @@ fn installed_matches(
 }
 
 impl HiqliteAuthStore {
-    async fn dispatch_turns_installed(
-        &self,
-        expected: &[(String, String)],
-    ) -> Result<bool, StoreError> {
-        let installed = self
+    async fn dispatch_turns_catalog(&self) -> Result<Vec<RemoteShapeRow>, StoreError> {
+        self
             .client()
             // authority: installation and lost-ack reconciliation require the committed dispatch catalog.
             .query_consistent_map::<RemoteShapeRow, _>(
@@ -57,31 +34,42 @@ impl HiqliteAuthStore {
                 CATALOG,
                 params!(),
             )
-            .await?;
-        installed_matches(&installed, expected)
+            .await
     }
 
     pub(super) async fn install_dispatch_turns(
         &self,
         admission: SchemaMigrationAdmission<'_>,
     ) -> Result<(), StoreError> {
-        let expected = expected_catalog()?;
-        if self.dispatch_turns_installed(&expected).await? {
-            return Ok(());
-        }
+        let expected = expected_catalog(true)?;
+        let installed = self.dispatch_turns_catalog().await?;
+        let (predecessor, migrations) = if installed.is_empty() {
+            (Vec::new(), vec![SCHEMA, LIVE_TITLE_MIGRATION])
+        } else {
+            let original = expected_catalog(false)?;
+            if installed_matches(&installed, &expected).is_ok() {
+                return Ok(());
+            }
+            installed_matches(&installed, &original)?;
+            (original, vec![LIVE_TITLE_MIGRATION])
+        };
+        // Compare the whole observed layout again inside the replicated writer.
+        // A concurrent winner is recognized only after reading its complete catalog.
+        let predecessor = serde_json::to_string(&predecessor).expect("schema string pairs serialize");
         let mut statements = vec![(
-            "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM sqlite_master WHERE name GLOB 'dispatch_turn_*') THEN 1 ELSE json('dispatch turn schema raced') END".to_owned(),
-            params!(),
+            format!("SELECT CASE WHEN (SELECT json_group_array(json_array(name,sql)) FROM ({CATALOG}))=$1 THEN 1 ELSE json('dispatch turn schema raced') END"),
+            params!(predecessor),
         )];
-        statements.extend(
-            SCHEMA
-                .split("-- next statement\n")
-                .filter(|sql| !sql.trim().is_empty())
-                .map(|sql| (sql.to_owned(), params!())),
-        );
+        for migration in migrations {
+            statements.extend(
+                migration.split("-- next statement\n")
+                    .filter(|sql| !sql.trim().is_empty())
+                    .map(|sql| (sql.to_owned(), params!())),
+            );
+        }
         admit_schema_migration(admission)?;
         let attempt = self.schema_migration_transaction(statements).await;
-        if self.dispatch_turns_installed(&expected).await? {
+        if installed_matches(&self.dispatch_turns_catalog().await?, &expected).unwrap_or(false) {
             return Ok(());
         }
         attempt?;
@@ -100,7 +88,7 @@ mod tests {
     fn dispatch_turn_upgrade_agrees_with_replicated_catalog_and_rejects_partial_shape() {
         let db = rusqlite::Connection::open_in_memory().expect("database");
         SqliteStore::apply_migrations_for_test(&db, 123).expect("predecessor");
-        let expected = expected_catalog().expect("canonical extension");
+        let expected = expected_catalog(false).expect("canonical extension");
         assert!(!expected.is_empty());
         let installed = || {
             db.prepare(CATALOG)

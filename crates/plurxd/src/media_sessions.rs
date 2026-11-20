@@ -982,6 +982,7 @@ impl ControlRouteError {
             StoreError::Migration(_) => "migration",
             StoreError::JoinRefused(_) => "join_refused",
             StoreError::Task(_) => "task",
+            StoreError::AnalysisAdmission(_) => "analysis_admission",
             StoreError::Identity(_) => "identity",
             StoreError::Credential(_) => "credential",
             StoreError::FenceRejected { .. } => "fence_rejected",

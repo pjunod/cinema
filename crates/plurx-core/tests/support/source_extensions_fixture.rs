@@ -91,6 +91,7 @@ pub(crate) fn validated_source_tail_drops(
     objects: &[(String, String, String)],
     counts: &[(String, i64)],
     dispatch: bool,
+    live_titles: bool,
     remove: impl Fn(&str) -> bool,
 ) -> Vec<String> {
     let expected = rusqlite::Connection::open_in_memory().expect("published source tail witness");
@@ -107,6 +108,9 @@ pub(crate) fn validated_source_tail_drops(
         expected
             .execute_batch(include_str!("../../src/store/background_job_turns.sql"))
             .expect("published v124 dispatch extension");
+        if live_titles {
+            expected.execute_batch(include_str!("../../src/store/background_job_turns_v2.sql")).expect("published v136 dispatch migration");
+        }
     }
     assert_eq!(
         objects,
@@ -323,6 +327,7 @@ fn source_extension_rewind_plan(
         &objects,
         &counts,
         version >= 124,
+        false,
         |_| true,
     ));
     let marker: i64 = connection
@@ -890,6 +895,22 @@ pub(crate) fn rewind_empty_source_extensions_to_v121(connection: &rusqlite::Conn
 /// shape, the marker and that every table is empty before dropping anything.
 #[allow(dead_code)]
 pub(crate) fn rewind_empty_curation_to_v134(conn: &rusqlite::Connection) {
+    if conn.pragma_query_value(None, "user_version", |r| r.get::<_,i64>(0)).expect("dispatch ordinal") == 136 {
+        let fixture = rusqlite::Connection::open_in_memory().expect("dispatch fixture");
+        fixture.execute_batch("CREATE TABLE background_jobs(id); CREATE TABLE analysis_requests(request_id); CREATE TABLE background_source_custody(custody_id);").expect("dispatch subjects");
+        let original = include_str!("../../src/store/background_job_turns.sql");
+        fixture.execute_batch(original).expect("original dispatch catalog");
+        fixture.execute_batch(include_str!("../../src/store/background_job_turns_v2.sql")).expect("current dispatch catalog");
+        let catalog = |db: &rusqlite::Connection| {
+            db.prepare("SELECT name,sql FROM sqlite_master WHERE name GLOB 'dispatch_turn_*' ORDER BY name")
+                .expect("dispatch objects").query_map([], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?)))
+                .expect("dispatch rows").collect::<Result<Vec<_>,_>>().expect("complete dispatch catalog")
+        };
+        assert_eq!(catalog(conn), catalog(&fixture));
+        let restore: Vec<_> = original.split("-- next statement").filter(|sql| sql.contains("CREATE TRIGGER dispatch_turn_job ") || sql.contains("CREATE VIEW dispatch_turn_protected_jobs ")).collect();
+        assert_eq!(restore.len(), 2);
+        conn.execute_batch(&format!("SAVEPOINT restore_turns; DROP TRIGGER dispatch_turn_job; DROP VIEW dispatch_turn_protected_jobs; {} PRAGMA user_version=135; RELEASE restore_turns;",restore.join("\n"))).expect("restore original dispatch objects without deleting data");
+    }
     let ordinal: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .expect("curation ordinal");

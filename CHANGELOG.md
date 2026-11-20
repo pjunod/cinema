@@ -72,6 +72,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Recover expired Dolby Vision title attempts after physical source custody clears.
+  Activity distinguishes expired leases from live owners. Analysis requests report
+  the admission failure, and reconciliation preserves copy coordinator requests.
 - F+ publishes chroma MMR coefficients on the Q12 grid tested on the native path and
   qualifies their actual stored precision. The new fitting method reuses
   existing statistics; new sessions wait for its replacement table while

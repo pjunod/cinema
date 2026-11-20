@@ -140,7 +140,7 @@ WHERE file.revision>json_extract($1,'$.after')
  AND (file.terminal=0 OR file.scanner_digest IS NOT json_extract($1,'$.scanner'))
  AND (json_array_length(file.playback_recipes)>0 OR NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
  THEN json_extract(file.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END))
- OR NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state IN ('running','cancelling')
+ OR NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND (j.state='cancelling' OR (j.state='running' AND j.lease_expires_ms>json_extract($1,'$.now')))
   AND json_extract(j.payload_json,'$.file_id')=file.id))
 ORDER BY file.revision LIMIT 128"#
     );

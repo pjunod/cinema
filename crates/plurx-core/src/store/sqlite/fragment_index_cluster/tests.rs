@@ -2329,7 +2329,12 @@ async fn stranded_backlog_does_not_hold_the_ceiling_against_runnable_work() {
     };
     let unknown = store.enqueue_analysis_request(&request("unknown")).await;
     assert!(
-        unknown.is_err(),
+        matches!(
+            unknown,
+            Err(StoreError::AnalysisAdmission(
+                crate::error::AnalysisAdmissionRefusal::QueueFull
+            ))
+        ),
         "an unknown live set counts every active row, and the table is at the ceiling"
     );
     store
@@ -2347,10 +2352,81 @@ async fn stranded_backlog_does_not_hold_the_ceiling_against_runnable_work() {
         "bound-",
     )
     .await;
-    assert!(store
+    let refused = store
         .enqueue_analysis_request_with(&request("over-bound"), Some(&live_set))
+        .await;
+    assert!(matches!(
+        refused,
+        Err(StoreError::AnalysisAdmission(
+            crate::error::AnalysisAdmissionRefusal::BacklogFull
+        ))
+    ));
+    let joined = store
+        .enqueue_analysis_request_with(&request("runnable"), Some(&live_set))
         .await
-        .is_err());
+        .expect("deduplicate even at the hard bound");
+    assert_eq!(joined.request_id, "runnable");
+}
+
+/// Contract-owned copy work is runnable on its own dispatcher. A full queue
+/// can still join and settle admitted work, making space for the next request.
+#[tokio::test]
+async fn saturated_queue_drains_without_rewriting_copy_coordinators() {
+    use crate::error::AnalysisAdmissionRefusal::{QueueFull, SourceChanged};
+    use crate::store::LiveAnalysisEngines;
+    let store = SqliteStore::open_in_memory().expect("store");
+    seed_files(&store).await;
+    let engine = "a".repeat(64);
+    let inventory = LiveAnalysisEngines {
+        engines: [("node-a".to_owned(), engine.clone())].into(),
+        members: None,
+    };
+    fill_backlog(&store, MAX_ACTIVE_JOBS - 1, engine.clone(), "active-").await;
+    let mut copy = request("copy", false, 1);
+    copy.pipeline_version = format!("{}3", crate::store::analysis_coordination::PIPELINE_PREFIX);
+    let coordinator = store
+        .enqueue_analysis_request(&copy)
+        .await
+        .expect("copy request");
+    assert!(!inventory.is_stranded(&coordinator));
+    let next = request("next", true, 2);
+    assert!(matches!(
+        store
+            .enqueue_analysis_request_with(&next, Some(&inventory))
+            .await,
+        Err(StoreError::AnalysisAdmission(QueueFull))
+    ));
+    let mut stale = next.clone();
+    stale.source_size += 1;
+    assert!(matches!(
+        store
+            .enqueue_analysis_request_with(&stale, Some(&inventory))
+            .await,
+        Err(StoreError::AnalysisAdmission(SourceChanged))
+    ));
+    copy.request_id = "duplicate-copy".into();
+    let joined = store
+        .enqueue_analysis_request_with(&copy, Some(&inventory))
+        .await
+        .expect("join without another slot");
+    assert_eq!(joined.request_id, coordinator.request_id);
+    let running = store
+        .claim_analysis_request_compatible("node-a", Some(&engine), 10, 1000)
+        .await
+        .expect("claim")
+        .expect("runnable");
+    assert!(store
+        .complete_analysis_request(&running, "published-result", 11)
+        .await
+        .expect("complete under saturation"));
+    assert_eq!(
+        store
+            .enqueue_analysis_request_with(&next, Some(&inventory))
+            .await
+            .expect("freed slot")
+            .request_id,
+        "next"
+    );
 }
 
 /// The subtitle-source twin of the cap above (review S6): stranded

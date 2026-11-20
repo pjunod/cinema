@@ -13422,6 +13422,7 @@ async fn replicated_source_tail_drops(
             &source_shape,
             &source_counts,
             true,
+            true,
             remove,
         ))
         .collect()
@@ -29434,6 +29435,146 @@ async fn active_legacy_identity_blocks_exact_forced_successor() {
         );
     })
     .await;
+}
+
+/// A single replicated fixture write fills the queue, so this test exercises
+/// the real transaction and leader reads without thousands of setup commits.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+async fn replicated_analysis_admission_reports_fences_and_drains_at_capacity() {
+    use plurx_core::error::{AnalysisAdmissionRefusal::*, StoreError::AnalysisAdmission};
+    use plurx_core::store::{NewAnalysisRequest, MAX_ACTIVE_ANALYSIS_REQUESTS};
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("cluster client");
+    let telemetry = cluster._root.path().join("analysis-admission-telemetry.db");
+    let store: Arc<dyn Store> = Arc::new(
+        HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("replicated schema"),
+    );
+    let (_, file_id) = seed_file(&store, "saturated-analysis").await;
+    let base = NewAnalysisRequest {
+        request_id: "original".into(),
+        file_id,
+        source_size: 10_000,
+        source_mtime: 1,
+        component: "fragment_index".into(),
+        pipeline_version: "engine-a".into(),
+        video_identity: "video".into(),
+        requested_generation: "one".into(),
+        priority: "normal".into(),
+        trigger: "background".into(),
+        force_rebuild: false,
+        target_node_id: "node-a".into(),
+        not_before_ms: 1,
+        created_at_ms: 1,
+    };
+    store
+        .enqueue_analysis_request(&base)
+        .await
+        .expect("admit original");
+    let running = store
+        .claim_analysis_request_compatible("node-a", Some("engine-a"), 10, 1000)
+        .await
+        .expect("claim")
+        .expect("original");
+    let stale = NewAnalysisRequest {
+        source_size: 10_001,
+        ..base.clone()
+    };
+    assert!(matches!(
+        store.enqueue_analysis_request(&stale).await,
+        Err(AnalysisAdmission(SourceChanged))
+    ));
+    let stale_prediction = NewAnalysisRequest {
+        request_id: "expired-prediction".into(),
+        requested_generation: "predict:expired".into(),
+        ..base.clone()
+    };
+    assert!(matches!(
+        store.enqueue_analysis_request(&stale_prediction).await,
+        Err(AnalysisAdmission(PredictionExpired))
+    ));
+    // A reused request id with a different generation cannot silently join.
+    let conflict = NewAnalysisRequest {
+        requested_generation: "two".into(),
+        ..base.clone()
+    };
+    assert!(matches!(
+        store.enqueue_analysis_request(&conflict).await,
+        Err(AnalysisAdmission(GenerationConflict))
+    ));
+    client.execute("WITH RECURSIVE n(i) AS (VALUES (1) UNION ALL SELECT i+1 FROM n WHERE i < $1)
+        INSERT INTO analysis_requests(request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,priority,trigger,force_rebuild,target_node_id,state,not_before_ms,created_at_ms,updated_at_ms)
+        SELECT 'fill-'||i,$2,10000,1,'fragment_index','engine-b','video-'||i,'one','normal','background',0,'node-b','queued',1,1,1 FROM n",
+        hiqlite::params!(MAX_ACTIVE_ANALYSIS_REQUESTS - 1, file_id)).await.expect("fill queue");
+    let next = NewAnalysisRequest {
+        request_id: "next".into(),
+        video_identity: "next".into(),
+        ..base.clone()
+    };
+    assert!(matches!(
+        store.enqueue_analysis_request(&next).await,
+        Err(AnalysisAdmission(QueueFull))
+    ));
+    let duplicate = NewAnalysisRequest {
+        request_id: "duplicate".into(),
+        ..base.clone()
+    };
+    assert_eq!(
+        store
+            .enqueue_analysis_request(&duplicate)
+            .await
+            .expect("join at cap")
+            .request_id,
+        base.request_id
+    );
+    let viewer = NewAnalysisRequest {
+        request_id: "viewer".into(),
+        video_identity: "viewer".into(),
+        priority: "foreground".into(),
+        trigger: "playback".into(),
+        ..base
+    };
+    store
+        .enqueue_analysis_request(&viewer)
+        .await
+        .expect("playback headroom");
+    assert!(store
+        .complete_analysis_request(&running, "published-result", 11)
+        .await
+        .expect("finish at cap"));
+    assert!(matches!(
+        store.enqueue_analysis_request(&next).await,
+        Err(AnalysisAdmission(QueueFull))
+    ));
+    let viewer = store
+        .claim_analysis_request_compatible("node-a", Some("engine-a"), 12, 1000)
+        .await
+        .expect("viewer claim")
+        .expect("viewer");
+    assert!(store
+        .complete_analysis_request(&viewer, "viewer-result", 13)
+        .await
+        .expect("finish viewer"));
+    assert_eq!(
+        store
+            .enqueue_analysis_request(&next)
+            .await
+            .expect("refill freed slot")
+            .request_id,
+        "next"
+    );
 }
 
 #[tokio::test]

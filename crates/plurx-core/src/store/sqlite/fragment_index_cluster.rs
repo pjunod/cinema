@@ -812,6 +812,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         "SELECT {REQUEST_COLS} FROM analysis_requests
                           WHERE file_id = ?1 AND source_size = ?2 AND source_mtime = ?3
                             AND component = ?4
+                            AND EXISTS (SELECT 1 FROM files WHERE id = ?1 AND size = ?2 AND mtime = ?3)
                             AND video_identity = ?8
                             AND ((pipeline_version = ?5 AND requested_generation = ?6
                                   AND target_node_id = ?7)
@@ -846,12 +847,21 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     request_from_row,
                 )
                 .optional()?;
-            transaction.commit()?;
-            active.ok_or_else(|| {
-                StoreError::Task(
-                    "analysis source changed or the active request queue is full".to_owned(),
-                )
-            })
+            if let Some(active) = active {
+                transaction.commit()?;
+                return Ok(active);
+            }
+            use super::super::fragment_index_cluster::{
+                analysis_admission_error, analysis_admission_refusal_sql, analysis_headroom,
+            };
+            let input = serde_json::to_string(&request)
+                .map_err(|error| StoreError::Task(error.to_string()))?;
+            let reason: usize = transaction.query_row(
+                &analysis_admission_refusal_sql(),
+                params![input, live, analysis_headroom(&request)],
+                |row| row.get(0),
+            )?;
+            Err(analysis_admission_error(reason))
         })
         .await
     }

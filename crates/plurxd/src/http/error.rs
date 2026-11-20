@@ -211,6 +211,21 @@ impl From<serde_json::Error> for ApiError {
 
 impl From<StoreError> for ApiError {
     fn from(err: StoreError) -> Self {
-        ApiError::Internal(err.to_string())
+        use plurx_core::error::AnalysisAdmissionRefusal::*;
+        let StoreError::AnalysisAdmission(reason) = err else {
+            return ApiError::Internal(err.to_string());
+        };
+        let (status, code) = match reason {
+            QueueFull => (StatusCode::TOO_MANY_REQUESTS, "analysis_queue_full"),
+            BacklogFull => (StatusCode::TOO_MANY_REQUESTS, "analysis_backlog_full"),
+            SourceChanged => (StatusCode::CONFLICT, "analysis_source_changed"),
+            PredictionExpired => (StatusCode::CONFLICT, "analysis_prediction_stale"),
+            GenerationConflict => (StatusCode::CONFLICT, "analysis_generation_conflict"),
+        };
+        ApiError::Typed {
+            status,
+            code,
+            message: reason.to_string(),
+        }
     }
 }

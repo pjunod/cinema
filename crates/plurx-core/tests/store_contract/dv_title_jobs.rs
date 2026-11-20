@@ -1492,6 +1492,166 @@ fn playback_recipe(
 }
 
 #[tokio::test]
+async fn title_maintenance_rediscovers_expired_fel_attempt_and_fences_old_worker() {
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let file = seed_playback(&store, "title-expired-fel").await;
+        let (demand, old) = active(&store, file.id, &scanner, 1_000).await;
+        assert!(store
+            .request_dv_fel_variant(file.id, &playback_recipe(&demand))
+            .await
+            .expect("retain recipe with no active viewer"));
+        use plurx_core::store::background_jobs_resources::{
+            BackgroundSourceOwner, BackgroundSourceRegistration, SOURCE_AUTHORITY_REAP_GRACE_MS,
+        };
+        let token = old.token.clone().expect("claim");
+        let expiry = token.lease_expires_ms;
+        let BackgroundSourceRegistration::Registered(custody) = store
+            .register_background_source_custody(BackgroundSourceOwner::Job { token }, 1_001)
+            .await
+            .expect("register source")
+        else {
+            panic!("expected charged source custody on {backend}")
+        };
+        assert!(store
+            .activate_background_source_custody(custody.clone(), uuid::Uuid::new_v4().to_string())
+            .await
+            .expect("activate reader"));
+        for (now, expired) in [(expiry - 1, false), (expiry, true)] {
+            let counts = store.job_counts(now).await.expect("counts");
+            let row = counts
+                .iter()
+                .find(|c| c.kind == "dv_title_scan" && c.state == "running")
+                .expect("running title");
+            assert_eq!(
+                (row.count, row.expired_leases),
+                (1, i64::from(expired)),
+                "{backend}"
+            );
+            let demands = store
+                .dv_title_demands(&scanner, 0, now)
+                .await
+                .expect("maintenance");
+            assert_eq!(
+                demands
+                    .iter()
+                    .any(|d| d.active_job_id.as_ref() == Some(&old.id)),
+                expired,
+                "{backend}"
+            );
+        }
+        let contend = store
+            .claim_job(ClaimJob {
+                job_id: old.id.clone(),
+                expected_revision: old.revision,
+                node_id: "replacement".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::DvTitleScan,
+                payload_version: 1,
+                now_ms: expiry,
+                dispatched_at_ms: expiry,
+            })
+            .await
+            .expect("attempt replacement while physical reader is still charged");
+        assert!(
+            matches!(contend, ClaimOutcome::Contended),
+            "{backend}: {contend:?}"
+        );
+        assert!(store
+            .resolve_background_source_custody(custody.clone())
+            .await
+            .expect("observe source")
+            .is_some());
+        store
+            .enqueue_analysis_request(&plurx_core::store::NewAnalysisRequest {
+                request_id: "after-title".into(),
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                component: "fragment_index".into(),
+                pipeline_version: "admission-engine".into(),
+                video_identity: String::new(),
+                requested_generation: "title-lease-generation".into(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: "replacement".into(),
+                not_before_ms: expiry,
+                created_at_ms: expiry,
+            })
+            .await
+            .expect("queue competing analysis");
+        let claim_analysis = |now| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .claim_analysis_request_for_capacity(
+                        "replacement",
+                        Some("admission-engine"),
+                        now,
+                        now + 30_000,
+                        false,
+                        false,
+                        false,
+                        &[],
+                    )
+                    .await
+                    .expect("analysis capacity")
+            }
+        };
+        assert!(
+            claim_analysis(expiry).await.is_none(),
+            "{backend}: analysis must leave the second reader to playback"
+        );
+        let recovered_at = expiry + SOURCE_AUTHORITY_REAP_GRACE_MS;
+        store
+            .reap_settled_source_custody(recovered_at)
+            .await
+            .expect("normal bounded sweep");
+        assert!(store
+            .resolve_background_source_custody(custody)
+            .await
+            .expect("observe release")
+            .is_none());
+        let current = claim(&store, &old.id, recovered_at).await;
+        assert!(current.fence > old.fence, "{backend}");
+        let attempts = store.job_attempts(&old.id).await.expect("attempts");
+        assert_eq!(attempts.len(), 2, "{backend}");
+        assert!(attempts
+            .iter()
+            .any(|a| a.fence == old.fence && a.outcome.as_deref() == Some("lease_expired")));
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&demand, &old, &scanner, recovered_at + 1))
+                .await
+                .expect("late publication"),
+            JobPublishOutcome::LostOwnership
+        ));
+        assert!(store
+            .settle_job(SettleJob {
+                token: current.token.expect("new token"),
+                settlement: JobSettlement::Yield {
+                    error_code: Some("title_interrupted".into()),
+                    not_before_ms: recovered_at + 2,
+                    checkpoint: None,
+                },
+                now_ms: recovered_at + 1,
+            })
+            .await
+            .expect("new owner can settle"));
+        assert_eq!(
+            claim_analysis(recovered_at + 2)
+                .await
+                .expect("released source admits analysis")
+                .request_id,
+            "after-title"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn title_consumed_playback_recipe_returns_to_ordinary_paging() {
     use plurx_core::transcode::dv_fel_qualification as q;
     for_each_backend(|store, backend| async move {

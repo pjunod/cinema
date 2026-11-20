@@ -195,7 +195,11 @@ pub(crate) async fn candidate_in(
         row.reason = "other_component";
         return Ok(row);
     }
-    if old.requested_generation.starts_with("predict:") {
+    if old.requested_generation.starts_with("predict:")
+        || old
+            .pipeline_version
+            .starts_with(plurx_core::store::analysis_coordination::PIPELINE_PREFIX)
+    {
         row.reason = "producer_owned";
         return Ok(row);
     }

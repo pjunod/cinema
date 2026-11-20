@@ -643,7 +643,7 @@ macro_rules! claim_foreground_window {
     };
 }
 
-/// Two distinct holders already occupy the source.
+/// The same job still has a charged physical reader, or two distinct readers occupy the source.
 macro_rules! claim_source_holders {
     ($job:literal) => {
         concat!(
@@ -651,7 +651,9 @@ macro_rules! claim_source_holders {
     WHERE required.job_id = "#, $job, r#" AND (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
       WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.active_occupancy=1
         AND (held.expires_at_ms>json_extract($1,'$.now_ms') OR held.custody_id IS NOT NULL)
-        AND (held.work_id!="#, $job, r#" OR held.custody_id IS NOT NULL))>=2)"#
+        AND (held.work_id!="#, $job, r#" OR held.custody_id IS NOT NULL))>=2)
+  AND NOT EXISTS (SELECT 1 FROM background_source_custody previous
+    WHERE previous.owner_kind='job' AND previous.work_id="#, $job, r#" AND previous.phase!='paused')"#
     )
     };
 }
@@ -733,7 +735,8 @@ macro_rules! claim_maintenance_reader {
                     AND viewer.state = 'pending'
                     AND viewer.deadline_ms > json_extract($1, '$.now_ms')))
         + (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
-          WHERE held.owner_kind IN ('lease','offline') AND held.active_occupancy=1
+          WHERE (held.owner_kind IN ('lease','offline') OR (held.custody_id IS NOT NULL
+            AND held.expires_at_ms<=json_extract($1,'$.now_ms'))) AND held.active_occupancy=1
             AND (held.resource_key=required.resource_key OR held.resource_key='source_io' OR required.resource_key='source_io')
             AND (held.expires_at_ms>json_extract($1,'$.now_ms') OR held.custody_id IS NOT NULL)) >= 1))"#
     )
@@ -790,7 +793,7 @@ pub enum ClaimBlock {
     /// A foreground owner of the source does not permit background reads now,
     /// or still holds custody after its lease lapsed.
     ForegroundWindow,
-    /// Two holders already occupy the source.
+    /// A previous reader of this job or two source holders remain charged.
     SourceHolders,
     /// The second reader is reserved for live demand.
     MaintenanceReader,
@@ -3270,6 +3273,11 @@ pub trait BackgroundJobStore: Send + Sync {
         node_id: &str,
         now_ms: i64,
     ) -> Result<Option<ClaimVerdict>, StoreError>;
+    /// Read the durable claim predicates for one operator-requested job and node.
+    async fn explain_job_claim(
+        &self,
+        request: ClaimJob,
+    ) -> Result<Option<ClaimVerdict>, StoreError>;
     /// Narrow entry point shared by voter and learner artifact workers.
     async fn claim_artifact_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError>;
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError>;
@@ -5443,6 +5451,17 @@ LIMIT 1
         };
         request.validate()?;
         Ok(local_claim_verdict(self, &encode(&request)?).await)
+    }
+
+    async fn explain_job_claim(
+        &self,
+        request: ClaimJob,
+    ) -> Result<Option<ClaimVerdict>, StoreError> {
+        request.validate()?;
+        let rows = self
+            .queue_sql(CLAIM_VERDICT_SQL.into(), encode(&request)?, false, false)
+            .await?;
+        rows.first().map(|row| decode(row)).transpose()
     }
 
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError> {

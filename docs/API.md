@@ -3102,6 +3102,13 @@ The preparation status read requires an authenticated viewer; every other route 
 | PUT | `/api/v1/files/{id}/timeline-annotations/{kind}` | Writes a durable manual boundary |
 | DELETE | `/api/v1/files/{id}/timeline-annotations/{kind}` | Discards it, with explicit confirmation |
 
+A single-file analysis request returns HTTP 409 with `analysis_source_changed`,
+`analysis_prediction_stale` or `analysis_generation_conflict` when the corresponding
+identity check refuses admission. HTTP 429 distinguishes the runnable intake ceiling
+(`analysis_queue_full`) from the hard active backlog ceiling (`analysis_backlog_full`).
+For a multi-component request, inspect each component's acceptance and error in the
+202 response when another component was accepted.
+
 The preparation response has `file_id` as a decimal string, `checked_at_ms`,
 `source_current`, and `active` (actual queued/running work). Its `playback`,
 `subtitles`, `markers`, `probe`, `metadata`, `versions`, `thumbnails`,
@@ -3818,7 +3825,7 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 | GET | `/api/v1/cluster/work/storage-domains` | admin | Library roots, applied `mappings`, latest `pending` revision/state, `waiting_on` (at most 32 rows) and distinct `waiting_total`; two readers per domain and two library workers per provider |
 | PUT | `/api/v1/cluster/work/storage-domains` | admin | Array of `{library_id, root_path, domain_id}` saves the desired revision immediately, at most 256 roots / 64 KiB. Empty IDs are omitted for the global fallback. Returns 200 with `saved`, `revision`, `applied`, latest `pending`, `waiting_on` and `waiting_total`; 400 for invalid input or a stale library root. Eligible nodes apply atomically when affected jobs and disturbed-domain readers no longer depend on the previous mapping. [Apply status](server/STORAGE-DOMAINS-DEFERRED-APPLY-STATUS.md) |
 | GET | `/api/v1/cluster/jobs` | admin | Optional `state`, `kind`, `node_id`, `limit` (1–100; default 100), and `cursor` query parameters; owner/destination filtering precedes pagination; at most 100 durable job summaries, bounded counts, next cursor and up to 64 recent repair plans; payloads, paths and ownership tokens omitted |
-| GET | `/api/v1/cluster/jobs/{id}` | admin | Durable summary, latest 16 attempts and first 100 interests; `more_waiters` identifies truncation |
+| GET | `/api/v1/cluster/jobs/{id}` | admin | Durable summary, latest 16 attempts and first 100 interests. `more_waiters` identifies truncation. Add `?explain=true` to sample the first blocking store claim predicate on the serving node. An empty block with `evaluated=true` means these predicates passed. Placement, physical capability and turn arbitration are checked separately. |
 | POST | `/api/v1/cluster/jobs/{id}/cancel` | admin | Idempotent cooperative cancellation; running children retain reservations until joined or expired |
 | POST | `/api/v1/cluster/jobs/{id}/retry` | admin | JSON `request_id` UUID identifies one deliberate retry; failed/cancelled core work creates a fresh admin interest or fragment analysis generation. Preserve the UUID across transport retries; active work returns conflict |
 | GET | `/api/v1/cluster/nodes` | admin | Live roster, capacity, protocol range, per-node readiness |
