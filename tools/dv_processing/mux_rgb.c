@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 // Bounded timestamped RGB48LE -> NUT using public system libavformat.
 #include <errno.h>
 #include <libavcodec/avcodec.h>
@@ -7,6 +8,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#include "m7_np1_encode.h"
 static void need(int ok, const char *msg) {
   if (!ok) {
     fprintf(stderr, "RGB mux refused: %s\n", msg);
@@ -43,6 +46,10 @@ struct timing {
   int pd, dd;
 };
 int main(int argc, char **argv) {
+  if (argc >= 2 && !strcmp(argv[1], "--m7-encode-np1-v1")) {
+    m7_np1_need(argc == 2, "usage: mux_rgb --m7-encode-np1-v1");
+    return m7_np1_main();
+  }
   need(argc == 7,
        "usage: mux_rgb RGB48LE TIMING.tsv OUTPUT_NUT WIDTH HEIGHT MAX_FRAMES");
   int width = number(argv[4], 64, 3840), height = number(argv[5], 64, 2160),
