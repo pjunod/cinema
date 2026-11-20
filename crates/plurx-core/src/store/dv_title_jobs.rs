@@ -37,6 +37,59 @@ pub struct TitleDemand {
     #[serde(default)]
     pub fel_head_target: Option<String>,
 }
+/// Node-local maintenance discovery. A source may become admissible after
+/// this worker has passed it, while new revisions keep the forward walk busy.
+#[derive(Default)]
+pub struct TitleMaintenanceCursor {
+    forward_after: i64,
+    revisit_after: i64,
+    revisit_through: i64,
+    revisit_next: bool,
+}
+
+impl TitleMaintenanceCursor {
+    /// Return one page and its position. Advance the position for each row
+    /// examined: the worker may accept a job partway through either page.
+    pub async fn next_page(
+        &mut self,
+        store: &dyn super::BackgroundJobStore,
+        scanner: &str,
+        now_ms: i64,
+    ) -> Result<(Vec<TitleDemand>, &mut i64), StoreError> {
+        if self.revisit_next {
+            // Freeze the end of each revisit. Even a continually growing
+            // outbox cannot postpone the next trip back to the oldest rows.
+            if self.revisit_after >= self.revisit_through {
+                self.revisit_after = 0;
+                self.revisit_through = self.forward_after;
+            }
+            let mut rows = store
+                .dv_title_demands(scanner, self.revisit_after, now_ms)
+                .await?;
+            rows.truncate(rows.partition_point(|d| d.probe_revision <= self.revisit_through));
+            if !rows.is_empty() {
+                // Always give the forward walk its next page, even when
+                // this entire prefix is unreachable on this worker.
+                self.revisit_next = false;
+                return Ok((rows, &mut self.revisit_after));
+            }
+            // Everything else below the fence settled or disappeared.
+            self.revisit_after = 0;
+            self.revisit_through = 0;
+        }
+
+        let rows = store
+            .dv_title_demands(scanner, self.forward_after, now_ms)
+            .await?;
+        if rows.is_empty() {
+            *self = Self::default();
+        } else {
+            self.revisit_next = true;
+        }
+        Ok((rows, &mut self.forward_after))
+    }
+}
+
 /// Bounded viewer interest in one already registered exact quality recipe.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitleViewerRequest {
