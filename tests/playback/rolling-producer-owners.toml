@@ -4124,7 +4124,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Remote processed upgrades add one successor-context task after prime. It
 # restores a catalog under the existing two-second restoration deadline,
 # verifies the active local incarnation, and records an upgrade intent.
-expected_occurrences = 1182
+# The scanner deadline fixture owns a task so it can observe the actual probe child.
+expected_occurrences = 1183
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -6099,7 +6100,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # sleeps above. It wakes the existing splice task.
 # Main adds bounded artwork, offline worker, voter and heartbeat fixture waits.
 # Remote processed upgrade relay adds one test-only control-cadence wait.
-expected_occurrences = 2271
+# The scanner deadline fixture bounds cleanup after advancing the test clock.
+expected_occurrences = 2272
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
