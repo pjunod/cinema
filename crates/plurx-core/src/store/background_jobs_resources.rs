@@ -652,10 +652,11 @@ pub(super) async fn placement_source_pressure<T: QueueSql>(
           WHEN EXISTS(SELECT 1 FROM required WHERE {blocked})
             THEN 'foreground_window_protected'
           WHEN EXISTS(SELECT 1 FROM required WHERE EXISTS(
-            SELECT DISTINCT held.owner_kind,held.work_id,held.fence FROM source_io_occupancy held
+            SELECT 1 FROM source_io_occupancy held
             WHERE (held.resource_key=required.resource_key OR held.resource_key='source_io'
                 OR (required.resource_key='source_io' AND held.resource_key GLOB 'source_io:*'))
               AND held.active_occupancy=1 AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL)
+            GROUP BY held.owner_kind,held.work_id,held.fence
             LIMIT 1 OFFSET 1))
             THEN 'background_reader_slots_held'
           ELSE 'unknown' END) AS result_json"#
