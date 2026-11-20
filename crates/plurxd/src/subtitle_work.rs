@@ -586,8 +586,17 @@ mod foreground_admission_tests {
     async fn requested_subtitle_yield_keeps_cpu_until_original_work_returns() {
         let admissions = Admissions::new();
         let held = admissions
-            .try_admit_software(2, 1, Priority::Background)
-            .expect("actual background reservation");
+            .try_admit_bundle(
+                0,
+                2,
+                &TranscodeResourceEstimate {
+                    hardware_slot: false,
+                    cpu_threads: 1,
+                    decoder_threads: None,
+                },
+                Priority::Background,
+            )
+            .expect("actual one-thread background reservation");
         let registered = held
             .register_disposable_background()
             .expect("registered original work");

@@ -248,7 +248,7 @@ async fn a_riding_pass_reports_its_tracks_and_bytes_with_its_progress() {
     drop(build);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "cluster-integration-tests"))]
 pub(crate) async fn paced_index_until_reclaimed(
     manager: &crate::transcode::TranscodeManager,
     cache: &Path,
@@ -421,7 +421,7 @@ async fn unpolled_title_companion_retains_the_original_admission_until_input_dro
             root.path().join("must-not-enter"),
             "0".into(),
             Duration::from_secs(30),
-            None,
+            tokio_util::sync::CancellationToken::new(),
         )
     })
     .await;
@@ -431,8 +431,8 @@ async fn unpolled_title_companion_retains_the_original_admission_until_input_dro
         "the queued whole input retains its original admission"
     );
     // Current-thread scheduling: there has been no yield since spawn.
-    task.0.abort();
-    match (&mut task.0).await {
+    task.task.abort();
+    match (&mut task.task).await {
         Err(error) => assert!(error.is_cancelled()),
         Ok(_) => panic!("unpolled scanner unexpectedly entered"),
     }
@@ -480,7 +480,7 @@ exec sleep 30
             scanner,
             started.to_string_lossy().into_owned(),
             Duration::from_secs(30),
-            Some(&cancel),
+            cancel.child_token(),
         )
     })
     .await;
@@ -498,7 +498,7 @@ exec sleep 30
         "original work still owns the lane"
     );
     cancel.cancel();
-    let result = tokio::time::timeout(Duration::from_secs(5), &mut task.0)
+    let result = tokio::time::timeout(Duration::from_secs(5), &mut task.task)
         .await
         .expect("same cancellation reaches companion")
         .expect("same task joined");

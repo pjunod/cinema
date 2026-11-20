@@ -600,10 +600,12 @@ mod tests {
             EncoderCaps::default(),
             Pipeline::Cpu,
         );
-        let admission = manager
-            .admit_fragment()
-            .await
-            .expect("admit quota-pacing probe");
+        let admission = Arc::new(
+            manager
+                .admit_fragment()
+                .await
+                .expect("admit quota-pacing probe"),
+        );
         let cancel = CancellationToken::new();
         let shutdown = CancellationToken::new();
         let started = tokio::time::Instant::now();

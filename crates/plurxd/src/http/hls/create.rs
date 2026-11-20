@@ -8672,6 +8672,8 @@ mod funded_origin_response_tests {
             library_channel: None,
             request: crate::transcode::SessionRequest {
                 dv_processing_destination: None,
+                dv_refit_digest: None,
+                source_telemetry: None,
                 sdr_master_codecs: None,
                 continuous_media: None,
                 quality_catalog: None,

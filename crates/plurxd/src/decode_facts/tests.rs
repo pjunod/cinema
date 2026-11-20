@@ -213,7 +213,7 @@ async fn packaged_static_ffprobe_uses_supported_bounded_source_read_syscalls() {
     let identity = DecodeProbeIdentity::discover(&probe)
         .await
         .expect("qualify exact packaged parser identity");
-    let media = PathBuf::from(
+    let media = std::path::PathBuf::from(
         std::env::var_os("PLURX_TEST_STRICT_MEDIA").expect("generated qualification media"),
     );
     let (_store, _job, active) = crate::background_jobs::tests::active().await;

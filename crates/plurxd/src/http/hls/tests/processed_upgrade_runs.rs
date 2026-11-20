@@ -242,11 +242,14 @@ async fn auto_fel_refusal_reports_when_peer_selection_never_started() {
         &fixture.state,
         &intent,
         &run,
-        |_request, _recovery| async {
-            tokio::time::pause();
-            tokio::time::advance(crate::transcode::PROCESSED_UPGRADE_TRIAL_BUDGET).await;
-            tokio::time::resume();
-            Err(refusal)
+        |_request, _recovery| {
+            let refusal = refusal.clone();
+            async move {
+                tokio::time::pause();
+                tokio::time::advance(crate::transcode::PROCESSED_UPGRADE_TRIAL_BUDGET).await;
+                tokio::time::resume();
+                Err(refusal)
+            }
         },
     )
     .await;

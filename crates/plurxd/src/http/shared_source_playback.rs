@@ -2909,9 +2909,7 @@ async fn build_real_source_start_fixture(
     state_mut.replace_membership(selected.membership_manager());
     #[cfg(target_os = "linux")]
     if let Some(runtime) = direct_runtime {
-        Arc::get_mut(&mut state)
-            .expect("sole initial State")
-            .resource_runtime = Some(runtime);
+        state_mut.resource_runtime = Some(runtime);
     }
     state_mut.clock_observer = if let Some(clock) = &startup_clock {
         clock

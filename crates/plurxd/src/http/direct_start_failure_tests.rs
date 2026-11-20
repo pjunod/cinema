@@ -80,7 +80,7 @@ async fn direct_unpublished_open_failure_returns_original_ticket_and_releases_ow
         panic!("actual direct claim not acquired");
     };
     prepared
-        .bind_invocation(&binding)
+        .bind_invocation(&binding, crate::http::hls::SourceCopyPresentation::FullVod)
         .expect("actual complete invocation binding");
     let assignment = state
         .store

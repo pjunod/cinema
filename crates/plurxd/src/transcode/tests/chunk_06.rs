@@ -376,6 +376,8 @@
         producer_attempt: u64,
     ) -> Arc<Session> {
         Arc::new(Session {
+            #[cfg(target_os = "linux")]
+            playback_lane: std::sync::Mutex::new(None),
             audio_delivery: None,
             dir: dir.to_path_buf(),
             recovery: None,

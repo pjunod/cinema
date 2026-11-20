@@ -1059,10 +1059,12 @@ async fn playback_qualification_reclaims_local_index_heavy_turn_without_encoder_
         plurx_core::transcode::EncoderCaps::default(),
         plurx_core::transcode::Pipeline::Cpu,
     ));
-    let admission = manager
-        .admit_fragment()
-        .await
-        .expect("ordinary local-index admission");
+    let admission = Arc::new(
+        manager
+            .admit_fragment()
+            .await
+            .expect("ordinary local-index admission"),
+    );
     let mut child = tokio::process::Command::new("sleep")
         .arg("60")
         .kill_on_drop(true)

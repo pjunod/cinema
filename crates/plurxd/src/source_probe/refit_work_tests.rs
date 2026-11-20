@@ -1110,6 +1110,13 @@ async fn a_crashed_fit_recovers_its_initial_and_resumed_scene_lines() {
 #[tokio::test]
 async fn a_preempted_fit_resumes_and_equals_an_uninterrupted_one() {
     let fx = fixture().await;
+    fx.store
+        .put_setting(
+            plurx_core::store::keys::SW_POOL_THREADS,
+            &super::super::dv_refit::RESERVED_THREADS.to_string(),
+        )
+        .await
+        .expect("configured fit budget");
     let state = app(&fx);
     std::fs::create_dir_all(fx.root.join("runtime")).expect("runtime");
     let file = title(&fx, "resumed", 7, true).await;
@@ -1171,7 +1178,7 @@ async fn a_preempted_fit_resumes_and_equals_an_uninterrupted_one() {
             .transcode
             .admit_dv_refit(super::super::dv_refit::RESERVED_THREADS)
             .await
-            .unwrap_or_else(crate::transcode::FragmentAdmission::probe_only)
+            .expect("admit the original fit reservation")
     };
     // Preempted once the helper has written its lines.
     let (job, active) = attempt(&fx.store, &src).await;
@@ -1266,6 +1273,13 @@ async fn a_preempted_fit_resumes_and_equals_an_uninterrupted_one() {
 #[tokio::test]
 async fn a_cancelled_fit_publishes_nothing_and_stays_terminal() {
     let fx = fixture().await;
+    fx.store
+        .put_setting(
+            plurx_core::store::keys::SW_POOL_THREADS,
+            &super::super::dv_refit::RESERVED_THREADS.to_string(),
+        )
+        .await
+        .expect("configured fit budget");
     let state = app(&fx);
     std::fs::create_dir_all(fx.root.join("runtime")).expect("runtime");
     let file = title(&fx, "cancelled", 7, true).await;
@@ -1280,7 +1294,7 @@ async fn a_cancelled_fit_publishes_nothing_and_stays_terminal() {
         .transcode
         .admit_dv_refit(super::super::dv_refit::RESERVED_THREADS)
         .await
-        .unwrap_or_else(crate::transcode::FragmentAdmission::probe_only);
+        .expect("admit the original fit reservation");
     let work = tokio::spawn(execute(
         state.clone(),
         file.clone(),

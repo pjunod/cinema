@@ -50,6 +50,7 @@ fn fixture() -> (
     let request = SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -74,6 +75,7 @@ fn fixture() -> (
         presentation: Presentation::Vod,
         block_budget_secs: None,
         transport: None,
+        source_telemetry: None,
     };
     let recipe_digest = [7; 32];
     let candidate = QualityCandidate {
@@ -99,6 +101,7 @@ fn fixture() -> (
     }))
     .unwrap();
     let catalog = crate::media_sessions::CandidateCatalogContext {
+        catalog_query: None,
         caps,
         candidate,
         binding: crate::media_pool::PlanningBinding::from_snapshot(&snapshot),
@@ -224,9 +227,16 @@ fn static_configured_scope_rejects_parent_components_and_native_walk_refuses_int
 
 #[tokio::test]
 async fn static_original_registry_allows_claim_renewal_but_refuses_a_changed_saved_carrier() {
-    let (_, _, catalog) = fixture();
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+    use plurx_core::store::background_jobs::{
+        ClaimJob, EnqueueJob, JobKind, JobPayload, JobRequest,
+    };
+
+    let (_, snapshot, catalog) = fixture();
+    let file = &snapshot.file;
+    let source_version = "s1:1:2:42:10:0:10:0";
     let mut carrier =
-        serde_json::json!({ "catalog": catalog, "source_object_version": "s1:1:2:42:10:0:10:0" });
+        serde_json::json!({ "catalog": catalog, "source_object_version": source_version });
     let digest = static_payload_digest(&carrier).unwrap();
     let claim = plurx_core::playback::audio::canonical_producer_claim();
     let intent = EncodedOutputIntent {
@@ -257,24 +267,108 @@ async fn static_original_registry_allows_claim_renewal_but_refuses_a_changed_sav
         candidate_digest: Some([7; 32]),
     };
     assert!(intent.valid());
-    let token = JobToken {
-        job_id: uuid::Uuid::new_v4().to_string(),
-        node_id: "node".into(),
-        boot_id: uuid::Uuid::new_v4().to_string(),
-        claim_id: uuid::Uuid::new_v4().to_string(),
-        fence: 1,
-        revision: 1,
-        lease_expires_ms: crate::media_sessions::unix_ms() + 60_000,
-    };
     let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().unwrap());
+    let library = store
+        .create_library(&NewLibrary {
+            name: "static registry".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![file.path.parent().expect("fixture source root").into()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item_id = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "static registry".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let file_id = store
+        .upsert_file(
+            item_id,
+            file.path.to_str().expect("fixture source path"),
+            file.size,
+            file.mtime,
+            &Default::default(),
+        )
+        .await
+        .expect("source");
+    assert_eq!(file_id, file.id, "source matches saved catalog binding");
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let now_ms = crate::media_sessions::unix_ms();
+    let kind = JobKind::EncodedOutputPrepare;
+    store
+        .enqueue_job(EnqueueJob {
+            id: job_id.clone(),
+            payload: JobPayload::EncodedOutputPrepare {
+                encoded_output_version: 1,
+                file_id,
+                source_generation: source_version.into(),
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_object_version: source_version.into(),
+                policy_generation: "policy".into(),
+                intent: intent.clone(),
+                candidate_catalog: Some(carrier["catalog"].clone()),
+                scratch_bytes: 4096,
+                reason: "recent_demand".into(),
+            },
+            dedupe_key: hex::encode(digest),
+            priority: 1,
+            not_before_ms: now_ms,
+            now_ms,
+            request: JobRequest {
+                scope: "encoded_output_prepare".into(),
+                request_id: job_id.clone(),
+                request_digest: hex::encode(digest),
+                consumer_kind: "encoded_output".into(),
+                consumer_ref: file_id.to_string(),
+                target_node_id: Some(intent.target_node_id.clone()),
+                deadline_ms: None,
+                retain_identity: false,
+            },
+        })
+        .await
+        .expect("encoded output fixture enqueue");
+    let candidate = store
+        .background_job(&job_id)
+        .await
+        .expect("read original job")
+        .expect("queued original job");
+    let (job, deadline) = crate::background_jobs::claim_with_resolution(
+        store.as_ref(),
+        &candidate,
+        ClaimJob {
+            job_id,
+            expected_revision: candidate.revision,
+            node_id: intent.target_node_id.clone(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            kind,
+            payload_version: 1,
+            now_ms,
+            dispatched_at_ms: now_ms,
+        },
+    )
+    .await
+    .expect("claim exact fixture job")
+    .expect("admitted original claim");
+    let token = job.token.expect("original claim token");
     let active = crate::background_jobs::ActiveBackgroundJob::start(
         Arc::clone(&store),
         Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
         token.clone(),
-        tokio::time::Instant::now() + Duration::from_secs(30),
-        plurx_core::store::background_jobs::JobKind::EncodedOutputPrepare,
+        deadline,
+        kind,
     )
-    .unwrap();
+    .await
+    .expect("start the original claim");
     let controller = active.fence();
     let registry = StaticArtifactRuns::default();
     let original = registry
@@ -284,7 +378,7 @@ async fn static_original_registry_allows_claim_renewal_but_refuses_a_changed_sav
             controller.clone(),
             intent.clone(),
             "policy".into(),
-            1,
+            file_id,
             4096,
         )
         .unwrap();
@@ -298,7 +392,7 @@ async fn static_original_registry_allows_claim_renewal_but_refuses_a_changed_sav
             controller.clone(),
             intent.clone(),
             "policy".into(),
-            1,
+            file_id,
             4096,
         )
         .unwrap();
@@ -315,14 +409,14 @@ async fn static_original_registry_allows_claim_renewal_but_refuses_a_changed_sav
                 controller.clone(),
                 intent.clone(),
                 "policy".into(),
-                1,
+                file_id,
                 4096
             )
             .is_err(),
         "changed caps cannot borrow an already prepared operation"
     );
     let mut replacement = token;
-    replacement.claim_id = "another-claim".into();
+    replacement.claim_id = uuid::Uuid::new_v4().to_string();
     assert!(registry
         .reserve(
             replacement,
@@ -330,7 +424,7 @@ async fn static_original_registry_allows_claim_renewal_but_refuses_a_changed_sav
             controller,
             intent,
             "policy".into(),
-            1,
+            file_id,
             4096
         )
         .is_err());

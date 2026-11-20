@@ -891,8 +891,7 @@ async fn profile_actual_processed_publication(
     grid: plurx_core::transcode::VodFrameGrid,
     raster: (u32, u32),
 ) {
-    use futures_util::FutureExt;
-    use tokio::io::AsyncReadExt;
+    use futures_util::{FutureExt, StreamExt};
     let count = publication_control_count();
     let audio_channels = request
         .audio_delivery
@@ -952,32 +951,45 @@ async fn profile_actual_processed_publication(
             .expect("bounded segment wait")
             .expect("normal segment route");
             let owner = response.owner;
-            let mut ready = response
+            let ready = response
                 .result
                 .expect("published segment")
                 .expect("planned resource");
             let wait_ms = started.elapsed().as_millis();
             let body_started = Instant::now();
-            let mut bytes = Vec::new();
+            let length = ready.len;
             const LIMIT: u64 = 64 * 1024 * 1024;
-            assert!(ready.len <= LIMIT, "bounded served object");
-            tokio::time::timeout(
-                Duration::from_secs(10),
-                (&mut ready.file).take(LIMIT + 1).read_to_end(&mut bytes),
-            )
+            assert!(length <= LIMIT, "bounded served object");
+            let deadline = body_started + Duration::from_secs(10);
+            let bytes = tokio::time::timeout_at(deadline.into(), async {
+                assert_eq!(ready.file.length().await?, length);
+                let mut stream = ready
+                    .file
+                    .into_range_stream(
+                        0,
+                        length,
+                        crate::media_sessions::MEDIA_BODY_READ_BUFFER,
+                        deadline,
+                    )
+                    .await?;
+                let mut bytes = Vec::new();
+                while let Some(chunk) = stream.next().await {
+                    bytes.extend_from_slice(&chunk?);
+                }
+                Ok::<_, std::io::Error>(bytes)
+            })
             .await
             .expect("bounded body read")
             .expect("served bytes");
-            assert_eq!(bytes.len() as u64, ready.len);
+            assert_eq!(bytes.len() as u64, length);
             assert!(!bytes.is_empty());
             println!(
                 "{}",
                 serde_json::json!({"publication_entry":entry,"wait_ms":wait_ms,
                     "body_ms":body_started.elapsed().as_millis(),"bytes":bytes.len()})
             );
-            // Keep Ready's publication ownership until its read is complete.
-            drop(ready);
-            drop(owner);
+            // Keep the original publication ownership through stream EOF.
+            drop((ready.retained_lease, ready.cache_pin, owner));
             if entry.is_some() {
                 segments.push(bytes);
             } else {

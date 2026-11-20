@@ -4230,7 +4230,7 @@ mod equality_tests;
 /// future is dropped.
 #[cfg(test)]
 mod ride_along_tests;
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, target_os = "linux", feature = "cluster-integration-tests"))]
 pub(crate) use ride_along_tests::paced_index_until_reclaimed;
 
 #[cfg(test)]
