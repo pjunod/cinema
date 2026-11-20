@@ -98,7 +98,7 @@ async fn clustered_initial_vod_start_primes_a_cold_native_fel_head() {
         .create_library(&NewLibrary {
             name: "native-fel".into(),
             kind: LibraryKind::Movies,
-            paths: vec![directory.path().to_string_lossy().into_owned()],
+            paths: vec![directory.path().to_path_buf()],
             anime: false,
         })
         .await
