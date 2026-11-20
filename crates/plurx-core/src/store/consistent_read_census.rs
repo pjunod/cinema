@@ -58,14 +58,18 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // Offload: committed column shape before its additive schema migration.
     // Storage-domain pending apply checks its trigger shape and marker: two more.
     // Scoped application login (delegation) checks its shape and marker: two more.
+    // Curation (tags, rows, Home layouts) checks its shape and marker: two more.
     // F+ curve fits check their extension shape and marker: two more.
-    ("hiqlite.rs", 78),
+    ("hiqlite.rs", 80),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.
     ("hiqlite_annotations.rs", 5),
-    // Managed bootstrap validates committed shape and the singleton marker.
-    ("hiqlite_background_jobs.rs", 4),
+    // Curation reads are local replica reads: a person's own tags and rows.
+    ("hiqlite_curation.rs", 0),
+    // Managed bootstrap validates committed shape and marker. Legacy trigger
+    // installation also checks the committed custody-retention marker.
+    ("hiqlite_background_jobs.rs", 5),
     ("hiqlite_catalog.rs", 2),
     ("hiqlite_classification.rs", 1),
     ("hiqlite_coordination.rs", 2),
@@ -563,6 +567,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("dv_title_jobs_schema_version", STARTUP),
     ("invitation_schema_version", STARTUP),
     ("library_annotations_schema_version", STARTUP),
+    ("library_curation_schema_version", STARTUP),
     ("migrate_additive_schema_step", STARTUP),
     ("migrate_playback_inputs", STARTUP),
     ("migrate_schema", STARTUP),

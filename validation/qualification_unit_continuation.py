@@ -367,6 +367,12 @@ def historical_command(workflow, kind):
     return retention_enabled_rust_executor(workflow, kind, steps)
 
 
+# The pinned Linux CI image also sets the scope's run shell to Bash. Bind
+# the entire reviewed header so a different shell or working directory
+# cannot change how the historical promotion inputs were authenticated.
+PINNED_IMAGE_SCOPE_HEADER = '166d47a63bfaf0286c0d7b0375b65efba360e8a457bda07fcef9f0161a7ca6a2'
+
+
 def authenticate_scope(api, run_id, run, workflow, document, prior, repository):
     """A supplied input alone does not prove that manual binding executed."""
     event = receipts.bounded_json(run['event_payload'].encode())
@@ -387,7 +393,8 @@ def authenticate_scope(api, run_id, run, workflow, document, prior, repository):
                      'Historical workflow changes the default command executor')
     scope_header = re.search(r'(?ms)^  scope:\n(.*?)(?=^    steps:)', workflow)
     receipts.require(scope_header is not None
-                     and not re.search(r'(?m)^    (?:continue-on-error|defaults|env):', scope_header[1]),
+                     and (retention.digest(scope_header[1].encode()) == PINNED_IMAGE_SCOPE_HEADER
+                          or not re.search(r'(?m)^    (?:continue-on-error|defaults|env):', scope_header[1])),
                      'Historical binding scope masks errors or overrides its context')
     bind = [step for step in steps if re.search(r'(?m)^        id: promotion$', step)]
     receipts.require(len(bind) == 1, 'Historical promotion binding step unavailable')

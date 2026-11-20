@@ -211,6 +211,8 @@ mod hiqlite_catalog;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_coordination;
 #[cfg(feature = "hiqlite-store")]
+mod hiqlite_curation;
+#[cfg(feature = "hiqlite-store")]
 mod hiqlite_durable;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_dv_conversion;
@@ -288,11 +290,13 @@ pub mod background_jobs_transcription;
 pub mod classification_schedule;
 #[cfg(test)]
 mod copy_index_v3_tests;
+pub(crate) mod curation_sql;
 mod custody_retention;
 pub mod dv_refit_jobs;
 pub mod dv_title_jobs;
 mod dv_title_jobs_schema;
 mod library_annotations_schema;
+mod library_curation_schema;
 pub mod offline_claim;
 pub mod offline_expiry;
 pub mod replicated;
@@ -2307,6 +2311,9 @@ pub mod keys {
     /// in the world. So an operator arms it, sees it finish, and it disarms
     /// itself.
     pub const GENRE_BACKFILL: &str = "genres.backfill";
+    /// The household default Home layout (JSON `HomeLayout`), set by an
+    /// admin; empty or absent means the built-in Home.
+    pub const HOME_DEFAULT_LAYOUT: &str = "home.default_layout";
     /// The highest item id the backfill has finished with, stamped after
     /// every single title.
     ///
@@ -4339,6 +4346,129 @@ pub trait AnnotationStore: Send + Sync + 'static {
         list: crate::annotations::ItemList,
         item_ids: &[i64],
     ) -> Result<Vec<i64>, StoreError>;
+}
+
+/// Person-curated tags, saved rows, Home layouts and curation grants
+/// (docs/features/CUSTOM-TAGS-PLAN.md). Visibility — household rows and
+/// tags plus the viewer's own — is enforced in every query that takes a
+/// `viewer`; the HTTP layer decides *who may change what*.
+#[async_trait]
+pub trait CurationStore: Send + Sync + 'static {
+    /// The grants a user holds (admins hold every grant implicitly; that is
+    /// decided above the store).
+    async fn user_grants(&self, user_id: i64) -> Result<Vec<crate::curation::Grant>, StoreError>;
+    /// Grant or revoke. Idempotent; writes nothing for a user who does not exist.
+    async fn set_user_grant(
+        &self,
+        user_id: i64,
+        grant: crate::curation::Grant,
+        granted: bool,
+        by: i64,
+        at_ms: i64,
+    ) -> Result<(), StoreError>;
+    /// Household tags and the viewer's private ones, archived included, by name.
+    async fn visible_tags(&self, viewer: i64) -> Result<Vec<crate::curation::Tag>, StoreError>;
+    async fn curation_tag(&self, id: i64) -> Result<Option<crate::curation::Tag>, StoreError>;
+    /// `None` when a tag with the same key already exists in that scope.
+    async fn create_tag(
+        &self,
+        tag: &crate::curation::NewTag,
+        at_ms: i64,
+    ) -> Result<Option<crate::curation::Tag>, StoreError>;
+    /// The tag after the edit, or `None` if it does not exist.
+    async fn update_tag(
+        &self,
+        id: i64,
+        edit: &crate::curation::TagEdit,
+    ) -> Result<Option<crate::curation::Tag>, StoreError>;
+    /// Deletes the tag with its memberships and rejections.
+    async fn delete_tag(&self, id: i64) -> Result<bool, StoreError>;
+    /// Moves `from`'s memberships and rejections onto `into`, then deletes
+    /// `from`, in one transaction. Rows that named `from` are rewritten by
+    /// the caller.
+    async fn merge_tags(&self, from: i64, into: i64) -> Result<bool, StoreError>;
+    /// The viewer-visible tags on one item, ascending.
+    async fn item_tag_ids(&self, viewer: i64, item_id: i64) -> Result<Vec<i64>, StoreError>;
+    /// Remove then add memberships of one tag, in one transaction. Items that
+    /// do not exist are skipped; existing memberships keep their time.
+    async fn set_tag_members(
+        &self,
+        tag_id: i64,
+        add: &[i64],
+        remove: &[i64],
+        by: i64,
+        source: crate::curation::TagSource,
+        at_ms: i64,
+    ) -> Result<(), StoreError>;
+    /// The top-level titles a rule matches for its viewer, and their total.
+    async fn rule_items(
+        &self,
+        query: &crate::curation::RuleQuery<'_>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<crate::curation::IdPage, StoreError>;
+    /// Titles whose classifier terms match the tag's suggestion terms and
+    /// that are neither tagged nor rejected, by title.
+    async fn tag_suggestions(
+        &self,
+        tag_id: i64,
+        offset: i64,
+        limit: i64,
+    ) -> Result<crate::curation::SuggestionPage, StoreError>;
+    /// Reject suggestions (they never come back) and restore earlier
+    /// rejections, in one transaction.
+    async fn set_suggestion_rejections(
+        &self,
+        tag_id: i64,
+        reject: &[i64],
+        restore: &[i64],
+        by: i64,
+        at_ms: i64,
+    ) -> Result<(), StoreError>;
+    /// A tag's rejected titles, most recent first.
+    async fn rejected_items(
+        &self,
+        tag_id: i64,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Vec<i64>, StoreError>;
+    /// Household rows, then the viewer's own, oldest first.
+    async fn visible_rows(&self, viewer: i64)
+        -> Result<Vec<crate::curation::SavedRow>, StoreError>;
+    async fn curation_row(&self, id: i64) -> Result<Option<crate::curation::SavedRow>, StoreError>;
+    /// Every row (anyone's) whose rule names the tag.
+    async fn rows_naming_tag(
+        &self,
+        tag_id: i64,
+    ) -> Result<Vec<crate::curation::SavedRow>, StoreError>;
+    async fn create_row(
+        &self,
+        owner_user_id: Option<i64>,
+        title: &str,
+        spec: &crate::curation::RowSpec,
+        by: i64,
+        at_ms: i64,
+    ) -> Result<crate::curation::SavedRow, StoreError>;
+    async fn update_row(
+        &self,
+        id: i64,
+        title: &str,
+        spec: &crate::curation::RowSpec,
+        at_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn delete_row(&self, id: i64) -> Result<bool, StoreError>;
+    /// A user's stored Home layout; `None` means they never arranged it.
+    async fn home_layout(
+        &self,
+        user_id: i64,
+    ) -> Result<Option<crate::curation::HomeLayout>, StoreError>;
+    /// Store a layout, or `None` to go back to the household default.
+    async fn put_home_layout(
+        &self,
+        user_id: i64,
+        layout: Option<&crate::curation::HomeLayout>,
+        at_ms: i64,
+    ) -> Result<(), StoreError>;
 }
 
 /// Per-user text-publication state. It is separate from [`WatchStore`]
@@ -6483,6 +6613,7 @@ pub trait Store:
     + WatchStore
     + ReadingStore
     + AnnotationStore
+    + CurationStore
     + TraktStore
     + WatchedOutboxStore
     + TranscodeCacheStore
@@ -6545,6 +6676,7 @@ impl<T> Store for T where
         + WatchStore
         + ReadingStore
         + AnnotationStore
+        + CurationStore
         + TraktStore
         + WatchedOutboxStore
         + TranscodeCacheStore

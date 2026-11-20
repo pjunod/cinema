@@ -712,6 +712,7 @@ async function viewItem(id,isCurrent=()=>true){
   DV_FILE_PAGE_FILES=page.files||[];
   pollDvFileActions(DV_FILE_PAGE_FILES,generation,true);
   paintItemAnnotations(id,generation);
+  paintItemTags(id,generation);
   restoreScroll();
   // One-click play from an episode list lands here and starts immediately.
   if(AUTOPLAY===String(id)){

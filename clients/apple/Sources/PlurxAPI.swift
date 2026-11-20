@@ -145,6 +145,11 @@ struct PlurxAPI {
         return comps.url
     }
 
+    // Thin same-file seams for CustomTags.swift's extension.
+    func getTagsJSON<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T { try await get(path, query: query) }
+    func putTagsJSON<B: Encodable, T: Decodable>(_ path: String, body: B) async throws -> T { try await put(path, body: body) }
+    func postTagsJSON<B: Encodable, T: Decodable>(_ path: String, body: B) async throws -> T { try await post(path, body: body) }
+
     private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
         guard let url = makeURL(path, query: query) else { throw APIError.badURL }
         var req = URLRequest(url: url)

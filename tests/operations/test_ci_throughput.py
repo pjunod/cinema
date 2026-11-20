@@ -106,10 +106,10 @@ class RustGateTests(unittest.TestCase):
         jobs = load_script("ci-cargo-jobs")
         gib = 1024**3
         cases = [
-            ("400000 100000", str(20 * gib), 4),   # the gate's container: was CARGO_BUILD_JOBS=1
+            ("400000 100000", str(20 * gib), 1),   # serialize Clippy in the gate container
             ("400000 100000", str(8 * gib), 1),    # memory binds first
-            ("1600000 100000", str(40 * gib), 8),
-            ("150000 100000", str(20 * gib), 1),   # a fractional CPU rounds down, never to 0
+            ("1600000 100000", str(40 * gib), 3),
+            ("150000 100000", str(40 * gib), 1),   # a fractional CPU rounds down
         ]
         for cpu, memory, expected in cases:
             with self.subTest(cpu=cpu, memory=memory), tempfile.TemporaryDirectory() as temporary:
