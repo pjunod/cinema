@@ -12,6 +12,42 @@ Draft effort #1248; release qualification and deployment remain open.
 [retained exit](ADAPTIVE-PLAYBACK-RETAINED-EXIT.md) ·
 [capture](ADAPTIVE-PLAYBACK-CAPTURE-CUSTODY.md).
 
+## 2026-11-19 continuation — integrated source, acceptance open
+
+The current-main integration through `93e4e292` passed the normal pinned
+macOS hooks. On exact committed `93e4e292` (tree
+`e4619ada`), Linux Rust 1.97.1 passed the daemon production check and Core
+fixture test-frontend check in 281.47 seconds, under the 8 GiB/four-CPU
+profile. These are compile checks. No Rust unit or test bodies ran.
+
+The bounded M2 trial controller is integrated for the supported memory-backed
+SQLite recovery scope. Runtime acceptance remains pending. Normal Hiqlite
+speculation remains conservative until durable capture ordering through physical
+entry and safe mixed writers are established. Selected finite admission protects
+capture and delivery during trials. Cold-origin FEL placement can defer and
+adopt. Worker ranking distinguishes measured common source pressure from
+Unknown and reports relay occupancy separately.
+
+Integrated observations report rolling encoder service from committed media,
+shared AAC output from committed output, and DVR service from original capture
+writes. Subtitle admission can reclaim admitted work before foreground refusal.
+Relay admission remains held through physical drain. Rolling service coverage
+remains incomplete.
+
+The continuation through `d8e6fdf2` adds bounded Auto deferred FEL peer retry.
+The next peer must advertise retry support, and the original attempt must have
+confirmed `Closed` after capacity refusal. Retry uses the original deadline,
+and the incumbent remains current until viewer commit. Admitted local Linux
+file bodies also report bytes emitted from verified ranges and slack against
+their original read deadline. This observation carries no cleanup authority.
+The combined pinned macOS hook passed. Linux compilation of those additions
+and their runtime acceptance are pending at this checkpoint.
+
+Shared durable domains, all-path adapters, independent Astra review of the exact
+candidate and runtime acceptance remain open across M0–M7. The physical Linux cases require an isolated environment with
+Landlock ABI 6 or later and existing delegation; the inspected VM has ABI 4.
+Qualification, promotion and deployment remain open.
+
 ## 2026-11-19 continuation — source integration, not acceptance
 
 The current-main merge `e54d5d3e` passed normal hooks. Production native v2
