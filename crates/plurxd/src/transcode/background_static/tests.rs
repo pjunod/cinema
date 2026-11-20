@@ -49,7 +49,7 @@ fn fixture() -> (
     });
     let request = SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,

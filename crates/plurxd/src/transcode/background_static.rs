@@ -526,11 +526,11 @@ impl TranscodeManager {
     /// Existing manager reap cadence, never a new timer. The core book keeps
     /// every original P/R job and durable mutation when this bounded pass
     /// times out; the fixed entry remains until its R selector closes.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux", feature = "cluster-integration-tests"))]
     pub(crate) fn fixture_static_application_alias(&self) -> Option<impl Send> {
         self.static_artifact_runs.current()
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux", feature = "cluster-integration-tests"))]
     pub(crate) async fn fixture_reconcile_static_application(&self) {
         self.reconcile_static_artifact_run().await;
     }

@@ -18,7 +18,7 @@ async fn a_repeated_create_returns_the_same_session() {
     let request = SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -50,7 +50,7 @@ async fn a_repeated_create_returns_the_same_session() {
     // field silently leave the real key while the test stays green.
     let shifted = SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -76,7 +76,7 @@ async fn a_repeated_create_returns_the_same_session() {
     );
     let other_player = SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -137,7 +137,7 @@ async fn a_repeated_create_returns_the_same_session() {
     // not a quiet second stream.
     let different = SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -157,7 +157,7 @@ async fn a_repeated_create_returns_the_same_session() {
     // A fresh key from the same player supersedes, as any restart does.
     let next = SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -205,7 +205,7 @@ async fn concurrent_creates_with_one_request_id_share_one_session() {
     let request = SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -291,7 +291,7 @@ async fn a_failed_create_does_not_poison_its_request_id() {
     let request = SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -322,7 +322,7 @@ async fn a_failed_create_does_not_poison_its_request_id() {
 
     let retry = SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -364,7 +364,7 @@ async fn transport_replay_of_a_stall_reopen_returns_one_session_and_one_target()
     let original = SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -414,7 +414,7 @@ async fn transport_replay_of_a_stall_reopen_returns_one_session_and_one_target()
     // allowed to create a conflict or become a second ladder step.
     let replay = SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -536,7 +536,7 @@ async fn a_bound_auto_reopen_honors_a_safer_client_rung() {
 
     let lower = SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -884,7 +884,7 @@ async fn clustered_stall_reopen_survives_username_rename() {
 
     let foreign = SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -1366,7 +1366,7 @@ async fn an_audio_or_subtitle_change_during_a_stall_keeps_its_own_request() {
 
     let request = SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -1392,7 +1392,7 @@ async fn an_audio_or_subtitle_change_during_a_stall_keeps_its_own_request() {
 
     let track_change = SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -1626,7 +1626,7 @@ async fn two_devices_sharing_a_playback_id_bind_reopens_to_the_named_session() {
 
     let device_b = SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -1654,7 +1654,7 @@ async fn two_devices_sharing_a_playback_id_bind_reopens_to_the_named_session() {
 
     let foreign_user = SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -2932,7 +2932,7 @@ fn continuous_media_roles_have_strict_wire_and_distinct_request_identity() {
     let mut request = SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         quality_catalog: None,
         continuous_media: None,

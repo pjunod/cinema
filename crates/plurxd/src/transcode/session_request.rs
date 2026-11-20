@@ -735,14 +735,15 @@ pub struct SessionRequest {
     pub(crate) quality_catalog: Option<std::sync::Arc<crate::media_pool::QualityCatalogResult>>,
     #[serde(skip)]
     pub candidate_context: Option<Box<CandidateExecutionContext>>,
-    /// Settings → Developer `playback.sdr_master_codecs`, read by the HTTP
-    /// create from the planning snapshot it already holds, so a rolling start
-    /// does not pay a second serial Store read for it. Never on the wire:
-    /// a request rebuilt from a durable recipe (owner takeover, a remote
-    /// worker, VOD resurrection) carries `None`, and its start reads the
-    /// switch's current value instead.
+    /// The viewer's per-playback output-retention choice from the HTTP
+    /// create (`CreateOverrides::retain_output`). `Some(false)` means this
+    /// playback queues no complete-output preparation and does no rolling
+    /// retention; `None` or `Some(true)` follows the server setting. Never on
+    /// the wire: a request rebuilt from a durable recipe (owner takeover, a
+    /// remote worker, VOD resurrection) carries `None` and so falls back to
+    /// the server setting, and mixed fleets never see the field.
     #[serde(skip)]
-    pub(crate) sdr_master_codecs: Option<bool>,
+    pub(crate) retain_output: Option<bool>,
     /// The fitted copy table selected from a typed session platform at a
     /// generation boundary. Service-owned; absent preserves v1 semantics and
     /// old durable recipe bytes. A newer fit does not mutate this session.
@@ -1102,8 +1103,6 @@ pub(super) struct SessionOwner<'a> {
     pub(super) supersession_user: &'a str,
     pub(super) playback_id: &'a str,
     pub(super) automatic: bool,
-    /// The starting session's frozen `playback.sdr_master_codecs` choice.
-    pub(super) sdr_master_codecs: bool,
 }
 
 impl SessionKind {

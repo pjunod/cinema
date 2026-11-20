@@ -95,7 +95,7 @@ pub fn dv_playback_generation_digest(generation: &str) -> Result<DvDigest, DvCon
 /// Optional presentation evidence, never a request or a route admission token.
 /// Only a production-qualified receipt can construct it. Durable responses must
 /// reacquire current authority rather than deserialize this sidecar.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DvEffectiveProcessingReport {
     generation: String,
     hdr10_enhanced: bool,

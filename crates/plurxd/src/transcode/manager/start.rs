@@ -739,13 +739,6 @@ impl RollingStartInputs {
             .cloned()
             .unwrap_or_default()
     }
-
-    pub(super) fn content_aware_encoding(&self) -> bool {
-        self.settings
-            .get(keys::CONTENT_AWARE_ENCODING)
-            .map(String::as_str)
-            == Some("1")
-    }
 }
 
 impl TranscodeManager {
@@ -798,22 +791,12 @@ impl TranscodeManager {
     }
 
     /// The rolling-retention budget from settings already read: a pure
-    /// parse, never a Store read. `None` is off. Retention is enabled by its
-    /// Developer switch (`vod.rolling_retention`, absent = off), not by the
-    /// cache key's presence; its budget is `cache.max_gb` under the one
-    /// unset rule ([`crate::cachekeep::cache_budget`]).
+    /// parse, never a Store read. `None` is off. Rolling retention is always
+    /// on; its budget is `cache.max_gb` under the one unset rule
+    /// ([`crate::cachekeep::cache_budget`]).
     pub(super) fn rolling_retained_budget_from(
         settings: &std::collections::BTreeMap<String, String>,
     ) -> Option<u64> {
-        let enabled = plurx_core::store::stored_switch(
-            settings
-                .get(plurx_core::store::keys::VOD_ROLLING_RETENTION)
-                .map(String::as_str),
-            false,
-        );
-        if !enabled {
-            return None;
-        }
         crate::cachekeep::cache_budget(
             settings
                 .get(plurx_core::store::keys::CACHE_MAX_GB)
@@ -1472,7 +1455,7 @@ impl TranscodeManager {
         priority: Priority,
         audio_claim: Option<&plurx_core::playback::audio::AudioClaim>,
         retained_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
-        sdr_master_codecs: Option<bool>,
+        retain_output: Option<bool>,
         source_telemetry: bool,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<StartInfo, String> {
@@ -1504,7 +1487,6 @@ impl TranscodeManager {
             .rolling_start_inputs(file_id, candidate_context, plan)
             .await?;
         let preference = inputs.encoder_preference();
-        let content_aware = inputs.content_aware_encoding();
         let (max_hw_sessions, sw_budget) = inputs.capacity_limits();
         let RollingStartInputs {
             mut file,
@@ -1513,7 +1495,13 @@ impl TranscodeManager {
             item_title,
             capacity: _,
         } = inputs;
+        // The server's cache budget governs both reuse of an existing retained
+        // copy and new collection. `retain_output: Some(false)` is the
+        // viewer's per-playback opt-out (`SessionRequest::retain_output`): it
+        // stops this session collecting, never its reuse of a copy that
+        // already exists.
         let retained_budget = Self::rolling_retained_budget_from(&settings);
+        let collect_retained = retain_output != Some(false);
         let pacing = Self::pacing_from_settings(&settings, false).await;
 
         file.audio_offset_ms = if file.audio_streams.is_empty() {
@@ -1589,15 +1577,6 @@ impl TranscodeManager {
             self.resolve_movie_plan_from_probe(&file, &opts, encoder, probe_json.as_deref())?;
         opts.pipeline = plan.options().pipeline;
         opts.strict_dolby = plan.options().strict_dolby.clone();
-        // Freeze the master shape from the same settings read as the plan.
-        let sdr_master_codecs = sdr_master_codecs.unwrap_or_else(|| {
-            plurx_core::store::stored_switch(
-                settings
-                    .get(keys::PLAYBACK_SDR_MASTER_CODECS)
-                    .map(String::as_str),
-                false,
-            )
-        });
         if takeover.is_none() {
             if let Some(info) = self
                 .serve_cached(
@@ -1610,7 +1589,6 @@ impl TranscodeManager {
                         supersession_user,
                         playback_id,
                         automatic,
-                        sdr_master_codecs,
                     },
                 )
                 .await
@@ -1706,10 +1684,7 @@ impl TranscodeManager {
                         let frozen = FrozenHlsPresentation::from_contract(
                             file.clone(),
                             HlsContext {
-                                codec_facts: Some(
-                                    FrozenHlsCodecFacts::encoded(&retained_plan)
-                                        .with_sdr_master_codecs(sdr_master_codecs),
-                                ),
+                                codec_facts: Some(FrozenHlsCodecFacts::encoded(&retained_plan)),
                                 bandwidth: None,
                                 file_id,
                                 start_seconds,
@@ -1755,13 +1730,7 @@ impl TranscodeManager {
         // recipe and must never be redirected to a different one.
         if takeover.is_none() && candidate_context.is_none() {
             if let Some(mut cached_options) = self
-                .measured_content_cache_options_from(
-                    &file,
-                    &opts,
-                    encoder,
-                    content_aware,
-                    probe_json.as_deref(),
-                )
+                .measured_content_cache_options_from(&file, &opts, encoder, probe_json.as_deref())
                 .await
             {
                 // Resolution reads stored decoder facts; it does not probe or
@@ -1786,7 +1755,6 @@ impl TranscodeManager {
                                 supersession_user,
                                 playback_id,
                                 automatic,
-                                sdr_master_codecs,
                             },
                         )
                         .await
@@ -2027,9 +1995,7 @@ impl TranscodeManager {
         let frozen_presentation = FrozenHlsPresentation::from_contract(
             file.clone(),
             HlsContext {
-                codec_facts: Some(
-                    FrozenHlsCodecFacts::encoded(&plan).with_sdr_master_codecs(sdr_master_codecs),
-                ),
+                codec_facts: Some(FrozenHlsCodecFacts::encoded(&plan)),
                 bandwidth: None,
                 file_id,
                 start_seconds,
@@ -2047,7 +2013,7 @@ impl TranscodeManager {
                 rolling_provenance.as_ref(),
                 file.duration_ms,
                 file.size,
-                retained_budget,
+                retained_budget.filter(|_| collect_retained),
                 &dir,
                 file.id,
                 &item_title,
@@ -2375,6 +2341,7 @@ impl TranscodeManager {
             cache_location: None,
             control,
             publication: Mutex::new(RollingPublicationClock::default()),
+            native_split: None,
             publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
             file_id,
@@ -2644,6 +2611,7 @@ impl TranscodeManager {
             None,
             None,
             false,
+            false,
             None,
         )
         .await
@@ -2665,8 +2633,9 @@ impl TranscodeManager {
         playback_id: &str,
         automatic: bool,
         audio_delivery: Option<&plurx_core::playback::audio::AudioDelivery>,
-        sdr_master_codecs: Option<bool>,
+        retain_output: Option<bool>,
         source_telemetry: bool,
+        allow_native_split: bool,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<StartInfo, String> {
         #[cfg(target_os = "linux")]
@@ -2690,13 +2659,30 @@ impl TranscodeManager {
             item_title,
             capacity: _,
         } = self.rolling_start_inputs(file_id, None, plan).await?;
-        let retained_budget = Self::rolling_retained_budget_from(&settings);
+        let native_split_requested = allow_native_split
+            && start_seconds == 0.0
+            && audio_offset_ms == 0
+            && options.convert_dolby_vision
+            && takeover.is_none()
+            && replacement_deadline.is_none();
+        // A native split needs a fresh rendition inventory. The ordinary
+        // cache budget applies to both reuse and collection on the muxed path.
+        let retained_budget = if native_split_requested {
+            None
+        } else {
+            Self::rolling_retained_budget_from(&settings)
+        };
+        // The viewer's opt-out only stops collection for this playback.
+        let collect_retained = retain_output != Some(false);
+        // The selected copy owner covers a single muxed layout. A native
+        // split request keeps its separate paired startup grant and writer.
         // This exact one-input rolling profile is admitted through the core
         // P→R graph. Once selected, a planning or admission refusal is a
         // refusal of this start; it cannot fall through to the legacy native
         // probe, raw scratch directory, or unregistered FFmpeg spawn.
         #[cfg(target_os = "linux")]
         let selected_core_copy = self.resource_runtime.is_some()
+            && !native_split_requested
             && start_seconds == 0.0
             && takeover.is_none()
             && audio_offset_ms == 0
@@ -2997,27 +2983,14 @@ impl TranscodeManager {
             convert_dolby_vision: served.convert_dolby_vision,
             dual_layer_as_copied: served.dual_layer_as_copied,
         };
-        // Frozen with the rest of the presentation: this session's master
-        // keeps one shape whatever the setting does later.
-        let sdr_master_codecs = sdr_master_codecs.unwrap_or_else(|| {
-            plurx_core::store::stored_switch(
-                settings
-                    .get(keys::PLAYBACK_SDR_MASTER_CODECS)
-                    .map(String::as_str),
-                false,
-            )
-        });
         let frozen_presentation = FrozenHlsPresentation::new(
             file.clone(),
             HlsContext {
-                codec_facts: Some(
-                    FrozenHlsCodecFacts::audio(
-                        audio_delivery,
-                        !file.audio_streams.is_empty(),
-                        served.transcode_audio,
-                    )
-                    .with_sdr_master_codecs(sdr_master_codecs),
-                ),
+                codec_facts: Some(FrozenHlsCodecFacts::audio(
+                    audio_delivery,
+                    !file.audio_streams.is_empty(),
+                    served.transcode_audio,
+                )),
                 bandwidth: None,
                 file_id,
                 start_seconds,
@@ -3054,7 +3027,6 @@ impl TranscodeManager {
             .bitrate
             .filter(|rate| *rate > 0)
             .map(|rate| rate as f64);
-        let scratch_envelope = rolling_scratch_envelope(copy_bitrate, 1.0);
         // Only the legacy scratch grant still reads settings below. Release
         // selected planning settings before the distinct R charge begins.
         let settings = (!selected_core_copy).then_some(settings);
@@ -3214,16 +3186,33 @@ impl TranscodeManager {
         } else {
             None
         };
-        let scratch_reservation = if selected_core_copy {
-            None
-        } else {
-            Some(self.reserve_rolling_scratch_with(
-                RollingScratchSizing::Startup(rolling_startup_bytes(copy_bitrate, 1.0)),
-                self.ahead_limits_for_start(
-                    settings.as_ref().ok_or("legacy copy settings are absent")?,
+        let (scratch_reservation, split_startup_budget) = if let Some(settings) = settings.as_ref()
+        {
+            let limits = self.ahead_limits_for_start(settings);
+            let startup_bytes = rolling_startup_bytes(copy_bitrate, 1.0);
+            // Both split role objects and the ordinary mux keep their full
+            // startup grace. Try the paired reservation before publishing it.
+            let ordinary_sizing = RollingScratchSizing::Startup(startup_bytes);
+            let split_sizing = RollingScratchSizing::Startup(startup_bytes.saturating_mul(2));
+            let split_budget = split_sizing
+                .grant_bytes(limits)
+                .saturating_sub(ordinary_sizing.grant_bytes(limits));
+            let split_reservation = (native_split_requested && segmenting && split_budget > 0)
+                .then(|| self.reserve_rolling_scratch_with(split_sizing, limits))
+                .and_then(Result::ok);
+            match split_reservation {
+                Some(reservation) => (Some(reservation), split_budget),
+                None => (
+                    Some(self.reserve_rolling_scratch_with(ordinary_sizing, limits)?),
+                    0,
                 ),
-            )?)
+            }
+        } else {
+            (None, 0)
         };
+        let native_split = split_startup_budget > 0;
+        let scratch_envelope = rolling_scratch_envelope(copy_bitrate, 1.0)
+            .saturating_mul(if native_split { 2 } else { 1 });
         let dir = {
             #[cfg(target_os = "linux")]
             if let Some((owner, _, _, _)) = selected_owner.as_ref() {
@@ -3301,7 +3290,7 @@ impl TranscodeManager {
                 rolling_provenance.as_ref(),
                 file.duration_ms,
                 file.size,
-                retained_budget,
+                retained_budget.filter(|_| collect_retained),
                 &dir,
                 file.id,
                 &item_title,
@@ -3435,6 +3424,11 @@ impl TranscodeManager {
             cache_location: None,
             control,
             publication: Mutex::new(RollingPublicationClock::default()),
+            native_split: native_split.then(|| {
+                Arc::new(crate::copyseg::NativeSplitInventory::with_startup_budget(
+                    split_startup_budget as u64,
+                ))
+            }),
             publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
             file_id,

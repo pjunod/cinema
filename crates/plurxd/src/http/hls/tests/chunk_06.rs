@@ -342,11 +342,6 @@ async fn an_overloaded_create_records_no_ask() {
 async fn a_peers_stale_answer_ends_a_view_plan_before_any_candidate_is_picked() {
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
     let state = resolver_state();
-    state
-        .store
-        .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
-        .await
-        .expect("candidate route on");
     let library = state
         .store
         .create_library(&NewLibrary {
@@ -973,6 +968,7 @@ fn processed_requalification_replaces_hint_once_and_refuses_full_recipe_collisio
 #[tokio::test]
 async fn a05_geometry_promoted_compat_copy_carries_resolved_auto_policy() {
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    prepare_catalog_test_encoder().await;
     let state = resolver_state();
     let library = state
         .store
@@ -1034,7 +1030,7 @@ async fn a05_geometry_promoted_compat_copy_carries_resolved_auto_policy() {
         quality_auto: Some(true),
         caps: Some(
             serde_json::from_value(serde_json::json!({"v":2,"video":[{
-                "codec":"h264","max_width":1920,"max_height":1080
+                "codec":"h264","max_width":1920,"max_height":1080,"present":["sdr"]
             }]}))
             .expect("bounded decoder caps"),
         ),
@@ -1605,6 +1601,7 @@ fn the_compatible_base_override_lowers_the_plan_without_being_a_mismatch() {
         Some(&CreateOverrides {
             compatible_hdr_base: Some(true),
             force: None,
+            retain_output: None,
         }),
         &file,
         &capable_node(),
@@ -1641,6 +1638,7 @@ fn the_compatible_base_override_says_so_when_it_had_nothing_to_decline() {
         Some(&CreateOverrides {
             compatible_hdr_base: Some(true),
             force: None,
+            retain_output: None,
         }),
         &file,
         &capable_node(),
@@ -1676,6 +1674,7 @@ fn a_forced_rung_produces_the_servers_plan_for_that_force_and_says_which() {
         Some(&CreateOverrides {
             compatible_hdr_base: None,
             force: Some("transcode".to_owned()),
+            retain_output: None,
         }),
         &file,
         &capable_node(),
@@ -1923,6 +1922,7 @@ fn every_review_is_counted_and_the_parts_never_exceed_the_total() {
         Some(&CreateOverrides {
             compatible_hdr_base: Some(true),
             force: Some("transcode".to_owned()),
+            retain_output: None,
         }),
         &file,
         &capable_node(),
@@ -1966,84 +1966,30 @@ fn sdr_context() -> crate::transcode::HlsContext {
     hls_context("avc1.640034,mp4a.40.2", None)
 }
 
-/// With the session's frozen `playback.sdr_master_codecs` on, an SDR
-/// master names only complete frozen components. The switch is set
-/// explicitly on every context here: off is the default and is covered by
-/// `sdr_master_codecs_off_restores_the_pre_s10_master_and_leaves_hdr_alone`.
+/// SDR master variants carry no `CODECS`, even with complete frozen
+/// component facts: AVPlayer filters variants on it before fetching a byte,
+/// so the SDR master stays the one every client was qualified against. The
+/// HDR/Dolby Vision branch keeps its `CODECS` with or without facts.
 #[test]
-fn sdr_master_declares_only_complete_frozen_output_components() {
+fn sdr_master_never_declares_codecs_and_hdr_keeps_them() {
     let file = hls_file(vec![]);
-    let mut context = sdr_context();
-    assert!(!master_playlist(&file, None, &context).contains("CODECS="));
-    let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, true, false)
-        .with_sdr_master_codecs(true);
-    facts.bind_output_avc_init("avc1.64001F".to_owned());
-    context.codec_facts = Some(facts);
-    assert!(!master_playlist(&file, None, &context).contains("CODECS="));
-    let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, false, false)
-        .with_sdr_master_codecs(true);
-    facts.bind_output_avc_init("avc1.64001F".to_owned());
-    context.codec_facts = Some(facts);
-    let master = master_playlist(&file, None, &context);
-    assert!(master.contains("CODECS=\"avc1.64001F\""), "{master}");
-    assert!(!master.contains("mp4a.40.2"));
-    assert!(!master.contains("VIDEO-RANGE="));
-    assert!(
-        master.contains("#EXT-X-VERSION:7"),
-        "an SDR CODECS never moves the version"
-    );
-    assert_eq!(master.matches("#EXT-X-STREAM-INF:").count(), 1);
-}
-
-/// S-10's Developer switch, `playback.sdr_master_codecs`, default off.
-///
-/// Off must be the master every client played before S-10: complete SDR
-/// facts are still frozen, but no `CODECS` is printed, because AVPlayer
-/// filters variants on it before fetching a byte and no device has
-/// re-qualified the SDR string (HONEST-MASTER-PLAYLIST §2.5, §5.4). The
-/// HDR/Dolby Vision branch never consults the switch: its master is
-/// byte-identical either way.
-#[test]
-fn sdr_master_codecs_off_restores_the_pre_s10_master_and_leaves_hdr_alone() {
-    let file = hls_file(vec![]);
-    let complete = |enabled: bool| {
-        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, false, false)
-            .with_sdr_master_codecs(enabled);
+    let complete = || {
+        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, false, false);
         facts.bind_output_avc_init("avc1.64001F".to_owned());
         facts
     };
-
-    // The pre-S-10 SDR master: no facts at all, so nothing to print.
     let legacy = master_playlist(&file, None, &sdr_context());
-    let mut off = sdr_context();
-    off.codec_facts = Some(complete(false));
-    let off_master = master_playlist(&file, None, &off);
-    assert!(!off_master.contains("CODECS="), "{off_master}");
-    assert_eq!(
-        off_master, legacy,
-        "off is byte-for-byte the pre-S-10 master"
-    );
-    // Every diagnostic shape that may print CODECS agrees.
+    assert!(!legacy.contains("CODECS="), "{legacy}");
+    let mut sdr = sdr_context();
+    sdr.codec_facts = Some(complete());
+    let master = master_playlist(&file, None, &sdr);
+    assert_eq!(master, legacy, "complete facts print nothing on an SDR master");
+    assert!(master.contains("#EXT-X-VERSION:7"));
+    assert_eq!(master.matches("#EXT-X-STREAM-INF:").count(), 1);
     for diagnostic in ["video-only-codecs", "video-only-hdr"] {
-        let shaped = master_playlist_diagnostic(&file, None, &off, Some(diagnostic));
+        let shaped = master_playlist_diagnostic(&file, None, &sdr, Some(diagnostic));
         assert!(!shaped.contains("CODECS="), "{diagnostic}: {shaped}");
     }
-
-    let mut on = sdr_context();
-    on.codec_facts = Some(complete(true));
-    let on_master = master_playlist(&file, None, &on);
-    assert!(
-        on_master.contains(",CODECS=\"avc1.64001F\","),
-        "{on_master}"
-    );
-    assert_eq!(
-        on_master.replace(",CODECS=\"avc1.64001F\"", ""),
-        legacy,
-        "on adds exactly one attribute and moves nothing else"
-    );
-
-    // HDR10 and Dolby Vision: identical with the switch on, off, or with
-    // no component facts at all.
     for (codecs, supplemental) in [
         ("hvc1.2.4.H120.90,mp4a.40.2", None),
         ("hvc1.2.4.L150.B0,ec-3", Some("dvh1.08.10/db1p")),
@@ -2055,15 +2001,13 @@ fn sdr_master_codecs_off_restores_the_pre_s10_master_and_leaves_hdr_alone() {
             expected.contains(&format!("CODECS=\"{codecs}\"")),
             "{expected}"
         );
-        for enabled in [false, true] {
-            let mut context = bare.clone();
-            context.codec_facts = Some(complete(enabled));
-            assert_eq!(
-                master_playlist(&file, None, &context),
-                expected,
-                "{codecs}: the HDR branch ignores sdr_master_codecs={enabled}"
-            );
-        }
+        let mut with_facts = bare.clone();
+        with_facts.codec_facts = Some(complete());
+        assert_eq!(
+            master_playlist(&file, None, &with_facts),
+            expected,
+            "{codecs}: the HDR branch is untouched by frozen facts"
+        );
     }
 }
 
@@ -3050,11 +2994,9 @@ fn the_hdr10_rungs_master_gets_pq_and_hevc_codecs_from_the_existing_rule() {
     let sdr = master_playlist(&file, None, &hls_context("avc1.640034,mp4a.40.2", None));
     assert!(!sdr.contains("VIDEO-RANGE="), "{sdr}");
     assert!(!sdr.contains("CODECS="), "{sdr}");
-    // The same omission holds for a session whose complete SDR facts were
-    // frozen with `playback.sdr_master_codecs` off — the default, and the
-    // pre-S-10 ruling until the device re-qualification is recorded.
-    let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, false, false)
-        .with_sdr_master_codecs(false);
+    // The same omission holds for a session with complete frozen SDR facts:
+    // SDR masters never carry CODECS.
+    let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, false, false);
     facts.bind_output_avc_init("avc1.640028".to_owned());
     let mut off = hls_context("avc1.640028", None);
     off.codec_facts = Some(facts);
@@ -3449,24 +3391,20 @@ async fn actual_avc_init_binds_video_without_inventing_missing_audio_facts() {
     let resolved = exact_hls_context(&fixture.state, "avc-facts", context.clone())
         .await
         .expect("unknown audio resolves without declaration");
-    assert_eq!(
-        resolved
-            .codec_facts
-            .expect("component facts")
-            .complete_sdr_codecs(),
-        None
-    );
+    let unknown = serde_json::to_string(&resolved.codec_facts.expect("component facts"))
+        .expect("serializable facts");
+    assert!(unknown.contains("Unknown"), "audio stays unknown: {unknown}");
     context.codec_facts = Some(crate::transcode::FrozenHlsCodecFacts::audio(
         None, false, false,
     ));
     let resolved = exact_hls_context(&fixture.state, "avc-facts", context)
         .await
         .expect("video-only init resolves");
-    let facts = resolved.codec_facts.expect("component facts");
-    assert_eq!(facts.complete_sdr_codecs(), Some(expected));
-    assert!(serde_json::to_string(&facts)
-        .expect("serializable facts")
-        .contains("OutputInit"));
+    let facts = serde_json::to_string(&resolved.codec_facts.expect("component facts"))
+        .expect("serializable facts");
+    assert!(facts.contains("OutputInit"), "{facts}");
+    assert!(facts.contains(&expected), "the init's actual codec is bound: {facts}");
+    assert!(facts.contains("Absent"), "{facts}");
 }
 
 #[tokio::test]
@@ -4285,7 +4223,7 @@ async fn shipped_shape_primes_an_admitted_candidate() {
     let source = staging_source(&fixture).await;
     let mut recipe = crate::transcode::SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -5214,11 +5152,6 @@ async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_a
     let (fixture, session, route) =
         staging_route_with_incumbent_on(published, session_id, &playback, Some(incumbent.clone()))
             .await;
-    fixture
-        .store
-        .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
-        .await
-        .expect("setting");
     let control = preparing_control_request(&route);
     accepted_exchange(&fixture, &route, &control).await;
     let user = fixture
@@ -5744,11 +5677,6 @@ async fn a05_staged_intake_fixture(mode: u8) {
         }
     }
     if mode == 3 {
-        fixture
-            .store
-            .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
-            .await
-            .expect("setting");
         fixture
             .store
             .settle_media_session_activation(
@@ -6893,11 +6821,6 @@ async fn prepared_owner_catalog_is_bounded_by_the_create_stage_not_the_prime() {
 #[tokio::test]
 async fn required_legacy_auto_discovery_reports_overflow_but_copy_and_manual_survive() {
     let state = resolver_state();
-    state
-        .store
-        .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
-        .await
-        .expect("enable saved choice");
     let source = staged_source_file();
     let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
             "v": 2, "video": (0..65).map(|_| serde_json::json!({"codec":"h264", "present":["sdr"]})).collect::<Vec<_>>(),
@@ -7184,16 +7107,12 @@ fn subtitle_playlist_keeps_takeover_and_sliding_discontinuity_epochs() {
 
 #[tokio::test]
 async fn legacy_manual_to_auto_preparation_binds_a_real_non_upgrading_candidate() {
+    prepare_catalog_test_encoder().await;
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
     let state = resolver_state();
     // Start below the ordinary cold Auto rung so loss of the bootstrap ceiling
     // would cause a real upgrade, without assuming unmeasured1080p production.
     let incumbent_height = 360;
-    state
-        .store
-        .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
-        .await
-        .expect("Auto policy");
     let library = state
         .store
         .create_library(&NewLibrary {
@@ -7820,11 +7739,6 @@ async fn auto_transcode_selects_an_executable_route_before_normalization() {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("source epoch")
         .as_secs() as i64;
-    state
-        .store
-        .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
-        .await
-        .expect("Auto policy");
     let library = state
         .store
         .create_library(&NewLibrary {

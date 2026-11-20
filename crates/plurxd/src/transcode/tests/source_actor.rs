@@ -11,6 +11,7 @@ mod settlement_tests;
 mod fixed_native;
 
 use super::*;
+use crate::http::shared_source_playback::source_voter_fixture;
 
 /// This fixture boots the production one-voter selector. Candidate installation
 /// and explicit capability seeding are test setup, not rolling-upgrade proof.
@@ -332,9 +333,9 @@ async fn source_copy_preadmission_fixture_with_video(
     config.cluster.advertise_host = "localhost".into();
     crate::canonicalize_storage_roots(&mut config)
         .expect("production non-destructive storage preflight before Store ownership");
-    let mut selected = source_fixture_store(&config)
-        .await
-        .expect("actual standalone voter");
+    let result = source_fixture_store(&config).await;
+    let mut selected =
+        source_voter_fixture::finish_boot(&config, result, "actual standalone voter");
     eprintln!("Source fixture: actual standalone voter selected");
     selected
         .store
@@ -1305,7 +1306,7 @@ async fn source_start_budget_uses_actual_vod_settings_and_admission_policy() {
         source_telemetry: None,
         continuous_media: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         vod_only: false,
         passive_vod: false,
@@ -3683,7 +3684,11 @@ async fn source_resource_init_open_job_retains_actual_fd_and_guard_after_waiter_
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_resource_media_open_job_retains_actual_fd_and_guard_after_waiter_cancellation() {
-    Box::pin(source_copy_preadmission_fixture(43)).await;
+    source_voter_fixture::run(
+        "transcode::source_actor::tests::source_resource_media_open_job_retains_actual_fd_and_guard_after_waiter_cancellation",
+        Box::pin(source_copy_preadmission_fixture(43)),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

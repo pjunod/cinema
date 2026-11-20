@@ -282,7 +282,8 @@ async fn sharing_source_direct_counts_grant_and_source_slots() {
         .with_env_filter("plurx::sharing=warn")
         .with_test_writer()
         .try_init();
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    let mut fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    fixture.keep_fixture_membership_stable().await;
     let recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     for n in 0..4 {
         let mut next = recipe.clone();

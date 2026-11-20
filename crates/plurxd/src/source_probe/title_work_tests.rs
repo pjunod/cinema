@@ -146,25 +146,11 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
             .expect("enqueue title"),
         EnqueueOutcome::Accepted { .. }
     ));
-    assert!(matches!(
-        store
-            .claim_job(ClaimJob {
-                job_id: title_id.clone(),
-                expected_revision: 0,
-                node_id: state.node_id.clone(),
-                boot_id: uuid::Uuid::new_v4().to_string(),
-                claim_id: uuid::Uuid::new_v4().to_string(),
-                kind: JobKind::DvTitleScan,
-                payload_version: 1,
-                now_ms: now,
-                dispatched_at_ms: now,
-            })
-            .await
-            .expect("claim title"),
-        ClaimOutcome::Claimed { .. }
-    ));
+    // These fixture coordinators must cover population and both page reads.
+    // The assertions below explicitly retire their actual authority.
+    let coordinator_expires = now + 300_000;
     let plurx_core::cluster::coordination::LeaseClaim::Acquired(lease) = store
-        .acquire_lease("repair:probe", "coordinator", now, now + 60_000)
+        .acquire_lease("repair:probe", "coordinator", now, coordinator_expires)
         .await
         .expect("coordinator")
     else {
@@ -178,7 +164,7 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
             &format!("scan:library:{}", library.id),
             "scan-coordinator",
             now,
-            now + 60_000,
+            coordinator_expires,
         )
         .await
         .expect("library scan coordinator")
@@ -228,6 +214,26 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
             EnqueueOutcome::Accepted { .. }
         ));
     }
+    // Start the real 30-second title lease after the deliberately large
+    // candidate population has been committed.
+    let claim_time = now_ms();
+    assert!(matches!(
+        store
+            .claim_job(ClaimJob {
+                job_id: title_id.clone(),
+                expected_revision: 0,
+                node_id: state.node_id.clone(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::DvTitleScan,
+                payload_version: 1,
+                now_ms: claim_time,
+                dispatched_at_ms: claim_time,
+            })
+            .await
+            .expect("claim title"),
+        ClaimOutcome::Claimed { .. }
+    ));
     let mut task = TitleTask {
         work: Box::pin(std::future::pending()),
         cancel: CancellationToken::new(),

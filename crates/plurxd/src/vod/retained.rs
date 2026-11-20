@@ -280,7 +280,7 @@ pub(crate) async fn test_reorder_candidate_cost_isolation(
     let mut request = SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         vod_only: false,
@@ -2646,7 +2646,7 @@ mod tests {
         let mut request = SessionRequest {
             source_telemetry: None,
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
             vod_only: false,
@@ -3096,7 +3096,6 @@ mod tests {
             ),
             supersession_user: "fixture".into(),
             block_budget: Duration::from_secs(1),
-            sdr_master_codecs: false,
             lifecycle: serve.shared.session_lifecycle("cached"),
             incarnation: Arc::new(()),
             last_touch: StdMutex::new(Instant::now()),
@@ -4053,7 +4052,7 @@ mod tests {
         let request = SessionRequest {
             source_telemetry: None,
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
             vod_only: false,

@@ -1000,11 +1000,6 @@ async fn staged_processing_delivery_round_trip(profile81: bool, verified: bool) 
         .put_setting(plurx_core::store::keys::DV_HDR_PROCESSING, "1")
         .await
         .expect("processing enabled");
-    fixture
-        .store
-        .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
-        .await
-        .expect("route-v1 owner enabled before planning snapshot");
     let snapshot = fixture
         .store
         .playback_planning_snapshot(fixture.file_id(), &crate::transcode::QUALITY_PLANNING_KEYS)

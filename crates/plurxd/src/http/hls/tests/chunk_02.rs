@@ -2505,7 +2505,7 @@ async fn staging_route_with_incumbent_on(
     let predecessor_request = crate::transcode::SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,

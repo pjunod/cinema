@@ -431,6 +431,7 @@
             cache_location: None,
             control,
             publication: Mutex::new(RollingPublicationClock::default()),
+            native_split: None,
             publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
             file_id: 1,

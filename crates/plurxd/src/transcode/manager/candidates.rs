@@ -1341,7 +1341,7 @@ impl TranscodeManager {
             let request = SessionRequest {
                 source_telemetry: None,
                 dv_processing_destination: None,
-                sdr_master_codecs: None,
+                retain_output: None,
                 dv_refit_digest: None,
                 continuous_media: None,
                 vod_only: false,
@@ -2288,7 +2288,7 @@ fn candidate_heights(source_height: Option<i64>) -> Vec<i64> {
 /// some of them as unset. Capacity's four raw keys and verified installation
 /// also participate in the versioned admission binding, without normalizing
 /// this map or changing recipe-content identities.
-pub(crate) const QUALITY_PLANNING_KEYS: [&str; 38] = [
+pub(crate) const QUALITY_PLANNING_KEYS: [&str; 34] = [
     keys::HWACCEL,
     keys::DV_CONVERT,
     keys::DV_HDR_PROCESSING,
@@ -2297,18 +2297,13 @@ pub(crate) const QUALITY_PLANNING_KEYS: [&str; 38] = [
     keys::AUDIO_LANG,
     keys::SUB_LANG,
     keys::SUB_MODE,
-    keys::PLAYBACK_DISPLAY_AWARE_AUTO,
     keys::PLAYBACK_CONTROL_PROTOCOL_V1,
     keys::TRANSCODE_RATE_MODE,
     keys::TRANSCODE_QUALITY,
     "playback.vod_reorder_frames",
-    // Not a planning input: carried in the same committed read so the create
-    // freezes the session's SDR master shape without a second Store read
-    // (`SessionRequest::sdr_master_codecs`).
-    keys::PLAYBACK_SDR_MASTER_CODECS,
     // The rolling start path (D4, main-merge defects 2026-10-04): retention
-    // budget, input pacing, admission pools, content-aware lookup, the three
-    // scratch/ahead limits, and the two complete-output switches.
+    // budget, input pacing, admission pools, the three scratch/ahead limits,
+    // and the complete-output preparation selector.
     keys::CACHE_MAX_GB,
     keys::HLS_READRATE,
     keys::HLS_BURST_SECS,
@@ -2316,12 +2311,10 @@ pub(crate) const QUALITY_PLANNING_KEYS: [&str; 38] = [
     keys::MAX_HW_SESSIONS,
     keys::SW_POOL_THREADS_PROVENANCE,
     keys::MAX_HW_SESSIONS_PROVENANCE,
-    keys::CONTENT_AWARE_ENCODING,
     keys::HLS_AHEAD_MAX_SECS,
     keys::HLS_AHEAD_MAX_BYTES,
     keys::HLS_SCRATCH_MAX_BYTES,
     keys::VOD_OUTPUT_PREPARATION,
-    keys::VOD_ROLLING_RETENTION,
     // D3b (§4.2): the settings the create chain read after the snapshot,
     // so the one plan answers them. `vod_settings`' admission policy:
     keys::VOD_PRESENTATION,
@@ -2388,12 +2381,9 @@ mod tests {
             uncovered.is_empty(),
             "planning keys outside every generation trigger: {uncovered:?}"
         );
-        // The three keys that were outside the triggers before D3t.
-        for key in [
-            "cache.max_gb",
-            "vod.output_preparation",
-            "vod.rolling_retention",
-        ] {
+        // Two of the three keys that were outside the triggers before D3t;
+        // the third, `vod.rolling_retention`, is always on and no longer read.
+        for key in ["cache.max_gb", "vod.output_preparation"] {
             assert!(super::QUALITY_PLANNING_KEYS.contains(&key), "{key}");
         }
     }
@@ -4646,13 +4636,19 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             .await
             .expect("snapshot")
             .expect("source");
-        assert_eq!(QUALITY_PLANNING_KEYS.len(), 36);
+        assert_eq!(QUALITY_PLANNING_KEYS.len(), 32);
         assert!(QUALITY_PLANNING_KEYS.contains(&keys::DV_DISPLAY_TARGET));
         assert!(
             QUALITY_PLANNING_KEYS.len() <= plurx_core::store::PLANNING_SNAPSHOT_KEYS_MAX,
             "one planning snapshot binds at most PLANNING_SNAPSHOT_KEYS_MAX keys"
         );
-        assert!(QUALITY_PLANNING_KEYS.contains(&keys::PLAYBACK_SDR_MASTER_CODECS));
+        for always_on in [
+            "playback.display_aware_auto",
+            "transcode.content_aware_encoding",
+            keys::VOD_ROLLING_RETENTION,
+        ] {
+            assert!(!QUALITY_PLANNING_KEYS.contains(&always_on), "{always_on}");
+        }
         assert!(QUALITY_PLANNING_KEYS.contains(&"playback.vod_reorder_frames"));
         assert!(!TranscodeManager::vod_reorder_from_snapshot(&off_snapshot));
         let base = crate::test_tempdir().expect("work");
@@ -4845,7 +4841,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
         let request = SessionRequest {
             source_telemetry: None,
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
             vod_only: false,
@@ -5803,7 +5799,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
         let mut request = SessionRequest {
             source_telemetry: None,
             dv_processing_destination: None,
-            sdr_master_codecs: None,
+            retain_output: None,
             dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,

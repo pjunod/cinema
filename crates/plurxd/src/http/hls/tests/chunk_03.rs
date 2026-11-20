@@ -2167,7 +2167,7 @@ async fn a_staged_successor_commits_into_a_usable_route() {
     // a session that is still playing.
     let candidate = crate::transcode::SessionRequest {
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,

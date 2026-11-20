@@ -98,7 +98,7 @@ const SETTINGS_ENDPOINTS={
     // A refused recovery read is a fact about the cluster, so it is reported
     // by the panel that reports the cluster — named, dated and retryable —
     // rather than as a page-level failure or, as it once was, as the end of
-    // the operator's session. `clusterOperationsCard` already knows this
+    // the operator's session. The cluster page's alert slot already knows this
     // shape; it is the same one `/cluster/nodes` uses when it cannot answer.
     clusterOpsStamp();
     return {unavailable:true,code:(error&&error.code)||null,
@@ -113,11 +113,12 @@ const SETTINGS_MANIFEST={
   analysis:{required:["settings","analysis"],secondary:["developerReadiness"]},
   maintenance:{required:["settings","dvConversions"],secondary:["developerReadiness"]},
   users:{required:["settings","users"],secondary:[]},
-  system:{required:["sys","settings"],secondary:[]},
+  system:{required:["sys"],secondary:["https","sourceRecovery","settings"]},
   cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness","settings"]},
-  sharing:{required:["sharingStatus","sharingImports","sharingExports"],secondary:[]},
-  integrations:{required:["settings","trakt"],secondary:[]},
-  developer:{required:["settings"],secondary:["developerReadiness","https","sourceRecovery"]},
+  sharing:{required:["settings","sharingStatus","sharingImports","sharingExports"],secondary:["developerReadiness"]},
+  integrations:{required:["settings","trakt"],secondary:["developerReadiness"]},
+  remotes:{required:["settings"],secondary:["developerReadiness"]},
+  developer:{required:["settings"],secondary:["developerReadiness"]},
 };
 // The configured mode, not the current peer count or a failed status read,
 // determines whether cluster controls apply. /server is loaded before routing.
@@ -189,15 +190,15 @@ function loadSettingsKey(key,generation,cacheResult=true){
 async function loadSourceRecoveryCard(generation){
   try{
     const value=await loadSettingsKey("sourceRecovery",generation);
-    if(settingsCurrent(generation,"developer"))applySourceRecovery(value);
+    if(settingsCurrent(generation,"system"))applySourceRecovery(value);
   }catch(error){
     if(error?.staleSourceRecovery)return;
-    if(settingsCurrent(generation,"developer"))applySourceRecovery(null,error&&error.message||"request failed");
+    if(settingsCurrent(generation,"system"))applySourceRecovery(null,error&&error.message||"request failed");
   }
 }
 async function reloadSourceRecovery(btn){
   const generation=PAGE_RENDER_GENERATION;
-  if(!settingsCurrent(generation,"developer"))return;
+  if(!settingsCurrent(generation,"system"))return;
   if(btn)btn.disabled=true;
   SETTINGS_SOURCE_RECOVERY_EPOCH++;SETTINGS_LOADED.delete("sourceRecovery");SETTINGS_LOADS.delete("sourceRecovery");
   applySourceRecovery(null,"Loading this node's recovery status…");
@@ -234,18 +235,29 @@ function settingsShell(tab){
   return `<div class="setlayout"><nav class="settabs" aria-label="Settings sections">${settingsTabsHtml(tab)}</nav><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody"><div class="empty">Loading ${esc(SET_TABS.find(row=>row[0]===tab)[1])}…</div></div></div>`;
 }
 function patchSettingsSecondary(tab,key,value){
-  if(tab==="developer"&&key==="https") applyHttpsSettings(value);
+  if(tab==="system"&&key==="settings"){
+    const mount=document.getElementById("system-capacity-settings");
+    if(mount) mount.innerHTML=systemCapacityCard(value);
+  }
+  if(tab==="system"&&key==="https") applyHttpsSettings(value);
   if(tab==="metadata"&&key==="libs"){
     const mount=document.getElementById("metadata-libraries");
     if(mount) mount.innerHTML=keyBackfillHtml(SETTINGS_DATA.libs||[]);
   }
 
   if(tab==="cluster"&&key==="settings"){
-    // The settings cards under the board need the saved settings; the health
-    // board does not, so it never waits for them. Fill only their mount.
-    const mount=document.getElementById("cluster-settings");
-    if(mount) mount.outerHTML=clusterSettingsSection(SETTINGS_DATA);
-    // A link from Analysis names a card in here; the board painted before
+    // The settings list and the Backup card need the saved settings; the rest
+    // of the page does not, so it never waits for them. Fill only their
+    // mounts — and never over an unsaved edit: a same-section reload (Refresh)
+    // carries a dirty card across as the live node, and the cached settings
+    // arriving behind it must not redraw it from the saved values.
+    const fill=(id,html)=>{
+      const mount=document.getElementById(id);
+      if(mount&&!(mount.dataset.state==="ready"&&mount.classList.contains("dirty"))) mount.outerHTML=html;
+    };
+    fill("cluster-settings",clusterSettingsSection(SETTINGS_DATA));
+    fill("cluster-backup",clusterBackupCard(SETTINGS_DATA.settings,SETTINGS_DATA.developerReadiness||DEVELOPER_READINESS));
+    // A link from Analysis names a card in here; the page painted before
     // the card existed, so land on it now.
     revealSettingsAnchor(tab);
   }
@@ -253,6 +265,7 @@ function patchSettingsSecondary(tab,key,value){
     // Patch only the evidence rows. Re-rendering the entire panel here could
     // overwrite an unsaved setting while diagnostics are still loading.
     applyDeveloperReadiness(value);
+    if(tab==="cluster") patchClusterReadiness(value);
   }
   if(tab==="cluster"&&key==="clusterOps"){
     // The roster is already interactive while this secondary request is in
@@ -268,7 +281,7 @@ function patchSettingsSecondary(tab,key,value){
   }
 }
 function patchSettingsSecondaryError(tab,key,error){
-  if(tab==="developer"&&key==="https") applyHttpsSettings(null,error&&error.message||"request failed");
+  if(tab==="system"&&key==="https") applyHttpsSettings(null,error&&error.message||"request failed");
   const message=esc(error&&error.message||"request failed");
   if(tab==="metadata"&&key==="libs"){
     const mount=document.getElementById("metadata-libraries");
@@ -276,11 +289,15 @@ function patchSettingsSecondaryError(tab,key,error){
   }
 
   if(key==="developerReadiness"&&SETTINGS_MANIFEST[tab]?.secondary.includes(key)){
-    applyDeveloperReadiness({unavailable:error&&error.message||"request failed"});
+    const unavailable={unavailable:error&&error.message||"request failed"};
+    applyDeveloperReadiness(unavailable);
+    if(tab==="cluster") patchClusterReadiness(unavailable);
   }
   if(tab==="cluster"&&key==="settings"){
-    const mount=document.getElementById("cluster-settings");
-    if(mount) mount.outerHTML=clusterSettingsUnavailable(message);
+    const settings=document.getElementById("cluster-settings");
+    if(settings) settings.outerHTML=clusterSettingsUnavailable(message);
+    const backup=document.getElementById("cluster-backup");
+    if(backup) backup.outerHTML=clusterSettingsUnavailable(message,"cluster-backup","Backup settings");
   }
   if(tab==="cluster"&&key==="clusterOps"){
     const mount=document.getElementById("cluster-operations");
@@ -296,7 +313,7 @@ async function loadSettingsTab(generation,tab){
     if(!settingsCurrent(generation,tab)) return;
     const body=document.getElementById("setbody");
     if(body) body.innerHTML=`<div class="empty">${esc(error.message)}<div style="margin-top:12px"><button class="ghost sm" onclick="retrySettingsTab()">Retry</button></div></div>`;
-    if(tab==="developer"&&body){
+    if(tab==="system"&&body){
       body.innerHTML+=httpsSettingsMount(SETTINGS_DATA.https);
       const hasSourceRecovery=manifest.secondary.includes("sourceRecovery");
       if(hasSourceRecovery)body.innerHTML+=sourceRecoveryMount(SETTINGS_DATA.sourceRecovery);
@@ -317,7 +334,7 @@ async function loadSettingsTab(generation,tab){
     // already-rendered roster can open a decision dialog before this secondary
     // response arrives. Other secondary data can keep the ordinary eager cache.
     const staged=tab==="cluster"&&key==="clusterOps";
-    if(tab==="developer"&&key==="sourceRecovery")return loadSourceRecoveryCard(generation);
+    if(tab==="system"&&key==="sourceRecovery")return loadSourceRecoveryCard(generation);
     return loadSettingsKey(key,generation,!staged).then(value=>{
       if(settingsCurrent(generation,tab)) patchSettingsSecondary(tab,key,value);
     }).catch(error=>{
@@ -335,7 +352,7 @@ async function loadSettingsTab(generation,tab){
   return settingsCurrent(generation,tab);
 }
 async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
-  if(!ME.is_admin){ if(settingsRouteTab(location.hash)==="developer")viewLocalRemoteSettings(generation);else location.hash="#/"; return; }
+  if(!ME.is_admin){ if(["remotes","developer"].includes(settingsRouteTab(location.hash)))viewLocalRemoteSettings(generation);else location.hash="#/"; return; }
   const route=location.hash;
   if(reset){
     if(typeof sharingRetire==="function")sharingRetire();
@@ -352,6 +369,7 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
   // the operator who switched away is done with it whether or not they said so.
   if(SETTINGS_SHOWN_TAB!==tab) forgetJoinToken();
   if(SETTINGS_SHOWN_TAB!==tab&&typeof sharingRetire==="function")sharingRetire();
+  if(reset||SETTINGS_SHOWN_TAB!==tab) CLUSTER_OPEN_NODES=[];
   SETTINGS_SHOWN_TAB=tab; LIB_DRAWER=null; USER_DRAWER=null; DEVICE_DRAWER=null;
   try{ localStorage.setItem("plurx_settings_tab",tab); }catch(e){}
   layoutChrome("settings",settingsShell(tab));

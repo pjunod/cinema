@@ -5433,6 +5433,36 @@ pub(crate) fn visit_length_prefixed_hevc_nals(
     Ok(())
 }
 
+/// Identity of one source base-layer coded picture in four-byte HEVC
+/// framing. P7 enhancement and RPU units and all non-picture units are
+/// excluded so the lossless P8 copy and verified FEL input can witness the
+/// same source picture despite different metadata packaging.
+pub fn hevc_base_layer_vcl_sha256(sample: &[u8]) -> Result<[u8; 32], Fmp4Error> {
+    use sha2::{Digest, Sha256};
+    let mut sha = Sha256::new();
+    let mut first_slices = 0;
+    let mut malformed_header = false;
+    visit_length_prefixed_hevc_nals(sample, 4, |framed, kind| {
+        let nal = &framed[4..];
+        if nal.len() < 2 || nal[0] & 0x81 != 0 || nal[1] & 0xf8 != 0 || nal[1] & 7 == 0 {
+            malformed_header = true;
+            return;
+        }
+        if kind.is_some_and(|kind| kind < 32) {
+            let Some(header) = nal.get(2) else {
+                malformed_header = true;
+                return;
+            };
+            first_slices += usize::from(header & 0x80 != 0);
+            sha.update(framed);
+        }
+    })?;
+    if malformed_header || first_slices != 1 {
+        return malformed("source witness requires exactly one layer-zero coded picture");
+    }
+    Ok(sha.finalize().into())
+}
+
 /// Hash HEVC EBSP payloads in FFmpeg CBS Annex-B framing, preserving every
 /// byte and NAL order. CBS emits four-byte delimiters for the first NAL and
 /// types32–34, three otherwise (FFmpeg n8.0.1 cbs_h2645.c1686–1756).
@@ -7515,6 +7545,10 @@ pub fn playlist_entry(seconds: f64, name: &str) -> String {
 pub fn segment_name(index: u64) -> String {
     format!("seg{index:05}.m4s")
 }
+
+pub mod track_projection;
+pub mod video_splice;
+mod video_splice_format;
 
 #[cfg(test)]
 mod tests;

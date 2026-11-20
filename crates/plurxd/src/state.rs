@@ -7369,17 +7369,6 @@ impl JobManager {
             last_transcode_cleanup: self
                 .job_stamp(&self.local_job_key(keys::JOB_LAST_TRANSCODE_CLEANUP))
                 .await,
-            telemetry_retain_days: self
-                .job_interval_or(
-                    keys::TELEMETRY_RETAIN_DAYS,
-                    keys::TELEMETRY_RETAIN_DEFAULT_DAYS,
-                )
-                .await,
-            network_priors: self
-                .store
-                .get_setting(keys::PLAYBACK_NETWORK_PRIORS)
-                .await?
-                .is_some_and(|value| value.trim() == "1"),
             last_telemetry_prune: self
                 .job_stamp(&self.local_job_key(keys::JOB_LAST_TELEMETRY_PRUNE))
                 .await,
@@ -13245,7 +13234,7 @@ impl JobManager {
                             ?kind,
                             state = ?cancelled.state,
                             reason = "output_preparation_disabled",
-                            "cancelled queued output preparation the Developer switch no longer admits"
+                            "cancelled queued output preparation the output-preparation setting no longer admits"
                         );
                     }
                     // Another node cancelled it first, or it settled.

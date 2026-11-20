@@ -715,6 +715,7 @@ pub(super) async fn spawn_copy_reader_owner(
             .lock()
             .expect("copy observation lock") = Some(Arc::clone(&measurement));
         let retained = session.rolling_collection.clone();
+        let native_split = session.native_split.clone();
         let worker_measurement = Arc::clone(&measurement);
         let measurement_dir = dir.clone();
         // The completion barrier is installed *before* the worker is spawned
@@ -767,6 +768,7 @@ pub(super) async fn spawn_copy_reader_owner(
                 grants,
                 Some(worker_measurement),
                 retained,
+                native_split,
             )
             .await
         });

@@ -270,7 +270,7 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
     let mut request = SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -326,7 +326,6 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
             block_budget: Duration::from_secs(30),
             materialize_budget: Duration::from_secs(30),
             blocked_get_cap: 100,
-            sdr_master_codecs: false,
             index_cluster_cache: false,
             hevc_unverified_copy: false,
             live_recovery: true,
@@ -421,6 +420,24 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
     assert!(
         !cold_candidate.playable(),
         "unknown producer capacity is not negative source/recipe authority"
+    );
+    // The viewer's per-playback opt-out wins over every eligibility fact
+    // above: the same prepared hand-off with `retain_output: Some(false)`
+    // publishes nothing.
+    let mut declined = make_work("prepared-declined");
+    declined.request.retain_output = Some(false);
+    let declined_candidate = &mut declined
+        .request
+        .candidate_context
+        .as_mut()
+        .expect("canonical context")
+        .selected_candidate;
+    declined_candidate.complete_cache = false;
+    declined_candidate.sustainable = false;
+    manager.hand_off_prepared_output_enqueue(declined, &owner, &cold_facts.response_owner);
+    assert!(
+        receiver.try_recv().is_err(),
+        "a playback that turned output retention off queues no preparation"
     );
     manager.hand_off_prepared_output_enqueue(cold_work, &owner, &cold_facts.response_owner);
     let prepared = receiver

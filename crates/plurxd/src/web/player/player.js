@@ -32,6 +32,7 @@
  * @property {number} [declared]           the container's declared audio offset, ms
  * @property {boolean} [transcodeAudio]
  * @property {boolean} [preserveDolbyVision]
+ * @property {boolean} [retainOutputOff]  this playback opted out of keeping a reusable copy
  * @property {boolean} [requestHdr10]      what `/decision` asked the session to preserve; survives reopens
  * @property {string|null} deliveredRange  the grade on the wire (decision, then each session's report)
  * @property {number|null} deliveredDvProfile

@@ -757,13 +757,7 @@ mod finite_hevc_init_tests {
         )
         .expect("finite HEVC plan");
         assert_eq!(plan.output_contract().output_codec(), "hevc");
-        let codec_facts =
-            crate::transcode::FrozenHlsCodecFacts::encoded(&plan).with_sdr_master_codecs(true);
-        assert_eq!(
-            codec_facts.sdr_master_codecs(),
-            None,
-            "the family is not a qualified profile claim"
-        );
+        let codec_facts = crate::transcode::FrozenHlsCodecFacts::encoded(&plan);
         crate::transcode::HlsContext {
             bandwidth: None,
             file_id: file.id,
@@ -821,9 +815,9 @@ mod finite_hevc_init_tests {
             bind_hls_init_context(context, &init, "hvc1").expect("structurally complete init");
         assert_eq!(bound.codecs, format!("{expected},mp4a.40.2"));
         let frozen = bound.codec_facts.expect("frozen output facts");
-        assert_eq!(frozen.sdr_master_codecs(), Some(bound.codecs));
         let serialized = serde_json::to_value(frozen).expect("origin");
         assert!(serialized.to_string().contains("OutputInit"));
+        assert!(serialized.to_string().contains(&expected), "{serialized}");
     }
 
     #[test]

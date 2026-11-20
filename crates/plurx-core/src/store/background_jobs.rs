@@ -3508,6 +3508,9 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn settle_job(&self, request: SettleJob) -> Result<bool, StoreError>;
     async fn fail_fragment_job(&self, request: FragmentJobFailure) -> Result<bool, StoreError>;
     async fn cancel_job(&self, request: CancelJob) -> Result<Option<BackgroundJob>, StoreError>;
+    /// Cancel a viewer's complete-output preparation only while queued and
+    /// with only its original waiter, in the same transaction as the update.
+    async fn cancel_unshared_output_job(&self, request: CancelJob) -> Result<bool, StoreError>;
     async fn cancel_waiter(
         &self,
         request: CancelWaiter,
@@ -5278,6 +5281,29 @@ LIMIT 1
               RETURNING {JOB_JSON} AS result_json"
         ), encode(&request)?, true, true).await?;
         rows.first().map(|row| decode(row)).transpose()
+    }
+
+    async fn cancel_unshared_output_job(&self, request: CancelJob) -> Result<bool, StoreError> {
+        if uuid::Uuid::parse_str(&request.job_id).is_err() || request.now_ms < 0 {
+            return Err(invalid("invalid background cancellation"));
+        }
+        let rows = self
+            .queue_sql(
+                "UPDATE background_jobs SET state = 'cancelled', revision = revision + 1,
+                    updated_at_ms = json_extract($1, '$.now_ms')
+                 WHERE id = json_extract($1, '$.job_id') AND state = 'queued'
+                   AND kind IN ('copy_output_prepare','encoded_output_prepare')
+                   AND revision < 9223372036854775807
+                   AND (SELECT COUNT(*) FROM background_job_waiters
+                        WHERE job_id = background_jobs.id) = 1
+                 RETURNING 'true' AS result_json"
+                    .to_owned(),
+                encode(&request)?,
+                true,
+                true,
+            )
+            .await?;
+        Ok(!rows.is_empty())
     }
 
     async fn enqueue_job(&self, request: EnqueueJob) -> Result<EnqueueOutcome, StoreError> {

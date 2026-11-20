@@ -1207,7 +1207,7 @@ impl TranscodeManager {
                     priority,
                     req.audio_claim.as_ref(),
                     req.audio_delivery.as_ref(),
-                    req.sdr_master_codecs,
+                    req.retain_output,
                     req.source_telemetry == Some(crate::transcode::SourceTelemetry::FilmV1),
                     plan,
                 )
@@ -1238,8 +1238,17 @@ impl TranscodeManager {
                     &req.playback_id,
                     req.automatic,
                     req.audio_delivery.as_ref(),
-                    req.sdr_master_codecs,
+                    req.retain_output,
                     req.source_telemetry == Some(crate::transcode::SourceTelemetry::FilmV1),
+                    cfg!(target_os = "linux")
+                        && req.transport.as_deref() == Some("native")
+                        && req.automatic
+                        && req
+                            .candidate_context
+                            .as_deref()
+                            .and_then(|context| context.canonical_caps.as_ref())
+                            .and_then(|caps| caps.hls_hevc_sample_entries.as_ref())
+                            .is_some_and(|entries| entries.iter().any(|entry| entry == "hev1")),
                     plan,
                 )
                 .await
@@ -4678,10 +4687,13 @@ impl TranscodeManager {
             .await?;
         // Complete-output queue publication is handed to the owned enqueue
         // worker once the session exists; it never runs on the start path.
-        // Only when the Developer switch admits this kind: a play must not
-        // queue a whole-title background job the operator never turned on.
+        // Only when the server's output-preparation setting admits this kind
+        // and the viewer did not turn it off for this playback
+        // (`retain_output: Some(false)`): a play must not queue a whole-title
+        // background job nobody asked for.
         let output_enqueue = (complete_candidate_output
             && settings.output_preparation.admits(encoding.is_some())
+            && req.retain_output != Some(false)
             && matches!(
                 &retained_capture,
                 crate::vodserve::RetainedOutputCapture::New
@@ -4862,10 +4874,6 @@ impl TranscodeManager {
                 plurx_core::store::keys::VOD_MATERIALIZE_BUDGET_SECS,
                 plurx_core::store::keys::CACHE_MAX_GB,
                 plurx_core::store::keys::VOD_BLOCKED_GET_CAP,
-                // Not admission policy, but read on this same create path:
-                // folding it in costs no extra Store read, and the session
-                // freezes it beside its block budget (S-10 Developer switch).
-                plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS,
                 // Read on every VOD create too, and once one statement at a
                 // time (D4): the cluster index gate, the HEVC copy proof
                 // switch, and the live-recovery fallback switch.
@@ -4980,15 +4988,6 @@ impl TranscodeManager {
             block_budget: Duration::from_secs_f64(block_secs),
             materialize_budget: Duration::from_secs_f64(materialize_secs),
             blocked_get_cap,
-            // The create's own snapshot read when it carried one, so VOD and
-            // rolling freeze the same value; else this batch's. Missing is
-            // off: the pre-S-10 master with no SDR CODECS.
-            sdr_master_codecs: req.sdr_master_codecs.unwrap_or_else(|| {
-                plurx_core::store::stored_switch(
-                    read(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS).map(String::as_str),
-                    false,
-                )
-            }),
             index_cluster_cache: switch(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, false),
             hevc_unverified_copy: switch(plurx_core::store::keys::HEVC_UNVERIFIED_COPY, false),
             live_recovery: switch(plurx_core::store::keys::VOD_LIVE_RECOVERY, true),
@@ -5974,6 +5973,7 @@ impl TranscodeManager {
     ) {
         if work.request.presentation != Presentation::Vod
             || work.request.continuous_media.is_some()
+            || work.request.retain_output == Some(false)
             || !work
                 .settings
                 .output_preparation
@@ -6074,6 +6074,15 @@ impl TranscodeManager {
                     None => break,
                 },
             };
+            if self.output_retention_refused(&work.session_id) {
+                tracing::debug!(
+                    target: "plurxd::transcode",
+                    file_id = work.file.id,
+                    session_id = %work.session_id,
+                    "complete output preparation dropped: the viewer turned retention off"
+                );
+                continue;
+            }
             let started = Instant::now();
             let publication = async {
                 match &work.encoding {
@@ -6109,15 +6118,21 @@ impl TranscodeManager {
             let waited_ms = started.duration_since(work.queued_at).as_millis() as u64;
             let elapsed_ms = started.elapsed().as_millis() as u64;
             match result {
-                Ok(()) => tracing::debug!(
-                    target: "plurxd::transcode",
-                    file_id = work.file.id,
-                    session_id = %work.session_id,
-                    kind,
-                    waited_ms,
-                    elapsed_ms,
-                    "complete output preparation queued"
-                ),
+                Ok(job) => {
+                    tracing::debug!(
+                        target: "plurxd::transcode",
+                        file_id = work.file.id,
+                        session_id = %work.session_id,
+                        kind,
+                        waited_ms,
+                        elapsed_ms,
+                        "complete output preparation queued"
+                    );
+                    if let Some((job_id, created)) = job {
+                        self.record_queued_output(&work.session_id, job_id, created)
+                            .await;
+                    }
+                }
                 Err(error) => tracing::info!(
                     target: "plurxd::transcode",
                     file_id = work.file.id,
@@ -6129,6 +6144,78 @@ impl TranscodeManager {
                     "complete output preparation not queued"
                 ),
             }
+        }
+    }
+
+    /// Whether this session's viewer turned output retention off mid-playback.
+    pub(crate) fn output_retention_refused(&self, session_id: &str) -> bool {
+        self.retain_output
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refused(session_id)
+    }
+
+    /// Remember the complete-output row this session's start reached, or
+    /// cancel it at once when the viewer already turned retention off.
+    pub(crate) async fn record_queued_output(
+        &self,
+        session_id: &str,
+        job_id: String,
+        created: bool,
+    ) {
+        let cancel = self
+            .retain_output
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_queued(session_id, job_id, created);
+        if let Some(job_id) = cancel {
+            self.cancel_output_job(session_id, job_id).await;
+        }
+    }
+
+    /// Cancel a preparation row only while it is still queued. A running
+    /// preparation is never cancelled from here: the encode may already be
+    /// serving another viewer's dedup-joined request, and losing a queued row
+    /// costs no more than the title's next start offering it again.
+    async fn cancel_output_job(&self, session_id: &str, job_id: String) {
+        use plurx_core::store::background_jobs::CancelJob;
+        let request = CancelJob {
+            job_id: job_id.clone(),
+            now_ms: crate::media_sessions::unix_ms(),
+        };
+        if let Err(error) = self.store.cancel_unshared_output_job(request).await {
+            tracing::info!(
+                target: "plurxd::transcode",
+                session_id,
+                job_id,
+                %error,
+                "complete output preparation not cancelled"
+            );
+        }
+    }
+
+    /// The viewer turned output retention off for this playback, mid-way
+    /// (`POST /api/v1/hls/{session}/retain-output`). Off only: the rolling
+    /// producer abandons its retained collection, a hand-off still waiting
+    /// for the enqueue worker is dropped, and a complete-output row this
+    /// session's own start created is cancelled while it is still queued and
+    /// no other playback in the cluster joined it. A dedup join, a shared row and
+    /// a running preparation all stay. Idempotent.
+    pub(crate) async fn stop_output_retention(&self, session_id: &str) {
+        let queued = self
+            .retain_output
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refuse(session_id);
+        let session = self.sessions.lock().await.get(session_id).cloned();
+        if let Some(collection) = session
+            .as_ref()
+            .and_then(|session| session.rolling_collection.as_ref())
+        {
+            collection.abandon();
+        }
+        if let Some(job_id) = queued {
+            self.cancel_output_job(session_id, job_id).await;
         }
     }
 

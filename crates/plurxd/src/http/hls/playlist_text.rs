@@ -182,6 +182,43 @@ fn native_subtitle_media(
     out
 }
 
+pub(super) fn native_split_master_text(
+    file: &MediaFile,
+    context: &crate::transcode::HlsContext,
+    ids: &crate::copyseg::NativeSplitInitIds,
+) -> Vec<u8> {
+    let mode = context
+        .codecs
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .replacen("hvc1.", "hev1.", 1);
+    let fallback = file.bitrate.unwrap_or(25_000_000).max(128_000) as u64;
+    let (peak, average) = context.bandwidth.map_or((fallback, fallback), |budget| {
+        (budget.peak_bps, budget.average_bps)
+    });
+    let mut out = format!(
+        "#EXTM3U\n#EXT-X-VERSION:10\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Main\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/{}/index.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH={peak},AVERAGE-BANDWIDTH={average},CODECS=\"{mode},mp4a.40.2\",VIDEO-RANGE=PQ,AUDIO=\"audio\"",
+        ids.audio,
+    );
+    use std::fmt::Write as _;
+    if let Some(supplemental) = &context.supplemental_codecs {
+        let supplemental = supplemental.replacen("dvh1.", "dvhe.", 1);
+        let _ = write!(out, ",SUPPLEMENTAL-CODECS=\"{supplemental}\"");
+    }
+    if let (Some(width), Some(height)) = (file.width, file.height) {
+        let _ = write!(out, ",RESOLUTION={width}x{height}");
+    }
+    if let Some(rate) = context
+        .frame_rate
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+    {
+        let _ = write!(out, ",FRAME-RATE={rate:.3}");
+    }
+    let _ = write!(out, "\nvideo/{}/index.m3u8\n", ids.video);
+    out.into_bytes()
+}
+
 /// Preserve every verified video/audio declaration and attach only the common
 /// native text group. Source bitrate/raster never replace family media facts.
 pub(super) fn continuous_master_with_subtitles(
@@ -305,22 +342,6 @@ fn master_playlist_with_shape(
                     quoted(supplemental)
                 ));
             }
-        }
-    } else if shape.codecs {
-        // SDR (S-10). Before S-10 this branch did not exist and SDR variants
-        // carried no CODECS at all — the shape AVPlayer, Media3 and hls.js
-        // were qualified against. AVPlayer filters variants on CODECS before
-        // it fetches a byte, so a wrong string silently removes the rung.
-        // Printing therefore needs both complete frozen component facts and
-        // the session's frozen `playback.sdr_master_codecs` choice (Settings
-        // → Developer, default off), read once when the session was created.
-        // The HDR branch above is untouched by that switch.
-        if let Some(codecs) = context
-            .codec_facts
-            .as_ref()
-            .and_then(crate::transcode::FrozenHlsCodecFacts::sdr_master_codecs)
-        {
-            out.push_str(&format!(",CODECS=\"{}\"", quoted(&codecs)));
         }
     }
     // Unconditional. None of these variants carries a caption track, and

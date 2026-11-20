@@ -43,7 +43,7 @@ async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
     let request = crate::transcode::SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -210,7 +210,7 @@ async fn started_session_cleanup_shipped_shape() {
     let request = crate::transcode::SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
-        sdr_master_codecs: None,
+        retain_output: None,
         dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
@@ -3280,7 +3280,6 @@ async fn passive_vod_public_get_resurrects_same_route_and_stop_fences_late_get()
             block_budget: Duration::from_secs(8),
             materialize_budget: Duration::from_secs(30),
             blocked_get_cap: 64,
-            sdr_master_codecs: false,
             index_cluster_cache: false,
             hevc_unverified_copy: false,
             live_recovery: true,
@@ -3391,69 +3390,194 @@ async fn passive_vod_public_get_resurrects_same_route_and_stop_fences_late_get()
     assert_eq!(vod.active_sessions().await, 0);
 }
 
-/// S-10: a session's master shape is decided once, when it is created.
-/// The public create reads `playback.sdr_master_codecs` with the rest of
-/// its settings; flipping it afterwards changes the next session and never
-/// this one, because resolving a presentation reads the value the session
-/// recorded, not the store.
+/// The player's per-playback opt-out: `overrides.retain_output` reaches the
+/// session request whether or not the body carries caps, and never reaches a
+/// durable byte (the persisted planning overrides or the request recipe), so
+/// a takeover or resurrection falls back to the server setting.
+#[test]
+fn retain_output_override_reaches_the_request_and_never_its_durable_bytes() {
+    let overrides: CreateOverrides =
+        serde_json::from_value(serde_json::json!({"retain_output": false}))
+            .expect("the wire name parses");
+    assert_eq!(overrides.retain_output, Some(false));
+    assert_eq!(
+        serde_json::to_value(&overrides).expect("overrides serialize"),
+        serde_json::json!({"compatible_hdr_base": null, "force": null}),
+        "the persisted planning overrides never carry the per-playback choice"
+    );
+    let request = CreateSession {
+        playback_id: "retain-output-off".into(),
+        overrides: Some(overrides),
+        ..bare_create()
+    }
+    .into_request(1, 720);
+    assert_eq!(request.retain_output, Some(false));
+    let recipe = serde_json::to_value(&request).expect("request serializes");
+    assert!(
+        recipe.get("retain_output").is_none(),
+        "the durable recipe never carries it: {recipe}"
+    );
+    let default = CreateSession {
+        playback_id: "retain-output-default".into(),
+        ..bare_create()
+    }
+    .into_request(1, 720);
+    assert_eq!(default.retain_output, None, "absent follows the server setting");
+}
+
+/// `POST /api/v1/hls/{session}/retain-output` is off only and closed.
 #[tokio::test]
-async fn sdr_master_codecs_is_frozen_when_the_session_is_created() {
-    use plurx_core::playback::DesiredQuality;
-    let (state, user, file_id) = servable_state().await;
-    for (stored, created_with, flipped_to) in [("1", true, "0"), ("0", false, "1")] {
-        state
-            .store
-            .put_setting(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS, stored)
-            .await
-            .expect("set the switch before create");
-        let accepted = create(
-            crate::http::extract::AuthUser(user.clone()),
+async fn retain_output_route_refuses_anything_but_off_for_a_real_session() {
+    let (state, _user, _file_id) = servable_state().await;
+    let session = uuid::Uuid::new_v4().to_string();
+    for body in [
+        r#"{"retain_output":true}"#,
+        r#"{"retain_output":false,"extra":1}"#,
+        r#"{}"#,
+        "not json",
+    ] {
+        let response = retain_output(
             State(state.clone()),
-            AxPath(file_id),
-            HeaderMap::new(),
-            super::super::network::RemoteAddress(None),
-            Json(CreateSession {
-                playback_id: format!("sdr-codecs-{stored}"),
-                intent: Some(envelope(1, DesiredQuality::Original)),
-                copy: Some(true),
-                ..bare_create()
-            }),
+            AxPath(session.clone()),
+            Bytes::from_static(body.as_bytes()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+    let response = retain_output(
+        State(state.clone()),
+        AxPath("not-a-session".into()),
+        Bytes::from_static(br#"{"retain_output":false}"#),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = retain_output(
+        State(state.clone()),
+        AxPath(session.clone()),
+        Bytes::from_static(br#"{"retain_output":false}"#),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(!state.transcode.output_retention_refused(&session));
+}
+
+/// The owner side of the relay answers only for its own sessions: a relay
+/// that names another node is 400, and a route whose durable owner is not the
+/// node the relay expected is 409. Ingress for that route relays and, with the
+/// owner unreachable, answers 503.
+#[tokio::test]
+async fn retain_output_relay_refuses_an_owner_mismatch() {
+    use plurx_core::domain::{MediaSessionActivation, MediaSessionActivationSettlement};
+    let (state, user, _file_id) = servable_state().await;
+    let now = unix_ms();
+    let activation = MediaSessionActivation {
+        incarnation_id: uuid::Uuid::new_v4().to_string(),
+        session_id: uuid::Uuid::new_v4().to_string(),
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: user.id,
+        },
+        playback_id: "relay-mismatch".into(),
+        recovery_epoch: String::new(),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: false,
+        request_id: None,
+        request_fingerprint: "a".repeat(64),
+        owner_node_id: "another-node".into(),
+        recipe_json: "{}".into(),
+        response_json: "{}".into(),
+        publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms: 0,
+        now_ms: now,
+        lease_expires_at_ms: now + 60_000,
+        expected_desired_revision: None,
+    };
+    state
+        .store
+        .activate_media_session(&activation)
+        .await
+        .expect("activate")
+        .expect("activation accepted");
+    state
+        .store
+        .settle_media_session_activation(
+            &activation,
+            MediaSessionActivationSettlement::Confirm {
+                publication_ready_at_ms: 0,
+            },
+            now,
         )
         .await
-        .expect("the create must be accepted");
-        let id = accepted.session_id().to_owned();
-        state
-            .store
-            .put_setting(
-                plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS,
-                flipped_to,
-            )
-            .await
-            .expect("flip the switch after create");
-        let crate::transcode::HlsPresentationResolution::Ready(context, _, _) = state
-            .transcode
-            .hls_presentation_before(&id, Instant::now() + Duration::from_secs(5))
-            .await
-        else {
-            panic!("the created presentation resolves");
-        };
-        let facts = serde_json::to_value(
-            context
-                .codec_facts
-                .as_ref()
-                .expect("a created session freezes component facts"),
+        .expect("confirm")
+        .expect("confirmed route");
+    let session = activation.session_id.clone();
+    let named_elsewhere = retain_output_relayed(
+        &state,
+        RetainOutputRelayRequest {
+            session_id: session.clone(),
+            expected_owner_node_id: "another-node".into(),
+        },
+    )
+    .await;
+    assert_eq!(named_elsewhere.status(), StatusCode::BAD_REQUEST);
+    let mismatch = retain_output_relayed(
+        &state,
+        RetainOutputRelayRequest {
+            session_id: session.clone(),
+            expected_owner_node_id: state.node_id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(mismatch.status(), StatusCode::CONFLICT);
+    assert!(!state.transcode.output_retention_refused(&session));
+    let ingress = retain_output(
+        State(state.clone()),
+        AxPath(session.clone()),
+        Bytes::from_static(br#"{"retain_output":false}"#),
+    )
+    .await;
+    assert_eq!(ingress.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // The create-time relay is best effort: an unreachable owner is reported,
+    // never a failed create.
+    assert_eq!(
+        relay_retain_output_off(&state, "another-node", &session).await,
+        RetainOutputRelayOutcome::Unreachable
+    );
+}
+
+/// Mid-playback: turning retention off for a live session is recorded on
+/// its owner, so its pending complete-output hand-off is dropped and any row
+/// its own start created is cancelled. Repeating it is harmless.
+#[tokio::test]
+async fn retain_output_off_mid_playback_is_recorded_on_the_owner() {
+    use plurx_core::playback::DesiredQuality;
+    let (state, user, file_id) = servable_state().await;
+    let accepted = create(
+        crate::http::extract::AuthUser(user.clone()),
+        State(state.clone()),
+        AxPath(file_id),
+        HeaderMap::new(),
+        super::super::network::RemoteAddress(None),
+        Json(CreateSession {
+            playback_id: "retain-output-mid".into(),
+            intent: Some(envelope(1, DesiredQuality::Original)),
+            copy: Some(true),
+            ..bare_create()
+        }),
+    )
+    .await
+    .expect("the create must be accepted");
+    let id = accepted.session_id().to_owned();
+    assert!(!state.transcode.output_retention_refused(&id));
+    for _ in 0..2 {
+        let response = retain_output(
+            State(state.clone()),
+            AxPath(id.clone()),
+            Bytes::from_static(br#"{"retain_output":false}"#),
         )
-        .expect("serializable facts");
-        assert_eq!(
-            facts
-                .get("sdr_master_codecs")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            created_with,
-            "created with {stored:?}, then flipped to {flipped_to:?}: the session keeps \
-                 its create-time choice: {facts}"
-        );
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
+    assert!(state.transcode.output_retention_refused(&id));
 }
 
 #[tokio::test]

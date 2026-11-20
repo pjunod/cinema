@@ -213,12 +213,16 @@ pub use segment::*;
 // split: begin hls-tests
 #[cfg(test)]
 #[path = "hls/tests.rs"]
-mod tests;
+pub(super) mod tests;
 // split: end hls-tests
 
 #[path = "hls/quality_schedule.rs"]
 mod quality_schedule;
 pub(crate) use quality_schedule::*;
+
+#[path = "hls/retain_output.rs"]
+mod retain_output;
+pub(crate) use retain_output::*;
 
 #[path = "hls/fence.rs"]
 pub(crate) mod fence;

@@ -948,6 +948,10 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
     const force=(typeof qualityForce==="function")?qualityForce():"auto";
     if(force && force!=="auto") body.overrides=Object.assign({force},body.overrides||{});
   }
+  // The viewer turned "Keep a reusable copy" off for this playback; every
+  // create of it (open, fallback, seek, audio switch) carries that choice.
+  if(typeof retainOutputOn==="function"&&!retainOutputOn())
+    body.overrides=Object.assign({},body.overrides||{},{retain_output:false});
   const fileContext=playbackFileContext(fileId);
   if(fileContext.source_ref.kind!=="local"){
     // The same start clock a Local create sends; B carries it to the Source.

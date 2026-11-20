@@ -241,7 +241,7 @@ fn session_request(v: &crate::transcode::SessionRequest) -> Option<usize> {
         continuous_media: _,
         quality_catalog: _,
         candidate_context: _,
-        sdr_master_codecs: _,
+        retain_output: _,
         dv_refit_digest: _,
         vod_only: _,
         passive_vod: _,

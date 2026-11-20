@@ -184,8 +184,400 @@ impl Drop for Starved<'_> {
 const GRANT_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
 const GRANT_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Project the existing copy mux, keeping the copy child's audio clock
+/// and the rolling segment's extent. Prepared FEL may replace a video object
+/// only within that same extent before publication.
+pub(crate) struct NativeSplitAuthor {
+    tracks: fmp4::track_projection::CopyTrackProjection,
+    pub(crate) video: fmp4::video_splice::SpliceVideoFormat,
+    audio_end: Option<u64>,
+    video_end: Option<u64>,
+    #[cfg(target_os = "linux")]
+    source_frames: u64,
+}
+
+pub(crate) struct NativeSplitSegment {
+    pub(crate) audio: fmp4::Fragment,
+    #[cfg(target_os = "linux")]
+    pub(crate) ordinary: fmp4::Fragment,
+    pub(crate) public_video: fmp4::Fragment,
+    #[cfg(target_os = "linux")]
+    pub(crate) first_source_frame: u64,
+}
+
+impl NativeSplitSegment {
+    /// Plan private encode windows on the source frame grid. The caller has
+    /// a continuous film-head copy and verifies every observed picture
+    /// against this exact ordinary segment when packaging the result.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fel_windows(
+        &self,
+        grid: plurx_core::transcode::VodFrameGrid,
+    ) -> Result<Vec<plurx_core::segplan::PlanEntry>, String> {
+        use plurx_core::segplan::{PlanCut, PlanEntry, PlanEntryKind};
+        let frames = self.ordinary.tracks[0].sample_count() as u64;
+        let per_window = u64::from(grid.frames_per_segment).min(64);
+        if per_window == 0 || frames < 2 {
+            return Err("rolling segment cannot provide a complete FEL witness".into());
+        }
+        let last = self
+            .first_source_frame
+            .checked_add(frames)
+            .ok_or("source frame overflow")?;
+        let step = u64::from(grid.denominator);
+        let mut first = self.first_source_frame;
+        let mut entries = Vec::new();
+        while first < last {
+            let count = (per_window - first % per_window).min(last - first);
+            entries.push(PlanEntry {
+                index: u32::try_from(first / per_window)
+                    .map_err(|_| "private FEL index overflow")?,
+                kind: PlanEntryKind::Video,
+                start_ticks: first
+                    .checked_mul(step)
+                    .ok_or("first FEL source tick overflow")?,
+                duration_ticks: count
+                    .checked_mul(step)
+                    .ok_or("private FEL duration overflow")?,
+                est_bytes: 0,
+                cut: PlanCut::Clean,
+                fragments: 0,
+            });
+            first += count;
+        }
+        Ok(entries)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn enhanced_video(
+        &self,
+        author: &NativeSplitAuthor,
+        windows: &[crate::vodencode::dv_runtime::VerifiedWindow],
+        first_fragment_sequence: u32,
+    ) -> Result<Vec<u8>, String> {
+        let ordinary_track = author
+            .ordinary_video_init()
+            .video()
+            .ok_or("ordinary video missing")?;
+        crate::vodencode::dv_runtime::package_fel_segment(
+            windows,
+            &self.ordinary,
+            ordinary_track,
+            &self.public_video,
+            &author.video,
+            first_fragment_sequence,
+        )
+    }
+}
+
+impl NativeSplitAuthor {
+    pub(crate) fn new(init: Init) -> Result<Self, fmp4::Fmp4Error> {
+        let tracks = fmp4::track_projection::CopyTrackProjection::new(init)?;
+        let video = fmp4::video_splice::SpliceVideoFormat::new(tracks.video_init(), 48_000)?;
+        Ok(Self {
+            tracks,
+            video,
+            audio_end: None,
+            video_end: None,
+            #[cfg(target_os = "linux")]
+            source_frames: 0,
+        })
+    }
+
+    pub(crate) fn audio_init(&self) -> &Init {
+        self.tracks.audio_init()
+    }
+
+    pub(crate) fn ordinary_video_init(&self) -> &Init {
+        self.tracks.video_init()
+    }
+
+    /// The caller owns the unpublished copy artifact and the next sequence.
+    /// State advances once both projected tracks have passed all checks.
+    pub(crate) fn segment(
+        &mut self,
+        multiplexed: &[u8],
+        sequence: u32,
+    ) -> Result<NativeSplitSegment, fmp4::Fmp4Error> {
+        use fmp4::video_splice::{SpliceBoundary, VideoSpliceClock};
+        let error = |what: &str| fmp4::Fmp4Error::Unsupported(what.to_owned());
+        let split = self.tracks.segment(multiplexed, sequence)?;
+        let audio = &split.audio.tracks[0];
+        let ordinary = &split.video.tracks[0];
+        let scale = u128::from(self.ordinary_video_init().tracks[0].timescale);
+        let output_scale = u128::from(self.video.init().tracks[0].timescale);
+        let output_start = u128::from(ordinary.base_decode_time) * output_scale;
+        if !output_start.is_multiple_of(scale) {
+            return Err(error(
+                "ordinary decode time falls between splice clock ticks",
+            ));
+        }
+        let output_start = u64::try_from(output_start / scale)
+            .map_err(|_| error("ordinary decode time exceeds the splice clock"))?;
+        if self
+            .audio_end
+            .is_some_and(|end| end != audio.base_decode_time)
+            || self.video_end.is_some_and(|end| end != output_start)
+        {
+            return Err(error("split rendition has a discontinuous decode clock"));
+        }
+        let video = self.video.admit(self.ordinary_video_init())?.fragment(
+            &split.video,
+            VideoSpliceClock {
+                input_presentation_anchor: 0,
+                output_presentation_anchor: 0,
+                output_decode_start: output_start,
+            },
+            sequence,
+            // The ordinary copy may carry leading pictures at a CRA.
+            // It keeps its existing access semantics until a proved cut.
+            SpliceBoundary::Fragment,
+        )?;
+        let audio_end = audio
+            .base_decode_time
+            .checked_add(audio.duration())
+            .ok_or_else(|| error("split audio decode end overflows"))?;
+        let output_video = &video.tracks[0];
+        let video_end = output_video
+            .base_decode_time
+            .checked_add(output_video.duration())
+            .ok_or_else(|| error("split video decode end overflows"))?;
+        #[cfg(target_os = "linux")]
+        let first_source_frame = {
+            let first = self.source_frames;
+            self.source_frames = first
+                .checked_add(ordinary.sample_count() as u64)
+                .ok_or_else(|| error("split source frame count overflows"))?;
+            first
+        };
+        self.audio_end = Some(audio_end);
+        self.video_end = Some(video_end);
+        Ok(NativeSplitSegment {
+            audio: split.audio,
+            #[cfg(target_os = "linux")]
+            ordinary: split.video,
+            public_video: video,
+            #[cfg(target_os = "linux")]
+            first_source_frame,
+        })
+    }
+}
+
+/// Split assets are private until the rolling response owner selects the
+/// layout. Each segment is added only after its two immutable objects land.
+#[derive(Default)]
+pub(crate) struct NativeSplitInventory {
+    startup_budget: u64,
+    init_ids: std::sync::OnceLock<NativeSplitInitIds>,
+    chosen: std::sync::OnceLock<bool>,
+    reported_presentation: std::sync::atomic::AtomicBool,
+    pub(crate) changed: tokio::sync::Notify,
+    rendered_fel: std::sync::Mutex<std::collections::BTreeMap<u64, NativeSplitFelReport>>,
+    segments: std::sync::Mutex<std::collections::BTreeMap<u64, NativeSplitEntry>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeSplitInitIds {
+    pub(crate) video: String,
+    pub(crate) audio: String,
+}
+
+impl NativeSplitInitIds {
+    fn of(author: &NativeSplitAuthor) -> Self {
+        use sha2::Digest;
+        Self {
+            video: hex::encode(sha2::Sha256::digest(&author.video.init().bytes)),
+            audio: hex::encode(sha2::Sha256::digest(&author.audio_init().bytes)),
+        }
+    }
+
+    pub(crate) fn for_role(&self, role: &str) -> Option<&str> {
+        match role {
+            "video" => Some(&self.video),
+            "audio" => Some(&self.audio),
+            _ => None,
+        }
+    }
+}
+
+struct NativeSplitFelReport {
+    bytes: i64,
+    attempt: u64,
+    object: String,
+    incarnation_id: String,
+    delivered: bool,
+    report: plurx_core::transcode::dv_processing::DvEffectiveProcessingReport,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct NativeSplitEntry {
+    bytes: i64,
+    pub(crate) audio_ticks: u64,
+    #[cfg(target_os = "linux")]
+    pub(crate) first_source_frame: u64,
+    #[cfg(target_os = "linux")]
+    pub(crate) samples: u64,
+}
+
+impl NativeSplitInventory {
+    pub(crate) fn with_startup_budget(startup_budget: u64) -> Self {
+        Self {
+            startup_budget,
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_for_http_test(&self, count: u64) -> NativeSplitInitIds {
+        let ids = NativeSplitInitIds {
+            video: "a".repeat(64),
+            audio: "b".repeat(64),
+        };
+        self.init_ids
+            .set(ids.clone())
+            .expect("test split initialization");
+        self.segments
+            .lock()
+            .expect("test split inventory")
+            .extend((0..count).map(|index| {
+                (
+                    index,
+                    NativeSplitEntry {
+                        bytes: 1,
+                        audio_ticks: 192_000,
+                        #[cfg(target_os = "linux")]
+                        first_source_frame: 0,
+                        #[cfg(target_os = "linux")]
+                        samples: 0,
+                    },
+                )
+            }));
+        ids
+    }
+
+    pub(crate) fn choose(&self, range: Option<(u64, u64)>) -> Option<NativeSplitInitIds> {
+        let enabled = self.chosen.get_or_init(|| {
+            self.init_ids.get().is_some()
+                && range.is_some_and(|(first, last)| self.window(first, last).is_some())
+        });
+        if *enabled {
+            self.init_ids.get().cloned()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn active_ids(&self) -> Option<&NativeSplitInitIds> {
+        if self.chosen.get() == Some(&true) {
+            self.init_ids.get()
+        } else {
+            None
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn candidates(&self, after: u64) -> Vec<(u64, NativeSplitEntry)> {
+        self.segments
+            .lock()
+            .expect("split inventory")
+            .range((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
+            .map(|(index, entry)| (*index, *entry))
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn commit_fel(
+        &self,
+        index: u64,
+        attempt: u64,
+        incarnation_id: String,
+        object: &str,
+        report: plurx_core::transcode::dv_processing::DvEffectiveProcessingReport,
+        bytes: i64,
+    ) -> bool {
+        let mut entries = self.rendered_fel.lock().expect("split FEL inventory");
+        let std::collections::btree_map::Entry::Vacant(entry) = entries.entry(index) else {
+            return false;
+        };
+        entry.insert(NativeSplitFelReport {
+            bytes,
+            attempt,
+            object: object.to_owned(),
+            incarnation_id,
+            delivered: false,
+            report,
+        });
+        true
+    }
+
+    pub(crate) fn fel_object(&self, index: u64, attempt: u64) -> Option<String> {
+        let entries = self.rendered_fel.lock().expect("split FEL inventory");
+        let entry = entries.get(&index)?;
+        (entry.attempt == attempt).then(|| entry.object.clone())
+    }
+
+    pub(crate) fn mark_fel_delivered(&self, index: u64, attempt: u64) {
+        let mut entries = self.rendered_fel.lock().expect("split FEL inventory");
+        if let Some(entry) = entries
+            .get_mut(&index)
+            .filter(|entry| entry.attempt == attempt)
+        {
+            entry.delivered = true;
+        }
+    }
+
+    pub(crate) fn first_fel_presentation(&self) -> bool {
+        !self
+            .reported_presentation
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    pub(crate) fn fel_at(
+        &self,
+        index: u64,
+        attempt: u64,
+        incarnation: &str,
+    ) -> Option<plurx_core::transcode::dv_processing::DvEffectiveProcessingReport> {
+        let entries = self.rendered_fel.lock().expect("split FEL inventory");
+        let entry = entries.get(&index)?;
+        (entry.delivered && entry.attempt == attempt && entry.incarnation_id == incarnation)
+            .then(|| entry.report.clone())
+    }
+
+    pub(crate) fn bytes(&self) -> i64 {
+        let segments = self.segments.lock().expect("split inventory");
+        let fel = self.rendered_fel.lock().expect("split FEL inventory");
+        segments
+            .values()
+            .map(|entry| entry.bytes)
+            .chain(fel.values().map(|entry| entry.bytes))
+            .fold(0i64, i64::saturating_add)
+    }
+
+    pub(crate) fn remove(&self, index: u64) {
+        self.segments
+            .lock()
+            .expect("split inventory")
+            .remove(&index);
+        self.rendered_fel
+            .lock()
+            .expect("split FEL inventory")
+            .remove(&index);
+    }
+
+    pub(crate) fn window(&self, first: u64, last: u64) -> Option<Vec<NativeSplitEntry>> {
+        let entries = self.segments.lock().expect("split inventory");
+        (first..=last)
+            .map(|index| entries.get(&index).copied())
+            .collect()
+    }
+}
+
 struct SessionDir {
     dir: PathBuf,
+    split_inventory: Option<std::sync::Arc<NativeSplitInventory>>,
+    split_author: Option<NativeSplitAuthor>,
+    split_staged_bytes: u64,
     /// The `#EXTINF`/URI pairs, without the immutable header.
     entries: String,
     /// Media written so far, summed from every published segment's real
@@ -198,6 +590,7 @@ struct SessionDir {
     /// The playlist is on disk — the moment a player could be holding this
     /// timeline, and so the moment the legacy fallback stops being safe.
     started: bool,
+    optional_write: bool,
     /// Diagnostic identity and monotonic writer origin; no publication authority.
     diagnostic_session: Option<String>,
     writer_started_at: std::time::Instant,
@@ -208,6 +601,24 @@ struct SessionDir {
     measurement:
         Option<std::sync::Arc<std::sync::Mutex<crate::rolling_output::RollingOutputMeasurement>>>,
     retained: Option<std::sync::Arc<crate::vodserve::retained::RollingCollection>>,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn write_native_split_fel(
+    directory: PathBuf,
+    grants: WriteGrants,
+    object: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let mut writer = SessionDir::new(directory, 0, 1, Some(grants));
+    // This optional writer must never wait for growth capacity while it
+    // holds an unpublished render target. The incumbent keeps its grant.
+    writer.optional_write = true;
+    writer
+        .publish_file(object, bytes)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 impl SessionDir {
@@ -233,11 +644,15 @@ impl SessionDir {
     ) -> SessionDir {
         SessionDir {
             dir,
+            split_inventory: None,
+            split_author: None,
+            split_staged_bytes: 0,
             entries: String::new(),
             published_secs: 0.0,
             gate_secs,
             target_duration: target_duration.max(1),
             started: false,
+            optional_write: false,
             diagnostic_session: None,
             writer_started_at: std::time::Instant::now(),
             grants,
@@ -282,8 +697,9 @@ impl SessionDir {
             .authorize_write(name, bytes.len().saturating_mul(2))
             .await?;
         let tmp = self.dir.join(format!("{name}.tmp"));
-        let measured =
-            name != "index.m3u8" && (self.measurement.is_some() || self.retained.is_some());
+        let measured = name != "index.m3u8"
+            && !name.starts_with("split-")
+            && (self.measurement.is_some() || self.retained.is_some());
         let written = async {
             let owned = bytes.to_vec();
             let target = tmp.clone();
@@ -342,6 +758,12 @@ impl SessionDir {
         if let Some(authorized) = grants.authorize(bytes) {
             return Ok(Some(authorized));
         }
+        if self.optional_write {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "native FEL write has no capacity",
+            ));
+        }
         // Only a session that has never published can wait forever for
         // nothing, so only that one gets a deadline. Measured in polls, so
         // the bound is the same on a paused test clock as on a real one.
@@ -396,13 +818,162 @@ impl SessionDir {
         }
     }
 
+    async fn publish_split_files(&mut self, files: &[(String, &[u8])]) -> std::io::Result<bool> {
+        let inventory = self
+            .split_inventory
+            .as_ref()
+            .expect("split writer has inventory");
+        let mut active = inventory.active_ids().is_some();
+        if inventory.chosen.get() == Some(&false) {
+            return Ok(false);
+        }
+        let (payload, largest) = files
+            .iter()
+            .fold((0u64, 0u64), |(total, largest), (_, bytes)| {
+                let size = bytes.len() as u64;
+                (total.saturating_add(size), largest.max(size))
+            });
+        if !active
+            && self
+                .split_staged_bytes
+                .saturating_add(payload)
+                .saturating_add(largest)
+                > inventory.startup_budget
+        {
+            // Never start either member of a pair with the original copy's
+            // startup grant. A selected layout already owns a live reserve.
+            active = inventory.choose(None).is_some();
+            if !active {
+                return Ok(false);
+            }
+        }
+        self.optional_write = !active;
+        for (name, bytes) in files {
+            let mut result = self.publish_file(name, bytes).await;
+            if self.optional_write
+                && result
+                    .as_ref()
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+                && inventory.choose(None).is_some()
+            {
+                // The master selected the split while this write was
+                // optional. No bytes landed, so this member now waits for
+                // the same required grant as the rest of the published layout.
+                self.optional_write = false;
+                result = self.publish_file(name, bytes).await;
+            }
+            if let Err(error) = result {
+                self.optional_write = false;
+                if active || inventory.choose(None).is_some() {
+                    return Err(error);
+                }
+                tracing::debug!(%error, "split layout could not stage its first media");
+                return Ok(false);
+            }
+        }
+        self.optional_write = false;
+        self.split_staged_bytes = self.split_staged_bytes.saturating_add(payload);
+        Ok(true)
+    }
+
     async fn write_init(&mut self, init: &Init) -> std::io::Result<()> {
         let committed = self.publish_file("init.mp4", &init.bytes).await?;
         self.observe_object("init.mp4", committed);
+        if self.split_inventory.is_some() {
+            match NativeSplitAuthor::new(init.clone()) {
+                Ok(author) => {
+                    let items = [
+                        (
+                            "split-audio.mp4".to_owned(),
+                            author.audio_init().bytes.as_slice(),
+                        ),
+                        (
+                            "split-video.mp4".to_owned(),
+                            author.video.init().bytes.as_slice(),
+                        ),
+                    ];
+                    if !self.publish_split_files(&items).await? {
+                        return Ok(());
+                    }
+                    let ids = NativeSplitInitIds::of(&author);
+                    let inventory = self
+                        .split_inventory
+                        .as_ref()
+                        .expect("split writer has inventory");
+                    if inventory.init_ids.set(ids.clone()).is_err()
+                        && inventory.init_ids.get() != Some(&ids)
+                    {
+                        return Err(std::io::Error::other(
+                            "split copy changed its initialization",
+                        ));
+                    }
+                    self.split_author = Some(author);
+                }
+                Err(error) => {
+                    self.split_inventory = None;
+                    tracing::debug!(%error, "copy output declined native FEL splice packaging");
+                }
+            }
+        }
         // No playlist yet: one with no segment in it is a promise the session
         // cannot keep if ffmpeg dies in the next second. The actor's first-
         // media admission observes exactly this file, so it lands only when
         // the publish gate opens.
+        Ok(())
+    }
+
+    async fn write_split_segment(&mut self, published: &Published) -> Result<(), PublishError> {
+        let Some(author) = self.split_author.as_mut() else {
+            return Ok(());
+        };
+        let sequence = u32::try_from(published.index)
+            .ok()
+            .and_then(|index| index.checked_mul(256))
+            .ok_or_else(|| PublishError::Contract("split fragment sequence overflow".into()))?;
+        let media = match author.segment(&published.segment.bytes, sequence) {
+            Ok(media) => media,
+            Err(error) => {
+                self.split_author = None;
+                if let Some(inventory) = self.split_inventory.as_ref() {
+                    if inventory.active_ids().is_some() {
+                        return Err(PublishError::Contract(format!(
+                            "committed split layout lost its next media: {error}"
+                        )));
+                    }
+                    inventory.choose(None);
+                }
+                tracing::debug!(%error, "copy segment declined native FEL splice packaging");
+                return Ok(());
+            }
+        };
+        let name = published.name();
+        let items = [
+            (format!("split-audio-{name}"), media.audio.bytes.as_slice()),
+            (
+                format!("split-video-{name}"),
+                media.public_video.bytes.as_slice(),
+            ),
+        ];
+        if !self.publish_split_files(&items).await? {
+            self.split_author = None;
+            return Ok(());
+        }
+        let inventory = self
+            .split_inventory
+            .as_ref()
+            .expect("split writer has inventory");
+        inventory.segments.lock().expect("split inventory").insert(
+            published.index,
+            NativeSplitEntry {
+                bytes: (media.audio.bytes.len() + media.public_video.bytes.len()) as i64,
+                audio_ticks: media.audio.tracks[0].duration(),
+                #[cfg(target_os = "linux")]
+                first_source_frame: media.first_source_frame,
+                #[cfg(target_os = "linux")]
+                samples: media.ordinary.tracks[0].sample_count() as u64,
+            },
+        );
+        inventory.changed.notify_waiters();
         Ok(())
     }
 
@@ -421,6 +992,7 @@ impl SessionDir {
         let name = published.name();
         let committed = self.publish_file(&name, &published.segment.bytes).await?;
         self.observe_object(&name, committed);
+        self.write_split_segment(published).await?;
         if self.published_secs == 0.0 {
             tracing::info!(
                 target: "plurxd::transcode",
@@ -592,6 +1164,7 @@ pub(crate) async fn run_observed<R: AsyncRead + Unpin>(
         grants,
         measurement,
         None,
+        None,
     )
     .await
 }
@@ -609,6 +1182,7 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
         std::sync::Arc<std::sync::Mutex<crate::rolling_output::RollingOutputMeasurement>>,
     >,
     retained: Option<std::sync::Arc<crate::vodserve::retained::RollingCollection>>,
+    split_inventory: Option<std::sync::Arc<NativeSplitInventory>>,
 ) -> Outcome {
     match tokio::fs::metadata(&dir).await {
         Ok(metadata) if metadata.is_dir() => {}
@@ -628,6 +1202,7 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
     let mut out = SessionDir::new(dir, limits.publish_gate_secs, limits.target_seconds, grants);
     out.measurement = measurement;
     out.retained = retained;
+    out.split_inventory = split_inventory;
     out.diagnostic_session = Some(crate::transcode::session_log_id(session_id));
     plurx_core::copy_segmenter::run_copy_pipe(
         src,
