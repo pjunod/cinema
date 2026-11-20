@@ -1,5 +1,6 @@
 """Main-lane journals retain their own typed source identity."""
 import unittest
+import copy
 from unittest.mock import Mock, patch
 from validation import main_python_continuation as source
 from validation import python_unit_receipts as r
@@ -53,7 +54,7 @@ class MainPythonContinuationTests(unittest.TestCase):
               'head':{'sha':commit,'ref':item['branch'],'repo':{'id':1}},
               'base':{'ref':'main','repo':{'id':1}}}
         listed={'id':11,'commit_sha':commit,'status':'success','workflow_id':source.main.WORKFLOW,
-                'prettyref':'#7','event':'pull_request','event_payload':{'repository':{'id':1},'number':7,'pull_request':pull}}
+                'prettyref':'#7','event':'pull_request','event_payload':{'repository':{'id':1},'number':7,'pull_request':copy.deepcopy(pull)}}
         journal={'run':11,'commit':commit,'complete':True,'fixture_errors':[],
                  'passes':{key:{'run':11,'commit':commit}}}
         api=Mock();api.get.return_value=pull
@@ -105,3 +106,15 @@ class MainPythonContinuationTests(unittest.TestCase):
             api.pages.side_effect=[rows,artifacts]
             with self.subTest(kind=kind),self.assertRaises(r.ReceiptError):
                 self.read_main_supplement(api,item,journal)
+
+    def test_closed_pr_surrogate_preserves_original_event_branch_and_refuses_other_refs(self):
+        for ref,valid in [('refs/pull/7/head',True),('refs/pull/8/head',False),('codex/foreign',False)]:
+            api,item,journal,key=self.main_supplement()
+            api.get.return_value['head']['ref']=ref
+            if valid:
+                records,_=self.read_main_supplement(api,item,journal)
+                self.assertEqual(records[0][key],{'run':11,'commit':'a'*40})
+                self.assertEqual(item['branch'],'codex/main-ancestor')
+            else:
+                with self.subTest(ref=ref),self.assertRaises(r.ReceiptError):
+                    self.read_main_supplement(api,item,journal)

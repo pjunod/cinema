@@ -77,7 +77,8 @@ def authenticate_main_journals(api, items, binding, candidate, repository):
         pull = api.get(f'/pulls/{pr}')
         r.require(pull['number'] == pr and pull['state'] == 'closed' and pull['merged'] is True
                   and pull['head']['repo']['id'] == pull['base']['repo']['id'] == repository
-                  and pull['head']['sha'] == source and pull['head']['ref'] == item['branch']
+                  and pull['head']['sha'] == source
+                  and pull['head']['ref'] in {item['branch'], 'refs/pull/' + str(pr) + '/head'}
                   and pull['base']['ref'] == 'main' and main_ancestor(source, binding['base_sha'])
                   and main_ancestor(r.sha(pull['merge_commit_sha']), binding['base_sha']),
                   'Supplement is not an actual merged same-repository current-main ancestor')
