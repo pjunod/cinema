@@ -3430,8 +3430,15 @@ Runtime observation expires after 20 seconds. `attempt_bytes_written` and
 `write_bps` count successful application writes in the current attempt; they
 are not decoded-video, filesystem-sync or playable-duration claims. A
 `total_bytes_written` value exists only when the owner knows the distinct
-prior-attempt baseline. Every response in this block is private and
-`no-store`.
+prior-attempt baseline. The optional `observation.capture_service` describes
+an input-paced sample from that attempt. `sample_age_ms` gives the age of
+its completed write and `acknowledged_bytes` gives the cumulative bytes at
+that sample. `write_deadline_slack_ms` measures the remaining time on the
+write timeout at completion. `queued_write_bytes` counts outstanding bytes
+reserved by that sink after the write. `null` means the corresponding fact
+is unavailable or older than 15 seconds. Older owners and attempts without
+a positive sample omit `capture_service`. Every response in this block is
+private and `no-store`.
 
 The session routes take no account bearer at all, and an `Authorization`
 header on them is ignored. Two consequences follow: their capability values

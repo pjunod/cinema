@@ -33,6 +33,8 @@ use plurx_core::dvr::{
     DvrRecording, DvrState, DvrStatePatch, DvrTransition, DVR_ATTEMPTS_MAX, DVR_EVENT_PRUNE_BATCH,
     DVR_EVENT_RETENTION_MS, DVR_MIN_USEFUL_S, DVR_SCHEDULE_DAYS_MAX,
 };
+use plurx_core::process::observation::{Metric, UnknownReason};
+use plurx_core::resource_observation::{ServiceUnit, ServiceWindow, WorkPhase, WorkSample};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) mod capture_owner;
@@ -933,6 +935,8 @@ impl SinkWriter for tokio::io::DuplexStream {
 
 #[derive(Debug)]
 struct DvrSinkObservation {
+    attempt: i64,
+    service: ServiceWindow,
     phase: &'static str,
     first_write_at_ms: Option<i64>,
     last_write_at: Option<std::time::Instant>,
@@ -953,6 +957,8 @@ struct LatchedDvrEvent {
 impl DvrSinkObservation {
     fn new(attempt: i64) -> Self {
         Self {
+            attempt,
+            service: ServiceWindow::default(),
             phase: if attempt > 1 {
                 "reconnecting"
             } else {
@@ -966,7 +972,48 @@ impl DvrSinkObservation {
         }
     }
 
-    fn successful_write(&mut self, now: std::time::Instant, at_ms: i64, total: u64) {
+    fn successful_write(
+        &mut self,
+        now: std::time::Instant,
+        at_ms: i64,
+        total: u64,
+        deadline_slack_ms: i64,
+        queued_bytes: Option<u64>,
+    ) {
+        if total
+            > self
+                .rate_samples
+                .back()
+                .map_or(0, |(_, previous)| *previous)
+        {
+            if let Ok(generation) = u64::try_from(self.attempt) {
+                let (phase, deadline_slack_ms, queued_bytes) = if self.capture_service_available() {
+                    (
+                        WorkPhase::InputPaced,
+                        Metric::Known(deadline_slack_ms),
+                        queued_bytes.map_or(
+                            Metric::Unknown(UnknownReason::InvalidCounter),
+                            Metric::Known,
+                        ),
+                    )
+                } else {
+                    (
+                        WorkPhase::Retiring,
+                        Metric::Unknown(UnknownReason::InsufficientEvidence),
+                        Metric::Unknown(UnknownReason::InsufficientEvidence),
+                    )
+                };
+                self.service.observe(WorkSample {
+                    generation,
+                    phase,
+                    unit: ServiceUnit::Bytes,
+                    completed: total,
+                    deadline_slack_ms,
+                    queued_bytes,
+                    at: now,
+                });
+            }
+        }
         if !matches!(self.phase, "finishing" | "settling") {
             self.phase = "writing";
         }
@@ -1024,6 +1071,29 @@ impl DvrSinkObservation {
         self.phase = "settling";
     }
 
+    fn capture_service_available(&self) -> bool {
+        !matches!(self.phase, "finishing" | "settling") && self.reason_code.is_none()
+    }
+
+    fn capture_service(&self, now: std::time::Instant) -> Option<DvrCaptureService> {
+        let (sample, service) = self.service.snapshot_with_sample(now)?;
+        let current_input =
+            self.capture_service_available() && service.phase == WorkPhase::InputPaced;
+        Some(DvrCaptureService {
+            sample_age_ms: u64::try_from(now.checked_duration_since(sample.at)?.as_millis())
+                .unwrap_or(u64::MAX),
+            acknowledged_bytes: service.completed,
+            write_deadline_slack_ms: match service.deadline_slack_ms {
+                Metric::Known(slack) if current_input => Some(slack),
+                _ => None,
+            },
+            queued_write_bytes: match service.queued_bytes {
+                Metric::Known(bytes) if current_input => Some(bytes),
+                _ => None,
+            },
+        })
+    }
+
     fn write_bps(&self) -> Option<u64> {
         let (first_at, first_bytes) = self.rate_samples.front()?;
         let (last_at, last_bytes) = self.rate_samples.back()?;
@@ -1054,6 +1124,37 @@ pub(crate) struct DvrCaptureObservation {
     pub(crate) prior_attempt_bytes: Option<u64>,
     pub(crate) write_bps: Option<u64>,
     pub(crate) reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) capture_service: Option<DvrCaptureService>,
+}
+
+/// One original write observation on the attempt named by its enclosing row.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct DvrCaptureService {
+    pub(crate) sample_age_ms: u64,
+    pub(crate) acknowledged_bytes: u64,
+    pub(crate) write_deadline_slack_ms: Option<i64>,
+    pub(crate) queued_write_bytes: Option<u64>,
+}
+
+impl DvrCaptureService {
+    pub(crate) fn age(&mut self, elapsed_ms: u64) {
+        self.sample_age_ms = self.sample_age_ms.saturating_add(elapsed_ms);
+        if std::time::Duration::from_millis(self.sample_age_ms)
+            > plurx_core::resource_observation::SERVICE_SAMPLE_MAX_AGE
+        {
+            self.write_deadline_slack_ms = None;
+            self.queued_write_bytes = None;
+        }
+    }
+
+    pub(crate) fn bounded(&self, attempt_bytes_written: u64) -> bool {
+        self.acknowledged_bytes > 0
+            && self.acknowledged_bytes <= attempt_bytes_written
+            && self
+                .queued_write_bytes
+                .is_none_or(|bytes| bytes <= DVR_SINK_QUEUE_BYTES)
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1137,6 +1238,14 @@ fn start_sink_writer(sink: &Arc<DvrSink>, writer: Box<dyn SinkWriter>, delivered
     }
 }
 
+fn write_deadline_slack_ms(deadline: tokio::time::Instant, completed: tokio::time::Instant) -> i64 {
+    if deadline >= completed {
+        i64::try_from(deadline.duration_since(completed).as_millis()).unwrap_or(i64::MAX)
+    } else {
+        -i64::try_from(completed.duration_since(deadline).as_millis()).unwrap_or(i64::MAX)
+    }
+}
+
 async fn sink_writer_loop(
     sink: std::sync::Weak<DvrSink>,
     mut writer: Box<dyn SinkWriter>,
@@ -1154,9 +1263,13 @@ async fn sink_writer_loop(
             _ = cancel.cancelled() => break,
         };
         let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        match tokio::time::timeout(TUNER_READ_TIMEOUT, writer.write_all(&bytes)).await {
+        let write_deadline = tokio::time::Instant::now() + TUNER_READ_TIMEOUT;
+        match tokio::time::timeout_at(write_deadline, writer.write_all(&bytes)).await {
             Ok(Ok(())) => {
-                queued_bytes.fetch_sub(len, Ordering::AcqRel);
+                let completed = tokio::time::Instant::now();
+                let queued_after_write = queued_bytes
+                    .fetch_sub(len, Ordering::AcqRel)
+                    .checked_sub(len);
                 let Some(sink) = sink.upgrade() else {
                     return SinkWriterOutcome::Closed { bytes: 0 };
                 };
@@ -1167,7 +1280,13 @@ async fn sink_writer_loop(
                 sink.observation
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .successful_write(std::time::Instant::now(), unix_millis(), total);
+                    .successful_write(
+                        completed.into_std(),
+                        unix_millis(),
+                        total,
+                        write_deadline_slack_ms(write_deadline, completed),
+                        queued_after_write,
+                    );
                 delivered.fetch_add(len, Ordering::Release);
             }
             Ok(Err(error)) => {
@@ -1565,7 +1684,7 @@ impl LiveTvManager {
             .iter()
             .filter(|transport| !transport.live_sinks().is_empty())
             .count();
-        let now = std::time::Instant::now();
+        let now = tokio::time::Instant::now().into_std();
         let mut observations = Vec::new();
         for transport in transports {
             if !self.serving.running(transport.owner_serving_generation) {
@@ -1607,6 +1726,7 @@ impl LiveTvManager {
                     prior_attempt_bytes: sink.prior_attempt_bytes,
                     write_bps: sample.write_bps(),
                     reason_code: sample.reason_code.clone(),
+                    capture_service: sample.capture_service(now),
                 });
             }
         }

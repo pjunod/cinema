@@ -6,6 +6,9 @@ use std::time::{Duration, Instant};
 
 use crate::process::observation::{Metric, UnknownReason};
 
+/// The maximum age of the original accepted sample for current service facts.
+pub const SERVICE_SAMPLE_MAX_AGE: Duration = Duration::from_secs(15);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkPhase {
@@ -159,7 +162,7 @@ impl ServiceWindow {
         let sample = self.last?;
         let mut observation = self.last_observation?;
         let age = now.checked_duration_since(sample.at)?;
-        if age > Duration::from_secs(15) {
+        if age > SERVICE_SAMPLE_MAX_AGE {
             observation.units_per_second = Metric::Unknown(UnknownReason::Stale);
             observation.deadline_slack_ms = Metric::Unknown(UnknownReason::Stale);
             observation.queued_bytes = Metric::Unknown(UnknownReason::Stale);

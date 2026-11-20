@@ -2287,6 +2287,7 @@ mod visibility_tests {
             prior_attempt_bytes: Some(0),
             write_bps: Some(2_048),
             reason_code: None,
+            capture_service: None,
         }
     }
 

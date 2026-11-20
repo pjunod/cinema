@@ -214,6 +214,9 @@ fn age_dvr_observations(
             for observation in &mut dvr.observations {
                 observation.observation_age_ms =
                     observation.observation_age_ms.saturating_add(elapsed_ms);
+                if let Some(service) = observation.capture_service.as_mut() {
+                    service.age(elapsed_ms);
+                }
             }
         }
     }
@@ -623,6 +626,9 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
                         && observation.attempt >= 1
                         && !observation.phase.is_empty()
                         && observation.phase.len() <= 32
+                        && observation.capture_service.as_ref().is_none_or(|service| {
+                            service.bounded(observation.attempt_bytes_written)
+                        })
                         && observation
                             .reason_code
                             .as_ref()
@@ -1221,6 +1227,7 @@ mod tests {
                     prior_attempt_bytes: Some(0),
                     write_bps: Some(2_048),
                     reason_code: None,
+                    capture_service: None,
                 }],
                 recording_transports: 1,
                 storage_free_bytes: Some(1_000_000_000),
@@ -1228,10 +1235,46 @@ mod tests {
         };
         let body = serde_json::to_vec(&snapshot).expect("snapshot JSON");
 
-        assert!(matches!(
-            decode_snapshot(&body, "node-b"),
-            PeerActivityOutcome::Answered(_)
-        ));
+        let PeerActivityOutcome::Answered(old_peer) = decode_snapshot(&body, "node-b") else {
+            panic!("initial DVR serving generation remains valid")
+        };
+        assert!(old_peer.dvr.expect("legacy DVR snapshot").observations[0]
+            .capture_service
+            .is_none());
+
+        let mut snapshot = snapshot;
+        let row = &mut snapshot.dvr.as_mut().expect("DVR snapshot").observations[0];
+        row.capture_service = Some(crate::live_tv::dvr::DvrCaptureService {
+            sample_age_ms: 14_999,
+            acknowledged_bytes: 4_096,
+            write_deadline_slack_ms: Some(28_000),
+            queued_write_bytes: Some(0),
+        });
+        let new_body = serde_json::to_vec(&snapshot).expect("new DVR snapshot JSON");
+        assert!(snapshot_is_bounded(&snapshot, "node-b"));
+        #[derive(serde::Deserialize)]
+        struct LegacyDvrRow {
+            write_bps: Option<u64>,
+        }
+        let value = serde_json::from_slice::<serde_json::Value>(&new_body).expect("DVR snapshot");
+        let legacy: LegacyDvrRow = serde_json::from_value(value["dvr"]["observations"][0].clone())
+            .expect("legacy DVR parser ignores the added observation");
+        assert_eq!(legacy.write_bps, Some(2_048));
+
+        let aged = age_dvr_observations(
+            decode_snapshot(&new_body, "node-b"),
+            Duration::from_millis(2),
+        );
+        let PeerActivityOutcome::Answered(aged) = aged else {
+            panic!("the bounded observation remains valid")
+        };
+        let service = aged.dvr.expect("DVR snapshot").observations[0]
+            .capture_service
+            .expect("source write observation");
+        assert_eq!(service.sample_age_ms, 15_001);
+        assert_eq!(service.acknowledged_bytes, 4_096);
+        assert_eq!(service.write_deadline_slack_ms, None);
+        assert_eq!(service.queued_write_bytes, None);
     }
 
     #[test]

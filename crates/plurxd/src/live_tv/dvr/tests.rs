@@ -461,6 +461,66 @@ fn tuner_input(
 }
 
 #[tokio::test(start_paused = true)]
+async fn capture_service_tracks_original_write_slack_and_masks_retiring_queue() {
+    use tokio::io::AsyncReadExt as _;
+
+    let (writer, mut reader) = tokio::io::duplex(1);
+    let sink = test_sink_attempt_at(
+        "service",
+        2,
+        PathBuf::from("/unused/service"),
+        Box::new(writer),
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(LiveTvMetrics::default()),
+    );
+    let queue = sink
+        .writer
+        .lock()
+        .expect("sink writer")
+        .clone()
+        .expect("queue");
+    for bytes in [
+        bytes::Bytes::from_static(b"a"),
+        bytes::Bytes::from_static(b"bc"),
+    ] {
+        assert!(reserve_sink_queue_bytes(&queue.queued_bytes, bytes.len()));
+        queue.tx.try_send(bytes).expect("enqueue fixture write");
+    }
+    let mut first = [0];
+    reader
+        .read_exact(&mut first)
+        .await
+        .expect("first write reached its sink");
+    assert_eq!(&first, b"a");
+    {
+        let now = tokio::time::Instant::now().into_std();
+        let mut observation = sink.observation.lock().expect("write observation");
+        let sample = observation.service.snapshot(now).expect("completed write");
+        assert_eq!(sample.generation, 2);
+        assert_eq!(sample.phase, WorkPhase::InputPaced);
+        assert_eq!(sample.unit, ServiceUnit::Bytes);
+        assert_eq!(
+            sample.units_per_second,
+            Metric::Unknown(UnknownReason::InsufficientEvidence)
+        );
+        let service = observation.capture_service(now).expect("write service");
+        assert_eq!(service.acknowledged_bytes, 1);
+        assert_eq!(service.write_deadline_slack_ms, Some(30_000));
+        assert_eq!(service.queued_write_bytes, Some(2));
+        assert_eq!(sink.bytes.load(Ordering::Acquire), 1);
+
+        observation.begin_finishing(unix_millis());
+        let finishing = observation.capture_service(now).expect("historical write");
+        assert_eq!(finishing.acknowledged_bytes, 1);
+        assert_eq!(finishing.write_deadline_slack_ms, None);
+        assert_eq!(finishing.queued_write_bytes, None);
+    }
+    drop(reader);
+    drop(queue);
+    assert_eq!(settle_sink(&sink).await, SinkStopResult::Settled);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_slow_sink_never_delays_the_tuner_reader_or_its_sibling() {
     let metrics = Arc::new(LiveTvMetrics::default());
     let delivered = Arc::new(AtomicU64::new(0));
@@ -1991,11 +2051,23 @@ fn queue_byte_reservations_never_exceed_the_bound() {
 fn write_rate_uses_successful_samples_from_one_five_second_window() {
     let mut sample = DvrSinkObservation::new(1);
     let start = std::time::Instant::now();
-    sample.successful_write(start, 1_000, 100);
+    sample.successful_write(start, 1_000, 100, 500, Some(0));
     assert_eq!(sample.write_bps(), None, "one write is not a rate");
-    sample.successful_write(start + std::time::Duration::from_secs(1), 2_000, 1_100);
+    sample.successful_write(
+        start + std::time::Duration::from_secs(1),
+        2_000,
+        1_100,
+        500,
+        Some(0),
+    );
     assert_eq!(sample.write_bps(), Some(1_000));
-    sample.successful_write(start + std::time::Duration::from_secs(7), 8_000, 2_100);
+    sample.successful_write(
+        start + std::time::Duration::from_secs(7),
+        8_000,
+        2_100,
+        500,
+        Some(0),
+    );
     assert_eq!(
         sample.write_bps(),
         None,
@@ -2009,7 +2081,7 @@ fn finishing_is_latched_before_late_writes_can_relabel_the_sink() {
     let mut sample = DvrSinkObservation::new(2);
     assert_eq!(sample.phase, "reconnecting");
     sample.begin_finishing(2_000);
-    sample.successful_write(std::time::Instant::now(), 2_001, 512);
+    sample.successful_write(std::time::Instant::now(), 2_001, 512, 500, Some(0));
     assert_eq!(sample.phase, "finishing");
     assert_eq!(
         sample.pending_events.front().map(|event| event.kind),
@@ -2017,7 +2089,7 @@ fn finishing_is_latched_before_late_writes_can_relabel_the_sink() {
     );
 
     sample.settling();
-    sample.successful_write(std::time::Instant::now(), 2_002, 1_024);
+    sample.successful_write(std::time::Instant::now(), 2_002, 1_024, 500, Some(0));
     assert_eq!(sample.phase, "settling");
 }
 
