@@ -12,6 +12,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "m7_limits.h"
+
 /*
  * mux_rgb --m7-encode-np1-v1
  * Inherited fd 4 is the owned output directory. Fd 6 contains packed
@@ -53,12 +55,10 @@ enum {
   M7_NP1_DIRECTORY_FD = 4,
   M7_NP1_PLANES_FD = 6,
   M7_NP1_PLAN_FD = 7,
-  M7_NP1_FRAMES = 48,
+  M7_NP1_FRAMES = M7_MAX_WINDOW_FRAMES,
   M7_NP1_GRID = 16,
-  M7_NP1_MAX_WIDTH = 3840,
-  M7_NP1_MAX_HEIGHT = 2160,
-  M7_NP1_MAX_ROIS = (M7_NP1_MAX_WIDTH / M7_NP1_GRID) *
-                   (M7_NP1_MAX_HEIGHT / M7_NP1_GRID) + 1,
+  M7_NP1_MAX_ROIS = (M7_MAX_RASTER_WIDTH / M7_NP1_GRID) *
+                   (M7_MAX_RASTER_HEIGHT / M7_NP1_GRID) + 1,
   M7_NP1_RECIPE_HEADER = 212,
   M7_NP1_FRAME_ROW = 204,
   M7_NP1_ROI_BYTES = 16,
@@ -185,9 +185,7 @@ static void m7_np1_validate_recipe(struct m7_np1_recipe *recipe) {
   recipe->cll = AV_RL16(h + 80);
   recipe->fall = AV_RL16(h + 82);
   m7_np1_need(recipe->mode <= 2 &&
-                  recipe->width >= 64 && recipe->width <= M7_NP1_MAX_WIDTH &&
-                  recipe->height >= 64 && recipe->height <= M7_NP1_MAX_HEIGHT &&
-                  !(recipe->width % 2) && !(recipe->height % 2) &&
+                  m7_supported_raster(recipe->width, recipe->height) &&
                   AV_RL32(h + 20) == M7_NP1_FRAMES &&
                   ((recipe->timescale == 24 && recipe->frame_ticks == 1) ||
                    (recipe->timescale == 24000 && recipe->frame_ticks == 1001)) &&

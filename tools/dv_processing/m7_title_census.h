@@ -3,9 +3,10 @@
 #define PLURX_M7_TITLE_CENSUS_H
 
 #include "coded_au.h"
+#include "m7_limits.h"
 
 #define M7_TITLE_CENSUS_WINDOWS 16
-#define M7_TITLE_CENSUS_FRAMES 48
+#define M7_TITLE_CENSUS_FRAMES M7_MAX_WINDOW_FRAMES
 
 struct m7_title_coded_frame {
   struct picture_time time;

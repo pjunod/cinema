@@ -11,7 +11,9 @@ use plurx_core::{
     transcode::{
         dv_fel_qualification::pq_eotf,
         dv_m7_scoring::{
-            aggregation::AGGREGATION_REVISION, capture::FrameEvidence, SCORING_REVISION,
+            aggregation::AGGREGATION_REVISION,
+            capture::{supported_raster, FrameEvidence},
+            SCORING_REVISION,
         },
         Rational,
     },
@@ -109,10 +111,7 @@ pub(super) fn build_map(
     cancelled: impl Fn() -> bool,
 ) -> Result<BenefitMap, Error> {
     let [width, height] = frame.raster.map(usize::from);
-    if !(64..=3840).contains(&width)
-        || !(64..=2160).contains(&height)
-        || !width.is_multiple_of(2)
-        || !height.is_multiple_of(2)
+    if !supported_raster(frame.raster)
         || frame.source.pts == i64::MIN
         || frame.source.duration <= 0
         || frame

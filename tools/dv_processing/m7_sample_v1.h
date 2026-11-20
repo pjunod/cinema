@@ -4,6 +4,8 @@
 
 #include <libavutil/intreadwrite.h>
 
+#include "m7_limits.h"
+
 // The little-endian stream starts with PLXM7F01 for calibrated P7 FEL or
 // PLXM7C01 for its separately admitted authored P8.1 candidate. Metadata-only
 // census streams use PLXM7S01 and PLXM7A01 respectively. Their samples/frame,
@@ -32,7 +34,7 @@
 // counts the total payload bytes of both planes of all frames. A reader must require exact lengths,
 // coverage and EOF after END1, plus the successful exit of the writer.
 enum {
-  M7_SAMPLE_MAX_FRAMES = 48,
+  M7_SAMPLE_MAX_FRAMES = M7_MAX_WINDOW_FRAMES,
   M7_SAMPLE_MAX_PACKETS = 16384,
   M7_SAMPLE_FEL_RECORD_BYTES = 16,
   M7_SAMPLE_CANDIDATE_RECORD_BYTES = 10,
@@ -58,6 +60,7 @@ static void m7_sample_v1_open(struct m7_sample_v1 *sample, const char *path,
                               int64_t first, int64_t last, int64_t first_pts,
                               bool candidate, enum m7_stream_kind kind) {
   const int *roi = sample->roi;
+  refit_content(m7_supported_raster(width, height), "supported M7 raster");
   refit_content(roi[2] <= width && roi[3] <= height &&
                     roi[2] - roi[0] >= 2 && roi[3] - roi[1] >= 2,
                 "M7 ROI fits the decoded raster and contains both phases");

@@ -16,6 +16,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+pub use super::capture::MAX_SITES_PER_FRAME;
 use super::{Model, ModelSampleScore, LUMINANCE_BAND_UPPER_NITS};
 
 /// Version of the exact-rank, compensated-mean managed Rust contract.
@@ -27,8 +28,6 @@ const F64_BYTES: usize = size_of::<f64>();
 const BUFFER_VALUES: usize = 1024;
 const BUFFER_BYTES: usize = BUFFER_VALUES * F64_BYTES;
 const SPILL_BYTES_PER_SITE: u64 = (MODELS * 3 * F64_BYTES) as u64;
-// Matches the largest raster and fixed lattice admitted by the M7 renderer.
-pub const MAX_SITES_PER_FRAME: usize = 1024 * 540;
 pub const MAX_FRAMES_PER_WINDOW: usize = 48;
 pub const MAX_EVALUATION_WINDOWS: usize = 8;
 // RGB16 PQ inputs have ICtCp components bounded by the matrix row sums.
@@ -210,8 +209,12 @@ impl Aggregator {
         {
             return Err(AggregationError::UnsupportedShape);
         }
-        let total: usize = plan.iter().map(|w| w.frames * w.sites_per_frame).sum();
-        Ok(total as u64 * SPILL_BYTES_PER_SITE)
+        plan.iter()
+            .try_fold(0_u64, |total, window| {
+                let sites = (window.frames as u64).checked_mul(window.sites_per_frame as u64)?;
+                total.checked_add(sites.checked_mul(SPILL_BYTES_PER_SITE)?)
+            })
+            .ok_or(AggregationError::UnsupportedShape)
     }
 
     pub fn new(

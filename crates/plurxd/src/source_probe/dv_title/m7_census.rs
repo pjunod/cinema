@@ -2,7 +2,10 @@
 
 use crate::{dv_tools::ToolSet, fragment_index_cluster::SourceFence};
 use plurx_core::transcode::{
-    dv_m7_scoring::capture::{CaptureLayout, CaptureRole, FrameEvidence},
+    dv_m7_scoring::{
+        aggregation::MAX_FRAMES_PER_WINDOW,
+        capture::{supported_raster, CaptureLayout, CaptureRole, FrameEvidence},
+    },
     Rational,
 };
 use serde::Deserialize;
@@ -11,7 +14,6 @@ use std::path::Path;
 
 pub(super) const OUTPUT: &str = "m7-window-census.json";
 const MAX_WINDOWS: usize = 16;
-const MAX_FRAMES: usize = 48;
 const MAX_BYTES: u64 = 512 * 1024;
 
 #[derive(Clone, Copy)]
@@ -134,10 +136,7 @@ pub(super) fn read(
         || document.video_index != u32::from(video_index)
         || document.title_frames != title_frames
         || document.windows.len() != ranges.len()
-        || !(64..=4096).contains(&document.width)
-        || !(64..=2160).contains(&document.height)
-        || !document.width.is_multiple_of(2)
-        || !document.height.is_multiple_of(2)
+        || !supported_raster([document.width, document.height])
     {
         return Err("M7 census whole-title coverage differs".into());
     }
@@ -146,7 +145,7 @@ pub(super) fn read(
     for (observed, range) in document.windows.into_iter().zip(ranges) {
         if observed.first_pts != range.first_pts
             || observed.end_pts != range.end_pts
-            || !(1..=MAX_FRAMES).contains(&observed.frames.len())
+            || !(1..=MAX_FRAMES_PER_WINDOW).contains(&observed.frames.len())
         {
             return Err("M7 census window differs from its request".into());
         }

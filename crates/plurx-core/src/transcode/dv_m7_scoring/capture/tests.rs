@@ -428,15 +428,20 @@ fn scorer_requires_exact_authoring_crop_two_clocks_and_readback() {
 }
 
 #[test]
-fn layout_admits_the_frozen_lattice_size_and_refuses_larger_work() {
-    let full = CaptureLayout {
+fn layout_admits_the_full_supported_raster_and_preserves_the_frozen_roi() {
+    let frozen = CaptureLayout {
         raster: [3840, 2160],
         roi: [0, 32, 3840, 2128],
         ..layout(CaptureRole::SourceFel, 1000)
     };
-    assert_eq!(full.sites_per_frame().unwrap(), 503_040);
-    let oversized = CaptureLayout {
+    assert_eq!(frozen.sites_per_frame().unwrap(), 503_040);
+    let full = CaptureLayout {
         roi: [0, 0, 3840, 2160],
+        ..frozen
+    };
+    assert_eq!(full.sites_per_frame().unwrap(), 518_400);
+    let oversized = CaptureLayout {
+        raster: [3842, 2160],
         ..full
     };
     assert!(matches!(

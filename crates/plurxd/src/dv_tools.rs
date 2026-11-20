@@ -158,6 +158,10 @@ fn renderer_source_identity() -> String {
             include_bytes!("../../../tools/dv_processing/hevc-rasl-frame-thread.patch"),
         ),
         (
+            "m7_limits.h",
+            include_bytes!("../../../tools/dv_processing/m7_limits.h"),
+        ),
+        (
             "m7_np1_encode.h",
             include_bytes!("../../../tools/dv_processing/m7_np1_encode.h"),
         ),

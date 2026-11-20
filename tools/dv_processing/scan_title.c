@@ -457,6 +457,8 @@ int main(int argc, char **argv) {
   int length_size = configuration(stream->codecpar);
   FILE *census_output = NULL;
   if (census) {
+    need(m7_supported_raster(stream->codecpar->width, stream->codecpar->height),
+         "supported M7 census raster");
     need(length_size == 4, "M7 census requires four-byte hvcC access units");
     const AVPacketSideData *config = av_packet_side_data_get(
         stream->codecpar->coded_side_data, stream->codecpar->nb_coded_side_data,

@@ -33,7 +33,7 @@ use plurx_core::{
         dv_m7_scoring::{
             aggregation::{
                 AggregationError, Aggregator, ComparisonReport, FrozenMargin, WindowShape,
-                AGGREGATION_REVISION,
+                AGGREGATION_REVISION, MAX_FRAMES_PER_WINDOW,
             },
             capture::{
                 score_paired_frame, AuthoringFrameBinding, CaptureError, CaptureLayout,
@@ -278,12 +278,13 @@ async fn execute_owned(
         return Ok(ComparisonRun::Reused(receipt));
     }
     let spill = Aggregator::required_spill_bytes(&shapes)?;
-    let captures = shapes
-        .iter()
-        .map(|shape| capture_bytes(*shape, 16) + capture_bytes(*shape, 10))
-        .max()
-        .ok_or(Error::Unsupported("evaluation windows"))?;
-    if spill.saturating_add(captures as u64) > input.scratch_bytes {
+    let max_captures = shapes.iter().try_fold(0, |max: u64, &shape| {
+        capture_pair_bytes(shape).map(|bytes| max.max(bytes))
+    })?;
+    let required = spill
+        .checked_add(max_captures)
+        .ok_or(Error::Unsupported("M7 scratch extent"))?;
+    if required > input.scratch_bytes {
         return Err(Error::Busy("admitted M7 scratch is too small".into()));
     }
 
@@ -546,7 +547,6 @@ fn endpoints(
     frames: &[FrameEvidence],
     layout: CaptureLayout,
 ) -> Result<(FrameEvidence, FrameEvidence, i64), Error> {
-    use plurx_core::transcode::dv_m7_scoring::aggregation::MAX_FRAMES_PER_WINDOW;
     let (&first, &last) = frames
         .first()
         .zip(frames.last())
@@ -629,7 +629,7 @@ async fn capture_window(
             frames: &window.source_frames,
         },
         &source_dir,
-        capture_bytes(shape, 16),
+        capture_bytes(shape, CaptureRole::SourceFel)?,
     )
     .await?;
     let candidate_status = capture(
@@ -640,7 +640,7 @@ async fn capture_window(
             frames: &candidate.frames,
         },
         &candidate_dir,
-        capture_bytes(shape, 10),
+        capture_bytes(shape, CaptureRole::AuthoredCandidate)?,
     )
     .await?;
     Ok(CaptureFiles {
@@ -717,7 +717,7 @@ pub(super) async fn capture_source_lattice(
         frames: plan.frames.len(),
         sites_per_frame: plan.layout.sites_per_frame()?,
     };
-    let limit = capture_bytes(shape, 16);
+    let limit = capture_bytes(shape, CaptureRole::SourceFel)?;
     if limit as u64 > scratch_bytes {
         return Err(Error::Busy(
             "admitted calibration scratch is too small".into(),
@@ -851,9 +851,49 @@ async fn run_renderer(
     Ok(output.status)
 }
 
-fn capture_bytes(shape: WindowShape, record_bytes: usize) -> usize {
-    CAPTURE_HEADER_AND_TRAILER
-        + shape.frames * (FRAME_PREFIX_BYTES + MAX_NAL_BYTES + shape.sites_per_frame * record_bytes)
+fn stream_limit(frames: usize, extra_frame_bytes: usize) -> Result<usize, Error> {
+    if !(1..=MAX_FRAMES_PER_WINDOW).contains(&frames) {
+        return Err(Error::Unsupported("M7 capture frame count"));
+    }
+    extra_frame_bytes
+        .checked_add(FRAME_PREFIX_BYTES + MAX_NAL_BYTES)
+        .and_then(|frame_bytes| frames.checked_mul(frame_bytes))
+        .and_then(|payload| CAPTURE_HEADER_AND_TRAILER.checked_add(payload))
+        .ok_or(Error::Unsupported("M7 capture extent"))
+}
+
+fn capture_bytes(shape: WindowShape, role: CaptureRole) -> Result<usize, Error> {
+    let payload = shape
+        .sites_per_frame
+        .checked_mul(role.record_bytes())
+        .ok_or(Error::Unsupported("M7 lattice extent"))?;
+    stream_limit(shape.frames, payload)
+}
+
+fn capture_pair_bytes(shape: WindowShape) -> Result<u64, Error> {
+    let source = capture_bytes(shape, CaptureRole::SourceFel)? as u64;
+    let candidate = capture_bytes(shape, CaptureRole::AuthoredCandidate)? as u64;
+    source
+        .checked_add(candidate)
+        .ok_or(Error::Unsupported("M7 lattice pair extent"))
+}
+
+/// Reserve one automatic 48-frame evaluation exposure before any stage runs.
+pub(super) fn title_scratch_bytes(layout: CaptureLayout) -> Result<u64, Error> {
+    let shape = WindowShape {
+        frames: MAX_FRAMES_PER_WINDOW,
+        sites_per_frame: layout.sites_per_frame()?,
+    };
+    let spill = Aggregator::required_spill_bytes(&[shape])?;
+    let planes = full_planes::scratch_bytes(layout)?;
+    let captures = capture_pair_bytes(shape)?;
+    // Separate bounded whole/seek video boxes, coded controls, candidate and receipts.
+    const AUXILIARY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    spill
+        .checked_add(planes)
+        .and_then(|n| n.checked_add(captures))
+        .and_then(|n| n.checked_add(AUXILIARY_BYTES))
+        .ok_or(Error::Unsupported("M7 title scratch extent"))
 }
 
 fn score_window(

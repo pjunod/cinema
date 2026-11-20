@@ -159,6 +159,22 @@ fn refuses_budget_truncated_or_incomplete_capture_and_cancellation() {
         Aggregator::required_spill_bytes(&full_window).unwrap(),
         2_318_008_320
     );
+    let full_raster = [WindowShape {
+        frames: 48,
+        sites_per_frame: 518_400,
+    }];
+    assert_eq!(
+        Aggregator::required_spill_bytes(&full_raster).unwrap(),
+        2_388_787_200
+    );
+    let oversized = [WindowShape {
+        sites_per_frame: 518_401,
+        ..full_raster[0]
+    }];
+    assert!(matches!(
+        Aggregator::required_spill_bytes(&oversized),
+        Err(AggregationError::UnsupportedShape)
+    ));
     assert!(matches!(
         Aggregator::new(
             directory.path(),

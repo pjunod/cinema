@@ -3,13 +3,14 @@
 use super::census::{i64_at, sha_at, u32_at, u64_at};
 use super::{
     admit_renderer, check_cancel, digest, execution, off_runtime, request, run_renderer,
-    verify_authority, verify_source_census, CensusRequest, Error, HeldTitle, TitleContext,
-    CAPTURE_HEADER_AND_TRAILER, CAPTURE_OUTPUT, FRAME_PREFIX_BYTES, MAX_NAL_BYTES,
+    stream_limit, verify_authority, verify_source_census, CensusRequest, Error, HeldTitle,
+    TitleContext, CAPTURE_OUTPUT, FRAME_PREFIX_BYTES, MAX_NAL_BYTES,
 };
 use crate::{fragment_index_cluster::SourceFence, source_probe::m7_candidate};
 use plurx_core::transcode::{
-    dv_m7_scoring::capture::{
-        CaptureError, CaptureLayout, CapturePlan, CaptureRole, FrameEvidence,
+    dv_m7_scoring::{
+        aggregation::MAX_FRAMES_PER_WINDOW,
+        capture::{CaptureError, CaptureLayout, CapturePlan, CaptureRole, FrameEvidence},
     },
     Rational,
 };
@@ -21,7 +22,6 @@ use std::{
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
-const FRAMES: usize = 48;
 const DIGEST_BYTES: usize = 64;
 const COMPOSED: &str = "composed.yuv";
 
@@ -51,6 +51,40 @@ impl PreparedPlanes {
     }
 }
 
+struct PlaneExtent {
+    plane_bytes: usize,
+    capture_bytes: usize,
+    staged_bytes: u64,
+}
+
+impl PlaneExtent {
+    fn new(layout: CaptureLayout) -> Result<Self, Error> {
+        layout.sites_per_frame()?;
+        let [width, height] = layout.raster.map(usize::from);
+        let plane_bytes = 3 * width * height;
+        let capture_bytes = stream_limit(MAX_FRAMES_PER_WINDOW, 2 * (DIGEST_BYTES + plane_bytes))?;
+        // Only the composed raster is retained after checking the capture.
+        let staged_bytes = (MAX_FRAMES_PER_WINDOW as u64)
+            .checked_mul(plane_bytes as u64)
+            .ok_or(Error::Unsupported("M7 staged plane extent"))?;
+        Ok(Self {
+            plane_bytes,
+            capture_bytes,
+            staged_bytes,
+        })
+    }
+
+    fn scratch_bytes(&self) -> Result<u64, Error> {
+        (self.capture_bytes as u64)
+            .checked_add(self.staged_bytes)
+            .ok_or(Error::Unsupported("M7 full-plane scratch extent"))
+    }
+}
+
+pub(super) fn scratch_bytes(layout: CaptureLayout) -> Result<u64, Error> {
+    PlaneExtent::new(layout)?.scratch_bytes()
+}
+
 pub(in crate::source_probe) async fn prepare_planes(
     context: &TitleContext<'_>,
     title: &HeldTitle,
@@ -60,18 +94,13 @@ pub(in crate::source_probe) async fn prepare_planes(
 ) -> Result<PreparedPlanes, Error> {
     let selection = request(plan)?;
     let layout = plan.layout;
-    layout.sites_per_frame()?;
-    if layout.role != CaptureRole::SourceFel || plan.frames.len() != FRAMES {
+    if layout.role != CaptureRole::SourceFel || plan.frames.len() != MAX_FRAMES_PER_WINDOW {
         return Err(Error::Unsupported(
             "full-plane FEL input requires exactly 48 frames",
         ));
     }
-    let [width, height] = layout.raster.map(usize::from);
-    let plane_bytes = 3 * width * height;
-    let capture_bytes = CAPTURE_HEADER_AND_TRAILER
-        + FRAMES * (FRAME_PREFIX_BYTES + 2 * DIGEST_BYTES + MAX_NAL_BYTES + 2 * plane_bytes);
-    let staged_composed_bytes = FRAMES * plane_bytes;
-    if (capture_bytes + staged_composed_bytes) as u64 > staged_bytes {
+    let extent = PlaneExtent::new(layout)?;
+    if extent.scratch_bytes()? > staged_bytes {
         return Err(Error::Busy(
             "admitted full-plane scratch is too small".into(),
         ));
@@ -88,7 +117,7 @@ pub(in crate::source_probe) async fn prepare_planes(
         selection,
         "--m7-export-full-planes-v1",
         &capture,
-        capture_bytes,
+        extent.capture_bytes,
     )
     .await?;
     let frames = plan.frames.to_vec();
@@ -105,7 +134,7 @@ pub(in crate::source_probe) async fn prepare_planes(
                 capture,
                 selection,
                 frames,
-                plane_bytes,
+                extent.plane_bytes,
                 title_binding,
                 &cancel,
             )
@@ -136,7 +165,7 @@ fn stage(
     verify_header(&header, selection)?;
     let mut original = vec![0; plane_bytes];
     let mut composed = vec![0; plane_bytes];
-    let mut prepared = Vec::with_capacity(FRAMES);
+    let mut prepared = Vec::with_capacity(MAX_FRAMES_PER_WINDOW);
     for source in frames {
         check_cancel(cancel)?;
         let mut prefix = [0; FRAME_PREFIX_BYTES + 2 * DIGEST_BYTES];
@@ -192,8 +221,8 @@ fn stage(
     read_exact(&mut reader, &mut trailer)?;
     if &trailer[..4] != b"END1"
         || u32_at(&trailer, 4) != 16
-        || u64_at(&trailer, 8) != FRAMES as u64
-        || u64_at(&trailer, 16) != (FRAMES * 2 * plane_bytes) as u64
+        || u64_at(&trailer, 8) != MAX_FRAMES_PER_WINDOW as u64
+        || u64_at(&trailer, 16) != (MAX_FRAMES_PER_WINDOW * 2 * plane_bytes) as u64
         || reader.read(&mut [0]).map_err(execution)? != 0
     {
         return Err(CaptureError::Completion.into());
@@ -201,7 +230,8 @@ fn stage(
     writer.flush().map_err(execution)?;
     drop(writer);
     let composed = plurx_core::fs_secure::open_read_nofollow_blocking(&path).map_err(execution)?;
-    if composed.metadata().map_err(execution)?.len() != (FRAMES * plane_bytes) as u64 {
+    if composed.metadata().map_err(execution)?.len() != (MAX_FRAMES_PER_WINDOW * plane_bytes) as u64
+    {
         return Err(CaptureError::Completion.into());
     }
     let composed = SourceFence::clone_current_held(&composed).map_err(Error::Execution)?;
@@ -239,7 +269,7 @@ fn verify_header(header: &[u8; 88], selection: CensusRequest) -> Result<(), Capt
                 3,
                 0,
                 0,
-                FRAMES as u32,
+                MAX_FRAMES_PER_WINDOW as u32,
                 selection.first as u32,
                 selection.last as u32,
             ])

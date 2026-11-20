@@ -26,8 +26,18 @@ const FRAME_PREFIX_BYTES: usize = FRAME_FIELDS_BYTES + 3 * DIGEST_BYTES;
 const MAX_RPU_BYTES: usize = 4097;
 const STRIDE: usize = 8;
 const PHASES: u32 = 3;
-const MAX_SITES_PER_FRAME: usize = 503_040;
 const MAX_SOURCE_ORDINAL: u64 = 999_999;
+const MIN_RASTER_DIMENSION: u16 = 64;
+const MAX_RASTER_WIDTH: u16 = 3840;
+const MAX_RASTER_HEIGHT: u16 = 2160;
+pub const MAX_SITES_PER_FRAME: usize = axis_count(MAX_RASTER_WIDTH) * axis_count(MAX_RASTER_HEIGHT);
+
+pub fn supported_raster([width, height]: [u16; 2]) -> bool {
+    (MIN_RASTER_DIMENSION..=MAX_RASTER_WIDTH).contains(&width)
+        && (MIN_RASTER_DIMENSION..=MAX_RASTER_HEIGHT).contains(&height)
+        && width.is_multiple_of(2)
+        && height.is_multiple_of(2)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureRole {
@@ -36,10 +46,17 @@ pub enum CaptureRole {
 }
 
 impl CaptureRole {
-    fn wire(self) -> (&'static [u8; 8], usize) {
+    fn magic(self) -> &'static [u8; 8] {
         match self {
-            Self::SourceFel => (b"PLXM7F01", 16),
-            Self::AuthoredCandidate => (b"PLXM7C01", 10),
+            Self::SourceFel => b"PLXM7F01",
+            Self::AuthoredCandidate => b"PLXM7C01",
+        }
+    }
+
+    pub fn record_bytes(self) -> usize {
+        match self {
+            Self::SourceFel => 16,
+            Self::AuthoredCandidate => 10,
         }
     }
 }
@@ -58,10 +75,7 @@ impl CaptureLayout {
     pub fn sites_per_frame(self) -> Result<usize, CaptureError> {
         let [width, height] = self.raster;
         let [x0, y0, x1, y1] = self.roi;
-        if !(64..=3840).contains(&width)
-            || !(64..=2160).contains(&height)
-            || !width.is_multiple_of(2)
-            || !height.is_multiple_of(2)
+        if !supported_raster(self.raster)
             || x1 > width
             || y1 > height
             || x1.saturating_sub(x0) < 2
@@ -247,7 +261,8 @@ impl<'a, R: Read> CaptureReader<'a, R> {
         let first = plan.frames[0];
         let last = plan.frames[plan.frames.len() - 1];
         let layout = plan.layout;
-        let (magic, record_bytes) = layout.role.wire();
+        let magic = layout.role.magic();
+        let record_bytes = layout.role.record_bytes();
         let header = read_fixed::<HEADER_BYTES>(&mut input)?;
         let mut fields = [0_u32; 16];
         for (i, field) in fields.iter_mut().enumerate() {
@@ -442,7 +457,9 @@ pub fn score_baseline_frame(
     }
     let scorer =
         FrameScorer::for_calibration(&source.rpu_nal, whole.rpu_nal, seek.rpu_nal, pinned)?;
-    let records = source.records.chunks_exact(CaptureRole::SourceFel.wire().1);
+    let records = source
+        .records
+        .chunks_exact(CaptureRole::SourceFel.record_bytes());
     let count = records.len() as u64;
     let mut sums = [0.0; 4];
     for (i, record) in records.enumerate() {
@@ -503,11 +520,11 @@ pub fn score_paired_frame(
     let mut scores = Vec::with_capacity(source.layout.sites_per_frame()?);
     let samples = source
         .records
-        .chunks_exact(CaptureRole::SourceFel.wire().1)
+        .chunks_exact(CaptureRole::SourceFel.record_bytes())
         .zip(
             candidate
                 .records
-                .chunks_exact(CaptureRole::AuthoredCandidate.wire().1),
+                .chunks_exact(CaptureRole::AuthoredCandidate.record_bytes()),
         );
     for (i, (source_sample, candidate_sample)) in samples.enumerate() {
         if i.is_multiple_of(1024) && cancelled() {
@@ -525,8 +542,8 @@ pub fn score_paired_frame(
     Ok(scores)
 }
 
-fn axis_count(extent: u16) -> usize {
-    let extent = usize::from(extent);
+const fn axis_count(extent: u16) -> usize {
+    let extent = extent as usize;
     extent.div_ceil(STRIDE) + (extent - 1).div_ceil(STRIDE)
 }
 

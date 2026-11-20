@@ -16,6 +16,7 @@ INPUTS = (
     'dv_trace.h',
     'fel_renderer.h',
     'hevc-rasl-frame-thread.patch',
+    'm7_limits.h',
     'm7_np1_encode.h',
     'm7_sample_v1.h',
     'm7_title_census.h',

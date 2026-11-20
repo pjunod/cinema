@@ -1,12 +1,15 @@
 //! Read the independent coded AU census before a sample writer can run.
 
 use super::{
-    capture_bytes, digest, execution, off_runtime, run_renderer, Error, TitleContext, WindowShape,
+    digest, execution, off_runtime, run_renderer, stream_limit, Error, TitleContext,
     CAPTURE_OUTPUT, FRAME_PREFIX_BYTES, MAX_NAL_BYTES,
 };
 use crate::fragment_index_cluster::SourceFence;
 use plurx_core::transcode::{
-    dv_m7_scoring::capture::{CaptureError, CaptureLayout, CaptureRole, FrameEvidence},
+    dv_m7_scoring::{
+        aggregation::MAX_FRAMES_PER_WINDOW,
+        capture::{CaptureError, CaptureLayout, CaptureRole, FrameEvidence},
+    },
     Rational,
 };
 use std::io::Read;
@@ -30,10 +33,10 @@ impl CensusRequest {
         let frames = self
             .last
             .checked_sub(self.first)
-            .ok_or(CaptureError::Census)?
-            + 1;
+            .and_then(|extent| extent.checked_add(1))
+            .ok_or(CaptureError::Census)?;
         self.layout.sites_per_frame()?;
-        if frames > 48
+        if frames > MAX_FRAMES_PER_WINDOW as u64
             || self.layout.video_index > 255
             || self.first_pts == i64::MIN
             || self.end_pts == i64::MAX
@@ -63,13 +66,7 @@ pub(in crate::source_probe) async fn observe(
     job_dir: &TempDir,
 ) -> Result<Vec<FrameEvidence>, Error> {
     let frames = request.frames()?;
-    let limit = capture_bytes(
-        WindowShape {
-            frames,
-            sites_per_frame: 0,
-        },
-        0,
-    );
+    let limit = stream_limit(frames, 0)?;
     let mode = match request.layout.role {
         CaptureRole::SourceFel => "--m7-census-fel-v1",
         CaptureRole::AuthoredCandidate => "--m7-census-candidate-v1",
