@@ -1,7 +1,9 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-11-19 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-11-20 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
+- **2026-11-20 · HDR regression reuse:** fractional-rate/late-grade score-admission controls; [coverage and source-only limits](docs/performance/HDR-REFERENCE-SCORING.md). Parked algorithms and physical acceptance unchanged.
+
 
 - **2026-11-19 · MPV live opening delay:** Codex. ROG baseline seek passed. Patched Play and seek measurements are pending. [Ledger](docs/streaming/MPV-LIVE-STARTUP.md).
 - **2026-11-19 · Dolby Vision F+ curve fit (FEL RPU re-fit):** Owner Claude (claude-opus-5-5, from Codex 2026-11-18). Milestones 1–6 landed as #1565 (`8630ee431`) through `scripts/land` with the train off; all 50 Regression-Test lines carried. The nearest-Q12 production RPU passes all 48 native points and controls, and the full lane passed on `f8a7f5ab3`. The landed main merge ran preflight only (`Landed-Untested`, by Paul's order), so the combined tree has no lane run. Not deployed; physical playback and milestone 7 re-encode trials remain. [Ledger](docs/streaming/FEL-RPU-REFIT-BUILD.md).
