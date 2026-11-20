@@ -2,7 +2,7 @@
 import copy
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from validation import landing
 from validation import source_gate_landing as source
 from validation import python_unit_receipts as r
@@ -45,12 +45,18 @@ class SourceGateLandingTests(unittest.TestCase):
         completion = dict(version=source.nextest.POLICY, kind='selected-pr-rust-source-gate',
             candidate=proof['candidate'], base=proof['base'], source_run=9, enrollment_digest=proof['digest'],
             selection_projection={}, selected=proof['selected'], retained=proof['retained_ids'], executed=['plurxd::bin/plurxd red'],
-            current_listing_sha256='d' * 64, current_universe=proof['universe'], complete=True)
+            current_listing_sha256='d' * 64, current_universe=proof['universe'], historical_retired_passes={}, complete=True)
         source.completion_census(proof, completion, listing, config, 'd' * 64)
         for field, value in (('kind', 'effort-qualification'), ('complete', False), ('executed', []),
+                             ('historical_retired_passes', {'forged': 'replacement'}),
                              ('candidate', 'f' * 40), ('base', 'f' * 40), ('current_listing_sha256', 'e' * 64)):
             with self.subTest(field=field), self.assertRaises(r.ReceiptError):
                 source.completion_census(proof, {**completion, field: value}, listing, config, 'd' * 64)
+
+    def test_source_completion_requires_explicit_authenticated_retirement_field(self):
+        with patch.object(source.nextest, 'current_census', return_value=(set(), set(), set())):
+            with self.assertRaisesRegex(r.ReceiptError, 'Unknown source-gate completion fields'):
+                source.completion_census({}, {}, {}, None, 'd' * 64)
 
     def test_wrong_owner_attempt_or_missing_job_is_not_qualified(self):
         job = dict(name='Main promotion gate', id=20, run_id=10, repo_id=1, owner_id=3, attempt=1)

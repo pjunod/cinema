@@ -136,9 +136,10 @@ def completion_census(proof, completion, listing, config, listing_sha256):
     current, due, _ = nextest.current_census(proof, listing, config)
     r.require(set(completion) == {'version', 'kind', 'candidate', 'base', 'source_run',
               'enrollment_digest', 'selection_projection', 'selected', 'retained', 'executed', 'current_listing_sha256',
-              'current_universe', 'complete'}, 'Unknown source-gate completion fields')
+              'current_universe', 'historical_retired_passes', 'complete'}, 'Unknown source-gate completion fields')
     r.require(completion['version'] == nextest.POLICY and completion['kind'] == 'selected-pr-rust-source-gate'
               and completion['candidate'] == proof['candidate'] and completion['base'] == proof['base']
+              and completion['historical_retired_passes'] == proof.get('retired_ids', {})
               and completion['source_run'] == proof['run'] and completion['enrollment_digest'] == proof['digest']
               and completion['selection_projection'] == proof['selection_projection']
               and completion['selected'] == proof['selected'] and completion['retained'] == proof['retained_ids']
