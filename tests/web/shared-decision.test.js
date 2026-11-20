@@ -287,9 +287,23 @@ test("HLS HEVC requires selected MSE transport and every claimed profile",async(
  assert.ok(queries.some(c=>c.video.transferFunction==="pq"));
  for(const override of [{nativeHls:true},{hlsJsSupported:false},{mediaSource:{isTypeSupported:()=>false}},{mediaCapabilities:{decodingInfo:async()=>({supported:false})}}])
   assert.deepEqual(Array.from(await probe([true,true,false,true,false],null,{...injected,...override})),[]);
- const native={nativeHls:true,userAgent:"Mozilla/5.0 (Macintosh) Version/27.2 Safari/605.1.15",videoElement:{canPlayType:type=>type.includes("hev1")?"probably":""}};
- assert.deepEqual(Array.from(await probe([true,true,false,true,false],[false,false,false,true,false],native)),["hvc1","hev1"]);
- assert.deepEqual(Array.from(await probe([true,true,false,true,false],[false,false,false,true,false],{...native,userAgent:"Mozilla/5.0 (Macintosh) Version/26.4 Safari/605.1.15"})),[]);
+});
+test("qualified macOS Safari claims native HEVC HLS despite a negative standalone hev1 probe",async()=>{
+ const probe=hlsHevcHarness();
+ const tiers=[true,true,true,true,true], pq=[false,false,false,true,true];
+ const videoElement={canPlayType:type=>type==="application/vnd.apple.mpegurl"?"maybe":""};
+ const native={nativeHls:true,userAgent:"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Version/27.2 Safari/605.1.15",maxTouchPoints:0,videoElement};
+ assert.equal(videoElement.canPlayType('video/mp4; codecs="hev1.2.4.L153.B0"'),"");
+ assert.deepEqual(Array.from(await probe(tiers,pq,native)),["hvc1","hev1"]);
+ assert.deepEqual(Array.from(await probe(tiers,null,native)),[]);
+ for(const override of [
+  {nativeHls:false,hlsJsSupported:false},
+  {maxTouchPoints:5},
+  {videoElement:{canPlayType:()=>""}},
+  {userAgent:"Mozilla/5.0 (Macintosh) Version/26.4 Safari/605.1.15"},
+  {userAgent:"Mozilla/5.0 (iPhone) Version/27.2 Safari/605.1.15"},
+  {userAgent:"Mozilla/5.0 (Macintosh) Chrome/147.0.0.0 Safari/537.36"},
+ ]) assert.deepEqual(Array.from(await probe(tiers,pq,{...native,...override})),[]);
 });
 
 
