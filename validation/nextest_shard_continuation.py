@@ -103,7 +103,7 @@ def reviewed_changes(record, candidate, universe):
     invalidated = set()
     for path, witness in changes.items():
         r.require((path in TEST_INPUTS or path in retention.PROTOCOL_PATHS)
-                  and not path.startswith('.github/'),
+                  and (not path.startswith('.github/') or path == '.github/workflows/ci.yml'),
                   'Changed protected or unreviewed nextest input')
         r.require(isinstance(witness, dict)
                   and set(witness) == {'before', 'after', 'affected', 'reason'}
@@ -113,6 +113,10 @@ def reviewed_changes(record, candidate, universe):
         r.require(witness['before'] == (retention.digest(before) if before is not None else None)
                   and witness['after'] == (retention.digest(after) if after is not None else None),
                   'Nextest applicability bytes differ')
+        if path == '.github/workflows/ci.yml':
+            from validation.workspace_rust_continuation import metadata_only_workflow
+            r.require(before is not None and after is not None and metadata_only_workflow(before, after),
+                      'Changed protected workflow execution, beyond exact source-gate metadata')
         affected = witness['affected']
         r.require(isinstance(affected, list) and len(affected) == len(set(affected))
                   and set(affected) <= universe, 'Unknown nextest affected body')
@@ -121,7 +125,7 @@ def reviewed_changes(record, candidate, universe):
     return invalidated
 
 
-def authenticate(api, record, binding, candidate, repository):
+def authenticate(api, record, binding, candidate, repository, *, current_run=None):
     fields = {'version', 'repository', 'pr', 'branch', 'base_sha', 'source_commit',
               'prior', 'run', 'plan_artifact', 'crate_artifacts', 'shard_artifacts', 'changes', 'compatibility'}
     r.require(set(record) == fields and record['version'] == POLICY
@@ -165,7 +169,7 @@ def authenticate(api, record, binding, candidate, repository):
     r.require(plan['shards'] in range(1, units.MAX_SHARDS + 1)
               and not plan.get('absent'), 'Invalid or absent original plan bodies')
     config = units.Config.load(units.Tree(prior).text(str(units.CONFIG)))
-    auth = units.Authenticator(ForgeView(api), int(os.environ['GITHUB_RUN_ID']), config)
+    auth = units.Authenticator(ForgeView(api), current_run if current_run is not None else int(os.environ['GITHUB_RUN_ID']), config)
     jobs = api.pages(f'/actions/runs/{run_id}/jobs')
     r.require(jobs and len({job['id'] for job in jobs}) == len(jobs)
               and all(job['run_id'] == run_id and job['repo_id'] == repository and job['attempt'] == 1
@@ -324,6 +328,19 @@ def install_nextest(directory):
     return executable
 
 
+
+def require_pidfd_environment():
+    """Read-only host eligibility; no body may run on an ENOSYS worker."""
+    print('Nextest kernel:', os.uname().release, flush=True)
+    r.require(hasattr(os, 'pidfd_open'), 'Python has no pidfd_open; source gate is ineligible')
+    try:
+        descriptor = os.pidfd_open(os.getpid())
+    except OSError as error:
+        raise r.ReceiptError('pidfd_open unavailable (errno ' + str(error.errno) + '); no bodies executed') from None
+    os.close(descriptor)
+    print('Nextest pidfd_open: available; self descriptor closed', flush=True)
+
+
 def execute(proof):
     """Compile selected tests and run only uncovered original/new IDs.
 
@@ -340,6 +357,7 @@ def execute(proof):
               and not os.environ.get('CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER')
               and subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == proof['candidate'],
               'Nextest source-gate runtime or candidate differs')
+    require_pidfd_environment()
     from validation.qualification_unit_continuation import require_unmodified_cargo_environment
     require_unmodified_cargo_environment(os.environ)
     r.require(not any(os.environ.get(key) for key in ('RUSTDOCFLAGS', 'CARGO_ENCODED_RUSTDOCFLAGS',

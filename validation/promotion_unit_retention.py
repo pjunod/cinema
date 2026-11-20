@@ -20,6 +20,12 @@ COHORTS = {'rust': {'core', 'daemon', 'workspace-contracts'},
            'android_jvm': {'jvm'}, 'android_device': {'device'},
            'web_preflight': {'node-contracts'}}
 PROTOCOL_PATHS = {
+    'validation/source_gate_landing.py',
+    'validation/landing.py',
+    'validation/main_python_continuation.py',
+    'validation/native_python_execute.py',
+    'tests/validation/test_source_gate_landing.py',
+    'tests/validation/test_main_python_continuation.py',
     'validation/nextest_shard_continuation.py',
     'tests/validation/test_nextest_shard_continuation.py',
     'validation/workspace_rust_continuation.py',

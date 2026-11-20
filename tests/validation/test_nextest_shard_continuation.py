@@ -154,6 +154,8 @@ class NextestShardContinuationTests(unittest.TestCase):
                        'PLURX_PROMOTION_PR': '42', 'PLURX_PROMOTION_HEAD_SHA': 'a' * 40,
                        'PLURX_PROMOTION_BASE_SHA': 'b' * 40, 'GITHUB_SHA': 'a' * 40,
                        'PLURX_PROMOTION_BINDING': json.dumps(binding)}
+        environment['PLURX_SOURCE_GATE_PAPERWORK'] = json.dumps({'version': 1, 'head': 'a' * 40,
+            'base': 'b' * 40, 'pr': 42, 'passed': True, 'body_sha256': 'd' * 64, 'title_sha256': 'e' * 64})
         result = qualification.build_receipt(environment, {name: 'success' for name in qualification.REQUIRED_JOBS},
                                              'a' * 40, 'c' * 40)
         self.assertEqual(result['kind'], 'selected-pr-source-gate')
@@ -182,3 +184,24 @@ class NextestShardContinuationTests(unittest.TestCase):
                              (common + probe.replace(proof.FFMPEG_VERSION, '9.0'), False)):
             with self.subTest(raw=raw), self.assertRaises(r.ReceiptError):
                 proof.environment_witness(raw.encode(), archive=archive)
+
+    def test_pidfd_capability_refuses_enosys_before_any_body(self):
+        import errno
+        with patch.object(proof.os, 'pidfd_open', create=True, return_value=123) as opened, \
+                patch.object(proof.os, 'close') as closed:
+            proof.require_pidfd_environment()
+            opened.assert_called_once_with(proof.os.getpid())
+            closed.assert_called_once_with(123)
+        with patch.object(proof.os, 'pidfd_open', create=True, side_effect=OSError(errno.ENOSYS, 'unavailable')), \
+                patch.object(proof.os, 'close') as closed, self.assertRaises(r.ReceiptError):
+            proof.require_pidfd_environment()
+        closed.assert_not_called()
+
+    def test_workflow_projection_accepts_only_exact_metadata_blocks(self):
+        from validation import workspace_rust_continuation as workspace
+        before = b'known original workflow'
+        after = before + workspace.SOURCE_GATE_UPLOAD.encode() + workspace.SOURCE_GATE_PAPERWORK.encode()
+        self.assertTrue(workspace.metadata_only_workflow(before, after))
+        for bad in (after + b'changed runtime', after.replace(b'retention-days: 14', b'retention-days: 1'),
+                    after + workspace.SOURCE_GATE_UPLOAD.encode()):
+            self.assertFalse(workspace.metadata_only_workflow(before, bad))

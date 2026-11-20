@@ -67,6 +67,26 @@ original evidence enrollment, retained IDs, and actually executed IDs. No
 manual dispatch, publication, or source-gate completion is implied by preparing
 an attachment. Review new adoption code independently before executing it.
 
+### Explicit landing and environment eligibility
+
+`scripts/land --source-gate-run <actual-ci-run>` verifies actual manual CI
+provenance, every required CI surface, enrolled per-body Rust coverage and
+creator-bound completion artifacts; no status alias or untested acceptance is
+used. The fast-lane-only worker proof is retained only across the closed
+reviewed test/protocol manifest. Gate-local paperwork binds the current PR
+body/title. Release publishers still reject schema2 source-gate receipts.
+
+Before any Rust body, a read-only self `pidfd_open` probe logs kernel/capability,
+closes its descriptor and refuses unsupported environments without fallback
+or skip. Placement uses an empirically eligible worker; pools are unchanged.
+
+The separately typed `main-python-journal-continuation-v1` provider uses the
+unchanged original main-unit start/final journal authenticator and source
+fingerprints, plus reviewed all-path imported-implementation impacts. It
+preserves inherited source/run identities and stops on unknown applicability
+instead of replaying valid passes. Main-lane records are never relabelled as
+native ci.yml discoveries.
+
 ## 1. What runs when
 
 | Trigger | What happens |

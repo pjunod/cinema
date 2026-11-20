@@ -661,6 +661,16 @@ jobs:
       - name: Compile the full workspace and execute missing Rust outcomes
         if: inputs.workspace_rust_evidence != ''
         run: python3 -m validation.workspace_rust_execute
+      - name: Retain the selected Rust source-gate completion
+        if: steps.workspace-continuation.outputs.provider == 'workspace-nextest-shards-v1'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: selected-pr-rust-source-gate-${{ github.run_id }}
+          path: |
+            target/validation/nextest-continuation/receipt.json
+            target/validation/nextest-continuation/listing.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         uses: ./.github/actions/cargo-cache-finalize
@@ -2553,6 +2563,12 @@ jobs:
             echo "PLURX_CURRENT_HEAD_SHA=$(git rev-parse --verify 'refs/plurx/current-head^{commit}')"
             echo "PLURX_CURRENT_BASE_SHA=$(git rev-parse --verify 'refs/plurx/current-base^{commit}')"
           } >> "$GITHUB_ENV"
+      - name: Check current ordinary-PR source-gate paperwork
+        if: github.event_name == 'workflow_dispatch' && inputs.workspace_rust_evidence != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}
+        run: python3 -m validation.source_gate_landing paperwork
       - name: Write the exact-tree effort qualification record
         if: needs.scope.outputs.qualification == 'true'
         env:
