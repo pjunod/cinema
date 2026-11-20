@@ -72,6 +72,14 @@ voter_hosts = ["lab6", "lab3", "lab4", "media1"]
 # See `gha-lab2-android-01` below for what a false eligibility claim cost.
 host_exclusive_labels = ["ci-nonvoter-store", "ci-topology"]
 
+# CI Fleet registers a runner with this exact label for one approved attempt
+# and removes the registration after the job.
+[[ephemeral_jobs]]
+workflow = ".github/workflows/validation-marker-units.yml"
+job = "validation-markers"
+label = "ci-fleet-plurx-markers-v1"
+commit_variable = "CI_FLEET_MARKER_UNITS_SHA"
+
 # --- lab1: Incus guest host, non-voter -------------------------------------
 [[runners]]
 name = "gha-lab1-general-01"

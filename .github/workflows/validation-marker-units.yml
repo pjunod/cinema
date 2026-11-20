@@ -3,14 +3,11 @@ name: Validation marker units
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   validation-markers:
     name: Python validation marker units
     if: ${{ github.repository == 'noirr/plurx' && github.ref == 'refs/heads/main' && github.sha == vars.CI_FLEET_MARKER_UNITS_SHA }}
-    runs-on: ci-fleet-plurx-markers-v1
+    runs-on: [ci-fleet-plurx-markers-v1]
     timeout-minutes: 3
     steps:
       - name: Run the validation marker suite from the exact source

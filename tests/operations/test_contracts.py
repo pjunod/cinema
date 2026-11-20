@@ -4952,6 +4952,16 @@ assert.equal(context.ACT_TIMER, null);
         # newer than it.
         runners = rostered_runners()
         self.assertTrue(runners, "the runner roster is empty")
+        labels_in_use = {label for _, carried in runners for label in carried}
+        ephemeral = {}
+        for profile in runner_fleet().get("ephemeral_jobs", []):
+            key = (profile["workflow"], profile["job"])
+            label = profile["label"]
+            self.assertNotIn(key, ephemeral)
+            self.assertRegex(label, r"^ci-fleet-[a-z0-9-]+$")
+            self.assertNotIn(label, labels_in_use)
+            labels_in_use.add(label)
+            ephemeral[key] = profile
 
         workflow_paths = sorted(
             path.relative_to(ROOT).as_posix()
@@ -4961,9 +4971,20 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn(".github/workflows/store-shards.yml", workflow_paths)
 
         selections = 0
+        seen_ephemeral = set()
         for path in workflow_paths:
+            workflow = read(path)
             parsed: list[tuple[str, ...]] = []
             for name, block in workflow_job_blocks(path).items():
+                profile = ephemeral.get((path, name))
+                if profile:
+                    seen_ephemeral.add((path, name))
+                    self.assertEqual(re.findall(r"(?m)^ +runs-on: (.+)$", block),
+                                     [f"[{profile['label']}]"])
+                    self.assertRegex(workflow, r"(?m)^on:\n  workflow_dispatch:\n\njobs:\n")
+                    expected = ("github.repository == 'noirr/plurx' && github.ref == 'refs/heads/main'"
+                                f" && github.sha == vars.{profile['commit_variable']}")
+                    self.assertEqual(re.findall(r"(?m)^    if: (.+)$", block), [f"${{{{ {expected} }}}}"])
                 for labels in self_hosted_label_sets(block):
                     parsed.append(labels)
                     selections += 1
@@ -4979,28 +5000,29 @@ assert.equal(context.ACT_TIMER, null);
                             "Give a runner the label before a workflow asks "
                             "for it.",
                         )
+                if profile or path in GITHUB_ONLY_WORKFLOWS:
+                    continue
+                for declaration in re.findall(r"(?m)^ +runs-on: (.+)$", block):
+                    self.assertTrue(
+                        declaration.startswith("[self-hosted, ")
+                        or declaration == "${{ fromJSON(matrix.runs_on) }}"
+                        or bool(self_hosted_label_sets("    runs-on: " + declaration + "\n")),
+                        f"{path} has a non-local runner declaration: {declaration}",
+                    )
             # The per-job parse above has to see every self-hosted selection in
             # the file. A `runs-on` spelling it cannot read would otherwise be
             # quietly exempt, which is the same "nothing was looking" failure
             # wearing a different hat, so compare against the whole file.
             self.assertEqual(
                 sorted(parsed),
-                sorted(self_hosted_label_sets(read(path))),
+                sorted(self_hosted_label_sets(workflow)),
                 f"{path} selects a self-hosted runner in a shape this test "
                 "cannot parse; teach self_hosted_label_sets to read it",
             )
-            if path in GITHUB_ONLY_WORKFLOWS:
-                continue  # GitHub-hosted by design; see the GitHub-only contract
-            for declaration in re.findall(r"(?m)^ +runs-on: (.+)$", read(path)):
-                self.assertTrue(
-                    declaration.startswith("[self-hosted, ")
-                    or declaration == "${{ fromJSON(matrix.runs_on) }}"
-                    or bool(self_hosted_label_sets("    runs-on: " + declaration + "\n")),
-                    f"{path} has a non-local runner declaration: {declaration}",
-                )
         # Guard against the parser silently matching nothing at all and the
         # loop above passing vacuously.
         self.assertGreater(selections, 20)
+        self.assertEqual(seen_ephemeral, set(ephemeral))
 
     def test_the_runner_roster_keeps_heavy_cluster_lanes_off_shared_hosts(self):
         # The roster is only worth what its own shape guarantees. `ci-store`
