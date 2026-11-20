@@ -20,6 +20,9 @@ COHORTS = {'rust': {'core', 'daemon', 'workspace-contracts'},
            'android_jvm': {'jvm'}, 'android_device': {'device'},
            'web_preflight': {'node-contracts'}}
 PROTOCOL_PATHS = {
+    'CHANGELOG.md',
+    'tests/playback/rolling-producer-owners.toml',
+    'verification/durable-jobs/mapping.json',
     '.github/workflows/main-fast-lane.yml',
     'validation/merge_train.py',
     'tests/validation/test_manual_source_guard.py',

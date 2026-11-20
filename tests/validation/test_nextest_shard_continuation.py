@@ -12,6 +12,44 @@ from validation import qualification
 
 
 class NextestShardContinuationTests(unittest.TestCase):
+    def retirement_record(self):
+        return {'changes': {proof.RETIRED_FEL_PATH: {
+            'before': proof.RETIRED_FEL_SOURCE[0], 'after': proof.RETIRED_FEL_SOURCE[1],
+            'affected': [proof.RETIRED_FEL_ID],
+            'retirement': {'retired': proof.RETIRED_FEL_ID, 'successor': proof.FEL_SUCCESSOR_ID}}}}
+
+    def test_reviewed_retirement_preserves_only_an_authenticated_pass_with_exact_source_pair(self):
+        record = self.retirement_record()
+        self.assertEqual(proof.reviewed_retirements(record, {proof.RETIRED_FEL_ID: 'PASS'}),
+                         {proof.RETIRED_FEL_ID: proof.FEL_SUCCESSOR_ID})
+        for field in ('before', 'after', 'affected', 'retirement'):
+            changed = copy.deepcopy(record)
+            changed['changes'][proof.RETIRED_FEL_PATH][field] = [] if field == 'affected' else 'forged'
+            with self.subTest(field=field), self.assertRaises(r.ReceiptError):
+                proof.reviewed_retirements(changed, {proof.RETIRED_FEL_ID: 'PASS'})
+
+    def test_failed_missing_or_existing_successor_outcomes_cannot_be_retired(self):
+        for outcomes in ({}, {proof.RETIRED_FEL_ID: 'FAIL'},
+                         {proof.RETIRED_FEL_ID: 'PASS', proof.FEL_SUCCESSOR_ID: 'PASS'}):
+            with self.subTest(outcomes=outcomes), self.assertRaises(r.ReceiptError):
+                proof.reviewed_retirements(self.retirement_record(), outcomes)
+
+    def test_retired_pass_never_counts_as_current_coverage_and_successor_is_due(self):
+        record = {'selected': ['plurxd'], 'universe': [proof.RETIRED_FEL_ID],
+                  'serial_ids': [], 'retained_ids': [],
+                  'retired_ids': {proof.RETIRED_FEL_ID: proof.FEL_SUCCESSOR_ID}}
+        name = proof.FEL_SUCCESSOR_ID.split(' ', 1)[1]
+        config = type('Config', (), {'serial_ignored': {}})()
+        current, due, _ = proof.current_census(record, self.listing({name: False}), config)
+        self.assertEqual(current, {proof.FEL_SUCCESSOR_ID})
+        self.assertEqual(due, current)
+        for names in ({name: True}, {}, {name: False, proof.RETIRED_FEL_ID.split(' ', 1)[1]: False}):
+            with self.subTest(names=names), self.assertRaises(r.ReceiptError):
+                proof.current_census(record, self.listing(names), config)
+        record['retained_ids'] = [proof.FEL_SUCCESSOR_ID]
+        with self.assertRaises(r.ReceiptError):
+            proof.current_census(record, self.listing({name: False}), config)
+
     def test_duplicate_and_contradictory_original_statuses_are_refused(self):
         green = b'2026-11-20T17:00:00Z         PASS [ 0.01s] (1/2) plurxd::bin/plurxd group::a\n'
         self.assertEqual(proof.strict_outcomes(green), {'plurxd::bin/plurxd group::a': 'PASS'})

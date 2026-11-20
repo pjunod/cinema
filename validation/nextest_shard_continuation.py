@@ -63,7 +63,32 @@ RUNTIME_INPUTS = {'clients/android/app/build.gradle.kts',
  'crates/plurxd/src/vod/session.rs',
  'crates/plurxd/src/vod/tests/chunk_01.rs',
  'crates/plurxd/src/vod/tests/chunk_03.rs',
- 'crates/plurxd/src/vodgen.rs'}
+ 'crates/plurxd/src/vodgen.rs',
+ 'crates/plurx-core/src/store/background_jobs.rs',
+ 'crates/plurx-core/src/store/dv_title_jobs.rs',
+ 'crates/plurx-core/tests/store_contract/dv_title_jobs.rs',
+ 'crates/plurxd/src/copyseg.rs',
+ 'crates/plurxd/src/dv_runtime.rs',
+ 'crates/plurxd/src/dv_segment.rs',
+ 'crates/plurxd/src/http/hls/preparation.rs',
+ 'crates/plurxd/src/http/hls/processed_upgrade.rs',
+ 'crates/plurxd/src/source_probe/fel_qualification.rs',
+ 'crates/plurxd/src/source_probe/title_work.rs',
+ 'crates/plurxd/src/source_probe/title_work_tests.rs',
+ 'crates/plurxd/src/transcode.rs',
+ 'crates/plurxd/src/transcode/manager/construct.rs',
+ 'crates/plurxd/src/transcode/manager/create.rs',
+ 'crates/plurxd/src/transcode/manager/native_fel.rs',
+ 'crates/plurxd/src/transcode/manager/processed_reuse_tests.rs',
+ 'crates/plurxd/src/transcode/manager/publication.rs',
+ 'crates/plurxd/src/transcode/manager/retained_recovery_tests.rs',
+ 'crates/plurxd/src/transcode/manager/start.rs',
+ 'crates/plurxd/src/transcode/pretranscode/source.rs',
+ 'crates/plurxd/src/transcode/producer/prepublication_executor.rs',
+ 'crates/plurxd/src/transcode/rolling/retention.rs',
+ 'crates/plurxd/src/transcode/rolling/session.rs',
+ 'crates/plurxd/src/transcode/tests/chunk_03.rs',
+}
 
 # Reviewed recipes, not a source-commit or pull-request exception. Different
 # workflow, selector, feature, image or nextest contracts need a new review.
@@ -250,6 +275,31 @@ def compile_only_ignored(path, witness, before, after, universe, *, prior, run):
               'Empty ignored witness changes selected source outside its isolated functions')
 
 
+
+RETIRED_FEL_PATH = 'crates/plurxd/src/source_probe/fel_qualification.rs'
+RETIRED_FEL_ID = 'plurxd::bin/plurxd source_probe::fel_qualification::tests::a_foreign_backend_recipe_request_stays_pending_without_measurement'
+FEL_SUCCESSOR_ID = 'plurxd::bin/plurxd source_probe::fel_qualification::tests::foreign_pending_recipe_does_not_block_current_background_qualification'
+RETIRED_FEL_SOURCE = ('d4446cbf718abf6da23cb7d00df89483124e8a51736f0b789afb5e18dc205f28',
+                      '02c3c5b4542cff5c5fa3172a9a27f48d47712d6374237dbac473f962b6149129')
+
+
+def reviewed_retirements(record, outcomes):
+    """An old PASS remains historical; its reviewed replacement must execute."""
+    retired = {}
+    for path, witness in record['changes'].items():
+        if 'retirement' not in witness:
+            continue
+        r.require(path == RETIRED_FEL_PATH
+                  and witness['retirement'] == {'retired': RETIRED_FEL_ID, 'successor': FEL_SUCCESSOR_ID}
+                  and (witness['before'], witness['after']) == RETIRED_FEL_SOURCE
+                  and RETIRED_FEL_ID in witness['affected']
+                  and outcomes.get(RETIRED_FEL_ID) == 'PASS'
+                  and FEL_SUCCESSOR_ID not in outcomes,
+                  'Unreviewed source retirement, failed origin, or existing successor')
+        retired[RETIRED_FEL_ID] = FEL_SUCCESSOR_ID
+    return retired
+
+
 def reviewed_changes(record, candidate, universe):
     prior = r.sha(record['prior'])
     changes = record['changes']
@@ -262,7 +312,8 @@ def reviewed_changes(record, candidate, universe):
                   'Changed protected or unreviewed nextest input')
         r.require(isinstance(witness, dict)
                   and set(witness) in ({'before', 'after', 'affected', 'reason'},
-                                       {'before', 'after', 'affected', 'reason', 'compile_only'})
+                                       {'before', 'after', 'affected', 'reason', 'compile_only'},
+                                       {'before', 'after', 'affected', 'reason', 'retirement'})
                   and isinstance(witness['reason'], str) and 0 < len(witness['reason'].strip()) <= 2048,
                   'Missing nextest source applicability reason')
         before, after = retention.git_bytes(prior, path), retention.git_bytes(candidate, path)
@@ -416,11 +467,13 @@ def authenticate(api, record, binding, candidate, repository, *, current_run=Non
     # A shard receipt is not an outcome source; authenticated original status
     # rows remain authoritative, including all failures and abnormal exits.
     invalidated = reviewed_changes(record, candidate, universe)
+    retired = reviewed_retirements(record, outcomes)
     retained = sorted(test for test, value in outcomes.items() if value == 'PASS' and test not in invalidated)
     return {'provider': POLICY, 'scope': 'selected-pr-rust-source-gate', 'candidate': candidate,
             'prior': prior, 'base': binding['base_sha'], 'run': run_id, 'logs': logs,
             'selection_projection': current['projection'], 'selected': sorted(selected), 'universe': sorted(universe), 'retained_ids': retained,
-            'must_pass_ids': sorted(universe - set(retained)),
+            'must_pass_ids': sorted(universe - set(retained) - set(retired)),
+            'retired_ids': retired,
             'serial_ids': sorted(test for row in plan['crates'].values() for test in row['serial']),
             'outcomes': outcomes, 'root_ownership_passed': False,
             'compile_only_ignored_ids': [IGNORED_COMPILE_ID] if any(
@@ -459,7 +512,14 @@ def current_census(proof, listing, config):
         ordinary, ignored = units.crate_tests(suites, crate, set(config.serial_ignored.get(crate, ())))
         current.update(ordinary + ignored)
         serial.update(ignored)
-    r.require(set(proof['universe']) <= current and set(proof['serial_ids']) == serial,
+    retired = proof.get('retired_ids', {})
+    r.require(isinstance(retired, dict) and (not retired or retired == {RETIRED_FEL_ID: FEL_SUCCESSOR_ID})
+              and set(retired) <= set(proof['universe'])
+              and not set(retired) & current
+              and set(retired.values()) <= current
+              and not set(retired.values()) & (serial | set(proof['retained_ids'])),
+              'Reviewed retirement is missing its mandatory ordinary successor')
+    r.require(set(proof['universe']) - set(retired) <= current and set(proof['serial_ids']) == serial,
               'Historical body disappeared, became ignored, or changed serial contract')
     for identity in proof.get('compile_only_ignored_ids', []):
         binary, name = identity.split(' ', 1)
@@ -643,5 +703,6 @@ def execute(proof):
                   'candidate': proof['candidate'], 'base': proof['base'], 'source_run': proof['run'],
                   'enrollment_digest': proof['digest'], 'selection_projection': proof['selection_projection'], 'selected': proof['selected'],
                   'retained': proof['retained_ids'], 'executed': sorted(observed),
+                  'historical_retired_passes': proof.get('retired_ids', {}),
                   'current_listing_sha256': retention.digest(listing_raw), 'current_universe': sorted(current),
                   'complete': True})
