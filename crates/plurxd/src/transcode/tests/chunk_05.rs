@@ -2402,7 +2402,7 @@
     include!("../../vodencode_manager_tests.rs");
 
     async fn seed_file(store: &Arc<dyn Store>) -> i64 {
-        seed_file_at(store, &placeholder_source().await).await
+        seed_file_at(store, placeholder_source()).await
     }
 
     /// The stand-in, not FFmpeg, is what the start spawned. Its marker is
@@ -2443,83 +2443,112 @@
         marker
     }
 
-    /// The placeholder source every `seed_file` test plays: a real file with
-    /// the exact shape the seeded probe records (hevc · mkv · 3840×2160 ·
-    /// 6,000 s), so the held-source scan comparison agrees with the catalog
-    /// and ffmpeg keeps reading it for as long as the manager lets it.
-    ///
-    /// It used to be `/media/Heat.mkv`, a path that does not exist. That met
-    /// the documented need — ffmpeg *starts* — but the child then exited in
-    /// tens of milliseconds, and once producer decisions became
-    /// authoritative an exit that lands before `register_session` authorizes
-    /// the install makes `create_session` fail with `DecisionMismatch`, and
-    /// an exit that lands between two assertions hands a live permit back
-    /// early. Which one happened was the control actor's mailbox turn
-    /// against a process exit, and a loaded runner lost it in about one
-    /// transcode test per full run.
-    ///
-    /// One frame every fifty seconds keeps the encode to 120 4K frames, about
-    /// a second with libx265 ultrafast and under a megabyte. The file lives
-    /// at one fixed, shape-named path under the system temp dir and is
-    /// reused by every later test process on the host; it is encoded to a
-    /// process-private name and renamed into place, so two processes
-    /// starting at once cannot read a half-written file, and nothing is
-    /// left behind but that one file.
-    async fn placeholder_source() -> String {
-        static SOURCE: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
-        SOURCE
-            .get_or_init(|| async {
-                let dir = std::fs::canonicalize(std::env::temp_dir())
-                    .expect("canonical system temporary directory");
-                let path = dir.join("plurxd-placeholder-source-hevc-3840x2160-6000s.mkv");
-                if std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false) {
-                    return path.to_string_lossy().into_owned();
+    const PLACEHOLDER_SOURCE: &[u8] = include_bytes!("fixtures/placeholder-source.mkv");
+
+    /// Seed a real source that matches the catalog's HEVC, 3840×2160, 6,000 s
+    /// probe record. Its sparse timeline keeps FFmpeg alive during playback
+    /// assertions without requiring a 4K encode during fixture setup.
+    fn placeholder_source() -> &'static str {
+        use sha2::{Digest, Sha256};
+        use std::io::{Read, Write};
+
+        static SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        SOURCE.get_or_init(|| {
+            let dir = std::fs::canonicalize(std::env::temp_dir())
+                .expect("canonical system temporary directory");
+            let digest = Sha256::digest(PLACEHOLDER_SOURCE);
+            let path = dir.join(format!("plurxd-placeholder-source-{digest:x}.mkv"));
+            let file = match std::fs::File::open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let mut staging =
+                        tempfile::NamedTempFile::new_in(&dir).expect("stage placeholder source");
+                    staging
+                        .write_all(PLACEHOLDER_SOURCE)
+                        .expect("write placeholder source");
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        // The synthetic fixture can be shared by users of this temp root.
+                        staging
+                            .as_file()
+                            .set_permissions(std::fs::Permissions::from_mode(0o444))
+                            .expect("protect placeholder source");
+                    }
+                    match staging.persist_noclobber(&path) {
+                        Ok(_) => {}
+                        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(error) => panic!("publish placeholder source: {error}"),
+                    }
+                    std::fs::File::open(&path).expect("open published placeholder source")
                 }
-                let staging = dir.join(format!(
-                    "plurxd-placeholder-source-{}.mkv.part",
-                    std::process::id()
-                ));
-                let mut command = tokio::process::Command::new(
-                    std::env::var("PLURX_FFMPEG").unwrap_or_else(|_| "ffmpeg".into()),
-                );
-                command
-                    .kill_on_drop(true)
-                    .args([
-                        "-hide_banner",
-                        "-loglevel",
-                        "error",
-                        "-f",
-                        "lavfi",
-                        "-i",
-                        "color=c=black:size=3840x2160:rate=0.02:duration=6000",
-                        "-pix_fmt",
-                        "yuv420p",
-                        "-c:v",
-                        "libx265",
-                        "-preset",
-                        "ultrafast",
-                        "-x265-params",
-                        "log-level=none:keyint=1:pools=none",
-                        "-f",
-                        "matroska",
-                        "-y",
-                    ])
-                    .arg(&staging);
-                let output =
-                    tokio::time::timeout(std::time::Duration::from_secs(120), command.output())
-                        .await
-                        .expect("placeholder source encode exceeded its deadline")
-                        .expect("failed to start the placeholder source encode");
-                assert!(
-                    output.status.success(),
-                    "placeholder source encode failed — this suite needs an ffmpeg with libx265: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                std::fs::rename(&staging, &path).expect("placeholder source rename");
-                path.to_string_lossy().into_owned()
-            })
-            .await
-            .clone()
+                Err(error) => panic!("open placeholder source: {error}"),
+            };
+            let mut bytes = Vec::with_capacity(PLACEHOLDER_SOURCE.len());
+            file.take((PLACEHOLDER_SOURCE.len() + 1) as u64)
+                .read_to_end(&mut bytes)
+                .expect("read placeholder source");
+            assert!(
+                bytes == PLACEHOLDER_SOURCE,
+                "placeholder source differs from the tracked fixture at {}",
+                path.display()
+            );
+            path.to_string_lossy().into_owned()
+        })
+    }
+
+    #[test]
+    fn placeholder_source_matches_provenance_and_catalog_shape() {
+        use sha2::{Digest, Sha256};
+
+        let provenance: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/placeholder-source.json"))
+                .expect("placeholder source provenance");
+        assert_eq!(provenance["bytes"], PLACEHOLDER_SOURCE.len());
+        assert_eq!(
+            provenance["sha256"],
+            format!("{:x}", Sha256::digest(PLACEHOLDER_SOURCE))
+        );
+
+        let output = std::process::Command::new(crate::ffmpeg::ffprobe_bin())
+            .args([
+                "-v",
+                "error",
+                "-show_packets",
+                "-show_streams",
+                "-show_format",
+                "-show_entries",
+                "format=format_name,duration:stream=codec_name,profile,width,height,pix_fmt:packet=pts_time,duration_time,flags",
+                "-of",
+                "json",
+                placeholder_source(),
+            ])
+            .output()
+            .expect("probe placeholder source");
+        assert!(
+            output.status.success(),
+            "probe placeholder source: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let probe: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("placeholder source probe");
+        let streams = probe["streams"].as_array().expect("one video stream");
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0]["codec_name"], "hevc");
+        assert_eq!(streams[0]["profile"], "Rext");
+        assert_eq!(streams[0]["width"], 3840);
+        assert_eq!(streams[0]["height"], 2160);
+        assert_eq!(streams[0]["pix_fmt"], "yuv420p");
+        assert_eq!(probe["format"]["format_name"], "matroska,webm");
+        assert_eq!(probe["format"]["duration"], "6000.000000");
+        let packets = probe["packets"].as_array().expect("video packets");
+        assert_eq!(packets.len(), 120);
+        for (index, packet) in packets.iter().enumerate() {
+            assert_eq!(packet["pts_time"], format!("{}.000000", index * 50));
+            assert_eq!(packet["duration_time"], "50.000000");
+            let flags = packet["flags"].as_str().expect("video packet flags");
+            assert!(flags.starts_with('K'), "packet {index} must be seekable");
+        }
     }
 
     async fn seed_file_at(store: &Arc<dyn Store>, path: &str) -> i64 {
