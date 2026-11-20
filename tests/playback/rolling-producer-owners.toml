@@ -4111,15 +4111,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 #  +1 source_probe/refit_work.rs: spawn_blocking for the curve fit, awaited by the job.
 #  +2 source_probe/refit_work_tests.rs: test-only execute() tasks, each awaited under a
 #     timeout and cancelled by the test.
-# Main 60443f341 has 1181 matches. Recovery adds two request tasks in
-# shared_source_playback/tests.rs. The Direct fixture awaits its Start before
-# checking the response. The cold-index fixture awaits its admission repost
-# after End retires the Start waiter.
-# The changed-source offline fixture awaits one queue pass in place of the
-# spawned worker loop, removing one test task.
-# The owned-process pause fixture joins the blocking clock guard and each
-# host-clock observation timer. Channels release both on test cancellation.
-expected_occurrences = 1184
+# PR #1640 and main #1777 source union: recovery owns and joins the Start
+# admission tasks, the offline fixture awaits its one queue pass, and the
+# scanner fixture owns the task used to observe the actual probe child.
+# Canonical structural census of the merged source, not parent-count sums.
+expected_occurrences = 1185
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -6080,14 +6076,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 #     unpolled fit.
 #  +6 source_probe/refit_work_tests.rs: test pacing sleeps and the 20 s bounds on the
 #     joined execute() tasks.
-# The title-lane and reader admission timers retain their existing owners.
-# Recovery diagnostics, the native heartbeat collision and the voter fixture
-# retain bounded waits. The pause fixture observes the child on the host
-# clock and advances the active budget on the paused clock.
-# PR #1802 removes the membership status timeout and three link receipt
-# test timers. The retained-copy reuse test adds a timeout and polling sleep.
-# The native FEL splice loop waits on its existing task while idle.
-# The segment timeout remains on the HLS request.
+# PR #1640 and main #1777 source union: pause observations retain their
+# bounded host-clock waits, and the scanner owns its bounded cleanup wait.
+# The immutable HEVC fixture removes the cold encoder's setup timeout.
+# Canonical structural census of the merged source, not parent-count sums.
 expected_occurrences = 2266
 
 
@@ -7944,7 +7936,9 @@ pattern = "kill_on_drop\\s*\\("
 # Union at 0d501cae6: 126 + 2 + 1 = 129, less 1 counted twice = 128; the spool
 # registration test adds one: 129.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 132
+# PR #1640 removes the runtime placeholder encoder and its cancellation
+# backstop; playback still uses the verified real HEVC fixture.
+expected_occurrences = 131
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

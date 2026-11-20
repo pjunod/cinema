@@ -106,6 +106,13 @@ bump may break compatibility and a **patch** bump never does.
   Seek latency no longer leaves both exact-current attempts behind the moving
   incumbent; the same decoded-frame guard still decides whether to expose.
 
+- Linux Player live starts and out-of-range seeks identify MPV as their consumer,
+  so their startup window covers MPV’s producer/reload behavior instead of
+  inheriting Safari’s 48-second presentation window. Unknown producer capacity
+  retains conservative admission, and early publication cannot bypass the
+  initial capacity assessment. Native Safari admission and steady reserve
+  retain their existing contracts.
+
 - Web prepared upgrades keep predecessor control observations on their own
   media source through exposure, so a transient successor wait cannot cancel
   its own preparation. The first visible frame freezes the final commit;
