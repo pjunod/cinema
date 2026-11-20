@@ -19,6 +19,9 @@ use plurx_core::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+mod production;
+pub(super) use production::{prepare_authored, PrepareError};
+
 type Hash = [u8; 32];
 
 const RECIPE_REVISION: u32 = 1;
