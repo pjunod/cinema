@@ -1229,7 +1229,12 @@ async fn closing_a_shared_transport_ends_every_viewer_and_joins_its_reader() {
     ));
     let cell = manager
         .capture_owners
-        .reserve_transport(&transport, &manager.registry)
+        .reserve_transport(
+            &transport,
+            &manager.registry,
+            #[cfg(target_os = "linux")]
+            None,
+        )
         .expect("original tuner slot");
     *transport.worker.lock().expect("worker slot") = Some(Arc::downgrade(&cell));
     cell.install(worker);
@@ -2323,7 +2328,12 @@ async fn cancelled_transport_close_keeps_original_worker_and_closed_false() {
     register(&manager, "7.1", &transport);
     let cell = manager
         .capture_owners
-        .reserve_transport(&transport, &manager.registry)
+        .reserve_transport(
+            &transport,
+            &manager.registry,
+            #[cfg(target_os = "linux")]
+            None,
+        )
         .expect("fixture operation succeeds: cancelled transport close keeps original worker and closed false");
     *transport.worker.lock().expect("fixture operation succeeds: cancelled transport close keeps original worker and closed false") = Some(Arc::downgrade(&cell));
     let (release, blocked) = tokio::sync::oneshot::channel();
@@ -2354,4 +2364,59 @@ async fn cancelled_transport_close_keeps_original_worker_and_closed_false() {
         .shutdown(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
         .await
         .expect("fixture operation succeeds: cancelled transport close keeps original worker and closed false");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn shared_tuner_close_waits_for_registered_probe() {
+    let dir = tempfile::tempdir().expect("transport fixture");
+    let manager = transport_test_manager(dir.path());
+    let transport = DvrTransport::new(TransportInit {
+        channel: test_channel(),
+        generation: 3,
+        owner_serving_generation: 0,
+        device_id: "fixture-device".to_owned(),
+        address: std::net::Ipv4Addr::LOCALHOST,
+        origin: TransportOrigin::Viewer,
+        scratch: dir.path().join("original-probe"),
+        metrics: Arc::new(LiveTvMetrics::default()),
+        seats: 0,
+    });
+    register(&manager, "7.1", &transport);
+    std::fs::create_dir(&transport.scratch).expect("create original probe scratch");
+    let sample = std::fs::File::create(transport.scratch.join("source.ts"))
+        .expect("open original probe file");
+    let (release, blocked) = tokio::sync::oneshot::channel();
+    let owner = OriginalTask::default();
+    owner.install(tokio::spawn(async move {
+        blocked.await.expect("release original probe");
+        drop(sample);
+    }));
+    let original = owner.identity();
+    *transport.probe_owner.lock().expect("original probe owner") = Some(owner);
+
+    close_transport_original(Arc::downgrade(&manager.registry), Arc::clone(&transport)).await;
+    assert!(!transport.is_closed());
+    assert!(transport.scratch.is_dir());
+    assert_eq!(
+        transport
+            .probe_owner
+            .lock()
+            .expect("same registered probe")
+            .as_ref()
+            .and_then(OriginalTask::identity),
+        original,
+    );
+
+    release.send(()).expect("let original file close");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !transport.is_closed() {
+            close_transport_original(Arc::downgrade(&manager.registry), Arc::clone(&transport))
+                .await;
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("join original probe before scratch cleanup");
+    assert!(!transport.scratch.exists());
 }

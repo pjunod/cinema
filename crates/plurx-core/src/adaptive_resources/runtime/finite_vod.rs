@@ -6,12 +6,14 @@ mod initial_unit;
 pub(in crate::adaptive_resources) mod pump;
 #[cfg(target_os = "linux")]
 pub use super::finite_native::FiniteNativePlan;
+#[cfg(target_os = "linux")]
+pub use super::finite_policy::FiniteQualificationWindow;
 pub use super::operations::bootstrap::readers::{FiniteReadChunk, FiniteReader};
 pub use command::{FiniteEngineSnapshot, SoftwareAvcCommand};
 pub use executable::SoftwareAvcExecutable;
 pub use pump::{
     FiniteWriterCompletion, FiniteWriterFailureKind, FiniteWriterOutcome, SoftwareAvcPumpPlan,
-    SoftwareVodEvent,
+    SoftwareVodEvent, SoftwareVodEvents,
 };
 
 /// Joined producer metadata only. Original native owners and the reservation
@@ -260,6 +262,165 @@ impl SoftwareVodRequest {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(super) fn history_basis_for_trial(
+    request: &SoftwareVodRequest,
+) -> Option<([u8; 32], [u8; 32])> {
+    pump::history_basis(request).map(pump::HistoryBasis::timing_key)
+}
+
+/// Paid kernel leaf ceiling plus this fixed parser/writer's charged
+/// requested memory. This carries no observed or aggregate producer peak.
+#[cfg(target_os = "linux")]
+#[derive(PartialEq, Eq)]
+struct FiniteTrialMemoryEnvelope {
+    native: u64,
+    local: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl FiniteTrialMemoryEnvelope {
+    fn from_request(runtime: &NodeResourceRuntime, request: &SoftwareVodRequest) -> Option<Self> {
+        let native = request.native_plan.as_ref()?;
+        if !native.matches(runtime, &request.command) {
+            return None;
+        }
+        let (_, native) = native.requested_resources()?;
+        let local = SoftwareVodRequest::known_memory_component(
+            &request.command,
+            &request.producer,
+            &request.output,
+            request.application_owner_bytes,
+        )
+        .ok()?;
+        let Metric::Known(resources) = request.demand.resources else {
+            return None;
+        };
+        (native.checked_add(local)? <= resources.peak_memory_bytes)
+            .then_some(Self { native, local })
+    }
+}
+
+/// Original core admission evidence for this precise contained finite request.
+#[cfg(target_os = "linux")]
+pub struct FiniteTrialPermit {
+    key: super::finite_policy::FiniteTrialKey,
+    memory: FiniteTrialMemoryEnvelope,
+    allocation: crate::resource_policy::TrialAllocation,
+    startup_by: Instant,
+    original: crate::cluster::clock::ContinuousDeadline,
+}
+
+#[cfg(target_os = "linux")]
+impl FiniteTrialPermit {
+    pub fn startup_by(&self) -> Instant {
+        self.startup_by
+    }
+
+    pub fn allocation(&self) -> crate::resource_policy::TrialAllocation {
+        self.allocation
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl NodeResourceRuntime {
+    /// Placement already retained activation A and supplied a local-only
+    /// opportunity. The peer floor still comes out of the original B.
+    /// An exact fresh service observation leaves the request on ordinary
+    /// hard admission without starting exploration.
+    pub fn allocate_local_finite_trial(
+        &self,
+        request: &SoftwareVodRequest,
+        original: &crate::cluster::clock::ContinuousDeadline,
+        now: Instant,
+    ) -> Result<Option<FiniteTrialPermit>, crate::resource_policy::TrialRefusal> {
+        use crate::resource_policy::{TrialBudget, TrialRefusal};
+
+        if let Some(observation) = request.placement_observation {
+            // Placement sampled before this request charged its precise M.
+            // Match that mix, preserving every other owner, including equal
+            // M rows. Positive service still grants no physical capacity.
+            let mix = self
+                .ledger
+                .observation_history_mix(None, Some(observation.original_metadata))
+                .ok()
+                .and_then(|mix| mix.incumbents)
+                .ok_or(TrialRefusal::InsufficientEvidence)?;
+            let recipe = pump::history_basis(request)
+                .ok_or(TrialRefusal::InsufficientEvidence)?
+                .with_mix(mix)
+                .finite_placement_recipe();
+            let measured = self
+                .history
+                .try_lock()
+                .map_err(|_| TrialRefusal::InsufficientEvidence)?
+                .finite_placement_hint(observation.request, mix);
+            if measured.is_some_and(|hint| hint.recipe == recipe) {
+                return Ok(None);
+            }
+        }
+        let memory = FiniteTrialMemoryEnvelope::from_request(self, request)
+            .ok_or(TrialRefusal::UnknownMemory)?;
+        let Metric::Known(resources) = request.demand.resources else {
+            return Err(TrialRefusal::UnknownMemory);
+        };
+        let charged = resources
+            .peak_memory_bytes
+            .checked_add(request.output.reserved_storage_bytes)
+            .ok_or(TrialRefusal::UnknownMemory)?;
+        let accounting = self
+            .ledger
+            .snapshot()
+            .map_err(|_| TrialRefusal::UnknownMemory)?;
+        if !matches!(accounting.capacity.memory_bytes, Metric::Known(capacity)
+            if accounting.used.peak_memory_bytes.checked_add(charged)
+                .is_some_and(|required| required <= capacity))
+        {
+            return Err(TrialRefusal::UnknownMemory);
+        }
+        let key = self
+            .finite_trial_key(request)
+            .ok_or(TrialRefusal::InsufficientEvidence)?;
+        let (startup, cleanup) = self
+            .qualified_trial_bounds(key, now)
+            .ok_or(TrialRefusal::UnknownBounds)?;
+        let remaining = original
+            .entry_remaining()
+            .map_err(|_| TrialRefusal::DeadlineBudget)?;
+        let original_deadline = original
+            .monotonic_cutoff()
+            .map_err(|_| TrialRefusal::DeadlineBudget)?
+            .min(
+                now.checked_add(remaining)
+                    .ok_or(TrialRefusal::DeadlineBudget)?,
+            );
+        let allocation = TrialBudget {
+            original_deadline,
+            activation_allowance: std::time::Duration::ZERO,
+            peer_prepare_estimate: Metric::Unknown(
+                crate::process::observation::UnknownReason::InsufficientEvidence,
+            ),
+            known_capacity_peer: false,
+            startup_bound: Metric::Known(startup),
+            cleanup_bound: Metric::Known(cleanup),
+            // This path pays the actual cgroup ceiling and the explicitly
+            // bounded daemon workspace. The ledger's aggregate producer
+            // peak and exclusive interlock remain UnknownProducerPeak.
+            memory_bound_known: true,
+        }
+        .allocate(now)?;
+        Ok(Some(FiniteTrialPermit {
+            key,
+            memory,
+            allocation,
+            startup_by: now
+                .checked_add(startup)
+                .ok_or(TrialRefusal::DeadlineBudget)?,
+            original: original.clone(),
+        }))
+    }
+}
+
 /// Nonserde ownership selection. The runtime book retains all actual resources
 /// if a request drops this value or cancels any borrowed setup wait.
 pub(in crate::adaptive_resources::runtime) struct FiniteControl {
@@ -267,6 +428,8 @@ pub(in crate::adaptive_resources::runtime) struct FiniteControl {
     suspended: std::sync::atomic::AtomicBool,
     root: std::sync::Mutex<Option<crate::process::priority::RegisteredChildControl>>,
     task: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    #[cfg(target_os = "linux")]
+    timing: std::sync::Mutex<super::finite_policy::FiniteTimingWitness>,
 }
 impl FiniteControl {
     fn new() -> Self {
@@ -275,8 +438,17 @@ impl FiniteControl {
             suspended: std::sync::atomic::AtomicBool::new(false),
             root: std::sync::Mutex::new(None),
             task: std::sync::Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            timing: std::sync::Mutex::new(super::finite_policy::FiniteTimingWitness::default()),
         }
     }
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn outside_supported_trial_io(&self) {
+        if let Ok(mut timing) = self.timing.lock() {
+            timing.outside_supported_io();
+        }
+    }
+
     pub(in crate::adaptive_resources::runtime) fn requested(&self) -> bool {
         self.requested.load(std::sync::atomic::Ordering::Acquire)
     }
@@ -350,6 +522,10 @@ impl FiniteControl {
         Ok(())
     }
     fn request(&self) -> std::io::Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Ok(mut timing) = self.timing.lock() {
+            timing.stop(Instant::now());
+        }
         self.requested
             .store(true, std::sync::atomic::Ordering::Release);
         // Attempt both original controls even when signalling one fails. This
@@ -381,6 +557,21 @@ pub struct SoftwareVodControl {
     _app_guard: Arc<super::finite_lifetime::FiniteAppGuard>,
 }
 impl SoftwareVodControl {
+    #[cfg(target_os = "linux")]
+    pub fn qualification_start(&self, scope: FiniteQualificationWindow, before_prepare: Instant) {
+        if let Ok(mut timing) = self.control.timing.lock() {
+            timing.set_start_scope(scope);
+            timing.start(before_prepare);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn qualification_stop(&self, scope: FiniteQualificationWindow) {
+        if let Ok(mut timing) = self.control.timing.lock() {
+            timing.set_stop_scope(scope);
+        }
+    }
+
     pub fn request_stop(&self) -> std::io::Result<()> {
         self.control.request()
     }
@@ -401,7 +592,7 @@ pub struct SoftwareVodOwner {
     scratch_member: Uuid,
     directory_path: Arc<PathBuf>,
     encoded_process_marker: bool,
-    events: Option<tokio::sync::mpsc::Receiver<SoftwareVodEvent>>,
+    events: Option<SoftwareVodEvents>,
     control: Arc<FiniteControl>,
     #[cfg(target_os = "linux")]
     history_basis: Option<pump::HistoryBasis>,
@@ -581,6 +772,8 @@ pub struct FiniteCloseTicket {
     // Selection can be taken before a fallible destructor. Empty options alone
     // cannot establish that the matching ledger/census close actually succeeded.
     retirement_succeeded: bool,
+    #[cfg(target_os = "linux")]
+    stopped_profile: Option<super::finite_policy::FiniteStoppedProfile>,
 }
 
 impl FiniteCloseTicket {
@@ -627,6 +820,11 @@ impl FiniteCloseTicket {
             .finish_finite_close(&mut self.preparation, 0, deadline)
             .await?;
         self.retirement_succeeded = true;
+        #[cfg(target_os = "linux")]
+        if let Some(profile) = self.stopped_profile.take() {
+            self.runtime
+                .qualify_finalized_finite_stop(profile, Instant::now());
+        }
         Ok(())
     }
 
@@ -642,6 +840,11 @@ impl FiniteCloseTicket {
             .finish_finite_close_in(&mut self.preparation, 0, workspace, deadline)
             .await?;
         self.retirement_succeeded = true;
+        #[cfg(target_os = "linux")]
+        if let Some(profile) = self.stopped_profile.take() {
+            self.runtime
+                .qualify_finalized_finite_stop(profile, Instant::now());
+        }
         Ok(())
     }
 }
@@ -833,6 +1036,8 @@ impl FiniteOutput {
             app_state: Some(app_state),
             original_identity: self.preparation.finite_identity(0),
             retirement_succeeded: false,
+            #[cfg(target_os = "linux")]
+            stopped_profile: None,
         })
     }
 
@@ -1068,6 +1273,34 @@ impl SoftwareVodOwner {
         }
     }
 
+    /// Fail closed if the original hard admission observations are no
+    /// longer sufficient for this still charged trial owner.
+    #[cfg(target_os = "linux")]
+    pub async fn trial_hard_pressure(&self, deadline: Instant) -> bool {
+        if self
+            .runtime
+            .refresh_admission_capacity(deadline)
+            .await
+            .is_err()
+        {
+            return true;
+        }
+        if self
+            .runtime
+            .finite_trial_native_pressure(&self.preparation)
+            .unwrap_or(true)
+        {
+            return true;
+        }
+        self.runtime.ledger.snapshot().map_or(true, |snapshot| {
+            snapshot.native_overage_fenced
+                || !matches!(snapshot.capacity.memory_bytes, Metric::Known(capacity)
+                    if capacity >= snapshot.used.peak_memory_bytes)
+                || !matches!(snapshot.capacity.cpu_ns_per_second, Metric::Known(capacity)
+                    if capacity >= snapshot.used.cpu_ns_per_second)
+        })
+    }
+
     /// Observe the original durable producer service event. This updates only
     /// fixed node-local hysteresis; it cannot admit a trial or release custody.
     #[cfg(target_os = "linux")]
@@ -1248,19 +1481,32 @@ impl SoftwareVodOwner {
     }
 
     /// Metadata notifications do not confer root/task completion or refunds.
-    pub fn take_events(&mut self) -> Option<tokio::sync::mpsc::Receiver<SoftwareVodEvent>> {
+    pub fn take_events(&mut self) -> Option<SoftwareVodEvents> {
         self.events.take()
     }
 
     /// Core opens its own prearmed source/output cells and launches only the
     /// immutable compiled software recipe. No child, raw pipe or callback leaves.
     pub async fn start(&mut self, deadline: Instant) -> Result<(), FiniteVodError> {
+        #[cfg(target_os = "linux")]
+        if let Ok(mut timing) = self.control.timing.lock() {
+            timing.start(Instant::now());
+        }
         self.prepare_inputs(deadline).await?;
         self.open_output(deadline).await?;
         self.runtime
             .start_finite_vod(&self.preparation, 0, deadline)
             .await?;
         Ok(())
+    }
+
+    /// Called by the original finite writer consumer after its first
+    /// durably materialized segment is accepted under the current generation.
+    #[cfg(target_os = "linux")]
+    pub fn note_verified_trial_startup(&self) {
+        if let Ok(mut timing) = self.control.timing.lock() {
+            timing.verified_publish(Instant::now());
+        }
     }
 
     /// Freeze new producer entry, join the original writer/root and registered
@@ -1341,6 +1587,13 @@ impl SoftwareVodOwner {
             app_state: Some(app_state),
             original_identity: self.preparation.finite_identity(0),
             retirement_succeeded: false,
+            #[cfg(target_os = "linux")]
+            stopped_profile: self
+                .control
+                .timing
+                .lock()
+                .ok()
+                .and_then(|mut timing| timing.take_stopped()),
         })
     }
 }
@@ -1374,6 +1627,8 @@ impl NodeResourceRuntime {
             app_state: Some(app_state),
             original_identity: original.finite_identity(0),
             retirement_succeeded: false,
+            #[cfg(target_os = "linux")]
+            stopped_profile: None,
         })
     }
 }
@@ -1440,7 +1695,7 @@ impl NodeResourceRuntime {
             )
             .into());
         }
-        self.prepare_software_vod_with_naming(request, deadline, false, None, |_| Ok(()))
+        self.prepare_software_vod_with_naming(request, deadline, false, None, false, |_| Ok(()))
             .map(|(owner, ())| owner)
     }
 
@@ -1452,7 +1707,72 @@ impl NodeResourceRuntime {
         deadline: Instant,
     ) -> Result<SoftwareVodOwner, FiniteVodError> {
         let result = self
-            .prepare_software_vod_with_naming(request, deadline, false, Some(slot), |_| Ok(()))
+            .prepare_software_vod_with_naming(request, deadline, false, Some(slot), false, |_| {
+                Ok(())
+            })
+            .map(|(owner, ())| owner);
+        slot.wake_failure();
+        result
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn prepare_collected_software_trial(
+        self: &Arc<Self>,
+        mut request: SoftwareVodRequest,
+        permit: FiniteTrialPermit,
+        slot: &super::ordinary_finite_collector::OrdinarySlot,
+    ) -> Result<SoftwareVodOwner, FiniteVodError> {
+        if self.finite_trial_key(&request) != Some(permit.key)
+            || FiniteTrialMemoryEnvelope::from_request(self, &request) != Some(permit.memory)
+            || std::time::Instant::now() >= permit.startup_by
+            || self
+                .qualified_trial_bounds(permit.key, Instant::now())
+                .is_none()
+            || request
+                .continuous_entry_deadline
+                .as_ref()
+                .is_none_or(|deadline| !deadline.same_original(&permit.original))
+        {
+            return Err(invalid());
+        }
+        // Source workers, directory bootstrap and native entry all keep the
+        // same shortened BOOTTIME window. Cleanup keeps its separate budget.
+        request.continuous_entry_deadline = Some(
+            permit
+                .original
+                .narrow_entry_to(permit.startup_by)
+                .map_err(|_| {
+                    OperationError::BeforeReservation(
+                        super::operations::PreReservationRefusal::ContinuousCutoff,
+                    )
+                })?,
+        );
+        // Local output is tmpfs. Its entire authorized storage extent can
+        // become resident in the daemon's parent cgroup, independently of
+        // the child's memory.max. Carry those bytes through the S transfer.
+        let backing = request.output.reserved_storage_bytes;
+        request.output.resident_memory_bytes = request
+            .output
+            .resident_memory_bytes
+            .checked_add(backing)
+            .ok_or_else(invalid)?;
+        let Metric::Known(resources) = &mut request.demand.resources else {
+            return Err(invalid());
+        };
+        resources.peak_memory_bytes = resources
+            .peak_memory_bytes
+            .checked_add(backing)
+            .ok_or_else(invalid)?;
+        request.demand.trial = true;
+        let result = self
+            .prepare_software_vod_with_naming(
+                request,
+                permit.startup_by,
+                false,
+                Some(slot),
+                true,
+                |_| Ok(()),
+            )
             .map(|(owner, ())| owner);
         slot.wake_failure();
         result
@@ -1494,7 +1814,7 @@ impl NodeResourceRuntime {
             .peak_memory_bytes
             .checked_add(manifest_workspace_bytes)
             .ok_or_else(invalid)?;
-        self.prepare_software_vod_with_naming(request, deadline, true, None, |state| {
+        self.prepare_software_vod_with_naming(request, deadline, true, None, false, |state| {
             state
                 .take_application_lease(application_owner_bytes)
                 .ok_or_else(invalid)
@@ -1507,6 +1827,7 @@ impl NodeResourceRuntime {
         deadline: Instant,
         static_artifact: bool,
         collector: Option<&super::ordinary_finite_collector::OrdinarySlot>,
+        contained_trial: bool,
         application: impl FnOnce(
             &Arc<super::finite_lifetime::FiniteAppState>,
         ) -> Result<T, FiniteVodError>,
@@ -1519,6 +1840,10 @@ impl NodeResourceRuntime {
             )
             .into());
         }
+        #[cfg(target_os = "linux")]
+        let timing_key = (!request.demand.trial && !static_artifact)
+            .then(|| self.finite_trial_key(&request))
+            .flatten();
         let continuous_entry_deadline = request.continuous_entry_deadline.clone();
         if request.generation_epoch == 0 {
             return Err(OperationError::BeforeReservation(
@@ -1611,7 +1936,7 @@ impl NodeResourceRuntime {
             || resources.scratch_bytes < request.output.reserved_storage_bytes
             || resources.hardware_slots != 0
             || resources.tuner_slots != 0
-            || request.demand.trial
+            || request.demand.trial != contained_trial
         {
             return Err(invalid());
         }
@@ -1945,6 +2270,10 @@ impl NodeResourceRuntime {
         let application = application(&app_state)?;
         let family = self.new_family()?;
         let control = Arc::new(FiniteControl::new());
+        #[cfg(target_os = "linux")]
+        if let Ok(mut timing) = control.timing.lock() {
+            *timing = super::finite_policy::FiniteTimingWitness::new(timing_key);
+        }
         let source_members_for_launch = source_members.clone();
         let control_for_launch = Arc::clone(&control);
         let directory_for_output = Arc::clone(&directory_path);
@@ -1964,6 +2293,7 @@ impl NodeResourceRuntime {
                 continuous_entry_deadline,
                 deadline,
                 collector,
+                contained_trial,
                 |preparation| {
                     let output = FiniteOutput {
                         runtime: Arc::clone(self),
@@ -1990,6 +2320,7 @@ impl NodeResourceRuntime {
                         task_member.uuid(),
                         root_acquisition_id.uuid(),
                         source_members_for_launch,
+                        contained_trial,
                         #[cfg(target_os = "linux")]
                         request.native_plan,
                         request.command,

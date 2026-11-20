@@ -1789,6 +1789,20 @@ impl ContinuousDeadline {
             && self.capture.identity == other.capture.identity
             && self.cutoff_ns == other.cutoff_ns
     }
+    /// Narrow entry on this original continuous anchor. The scheduling
+    /// instant supplies a conservative offset, without taking a new capture
+    /// or extending the cutoff the caller already holds.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn narrow_entry_to(&self, cutoff: Instant) -> Result<Self, ClockRefusal> {
+        let offset = cutoff
+            .checked_duration_since(self.capture.monotonic_before)
+            .ok_or(ClockRefusal::Unknown)?;
+        let mut narrowed = self.capture.deadline(offset, self.mint)?;
+        narrowed.cutoff_ns = narrowed.cutoff_ns.min(self.cutoff_ns);
+        narrowed.entry_window()?;
+        Ok(narrowed)
+    }
+
     /// A conservative local scheduling instant paired BEFORE the original
     /// BOOTTIME read. This never replaces entry_remaining(): the standard
     /// monotonic clock may pause during suspend, so native entry retains this

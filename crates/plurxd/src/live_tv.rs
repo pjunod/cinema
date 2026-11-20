@@ -45,6 +45,27 @@ pub(crate) use guide::{
     GuideFreshness, GuideWindow, LiveTvGuide, LiveTvGuideChannel, LiveTvProgramme,
 };
 
+/// The actual SQLite manager that owns the original durable capture gate.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(crate) struct LocalDvrTrialAuthority(Arc<LiveTvManager>);
+
+#[cfg(target_os = "linux")]
+impl LocalDvrTrialAuthority {
+    pub(crate) async fn capture_exclusion_before(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Option<crate::admission::CaptureTrialEpoch> {
+        let epoch = self.0.transcode.admissions().capture_trial_epoch()?;
+        let clear =
+            tokio::time::timeout_at(deadline.into(), self.0.store.local_dvr_obligations_clear())
+                .await
+                .ok()?
+                .ok()?;
+        (clear && std::time::Instant::now() < deadline).then_some(epoch)
+    }
+}
+
 pub(crate) const SNAPSHOT_PATH: &str = "/_internal/v1/live-tv/snapshot";
 pub(crate) const START_PATH: &str = "/_internal/v1/live-tv/start";
 pub(crate) const START_V2_PATH: &str = "/_internal/v2/live-tv/start";
@@ -1386,6 +1407,8 @@ struct LiveTvProcess {
 /// never removes a directory a still-alive FFmpeg may be writing into.
 struct OrphanSession {
     capability: String,
+    #[cfg(target_os = "linux")]
+    protection: Option<crate::admission::ProtectedPlaybackLane>,
     directory: PathBuf,
     /// Present while the child's exit is unconfirmed.
     process: Option<LiveTvProcess>,
@@ -3690,6 +3713,13 @@ pub(crate) struct LiveTvManager {
 }
 
 impl LiveTvManager {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn local_dvr_trial_authority(self: &Arc<Self>) -> Option<LocalDvrTrialAuthority> {
+        self.store
+            .has_local_dvr_commit_authority()
+            .then(|| LocalDvrTrialAuthority(Arc::clone(self)))
+    }
+
     /// Live TV's serving authority, for the loop that resolves its losses.
     pub(crate) fn authority(&self) -> LiveTvAuthority {
         self.serving.clone()
@@ -4269,6 +4299,13 @@ impl LiveTvManager {
         // keeps that refusal ahead of any tuner reservation.
         let path = format!("/auto/v{}", channel.guide_number);
         pinned_url(address, 5004, &path)?;
+        #[cfg(target_os = "linux")]
+        let viewer_protection = self
+            .transcode
+            .admissions()
+            .acquire_protected_playback_lane((started + STARTUP_TIMEOUT).into_std())
+            .await
+            .map_err(|reason| LiveTvError::OwnerUnavailable(reason.into()))?;
         self.resource_start(
             &request,
             &device_id,
@@ -4379,6 +4416,12 @@ impl LiveTvManager {
         // One decision per registry lock hold, and at most one retry after
         // waiting for a transport to close — never a wait while holding the
         // lock, and never a second transport for one channel.
+        #[cfg(target_os = "linux")]
+        let transport_protection = self
+            .transcode
+            .admissions()
+            .try_acquire_protected_playback_lane()
+            .map_err(|reason| LiveTvError::OwnerUnavailable(reason.into()))?;
         let mut waited = false;
         let (raced_session, opened) = loop {
             let decision = {
@@ -4489,13 +4532,26 @@ impl LiveTvManager {
             (None, _) => LiveStartKind::Joined,
         };
         if let Some(transport) = opened {
-            self.spawn_transport_worker(&transport, client);
+            self.spawn_transport_worker(
+                &transport,
+                client,
+                #[cfg(target_os = "linux")]
+                transport_protection,
+            );
         }
 
         let manager = Arc::downgrade(self);
         let worker_session = Arc::clone(&session);
         let worker = tokio::spawn(async move {
-            run_live_session(manager, worker_session, config, kind).await;
+            run_live_session(
+                manager,
+                worker_session,
+                config,
+                kind,
+                #[cfg(target_os = "linux")]
+                Some(viewer_protection),
+            )
+            .await;
         });
         *session
             .worker
@@ -4665,10 +4721,23 @@ impl LiveTvManager {
                         })?
                 };
                 let path = session.directory.join(&name);
+                let deadline = tokio::time::Instant::now() + LOCAL_RESOURCE_NO_PROGRESS_TIMEOUT;
+                #[cfg(target_os = "linux")]
+                let lane = Arc::new(
+                    self.transcode
+                        .admissions()
+                        .acquire_protected_playback_lane(deadline.into_std())
+                        .await
+                        .map_err(|reason| LiveTvError::OwnerUnavailable(reason.into()))?,
+                );
+                #[cfg(target_os = "linux")]
+                let open = open_protected_bounded_segment(path, expected_len, Arc::clone(&lane));
+                #[cfg(not(target_os = "linux"))]
+                let open = open_bounded_segment(&path, expected_len);
                 let file = tokio::select! {
                     biased;
                     _ = session.cancel.cancelled() => return Err(LiveTvError::CapabilityExpired("the live-TV session stopped".into())),
-                    result = tokio::time::timeout(LOCAL_RESOURCE_NO_PROGRESS_TIMEOUT, open_bounded_segment(&path, expected_len)) => {
+                    result = tokio::time::timeout_at(deadline, open) => {
                         result.map_err(|_| LiveTvError::StreamFailed("opening the live-TV segment timed out".into()))??
                     }
                 };
@@ -4681,13 +4750,16 @@ impl LiveTvManager {
                 } else {
                     "video/mp2t"
                 };
-                Response::builder()
+                let response = Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, content_type)
                     .header(header::CACHE_CONTROL, "no-store")
                     .header(header::CONTENT_LENGTH, expected_len)
                     .body(body)
-                    .map_err(|error| LiveTvError::StreamFailed(error.to_string()))
+                    .map_err(|error| LiveTvError::StreamFailed(error.to_string()))?;
+                #[cfg(target_os = "linux")]
+                let response = crate::http::stream::protect_body(response, lane);
+                Ok(response)
             }
             LiveTvResourceRequest::Init { .. } => {
                 let permit = Arc::clone(&session.resource_admission)
@@ -4709,16 +4781,30 @@ impl LiveTvManager {
                             "the live-TV init segment is not published".into(),
                         )
                     })?;
+                let path = session.directory.join(&name);
+                #[cfg(target_os = "linux")]
+                let lane = Arc::new(
+                    self.transcode
+                        .admissions()
+                        .try_acquire_protected_playback_lane()
+                        .map_err(|reason| LiveTvError::OwnerUnavailable(reason.into()))?,
+                );
+                #[cfg(target_os = "linux")]
                 let file =
-                    open_bounded_segment(&session.directory.join(&name), expected_len).await?;
+                    open_protected_bounded_segment(path, expected_len, Arc::clone(&lane)).await?;
+                #[cfg(not(target_os = "linux"))]
+                let file = open_bounded_segment(&path, expected_len).await?;
                 let body = bounded_segment_body(file, expected_len, session.cancel.clone(), permit);
-                Response::builder()
+                let response = Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, "video/mp4")
                     .header(header::CACHE_CONTROL, "no-store")
                     .header(header::CONTENT_LENGTH, expected_len)
                     .body(body)
-                    .map_err(|error| LiveTvError::StreamFailed(error.to_string()))
+                    .map_err(|error| LiveTvError::StreamFailed(error.to_string()))?;
+                #[cfg(target_os = "linux")]
+                let response = crate::http::stream::protect_body(response, lane);
+                Ok(response)
             }
             LiveTvResourceRequest::Status { .. } => {
                 let mut status = session.status(&self.node_id);
@@ -4896,7 +4982,11 @@ impl LiveTvManager {
     /// Take over what a session's failed cleanup left: its process, if the
     /// child's exit was not confirmed, and its directory. Claimed for the
     /// sweeper before the session leaves the registry.
-    async fn adopt_orphan(&self, session: &LiveTvSession) {
+    async fn adopt_orphan(
+        &self,
+        session: &LiveTvSession,
+        #[cfg(target_os = "linux")] protection: Option<crate::admission::ProtectedPlaybackLane>,
+    ) {
         let process = session.process.lock().await.take();
         self.scratch_claims
             .lock()
@@ -4905,6 +4995,8 @@ impl LiveTvManager {
         let mut orphans = self.orphans.lock().await;
         orphans.push(OrphanSession {
             capability: session.capability.clone(),
+            #[cfg(target_os = "linux")]
+            protection,
             directory: session.directory.clone(),
             process,
             removal: None,
@@ -4928,12 +5020,14 @@ impl LiveTvManager {
                 let _ = process.child.start_kill();
                 match process.child.try_wait() {
                     Ok(Some(_)) => {
-                        if let Some(stderr) = process.stderr.take() {
+                        let stderr = process.stderr.take();
+                        if let Some(stderr) = stderr.as_ref() {
                             stderr.abort();
                         }
-                        if let Some(sink) = process.sink.take() {
+                        let sink = process.sink.take();
+                        if sink.is_some() || stderr.is_some() {
                             orphan.removal =
-                                Some(self.spawn_orphan_removal(&orphan.directory, Some(sink)));
+                                Some(self.spawn_orphan_removal(&orphan.directory, sink, stderr));
                         }
                         // Drops the job and the encoder admission with it.
                         orphan.process = None;
@@ -4957,8 +5051,13 @@ impl LiveTvManager {
                 .take()
                 .and_then(futures_util::FutureExt::now_or_never);
             match finished {
-                Some(Ok(Ok(()))) => return true,
-                Some(Ok(Err(error))) if error.kind() == io::ErrorKind::NotFound => return true,
+                Some(Ok(Ok(()))) => {
+                    #[cfg(target_os = "linux")]
+                    if let Some(lane) = orphan.protection.take() {
+                        lane.known_finished();
+                    }
+                    return true;
+                }
                 Some(Ok(Err(error))) => {
                     if orphan.attempts.is_power_of_two() {
                         tracing::warn!(
@@ -4975,7 +5074,7 @@ impl LiveTvManager {
                 None => {}
             }
         }
-        orphan.removal = Some(self.spawn_orphan_removal(&orphan.directory, None));
+        orphan.removal = Some(self.spawn_orphan_removal(&orphan.directory, None, None));
         false
     }
 
@@ -4984,6 +5083,7 @@ impl LiveTvManager {
         &self,
         directory: &Path,
         sink: Option<crate::scratch_put::PutSink>,
+        stderr: Option<tokio::task::JoinHandle<()>>,
     ) -> OrphanRemoval {
         #[cfg(test)]
         if self.hang_orphan_removals.load(Ordering::Acquire) {
@@ -4991,6 +5091,9 @@ impl LiveTvManager {
         }
         let directory = directory.to_owned();
         tokio::spawn(async move {
+            if let Some(stderr) = stderr {
+                let _ = stderr.await;
+            }
             if let Some(sink) = sink {
                 sink.drain().await;
             }
@@ -5000,7 +5103,10 @@ impl LiveTvManager {
                     "live-TV response still holds cache media",
                 ));
             }
-            tokio::fs::remove_dir_all(&directory).await
+            match tokio::fs::remove_dir_all(&directory).await {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                result => result,
+            }
         })
     }
 
@@ -6777,7 +6883,12 @@ async fn run_live_session(
     session: Arc<LiveTvSession>,
     config: LiveTvConfig,
     kind: LiveStartKind,
+    #[cfg(target_os = "linux")] mut protection: Option<crate::admission::ProtectedPlaybackLane>,
 ) {
+    #[cfg(target_os = "linux")]
+    if let Some(lane) = protection.as_mut() {
+        lane.arm_physical();
+    }
     let result = run_live_session_inner(&manager, &session, &config, kind).await;
     session.cancel.cancel();
     // Detach before anything slower: the transport's fan-out sees this
@@ -6843,7 +6954,19 @@ async fn run_live_session(
             kind = %error,
             "Live TV session cleanup did not finish before its deadline; the owner keeps retrying it"
         );
-        manager.adopt_orphan(&session).await;
+        manager
+            .adopt_orphan(
+                &session,
+                #[cfg(target_os = "linux")]
+                protection.take(),
+            )
+            .await;
+    }
+    #[cfg(target_os = "linux")]
+    if cleanup.is_ok() {
+        if let Some(lane) = protection.take() {
+            lane.known_finished();
+        }
     }
     session
         .state
@@ -8111,6 +8234,8 @@ async fn probe_live_source(
         .map_err(|error| {
             LiveTvError::StreamFailed(format!("reserving bounded source probe: {error}"))
         })?;
+    plurx_core::process::bounded::check_cancellation()
+        .map_err(|error| LiveTvError::StreamFailed(format!("source probe cancelled: {error}")))?;
     tokio::fs::write(&sample, prefix).await.map_err(|error| {
         LiveTvError::StreamFailed(format!("writing bounded source probe: {error}"))
     })?;
@@ -8140,13 +8265,50 @@ async fn probe_live_source(
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
     }
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
-        &mut command,
-        crate::process_control::ChildWork::new(work.class, "Live TV source probe"),
-    )
-    .map_err(|error| {
-        LiveTvError::CodecUnsupported(format!("starting bounded source probe: {error}"))
-    })?;
+    let result = capture_live_source_probe(&mut command, work).await;
+    let remove = tokio::fs::remove_file(&sample).await;
+    if let Err(error) = remove {
+        if error.kind() != io::ErrorKind::NotFound {
+            return Err(LiveTvError::StreamFailed(format!(
+                "removing bounded source probe: {error}"
+            )));
+        }
+    }
+    result
+}
+
+/// The transport's optional original keeper retains this exact child and
+/// pipes after the controlling tuner future is cancelled.
+async fn capture_live_source_probe(
+    command: &mut tokio::process::Command,
+    work: SourceProbeWork,
+) -> Result<LiveSourceFacts, LiveTvError> {
+    let child_work = crate::process_control::ChildWork::new(work.class, "Live TV source probe");
+    #[cfg(target_os = "linux")]
+    if plurx_core::process::bounded::original_keeper().is_some() {
+        let out = plurx_core::process::bounded::output_command_inherited_env(
+            command,
+            work.budget,
+            MAX_SOURCE_PROBE_JSON_BYTES + 1,
+            child_work,
+        )
+        .await
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::TimedOut {
+                LiveTvError::StartupTimeout(format!(
+                    "source_probe_incomplete: FFprobe exceeded its {} s budget",
+                    work.budget.as_secs(),
+                ))
+            } else {
+                LiveTvError::StreamFailed(format!("waiting for source probe: {error}"))
+            }
+        })?;
+        return source_probe_facts(out.status, &out.stdout);
+    }
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(command, child_work)
+        .map_err(|error| {
+            LiveTvError::CodecUnsupported(format!("starting bounded source probe: {error}"))
+        })?;
     let stdout = child.stdout.take().ok_or_else(|| {
         LiveTvError::StreamFailed("bounded source probe did not expose stdout".into())
     })?;
@@ -8160,19 +8322,9 @@ async fn probe_live_source(
         let status = child.wait().await.map_err(|error| {
             LiveTvError::StreamFailed(format!("waiting for source probe: {error}"))
         })?;
-        if !status.success() {
-            return Err(LiveTvError::InvalidResponse(
-                "source_probe_incomplete: FFprobe could not identify the retained prefix".into(),
-            ));
-        }
-        if bytes.len() > MAX_SOURCE_PROBE_JSON_BYTES {
-            return Err(LiveTvError::InvalidResponse(
-                "source_probe_incomplete: FFprobe JSON exceeded 256 KiB".into(),
-            ));
-        }
-        parse_probe_facts(&bytes)
+        source_probe_facts(status, &bytes)
     };
-    let result = match tokio::time::timeout(work.budget, probe).await {
+    match tokio::time::timeout(work.budget, probe).await {
         Ok(result) => result,
         Err(_) => {
             let _ = child.start_kill();
@@ -8182,16 +8334,24 @@ async fn probe_live_source(
                 work.budget.as_secs()
             )))
         }
-    };
-    let remove = tokio::fs::remove_file(&sample).await;
-    if let Err(error) = remove {
-        if error.kind() != io::ErrorKind::NotFound {
-            return Err(LiveTvError::StreamFailed(format!(
-                "removing bounded source probe: {error}"
-            )));
-        }
     }
-    result
+}
+
+fn source_probe_facts(
+    status: std::process::ExitStatus,
+    bytes: &[u8],
+) -> Result<LiveSourceFacts, LiveTvError> {
+    if !status.success() {
+        return Err(LiveTvError::InvalidResponse(
+            "source_probe_incomplete: FFprobe could not identify the retained prefix".into(),
+        ));
+    }
+    if bytes.len() > MAX_SOURCE_PROBE_JSON_BYTES {
+        return Err(LiveTvError::InvalidResponse(
+            "source_probe_incomplete: FFprobe JSON exceeded 256 KiB".into(),
+        ));
+    }
+    parse_probe_facts(bytes)
 }
 
 /// A tuner stream cannot expose codec/profile facts until after its HTTP body
@@ -9567,6 +9727,25 @@ async fn read_bounded_regular_file(path: &Path, max: u64) -> Result<Vec<u8>, Liv
 struct LiveSegmentFile {
     file: tokio::fs::File,
     cache_pin: Option<crate::playback_cache::CachePin>,
+    #[cfg(target_os = "linux")]
+    protection: Option<Arc<crate::admission::ProtectedPlaybackLane>>,
+}
+
+#[cfg(target_os = "linux")]
+async fn open_protected_bounded_segment(
+    path: PathBuf,
+    expected_len: u64,
+    protection: Arc<crate::admission::ProtectedPlaybackLane>,
+) -> Result<LiveSegmentFile, LiveTvError> {
+    // A cancelled response observer cannot free the lane of a blocking open.
+    // The original task and its unclaimed File result both carry it.
+    tokio::spawn(async move {
+        let mut file = open_bounded_segment(&path, expected_len).await?;
+        file.protection = Some(protection);
+        Ok(file)
+    })
+    .await
+    .map_err(|error| LiveTvError::StreamFailed(format!("opening live segment: {error}")))?
 }
 
 async fn open_bounded_segment(
@@ -9592,7 +9771,12 @@ async fn open_bounded_segment(
             "live segment failed its opened-file inventory check".into(),
         ));
     }
-    Ok(LiveSegmentFile { file, cache_pin })
+    Ok(LiveSegmentFile {
+        file,
+        cache_pin,
+        #[cfg(target_os = "linux")]
+        protection: None,
+    })
 }
 
 async fn open_regular_file(path: &Path) -> Result<tokio::fs::File, LiveTvError> {
@@ -9755,34 +9939,36 @@ fn bounded_segment_body(
         let LiveSegmentFile {
             mut file,
             cache_pin: _cache_pin,
+            #[cfg(target_os = "linux")]
+            protection,
         } = opened;
         let cancel = producer_cancel;
         let mut sent = 0_u64;
         let mut buffer = vec![0_u8; LOCAL_RESOURCE_CHUNK_BYTES];
-        loop {
+        'read: loop {
             let remaining = expected_len.saturating_sub(sent);
             if remaining == 0 {
-                return;
+                break 'read;
             }
             let read_len = buffer
                 .len()
                 .min(usize::try_from(remaining).unwrap_or(usize::MAX));
             let read = tokio::select! {
                 biased;
-                _ = cancel.cancelled() => return,
+                _ = cancel.cancelled() => break 'read,
                 result = tokio::time::timeout_at(deadline, file.read(&mut buffer[..read_len])) => {
                     match result {
                         Ok(Ok(read)) => read,
                         Ok(Err(error)) => {
                             let _ = sender.try_send(Err(error));
-                            return;
+                            break 'read;
                         }
                         Err(_) => {
                             let _ = sender.try_send(Err(io::Error::new(
                                 io::ErrorKind::TimedOut,
                                 "live-TV segment exceeded its total response deadline",
                             )));
-                            return;
+                            break 'read;
                         }
                     }
                 }
@@ -9792,7 +9978,7 @@ fn bounded_segment_body(
                     io::ErrorKind::UnexpectedEof,
                     "live-TV segment changed while streaming",
                 )));
-                return;
+                break 'read;
             }
             sent = sent.saturating_add(read as u64);
             let chunk = bytes::Bytes::copy_from_slice(&buffer[..read]);
@@ -9800,12 +9986,20 @@ fn bounded_segment_body(
                 deadline.min(tokio::time::Instant::now() + LOCAL_RESOURCE_NO_PROGRESS_TIMEOUT);
             let delivered = tokio::select! {
                 biased;
-                _ = cancel.cancelled() => return,
+                _ = cancel.cancelled() => break 'read,
                 result = tokio::time::timeout_at(progress_deadline, sender.send(Ok(chunk))) => result,
             };
             if !matches!(delivered, Ok(Ok(()))) {
-                return;
+                break 'read;
             }
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(protection) = protection {
+            // Tokio File can retain an in-flight blocking read after the
+            // cancellation branch wins. Join it before releasing the lane.
+            drop(file.into_std().await);
+            drop(_cache_pin);
+            drop(protection);
         }
     });
     Body::from_stream(LocalResourceStream { state, cancel })

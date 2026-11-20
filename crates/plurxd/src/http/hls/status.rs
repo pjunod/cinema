@@ -153,6 +153,8 @@ async fn status_local_answer(
                     deadline_unix_ms,
                     headers: RelayHeaders::default(),
                 },
+                #[cfg(target_os = "linux")]
+                None,
             )
             .await
             .map_err(|error| {

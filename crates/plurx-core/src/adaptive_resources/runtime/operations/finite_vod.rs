@@ -14,6 +14,7 @@ pub(super) struct FiniteLaunch {
     pub(super) task_member: Uuid,
     pub(super) acquisition_id: Uuid,
     pub(super) source_members: Vec<Uuid>,
+    pub(super) contained_trial: bool,
     /// Synchronous original registrations; absence is meaningful only with
     /// the sealed no-root graph and a matching unarmed planned slot.
     pub(super) registered_source_members: std::collections::BTreeSet<Uuid>,
@@ -113,6 +114,26 @@ impl FiniteTaskDisposition {
 }
 
 impl NodeResourceRuntime {
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn finite_trial_native_pressure(
+        &self,
+        owner: &OwnedPreparation,
+    ) -> Result<bool, OperationError> {
+        self.validate_preparation(owner)?;
+        let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
+        let [role] = bundle.roles.as_slice() else {
+            return Err(OperationError::State);
+        };
+        if bundle.id != owner.id || role.refunded {
+            return Err(OperationError::State);
+        }
+        role.graph
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .finite_trial_hard_pressure()
+            .map_err(Into::into)
+    }
+
     /// Retain the same original control when a granted owner never reached a
     /// daemon envelope. A missing launch remains unresolved, never NoTask.
     pub(in crate::adaptive_resources::runtime) fn original_finite_control(
@@ -267,6 +288,7 @@ impl NodeResourceRuntime {
         task_member: Uuid,
         acquisition_id: Uuid,
         source_members: Vec<Uuid>,
+        contained_trial: bool,
         #[cfg(target_os = "linux")] native_plan: Option<
             super::super::finite_native::FiniteNativePlan,
         >,
@@ -296,6 +318,7 @@ impl NodeResourceRuntime {
             task_member,
             acquisition_id,
             source_members,
+            contained_trial,
             registered_source_members: std::collections::BTreeSet::new(),
             command,
             #[cfg(target_os = "linux")]
@@ -435,6 +458,27 @@ impl NodeResourceRuntime {
         #[cfg(target_os = "linux")]
         if finite.native_plan.is_some() && !finite.entered {
             self.refresh_admission_capacity(deadline).await?;
+        }
+        #[cfg(target_os = "linux")]
+        if !finite.entered {
+            let supported_io = role.bootstrap.len() == 1
+                && role
+                    .bootstrap
+                    .values()
+                    .all(|output| output.memory_backed_sink())
+                && finite.source_members[..finite.source_members.len() - 1]
+                    .iter()
+                    .all(|member| {
+                        role.sources
+                            .get(member)
+                            .is_some_and(|source| source.memory_backed())
+                    });
+            if !supported_io {
+                finite.control.outside_supported_trial_io();
+                if finite.contained_trial {
+                    return Err(OperationError::State);
+                }
+            }
         }
         // Resume the exact retained journal command, never submit replacement
         // IDs after a cancelled/unknown wait. Native ownership is already held.

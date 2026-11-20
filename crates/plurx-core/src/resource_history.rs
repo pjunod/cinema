@@ -29,6 +29,20 @@ pub struct HistoryKey {
     pub phase: CostPhase,
 }
 
+#[cfg(target_os = "linux")]
+impl HistoryKey {
+    pub(crate) fn finite_placement_recipe(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+
+        let mut recipe = Sha256::new();
+        recipe.update(b"plurx:finite-placement-observed-recipe:v1");
+        recipe.update(self.runtime_epoch);
+        recipe.update(self.workload);
+        recipe.update(self.recipe);
+        recipe.finalize().into()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CostPhase {
@@ -374,7 +388,6 @@ impl ResourceHistory {
         now_boot_ns: u64,
     ) -> Option<FinitePlacementHint> {
         use crate::resource_policy::{assess_finite_observed_service, FiniteObservedService};
-        use sha2::{Digest, Sha256};
 
         let mut matches = self.entries.iter().filter_map(|(key, entry)| {
             let tagged = entry.placement?;
@@ -405,13 +418,8 @@ impl ResourceHistory {
         else {
             return None;
         };
-        let mut recipe = Sha256::new();
-        recipe.update(b"plurx:finite-placement-observed-recipe:v1");
-        recipe.update(key.runtime_epoch);
-        recipe.update(key.workload);
-        recipe.update(key.recipe);
         Some(FinitePlacementHint {
-            recipe: recipe.finalize().into(),
+            recipe: key.finite_placement_recipe(),
             incumbents,
             elapsed_per_unit,
             cpu_ns_per_unit,

@@ -4474,6 +4474,8 @@ async fn run_session_to_its_end(manager: &Arc<LiveTvManager>, session: &Arc<Live
         Arc::clone(session),
         guide_config(session.request.config_generation),
         LiveStartKind::Cold,
+        #[cfg(target_os = "linux")]
+        None,
     )
     .await;
 }

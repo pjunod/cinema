@@ -963,11 +963,54 @@ impl From<crate::admission::TranscodePermit> for EncodePermit {
 pub(crate) struct FiniteSoftwareCompatibility {
     original: Option<EncodeWorkerPermit>,
     possible_entry: bool,
+    trial_lane: Option<crate::admission::PlaybackTrialLane>,
 }
 #[cfg(target_os = "linux")]
 impl FiniteSoftwareCompatibility {
+    pub(crate) fn idle_trial_qualification_window(
+        &self,
+    ) -> Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteQualificationWindow>
+    {
+        let reservation = self.original.as_ref()?.reservation();
+        reservation
+            ._reservation
+            ._software
+            .as_ref()?
+            .idle_qualification_window()
+    }
+
+    pub(crate) fn try_acquire_trial_lane(
+        &mut self,
+        capture: crate::admission::CaptureTrialEpoch,
+    ) -> Option<crate::admission::PlaybackTrialStop> {
+        let reservation = self.original.as_ref()?.reservation();
+        let lane = reservation
+            ._reservation
+            ._software
+            .as_ref()?
+            .try_acquire_playback_trial_lane(capture)?;
+        let stop = lane.stop_token();
+        self.trial_lane = Some(lane);
+        Some(stop)
+    }
+
+    pub(crate) fn begin_trial_adoption(&self, claim: impl FnOnce() -> bool) -> bool {
+        self.trial_lane
+            .as_ref()
+            .is_some_and(|lane| lane.begin_adoption(claim))
+    }
+
+    pub(crate) fn promote_trial_lane(&mut self) {
+        if let Some(lane) = self.trial_lane.take() {
+            lane.known_finished();
+        }
+    }
+
     pub(crate) fn enter(mut self) -> Self {
         self.possible_entry = true;
+        if let Some(lane) = self.trial_lane.as_mut() {
+            lane.arm_native();
+        }
         self
     }
     pub(crate) fn reservation(&self) -> EncodePermit {
@@ -979,12 +1022,15 @@ impl FiniteSoftwareCompatibility {
     /// Only exact pre-R provenance, known original R-to-S, or successful
     /// original close with its driver/application barriers authorizes this.
     pub(crate) fn known_retired(mut self) {
+        self.promote_trial_lane();
         drop(self.original.take());
     }
     /// The wrapper itself is included in each owner's size_of projection.
     /// Shared pool/BTree/allocator peaks remain Unknown, not this Arc size.
     pub(crate) fn requested_heap_bytes() -> Option<usize> {
-        std::mem::size_of::<EncodeReservation>().checked_add(2 * std::mem::size_of::<usize>())
+        std::mem::size_of::<EncodeReservation>()
+            .checked_add(2 * std::mem::size_of::<usize>())?
+            .checked_add(crate::admission::PlaybackTrialLane::requested_heap_bytes()?)
     }
 }
 #[cfg(target_os = "linux")]
@@ -1095,6 +1141,7 @@ impl Encoding {
                 return Ok(FiniteSoftwareCompatibility {
                     original: Some(original),
                     possible_entry: false,
+                    trial_lane: None,
                 });
             }
             let Some(waiting) = waiting.as_mut().filter(|_| background_before_attempt) else {

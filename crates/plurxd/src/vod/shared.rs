@@ -190,8 +190,9 @@ impl FiniteBuildSlot<'_> {
         owner: plurx_core::adaptive_resources::runtime::finite_vod::SoftwareVodOwner,
         cache_grant: crate::playback_cache::FiniteCacheReservation,
         compatibility: crate::vodencode::FiniteSoftwareCompatibility,
+        trial: Option<super::finite_software::FiniteTrialRun>,
     ) -> RenditionDir {
-        let mut dir = RenditionDir::from_finite_producer(owner, cache_grant, compatibility);
+        let mut dir = RenditionDir::from_finite_producer(owner, cache_grant, compatibility, trial);
         let output = dir.finite_output().expect("fresh finite output");
         let producer = dir
             .finite_producer()
@@ -693,6 +694,10 @@ impl PreparedAttemptRendition {
             self.original_driver_registered = true;
         }
         let prepared = producer.prepare_adaptive_inputs(deadline).await?;
+        if producer.request_trial() {
+            self.rendition().kick();
+            producer.wait_prepared_trial().await?;
+        }
         if producer.original_driver_finished() {
             return Err("original adaptive driver ended before Prepared".into());
         }
@@ -705,6 +710,21 @@ impl PreparedAttemptRendition {
             .output_digest()
             .map_err(|error| format!("binding finite attempt output: {error}"))?;
         Ok((hex::encode(prepared), hex::encode(output)))
+    }
+
+    pub(crate) fn trial_cleanup_cutoff(&self) -> Option<Instant> {
+        self.rendition()
+            .dir
+            .finite_producer()?
+            .trial_cleanup_cutoff()
+    }
+
+    pub(crate) fn begin_trial_adoption(&self) -> Result<(), String> {
+        self.rendition()
+            .dir
+            .finite_producer()
+            .ok_or("prepared attempt lost its finite producer")?
+            .begin_trial_adoption()
     }
 
     /// The committed Store Adopt is the only caller that may publish this
@@ -734,7 +754,7 @@ impl PreparedAttemptRendition {
             // Activation and publication have no await between them. A real
             // reader cannot find the map entry before its original driver is
             // activated, and publication adds no synthetic demand wake.
-            producer.activate_driver();
+            producer.activate_driver()?;
             renditions.insert(self.key.clone(), Arc::clone(&rendition));
             cleanup.published(&mut closings);
         }

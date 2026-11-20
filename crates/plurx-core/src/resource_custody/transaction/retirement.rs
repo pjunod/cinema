@@ -116,10 +116,10 @@ pub(super) fn change(
         &full,
         proof.target_resources,
     )?;
-    let (original, epoch, trial): (Vec<u8>, Vec<u8>, Option<Vec<u8>>) = tx.query_row(
-        "SELECT resources,allocation_epoch,trial_group_id FROM obligations WHERE obligation_id=?1",
+    let (original, epoch): (Vec<u8>, Vec<u8>) = tx.query_row(
+        "SELECT resources,allocation_epoch FROM obligations WHERE obligation_id=?1",
         [key.handle.obligation_id.as_bytes()],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     if codec::vector_from_bytes(&original)?
         .checked_sub(proof.target_resources)
@@ -154,14 +154,13 @@ pub(super) fn change(
     let target_identity_json = codec::encode(&target_envelope)?;
     let sequence = next_sequence(tx)?;
     tx.execute(
-        "INSERT INTO obligations (obligation_id,owner_id,graph_id,allocation_epoch,resources,trial_group_id,phase,sequence,last_operation_id,manifest_json,hold_reason,settlement_json,memory_claim) VALUES(?1,?2,?3,?4,?5,?6,'sealed',?7,?8,?9,NULL,NULL,'bounded_resident')",
+        "INSERT INTO obligations (obligation_id,owner_id,graph_id,allocation_epoch,resources,trial_group_id,phase,sequence,last_operation_id,manifest_json,hold_reason,settlement_json,memory_claim) VALUES(?1,?2,?3,?4,?5,NULL,'sealed',?6,?7,?8,NULL,NULL,'bounded_resident')",
         params![
             target.obligation_id.as_bytes(),
             owner.as_bytes(),
             target.graph_id.as_bytes(),
             epoch,
             codec::vector_bytes(proof.target_resources),
-            trial,
             sequence,
             key.operation_id.as_bytes(),
             target_manifest_json

@@ -39,10 +39,12 @@ enum LocalDirectRecord {
     Active {
         _entry: Arc<LocalDirectEntry>,
         worker: DirectSourceApplicationWorker,
+        protection: crate::admission::ProtectedPlaybackLane,
     },
     Settling {
         ticket: SharedTicket,
         worker: JoinHandle<Result<(), DirectSourceError>>,
+        protection: crate::admission::ProtectedPlaybackLane,
     },
 }
 
@@ -180,6 +182,11 @@ impl TranscodeManager {
             limit_epoch: epoch,
             trial: false,
         };
+        let mut protection = self
+            .admissions()
+            .acquire_protected_playback_lane(deadline)
+            .await
+            .map_err(|_| LocalDirectFailure::Unavailable)?;
         // Claim an inline slot and keep its mutex through synchronous core
         // prepare and original task registration. No await separates them.
         let (owner, entry) = {
@@ -217,6 +224,10 @@ impl TranscodeManager {
             *slot = Some(LocalDirectRecord::Active {
                 _entry: Arc::clone(&entry),
                 worker,
+                protection: {
+                    protection.arm_physical();
+                    protection
+                },
             });
             (owner, entry)
         };
@@ -349,20 +360,29 @@ impl TranscodeManager {
                 Transition::ToSettling(ticket) => {
                     // Drop the joined task, rich entry and application lease
                     // before the compact ticket may settle/refund the role.
-                    drop(slot.take());
+                    let Some(LocalDirectRecord::Active { protection, .. }) = slot.take() else {
+                        unreachable!("only joined direct readers prepare a retirement ticket");
+                    };
                     let ticket = Arc::new(AsyncMutex::new(ticket));
                     let worker =
                         tokio::spawn(Self::finish_local_retirement(Some(Arc::clone(&ticket))));
-                    *slot = Some(LocalDirectRecord::Settling { ticket, worker });
+                    *slot = Some(LocalDirectRecord::Settling {
+                        ticket,
+                        worker,
+                        protection,
+                    });
                 }
                 Transition::RetrySettle => {
-                    if let Some(LocalDirectRecord::Settling { ticket, worker }) = slot {
+                    if let Some(LocalDirectRecord::Settling { ticket, worker, .. }) = slot {
                         *worker =
                             tokio::spawn(Self::finish_local_retirement(Some(Arc::clone(ticket))));
                     }
                 }
                 Transition::Remove => {
-                    *slot = None;
+                    let Some(LocalDirectRecord::Settling { protection, .. }) = slot.take() else {
+                        unreachable!("only settled direct readers release original protection");
+                    };
+                    protection.known_finished();
                 }
             }
         }

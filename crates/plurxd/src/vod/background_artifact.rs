@@ -5,7 +5,7 @@
 use super::*;
 use plurx_core::adaptive_resources::runtime::finite_vod::{
     FiniteApplicationLease, FiniteFile, FiniteOutput, FiniteWriterOutcome, SoftwareVodEvent,
-    SoftwareVodOwner, SoftwareVodRequest,
+    SoftwareVodEvents, SoftwareVodOwner, SoftwareVodRequest,
 };
 
 /// Compact process-private policy facts from the original admitted snapshot.
@@ -237,7 +237,7 @@ impl StaticArtifactPublication {
     /// yet; source parents remain live for the post-publication fence.
     pub(super) async fn await_complete_events(
         &mut self,
-        events: &mut tokio::sync::mpsc::Receiver<SoftwareVodEvent>,
+        events: &mut SoftwareVodEvents,
         deadline: Instant,
     ) -> io::Result<()> {
         while self.identity.is_none() || self.next_entry as usize != self.plan.len() {
@@ -252,10 +252,7 @@ impl StaticArtifactPublication {
 
     /// Call after the original writer/root join and before freeze. A late
     /// duplicate cannot turn an already published manifest into retained S.
-    pub(super) fn reject_late_events(
-        &mut self,
-        events: &mut tokio::sync::mpsc::Receiver<SoftwareVodEvent>,
-    ) -> io::Result<()> {
+    pub(super) fn reject_late_events(&mut self, events: &mut SoftwareVodEvents) -> io::Result<()> {
         match events.try_recv() {
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Ok(()),
@@ -306,7 +303,7 @@ pub(crate) struct StaticArtifactRun {
     provenance: StaticArtifactProvenance,
     owner: SoftwareVodOwner,
     output: FiniteOutput,
-    events: Option<tokio::sync::mpsc::Receiver<SoftwareVodEvent>>,
+    events: Option<SoftwareVodEvents>,
     publication: StaticArtifactPublication,
     logical: retained_manifest::LogicalOutput,
     artifact_id: uuid::Uuid,

@@ -1238,6 +1238,18 @@ impl NativeDomainExtinction {
 }
 
 impl NativeDomainCore {
+    /// Read the actual original leaf's hard-limit events. A memory limit
+    /// hit is pressure even when the kernel has not killed a process.
+    fn observed_trial_limit_pressure(&self) -> io::Result<bool> {
+        self.verify()?;
+        let pids = read_bounded(&self.files.pids_events, CONTROL_READ_LIMIT)?;
+        let memory = read_bounded(&self.files.memory_events, CONTROL_READ_LIMIT)?;
+        let pids_max = event_counter(&pids, "max")?;
+        let memory_max = event_counter(&memory, "max")?;
+        let oom_kills = event_counter(&memory, "oom_kill")?;
+        Ok(pids_max != 0 || memory_max != 0 || oom_kills != 0)
+    }
+
     /// Original-domain controller observation, never a resource upper bound.
     pub fn observed_pids_limit_events(&self) -> io::Result<u64> {
         self.verify()?;
@@ -1480,6 +1492,9 @@ impl OwnedNativeDomain {
     }
     pub fn observed_oom_kill_events(&self) -> io::Result<u64> {
         self.core().observed_oom_kill_events()
+    }
+    pub(crate) fn observed_trial_limit_pressure(&self) -> io::Result<bool> {
+        self.core().observed_trial_limit_pressure()
     }
     pub(in crate::process) fn take_entry_seed(&mut self) -> io::Result<EntrySeed> {
         let result = self.core_mut().take_entry_seed();

@@ -180,13 +180,14 @@ impl ResourceLedger {
         };
         let mut next_trial = state.trial.clone();
         if let Some(members) = next_trial.as_mut() {
-            if members.remove(&swap.source.reservation) {
-                members.insert(swap.target.reservation);
+            members.remove(&swap.source.reservation);
+            if members.is_empty() {
+                next_trial = None;
             }
         }
 
-        // All fallible checks are complete. The source removal, target insert,
-        // used replacement and trial transfer form one locked state change.
+        // The original native producer is already positively closed.
+        // Conserving retained storage does not retain its trial slot.
         state.entries.remove(&swap.source.reservation);
         state.entries.insert(
             swap.target.reservation,

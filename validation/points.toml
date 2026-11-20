@@ -2056,6 +2056,7 @@ contract = "An ordinary selected Linux software VOD keeps its actual source, pro
 paths = [
   "crates/plurxd/src/vod/tests/finite_software.rs",
   "crates/plurxd/src/vod/tests/finite_software_restart.rs",
+  "crates/plurxd/src/admission/playback_trial.rs",
   "crates/plurxd/src/vod/finite_software.rs",
   "crates/plurxd/src/vod/finite_profile.rs",
   "crates/plurx-core/src/adaptive_resources/runtime/finite_vod.rs",

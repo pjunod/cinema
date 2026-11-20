@@ -60,6 +60,7 @@ impl RootCell {
         plan: &ScratchPlanV3,
         io: v2::Id,
         operation: &BootstrapIoV1,
+        require_memory_backing: bool,
     ) -> Result<tokio::sync::oneshot::Sender<()>, OperationError> {
         if self.pending.is_some() || self.failed_join || self.io_id == io {
             return Err(OperationError::State);
@@ -107,7 +108,14 @@ impl RootCell {
                 result.audit = empty_audit(v2::scratch::NativeOutcomeV1::NeverEntered);
                 return result;
             }
-            let result = run_step(result, &plan, io, observe_id, &operation);
+            let result = run_step(
+                result,
+                &plan,
+                io,
+                observe_id,
+                &operation,
+                require_memory_backing,
+            );
             #[cfg(all(
                 test,
                 feature = "fixtures",
@@ -138,12 +146,45 @@ impl RootCell {
     }
 }
 
+fn memory_backed(file: &File, mount: &v2::NativeValue<u64>) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsFd as _;
+        crate::adaptive_resources::runtime::finite_policy::local_memory_filesystem(
+            file.as_fd(),
+            mount,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (file, mount);
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl BootstrapMember {
+    pub(in crate::adaptive_resources::runtime::operations) fn memory_backed_sink(&self) -> bool {
+        let sink_ready = self
+            .fold
+            .as_ref()
+            .is_some_and(|fold| fold.state().bootstrap.phase == BootstrapPhase::SinkReady);
+        sink_ready
+            && self
+                .native_root
+                .as_ref()
+                .and_then(|root| root.result.as_ref())
+                .is_some_and(|result| result.memory_backed_sink)
+    }
+}
+
 fn run_step(
     mut result: RootResult,
     plan: &ScratchPlanV3,
     io: v2::Id,
     observed: v2::Id,
     operation: &BootstrapIoV1,
+    require_memory_backing: bool,
 ) -> RootResult {
     let old = result
         .audit
@@ -176,10 +217,14 @@ fn run_step(
         matches!(plan.filesystem_domain.mount_namespace, v2::NativeValue::Known { value } if value == m.ino()))
     { return result; }
     let parent_before = parent.metadata();
+    let parent_memory_backed = create && memory_backed(parent, &old.native_object.mount_id);
     if create {
+        result.audit.child_effect = ChildEffect::Unchanged;
+        if require_memory_backing && !parent_memory_backed {
+            return result;
+        }
         // EEXIST is never adoption. Once entered, a failed mkdir is an actual
         // failed observation; it is not NeverEntered or evidence of ownership.
-        result.audit.child_effect = ChildEffect::Unchanged;
         // SAFETY: parent is retained; name is one validated NUL-terminated component.
         if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
             if std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
@@ -256,6 +301,10 @@ fn run_step(
         native_object: native,
     });
     if known && continuous && allocated_within_bound {
+        #[cfg(target_os = "linux")]
+        {
+            result.memory_backed_sink = parent_memory_backed;
+        }
         if !create {
             // Close the actual previous copy before recording closed_copy_ids.
             // No duplicate fd exists; peak traversal is exactly old+new.
@@ -287,6 +336,10 @@ impl NodeResourceRuntime {
         self.eligible(&bundle)?;
         let bundle_id = bundle.id;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        let require_memory_backing = role
+            .finite_vod
+            .as_ref()
+            .is_some_and(|finite| finite.contained_trial);
         loop {
             if role.refunded
                 || !matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed)
@@ -409,7 +462,8 @@ impl NodeResourceRuntime {
                 {
                     return Err(OperationError::State);
                 }
-                let enter = native.launch_next(&bootstrap.plan, io, &operation)?;
+                let enter =
+                    native.launch_next(&bootstrap.plan, io, &operation, require_memory_backing)?;
                 // Original handle is already installed in the SAME owned cell.
                 #[cfg(all(
                     test,
@@ -555,7 +609,7 @@ impl NodeResourceRuntime {
             // The original arm committed but native entry was never released.
             // Retain the worker in this cell and drop its latch: it reports
             // NeverEntered, with no openat/mkdirat on cancellation.
-            let enter = native.launch_next(&bootstrap.plan, io, &operation)?;
+            let enter = native.launch_next(&bootstrap.plan, io, &operation, false)?;
             drop(enter);
         }
         let audit = native.join().await?.audit.clone();

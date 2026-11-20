@@ -750,6 +750,46 @@ pub(crate) struct CreateRecording {
     title: Option<String>,
 }
 
+#[cfg(target_os = "linux")]
+fn capture_commit_protection(
+    state: &AppState,
+) -> Result<Option<crate::admission::ProtectedPlaybackLane>, ApiError> {
+    if !state.store.has_local_dvr_commit_authority() {
+        return Ok(None);
+    }
+    state
+        .transcode
+        .admissions()
+        .try_acquire_protected_playback_lane()
+        .map(Some)
+        .map_err(|reason| ApiError::ServiceUnavailable(reason.into()))
+}
+
+#[cfg(target_os = "linux")]
+async fn run_dvr_write<T, F>(
+    protection: Option<crate::admission::ProtectedPlaybackLane>,
+    write: F,
+) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = Result<T, plurx_core::error::StoreError>> + Send + 'static,
+{
+    let Some(mut protection) = protection else {
+        return write.await.map_err(Into::into);
+    };
+    protection.arm_physical();
+    // SQLite's blocking transaction can outlive a dropped HTTP observer.
+    // Keep the same guard with the original result, including rollback.
+    tokio::spawn(async move {
+        let result = write.await;
+        protection.known_finished();
+        result
+    })
+    .await
+    .map_err(|error| ApiError::Internal(format!("DVR write owner: {error}")))?
+    .map_err(Into::into)
+}
+
 pub(crate) async fn create_recording(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
@@ -795,11 +835,24 @@ pub(crate) async fn create_recording(
         serde_json::json!({"origin": row.origin.as_str(), "rule_id": row.rule_id}),
         false,
     );
-    match state
+    #[cfg(target_os = "linux")]
+    let outcome = {
+        let protection = capture_commit_protection(&state)?;
+        let store = state.store.clone();
+        let original_row = row.clone();
+        run_dvr_write(protection, async move {
+            store
+                .insert_dvr_airing_with_event(&original_row, &event)
+                .await
+        })
+        .await?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let outcome = state
         .store
         .insert_dvr_airing_with_event(&row, &event)
-        .await?
-    {
+        .await?;
+    match outcome {
         DvrInsertOutcome::Inserted => Ok((StatusCode::CREATED, Json(row))),
         DvrInsertOutcome::Exists(_) => {
             // One airing is one row, so an existing one is the answer rather
@@ -1541,21 +1594,18 @@ pub(crate) async fn restore_recording(
         serde_json::json!({}),
         false,
     );
-    let restored = state
-        .store
-        .transition_dvr_recording_with_event(
-            &DvrTransition {
-                id: &id,
-                from: &[DvrState::Cancelled],
-                to: DvrState::Scheduled,
-                reason: None,
-                patch: DvrStatePatch::None,
-                fence_generation: None,
-                now_ms: at_ms,
-            },
-            &event,
-        )
-        .await?;
+    #[cfg(target_os = "linux")]
+    let restored = {
+        let protection = capture_commit_protection(&state)?;
+        let store = state.store.clone();
+        let original_id = id.clone();
+        run_dvr_write(protection, async move {
+            restore_recording_commit(store.as_ref(), &original_id, at_ms, &event).await
+        })
+        .await?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let restored = restore_recording_commit(state.store.as_ref(), &id, at_ms, &event).await?;
     if !restored {
         return Err(ApiError::Conflict(
             "only a cancelled recording can be restored".into(),
@@ -1567,6 +1617,28 @@ pub(crate) async fn restore_recording(
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound("no such recording"))
+}
+
+async fn restore_recording_commit(
+    store: &dyn plurx_core::store::Store,
+    id: &str,
+    at_ms: i64,
+    event: &DvrEventInput,
+) -> Result<bool, plurx_core::error::StoreError> {
+    store
+        .transition_dvr_recording_with_event(
+            &DvrTransition {
+                id,
+                from: &[DvrState::Cancelled],
+                to: DvrState::Scheduled,
+                reason: None,
+                patch: DvrStatePatch::None,
+                fence_generation: None,
+                now_ms: at_ms,
+            },
+            event,
+        )
+        .await
 }
 
 // ---- schedule -------------------------------------------------------------
@@ -1796,7 +1868,7 @@ pub(crate) async fn create_rule(
     }
     apply_rule_body(&mut rule, &body, at_ms)?;
     validate_rule(&rule)?;
-    if !state.store.put_dvr_rule(&rule).await? {
+    if !save_rule(&state, &rule).await? {
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "rule_limit",
@@ -1822,8 +1894,22 @@ pub(crate) async fn update_rule(
     }
     apply_rule_body(&mut rule, &body, now_ms())?;
     validate_rule(&rule)?;
-    state.store.put_dvr_rule(&rule).await?;
+    save_rule(&state, &rule).await?;
     Ok(Json(rule))
+}
+
+async fn save_rule(state: &AppState, rule: &DvrRule) -> Result<bool, ApiError> {
+    #[cfg(target_os = "linux")]
+    if state.store.has_local_dvr_commit_authority() {
+        // A rule is desired policy. Persist the user's choice while fencing
+        // new low-pressure speculation at the same mutation boundary. The
+        // scheduler must later hold its own lane before materialization.
+        let protection = state.transcode.admissions().begin_capture_intent_update();
+        let store = state.store.clone();
+        let rule = rule.clone();
+        return run_dvr_write(protection, async move { store.put_dvr_rule(&rule).await }).await;
+    }
+    state.store.put_dvr_rule(rule).await.map_err(Into::into)
 }
 
 fn apply_rule_body(rule: &mut DvrRule, body: &RuleBody, at_ms: i64) -> Result<(), ApiError> {

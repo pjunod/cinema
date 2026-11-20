@@ -5213,6 +5213,9 @@ impl MediaSessionCoordinator {
         &self,
         owner_node_id: &str,
         request: &RelayRequest,
+        #[cfg(target_os = "linux")] protection: Option<
+            Arc<crate::admission::ProtectedPlaybackLane>,
+        >,
     ) -> Result<Response<Body>, PeerTransportError> {
         let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
         if body.len() > MAX_CONTROL_REQUEST_BYTES {
@@ -5236,7 +5239,17 @@ impl MediaSessionCoordinator {
                 PeerAuthMode::ExactRequest,
             )
             .await?;
-        relay_response(response)
+        relay_response_with_limits_observed(
+            response,
+            MAX_ADMITTED_MEDIA_BODY_LIFETIME,
+            MEDIA_BODY_NO_PROGRESS_TIMEOUT,
+            None,
+            None,
+            None,
+            None,
+            #[cfg(target_os = "linux")]
+            protection,
+        )
     }
 
     /// Exact authenticated closure of an outer accepted driver. No request
@@ -5801,14 +5814,7 @@ fn validate_route_resolution(
     Ok(resolution)
 }
 
-fn relay_response(response: reqwest::Response) -> Result<Response<Body>, PeerTransportError> {
-    relay_response_with_limits(
-        response,
-        MAX_ADMITTED_MEDIA_BODY_LIFETIME,
-        MEDIA_BODY_NO_PROGRESS_TIMEOUT,
-    )
-}
-
+#[cfg(test)]
 pub(crate) fn relay_response_with_limits(
     response: reqwest::Response,
     max_lifetime: Duration,
@@ -5822,6 +5828,8 @@ pub(crate) fn relay_response_with_limits(
         None,
         None,
         None,
+        #[cfg(target_os = "linux")]
+        None,
     )
 }
 
@@ -5831,6 +5839,7 @@ pub(crate) fn relay_response_with_limits_counted_bounded(
     no_progress_timeout: Duration,
     relayed_bytes: Arc<std::sync::atomic::AtomicU64>,
     max_body_bytes: u64,
+    #[cfg(target_os = "linux")] protection: Arc<crate::admission::ProtectedPlaybackLane>,
 ) -> Result<Response<Body>, PeerTransportError> {
     relay_response_with_limits_observed(
         response,
@@ -5840,6 +5849,8 @@ pub(crate) fn relay_response_with_limits_counted_bounded(
         None,
         Some(relayed_bytes),
         Some(max_body_bytes),
+        #[cfg(target_os = "linux")]
+        Some(protection),
     )
 }
 
@@ -5888,6 +5899,7 @@ impl RelayBodyTerminal {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // existing optional observations, limits and original lane
 fn relay_response_with_limits_observed(
     response: reqwest::Response,
     max_lifetime: Duration,
@@ -5896,6 +5908,7 @@ fn relay_response_with_limits_observed(
     upstream_pulls: Option<Arc<std::sync::atomic::AtomicUsize>>,
     relayed_bytes: Option<Arc<std::sync::atomic::AtomicU64>>,
     max_body_bytes: Option<u64>,
+    #[cfg(target_os = "linux")] protection: Option<Arc<crate::admission::ProtectedPlaybackLane>>,
 ) -> Result<Response<Body>, PeerTransportError> {
     if max_body_bytes.is_some_and(|limit| {
         response
@@ -5926,7 +5939,6 @@ fn relay_response_with_limits_observed(
             builder = builder.header(name, value.as_bytes());
         }
     }
-    let mut upstream = Box::pin(response.bytes_stream());
     let (sender, receiver) =
         tokio::sync::mpsc::channel::<Result<Bytes, io::Error>>(RELAY_BODY_CHANNEL_CAPACITY);
     let terminal = RelayBodyTerminal::new();
@@ -5937,8 +5949,13 @@ fn relay_response_with_limits_observed(
     // `closed()`/a failed send so abandoning the public body cancels the peer.
     let body_deadline = tokio::time::Instant::now() + max_lifetime;
     let pump_terminal = terminal.clone();
+    #[cfg(target_os = "linux")]
+    let pump_protection = protection.clone();
     tokio::spawn(async move {
         let _completion = RelayPumpCompletion(completion);
+        #[cfg(target_os = "linux")]
+        let _protection = pump_protection;
+        let mut upstream = Box::pin(response.bytes_stream());
         let fail = |kind, message: String| pump_terminal.fail(kind, message);
         let mut body_bytes = 0_u64;
         loop {
@@ -6075,9 +6092,15 @@ fn relay_response_with_limits_observed(
             Some((item, (receiver, terminal, body_deadline, false)))
         },
     );
-    builder
+    let response = builder
         .body(Body::from_stream(stream))
-        .map_err(|_| PeerTransportError::InvalidResponse)
+        .map_err(|_| PeerTransportError::InvalidResponse)?;
+    #[cfg(target_os = "linux")]
+    let response = match protection {
+        Some(lane) => crate::http::stream::protect_body(response, lane),
+        None => response,
+    };
+    Ok(response)
 }
 
 pub(crate) fn unix_ms() -> i64 {

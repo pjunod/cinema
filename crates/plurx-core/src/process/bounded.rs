@@ -52,6 +52,13 @@ pub enum OriginalWorkUncertainty {
 /// success of a leader wait cannot clear an earlier uncertainty.
 pub trait OriginalWorkKeeper: Send + Sync {
     fn retain_uncertainty(&self, reason: OriginalWorkUncertainty);
+
+    /// Some incumbent lanes may overlap a trial only after the original
+    /// trusted helper's process group has also stopped doing work.
+    #[cfg(target_os = "linux")]
+    fn requires_group_quiescence(&self) -> bool {
+        false
+    }
 }
 
 /// Directly awaited bounded work inherits this original keeper. Spawned work
@@ -557,7 +564,13 @@ async fn output_command_environment(
         stderr_selector,
     )));
     #[cfg(target_os = "linux")]
-    let source_group = pause_guard.as_ref().and(child.process_group);
+    let source_group = (pause_guard.is_some()
+        || collector
+            .keeper
+            .as_ref()
+            .is_some_and(|keeper| keeper.requires_group_quiescence()))
+    .then_some(child.process_group)
+    .flatten();
     let deadline = controller.as_ref().map_or_else(
         || tokio::time::Instant::now() + wall_time,
         |controller| controller.hard_deadline(wall_time),

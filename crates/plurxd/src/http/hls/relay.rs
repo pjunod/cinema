@@ -82,6 +82,8 @@ pub(super) async fn relay_if_remote(
             }
         }
     };
+    #[cfg(target_os = "linux")]
+    let protection = protect_relay(state, &resource, request_deadline).await?;
     for attempt in 0..2 {
         let deadline_unix_ms =
             resource_deadline_unix_ms(request_deadline).ok_or_else(response_publication_timeout)?;
@@ -123,6 +125,8 @@ pub(super) async fn relay_if_remote(
                     // relayed request downgrades to a complete representation.
                     headers: headers.for_unversioned_peer(),
                 },
+                #[cfg(target_os = "linux")]
+                protection.clone(),
             )
             .await
             .map_err(|error| {
@@ -228,9 +232,35 @@ pub(super) fn relay_status_requires_reclassification(status: StatusCode) -> bool
 
 /// Execute an authenticated relay on the owning worker without performing a
 /// second route lookup that could proxy back to the ingress node.
+#[cfg(target_os = "linux")]
+async fn protect_relay(
+    state: &AppState,
+    resource: &RelayResource,
+    deadline: Instant,
+) -> Result<Option<std::sync::Arc<crate::admission::ProtectedPlaybackLane>>, ApiError> {
+    if matches!(
+        resource,
+        RelayResource::Status | RelayResource::Delete | RelayResource::PassivePresence { .. }
+    ) {
+        return Ok(None);
+    }
+    state
+        .transcode
+        .admissions()
+        .acquire_protected_playback_lane(deadline)
+        .await
+        .map(|lane| Some(std::sync::Arc::new(lane)))
+        .map_err(|error| ApiError::ServiceUnavailable(error.into()))
+}
+
 pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Response {
     let Some(request_deadline) = inherited_resource_deadline(&request) else {
         return response_publication_timeout().into_response();
+    };
+    #[cfg(target_os = "linux")]
+    let protection = match protect_relay(state, &request.resource, request_deadline).await {
+        Ok(protection) => protection,
+        Err(error) => return error.into_response(),
     };
     let (playlist_deadline, _) = playlist_request_deadlines_before(state, request_deadline);
     // Keep each resource future on the heap. Their combined dispatch frame
@@ -383,10 +413,16 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
             .into_response();
         }
     };
-    match result {
+    let response = match result {
         Ok(response) => response,
         Err(error) => error.into_response(),
-    }
+    };
+    #[cfg(target_os = "linux")]
+    let response = match protection {
+        Some(lane) => crate::http::stream::protect_body(response, lane),
+        None => response,
+    };
+    response
 }
 
 #[cfg(test)]

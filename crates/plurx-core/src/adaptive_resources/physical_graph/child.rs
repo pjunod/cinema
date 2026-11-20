@@ -90,6 +90,20 @@ impl GraphChild {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    pub(super) fn finite_trial_hard_pressure(&self) -> io::Result<bool> {
+        let Backend::Native {
+            child,
+            adapter_uncertain: false,
+        } = &self.backend
+        else {
+            return Err(io::Error::other(
+                "original finite native control is unavailable",
+            ));
+        };
+        child.finite_trial_hard_pressure()
+    }
+
     pub(super) fn is_native(&self) -> bool {
         match &self.backend {
             Backend::Legacy(_) => false,

@@ -906,6 +906,8 @@ impl Drop for CaptureLease {
 struct CaptureRecord {
     entry: Arc<CaptureEntry>,
     admission: RestartAdmission,
+    #[cfg(target_os = "linux")]
+    protection: Option<crate::admission::ProtectedPlaybackLane>,
 }
 impl std::ops::Deref for CaptureRecord {
     type Target = CaptureEntry;
@@ -920,6 +922,8 @@ struct TransportOriginal {
     registry: std::sync::Weak<Mutex<super::super::LiveTvRegistry>>,
     cleanup: OriginalTask<()>,
     cleanup_started: bool,
+    #[cfg(target_os = "linux")]
+    protection: Option<Arc<crate::http::stream::ProtectedOriginalWork>>,
 }
 
 pub(crate) struct CaptureOwners {
@@ -967,11 +971,28 @@ impl CaptureOwners {
         let _ = enter.send(());
         root
     }
+    #[cfg(test)]
     pub(super) fn reserve(
         &self,
         recording: &str,
         attempt: i64,
         admission: RestartAdmission,
+    ) -> Result<CaptureLease, super::LiveTvError> {
+        self.reserve_original(
+            recording,
+            attempt,
+            admission,
+            #[cfg(target_os = "linux")]
+            None,
+        )
+    }
+
+    pub(super) fn reserve_original(
+        &self,
+        recording: &str,
+        attempt: i64,
+        admission: RestartAdmission,
+        #[cfg(target_os = "linux")] mut protection: Option<crate::admission::ProtectedPlaybackLane>,
     ) -> Result<CaptureLease, super::LiveTvError> {
         let mut entries = self
             .entries
@@ -1015,9 +1036,15 @@ impl CaptureOwners {
             writer_installed: AtomicBool::new(false),
             closed: AtomicBool::new(false),
         });
+        #[cfg(target_os = "linux")]
+        if let Some(lane) = protection.as_mut() {
+            lane.arm_physical();
+        }
         entries.push(CaptureRecord {
             entry: Arc::clone(&entry),
             admission,
+            #[cfg(target_os = "linux")]
+            protection,
         });
         Ok(CaptureLease { entry })
     }
@@ -1130,6 +1157,9 @@ impl CaptureOwners {
         &self,
         transport: &Arc<super::DvrTransport>,
         registry: &Arc<Mutex<super::super::LiveTvRegistry>>,
+        #[cfg(target_os = "linux")] protection: Option<
+            Arc<crate::http::stream::ProtectedOriginalWork>,
+        >,
     ) -> Result<Arc<OriginalTask<Result<(), super::LiveTvError>>>, super::LiveTvError> {
         let mut cells = self
             .transports
@@ -1141,12 +1171,18 @@ impl CaptureOwners {
             ));
         }
         let cell = Arc::new(OriginalTask::default());
+        #[cfg(target_os = "linux")]
+        if let Some(lane) = protection.as_ref() {
+            lane.track_original(true);
+        }
         cells.push(TransportOriginal {
             worker: Arc::clone(&cell),
             transport: Arc::clone(transport),
             registry: Arc::downgrade(registry),
             cleanup: OriginalTask::default(),
             cleanup_started: false,
+            #[cfg(target_os = "linux")]
+            protection,
         });
         Ok(cell)
     }
@@ -1202,13 +1238,27 @@ impl CaptureOwners {
                 && exclusive
                 && writer_destroyed
             {
-                let CaptureRecord { entry, admission } = entries.swap_remove(index);
+                let CaptureRecord {
+                    entry,
+                    admission,
+                    #[cfg(target_os = "linux")]
+                    protection,
+                } = entries.swap_remove(index);
                 match Arc::try_unwrap(entry) {
                     Ok(entry) => {
                         drop(entry);
                         drop(admission);
+                        #[cfg(target_os = "linux")]
+                        if let Some(lane) = protection {
+                            lane.known_finished();
+                        }
                     }
-                    Err(entry) => entries.push(CaptureRecord { entry, admission }),
+                    Err(entry) => entries.push(CaptureRecord {
+                        entry,
+                        admission,
+                        #[cfg(target_os = "linux")]
+                        protection,
+                    }),
                 }
             } else {
                 index += 1;
@@ -1274,10 +1324,18 @@ impl CaptureOwners {
                 let _ = enter.send(());
             }
         }
-        transports.retain(|row| {
-            !(row.worker.retired.load(Ordering::Acquire)
+        transports.retain_mut(|row| {
+            let finished = row.worker.retired.load(Ordering::Acquire)
+                && row.transport.is_closed()
                 && row.cleanup_started
-                && row.cleanup.observe() == JoinState::Joined)
+                && row.cleanup.observe() == JoinState::Joined;
+            #[cfg(target_os = "linux")]
+            if finished {
+                if let Some(lane) = row.protection.take() {
+                    lane.track_original(false);
+                }
+            }
+            !finished
         });
     }
     pub(crate) fn seal(&self, deadline: tokio::time::Instant) {

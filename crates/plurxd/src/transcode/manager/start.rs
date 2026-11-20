@@ -400,6 +400,7 @@ impl TranscodeManager {
             .insert(
                 identity,
                 SelectedCopyTerminalTicket {
+                    playback_lane: None,
                     native,
                     quota: Some(quota),
                     actor: Some(actor),
@@ -1475,6 +1476,18 @@ impl TranscodeManager {
         source_telemetry: bool,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<StartInfo, String> {
+        #[cfg(target_os = "linux")]
+        let playback_lane = self
+            .admissions
+            .acquire_protected_playback_lane(
+                replacement_deadline
+                    .unwrap_or_else(|| {
+                        crate::media_pool::create_stage_deadline(crate::admission::QUEUE_WAIT)
+                    })
+                    .into_std(),
+            )
+            .await
+            .map_err(str::to_owned)?;
         let rate_control = self.rate_control_snapshot();
         // Cluster replacements are provisional until their durable pointer CAS
         // wins. Killing the old process here would turn an admission/Store
@@ -2307,6 +2320,8 @@ impl TranscodeManager {
             );
 
         let session = Arc::new(Session {
+            #[cfg(target_os = "linux")]
+            playback_lane: std::sync::Mutex::new(Some(playback_lane)),
             dir: dir.clone(),
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen_presentation),
@@ -2425,6 +2440,8 @@ impl TranscodeManager {
             first_slide_logged: AtomicBool::new(false),
         });
         start_settlement.attach(&session);
+        #[cfg(target_os = "linux")]
+        session.arm_playback_lane();
         if let Err(reason) = executor_registration.register().await {
             fail_prepublication_transaction(
                 &session,
@@ -2652,6 +2669,18 @@ impl TranscodeManager {
         source_telemetry: bool,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<StartInfo, String> {
+        #[cfg(target_os = "linux")]
+        let playback_lane = self
+            .admissions
+            .acquire_protected_playback_lane(
+                replacement_deadline
+                    .unwrap_or_else(|| {
+                        crate::media_pool::create_stage_deadline(crate::admission::QUEUE_WAIT)
+                    })
+                    .into_std(),
+            )
+            .await
+            .map_err(str::to_owned)?;
         // One Store read for the file, its probe and its settings (D4), or
         // the create's plan (D3b).
         let RollingStartInputs {
@@ -3348,6 +3377,8 @@ impl TranscodeManager {
             );
         let failed = Arc::new(AtomicBool::new(false));
         let session = Arc::new(Session {
+            #[cfg(target_os = "linux")]
+            playback_lane: std::sync::Mutex::new(Some(playback_lane)),
             // A copy session encodes nothing; `session_delivered_dynamic_range`
             // reads its range off the source and `preserve_dolby_vision`.
             grade: OutputGrade::Sdr,
@@ -3467,6 +3498,8 @@ impl TranscodeManager {
             start_settlement = Some(PrepublicationStartSettlement::new(dir.clone()));
         }
         start_settlement.attach(&session);
+        #[cfg(target_os = "linux")]
+        session.arm_playback_lane();
         #[cfg(target_os = "linux")]
         if let Some(bound) = selected_metadata_bound {
             if selected_copy_session_dynamic_bytes(&session).is_none_or(|actual| actual > bound) {

@@ -94,6 +94,8 @@ fn held_fixture(path: &Path, plan: &ScratchPlanV3) -> RootCell {
         failed_join: false,
         imported_retained: false,
         result: Some(RootResult {
+            #[cfg(target_os = "linux")]
+            memory_backed_sink: false,
             files: BTreeMap::from([(copy, file)]),
             audit: BootstrapResultV1 {
                 outcome: v2::scratch::NativeOutcomeV1::Completed,
@@ -137,7 +139,7 @@ async fn bootstrap_step_unreleased_latch_retains_original_parent_without_acquisi
         parent: reference(&cell),
         copy_id: id(),
     };
-    let enter = cell.launch_next(&plan, id(), &operation).unwrap();
+    let enter = cell.launch_next(&plan, id(), &operation, false).unwrap();
     let original = cell.pending.as_ref().unwrap().id();
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(1), cell.join())
@@ -167,14 +169,14 @@ async fn bootstrap_step_foreign_directory_or_missing_actual_copy_never_launches(
         parent,
         copy_id: id(),
     };
-    assert!(cell.launch_next(&plan, id(), &wrong).is_err());
+    assert!(cell.launch_next(&plan, id(), &wrong, false).is_err());
     let correct = BootstrapIoV1::OpenNextComponent {
         index: 0,
         parent: reference(&cell),
         copy_id: id(),
     };
     cell.result.as_mut().unwrap().files.clear();
-    assert!(cell.launch_next(&plan, id(), &correct).is_err());
+    assert!(cell.launch_next(&plan, id(), &correct, false).is_err());
     assert!(cell.pending.is_none());
 }
 #[tokio::test]
@@ -186,7 +188,7 @@ async fn bootstrap_child_unknown_mount_never_enters_mkdir() {
         parent: reference(&cell),
         copy_id: id(),
     };
-    assert!(cell.launch_next(&plan, id(), &operation).is_err());
+    assert!(cell.launch_next(&plan, id(), &operation, false).is_err());
     assert!(cell.pending.is_none() && !root.path().join("fresh-output").exists());
 }
 
@@ -218,7 +220,7 @@ async fn native_parent(path: &Path) -> (RootCell, ScratchPlanV3) {
             parent: reference(&cell),
             copy_id: id(),
         };
-        let enter = cell.launch_next(&plan, id(), &operation).unwrap();
+        let enter = cell.launch_next(&plan, id(), &operation, false).unwrap();
         enter.send(()).unwrap();
         let result = cell.join().await.unwrap();
         assert_eq!(
@@ -240,7 +242,7 @@ async fn bootstrap_native_linux_actual_parent_child_and_mount_are_retained() {
         parent: reference(&cell),
         copy_id: id(),
     };
-    let enter = cell.launch_next(&plan, id(), &operation).unwrap();
+    let enter = cell.launch_next(&plan, id(), &operation, false).unwrap();
     enter.send(()).unwrap();
     let result = cell.join().await.unwrap();
     assert_eq!(
@@ -268,7 +270,7 @@ async fn bootstrap_native_linux_existing_child_is_never_adopted() {
         parent: reference(&cell),
         copy_id: id(),
     };
-    let enter = cell.launch_next(&plan, id(), &operation).unwrap();
+    let enter = cell.launch_next(&plan, id(), &operation, false).unwrap();
     enter.send(()).unwrap();
     let result = cell.join().await.unwrap();
     assert!(matches!(
@@ -299,7 +301,7 @@ async fn cleanup_directory_subset_preserves_original_unlent_files_and_rejects_in
         parent: reference(&cell),
         copy_id: id(),
     };
-    cell.launch_next(&plan, id(), &operation)
+    cell.launch_next(&plan, id(), &operation, false)
         .unwrap()
         .send(())
         .unwrap();

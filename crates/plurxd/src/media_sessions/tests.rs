@@ -4203,6 +4203,8 @@ async fn relay_total_lifetime_fires_while_body_is_unpolled_and_backpressured() {
         Some(Arc::clone(&upstream_pulls)),
         None,
         None,
+        #[cfg(target_os = "linux")]
+        None,
     )
     .expect("build independently pumped relay");
 
@@ -4277,6 +4279,8 @@ async fn bounded_relay_rejects_declared_and_chunked_oversize_bodies() {
             None,
             None,
             Some(5),
+            #[cfg(target_os = "linux")]
+            None,
         ),
         Err(PeerTransportError::InvalidResponse)
     ));
@@ -4294,6 +4298,8 @@ async fn bounded_relay_rejects_declared_and_chunked_oversize_bodies() {
         None,
         None,
         Some(5),
+        #[cfg(target_os = "linux")]
+        None,
     )
     .expect("build bounded chunked relay");
     // HTTP framing may coalesce the source chunks before reqwest exposes
@@ -4332,6 +4338,14 @@ async fn dropping_relay_body_cancels_its_network_pump() {
         .send()
         .await
         .expect("request peer stream");
+    #[cfg(target_os = "linux")]
+    let protection = Arc::new(
+        crate::admission::Admissions::new()
+            .try_acquire_protected_playback_lane()
+            .expect("no competing trial"),
+    );
+    #[cfg(target_os = "linux")]
+    let original = Arc::downgrade(&protection);
     let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
     let relayed = relay_response_with_limits_observed(
         peer,
@@ -4341,13 +4355,25 @@ async fn dropping_relay_body_cancels_its_network_pump() {
         None,
         None,
         None,
+        #[cfg(target_os = "linux")]
+        Some(protection),
     )
     .expect("build cancellable relay");
     drop(relayed);
+    #[cfg(target_os = "linux")]
+    assert!(
+        original.upgrade().is_some(),
+        "the original pump still owns its lane"
+    );
     tokio::time::timeout(Duration::from_millis(250), settled_rx)
         .await
         .expect("body Drop cancels the sole network owner")
         .expect("relay pump completion signal");
+    #[cfg(target_os = "linux")]
+    assert!(
+        original.upgrade().is_none(),
+        "the original pump has settled"
+    );
     server.abort();
 }
 

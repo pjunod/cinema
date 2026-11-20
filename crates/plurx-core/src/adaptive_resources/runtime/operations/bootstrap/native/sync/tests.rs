@@ -56,6 +56,8 @@ fn held_root(path: &Path) -> (RootCell, DirectoryObservedV1, i32) {
         join_id: id(),
         pending: None,
         result: Some(RootResult {
+            #[cfg(target_os = "linux")]
+            memory_backed_sink: false,
             files: BTreeMap::from([(copy_id, file)]),
             audit: BootstrapResultV1 {
                 outcome: NativeOutcomeV1::Completed,

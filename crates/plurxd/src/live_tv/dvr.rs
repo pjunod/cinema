@@ -175,6 +175,8 @@ pub(crate) struct DvrTransport {
     seats: AtomicUsize,
     consumers_changed: tokio::sync::Notify,
     worker: std::sync::Mutex<Option<std::sync::Weak<TransportWorkerTask>>>,
+    #[cfg(target_os = "linux")]
+    probe_owner: std::sync::Mutex<Option<OriginalTask<()>>>,
     /// What the prefix probe saw, for every sidecar this transport writes.
     pub(crate) source: std::sync::Mutex<Option<LiveSourceFacts>>,
     probe: tokio::sync::watch::Sender<ProbePublication>,
@@ -267,6 +269,8 @@ impl DvrTransport {
             seats: AtomicUsize::new(init.seats),
             consumers_changed: tokio::sync::Notify::new(),
             worker: std::sync::Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            probe_owner: std::sync::Mutex::new(None),
             source: std::sync::Mutex::new(None),
             probe: tokio::sync::watch::Sender::new(ProbePublication {
                 epoch: 1,
@@ -1300,6 +1304,10 @@ async fn close_transport_original(
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    if !transport.original_probe_closed() {
+        return;
+    }
     {
         if let Some(registry) = registry.upgrade() {
             let mut registry = registry
@@ -1410,6 +1418,21 @@ impl LiveTvManager {
         let live_tv = LiveTvConfig::from_snapshot(&snapshot, &self.node_id);
         self.observe_config(&live_tv);
         Ok((live_tv, DvrConfig::from_snapshot(&snapshot)))
+    }
+
+    /// An incumbent scheduler releases its own reservation after a fresh
+    /// read says it has no current capture authority.
+    #[cfg(target_os = "linux")]
+    async fn capture_config_inactive_before(&self, deadline: std::time::Instant) -> bool {
+        let Ok(Ok(snapshot)) =
+            tokio::time::timeout_at(deadline.into(), self.store.settings_snapshot()).await
+        else {
+            return false;
+        };
+        let live_tv = LiveTvConfig::from_snapshot(&snapshot, &self.node_id);
+        let dvr = DvrConfig::from_snapshot(&snapshot);
+        std::time::Instant::now() < deadline
+            && !(live_tv.owner_node_id == self.node_id && live_tv.enabled && dvr.enabled)
     }
 
     /// Channels currently held by captures, for the capacity refusal body.
@@ -1681,6 +1704,8 @@ impl LiveTvManager {
         shutdown: CancellationToken,
     ) {
         let mut last_retention = 0_i64;
+        #[cfg(target_os = "linux")]
+        let mut capture_reservation: Option<crate::admission::ProtectedPlaybackLane> = None;
         loop {
             // The applied view says whether this node records (Live TV and
             // recording both on, A4). Only that case, or a node that holds a
@@ -1703,7 +1728,33 @@ impl LiveTvManager {
                 };
             if let Ok((live_tv, dvr)) = configs {
                 let ours = live_tv.owner_node_id == self.node_id;
-                if ours && live_tv.enabled && dvr.enabled && self.serving.admit().is_some() {
+                let capture_enabled = ours && live_tv.enabled && dvr.enabled;
+                #[cfg(target_os = "linux")]
+                if capture_enabled && capture_reservation.is_none() {
+                    // Take the scheduling authority before recover or planning
+                    // can encounter a due recording. The actual sink and
+                    // transport retain their own lane through original cleanup.
+                    let admission = self.transcode.admissions();
+                    let deadline = std::time::Instant::now() + DVR_TICK;
+                    capture_reservation = tokio::select! {
+                        _ = shutdown.cancelled() => {
+                            self.close_all_transports().await;
+                            return;
+                        }
+                        lane = admission.acquire_protected_playback_lane(deadline) => lane.ok(),
+                    };
+                    if let Some(lane) = capture_reservation.as_mut() {
+                        // This same original scheduler can commit capture
+                        // promises. Panic or cancellation cannot certify its
+                        // last submitted durable operation finished.
+                        lane.arm_physical();
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                let may_schedule = capture_enabled && capture_reservation.is_some();
+                #[cfg(not(target_os = "linux"))]
+                let may_schedule = capture_enabled;
+                if may_schedule && self.serving.admit().is_some() {
                     self.dvr_storage_free_bytes.store(
                         crate::live_tv::free_space_bytes(&dvr.root).unwrap_or(u64::MAX),
                         Ordering::Relaxed,
@@ -1742,10 +1793,28 @@ impl LiveTvManager {
                         tracing::debug!(%error, "recording deletion will retry");
                     }
                 }
+                #[cfg(target_os = "linux")]
+                if !capture_enabled {
+                    // A local scheduler that has previously acquired capture
+                    // authority only hands it back after a fresh direct read.
+                    if capture_reservation.is_some()
+                        && self
+                            .capture_config_inactive_before(std::time::Instant::now() + DVR_TICK)
+                            .await
+                    {
+                        if let Some(lane) = capture_reservation.take() {
+                            lane.known_finished();
+                        }
+                    }
+                }
             }
             tokio::select! {
                 _ = shutdown.cancelled() => {
                     self.close_all_transports().await;
+                    #[cfg(target_os = "linux")]
+                    if let Some(lane) = capture_reservation.take() {
+                        lane.known_finished();
+                    }
                     return;
                 }
                 _ = tokio::time::sleep(DVR_TICK) => {}
@@ -2577,7 +2646,31 @@ impl LiveTvManager {
             .ok_or_else(|| {
                 LiveTvError::OwnerUnavailable("this node is preparing for restart".to_owned())
             })?;
-        let capture = self.capture_owners.reserve(&row.id, attempt, admission)?;
+        #[cfg(target_os = "linux")]
+        let protection = {
+            let remaining = row
+                .capture_end
+                .saturating_sub(DVR_MIN_USEFUL_S)
+                .saturating_sub(unix_seconds())
+                .max(0) as u64;
+            let deadline = std::time::Instant::now()
+                .checked_add(std::time::Duration::from_secs(remaining))
+                .ok_or_else(|| {
+                    LiveTvError::OwnerUnavailable("recording window is invalid".into())
+                })?;
+            self.transcode
+                .admissions()
+                .acquire_protected_playback_lane(deadline)
+                .await
+                .map_err(|reason| LiveTvError::OwnerUnavailable(reason.into()))?
+        };
+        let capture = self.capture_owners.reserve_original(
+            &row.id,
+            attempt,
+            admission,
+            #[cfg(target_os = "linux")]
+            Some(protection),
+        )?;
         if dvr.root.trim().is_empty() {
             return Err(LiveTvError::InvalidConfig(
                 "no DVR root is configured, so a recording has nowhere to go".to_owned(),
@@ -2656,6 +2749,12 @@ impl LiveTvManager {
         // opened, holding the seat this sink will take; a joined transport
         // has that seat reserved on it. Nothing is ever inserted over a live
         // entry.
+        #[cfg(target_os = "linux")]
+        let transport_protection = self
+            .transcode
+            .admissions()
+            .try_acquire_protected_playback_lane()
+            .map_err(|reason| LiveTvError::OwnerUnavailable(reason.into()))?;
         let mut retried = false;
         let (transport, opened) = loop {
             let decision = {
@@ -2794,7 +2893,12 @@ impl LiveTvManager {
         }
         seat.commit();
         if opened {
-            self.spawn_transport_worker(&transport, client);
+            self.spawn_transport_worker(
+                &transport,
+                client,
+                #[cfg(target_os = "linux")]
+                transport_protection,
+            );
         }
         Ok(())
     }
@@ -2829,11 +2933,16 @@ impl LiveTvManager {
         self: &Arc<Self>,
         transport: &Arc<DvrTransport>,
         client: reqwest::Client,
+        #[cfg(target_os = "linux")] protection: crate::admission::ProtectedPlaybackLane,
     ) {
-        let cell = match self
-            .capture_owners
-            .reserve_transport(transport, &self.registry)
-        {
+        #[cfg(target_os = "linux")]
+        let protection = crate::http::stream::ProtectedOriginalWork::new(protection);
+        let cell = match self.capture_owners.reserve_transport(
+            transport,
+            &self.registry,
+            #[cfg(target_os = "linux")]
+            Some(Arc::clone(&protection)),
+        ) {
             Ok(cell) => cell,
             Err(error) => {
                 transport.cancel.cancel();
@@ -2851,7 +2960,7 @@ impl LiveTvManager {
         let worker_transport = Arc::clone(transport);
         let serving = self.serving.clone();
         let (enter, registered) = tokio::sync::oneshot::channel();
-        let worker = tokio::spawn(async move {
+        let worker = async move {
             if registered.await.is_err() {
                 return Err(LiveTvError::OwnerUnavailable(
                     "tuner task was not registered".into(),
@@ -2891,8 +3000,10 @@ impl LiveTvManager {
             worker_transport.cancel.cancel();
             worker_transport.finish(&result);
             result
-        });
-        cell.install(worker);
+        };
+        #[cfg(target_os = "linux")]
+        let worker = plurx_core::process::bounded::with_original_work_keeper(protection, worker);
+        cell.install(tokio::spawn(worker));
         let _ = enter.send(());
     }
 
@@ -3513,6 +3624,86 @@ fn store_error(error: plurx_core::error::StoreError) -> LiveTvError {
 
 /// Open the tuner, keep the same prefix the live path keeps, probe it, and
 /// then write every chunk to every sink whose window contains this moment.
+#[cfg(target_os = "linux")]
+impl DvrTransport {
+    fn original_probe_closed(&self) -> bool {
+        self.probe_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_none_or(|owner| owner.observe() == JoinState::Joined)
+    }
+
+    async fn probe_source(
+        &self,
+        system: Arc<super::SystemInfo>,
+        prefix: bytes::Bytes,
+    ) -> Result<LiveSourceFacts, LiveTvError> {
+        let Some(keeper) = plurx_core::process::bounded::original_keeper() else {
+            // The platform-independent fan-out fixtures have no admitted
+            // transport. Every actual Linux tuner worker installs its keeper.
+            return probe_live_source(
+                &system,
+                &self.scratch,
+                &prefix,
+                super::SourceProbeWork::VIEWER,
+            )
+            .await;
+        };
+        let cancel = self.cancel.child_token();
+        if cancel.is_cancelled() {
+            return Err(LiveTvError::StreamFailed(
+                "the original tuner is closing".into(),
+            ));
+        }
+        let cancel_on_drop = cancel.clone().drop_guard();
+        let directory = self.scratch.clone();
+        let (send, result) = tokio::sync::oneshot::channel();
+        {
+            let mut original = self
+                .probe_owner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if original
+                .as_ref()
+                .is_some_and(|o| o.observe() != JoinState::Joined)
+            {
+                return Err(LiveTvError::StreamFailed(
+                    "the original tuner probe is still closing".into(),
+                ));
+            }
+            let (enter, registered) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                if registered.await.is_err() {
+                    return;
+                }
+                let source = plurx_core::process::bounded::with_original_work_keeper(
+                    keeper,
+                    plurx_core::process::bounded::cancellable(
+                        cancel,
+                        probe_live_source(
+                            &system,
+                            &directory,
+                            &prefix,
+                            super::SourceProbeWork::VIEWER,
+                        ),
+                    ),
+                )
+                .await;
+                let _ = send.send(source);
+            });
+            let owner = OriginalTask::default();
+            owner.install(task);
+            *original = Some(owner);
+            let _ = enter.send(());
+        }
+        let _cancel_on_drop = cancel_on_drop;
+        result.await.map_err(|error| {
+            LiveTvError::StreamFailed(format!("joining tuner source probe: {error}"))
+        })?
+    }
+}
+
 async fn run_transport(
     client: reqwest::Client,
     system: Arc<super::SystemInfo>,
@@ -3560,6 +3751,11 @@ async fn run_transport(
     if warm {
         return pump_tuner_fanout(input, serving, transport, Some(system)).await;
     }
+    #[cfg(target_os = "linux")]
+    let source = transport
+        .probe_source(Arc::clone(&system), input.prefix.clone())
+        .await;
+    #[cfg(not(target_os = "linux"))]
     let source = probe_live_source(
         &system,
         &transport.scratch,
@@ -3734,10 +3930,20 @@ async fn pump_tuner_fanout(
                     ..
                 }) = sample.take()
                 {
+                    #[cfg(not(target_os = "linux"))]
                     let directory = transport.scratch.clone();
+                    #[cfg(target_os = "linux")]
+                    let source_transport = Arc::clone(&transport);
                     let system = prober.clone();
                     probing = Some(Box::pin(async move {
                         let result = match system {
+                            #[cfg(target_os = "linux")]
+                            Some(system) => {
+                                source_transport
+                                    .probe_source(system, collected.into())
+                                    .await
+                            }
+                            #[cfg(not(target_os = "linux"))]
                             Some(system) => {
                                 probe_live_source(
                                     &system,

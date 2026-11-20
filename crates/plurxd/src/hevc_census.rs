@@ -165,9 +165,22 @@ fn note_failure(file: &MediaFile) {
 /// Sample the film and conclude, or `None` when nothing conclusive came back.
 async fn measure(file: &MediaFile) -> Option<Census> {
     let mut samples = tokio::task::JoinSet::new();
+    let keeper = plurx_core::process::bounded::original_keeper();
+    let cancel = tokio_util::sync::CancellationToken::new();
     for at in hevc_census::sample_points(file.duration_ms) {
         let args = hevc_census::sample_args(&file.path, at);
-        samples.spawn(sample(args));
+        if let Some(keeper) = keeper.clone() {
+            let cancel = cancel.clone();
+            samples.spawn(async move {
+                plurx_core::process::bounded::with_original_work_keeper(
+                    keeper,
+                    plurx_core::process::bounded::cancellable(cancel, sample(args)),
+                )
+                .await
+            });
+        } else {
+            samples.spawn(sample(args));
+        }
     }
     let deadline = tokio::time::Instant::now() + CENSUS_BUDGET;
     let mut observations = Vec::new();
@@ -180,7 +193,14 @@ async fn measure(file: &MediaFile) -> Option<Census> {
             Ok(Some(Err(joined))) => failures.push(joined.to_string()),
             Ok(None) => break,
             Err(_) => {
-                samples.abort_all();
+                if keeper.is_some() {
+                    // Keep the existing census answer deadline. Each original
+                    // bounded helper owns the same lane until its cleanup.
+                    cancel.cancel();
+                    samples.detach_all();
+                } else {
+                    samples.abort_all();
+                }
                 timed_out = true;
                 break;
             }

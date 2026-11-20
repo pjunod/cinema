@@ -17,7 +17,10 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
-use tokio::{io::AsyncReadExt, sync::mpsc};
+use tokio::io::AsyncReadExt;
+mod events;
+pub use events::SoftwareVodEvents;
+use events::{EventSender, SoftwareVodMailbox};
 #[cfg(target_os = "linux")]
 mod telemetry;
 #[cfg(target_os = "linux")]
@@ -128,9 +131,9 @@ impl SoftwareAvcPumpPlan {
         self.plan.entries.len()
     }
 
-    /// The private Tokio channel layout, block rollover/reuse peak, allocator
-    /// rounding, and native producer peak have no certified finite bound here.
-    /// This claim must accompany the numeric known component at admission.
+    /// Runtime/allocator overhead and the producer peak outside the
+    /// explicitly paid partitions are still unknown. A fixed mailbox and
+    /// bounded child envelope do not certify the whole graph's peak.
     pub(in crate::adaptive_resources::runtime) fn memory_claim(
         &self,
     ) -> crate::adaptive_resources::MemoryClaim {
@@ -138,11 +141,11 @@ impl SoftwareAvcPumpPlan {
     }
 
     /// Known requested partitions, including the inline pump/receiver owners,
-    /// the initial event block's payload and both identity copies. This is a minimum, not an upper bound on Tokio
-    /// channel or task/native memory; `memory_claim` retains that uncertainty.
+    /// one fixed event mailbox and both identity copies. This is requested
+    /// storage, not an upper bound on task/native memory.
     pub(in crate::adaptive_resources) fn minimum_memory_bytes(&self) -> io::Result<u64> {
         let total = size_of::<SoftwarePump>()
-            .checked_add(size_of::<mpsc::Receiver<SoftwareVodEvent>>())
+            .checked_add(size_of::<SoftwareVodEvents>())
             .and_then(|n| {
                 n.checked_add(
                     self.plan
@@ -181,7 +184,7 @@ impl SoftwareAvcPumpPlan {
 /// Bounded-channel metadata; never a terminal receipt or a resource refund.
 #[allow(
     clippy::large_enum_variant,
-    reason = "Keep the event inline; boxing adds another allocation. initial_event_requested_bytes counts the initial block payload and both AVC identity copies; the private channel layout and live block peak remain UnknownProducerPeak."
+    reason = "The finite mailbox and writer both count the inline event; boxing would add a separate allocation."
 )]
 pub enum SoftwareVodEvent {
     Initialized(InitIdentity),
@@ -192,16 +195,6 @@ pub enum SoftwareVodEvent {
     },
 }
 
-// Tokio 1.53.1 sync/mpsc/mod.rs: BLOCK_CAP is 32 on 64-bit and 16 on
-// 32-bit. list::channel allocates one Block immediately, irrespective of the
-// bounded semaphore's message capacity. block::Values is an inline array of
-// that many event slots. This is only a payload projection, not a mirror of
-// Tokio's private Block/Chan/CachePadded/semaphore or allocator layouts.
-const EVENT_CHANNEL_CAPACITY: usize = 1;
-#[cfg(target_pointer_width = "64")]
-const INITIAL_EVENT_BLOCK_SLOTS: usize = 32;
-#[cfg(not(target_pointer_width = "64"))]
-const INITIAL_EVENT_BLOCK_SLOTS: usize = 16;
 // identity::digest formats two SHA-256 digests as 64-byte hex strings. AVC
 // always establishes with empty/default promotion facts. The original and one
 // Initialized clone coexist; no parameter-set Vec backing may enter this path.
@@ -209,8 +202,8 @@ const IDENTITY_DIGEST_BYTES: usize = 64;
 const LIVE_IDENTITY_COPIES: usize = 2;
 
 fn initial_event_requested_bytes() -> Option<usize> {
-    INITIAL_EVENT_BLOCK_SLOTS
-        .checked_mul(size_of::<SoftwareVodEvent>())?
+    size_of::<SoftwareVodMailbox>()
+        .checked_add(2 * size_of::<usize>())? // Arc ownership counters
         .checked_add(
             LIVE_IDENTITY_COPIES
                 .checked_mul(2)?
@@ -236,7 +229,7 @@ fn initialized_event(identity: &InitIdentity) -> io::Result<SoftwareVodEvent> {
 pub(in crate::adaptive_resources) struct SoftwarePump {
     output: FiniteOutput,
     plan: SoftwareAvcPumpPlan,
-    events: mpsc::Sender<SoftwareVodEvent>,
+    events: EventSender,
     #[cfg(target_os = "linux")]
     history_context: Option<(telemetry::HistoryBasis, ResourceLedger, FamilyIdentity)>,
 }
@@ -318,7 +311,7 @@ impl SoftwarePump {
     pub(in crate::adaptive_resources) fn new(
         output: FiniteOutput,
         plan: SoftwareAvcPumpPlan,
-    ) -> io::Result<(Self, mpsc::Receiver<SoftwareVodEvent>)> {
+    ) -> io::Result<(Self, SoftwareVodEvents)> {
         if !output.has_encoded_process_metadata() {
             return Err(invalid("ordinary AVC requires encoded-process metadata"));
         }
@@ -330,8 +323,8 @@ impl SoftwarePump {
     pub(in crate::adaptive_resources::runtime) fn from_encoded_output(
         output: FiniteOutput,
         plan: SoftwareAvcPumpPlan,
-    ) -> (Self, mpsc::Receiver<SoftwareVodEvent>) {
-        let (events, receiver) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+    ) -> (Self, SoftwareVodEvents) {
+        let (events, receiver) = events::channel();
         (
             Self {
                 output,
@@ -523,7 +516,7 @@ impl SoftwarePump {
 
 struct FiniteSink<'a> {
     output: &'a FiniteOutput,
-    events: &'a mpsc::Sender<SoftwareVodEvent>,
+    events: &'a EventSender,
     complete: &'a AtomicBool,
     #[cfg(target_os = "linux")]
     telemetry: std::sync::Mutex<FiniteTelemetry>,

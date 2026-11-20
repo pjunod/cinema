@@ -80,6 +80,9 @@ impl TranscodeManager {
                 if let Some(quota) = ticket.quota.take() {
                     quota.known_closed();
                 }
+                if let Some(lane) = ticket.playback_lane.take() {
+                    lane.known_finished();
+                }
                 attempt.ticket.take();
             }
             Err(error) => tracing::debug!(target: "plurxd::transcode", %error,

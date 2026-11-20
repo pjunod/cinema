@@ -53,11 +53,8 @@ pub(crate) async fn probe_media_origin(source_path: &std::path::Path, start_seco
         );
         return start_seconds;
     }
-    let probe = crate::process_control::output_job_owned(
-        &mut command,
-        crate::process_control::ChildWork::realtime("playback start media probe"),
-    );
-    let Ok(Ok(out)) = tokio::time::timeout(MEDIA_ORIGIN_PROBE_TIMEOUT, probe).await else {
+    let out = capture_media_origin(&mut command).await;
+    let Ok(out) = out else {
         tracing::warn!(
             target: "plurxd::transcode",
             start_seconds,
@@ -96,6 +93,36 @@ pub(crate) async fn probe_media_origin(source_path: &std::path::Path, start_seco
 /// A copy session must use the preceding keyframe reported on stdout, not the
 /// requested seek time. Generate exactly two keyframes so the expected origin
 /// is a property of this fixture rather than of an installed media file.
+async fn capture_media_origin(
+    command: &mut tokio::process::Command,
+) -> std::io::Result<std::process::Output> {
+    let work = crate::process_control::ChildWork::realtime("playback start media probe");
+    #[cfg(target_os = "linux")]
+    if plurx_core::process::bounded::original_keeper().is_some() {
+        // This exact command emits at most four compact packet rows. Keep
+        // bounded diagnostics with the original group and pipe reaper.
+        const ORIGIN_PROBE_BYTES: usize = 64 * 1024;
+        let out = plurx_core::process::bounded::output_command(
+            command,
+            MEDIA_ORIGIN_PROBE_TIMEOUT,
+            ORIGIN_PROBE_BYTES,
+            work,
+        )
+        .await?;
+        return Ok(std::process::Output {
+            status: out.status,
+            stdout: out.stdout,
+            stderr: out.stderr,
+        });
+    }
+    tokio::time::timeout(
+        MEDIA_ORIGIN_PROBE_TIMEOUT,
+        crate::process_control::output_job_owned(command, work),
+    )
+    .await
+    .map_err(std::io::Error::other)?
+}
+
 #[cfg(test)]
 #[tokio::test]
 #[ignore = "needs ffmpeg"]

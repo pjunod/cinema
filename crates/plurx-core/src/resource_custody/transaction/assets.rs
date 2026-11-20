@@ -83,7 +83,7 @@ pub(super) fn load(connection: &Connection) -> Result<Vec<RetainedAssetOwner>, C
             || codec::uuid_from_bytes(&producer_graph)? != custody.producer_graph_id.uuid()
             || original.checked_sub(retained).is_none()
             || original_epoch != target_epoch
-            || original_trial != trial
+            || (trial.is_some() && original_trial != trial)
         {
             return Err(codec::invalid());
         }
@@ -254,7 +254,7 @@ fn validate_v2_row(
             .checked_sub(retained)
             .is_none()
         || original_epoch != target_epoch
-        || original_trial != trial
+        || (trial.is_some() && original_trial != trial)
     {
         return Err(codec::invalid());
     }

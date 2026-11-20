@@ -24,6 +24,120 @@ use super::extract::AuthUser;
 use crate::ffmpeg::{ffmpeg_bin, ffprobe_bin, pacing_caps, PacingCaps};
 use crate::state::AppState;
 
+/// Keep the original egress owner through both body polling and any frames
+/// handed to the HTTP connection before cancellation or end-of-stream.
+#[cfg(target_os = "linux")]
+pub(crate) fn protect_body<L: Send + Sync + 'static>(
+    response: Response,
+    lane: std::sync::Arc<L>,
+) -> Response {
+    response.map(|body| Body::new(ProtectedBody { body, lane }))
+}
+
+#[cfg(target_os = "linux")]
+struct ProtectedBody<L> {
+    body: Body,
+    lane: std::sync::Arc<L>,
+}
+
+#[cfg(target_os = "linux")]
+struct ProtectedFrame<L> {
+    bytes: bytes::Bytes,
+    _lane: std::sync::Arc<L>,
+}
+
+#[cfg(target_os = "linux")]
+impl<L> AsRef<[u8]> for ProtectedFrame<L> {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl<L: Send + Sync + 'static> http_body::Body for ProtectedBody<L> {
+    type Data = bytes::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let frame = std::pin::Pin::new(&mut self.body).poll_frame(cx);
+        match frame {
+            std::task::Poll::Ready(Some(Ok(frame))) => std::task::Poll::Ready(Some(Ok(frame
+                .map_data(|bytes| {
+                    bytes::Bytes::from_owner(ProtectedFrame {
+                        bytes,
+                        _lane: std::sync::Arc::clone(&self.lane),
+                    })
+                })))),
+            other => other,
+        }
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+}
+
+/// One actual lane spans its original native owner and the work it spawned.
+#[cfg(target_os = "linux")]
+pub(crate) struct ProtectedOriginalWork {
+    lane: crate::admission::ProtectedPlaybackLane,
+    native_possible: std::sync::atomic::AtomicBool,
+    uncertain_helper: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(target_os = "linux")]
+impl ProtectedOriginalWork {
+    fn try_acquire(state: &AppState) -> Result<std::sync::Arc<Self>, ApiError> {
+        let lane = state
+            .transcode
+            .admissions()
+            .try_acquire_protected_playback_lane()
+            .map_err(|reason| ApiError::ServiceUnavailable(reason.into()))?;
+        Ok(Self::new(lane))
+    }
+
+    pub(crate) fn new(lane: crate::admission::ProtectedPlaybackLane) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            lane,
+            native_possible: std::sync::atomic::AtomicBool::new(false),
+            uncertain_helper: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn track_original(&self, possible: bool) {
+        self.native_possible
+            .store(possible, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl plurx_core::process::bounded::OriginalWorkKeeper for ProtectedOriginalWork {
+    fn retain_uncertainty(&self, _reason: plurx_core::process::bounded::OriginalWorkUncertainty) {
+        self.uncertain_helper
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn requires_group_quiescence(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ProtectedOriginalWork {
+    fn drop(&mut self) {
+        if *self.native_possible.get_mut() || *self.uncertain_helper.get_mut() {
+            self.lane.arm_physical();
+        }
+    }
+}
+
 /// How fast a remux is allowed to run, as a multiple of real time, and how much
 /// it may deliver flat-out before that limit engages.
 ///
@@ -3426,6 +3540,27 @@ async fn serve_stream_mp4(
             "this source cannot be made compatible by the progressive copy endpoint; use the planned HLS session",
         ));
     }
+    #[cfg(target_os = "linux")]
+    let protection = ProtectedOriginalWork::try_acquire(&state)?;
+    #[cfg(target_os = "linux")]
+    let probe_json = {
+        let keeper: std::sync::Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper> =
+            protection.clone();
+        let store = state.store.clone();
+        let census_file = file.clone();
+        // The caller may abandon its response while the original census
+        // is still joining its helpers. The admitted task retains the lane.
+        tokio::spawn(async move {
+            plurx_core::process::bounded::with_original_work_keeper(
+                keeper,
+                crate::hevc_census::probe_json_for_copy(store.as_ref(), &census_file),
+            )
+            .await
+        })
+        .await
+        .map_err(|error| ApiError::Internal(format!("progressive census worker: {error}")))??
+    };
+    #[cfg(not(target_os = "linux"))]
     let probe_json = crate::hevc_census::probe_json_for_copy(state.store.as_ref(), &file).await?;
     let promote_hevc_parameter_sets =
         plurx_core::transcode::hevc_parameter_set_promotion_required(&file, probe_json.as_deref());
@@ -3553,6 +3688,8 @@ async fn serve_stream_mp4(
         readrate,
         tracked,
         serving: state.serving.subscribe(),
+        #[cfg(target_os = "linux")]
+        protection,
     })
     .await
 }
@@ -4088,6 +4225,8 @@ struct RemuxSpec<'a> {
     /// Process-wide quorum authority. Its monotonic generation makes a loss
     /// observable even when recovery is published before this task runs.
     serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+    #[cfg(target_os = "linux")]
+    protection: std::sync::Arc<ProtectedOriginalWork>,
 }
 
 /// Cancels the independent child owner when the HTTP body is dropped. The
@@ -4144,7 +4283,74 @@ fn spawn_remux_process_owner(
         admitted_generation,
         registry_guard,
         None,
+        #[cfg(target_os = "linux")]
+        None,
     )
+}
+
+#[cfg(target_os = "linux")]
+struct RemuxProtection {
+    lane: std::sync::Arc<ProtectedOriginalWork>,
+    stderr: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(target_os = "linux")]
+struct PendingRemuxInput {
+    input: Option<crate::source_input::SourceInput>,
+    protection: std::sync::Arc<ProtectedOriginalWork>,
+}
+
+#[cfg(target_os = "linux")]
+impl PendingRemuxInput {
+    async fn open(
+        request: crate::source_custody::SourceRequest,
+        protection: std::sync::Arc<ProtectedOriginalWork>,
+    ) -> Result<Self, ApiError> {
+        // The request observes this one original native open. Its result also
+        // owns actual cleanup if the observer leaves before taking it.
+        tokio::spawn(async move {
+            let input = plurx_core::process::bounded::with_original_work_keeper(
+                protection.clone(),
+                crate::source_input::SourceInput::open(request, "progressive-remux"),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+            protection.track_original(true);
+            Ok(Self {
+                input: Some(input),
+                protection,
+            })
+        })
+        .await
+        .map_err(|error| ApiError::Internal(format!("progressive source worker: {error}")))?
+    }
+
+    fn into_input(mut self) -> crate::source_input::SourceInput {
+        self.input
+            .take()
+            .expect("one prepared original remux source")
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for PendingRemuxInput {
+    fn drop(&mut self) {
+        if let Some(input) = self.input.take() {
+            let protection = self.protection.clone();
+            // If the runtime cannot run the actual cleanup, the armed lane
+            // preserves the original uncertainty.
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    match input.close_and_wait().await {
+                        Ok(()) => protection.track_original(false),
+                        Err(error) => {
+                            tracing::warn!(%error, "abandoned remux source is still settling")
+                        }
+                    }
+                });
+            }
+        }
+    }
 }
 
 fn spawn_remux_process_owner_with_source(
@@ -4154,6 +4360,7 @@ fn spawn_remux_process_owner_with_source(
     admitted_generation: u64,
     registry_guard: Option<crate::progressive::StreamGuard>,
     source_custody: Option<crate::source_input::SourceInput>,
+    #[cfg(target_os = "linux")] protection: Option<RemuxProtection>,
 ) -> (
     RemuxProcessGuard,
     tokio_util::sync::CancellationToken,
@@ -4163,8 +4370,10 @@ fn spawn_remux_process_owner_with_source(
     let owner_cancel = cancel.clone();
     let fenced = tokio_util::sync::CancellationToken::new();
     let owner_fenced = fenced.clone();
+    #[cfg(target_os = "linux")]
+    let process_group = child.id().and_then(|id| i32::try_from(id).ok());
     let task = tokio::spawn(async move {
-        let _child_job = child_job;
+        let job = child_job;
         let mut source_custody = source_custody;
         // Registration belongs to the process lifetime. It disappears on
         // natural exit, body drop, or serving loss—not merely when Hyper next
@@ -4177,6 +4386,8 @@ fn spawn_remux_process_owner_with_source(
         // (or, at startup, a response not yet sent), and only this owner can
         // tell it that a loss outlasted the grace.
         let mut exited = false;
+        #[cfg(target_os = "linux")]
+        let mut original_closed = false;
         // `Some(reason)`: the stream ends because authority is gone.
         let fenced_out: Option<&'static str> = loop {
             let authority = *serving.borrow_and_update();
@@ -4214,14 +4425,12 @@ fn spawn_remux_process_owner_with_source(
             }
             tokio::select! {
                 status = child.wait(), if !exited => {
-                    if let Err(error) = status {
-                        tracing::warn!(%error, "waiting for remux ffmpeg failed");
-                        if let Some(custody)=source_custody.take() { custody.cleanup_pending(); }
-                    }
+                    let closed = close_remux_source(status, source_custody.take()).await;
+                    #[cfg(target_os = "linux")]
+                    { original_closed = closed; }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = closed;
                     exited = true;
-                    if let Some(input)=source_custody.take() {
-                        if let Err(error)=input.close_and_wait().await {tracing::warn!(%error,"progressive original input settlement failed");}
-                    }
                     drop(registry_guard.take());
                 }
                 () = owner_cancel.cancelled() => break None,
@@ -4245,23 +4454,54 @@ fn spawn_remux_process_owner_with_source(
             if child.try_wait().ok().flatten().is_none() {
                 let _ = child.kill().await;
             }
-            match child.wait().await {
-                Ok(_) => {
-                    if let Some(input) = source_custody.take() {
-                        if let Err(error) = input.close_and_wait().await {
-                            tracing::warn!(%error,"progressive original input settlement failed");
-                        }
-                    }
-                }
-                Err(_) => {
-                    if let Some(custody) = source_custody.take() {
-                        custody.cleanup_pending();
+            let closed = close_remux_source(child.wait().await, source_custody.take()).await;
+            #[cfg(target_os = "linux")]
+            {
+                original_closed = closed;
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = closed;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(RemuxProtection { lane, stderr }) = protection {
+            let stderr_closed = stderr.await.is_ok();
+            drop(child);
+            drop(job);
+            if original_closed && stderr_closed {
+                if let Some(group) = process_group {
+                    if matches!(
+                        plurx_core::process::bounded::source_group_quiescent(group, false).await,
+                        Ok(true)
+                    ) {
+                        lane.track_original(false);
                     }
                 }
             }
         }
+        #[cfg(not(target_os = "linux"))]
+        drop(job);
     });
     (RemuxProcessGuard { cancel }, fenced, task)
+}
+
+async fn close_remux_source(
+    status: std::io::Result<std::process::ExitStatus>,
+    source: Option<crate::source_input::SourceInput>,
+) -> bool {
+    if let Err(error) = status {
+        tracing::warn!(%error, "waiting for remux ffmpeg failed");
+        if let Some(source) = source {
+            source.cleanup_pending();
+        }
+        return false;
+    }
+    if let Some(source) = source {
+        if let Err(error) = source.close_and_wait().await {
+            tracing::warn!(%error, "progressive original input settlement failed");
+            return false;
+        }
+    }
+    true
 }
 
 /// Whether the progressive body may publish now: serving authority is held,
@@ -4471,6 +4711,8 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         readrate,
         tracked,
         mut serving,
+        #[cfg(target_os = "linux")]
+        protection,
     } = spec;
     let admitted_generation = {
         let authority = *serving.borrow_and_update();
@@ -4600,7 +4842,14 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         .map_err(ApiError::Internal)?;
     #[cfg(not(windows))]
     let descriptors = crate::producer_spawn::Descriptors::default();
-    let source_custody = match source_request {
+    let mut source_custody = match source_request {
+        #[cfg(target_os = "linux")]
+        Some(request) => Some(
+            PendingRemuxInput::open(request, protection.clone())
+                .await?
+                .into_input(),
+        ),
+        #[cfg(not(target_os = "linux"))]
         Some(request) => Some(
             crate::source_input::SourceInput::open(request, "progressive-remux")
                 .await
@@ -4608,6 +4857,8 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         ),
         None => None,
     };
+    #[cfg(target_os = "linux")]
+    protection.track_original(true);
     let args = crate::source_input::source_args(
         &args,
         path,
@@ -4615,12 +4866,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         source_custody.as_ref().map(|input| input.url()),
     );
     let program = ffmpeg_bin();
-    let crate::producer_spawn::Spawned {
-        child,
-        child_job,
-        stdout,
-        stderr,
-    } = crate::producer_spawn::spawn(
+    let spawn = crate::producer_spawn::spawn(
         Path::new(&program),
         &args,
         crate::producer_spawn::SpawnOptions {
@@ -4634,8 +4880,23 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
             env: &[],
             work: crate::process_control::ChildWork::realtime("playback remux"),
         },
-    )
-    .map_err(ApiError::Internal)?;
+    );
+    let crate::producer_spawn::Spawned {
+        child,
+        child_job,
+        stdout,
+        stderr,
+    } = match spawn {
+        Ok(spawn) => spawn,
+        Err(error) => {
+            if let Some(source) = source_custody.take() {
+                if let Err(cleanup_error) = source.close_and_wait().await {
+                    tracing::warn!(%cleanup_error, "failed remux start's source is still settling");
+                }
+            }
+            return Err(ApiError::Internal(error));
+        }
+    };
 
     let (tracked_stream, guard) = match tracked {
         Some((s, g)) => (Some(s), Some(g)),
@@ -4654,7 +4915,9 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         let generation = p.begin_attempt();
         (p, generation)
     });
-    tokio::spawn(consume_remux_stderr(stderr, telemetry));
+    let stderr = tokio::spawn(consume_remux_stderr(stderr, telemetry));
+    #[cfg(not(target_os = "linux"))]
+    drop(stderr);
 
     // The owner takes the child before anything else can wait, so a loss of
     // serving authority during the origin probe is resolved by the same grace
@@ -4667,6 +4930,11 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         admitted_generation,
         owner_guard,
         source_custody,
+        #[cfg(target_os = "linux")]
+        Some(RemuxProtection {
+            lane: protection.clone(),
+            stderr,
+        }),
     );
 
     // Probe after the remux starts opening the source, matching the HLS copy
@@ -4674,11 +4942,35 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // `make_zero` makes the preceding keyframe local time zero, so the
     // requested seek is not an accurate source-time origin for copied video.
     let start_seconds = start.unwrap_or(0.0).max(0.0);
+    #[cfg(target_os = "linux")]
+    let origin = {
+        let keeper: std::sync::Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper> =
+            protection.clone();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let cancel_on_drop = cancellation.clone().drop_guard();
+        let path = path.to_owned();
+        let worker = tokio::spawn(async move {
+            plurx_core::process::bounded::with_original_work_keeper(
+                keeper,
+                plurx_core::process::bounded::cancellable(
+                    cancellation,
+                    crate::transcode::probe_media_origin(&path, start_seconds),
+                ),
+            )
+            .await
+        });
+        async move {
+            let _cancel_on_drop = cancel_on_drop;
+            worker.await.unwrap_or(start_seconds)
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let origin = crate::transcode::probe_media_origin(path, start_seconds);
     let media_origin_seconds = tokio::select! {
         origin = bounded_progressive_media_origin(
             start_seconds,
             PROGRESSIVE_MEDIA_ORIGIN_PROBE_TIMEOUT,
-            crate::transcode::probe_media_origin(path, start_seconds),
+            origin,
         ) => origin,
         () = fenced.cancelled() => {
             return Err(ApiError::ServiceUnavailable(
@@ -4715,6 +5007,8 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         HeaderValue::from_str(&media_origin_ms.to_string())
             .expect("a signed integer is a valid HTTP header value"),
     );
+    #[cfg(target_os = "linux")]
+    let response = protect_body(response, protection);
     Ok(response)
 }
 

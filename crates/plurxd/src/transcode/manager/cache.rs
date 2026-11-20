@@ -907,6 +907,8 @@ impl TranscodeManager {
             return None;
         }
         let session = Arc::new(Session {
+            #[cfg(target_os = "linux")]
+            playback_lane: std::sync::Mutex::new(None),
             dir,
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen_presentation),

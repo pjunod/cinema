@@ -518,6 +518,7 @@ impl NodeResourceRuntime {
             None,
             deadline,
             None,
+            false,
             |_| (),
         )
         .map(|(owner, ())| owner)
@@ -582,6 +583,7 @@ impl NodeResourceRuntime {
             continuous_entry_deadline,
             deadline,
             None,
+            false,
             initialize,
         )
     }
@@ -600,6 +602,7 @@ impl NodeResourceRuntime {
         continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
         deadline: Instant,
         collector: Option<&super::ordinary_finite_collector::OrdinarySlot>,
+        contained_trial: bool,
         initialize: impl FnOnce(&OwnedPreparation) -> T,
     ) -> Result<(OwnedPreparation, T), OperationError> {
         self.prepare_plan_families(
@@ -621,6 +624,7 @@ impl NodeResourceRuntime {
             continuous_entry_deadline,
             deadline,
             collector,
+            contained_trial,
             initialize,
         )
     }
@@ -639,6 +643,7 @@ impl NodeResourceRuntime {
         continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
         deadline: Instant,
         collector: Option<&super::ordinary_finite_collector::OrdinarySlot>,
+        contained_trial: bool,
         initialize: impl FnOnce(&OwnedPreparation) -> T,
     ) -> Result<(OwnedPreparation, T), OperationError> {
         if families.is_empty()
@@ -726,7 +731,7 @@ impl NodeResourceRuntime {
                     }
                     let owned = self
                         .ledger
-                        .reserve_families_claiming(families, claims)
+                        .reserve_families_claiming_contained(families, claims, contained_trial)
                         .map_err(|error| {
                             OperationError::BeforeReservation(PreReservationRefusal::Admission(
                                 error,
@@ -745,7 +750,7 @@ impl NodeResourceRuntime {
                         let binding = reservation.custody_binding();
                         // Graph construction creates only private memory custody, no kernel
                         // object, child, task, file or other counted member.
-                        let graph = reservation.into_physical_graph()?;
+                        let graph = reservation.into_owned_physical_graph(contained_trial)?;
                         let identity = graph.identity();
                         if identity.process_instance != self.owner.owner_id {
                             return Err(OperationError::State);

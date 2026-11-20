@@ -614,7 +614,15 @@ pub(super) async fn prepare_adaptive_origin(
             };
             // No legacy fallback or new Claim until the SAME original row is
             // known fenced. Winner/unknown/deadline holds are returned intact.
-            adaptive_retry::fence_original(state, context, &claim, deadline).await?;
+            let cleanup_deadline = if owner_node_id == state.node_id {
+                state
+                    .transcode
+                    .adaptive_local_trial_cleanup_cutoff(claim.key.attempt_id)
+                    .map_or(deadline, |cutoff| deadline.min(cutoff.into()))
+            } else {
+                deadline
+            };
+            adaptive_retry::fence_original(state, context, &claim, cleanup_deadline).await?;
             // A typed growth refusal is not a cleanup receipt. Its fixed P/M
             // may still be retained even though no new R was admitted.
             let processed_capacity =
@@ -623,7 +631,8 @@ pub(super) async fn prepare_adaptive_origin(
                 && (!recipe.request.is_exact_adaptive_fel() || processed_capacity)
                 && (!(processed_capacity
                     || error.code() == Some(crate::media_sessions::ADAPTIVE_TRIAL_REFUSED))
-                    || adaptive_retry::policy_refusal_retry_ready(state, &claim, deadline).await);
+                    || adaptive_retry::policy_refusal_retry_ready(state, &claim, cleanup_deadline)
+                        .await);
             Err(if may_retry {
                 AdaptiveOriginFailure::NextWorker(error)
             } else {
@@ -5552,6 +5561,14 @@ async fn create_with_purpose_attempt(
             && file.dolby_vision.is_empty()
     });
     #[cfg(target_os = "linux")]
+    let needs_adaptive_software_prepare = |offer: &crate::media_pool::MediaOffer| {
+        // The ordinary local start revalidates the selected cache and binds
+        // the real retained owner. Adaptive prepare only owns a new R.
+        offer.eligible
+            && offer.encoder == "software"
+            && !(offer.node_id == state.node_id && offer.cache_hit)
+    };
+    #[cfg(target_os = "linux")]
     let mut ranked_software_offers = None;
     let candidate_owner = request
         .candidate_context
@@ -5591,7 +5608,7 @@ async fn create_with_purpose_attempt(
                     ranked_software_offers = Some(
                         offers
                             .iter()
-                            .filter(|offer| offer.eligible && offer.encoder == "software")
+                            .filter(|offer| needs_adaptive_software_prepare(offer))
                             .map(|offer| offer.node_id.clone())
                             .collect(),
                     );
@@ -5651,7 +5668,7 @@ async fn create_with_purpose_attempt(
                     .await
                     .offers
                     .into_iter()
-                    .filter(|row| row.eligible && row.encoder == "software")
+                    .filter(needs_adaptive_software_prepare)
                     .map(|row| row.node_id)
                     .collect(),
                 Err(_) => std::collections::HashSet::new(),
@@ -5672,6 +5689,13 @@ async fn create_with_purpose_attempt(
     // takes it (review S2).
     let mut placement_ended = false;
     let mut unbound_confirmed = false;
+    #[cfg(target_os = "linux")]
+    let consider_local_trial =
+        if !exact_fel && owner_candidates.as_slice() == [state.node_id.as_str()] {
+            state.live_tv.local_dvr_trial_authority()
+        } else {
+            None
+        };
     for candidate in owner_candidates {
         if tokio::time::Instant::now() >= placement_deadline {
             last_error = Some(create_still_starting(
@@ -5719,28 +5743,32 @@ async fn create_with_purpose_attempt(
             // The root claim has entered the versioned attempt protocol.
             // A failed or uncertain result never falls through to legacy.
             request_guard.disarm();
-            let selection = prepare_adaptive_origin(
-                &state,
-                &mut adaptive_context,
-                &candidate,
-                quote,
-                source.as_ref().expect("adaptive source was checked"),
-                planning_snapshot
-                    .as_ref()
-                    .expect("adaptive snapshot was checked"),
-                &remote_request,
-                &request_claim_id,
-                &incarnation_id,
-                &fingerprint,
-                &recovery_epoch,
-                activation_predecessor.as_ref(),
-                expected_predecessor_incarnation_id.as_deref(),
-                recorded_ask_revision,
-                original_claim_deadline_ms,
-                placement_deadline,
-                crate::media_sessions::AdaptivePreparePurpose::Create,
-            )
-            .await;
+            let selection = crate::admission::CONSIDER_LOCAL_PLAYBACK_TRIAL
+                .scope(
+                    consider_local_trial.clone(),
+                    prepare_adaptive_origin(
+                        &state,
+                        &mut adaptive_context,
+                        &candidate,
+                        quote,
+                        source.as_ref().expect("adaptive source was checked"),
+                        planning_snapshot
+                            .as_ref()
+                            .expect("adaptive snapshot was checked"),
+                        &remote_request,
+                        &request_claim_id,
+                        &incarnation_id,
+                        &fingerprint,
+                        &recovery_epoch,
+                        activation_predecessor.as_ref(),
+                        expected_predecessor_incarnation_id.as_deref(),
+                        recorded_ask_revision,
+                        original_claim_deadline_ms,
+                        placement_deadline,
+                        crate::media_sessions::AdaptivePreparePurpose::Create,
+                    ),
+                )
+                .await;
             let mut selection = match selection {
                 Ok(selection) => {
                     if candidate != state.node_id {

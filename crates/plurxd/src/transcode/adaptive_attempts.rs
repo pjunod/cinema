@@ -692,6 +692,7 @@ pub(super) struct AttemptEntry {
     remote_registration: Mutex<Option<RemoteRegistration>>,
     // Inline reason belongs to this original owner, including failed replay.
     trial_refusal: Mutex<Option<plurx_core::resource_policy::TrialRefusal>>,
+    local_trial_cleanup_by: Mutex<Option<std::time::Instant>>,
     processed_refusal: Mutex<Option<AdaptiveProcessedRefusal>>,
     coordinator_frame_bytes: std::sync::atomic::AtomicUsize,
     task_join_failed: std::sync::atomic::AtomicBool,
@@ -930,6 +931,7 @@ impl AdaptiveAttemptRegistry {
                 remote_changed: tokio::sync::Notify::new(),
                 remote_registration: Mutex::new(None),
                 trial_refusal: Mutex::new(None),
+                local_trial_cleanup_by: Mutex::new(None),
                 processed_refusal: Mutex::new(None),
                 coordinator_frame_bytes: std::sync::atomic::AtomicUsize::new(0),
                 attempt_id,
@@ -2127,6 +2129,9 @@ impl super::TranscodeManager {
         // preparation allowance and continuous cutoff. Preserve registered
         // replay above even after caller cancellation; refuse fresh
         // registration without that scope.
+        let consider_trial = crate::admission::CONSIDER_LOCAL_PLAYBACK_TRIAL
+            .try_with(Clone::clone)
+            .unwrap_or_default();
         let (entry, deadline) = self
             .adaptive_attempts
             .reserve_local(&request.claim, deadline)?;
@@ -2140,8 +2145,17 @@ impl super::TranscodeManager {
                 admission,
                 async move {
                     let _restart_admission = restart_admission;
-                    let result = manager
-                        .run_adaptive_prepare(state, request, original.clone(), deadline, frame_rx)
+                    let result = crate::admission::CONSIDER_LOCAL_PLAYBACK_TRIAL
+                        .scope(
+                            consider_trial,
+                            manager.run_adaptive_prepare(
+                                state,
+                                request,
+                                original.clone(),
+                                deadline,
+                                frame_rx,
+                            ),
+                        )
                         .await;
                     let _ = reply_tx.send(result.map_err(|error| original.prepare_error(error)));
                 },
@@ -2789,6 +2803,9 @@ impl super::TranscodeManager {
                 )
                 .ok_or("adaptive settlement protection is full; original owner remains held")?,
             );
+        }
+        if let PreparedWorkerProduct::Finite(pending) = &rich.pending {
+            pending.begin_trial_adoption()?;
         }
         let outcome = match self.store.adopt_adaptive_winner(original).await {
             Ok(AttemptAdoption::Applied(outcome) | AttemptAdoption::Replay(outcome)) => outcome,
@@ -3873,7 +3890,25 @@ impl super::TranscodeManager {
         }
         let (prepared_handle_digest, output_digest) = match &mut rich.pending {
             PreparedWorkerProduct::Finite(pending) => {
-                pending.prepare_worker_binding(deadline).await?
+                let cleanup_by = pending.trial_cleanup_cutoff();
+                *entry
+                    .local_trial_cleanup_by
+                    .lock()
+                    .map_err(|_| "local trial cleanup fence unavailable")? = cleanup_by;
+                match pending.prepare_worker_binding(deadline).await {
+                    Ok(binding) => binding,
+                    Err(error) => {
+                        if cleanup_by.is_some() {
+                            *entry
+                                .trial_refusal
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
+                                plurx_core::resource_policy::TrialRefusal::InsufficientEvidence,
+                            );
+                        }
+                        return Err(error);
+                    }
+                }
             }
             PreparedWorkerProduct::ProcessedFel(pending) => pending.binding()?,
         };
@@ -4033,6 +4068,15 @@ impl super::TranscodeManager {
             return Err("adaptive starting route differs from Store Claim");
         }
         Ok(())
+    }
+
+    pub(crate) fn adaptive_local_trial_cleanup_cutoff(
+        &self,
+        attempt_id: Uuid,
+    ) -> Option<std::time::Instant> {
+        let entry = self.adaptive_attempts.get(attempt_id)?;
+        let cutoff = *entry.local_trial_cleanup_by.lock().ok()?;
+        cutoff
     }
 
     pub(crate) async fn adaptive_attempt_local_status(&self, attempt_id: Uuid) -> &'static str {

@@ -30,6 +30,16 @@
 //! session whose viewer already owns its slot. The two uses share a syscall and
 //! nothing else.)
 
+#[cfg(target_os = "linux")]
+mod playback_trial;
+#[cfg(target_os = "linux")]
+use playback_trial::PlaybackTrialSignal;
+#[cfg(target_os = "linux")]
+pub(crate) use playback_trial::{
+    CaptureTrialEpoch, PlaybackTrialLane, PlaybackTrialStop, ProtectedPlaybackLane,
+    CONSIDER_LOCAL_PLAYBACK_TRIAL,
+};
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -147,6 +157,12 @@ struct PermitState {
     /// Actual role guards own membership until the final worker is reaped.
     families: HashMap<u64, FamilyUsage>,
     next_family: u64,
+    #[cfg(target_os = "linux")]
+    protected_playback: usize,
+    #[cfg(target_os = "linux")]
+    playback_epoch: Arc<AtomicU64>,
+    #[cfg(target_os = "linux")]
+    playback_trial: Option<Arc<PlaybackTrialSignal>>,
 }
 
 #[derive(Debug, Default)]
@@ -367,6 +383,10 @@ impl SwPool {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(target_os = "linux")]
+        if permits.blocks_playback_trial(priority == Priority::Live) {
+            return None;
+        }
         if permits.family_blocked(None) {
             return None;
         }
@@ -425,6 +445,8 @@ impl SwPool {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(target_os = "linux")]
+        permits.blocks_playback_trial(true);
         permits.live_waiting += 1;
         drop(permits);
         LiveWait {
@@ -460,6 +482,10 @@ impl SwPool {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(target_os = "linux")]
+        if permits.blocks_playback_trial(true) {
+            return None;
+        }
         if permits.family_blocked(None) {
             return None;
         }
@@ -490,6 +516,8 @@ impl SwPool {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(target_os = "linux")]
+        permits.blocks_playback_trial(true);
         permits.software_live_permits += 1;
         permits.software_live_used += weight;
         drop(permits);
@@ -891,6 +919,10 @@ impl Admissions {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(target_os = "linux")]
+        if permits.blocks_playback_trial(priority == Priority::Live) {
+            return None;
+        }
         if permits.family_blocked(None) {
             return None;
         }
@@ -1007,6 +1039,10 @@ impl Admissions {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(target_os = "linux")]
+        if permits.blocks_playback_trial(priority == Priority::Live) {
+            return None;
+        }
         permits.prune();
         if permits.background_active() {
             return None;
@@ -1201,6 +1237,8 @@ impl Admissions {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(target_os = "linux")]
+        permits.blocks_playback_trial(true);
         permits.live_waiting += 1;
         drop(permits);
         LiveWait {
@@ -1265,6 +1303,8 @@ impl Admissions {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(target_os = "linux")]
+        permits.blocks_playback_trial(true);
         permits.prune();
         permits.next_reservation += 1;
         let token = permits.next_reservation;
@@ -1365,6 +1405,10 @@ impl Admissions {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(target_os = "linux")]
+        if permits.blocks_playback_trial(true) {
+            return None;
+        }
         if permits.family_blocked(None) {
             return None;
         }
@@ -1405,6 +1449,10 @@ impl Admissions {
             .permits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(target_os = "linux")]
+        if permits.blocks_playback_trial(priority == Priority::Live) {
+            return None;
+        }
         if permits.family_blocked(None) {
             return None;
         }

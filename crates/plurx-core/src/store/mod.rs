@@ -2956,6 +2956,20 @@ pub trait LibraryChannelStore: Send + Sync + 'static {
 ///   so a 30-second progress write racing a viewer's Stop cannot erase it.
 #[async_trait]
 pub trait DvrStore: Send + Sync + 'static {
+    /// This backend's durable capture writes are owned by one daemon.
+    /// A replicated backend cannot derive this from its current peer count.
+    #[cfg(target_os = "linux")]
+    fn has_local_dvr_commit_authority(&self) -> bool {
+        false
+    }
+
+    /// A single authoritative read of dormant as well as current promises.
+    /// The caller must separately serialize capture commits with its trial.
+    #[cfg(target_os = "linux")]
+    async fn local_dvr_obligations_clear(&self) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
     async fn list_dvr_rules(&self) -> Result<Vec<crate::dvr::DvrRule>, StoreError>;
 
     async fn get_dvr_rule(&self, id: &str) -> Result<Option<crate::dvr::DvrRule>, StoreError>;

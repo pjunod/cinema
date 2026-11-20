@@ -499,12 +499,13 @@ impl State {
         Ok(())
     }
     fn assess(&self, demand: WorkloadDemand) -> Result<ResourceVector, AdmissionRefusal> {
-        self.assess_claim(demand, MemoryClaim::default())
+        self.assess_claim(demand, MemoryClaim::default(), false)
     }
     fn assess_claim(
         &self,
         demand: WorkloadDemand,
         claim: MemoryClaim,
+        contained_trial: bool,
     ) -> Result<ResourceVector, AdmissionRefusal> {
         if self.invalid || self.draining {
             return Err(AdmissionRefusal::Unavailable);
@@ -530,7 +531,7 @@ impl State {
         self.memory_claims_fit(&[claim])?;
         let task_claim = TaskClaim::from_processes(resources.processes);
         self.task_claims_fit(&[task_claim])?;
-        if demand.trial && self.support.is_some() {
+        if demand.trial && self.support.is_some() && !contained_trial {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }
         if demand.trial && self.trial.is_some() {
@@ -669,6 +670,15 @@ impl ResourceLedger {
         families: &[FamilyDemand<'_>],
         claims: Option<&[MemoryClaim]>,
     ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
+        self.reserve_families_claiming_contained(families, claims, false)
+    }
+
+    pub(in crate::adaptive_resources) fn reserve_families_claiming_contained(
+        &self,
+        families: &[FamilyDemand<'_>],
+        claims: Option<&[MemoryClaim]>,
+        contained_trial: bool,
+    ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
         if families.is_empty()
             || families.len() > MAX_OVERLAP_FAMILIES
             || families.iter().any(|family| {
@@ -697,7 +707,7 @@ impl ResourceLedger {
                 ));
             }
         }
-        self.reserve_roles_claiming(&roles, claims)
+        self.reserve_roles_claiming_contained(&roles, claims, contained_trial)
     }
 
     #[allow(clippy::type_complexity)]
@@ -721,6 +731,20 @@ impl ResourceLedger {
         )],
         claims: Option<&[MemoryClaim]>,
     ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
+        self.reserve_roles_claiming_contained(roles, claims, false)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn reserve_roles_claiming_contained(
+        &self,
+        roles: &[(
+            Option<(FamilyIdentity, FamilyRole)>,
+            WorkloadDemand,
+            Option<RetainedRole<'_>>,
+        )],
+        claims: Option<&[MemoryClaim]>,
+        contained_trial: bool,
+    ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
         let mut state = self
             .inner
             .lock()
@@ -729,7 +753,20 @@ impl ResourceLedger {
         if state.invalid {
             return Err(AdmissionRefusal::Unavailable);
         }
-        if state.any_support() && roles.iter().any(|(_, demand, _)| demand.trial) {
+        if contained_trial
+            && (!matches!(roles, [(Some((_, FamilyRole::Video)), demand, None)] if demand.trial)
+                || claims != Some(&[MemoryClaim::UnknownProducerPeak])
+                || state
+                    .entries
+                    .values()
+                    .any(|entry| entry.memory_claim.is_active_producer()))
+        {
+            return Err(AdmissionRefusal::InsufficientEvidence);
+        }
+        if !contained_trial
+            && state.any_support()
+            && roles.iter().any(|(_, demand, _)| demand.trial)
+        {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }
         for (family_role, demand, retained) in roles {
@@ -820,7 +857,7 @@ impl ResourceLedger {
         let resources: Vec<_> = missing
             .iter()
             .zip(claims)
-            .map(|((_, demand), claim)| state.assess_claim(*demand, *claim))
+            .map(|((_, demand), claim)| state.assess_claim(*demand, *claim, contained_trial))
             .collect::<Result<_, _>>()?;
         let task_claims: Vec<_> = resources
             .iter()

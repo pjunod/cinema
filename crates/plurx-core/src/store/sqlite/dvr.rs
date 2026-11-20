@@ -350,6 +350,31 @@ fn load_recording(
 
 #[async_trait]
 impl DvrStore for SqliteStore {
+    #[cfg(target_os = "linux")]
+    fn has_local_dvr_commit_authority(&self) -> bool {
+        true
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn local_dvr_obligations_clear(&self) -> Result<bool, StoreError> {
+        self.with_read(|conn| {
+            // Disabled settings do not clear existing recordings or rules.
+            // Unknown states block a trial too. These two EXISTS projections
+            // share one SQLite read snapshot and return no inventory payload.
+            Ok(conn.query_row(
+                "SELECT NOT (
+                    EXISTS(SELECT 1 FROM dvr_recordings
+                        WHERE state IS NULL OR state NOT IN
+                            ('done','partial','failed','missed','cancelled','deleted'))
+                    OR EXISTS(SELECT 1 FROM dvr_rules WHERE enabled IS NULL OR enabled != 0)
+                )",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+    }
+
     async fn list_dvr_rules(&self) -> Result<Vec<crate::dvr::DvrRule>, StoreError> {
         self.with_read(move |conn| {
             let mut statement = conn.prepare(&format!(
@@ -1521,6 +1546,84 @@ mod catalog_purge_tests {
             Ok(())
         }).await.expect("fixture");
         store
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn dormant_recordings_and_enabled_rules_block_sqlite_trial_authority() {
+        use crate::store::UserStore as _;
+
+        let store = fixture().await;
+        assert!(store.has_local_dvr_commit_authority());
+        assert!(store
+            .local_dvr_obligations_clear()
+            .await
+            .expect("terminal-only state"));
+        for state in DvrState::PENDING
+            .iter()
+            .copied()
+            .chain([DvrState::Recording])
+        {
+            store
+                .with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE dvr_recordings SET state = ?1 WHERE id = '6'",
+                        [state.as_str()],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .expect("make the original row resumable");
+            assert!(!store
+                .local_dvr_obligations_clear()
+                .await
+                .expect("original recording obligation"));
+        }
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE dvr_recordings SET state = 'done' WHERE id = '6'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("close the original recording row");
+        let user = store
+            .create_user("dvr-rule-owner", "test-only", true)
+            .await
+            .expect("rule owner");
+        let mut rule = DvrRule {
+            id: "future-rule".into(),
+            owner_user_id: user.id,
+            priority: 1,
+            name: "Future programme".into(),
+            match_mode: DvrMatchMode::Title,
+            match_value: "Future programme".into(),
+            channel_id: None,
+            new_only: false,
+            keep_mode: DvrKeepMode::All,
+            keep_value: 0,
+            pad_start_s: 0,
+            pad_end_s: 0,
+            enabled: true,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        assert!(store
+            .put_dvr_rule(&rule)
+            .await
+            .expect("save a dormant enabled rule"));
+        assert!(!store
+            .local_dvr_obligations_clear()
+            .await
+            .expect("enabled rule survives disabled settings"));
+        rule.enabled = false;
+        assert!(store.put_dvr_rule(&rule).await.expect("disable exact rule"));
+        assert!(store
+            .local_dvr_obligations_clear()
+            .await
+            .expect("no remaining durable capture"));
     }
 
     #[tokio::test]

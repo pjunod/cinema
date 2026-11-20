@@ -12,6 +12,8 @@ fn held_parent(path: &Path) -> SourceCell {
     );
     cell.spec = None;
     cell.result = Some(SourceResult {
+        #[cfg(target_os = "linux")]
+        memory_backed: false,
         file: Some(Arc::new(File::open(path).expect("original parent File"))),
         observed: None,
         direct_open_error: None,

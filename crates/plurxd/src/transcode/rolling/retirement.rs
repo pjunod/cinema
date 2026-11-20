@@ -370,6 +370,7 @@ pub(super) type RetiredPresentations =
 /// control task join together after every rich Session alias has gone away.
 #[cfg(target_os = "linux")]
 pub(super) struct SelectedCopyTerminalTicket {
+    pub(super) playback_lane: Option<crate::admission::ProtectedPlaybackLane>,
     pub(super) quota: Option<crate::playback_cache::FiniteCacheReservation>,
     pub(super) native: plurx_core::adaptive_resources::runtime::copy_vod::CopyCloseTicket,
     pub(super) actor: Option<crate::playback_control::RollingControlActorJoin>,
@@ -503,6 +504,8 @@ pub(super) fn spawn_rolling_scratch_cleanup_owner(session_id: String, session: &
                     owned.live_bytes.store(0, Release);
                     owned.retention_garbage_bytes.store(0, Release);
                     settle_rolling_scratch_release(&owned);
+                    #[cfg(target_os = "linux")]
+                    owned.settle_playback_lane();
                     tracing::debug!(
                         target: "plurxd::transcode",
                         session = %session_log_id(&session_id),
@@ -889,6 +892,11 @@ async fn park_selected_copy_ticket(session: &Session) -> Result<(), String> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
     let original = SelectedCopyTerminalTicket {
+        playback_lane: session
+            .playback_lane
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take(),
         native,
         quota,
         actor: Some(session.control.original_actor_join()),
@@ -905,12 +913,17 @@ async fn park_selected_copy_ticket(session: &Session) -> Result<(), String> {
         }
     };
     if let Some(SelectedCopyTerminalTicket {
+        playback_lane,
         native,
         quota,
         actor: _,
     }) = rejected
     {
         *held = Some(native);
+        *session
+            .playback_lane
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = playback_lane;
         *session
             .core_copy_quota
             .lock()

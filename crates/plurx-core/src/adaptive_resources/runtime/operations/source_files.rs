@@ -244,6 +244,8 @@ pub(in crate::adaptive_resources::runtime) struct FixedProbeChildObservation {
     pub acknowledged: bool,
 }
 struct SourceResult {
+    #[cfg(target_os = "linux")]
+    memory_backed: bool,
     file: Option<Arc<File>>,
     observed: Option<v2::SourceObserved>,
     direct_open_error: Option<std::io::ErrorKind>,
@@ -528,6 +530,8 @@ impl SourceCell {
                     .is_some_and(|limit| limit.entry_remaining().is_err())
             {
                 return SourceResult {
+                    #[cfg(target_os = "linux")]
+                    memory_backed: false,
                     file: None,
                     observed: None,
                     direct_open_error: None,
@@ -608,6 +612,8 @@ fn open_scanner_source(
     planned_copies: Vec<v2::SourceCopy>,
 ) -> SourceResult {
     let mut result = SourceResult {
+        #[cfg(target_os = "linux")]
+        memory_backed: false,
         file: None,
         observed: None,
         direct_open_error: None,
@@ -678,6 +684,8 @@ fn open_source_with_cache(
     cache: &Mutex<VerifiedExecutableCache>,
 ) -> SourceResult {
     let mut result = SourceResult {
+        #[cfg(target_os = "linux")]
+        memory_backed: false,
         file: None,
         observed: None,
         direct_open_error: None,
@@ -762,6 +770,13 @@ fn open_source_with_cache(
             result.verified_elf = true;
         }
     }
+    let mount_id = bootstrap::native::steps::mount_id(file);
+    #[cfg(target_os = "linux")]
+    if spec.expected_sha256.is_none() {
+        use std::os::fd::AsFd as _;
+        result.memory_backed =
+            super::super::finite_policy::local_memory_filesystem(file.as_fd(), &mount_id);
+    }
     result.observed = Some(v2::SourceObserved {
         version: 1,
         holder_id: plan.holder_id,
@@ -780,7 +795,7 @@ fn open_source_with_cache(
             inode: v2::NativeValue::Known {
                 value: metadata.ino(),
             },
-            mount_id: bootstrap::native::steps::mount_id(file),
+            mount_id,
             filesystem_domain: plan.filesystem_domain,
         },
         access: v2::SourceAccess::ReadOnlyRegular,
@@ -1265,6 +1280,15 @@ impl SourceCell {
             return Err(OperationError::State);
         }
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn memory_backed(&self) -> bool {
+        self.observed_committed
+            && self
+                .result
+                .as_ref()
+                .is_some_and(|result| result.memory_backed)
     }
 
     pub(super) fn inherited_source(

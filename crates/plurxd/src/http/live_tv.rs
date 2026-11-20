@@ -1448,6 +1448,19 @@ async fn owner_resource(
             .body(Body::from(response.body))
             .map_err(|error| ApiError::Internal(error.to_string()));
     }
+    let deadline = deadline_after(RESOURCE_EXCHANGE_DEADLINE);
+    #[cfg(target_os = "linux")]
+    let lane = state
+        .transcode
+        .admissions()
+        .acquire_protected_playback_lane(deadline.into_std())
+        .await
+        .map_err(|reason| {
+            api_error_from(
+                LiveTvError::OwnerUnavailable(reason.into()),
+                Decided::Ingress,
+            )
+        })?;
     let response = state
         .live_tv_peers
         .request_stream(
@@ -1456,7 +1469,7 @@ async fn owner_resource(
             reqwest::Method::POST,
             RESOURCE_PATH,
             body,
-            deadline_after(RESOURCE_EXCHANGE_DEADLINE),
+            deadline,
             PeerAuthMode::ExactRequest,
         )
         .await
@@ -1479,6 +1492,8 @@ async fn owner_resource(
         Duration::from_secs(15),
         state.live_tv.relay_counter(),
         max_body_bytes,
+        #[cfg(target_os = "linux")]
+        std::sync::Arc::new(lane),
     )
     .map_err(|error| api_error_from(peer_error(error), Decided::Ingress))
 }

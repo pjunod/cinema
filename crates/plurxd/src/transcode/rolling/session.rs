@@ -10,6 +10,10 @@ pub(super) enum CopyReaderTask {
 }
 
 pub(super) struct Session {
+    /// Held across exact initial launch, forced recovery and original cleanup.
+    /// Cached sessions carry no producer entitlement here.
+    #[cfg(target_os = "linux")]
+    pub(super) playback_lane: std::sync::Mutex<Option<crate::admission::ProtectedPlaybackLane>>,
     pub(super) fallback_analysis_interest: std::sync::Mutex<
         Option<plurx_core::store::background_jobs_resources::PlaybackAnalysisSuspension>,
     >,
@@ -559,6 +563,24 @@ impl SessionHooks for SessionTestHooks {
 }
 
 impl Session {
+    #[cfg(target_os = "linux")]
+    pub(super) fn arm_playback_lane(&self) {
+        if let Ok(mut lane) = self.playback_lane.lock() {
+            if let Some(lane) = lane.as_mut() {
+                lane.arm_physical();
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn settle_playback_lane(&self) {
+        if let Ok(mut lane) = self.playback_lane.lock() {
+            if let Some(lane) = lane.take() {
+                lane.known_finished();
+            }
+        }
+    }
+
     /// Join the original registered copy stdout owner. A timed-out waiter
     /// leaves its JoinHandle in this session for the same retirement owner to
     /// retry; it never turns a writer counter into task-completion proof.

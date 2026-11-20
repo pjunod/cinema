@@ -198,6 +198,7 @@ impl RenditionDir {
         owner: plurx_core::adaptive_resources::runtime::finite_vod::SoftwareVodOwner,
         cache_grant: crate::playback_cache::FiniteCacheReservation,
         compatibility: crate::vodencode::FiniteSoftwareCompatibility,
+        trial: Option<crate::vodserve::finite_software::FiniteTrialRun>,
     ) -> Self {
         let output = owner.output();
         let producer = std::sync::Arc::new(
@@ -205,6 +206,7 @@ impl RenditionDir {
                 owner,
                 cache_grant,
                 compatibility,
+                trial,
             ),
         );
         Self {

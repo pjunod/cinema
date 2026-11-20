@@ -224,7 +224,14 @@ impl ResourceReservation {
     /// There is no externally launched child/receipt/cleanup callback argument.
     /// Unsupported containment refuses speculation BEFORE any launch; normal
     /// acquisition remains conservative and can accumulate UnknownHeld.
-    pub fn into_physical_graph(mut self) -> Result<OwnedPhysicalGraph, AdmissionRefusal> {
+    pub fn into_physical_graph(self) -> Result<OwnedPhysicalGraph, AdmissionRefusal> {
+        self.into_owned_physical_graph(false)
+    }
+
+    pub(in crate::adaptive_resources) fn into_owned_physical_graph(
+        mut self,
+        contained_trial: bool,
+    ) -> Result<OwnedPhysicalGraph, AdmissionRefusal> {
         // Boot lookup may perform bounded OS I/O. Never hold the ledger's
         // short accounting lock while doing that or initializing randomness.
         let (process_instance, os_boot) = daemon_identity();
@@ -245,6 +252,7 @@ impl ResourceReservation {
             .trial
             .as_ref()
             .is_some_and(|members| members.contains(&self.binding.reservation))
+            != contained_trial
         {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }

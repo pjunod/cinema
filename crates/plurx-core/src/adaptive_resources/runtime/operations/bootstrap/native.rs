@@ -23,6 +23,8 @@ pub(super) struct RootCell {
     imported_retained: bool,
 }
 struct RootResult {
+    #[cfg(target_os = "linux")]
+    memory_backed_sink: bool,
     // Even a partial fstat failure keeps the ACTUAL descriptor, not only JSON.
     files: BTreeMap<v2::Id, File>,
     audit: BootstrapResultV1,
@@ -117,6 +119,8 @@ impl RootCell {
             join_id: adoption_id,
             pending: None,
             result: Some(RootResult {
+                #[cfg(target_os = "linux")]
+                memory_backed_sink: false,
                 files,
                 audit: BootstrapResultV1 {
                     outcome: v2::scratch::NativeOutcomeV1::Completed,
@@ -403,6 +407,8 @@ impl RootCell {
         let pending = tokio::task::spawn_blocking(move || {
             if registered.blocking_recv().is_err() {
                 return RootResult {
+                    #[cfg(target_os = "linux")]
+                    memory_backed_sink: false,
                     files: BTreeMap::new(),
                     audit: BootstrapResultV1 {
                         outcome: v2::scratch::NativeOutcomeV1::NeverEntered,
@@ -498,6 +504,8 @@ fn open_root(
     observed: v2::Id,
 ) -> RootResult {
     let failure = |file: Option<File>| RootResult {
+        #[cfg(target_os = "linux")]
+        memory_backed_sink: false,
         files: file.into_iter().map(|file| (copy, file)).collect(),
         audit: BootstrapResultV1 {
             outcome: v2::scratch::NativeOutcomeV1::Failed {
@@ -558,6 +566,8 @@ fn open_root(
         ),
     };
     RootResult {
+        #[cfg(target_os = "linux")]
+        memory_backed_sink: false,
         files: BTreeMap::from([(copy, file)]),
         audit: BootstrapResultV1 {
             outcome,

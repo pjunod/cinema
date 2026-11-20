@@ -8,6 +8,14 @@ use crate::process::observation::{Metric, UnknownReason};
 use crate::resource_observation::{ServiceUnit, ServiceWindow, WorkPhase, WorkSample};
 use crate::resource_policy::{GrowthState, TrialAbort, TrialBudget, TrialRefusal};
 use std::time::{Duration, Instant};
+#[cfg(target_os = "linux")]
+mod trial_qualification;
+#[cfg(target_os = "linux")]
+pub use trial_qualification::FiniteQualificationWindow;
+#[cfg(target_os = "linux")]
+pub(super) use trial_qualification::{
+    local_memory_filesystem, FiniteStoppedProfile, FiniteTimingWitness, FiniteTrialKey,
+};
 
 // Fixed startup storage; observation never allocates or evicts a cooldown.
 // Exhaustion loses expansion availability rather than forgetting a failure.
@@ -77,6 +85,8 @@ pub(super) struct FinitePolicyRegistry {
     entries: [Option<GrowthEntry>; MAX_CLASSES],
     accepted_samples: u64,
     latest: Option<usize>,
+    #[cfg(target_os = "linux")]
+    qualifications: [Option<trial_qualification::QualifiedFiniteTrial>; MAX_CLASSES],
 }
 
 impl Default for FinitePolicyRegistry {
@@ -85,6 +95,8 @@ impl Default for FinitePolicyRegistry {
             entries: [const { None }; MAX_CLASSES],
             accepted_samples: 0,
             latest: None,
+            #[cfg(target_os = "linux")]
+            qualifications: [None; MAX_CLASSES],
         }
     }
 }

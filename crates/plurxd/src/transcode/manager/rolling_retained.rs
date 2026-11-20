@@ -94,6 +94,8 @@ impl TranscodeManager {
             crate::delivery::Method::Transcode
         };
         let session = Arc::new(Session {
+            #[cfg(target_os = "linux")]
+            playback_lane: std::sync::Mutex::new(None),
             dir: artifact.directory.clone(),
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen),

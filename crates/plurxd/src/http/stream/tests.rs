@@ -3219,3 +3219,36 @@ fn one_burn_guard_judges_the_delivery_without_the_burn() {
         );
     }
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn queued_media_frame_keeps_original_protection_after_body_drop() {
+    use http_body_util::BodyExt;
+    use std::sync::Arc;
+
+    let protection = Arc::new(
+        crate::admission::Admissions::new()
+            .try_acquire_protected_playback_lane()
+            .expect("no competing trial"),
+    );
+    let original = Arc::downgrade(&protection);
+    let mut body = protect_body(Response::new(Body::from("queued media")), protection).into_body();
+    let queued = body
+        .frame()
+        .await
+        .expect("data frame")
+        .expect("valid frame");
+    let bytes = queued.into_data().expect("response data");
+    drop(body);
+
+    assert_eq!(bytes.as_ref(), b"queued media");
+    assert!(
+        original.upgrade().is_some(),
+        "buffered egress retains its exact lane"
+    );
+    drop(bytes);
+    assert!(
+        original.upgrade().is_none(),
+        "all original egress aliases have closed"
+    );
+}

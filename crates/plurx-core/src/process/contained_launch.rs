@@ -384,6 +384,17 @@ pub(crate) struct OwnedContainedChild {
 }
 
 impl OwnedContainedChild {
+    /// These are observations of this original fresh leaf. A new task-limit
+    /// hit or OOM aborts a trial; it never proves extinction or cleanup.
+    pub(crate) fn finite_trial_hard_pressure(&self) -> io::Result<bool> {
+        let domain = &self
+            .custody
+            .as_ref()
+            .ok_or_else(|| io::Error::other("the original finite native domain is unavailable"))?
+            .domain;
+        domain.observed_trial_limit_pressure()
+    }
+
     pub(crate) fn try_wait(&mut self) -> io::Result<Option<i32>> {
         self.custody
             .as_mut()

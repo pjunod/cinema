@@ -8,27 +8,42 @@ fn identity() -> InitIdentity {
     }
 }
 
-#[test]
-fn initial_event_payload_tracks_pinned_tokio_slots_and_exceeds_old_allowance() {
-    let lock = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"));
-    let tokio = lock
-        .split("[[package]]")
-        .find(|package| package.lines().any(|line| line == r#"name = "tokio""#))
-        .expect("pinned Tokio package");
-    assert!(
-        tokio.lines().any(|line| line == r#"version = "1.53.1""#),
-        "re-audit private initial block cardinality when Tokio changes"
-    );
-    let slots = if usize::BITS == 64 { 32 } else { 16 };
-    assert_eq!(INITIAL_EVENT_BLOCK_SLOTS, slots);
-    assert!(slots > EVENT_CHANNEL_CAPACITY);
-    let payload = slots * size_of::<SoftwareVodEvent>();
-    assert_eq!(initial_event_requested_bytes(), Some(payload + 256));
-    #[cfg(target_pointer_width = "64")]
-    assert!(
-        payload > 8192,
-        "one initial block already exceeds the removed allowance"
-    );
+#[tokio::test]
+async fn fixed_mailbox_preserves_backpressure_and_receives_pending_event_after_writer_closes() {
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    let (sender, mut reader) = events::channel();
+    let materialized = |entry| SoftwareVodEvent::Materialized {
+        entry,
+        bytes: 1,
+        digest: [0; 32],
+    };
+    sender.send(materialized(0)).await.expect("first event");
+    let second = sender.send(materialized(1));
+    tokio::pin!(second);
+    assert!(futures_util::poll!(&mut second).is_pending());
+    assert!(matches!(
+        reader.try_recv(),
+        Ok(SoftwareVodEvent::Materialized { entry: 0, .. })
+    ));
+    second.await.expect("space in same mailbox");
+
+    assert!(matches!(
+        reader.recv().await,
+        Some(SoftwareVodEvent::Materialized { entry: 1, .. })
+    ));
+    sender.send(materialized(2)).await.expect("final event");
+    drop(reader);
+    assert!(sender.send(materialized(3)).await.is_err());
+
+    let (sender, mut reader) = events::channel();
+    sender.send(materialized(4)).await.expect("original event");
+    drop(sender);
+    assert!(matches!(
+        reader.recv().await,
+        Some(SoftwareVodEvent::Materialized { entry: 4, .. })
+    ));
+    assert!(matches!(reader.try_recv(), Err(TryRecvError::Disconnected)));
 }
 
 #[test]
@@ -66,7 +81,7 @@ fn rich_or_oversized_identity_is_refused_before_event_clone() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn numeric_pump_component_cannot_certify_channel_or_native_peak() {
+fn fixed_mailbox_does_not_certify_the_producer_peak() {
     let plan = super::super::tests::pump_plan();
     assert_eq!(
         plan.memory_claim(),
@@ -74,6 +89,6 @@ fn numeric_pump_component_cannot_certify_channel_or_native_peak() {
     );
     assert!(
         plan.minimum_memory_bytes().expect("requested component")
-            >= initial_event_requested_bytes().expect("initial payload") as u64
+            >= initial_event_requested_bytes().expect("fixed mailbox") as u64
     );
 }

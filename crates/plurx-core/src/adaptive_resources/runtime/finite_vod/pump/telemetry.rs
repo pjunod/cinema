@@ -43,6 +43,10 @@ pub(in crate::adaptive_resources::runtime) struct HistoryBasis {
     placement: Option<super::super::FinitePlacementObservation>,
 }
 impl HistoryBasis {
+    pub(in crate::adaptive_resources::runtime) fn timing_key(self) -> ([u8; 32], [u8; 32]) {
+        (self.workload, self.recipe)
+    }
+
     /// Exact, conservatively narrow class for node-local service hysteresis.
     /// It carries no admission or executable authority.
     pub(in crate::adaptive_resources::runtime) fn policy_class(self) -> ([u8; 32], [u8; 32]) {

@@ -5,7 +5,7 @@ pub(crate) use super::shared::FiniteBuildCleanup;
 use super::*;
 use plurx_core::adaptive_resources::runtime::finite_vod::{
     FiniteApplicationLease, FiniteClientStateLease, FiniteFile, FiniteMetadataLease, FiniteOutput,
-    FiniteWriterOutcome, SoftwareVodControl, SoftwareVodEvent, SoftwareVodOwner,
+    FiniteWriterOutcome, SoftwareVodControl, SoftwareVodEvent, SoftwareVodEvents, SoftwareVodOwner,
 };
 use plurx_core::transcode::{DecodeBackend, Encoder};
 use std::sync::atomic::AtomicU8;
@@ -34,6 +34,28 @@ fn speculative_capacity_refusal(refusal: plurx_core::adaptive_resources::Admissi
     )
 }
 
+pub(crate) struct FiniteTrialRun {
+    allocation: plurx_core::resource_policy::TrialAllocation,
+    startup_by: Instant,
+    stop: crate::admission::PlaybackTrialStop,
+    requested: AtomicBool,
+    outcome: AtomicU8,
+    changed: Notify,
+}
+
+impl FiniteTrialRun {
+    const UNTRIED: u8 = 0;
+    const ACCEPTED: u8 = 1;
+    const REFUSED: u8 = 2;
+    const ADOPTING: u8 = 3;
+    const PROMOTED: u8 = 4;
+
+    fn complete(&self, outcome: u8) {
+        self.outcome.store(outcome, Release);
+        self.changed.notify_waiters();
+    }
+}
+
 /// Persistent application owner. Stage is diagnostic/control serialization;
 /// only core's original receipts and known journal commits release resources.
 pub(crate) struct FiniteSoftwareProducer {
@@ -54,6 +76,7 @@ pub(crate) struct FiniteSoftwareProducer {
     // Registration precedes Store Prepared. Publication authorizes ordinary
     // entry separately and transfers the exact original task handle here.
     driver_activated: AtomicBool,
+    trial: Option<FiniteTrialRun>,
     installed_driver: Mutex<OriginalDriver>,
     collector_slot: std::sync::Mutex<
         Option<plurx_core::adaptive_resources::runtime::ordinary_finite_collector::OrdinarySlot>,
@@ -110,6 +133,7 @@ impl FiniteSoftwareProducer {
         owner: SoftwareVodOwner,
         cache_grant: crate::playback_cache::FiniteCacheReservation,
         compatibility: crate::vodencode::FiniteSoftwareCompatibility,
+        trial: Option<FiniteTrialRun>,
     ) -> Self {
         Self {
             control: owner.control(),
@@ -124,6 +148,7 @@ impl FiniteSoftwareProducer {
             driver_state: AtomicU8::new(DRIVER_UNREGISTERED),
             driver_change: Notify::new(),
             driver_activated: AtomicBool::new(false),
+            trial,
             installed_driver: Mutex::new(OriginalDriver::NeverInstalled),
             collector_slot: std::sync::Mutex::new(None),
             #[cfg(all(test, feature = "cluster-integration-tests"))]
@@ -233,6 +258,10 @@ impl FiniteSoftwareProducer {
         &self,
         deadline: Instant,
     ) -> Result<[u8; 32], String> {
+        let deadline = self
+            .trial
+            .as_ref()
+            .map_or(deadline, |trial| deadline.min(trial.startup_by));
         let mut owner = self.owner.lock().await;
         owner
             .prepare_inputs(deadline)
@@ -264,8 +293,98 @@ impl FiniteSoftwareProducer {
         self.driver_state.load(Acquire) == DRIVER_UNREGISTERED
     }
 
-    pub(super) fn activate_driver(&self) {
+    pub(super) fn activate_driver(&self) -> Result<(), String> {
+        if let Some(trial) = self.trial.as_ref() {
+            if Instant::now() >= trial.allocation.stop_by
+                || trial
+                    .outcome
+                    .compare_exchange(
+                        FiniteTrialRun::ADOPTING,
+                        FiniteTrialRun::PROMOTED,
+                        AcqRel,
+                        Acquire,
+                    )
+                    .is_err()
+            {
+                return Err("the original finite trial cannot publish after abort".into());
+            }
+        }
+        if let Ok(mut compatibility) = self.compatibility.lock() {
+            if let Some(compatibility) = compatibility.as_mut() {
+                compatibility.promote_trial_lane();
+            }
+        }
         self.driver_activated.store(true, Release);
+        Ok(())
+    }
+
+    pub(super) fn request_trial(&self) -> bool {
+        let Some(trial) = self.trial.as_ref() else {
+            return false;
+        };
+        trial.requested.store(true, Release);
+        true
+    }
+
+    pub(super) fn trial_cleanup_cutoff(&self) -> Option<Instant> {
+        self.trial.as_ref().map(|trial| trial.allocation.cleanup_by)
+    }
+
+    pub(super) fn begin_trial_adoption(&self) -> Result<(), String> {
+        let Some(trial) = self.trial.as_ref() else {
+            return Ok(());
+        };
+        if matches!(
+            trial.outcome.load(Acquire),
+            FiniteTrialRun::ADOPTING | FiniteTrialRun::PROMOTED
+        ) {
+            return Ok(());
+        }
+        let compatibility = self
+            .compatibility
+            .lock()
+            .map_err(|_| "the original finite trial's admission owner is unavailable")?;
+        let permitted = compatibility.as_ref().is_some_and(|compatibility| {
+            // Protected admission cancels under this same lane lock. After
+            // this transition only the original Store outcome can decide
+            // promotion; protected callers wait for that owner to settle.
+            compatibility.begin_trial_adoption(|| {
+                Instant::now() < trial.allocation.stop_by
+                    && trial
+                        .outcome
+                        .compare_exchange(
+                            FiniteTrialRun::ACCEPTED,
+                            FiniteTrialRun::ADOPTING,
+                            AcqRel,
+                            Acquire,
+                        )
+                        .is_ok()
+            })
+        });
+        permitted
+            .then_some(())
+            .ok_or_else(|| "the original finite trial cannot be adopted".into())
+    }
+
+    pub(super) async fn wait_prepared_trial(&self) -> Result<(), String> {
+        let Some(trial) = self.trial.as_ref() else {
+            return Ok(());
+        };
+        loop {
+            let changed = trial.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            match trial.outcome.load(Acquire) {
+                FiniteTrialRun::ACCEPTED if !trial.stop.is_cancelled() => return Ok(()),
+                FiniteTrialRun::ACCEPTED | FiniteTrialRun::REFUSED => {
+                    return Err("the original finite trial was refused".into());
+                }
+                _ => {}
+            }
+            tokio::time::timeout_at(trial.allocation.stop_by.into(), changed)
+                .await
+                .map_err(|_| "the original finite trial reached its cutoff")?;
+        }
     }
 
     /// Retain the original handle before either publication or abandonment.
@@ -284,7 +403,8 @@ impl FiniteSoftwareProducer {
 
     pub(super) fn install_original_driver(&self, driver: tokio::task::JoinHandle<()>) {
         self.retain_original_driver(driver);
-        self.activate_driver();
+        self.activate_driver()
+            .expect("ordinary finite driver has no pending trial");
     }
 
     /// Keep the exact handle in its owner while awaiting it. Cancelling a
@@ -396,7 +516,23 @@ impl FiniteSoftwareProducer {
         }
     }
     pub(crate) fn request_stop(&self) -> io::Result<()> {
+        if self.trial.is_none() {
+            if let Some(window) = self.ordinary_qualification_window() {
+                self.control.qualification_stop(window);
+            }
+        }
         self.control.request_stop()
+    }
+
+    fn ordinary_qualification_window(
+        &self,
+    ) -> Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteQualificationWindow>
+    {
+        self.compatibility
+            .lock()
+            .ok()?
+            .as_ref()?
+            .idle_trial_qualification_window()
     }
     pub(crate) async fn perform(&self, step: Step) -> io::Result<Performed> {
         match step {
@@ -893,7 +1029,7 @@ async fn build_inner(
     // This aliases the same selected request for legacy compatibility only.
     // The core CPU demand above came from hard total capacity; do not subtract
     // this thread-pool claim again or add it as another physical core role.
-    let compatibility = recipe
+    let mut compatibility = recipe
         .encoding
         .as_ref()
         .expect("selected finite encoding")
@@ -968,12 +1104,54 @@ async fn build_inner(
             .ok_or("collected finite memory partition is inconsistent")?;
     }
     let cache_grant = crate::playback_cache::FiniteCacheReservation::enter(cache_grant);
+    let trial = async {
+        let authority = crate::admission::CONSIDER_LOCAL_PLAYBACK_TRIAL
+            .try_with(Clone::clone)
+            .ok()
+            .flatten()?;
+        let original = request.continuous_entry_deadline.as_ref()?;
+        build_slot.collector_slot()?;
+        let permit = runtime
+            .allocate_local_finite_trial(&request, original, Instant::now())
+            .ok()??;
+        let capture = authority
+            .capture_exclusion_before(permit.startup_by())
+            .await?;
+        let stop = compatibility.try_acquire_trial_lane(capture)?;
+        Some((permit, stop))
+    }
+    .await;
+    let trial_run = trial.as_ref().map(|(permit, stop)| FiniteTrialRun {
+        allocation: permit.allocation(),
+        startup_by: permit.startup_by(),
+        stop: stop.clone(),
+        requested: AtomicBool::new(false),
+        outcome: AtomicU8::new(FiniteTrialRun::UNTRIED),
+        changed: Notify::new(),
+    });
+    // Measure before this original preparation can register source/native
+    // work. Adaptive Prepared may open inputs before the driver is authorized.
+    let qualification = if trial.is_none() {
+        compatibility
+            .idle_trial_qualification_window()
+            .map(|scope| (scope, Instant::now()))
+    } else {
+        None
+    };
     let compatibility = compatibility.enter();
     // This is only a refusal candidate. Successful conservative admission
     // below ignores it; policy cannot turn unknown peaks into a trial permit.
     let speculative_refusal = application_owner_bytes
         .map(|_| runtime.finite_trial_refusal(&request, original_policy_cutoff, Instant::now()));
-    let prepared = if let Some(slot) = build_slot.collector_slot() {
+    let prepared = if let Some((permit, _)) = trial {
+        runtime.prepare_collected_software_trial(
+            request,
+            permit,
+            build_slot
+                .collector_slot()
+                .expect("checked original collector slot"),
+        )
+    } else if let Some(slot) = build_slot.collector_slot() {
         runtime.prepare_collected_software_vod(request, slot, admission_deadline)
     } else {
         runtime.prepare_software_vod(request, admission_deadline)
@@ -1001,6 +1179,9 @@ async fn build_inner(
             });
         }
     };
+    if let Some((scope, before_prepare)) = qualification {
+        owner.control().qualification_start(scope, before_prepare);
+    }
     if let Some(hint) = owner.history_hint() {
         use plurx_core::resource_policy::{assess_finite_observed_service, FiniteObservedService};
         let observed = assess_finite_observed_service(
@@ -1030,7 +1211,7 @@ async fn build_inner(
     let application_lease = application_owner_bytes
         .map(|bytes| owner.take_application_lease(bytes))
         .transpose();
-    let dir = build_slot.install(owner, cache_grant, compatibility);
+    let dir = build_slot.install(owner, cache_grant, compatibility, trial_run);
     let output = dir
         .finite_output()
         .expect("installed original finite output");
@@ -1303,7 +1484,13 @@ async fn run_body(
             break;
         }
         changed.await;
-        if rendition.closed.load(Acquire) || producer.driver_activated.load(Acquire) {
+        if rendition.closed.load(Acquire)
+            || producer.driver_activated.load(Acquire)
+            || producer
+                .trial
+                .as_ref()
+                .is_some_and(|trial| trial.requested.load(Acquire))
+        {
             break;
         }
     }
@@ -1325,10 +1512,27 @@ async fn run_body(
     };
     // Start publishes only the start decision, never completion. Its concrete
     // writer owns a bounded event channel, drained before joining that writer.
-    let start_result = owner
-        .start(Instant::now() + rendition.materialize_budget)
-        .await;
+    let deadline = producer.trial.as_ref().map_or_else(
+        || Instant::now() + rendition.materialize_budget,
+        |trial| trial.startup_by,
+    );
+    let start_result = if let Some(trial) = producer.trial.as_ref() {
+        tokio::select! {
+            biased;
+            () = trial.stop.cancelled() => Err("protected playback arrived before local trial entry".into()),
+            () = tokio::time::sleep_until(deadline.into()) => Err("finite trial startup cutoff elapsed".into()),
+            start = owner.start(deadline) => start.map_err(|error| error.to_string()),
+        }
+    } else {
+        owner
+            .start(deadline)
+            .await
+            .map_err(|error| error.to_string())
+    };
     if let Err(error) = start_result {
+        if let Some(trial) = producer.trial.as_ref() {
+            trial.complete(FiniteTrialRun::REFUSED);
+        }
         fail(
             &shared,
             &rendition,
@@ -1343,6 +1547,18 @@ async fn run_body(
         return;
     }
     producer.stage.store(RUNNING, Release);
+    if let Some(trial) = producer.trial.as_ref() {
+        if !observe_prepared_trial(&shared, &rendition, &producer, &owner, &mut events, trial).await
+        {
+            trial.complete(FiniteTrialRun::REFUSED);
+            fail(
+                &shared,
+                &rendition,
+                &producer,
+                "the original finite trial was aborted".into(),
+            );
+        }
+    }
     let completion = join_and_observe(&shared, &rendition, &producer, &owner, &mut events).await;
     // The original join drained the terminal notifications. Destroy the
     // receiver before S so completed producer event-channel allocations do
@@ -1414,12 +1630,132 @@ async fn run_body(
     }
 }
 
+/// This is the existing driver, before its original Adopt publication. No
+/// new worker/readers may enter while the owned idle lane is held.
+async fn observe_prepared_trial(
+    shared: &Arc<Shared>,
+    rendition: &Arc<Rendition>,
+    producer: &FiniteSoftwareProducer,
+    owner: &SoftwareVodOwner,
+    events: &mut SoftwareVodEvents,
+    trial: &FiniteTrialRun,
+) -> bool {
+    use plurx_core::resource_policy::{TrialMonitor, TrialProgress};
+
+    let now = Instant::now();
+    let Ok(mut monitor) = TrialMonitor::start(now, trial.allocation, owner.generation_epoch(), &[])
+    else {
+        return false;
+    };
+    let stopped_at = tokio::time::Instant::from_std(trial.allocation.stop_by);
+    let startup_at = tokio::time::Instant::from_std(trial.startup_by);
+    let mut started = false;
+    let mut next_pressure_at = tokio::time::Instant::now();
+    // Fail closed until the first actual sample; every later candidate
+    // decision consults the same latest reading. Do not burst after a stall.
+    let mut pressured = true;
+    loop {
+        let progress = tokio::select! {
+            biased;
+            () = trial.stop.cancelled() => return false,
+            () = tokio::time::sleep_until(stopped_at) => return false,
+            () = tokio::time::sleep_until(startup_at), if !started => return false,
+            () = tokio::time::sleep_until(next_pressure_at) => {
+                let cutoff = if started { stopped_at } else { startup_at.min(stopped_at) };
+                pressured = tokio::select! {
+                    biased;
+                    () = trial.stop.cancelled() => return false,
+                    () = tokio::time::sleep_until(cutoff) => return false,
+                    result = owner.trial_hard_pressure(cutoff.into_std()) => result,
+                };
+                next_pressure_at = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+                monitor.poll(Instant::now(), pressured)
+            },
+            _ = rendition.wake.notified() => {
+                if rendition.closed.load(Acquire) { return false; }
+                continue;
+            }
+            event = events.recv() => {
+                let Some(event) = event else { return false };
+                let materialized = matches!(event, SoftwareVodEvent::Materialized { .. });
+                if observe(shared, rendition, owner, event).await.is_err() {
+                    return false;
+                }
+                if !materialized { continue; }
+                if !started && Instant::now() >= trial.startup_by {
+                    return false;
+                }
+                started = true;
+                let now = Instant::now();
+                if let TrialProgress::Abort(_) = monitor.poll(now, pressured) {
+                    return false;
+                }
+                rendition.recipe.encoding.as_ref()
+                    .and_then(|encoding| encoding.resource_service_sample(now))
+                    .map_or(TrialProgress::Observing, |(sample, _)| monitor.candidate_sample(sample, now))
+            }
+        };
+        match progress {
+            TrialProgress::Abort(reason) => {
+                tracing::info!(
+                    target: "plurxd::vodserve",
+                    rendition = %rendition.key, ?reason,
+                    "original finite local trial stopped retaining its exact cleanup owner"
+                );
+                return false;
+            }
+            TrialProgress::Observing => {}
+            TrialProgress::Sufficient => break,
+        }
+    }
+    if producer.control.suspend().is_err() {
+        return false;
+    }
+    tracing::debug!(
+        target: "plurxd::vodserve",
+        rendition = %rendition.key,
+        "original finite trial verified a sustained output window before Winner"
+    );
+    trial.complete(FiniteTrialRun::ACCEPTED);
+    loop {
+        let changed = rendition.wake.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        if trial.outcome.load(Acquire) == FiniteTrialRun::PROMOTED {
+            return producer.control.resume().is_ok();
+        }
+        if rendition.closed.load(Acquire) {
+            return false;
+        }
+        tokio::select! {
+            () = &mut changed => {},
+            () = trial.stop.cancelled(), if trial.outcome.load(Acquire) != FiniteTrialRun::ADOPTING => {
+                if trial.outcome.compare_exchange(
+                    FiniteTrialRun::ACCEPTED, FiniteTrialRun::REFUSED, AcqRel, Acquire,
+                ).is_ok() {
+                    return false;
+                }
+            }
+            () = tokio::time::sleep_until(stopped_at) => {
+                let outcome = trial.outcome.load(Acquire);
+                if outcome != FiniteTrialRun::PROMOTED
+                    && trial.outcome.compare_exchange(
+                        outcome, FiniteTrialRun::REFUSED, AcqRel, Acquire,
+                    ).is_ok()
+                {
+                    return false;
+                }
+            },
+        }
+    }
+}
+
 async fn join_and_observe(
     shared: &Arc<Shared>,
     rendition: &Arc<Rendition>,
     producer: &FiniteSoftwareProducer,
     owner: &SoftwareVodOwner,
-    events: &mut tokio::sync::mpsc::Receiver<SoftwareVodEvent>,
+    events: &mut SoftwareVodEvents,
 ) -> Result<
     plurx_core::adaptive_resources::runtime::finite_vod::FiniteProducerCompletion,
     plurx_core::adaptive_resources::runtime::finite_vod::FiniteVodError,
@@ -1573,6 +1909,7 @@ async fn observe(
                         ticks_to_ms(planned.end_ticks(), rendition.timescale),
                         phase,
                     );
+                    owner.note_verified_trial_startup();
                     observe_policy_service(rendition, owner);
                 }
             }

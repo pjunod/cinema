@@ -739,6 +739,8 @@ fn test_session_with_optional_child(
         AttemptChild::new(0, child, control.clone(), None)
     });
     Session {
+        #[cfg(target_os = "linux")]
+        playback_lane: std::sync::Mutex::new(None),
         audio_delivery: None,
         dir,
         recovery: None,
