@@ -3003,6 +3003,19 @@ pub trait BackgroundJobStore: Send + Sync {
     ) -> Result<JobPublishOutcome, StoreError>;
     /// Offer a content-analysis pass's complete-title aggregate to the
     /// title's current demand.
+    /// Persist a bounded measurement without settling the title attempt.
+    async fn record_dv_m7_receipt(
+        &self,
+        request: super::dv_m7_receipts::RecordM7Receipt,
+    ) -> Result<bool, StoreError>;
+
+    /// Reuse a measurement only for the same current source and experiment.
+    async fn dv_m7_receipt(
+        &self,
+        binding: &crate::transcode::dv_m7_receipt::M7Binding,
+        source_probe: &crate::transcode::dv_m7_receipt::M7SourceProbe,
+    ) -> Result<Option<crate::transcode::dv_m7_receipt::M7Receipt>, StoreError>;
+
     async fn publish_dv_title_from_analysis(
         &self,
         output: super::dv_title_jobs::AnalysisTitleOutput,
@@ -4167,6 +4180,21 @@ LIMIT 1
     ) -> Result<JobPublishOutcome, StoreError> {
         super::dv_title_jobs::publish(self, request).await
     }
+    async fn record_dv_m7_receipt(
+        &self,
+        request: super::dv_m7_receipts::RecordM7Receipt,
+    ) -> Result<bool, StoreError> {
+        super::dv_m7_receipts::record(self, request).await
+    }
+
+    async fn dv_m7_receipt(
+        &self,
+        binding: &crate::transcode::dv_m7_receipt::M7Binding,
+        source_probe: &crate::transcode::dv_m7_receipt::M7SourceProbe,
+    ) -> Result<Option<crate::transcode::dv_m7_receipt::M7Receipt>, StoreError> {
+        super::dv_m7_receipts::lookup(self, binding, source_probe).await
+    }
+
     async fn publish_dv_title_from_analysis(
         &self,
         output: super::dv_title_jobs::AnalysisTitleOutput,

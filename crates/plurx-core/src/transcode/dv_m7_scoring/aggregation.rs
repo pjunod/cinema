@@ -148,7 +148,7 @@ pub struct WindowChecks {
 }
 
 impl WindowChecks {
-    fn checks(self) -> [Check; 5] {
+    pub(in crate::transcode) fn checks(self) -> [Check; 5] {
         [
             self.mean_gain.check,
             self.shadow_mean,
@@ -369,21 +369,12 @@ impl Aggregator {
             statistics(spill, &self.runs, &cancelled)?
         };
         let pooled_mean_gain = pooled_statistics.map(|model| mean_gain(&model, self.margin));
-        let mut disposition = Disposition::Satisfied;
-        for check in windows
-            .iter()
-            .flat_map(|window| window.checks.into_iter().flat_map(WindowChecks::checks))
-            .chain(pooled_mean_gain.map(|gain| gain.check))
-        {
-            match check {
-                Check::Failed => {
-                    disposition = Disposition::Refused;
-                    break;
-                }
-                Check::MissingBand => disposition = Disposition::Inconclusive,
-                Check::Passed => {}
-            }
-        }
+        let disposition = comparison_disposition(
+            windows
+                .iter()
+                .flat_map(|window| window.checks.into_iter().flat_map(WindowChecks::checks))
+                .chain(pooled_mean_gain.map(|gain| gain.check)),
+        );
         check_cancelled(&cancelled)?;
         Ok(ComparisonReport {
             margin: self.margin,
@@ -658,7 +649,21 @@ fn paired(
     })
 }
 
-fn mean_gain(stats: &ModelStatistics, margin: FrozenMargin) -> MeanGain {
+pub(in crate::transcode) fn comparison_disposition(
+    checks: impl IntoIterator<Item = Check>,
+) -> Disposition {
+    let mut disposition = Disposition::Satisfied;
+    for check in checks {
+        match check {
+            Check::Failed => return Disposition::Refused,
+            Check::MissingBand => disposition = Disposition::Inconclusive,
+            Check::Passed => {}
+        }
+    }
+    disposition
+}
+
+pub(in crate::transcode) fn mean_gain(stats: &ModelStatistics, margin: FrozenMargin) -> MeanGain {
     let delta_e_itp = stats.served_fplus.full.mean - stats.candidate.full.mean;
     MeanGain {
         delta_e_itp,
@@ -666,19 +671,12 @@ fn mean_gain(stats: &ModelStatistics, margin: FrozenMargin) -> MeanGain {
     }
 }
 
-fn window_checks(
+pub(in crate::transcode) fn window_checks(
     stats: &ModelStatistics,
     frames: &[[ModelStatistics; MODELS]],
     model: usize,
     margin: FrozenMargin,
 ) -> WindowChecks {
-    let compare_band = |band: usize, metric: fn(Distribution) -> f64| match (
-        stats.candidate.bands[band],
-        stats.served_fplus.bands[band],
-    ) {
-        (Some(candidate), Some(served)) => Check::from_test(metric(candidate) <= metric(served)),
-        _ => Check::MissingBand,
-    };
     let mut frames_with_shadow = 0;
     let mut worst_served: Option<f64> = None;
     let mut worst_candidate: Option<f64> = None;
@@ -693,13 +691,34 @@ fn window_checks(
                 Some(worst_candidate.map_or(candidate.p99, |old| old.max(candidate.p99)));
         }
     }
+    window_checks_from_shadow(
+        stats,
+        margin,
+        frames_with_shadow == frames.len(),
+        (worst_served, worst_candidate),
+    )
+}
+
+pub(in crate::transcode) fn window_checks_from_shadow(
+    stats: &ModelStatistics,
+    margin: FrozenMargin,
+    every_frame_has_shadow: bool,
+    (worst_served, worst_candidate): (Option<f64>, Option<f64>),
+) -> WindowChecks {
+    let compare_band = |band: usize, metric: fn(Distribution) -> f64| match (
+        stats.candidate.bands[band],
+        stats.served_fplus.bands[band],
+    ) {
+        (Some(candidate), Some(served)) => Check::from_test(metric(candidate) <= metric(served)),
+        _ => Check::MissingBand,
+    };
     WindowChecks {
         mean_gain: mean_gain(stats, margin),
         shadow_mean: compare_band(0, |s| s.mean),
         shadow_p99: compare_band(0, |s| s.p99),
         dark_p99: compare_band(1, |s| s.p99),
         largest_frame_shadow_p99: match (worst_candidate, worst_served) {
-            (Some(candidate), Some(served)) if frames_with_shadow == frames.len() => {
+            (Some(candidate), Some(served)) if every_frame_has_shadow => {
                 Check::from_test(candidate <= served)
             }
             _ => Check::MissingBand,

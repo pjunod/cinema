@@ -735,6 +735,8 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "dv_title_demands",
     "bind_dv_title_demand",
     "publish_dv_title_job",
+    "record_dv_m7_receipt",
+    "dv_m7_receipt",
     "publish_dv_title_from_analysis",
     "probe_can_preempt_title",
     // F+ curve fits: demand, the one-write fenced publication, the current
@@ -21732,7 +21734,8 @@ fn contract_inventory_matches_every_store_method() {
     // +2: claim_job_attempt and claim_verdict, the claim local verdict
     // (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md), in BACKGROUND_JOB_METHODS.
     // +1: cancel_unshared_output_job, the fenced retained-output cleanup.
-    assert_eq!(declared.len(), 629, "review the Store method count");
+    // +2: exact-binding M7 receipt write and lookup on both backends.
+    assert_eq!(declared.len(), 631, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

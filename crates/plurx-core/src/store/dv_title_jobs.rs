@@ -250,7 +250,12 @@ pub(super) async fn publish<T: QueueSql>(
     }
     let body = serde_json::to_value(input).map_err(|e| StoreError::Task(e.to_string()))?;
     let rows = store
-        .queue_sql(PUBLISH_SQL.into(), encode(&body)?, true, true)
+        .queue_sql(
+            PUBLISH_SQL.replace("__TITLE_JOB_OWNS__", TITLE_JOB_OWNERSHIP),
+            encode(&body)?,
+            true,
+            true,
+        )
         .await?;
     decode(
         rows.first()
@@ -395,12 +400,9 @@ WHERE job.id=json_extract($1,'$.probe') AND job.kind='media_probe' AND job.paylo
     Ok(!rows.is_empty())
 }
 
-const PUBLISH_SQL: &str = r#"
-WITH input AS (SELECT json($1) AS body), observation AS (
- SELECT body,job.id,job.state,job.result_ref,json_extract(body,'$.output') AS output,
- EXISTS(SELECT 1 FROM background_job_attempts a WHERE a.job_id=job.id
-  AND a.fence=job.fence AND a.fence=json_extract(body,'$.token.fence') AND a.claim_id=json_extract(body,'$.token.claim_id')
-  AND a.owner_node_id=json_extract(body,'$.token.node_id') AND a.owner_boot_id=json_extract(body,'$.token.boot_id')) AS same_attempt,
+// Both terminal title publication and the nonterminal M7 write must
+// recognize the same live attempt and source generation.
+pub(super) const TITLE_JOB_OWNERSHIP: &str = r#"
  job.state='running' AND job.kind='dv_title_scan' AND job.payload_version=1
  AND job.owner_node_id=json_extract(body,'$.token.node_id') AND job.owner_boot_id=json_extract(body,'$.token.boot_id')
  AND job.claim_id=json_extract(body,'$.token.claim_id') AND job.fence=json_extract(body,'$.token.fence')
@@ -421,7 +423,16 @@ WITH input AS (SELECT json($1) AS body), observation AS (
   WHERE d.revision=json_extract(body,'$.output.probe_revision') AND d.file_id=json_extract(body,'$.output.file_id')
   AND d.scanner_digest=json_extract(body,'$.output.scanner_digest') AND d.terminal=0
   AND f.size=json_extract(body,'$.output.source_size') AND f.mtime=json_extract(body,'$.output.source_mtime')
-  AND f.video_codec='hevc' AND f.dv_profile IN (5,7,8) AND f.dv_rpu_present=1 AND json_valid(f.probe_json)) AS owns
+  AND f.video_codec='hevc' AND f.dv_profile IN (5,7,8) AND f.dv_rpu_present=1 AND json_valid(f.probe_json))
+"#;
+
+const PUBLISH_SQL: &str = r#"
+WITH input AS (SELECT json($1) AS body), observation AS (
+ SELECT body,job.id,job.state,job.result_ref,json_extract(body,'$.output') AS output,
+ EXISTS(SELECT 1 FROM background_job_attempts a WHERE a.job_id=job.id
+  AND a.fence=job.fence AND a.fence=json_extract(body,'$.token.fence') AND a.claim_id=json_extract(body,'$.token.claim_id')
+  AND a.owner_node_id=json_extract(body,'$.token.node_id') AND a.owner_boot_id=json_extract(body,'$.token.boot_id')) AS same_attempt,
+ __TITLE_JOB_OWNS__ AS owns
  FROM input LEFT JOIN background_jobs job ON job.id=json_extract(body,'$.token.job_id')
 ), verdict AS (
  SELECT *,CASE WHEN state='succeeded' AND same_attempt AND result_ref=output THEN 'already_published'

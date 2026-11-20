@@ -1714,6 +1714,40 @@ impl JobFence {
         Ok(published)
     }
 
+    /// Record the measurement while the title claim remains live.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn record_dv_m7_receipt(
+        &self,
+        source_probe: plurx_core::transcode::dv_m7_receipt::M7SourceProbe,
+        receipt: plurx_core::transcode::dv_m7_receipt::M7Receipt,
+    ) -> Result<bool, StoreError> {
+        use plurx_core::store::dv_m7_receipts::RecordM7Receipt;
+
+        let state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let mut request = RecordM7Receipt {
+            token,
+            source_probe,
+            receipt,
+            now_ms: unix_ms()?,
+        };
+        match self.0.store.record_dv_m7_receipt(request.clone()).await {
+            Ok(recorded) => Ok(recorded),
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.record_dv_m7_receipt(request).await
+            }
+        }
+    }
+
     /// Publish the title's whole curve table under the attempt's
     /// then-current token, in one replicated write (decision A). A store
     /// error is retried with backoff while the lease still holds (decision
