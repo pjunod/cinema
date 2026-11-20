@@ -1766,7 +1766,11 @@ async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
             )
             .await
             .expect("existing measured verdict"));
-        let original = store.get_file_probe_json(file.id).await.unwrap().unwrap();
+        let original = store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("read settled title probe")
+            .expect("settled title probe");
         let mut stale = request(1_004);
         stale.request = q::FelRecipeRequest::new(
             recipe.backend_identity.clone(),
@@ -1805,7 +1809,11 @@ async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
             .expect("native head demand is not a playback qualification")
             .is_empty());
         let id = reopened.active_job_id.expect("single queued episode");
-        let queued = store.background_job(&id).await.unwrap().unwrap();
+        let queued = store
+            .background_job(&id)
+            .await
+            .expect("read native FEL head job")
+            .expect("queued native FEL head job");
         assert_eq!(queued.state, JobState::Queued);
         let wrong_node = store
             .claim_job(ClaimJob {
