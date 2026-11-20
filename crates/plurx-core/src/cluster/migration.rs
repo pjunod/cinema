@@ -960,7 +960,7 @@ async fn join_fresh_store(
                     .map_err(|error| StoreError::Database(error.to_string()))
             };
             concrete_store
-                .install_adaptive_attempt_schema(Some(&admit_next))
+                .install_adaptive_playback_authority(Some(&admit_next))
                 .await?;
         }
         activation_admission
@@ -3156,7 +3156,7 @@ async fn open_active_store_with_key(
                     .map_err(|error| StoreError::Database(error.to_string()))
             };
             concrete_store
-                .install_adaptive_attempt_schema(Some(&admit_next))
+                .install_adaptive_playback_authority(Some(&admit_next))
                 .await?;
             // A desired voter that booted as a learner cannot migrate until
             // the actual local watch has proved its committed promotion.

@@ -19,6 +19,68 @@ async fn singleton() -> (tempfile::TempDir, SelectedStore) {
     (directory, selected)
 }
 
+#[test]
+fn admitted_singleton_installs_adaptive_source_scope_before_serving() {
+    startup_observer::run_plural_fixture("singleton-adaptive-source", singleton_adaptive_source);
+}
+
+async fn singleton_adaptive_source() {
+    use crate::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+
+    let (_directory, selected) = singleton().await;
+    assert_eq!(selected.backend, SelectedBackend::Replicated);
+    let store = &selected.store;
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Adaptive source".into(),
+            paths: vec!["/media/adaptive".into()],
+            kind: LibraryKind::Movies,
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Adaptive source".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let file = store
+        .upsert_file(
+            item,
+            "/media/adaptive/source.mkv",
+            10,
+            100,
+            &Default::default(),
+        )
+        .await
+        .expect("scanned file");
+    let snapshot = store
+        .playback_planning_snapshot(file, &[])
+        .await
+        .expect("planning snapshot")
+        .expect("same file");
+    let scope = store
+        .adaptive_source_scope(
+            file,
+            snapshot.file.size,
+            snapshot.file.mtime,
+            snapshot.generation,
+        )
+        .await
+        .expect("authoritative source scope")
+        .expect("original activation installed the source catalogue");
+    assert_eq!(scope.library_id, library.id);
+    assert_eq!(scope.resource_keys, ["source_io"]);
+    selected.shutdown().await.expect("stop real singleton");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn normal_replicated_singleton_trial_observes_durable_capture_without_blocking_saves() {

@@ -5456,6 +5456,16 @@ impl HiqliteAuthStore {
         ))
     }
 
+    pub(crate) async fn install_adaptive_playback_authority(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        // The source catalogue depends on the attempt schema, which becomes
+        // installable only after the owning membership initializer.
+        self.install_adaptive_attempt_schema(admission).await?;
+        self.install_adaptive_source_scope(admission).await
+    }
+
     pub(crate) async fn install_adaptive_attempt_schema(
         &self,
         admission: SchemaMigrationAdmission<'_>,
