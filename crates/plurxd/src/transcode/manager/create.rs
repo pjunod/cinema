@@ -4780,7 +4780,7 @@ impl TranscodeManager {
     pub(crate) async fn prepare_selected_copy(
         &self,
         request: &SessionRequest,
-        mut file: MediaFile,
+        mut file: plurx_core::domain::MediaFile,
         user_id: i64,
         position_ms: i64,
         shutdown: tokio_util::sync::CancellationToken,

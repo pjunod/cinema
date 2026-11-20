@@ -2297,7 +2297,7 @@ pub async fn decision_post(
         .filter(|position| *position >= 0)
         .map(|position| {
             (
-                state.clone(),
+                state.0.clone(),
                 auth.0.id,
                 position,
                 body.caps.clone(),
