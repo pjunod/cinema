@@ -6,16 +6,9 @@
 Companion to [the API reference](../API.md#56-activity) (existing operator
 surfaces), [scan hygiene](SCAN-AND-ENRICHMENT-HYGIENE.md) (walker and provider
 bounds), and [worker refinement](../cluster/WORKER-REFINEMENT-STATUS.md)
-(worker lifecycle evidence). This document owns the incident diagnosis,
-proposed repair, scheduling contract, queue management design, and remaining
-work. It is the canonical ledger for backlog project P42.
-
-## November 20 recurrence
-
-File 7230 remained queued while other Dolby Vision title jobs completed. Analysis
-intake was saturated and five title rows had expired leases. The [job service
-contract](../features/JOB-SERVICE.md) covers the new incident, the standalone
-and Raft acceptance cases, and the boundary with playback resource management.
+(worker lifecycle evidence). P42 tracks incident recovery and queue management here. The
+[November 20 follow-up](../features/JOB-SERVICE.md) covers job service in
+standalone and Raft deployments.
 
 ## November 7 recovery and release status
 
