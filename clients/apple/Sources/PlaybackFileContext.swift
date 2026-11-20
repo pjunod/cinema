@@ -155,7 +155,8 @@ struct PlaybackFileContext: Hashable {
     func path(_ resource: String, query: [URLQueryItem] = []) throws -> String {
         try requireCurrent()
         let sharedCaption = reference != nil && Self.matches(resource, "^captions(?:/[0-9a-f]{64}/(?:manifest|segments/[0-9a-f]{64}))?$")
-        guard sharedCaption || Self.matches(resource, "^(decision|hls/sessions|direct|stream\\.mp4|subs/[0-9]{1,6}(\\.vtt|/overlay\\.json|/overlay/[0-9a-f]{64}/objects/[0-9a-f]{64}\\.png)?|chapters/[0-9]{1,6}/thumb)$")
+        let localStartup = reference == nil && sessionId == nil && resource == "hls/prepare-startup" && query.isEmpty
+        guard sharedCaption || localStartup || Self.matches(resource, "^(decision|hls/sessions|direct|stream\\.mp4|subs/[0-9]{1,6}(\\.vtt|/overlay\\.json|/overlay/[0-9a-f]{64}/objects/[0-9a-f]{64}\\.png)?|chapters/[0-9]{1,6}/thumb)$")
         else { throw APIError.badURL }
         if reference != nil, !Self.sharedAssetIndexIsCanonical(resource) { throw APIError.badURL }
         if reference != nil && (resource == "direct" || resource == "stream.mp4") && sessionId == nil {

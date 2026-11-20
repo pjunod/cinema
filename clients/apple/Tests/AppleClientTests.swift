@@ -6580,6 +6580,15 @@ final class AppleClientTests: XCTestCase {
     }
     #endif
 
+    func testStartupPreparationIsAClosedLocalFileResource() throws {
+        let local = try PlaybackFileContext.local(42)
+        XCTAssertEqual(try local.apiPath("hls/prepare-startup"), "files/42/hls/prepare-startup")
+        XCTAssertThrowsError(try local.path("hls/prepare-startup", query: [URLQueryItem(name: "file", value: "7")]))
+        XCTAssertThrowsError(try local.path("hls/prepare-startup/extra"))
+        let session = try local.withSession("00000000-0000-4000-8000-000000000001")
+        XCTAssertThrowsError(try session.path("hls/prepare-startup"))
+    }
+
     func testNativeStartupSeekRequiresTheRequestedItemClock() {
         XCTAssertTrue(PlayerController.initialItemSeekLanded(.finished(true), positionMs: 6_174, targetMs: 6_200))
         XCTAssertFalse(PlayerController.initialItemSeekLanded(.finished(true), positionMs: 5_172, targetMs: 6_200))
