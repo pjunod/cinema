@@ -1,0 +1,88 @@
+name: Validation marker units
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validation-markers:
+    name: Python validation marker units
+    if: ${{ github.repository == 'noirr/plurx' && github.ref == 'refs/heads/main' && github.sha == vars.CI_FLEET_MARKER_UNITS_SHA }}
+    runs-on: ci-fleet-plurx-markers-v1
+    timeout-minutes: 3
+    steps:
+      - name: Run the validation marker suite from the exact source
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          SOURCE_REPO: ${{ github.repository }}
+          REPO_READ_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 -I -B - <<'PY'
+          import hashlib
+          from ipaddress import IPv4Address
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import sys
+          import tempfile
+          import unittest
+          from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+          class NoRedirect(HTTPRedirectHandler):
+              def redirect_request(self, request, fp, code, message, headers, newurl):
+                  return None
+
+          repo = os.environ["SOURCE_REPO"]
+          commit = os.environ["SOURCE_COMMIT"]
+          token = os.environ.pop("REPO_READ_TOKEN")
+          if repo != "noirr/plurx" or not re.fullmatch(r"[0-9a-f]{40}", commit) or not token:
+              raise SystemExit("Invalid Forgejo checkout identity")
+          files = (
+              "validation/__init__.py",
+              "validation/test_markers.py",
+              "tests/validation/test_test_markers.py",
+              "crates/plurx-core/src/secrets.rs",
+              "clients/android/app/src/test/java/tv/plurx/app/librarychannels/LibraryChannelStartFailureTest.kt",
+          )
+          # Use the same image-pinned destination as the guest's authenticated relay.
+          address, port = Path("/etc/ci-fleet-forge-origin").read_text(encoding="ascii").split()
+          if not port.isascii() or not port.isdecimal() or not 1 <= int(port) <= 65535:
+              raise SystemExit("Invalid Firecracker Forgejo relay port")
+          origin = f"http://{IPv4Address(address)}:{int(port)}"
+          opener = build_opener(ProxyHandler({}), NoRedirect)
+          hashes = {}
+          with tempfile.TemporaryDirectory(prefix="plurx-marker-unit-") as directory:
+              root = Path(directory)
+              for relative in files:
+                  request = Request(
+                      f"{origin}/api/v1/repos/{repo}/raw/{relative}?ref={commit}",
+                      headers={"Authorization": f"token {token}"},
+                  )
+                  with opener.open(request, timeout=8) as response:
+                      body = response.read(1_048_577)
+                  if len(body) > 1_048_576:
+                      raise SystemExit("Validation fixture exceeded the checkout limit")
+                  target = root / relative
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(body)
+                  hashes[relative] = hashlib.sha256(body).hexdigest()
+
+              del token, request
+              sys.path.insert(0, str(root))
+              suite = unittest.defaultTestLoader.discover(str(root / "tests/validation"), pattern="test_test_markers.py")
+              result = unittest.TextTestRunner(verbosity=2).run(suite)
+              if result.testsRun < 7 or result.skipped or not result.wasSuccessful():
+                  raise SystemExit("The validation marker suite did not run all required tests")
+              print("CI_FLEET_MARKER_RECEIPT " + json.dumps({
+                  "repository": repo,
+                  "commit": commit,
+                  "run_id": int(os.environ["GITHUB_RUN_ID"]),
+                  "attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                  "tests": result.testsRun,
+                  "sha256": hashes,
+              }, sort_keys=True), flush=True)
+          PY
