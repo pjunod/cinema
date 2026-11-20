@@ -280,7 +280,7 @@ impl TranscodeManager {
             .as_ref()
             .expect("actual selected runtime");
         let inputs = self
-            .rolling_start_inputs(file_id, None)
+            .rolling_start_inputs(file_id, None, None)
             .await
             .expect("actual source snapshot");
         let options = CopySessionOptions {
@@ -579,7 +579,7 @@ impl TranscodeManager {
             .expect("actual selected runtime");
         let baseline = runtime.accounting().expect("real initial accounting");
         let inputs = self
-            .rolling_start_inputs(file_id, None)
+            .rolling_start_inputs(file_id, None, None)
             .await
             .expect("actual source/probe/settings snapshot");
         let options = CopySessionOptions {

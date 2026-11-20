@@ -316,6 +316,7 @@ async fn automatic_static_application_fixture(survivor: StaticApplicationSurvivo
         tokio::time::Instant::now() + Duration::from_secs(45),
         JobKind::EncodedOutputPrepare,
     )
+    .await
     .expect("owner");
     let application = active.fence().application_group().clone();
     let pass = async {
@@ -612,6 +613,7 @@ async fn automatic_static_application_fixture(survivor: StaticApplicationSurvivo
     serve
         .try_create(
             VodRecipeRequest {
+                admission_priority: crate::admission::Priority::Live,
                 root_admission: None,
                 soundtrack: None,
                 companion: None,
@@ -891,6 +893,7 @@ async fn static_zero_compatibility_claim_survives_original_no_entry_ticket_and_a
     selected.audio_claim = None;
     selected.audio_delivery = encoding.options.audio.clone();
     let mut request_recipe = VodRecipeRequest {
+        admission_priority: crate::admission::Priority::Background,
         request: &selected,
         root_admission: None,
         soundtrack: None,

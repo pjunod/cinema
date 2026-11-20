@@ -752,6 +752,7 @@ async fn finite_restart_attach(
     serve
         .try_create(
             VodRecipeRequest {
+                admission_priority: crate::admission::Priority::Live,
                 root_admission: None,
                 soundtrack: None,
                 companion: None,

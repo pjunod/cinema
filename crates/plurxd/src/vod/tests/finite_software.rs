@@ -149,6 +149,7 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     serve
         .try_create(
             VodRecipeRequest {
+                admission_priority: crate::admission::Priority::Live,
                 root_admission: None,
                 soundtrack: None,
                 companion: None,
@@ -879,6 +880,7 @@ async fn finite_cancellation_fixture() -> FiniteCancellationFixture {
 
     let plan = encoding.media_plan(2_000);
     let recipe = Recipe {
+        source_telemetry: false,
         retained_logical: None,
         measured_candidate: None,
         file,
@@ -886,8 +888,10 @@ async fn finite_cancellation_fixture() -> FiniteCancellationFixture {
         aac: false,
         audio_delivery: encoding.options.audio.clone(),
         video: CopyVideoOptions::new(false, false),
+        dv_refit_gain: None,
         source_object_version: Some(encoding.source_object_version.clone()),
         cluster_cache_key: None,
+        copy_index_init_contract: None,
         encoding: Some(encoding),
     };
     FiniteCancellationFixture {
@@ -1525,7 +1529,7 @@ async fn dropped_finite_build_before_publication_keeps_its_original_cleanup_arm(
     );
     let family = VodServe::reserve_media_group(
         &[Arc::clone(&rendition)],
-        Some(crate::admission::Priority::Speculative),
+        crate::admission::Priority::Speculative,
     )
     .await
     .expect("family adopts same authentic selected finite credit");
@@ -1933,6 +1937,7 @@ async fn finite_attempt_case(case: FiniteAttemptCase) {
                 serving.authority(),
                 move |application_bytes| async move {
                     let mut recipe_request = VodRecipeRequest {
+                        admission_priority: crate::admission::Priority::Live,
                         request: &request,
                         root_admission: None,
                         soundtrack: None,
