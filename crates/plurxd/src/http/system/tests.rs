@@ -372,7 +372,14 @@ fn clustered_activity_attributes_answered_rows_and_names_missing_nodes() {
     assert!(missing.contains("node-c (timed_out)"), "{missing}");
     assert!(missing.contains("node-d (unhealthy)"), "{missing}");
     assert!(missing.contains("node-e (unsupported)"), "{missing}");
-    assert!(missing.contains("node-f (local_unavailable)"), "{missing}");
+    assert!(
+        missing.ends_with(", and 1 more did not answer"),
+        "{missing}"
+    );
+    assert!(
+        !missing.contains("node-f"),
+        "bounded summary must not name its fourth missing node: {missing}"
+    );
     assert!(missing.ends_with("did not answer"), "{missing}");
 }
 
