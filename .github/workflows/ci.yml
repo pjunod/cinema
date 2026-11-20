@@ -1329,7 +1329,11 @@ jobs:
     runs-on: [ci-nonvoter-compile-amd64]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
-      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+      # Activation runs the real Linux daemon, including source recovery admission.
+      options: >-
+        --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+        --mount type=bind,src=/etc/machine-id,dst=/run/plurx-host-machine-id,readonly
+        --mount type=bind,src=/proc/sys/kernel/random/boot_id,dst=/run/plurx-host-boot-id,readonly
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
@@ -1875,9 +1879,6 @@ jobs:
           test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.2"
           test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.2"
           test "$(xcodegen --version)" = "Version: 2.46.0"
-          simulator_runtimes="$(xcrun simctl list runtimes)"
-          grep -Fq "iOS 26.5 (26.5 - 23F77)" <<< "$simulator_runtimes"
-          grep -Fq "tvOS 26.5 (26.5 - 23L470)" <<< "$simulator_runtimes"
       # Keep DerivedData local to this checkout across build/test steps.
       # Its absolute-path build state is not transferred between job roots.
       - name: Create isolated iPhone, iPad, and Apple TV simulators
@@ -1893,21 +1894,24 @@ jobs:
             xcrun simctl shutdown "$stale_id" || true
             xcrun simctl delete "$stale_id" || true
           done
+          ios_runtime="$(python3 -m validation.apple_simulator_runtime iOS)"
+          tvos_runtime="$(python3 -m validation.apple_simulator_runtime tvOS)"
+          printf 'iOS runtime: %s\ntvOS runtime: %s\n' "$ios_runtime" "$tvos_runtime"
           suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           ios_id=$(xcrun simctl create \
             "plurx CI iPhone ${suffix}" \
             com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro \
-            com.apple.CoreSimulator.SimRuntime.iOS-26-5)
+            "$ios_runtime")
           echo "APPLE_IOS_SIM=platform=iOS Simulator,id=$ios_id" >> "$GITHUB_ENV"
           ipad_id=$(xcrun simctl create \
             "plurx CI iPad ${suffix}" \
             com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4-8GB \
-            com.apple.CoreSimulator.SimRuntime.iOS-26-5)
+            "$ios_runtime")
           echo "APPLE_IPAD_SIM=platform=iOS Simulator,id=$ipad_id" >> "$GITHUB_ENV"
           tvos_id=$(xcrun simctl create \
             "plurx CI Apple TV ${suffix}" \
             com.apple.CoreSimulator.SimDeviceType.Apple-TV-4K-3rd-generation-4K \
-            com.apple.CoreSimulator.SimRuntime.tvOS-26-5)
+            "$tvos_runtime")
           echo "APPLE_TVOS_SIM=platform=tvOS Simulator,id=$tvos_id" >> "$GITHUB_ENV"
           # `xcodebuild` can otherwise sit silently waiting for a destination
           # that CoreSimulator has not finished starting. Boot each concrete

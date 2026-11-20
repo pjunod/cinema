@@ -113,6 +113,7 @@
     "pages/diagnostics.js",
     "pages/activity-starts.js",
     "curator-login.js",
+    "pages/curation.js",
     "router.js"
   ]
 }
