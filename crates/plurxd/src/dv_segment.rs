@@ -1036,6 +1036,8 @@ impl SegmentWindow {
 #[cfg(target_os = "linux")]
 pub(crate) struct StreamingSegmentRequest {
     pub(crate) request: SegmentRequest,
+    /// Background head preparation must use its separately admitted reader.
+    pub(crate) background: bool,
     /// Renderer completion must be bounded even after encoder handoff.
     pub(crate) renderer_deadline: Instant,
     pub(crate) window: Option<SegmentWindow>,
@@ -1154,6 +1156,16 @@ async fn run_streaming(
         return Err("base-RPU processing requires an original-source window and omitted EL".into());
     }
     let request = stream.request;
+    if stream.background && request.source_input.is_none() {
+        return Err("background FEL render requires its owned source reader".into());
+    }
+    let work = |name| {
+        if stream.background {
+            crate::process_control::ChildWork::background(name)
+        } else {
+            crate::process_control::ChildWork::realtime(name)
+        }
+    };
     if windowed {
         request.shape.window_frame_bytes()?;
     } else {
@@ -1282,13 +1294,13 @@ async fn run_streaming(
             runtime_cache: &request.runtime_cache,
             progress: Progress::None,
             descriptors: Descriptors::from_files(
-                Some(&resources.source.handle),
+                (!stream.background).then_some(&resources.source.handle),
                 Some(&directory),
                 Some(&write),
                 true,
             ),
             env: &renderer_env,
-            work: crate::process_control::ChildWork::realtime("DV streaming reconstruction"),
+            work: work("DV streaming reconstruction"),
         },
     )?;
     stages.mark(WindowStage::HelperSpawned);
@@ -1329,7 +1341,7 @@ async fn run_streaming(
                     false,
                 ),
                 env: &[],
-                work: crate::process_control::ChildWork::realtime("DV streaming encoder"),
+                work: work("DV streaming encoder"),
             },
         )
     });
@@ -1494,6 +1506,7 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
     if streaming {
         #[cfg(target_os = "linux")]
         return spawn_streaming(StreamingSegmentRequest {
+            background: false,
             stages: WindowStageClock::start(),
             export_raster: None,
             display_target: None,
