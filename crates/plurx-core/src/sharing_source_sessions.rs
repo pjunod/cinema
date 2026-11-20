@@ -36,6 +36,9 @@ impl SourceAdmissionMembers {
     pub(crate) fn refreshed_after_heartbeat(&self, _fresh: &Self) -> bool {
         match *self {}
     }
+    pub(crate) fn same_preparation_floor(&self, _fresh: &Self) -> bool {
+        match *self {}
+    }
 }
 
 use crate::{
@@ -351,11 +354,100 @@ impl SourceSessionWriteAuthority {
     pub fn assignment(&self) -> &SourceDispatchAssignment {
         &self.assignment
     }
+    /// Immutable association for reobserving this assigned startup. It carries
+    /// no permission to serve, spawn, assign, or extend the original claim.
+    pub fn preparation_scope(&self) -> SourcePreparationScope {
+        SourcePreparationScope {
+            assignment: self.assignment.clone(),
+            request: self.intent.request.clone(),
+        }
+    }
     /// Required again after commit and before actual queue admission. This
     /// checks the original snapshot clock, not current grant or physical work.
     pub fn validate_observation_freshness(&self, now_ms: i64) -> Result<(), SourceAdmissionError> {
         self.assignment.validate_observation_freshness(now_ms)
     }
+}
+
+/// Retained startup identity, never a serving or physical-admission capability.
+#[derive(Clone)]
+pub struct SourcePreparationScope {
+    pub(crate) assignment: SourceDispatchAssignment,
+    request: SourceSessionRequest,
+}
+impl SourcePreparationScope {
+    pub fn refresh(&self) -> SourcePreparationRefresh {
+        SourcePreparationRefresh {
+            scope: self.clone(),
+            previous: None,
+            attempts: 0,
+        }
+    }
+    pub fn matches_assignment(&self, assignment: &SourceDispatchAssignment) -> bool {
+        self.assignment.same_identity(assignment)
+    }
+    pub(crate) fn matches(&self, authority: &SourceSessionWriteAuthority) -> bool {
+        let request = &authority.intent.request;
+        self.assignment.same_identity(&authority.assignment)
+            && self
+                .assignment
+                .members
+                .same_preparation_floor(&authority.assignment.members)
+            && self.request.claim_expires_at_ms == request.claim_expires_at_ms
+            && self.request.credential_hash == request.credential_hash
+            && self.request.ingress_registry_boot_id == request.ingress_registry_boot_id
+    }
+}
+
+/// Four bounded observations of one immutable startup. Another attempt is
+/// possible only after an assertion admitted nothing and a benign heartbeat
+/// advanced the same complete membership floor.
+pub struct SourcePreparationRefresh {
+    pub(crate) scope: SourcePreparationScope,
+    previous: Option<SourceAdmissionMembers>,
+    attempts: u8,
+}
+impl SourcePreparationRefresh {
+    pub(crate) fn begin(&mut self, members: &SourceAdmissionMembers) -> bool {
+        if self.attempts >= 4
+            || !self
+                .scope
+                .assignment
+                .members
+                .same_preparation_floor(members)
+            || (self.attempts > 0
+                && !self
+                    .previous
+                    .as_ref()
+                    .is_some_and(|old| old.refreshed_after_heartbeat(members)))
+        {
+            self.attempts = 4;
+            self.previous = None;
+            return false;
+        }
+        self.attempts += 1;
+        self.previous = None;
+        true
+    }
+    pub(crate) fn refused(&mut self, members: &SourceAdmissionMembers) {
+        self.previous = Some(members.clone());
+    }
+}
+
+/// Which assertion rejected this attempt without admitting new work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourcePreparationPhase {
+    Activation,
+    Preparation,
+}
+
+pub enum SourcePreparationAuthorityRead {
+    Ready(Box<SourceSessionWriteAuthority>),
+    /// This assertion admitted nothing. Refresh still requires an exact
+    /// same-floor heartbeat; this variant alone never permits another attempt.
+    NoAdmission(SourcePreparationPhase),
+    Unavailable,
+    Capacity,
 }
 
 pub enum SourceWriteAuthorityRead {

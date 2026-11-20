@@ -615,6 +615,7 @@ struct DispatchPrepared {
 }
 enum DispatchPreparedRead {
     Ready(Box<DispatchPrepared>),
+    NoAdmission(Box<DispatchPrepared>),
     Unavailable,
     Capacity,
 }
@@ -623,6 +624,7 @@ async fn assign_dispatch_prepared<T: Backend>(
     binding: &SourceBindingHandle,
     credential: &CredentialKey,
     members: &SourceAdmissionMembers,
+    assigned_only: bool,
 ) -> Result<DispatchPreparedRead, StoreError> {
     if binding.released || !present(backend).await? {
         return Ok(DispatchPreparedRead::Unavailable);
@@ -642,6 +644,7 @@ async fn assign_dispatch_prepared<T: Backend>(
         || row.reservation != "held"
         || row.start_resolved.is_some()
         || !matches!(row.dispatch, 0 | 1)
+        || (assigned_only && row.dispatch != 1)
         || row.request_state.as_deref() != Some("starting")
     {
         return Ok(DispatchPreparedRead::Unavailable);
@@ -714,27 +717,86 @@ async fn assign_dispatch_prepared<T: Backend>(
     let request_exact = "r.incarnation_id=b.incarnation_id AND r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.request_fingerprint=b.request_fingerprint AND r.playback_id=b.playback_id AND r.principal_kind='sharing' AND r.user_id IS NULL AND r.share_grant_id=b.share_grant_id AND r.share_viewer_key=b.share_viewer_key AND r.state='starting' AND r.claim_expires_at_ms=$19 AND r.claim_expires_at_ms>$3";
     let owned_route = "s.incarnation_id=$10 AND s.owner_key=$4 AND s.principal_kind='sharing' AND s.user_id IS NULL AND s.share_grant_id=$5 AND s.share_viewer_key=$6 AND s.playback_id=$9 AND s.request_fingerprint=$8 AND s.owner_node_id=$22 AND s.owner_epoch=1 AND s.state='active' AND s.lease_expires_at_ms>$3";
     let local = format!("EXISTS(SELECT 1 FROM cluster_nodes WHERE raft_id=$21 AND node_id=$22 AND removed_at IS NULL) AND $23 IN(0,1) AND NOT EXISTS(SELECT 1 FROM settings WHERE key=$24) AND NOT EXISTS(SELECT 1 FROM media_sessions s WHERE s.incarnation_id=$10 AND ($23=0 OR NOT ({owned_route}))) AND NOT EXISTS(SELECT 1 FROM job_leases j WHERE j.resource='session:'||$10 AND ($23=0 OR NOT EXISTS(SELECT 1 FROM media_sessions s WHERE {owned_route} AND j.owner_node_id=s.owner_node_id AND j.fence=s.owner_epoch AND j.expires_at_ms=s.lease_expires_at_ms AND j.revision>0))) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins p WHERE p.consumer_kind='media_session' AND p.consumer_id=$10 AND ($23=0 OR NOT EXISTS(SELECT 1 FROM media_sessions s JOIN job_leases j ON j.resource='session:'||s.incarnation_id AND j.owner_node_id=s.owner_node_id AND j.fence=s.owner_epoch AND j.expires_at_ms=s.lease_expires_at_ms WHERE {owned_route}))) AND NOT EXISTS(SELECT 1 FROM media_session_preparations WHERE staged_incarnation_id=$10)");
-    let statements = vec![
+    let mut statements = vec![
             (format!("UPDATE sharing_source_session_bindings AS b SET dispatch_generation=1 WHERE {exact} AND b.dispatch_generation=0 AND {guard} AND {local} AND EXISTS(SELECT 1 FROM media_session_requests r WHERE {request_exact} AND r.owner_node_id IS NULL)"),values.clone()),
             (format!("UPDATE media_session_requests AS r SET owner_node_id=$22,updated_at_ms=$3 WHERE $23=0 AND r.owner_node_id IS NULL AND EXISTS(SELECT 1 FROM sharing_source_session_bindings b WHERE {exact} AND b.dispatch_generation=1 AND {request_exact} AND {guard} AND {local})"),values.clone()),
             (format!("INSERT INTO sharing_source_session_bindings(incarnation_id,owner_key,share_grant_id,share_viewer_key,request_id,request_fingerprint,playback_id,source_server_id,catalogue_epoch,library_id,item_id,file_id,file_revision,reservation_state,start_resolved_at_ms,dispatch_generation,created_at_ms) SELECT NULL,$4,$5,$6,$7,$8,$9,$11,$12,$13,$14,$15,$16,'held',NULL,0,$3 WHERE NOT EXISTS(SELECT 1 FROM sharing_source_session_bindings b JOIN media_session_requests r ON {request_exact} WHERE {exact} AND b.dispatch_generation=1 AND r.owner_node_id=$22 AND {guard} AND {local})"),values),
         ];
+    // Refresh of an already assigned startup never executes either ownership
+    // UPDATE. The exact original final assertion still checks every fence.
+    if assigned_only {
+        statements.drain(..2);
+    }
+    let prepared = Box::new(DispatchPrepared {
+        intent,
+        assignment: SourceDispatchAssignment {
+            binding: binding.clone(),
+            owner_node_id: current.node,
+            dispatch_generation: 1,
+            members: members.clone(),
+        },
+    });
     match backend.sharing_txn(statements).await {
-        Ok(counts) if counts.as_slice() == [1, 1, 0] || counts.as_slice() == [0, 0, 0] => {
-            Ok(DispatchPreparedRead::Ready(Box::new(DispatchPrepared {
-                intent,
-                assignment: SourceDispatchAssignment {
-                    binding: binding.clone(),
-                    owner_node_id: current.node,
-                    dispatch_generation: 1,
-                    members: members.clone(),
-                },
-            })))
+        Ok(counts)
+            if (assigned_only && counts.as_slice() == [0])
+                || (!assigned_only
+                    && (counts.as_slice() == [1, 1, 0] || counts.as_slice() == [0, 0, 0])) =>
+        {
+            Ok(DispatchPreparedRead::Ready(prepared))
         }
         Ok(_) => Err(invalid()),
+        Err(error) if lost_proposal(&error) && assigned_only => {
+            Ok(DispatchPreparedRead::NoAdmission(prepared))
+        }
         Err(error) if lost_proposal(&error) => Ok(DispatchPreparedRead::Unavailable),
         Err(error) => Err(error),
     }
+}
+
+async fn prepare_media_authority<B: Backend>(
+    backend: &B,
+    refresh: &mut SourcePreparationRefresh,
+    credential: &CredentialKey,
+    members: &SourceAdmissionMembers,
+) -> Result<SourcePreparationAuthorityRead, StoreError> {
+    if !refresh.begin(members) {
+        return Ok(SourcePreparationAuthorityRead::Unavailable);
+    }
+    let (prepared, rejected) = match assign_dispatch_prepared(
+        backend,
+        &refresh.scope.assignment.binding,
+        credential,
+        members,
+        true,
+    )
+    .await?
+    {
+        DispatchPreparedRead::Ready(prepared) => (prepared, false),
+        DispatchPreparedRead::NoAdmission(prepared) => (prepared, true),
+        DispatchPreparedRead::Unavailable => {
+            return Ok(SourcePreparationAuthorityRead::Unavailable)
+        }
+        DispatchPreparedRead::Capacity => return Ok(SourcePreparationAuthorityRead::Capacity),
+    };
+    let authority = SourceSessionWriteAuthority {
+        assignment: prepared.assignment,
+        intent: prepared.intent,
+    };
+    if !refresh.scope.matches(&authority) {
+        return Ok(SourcePreparationAuthorityRead::Unavailable);
+    }
+    let rejected_phase = if rejected {
+        Some(SourcePreparationPhase::Activation)
+    } else if !source_index_permission(backend, &authority).await? {
+        Some(SourcePreparationPhase::Preparation)
+    } else {
+        None
+    };
+    if let Some(phase) = rejected_phase {
+        refresh.refused(members);
+        return Ok(SourcePreparationAuthorityRead::NoAdmission(phase));
+    }
+    Ok(SourcePreparationAuthorityRead::Ready(Box::new(authority)))
 }
 
 fn owned_route_condition(
@@ -1435,6 +1497,14 @@ pub trait SharingSourceSessionStore: Send + Sync {
         &self,
         authority: &SourceSessionWriteAuthority,
     ) -> Result<bool, StoreError>;
+    /// Reobserve one already assigned preparation. Only an assertion-only
+    /// rejection can consume a subsequent same-floor heartbeat attempt.
+    async fn prepare_source_media_authority(
+        &self,
+        refresh: &mut SourcePreparationRefresh,
+        credential: &CredentialKey,
+        members: &SourceAdmissionMembers,
+    ) -> Result<SourcePreparationAuthorityRead, StoreError>;
     async fn prepare_source_activation_authority(
         &self,
         assignment: &SourceDispatchAssignment,
@@ -1532,9 +1602,11 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
         members: &SourceAdmissionMembers,
     ) -> Result<Option<SourceDispatchAssignment>, StoreError> {
         Ok(
-            match assign_dispatch_prepared(self, binding, credential, members).await? {
+            match assign_dispatch_prepared(self, binding, credential, members, false).await? {
                 DispatchPreparedRead::Ready(prepared) => Some(prepared.assignment),
-                DispatchPreparedRead::Unavailable | DispatchPreparedRead::Capacity => None,
+                DispatchPreparedRead::NoAdmission(_)
+                | DispatchPreparedRead::Unavailable
+                | DispatchPreparedRead::Capacity => None,
             },
         )
     }
@@ -1659,13 +1731,24 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
         source_index_permission(self, authority).await
     }
 
+    async fn prepare_source_media_authority(
+        &self,
+        refresh: &mut SourcePreparationRefresh,
+        credential: &CredentialKey,
+        members: &SourceAdmissionMembers,
+    ) -> Result<SourcePreparationAuthorityRead, StoreError> {
+        prepare_media_authority(self, refresh, credential, members).await
+    }
+
     async fn prepare_source_activation_authority(
         &self,
         assignment: &SourceDispatchAssignment,
         credential: &CredentialKey,
         members: &SourceAdmissionMembers,
     ) -> Result<SourceWriteAuthorityRead, StoreError> {
-        match assign_dispatch_prepared(self, &assignment.binding, credential, members).await? {
+        match assign_dispatch_prepared(self, &assignment.binding, credential, members, false)
+            .await?
+        {
             DispatchPreparedRead::Ready(prepared)
                 if prepared.assignment.owner_node_id == assignment.owner_node_id
                     && prepared.assignment.dispatch_generation
@@ -1678,9 +1761,9 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
                     },
                 )))
             }
-            DispatchPreparedRead::Ready(_) | DispatchPreparedRead::Unavailable => {
-                Ok(SourceWriteAuthorityRead::Unavailable)
-            }
+            DispatchPreparedRead::Ready(_)
+            | DispatchPreparedRead::NoAdmission(_)
+            | DispatchPreparedRead::Unavailable => Ok(SourceWriteAuthorityRead::Unavailable),
             DispatchPreparedRead::Capacity => Ok(SourceWriteAuthorityRead::Capacity),
         }
     }

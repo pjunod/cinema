@@ -72,6 +72,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Assigned Shared Source preparation reobserves exact startup authority after
+  a benign membership heartbeat, with four bounded assertion-only attempts;
+  ownership, file, credential, claim and membership changes remain refusals.
 - Main Python test receipts bind reviewed production-data inputs before reusing
   a pass; unchanged authenticated legacy inputs remain reusable.
 - Shared Source resource requests distinguish a legitimate concurrent heartbeat

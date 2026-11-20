@@ -317,6 +317,7 @@ impl TranscodeManager {
                 master: Arc::clone(&state.sharing.key),
                 registry_boot_id,
                 ingress,
+                preparation_scope: activation.preparation_scope(),
             }),
             retirement_deadline: Default::default(),
             direct: Some(Arc::new(prepared.into_direct_file())),

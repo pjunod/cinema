@@ -10779,3 +10779,30 @@ mod floor_advisory {
         );
     }
 }
+
+#[test]
+fn sharing_source_preparation_refresh_pins_the_complete_member_floor() {
+    let key = crate::secrets::CredentialKey::from_bytes([17; 32]);
+    let before = source_preparation_members_for_unit_test(1000000, 999999, &key)
+        .expect("old actual-shaped observation");
+    let fresh = source_preparation_members_for_unit_test(1000002, 1000001, &key)
+        .expect("normal heartbeat observation");
+    assert!(before.refreshed_after_heartbeat(&fresh));
+    assert!(!before.refreshed_after_heartbeat(&before));
+    for field in 0..6 {
+        let mut changed = fresh.clone();
+        match field {
+            0 => changed.local_raft_id = 2,
+            1 => changed.members_json = "[1,2]".into(),
+            2 => changed.membership_log_json = "{\"changed\":true}".into(),
+            3 => changed.membership_generation += 1,
+            4 => changed.purpose_master_fingerprint = Some("different-master".into()),
+            5 => changed.newest_heartbeat_ms = changed.completed_at_ms + 1,
+            _ => unreachable!(),
+        }
+        assert!(
+            !before.refreshed_after_heartbeat(&changed),
+            "changed field {field}"
+        );
+    }
+}

@@ -3637,13 +3637,17 @@ impl SourceAdmissionMembers {
     /// A validated observation of the same floor can include a heartbeat
     /// that had not happened when the previous observation finished.
     pub(crate) fn refreshed_after_heartbeat(&self, fresh: &Self) -> bool {
+        self.same_preparation_floor(fresh)
+            && fresh.newest_heartbeat_ms > self.completed_at_ms
+            && fresh.newest_heartbeat_ms <= fresh.completed_at_ms
+    }
+
+    pub(crate) fn same_preparation_floor(&self, fresh: &Self) -> bool {
         self.local_raft_id == fresh.local_raft_id
             && self.members_json == fresh.members_json
             && self.membership_log_json == fresh.membership_log_json
             && self.membership_generation == fresh.membership_generation
             && self.purpose_master_fingerprint == fresh.purpose_master_fingerprint
-            && fresh.newest_heartbeat_ms > self.completed_at_ms
-            && fresh.newest_heartbeat_ms <= fresh.completed_at_ms
     }
 
     /// Return the closed SQL predicate and its three numbered bindings. The
@@ -4164,6 +4168,27 @@ pub(crate) fn source_admission_members_with_purpose_for_unit_test(
 ) -> Result<SourceAdmissionMembers, MembershipError> {
     let mut observation = source_admission_members_for_unit_test(local_raft_id, members, now_ms)?;
     observation.purpose_master_fingerprint = Some(master.sharing_purpose_master_fingerprint());
+    Ok(observation)
+}
+
+/// Preserve the actual heartbeat timestamp when a SQLite fixture models a
+/// completed membership observation. This cannot construct serving authority.
+#[cfg(test)]
+pub(crate) fn source_preparation_members_for_unit_test(
+    now_ms: i64,
+    newest_heartbeat_ms: i64,
+    master: &crate::secrets::CredentialKey,
+) -> Result<SourceAdmissionMembers, MembershipError> {
+    if newest_heartbeat_ms > now_ms || newest_heartbeat_ms <= 0 {
+        return Err(MembershipError::Incompatible);
+    }
+    let mut observation = source_admission_members_with_purpose_for_unit_test(
+        1,
+        &BTreeSet::from([1]),
+        now_ms,
+        master,
+    )?;
+    observation.newest_heartbeat_ms = newest_heartbeat_ms;
     Ok(observation)
 }
 

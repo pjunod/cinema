@@ -3264,3 +3264,311 @@ async fn sharing_source_designation_settled_anchor_re_elects_only_after_all_file
         assert_eq!(count(&store, "copy_source_designation_bindings").await, 2);
     }
 }
+
+#[derive(Clone, Copy)]
+enum PreparationInterleave {
+    Heartbeat,
+    FileChangedWithoutHeartbeat,
+    StoreError,
+}
+/// Executes unchanged production assertions through the actual Store, placing
+/// one metadata operation after SQL clock binding and before its transaction.
+struct PreparationInterleavedStore<'a> {
+    store: &'a SqliteStore,
+    at: usize,
+    repeat: bool,
+    action: PreparationInterleave,
+    assertions: std::sync::atomic::AtomicUsize,
+}
+#[async_trait::async_trait]
+impl super::super::sharing::Backend for PreparationInterleavedStore<'_> {
+    fn sharing_is_replicated(&self) -> bool {
+        self.store.sharing_is_replicated()
+    }
+    async fn sharing_read(&self, sql: &str, values: Vec<Value>) -> Result<Vec<String>, StoreError> {
+        self.store.sharing_read(sql, values).await
+    }
+    async fn sharing_txn(&self, statements: Vec<Statement>) -> Result<Vec<usize>, StoreError> {
+        // Already-assigned authority acquisition and preparation are both
+        // assertion-only. No generation-0 ownership UPDATE may enter here.
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0]
+            .0
+            .starts_with("INSERT INTO sharing_source_session_bindings("));
+        assert!(statements[0].0.contains("SELECT NULL"));
+        let call = self
+            .assertions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if self.repeat || call == self.at {
+            match self.action {
+                PreparationInterleave::Heartbeat => {
+                    let Value::Integer(upper) = &statements[0].1[2] else {
+                        panic!("bound production upper timestamp")
+                    };
+                    let heartbeat = now_ms()?;
+                    assert!(heartbeat > *upper);
+                    self.store.sharing_txn(vec![
+                        ("UPDATE cluster_nodes SET last_seen_at=$1 WHERE node_id='voter'".into(), vec![heartbeat.into()]),
+                        ("UPDATE cluster_node_capabilities SET last_seen_at=$1 WHERE node_id='voter'".into(), vec![heartbeat.into()]),
+                    ]).await?;
+                }
+                PreparationInterleave::FileChangedWithoutHeartbeat => {
+                    self.store
+                        .sharing_txn(vec![(
+                            "UPDATE files SET size=size+1 WHERE id=1".into(),
+                            vec![],
+                        )])
+                        .await?;
+                }
+                PreparationInterleave::StoreError => return Err(invalid()),
+            }
+        }
+        self.store.sharing_txn(statements).await
+    }
+    async fn sharing_revision_key_rows(&self) -> Result<Vec<String>, StoreError> {
+        self.store.sharing_revision_key_rows().await
+    }
+    async fn sharing_file_locator_key_rows(&self) -> Result<Vec<String>, StoreError> {
+        self.store.sharing_file_locator_key_rows().await
+    }
+    async fn sharing_purpose_archive_rows(&self) -> Result<Vec<String>, StoreError> {
+        self.store.sharing_purpose_archive_rows().await
+    }
+}
+async fn preparation_members(store: &SqliteStore) -> SourceAdmissionMembers {
+    let rows = store.sharing_read("SELECT json_quote(MAX(last_seen_at)) AS payload FROM cluster_nodes WHERE removed_at IS NULL", vec![]).await.expect("actual heartbeat");
+    let heartbeat: i64 = serde_json::from_str(&rows[0]).expect("heartbeat timestamp");
+    crate::cluster::membership::source_preparation_members_for_unit_test(
+        now_ms().expect("completed observation"),
+        heartbeat,
+        &CredentialKey::from_bytes([17; 32]),
+    )
+    .expect("timestamp-accurate fixture observation")
+}
+async fn preparation_seed(store: &SqliteStore) -> (SourceSessionWriteAuthority, CredentialKey) {
+    let (grant, credential) = setup(store).await;
+    let request = intent(store, grant, &credential, "preparation-heartbeat").await;
+    let SourceClaimOutcome::Acquired(binding) = store
+        .claim_source_media_session(&request, &proof())
+        .await
+        .expect("claim")
+    else {
+        panic!("Source reservation")
+    };
+    let assignment = store
+        .assign_source_dispatch(&binding, &credential, &proof())
+        .await
+        .expect("assignment")
+        .expect("exact owner");
+    let SourceWriteAuthorityRead::Ready(authority) = store
+        .prepare_source_activation_authority(&assignment, &credential, &proof())
+        .await
+        .expect("seed")
+    else {
+        panic!("current exact activation witness")
+    };
+    (*authority, credential)
+}
+async fn assert_preparation_unadmitted(store: &SqliteStore) {
+    for table in [
+        "media_sessions",
+        "job_leases",
+        "cache_consumer_pins",
+        "media_session_preparations",
+    ] {
+        assert_eq!(
+            count(store, table).await,
+            0,
+            "assertion admits nothing in {table}"
+        );
+    }
+    assert_eq!(count(store, "sharing_source_session_bindings").await, 1);
+}
+
+#[tokio::test]
+async fn sharing_source_preparation_refresh_recovers_only_same_floor_heartbeat() {
+    let _clock = super::super::sharing::LogicalClock::install();
+    let dir = tempfile::tempdir().expect("directory");
+    for at in [1, 2] {
+        for store in [
+            SqliteStore::open_in_memory().expect("memory"),
+            SqliteStore::open(&dir.path().join(format!("preparation-{at}.db"))).expect("pool"),
+        ] {
+            let (authority, credential) = preparation_seed(&store).await;
+            let mut refresh = authority.preparation_scope().refresh();
+            let interleaved = PreparationInterleavedStore {
+                store: &store,
+                at,
+                repeat: false,
+                action: PreparationInterleave::Heartbeat,
+                assertions: std::sync::atomic::AtomicUsize::new(0),
+            };
+            let before = preparation_members(&store).await;
+            assert!(matches!(
+                prepare_media_authority(&interleaved, &mut refresh, &credential, &before)
+                    .await
+                    .expect("guarded attempt"),
+                SourcePreparationAuthorityRead::NoAdmission(_)
+            ));
+            assert_preparation_unadmitted(&store).await;
+            let fresh = preparation_members(&store).await;
+            assert!(before.refreshed_after_heartbeat(&fresh));
+            let SourcePreparationAuthorityRead::Ready(recovered) =
+                prepare_media_authority(&interleaved, &mut refresh, &credential, &fresh)
+                    .await
+                    .expect("bounded same-floor reauthorization")
+            else {
+                panic!("same startup recovers after benign heartbeat")
+            };
+            assert!(authority.assignment.same_identity(&recovered.assignment));
+            assert_eq!(
+                authority.intent.request.claim_expires_at_ms,
+                recovered.intent.request.claim_expires_at_ms
+            );
+            assert_eq!(
+                authority.intent.request.credential_hash,
+                recovered.intent.request.credential_hash
+            );
+            assert_eq!(
+                authority.intent.request.ingress_registry_boot_id,
+                recovered.intent.request.ingress_registry_boot_id
+            );
+            assert_preparation_unadmitted(&store).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn sharing_source_preparation_refresh_refuses_changed_scope_and_generation_zero() {
+    let _clock = super::super::sharing::LogicalClock::install();
+    for changed in 0..6 {
+        let store = SqliteStore::open_in_memory().expect("memory");
+        let (authority, credential) = preparation_seed(&store).await;
+        let mut seed = authority.clone();
+        match changed {
+            0 => seed.assignment.owner_node_id = "other-owner".into(),
+            1 => seed.intent.request.claim_expires_at_ms += 1,
+            2 => seed.intent.request.ingress_registry_boot_id = Uuid::new_v4(),
+            3 => seed.intent.request.credential_hash = "e".repeat(64),
+            4 => {
+                seed.assignment.members = source_admission_members_with_purpose_for_unit_test(
+                    1,
+                    &BTreeSet::from([1, 2]),
+                    now_ms().expect("clock"),
+                    &credential,
+                )
+                .expect("changed roster")
+            }
+            5 => {
+                // Recreate an unassigned retained binding. The refresh helper
+                // must refuse it without executing ownership UPDATEs.
+                store
+                    .sharing_txn(vec![
+                        (
+                            "UPDATE sharing_source_session_bindings SET dispatch_generation=0"
+                                .into(),
+                            vec![],
+                        ),
+                        (
+                            "UPDATE media_session_requests SET owner_node_id=NULL".into(),
+                            vec![],
+                        ),
+                    ])
+                    .await
+                    .expect("generation-zero fixture");
+            }
+            _ => unreachable!(),
+        }
+        let mut refresh = seed.preparation_scope().refresh();
+        assert!(matches!(
+            prepare_media_authority(
+                &store,
+                &mut refresh,
+                &credential,
+                &preparation_members(&store).await
+            )
+            .await
+            .expect("scope refusal"),
+            SourcePreparationAuthorityRead::Unavailable
+        ));
+        if changed == 5 {
+            let rows = store.sharing_read("SELECT json_quote(dispatch_generation) AS payload FROM sharing_source_session_bindings", vec![]).await.expect("unchanged binding");
+            assert_eq!(rows, ["0"]);
+        }
+        assert_preparation_unadmitted(&store).await;
+    }
+}
+
+#[tokio::test]
+async fn sharing_source_preparation_refresh_never_retries_errors_unchanged_refusal_or_exhaustion() {
+    let _clock = super::super::sharing::LogicalClock::install();
+    for action in [
+        PreparationInterleave::FileChangedWithoutHeartbeat,
+        PreparationInterleave::StoreError,
+        PreparationInterleave::Heartbeat,
+    ] {
+        let store = SqliteStore::open_in_memory().expect("memory");
+        let (authority, credential) = preparation_seed(&store).await;
+        let mut refresh = authority.preparation_scope().refresh();
+        let interleaved = PreparationInterleavedStore {
+            store: &store,
+            at: 1,
+            repeat: true,
+            action,
+            assertions: std::sync::atomic::AtomicUsize::new(0),
+        };
+        if matches!(action, PreparationInterleave::Heartbeat) {
+            for _ in 0..4 {
+                assert!(matches!(
+                    prepare_media_authority(
+                        &interleaved,
+                        &mut refresh,
+                        &credential,
+                        &preparation_members(&store).await
+                    )
+                    .await
+                    .expect("typed no admission"),
+                    SourcePreparationAuthorityRead::NoAdmission(_)
+                ));
+            }
+        } else {
+            let result = prepare_media_authority(
+                &interleaved,
+                &mut refresh,
+                &credential,
+                &preparation_members(&store).await,
+            )
+            .await;
+            match action {
+                PreparationInterleave::StoreError => assert!(result.is_err()),
+                _ => assert!(matches!(
+                    result.expect("typed rejection"),
+                    SourcePreparationAuthorityRead::NoAdmission(_)
+                )),
+            }
+        }
+        let calls = interleaved
+            .assertions
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            prepare_media_authority(
+                &interleaved,
+                &mut refresh,
+                &credential,
+                &preparation_members(&store).await
+            )
+            .await
+            .expect("terminal refusal"),
+            SourcePreparationAuthorityRead::Unavailable
+        ));
+        assert_eq!(
+            interleaved
+                .assertions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            calls,
+            "no additional guarded operation"
+        );
+        assert_preparation_unadmitted(&store).await;
+    }
+}

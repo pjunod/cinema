@@ -23,6 +23,7 @@ pub(crate) struct SourceProducerAuthority {
     master: Arc<plurx_core::secrets::CredentialKey>,
     registry_boot_id: uuid::Uuid,
     ingress: plurx_core::sharing_source_sessions::SourceIngressAdmissionPermission,
+    preparation_scope: plurx_core::sharing_source_sessions::SourcePreparationScope,
 }
 
 pub(crate) struct SourceGenerationAuthority {
@@ -1021,44 +1022,53 @@ impl SourceProducerAuthority {
         Box<plurx_core::sharing_source_sessions::SourceSessionWriteAuthority>,
         SourceWorkerError,
     > {
-        let members = self
-            .membership
-            .observe_source_admission_members()
-            .await
-            .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.members_store", "Source preparation refused"); SourceWorkerError::Unavailable })?
-            .ok_or_else(|| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.members_absent", "Source preparation refused"); SourceWorkerError::Unavailable })?;
-        if !self.ingress.assignment().same_identity(assignment) {
-            tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.assignment_identity", "Source preparation refused");
+        use plurx_core::sharing_source_sessions::SourcePreparationAuthorityRead;
+        if !self.ingress.assignment().same_identity(assignment)
+            || !self.preparation_scope.matches_assignment(assignment)
+        {
             return Err(SourceWorkerError::Conflict);
         }
-        let Some(permission) = self
-            .store
-            .refresh_source_ingress_admission(&self.ingress, &members)
-            .await
-            .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.permission_store", "Source preparation refused"); SourceWorkerError::Unresolved })?
-        else {
-            tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.permission_refused", "Source preparation refused"); return Err(SourceWorkerError::Unavailable);
-        };
-        permission
-            .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
-            .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.permission_freshness", "Source preparation refused"); SourceWorkerError::Unavailable })?;
-        let SourceWriteAuthorityRead::Ready(proof) = self
-            .store
-            .prepare_source_activation_authority(assignment, &self.master, &members)
-            .await
-            .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.activation_store", "Source preparation refused"); SourceWorkerError::Unresolved })?
-        else {
-            tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.activation_refused", "Source preparation refused"); return Err(SourceWorkerError::Unavailable);
-        };
-        if !self
-            .store
-            .authorize_source_media_preparation(&proof)
-            .await
-            .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.preparation_store", "Source preparation refused"); SourceWorkerError::Unresolved })?
-        {
-            tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.preparation_refused", "Source preparation refused"); return Err(SourceWorkerError::Unavailable);
+        // Initial claim/assignment and its HTTP activation observation remain
+        // upstream. This refresh covers only the retained generation-1 worker;
+        // its seed scope cannot extend the original claim or rotate credentials.
+        let mut refresh = self.preparation_scope.refresh();
+        for _ in 0..4 {
+            let members = self.membership.observe_source_admission_members().await
+                .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.members_store", "Source preparation refused"); SourceWorkerError::Unavailable })?
+                .ok_or_else(|| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.members_absent", "Source preparation refused"); SourceWorkerError::Unavailable })?;
+            let Some(permission) = self.store.refresh_source_ingress_admission(&self.ingress, &members).await
+                .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.permission_store", "Source preparation refused"); SourceWorkerError::Unresolved })?
+            else {
+                tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.permission_refused", "Source preparation refused");
+                return Err(SourceWorkerError::Unavailable);
+            };
+            permission.validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+                .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.permission_freshness", "Source preparation refused"); SourceWorkerError::Unavailable })?;
+            match self.store.prepare_source_media_authority(&mut refresh, &self.master, &members).await
+                .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.authority_store", "Source preparation refused"); SourceWorkerError::Unresolved })?
+            {
+                SourcePreparationAuthorityRead::Ready(proof) => return Ok(proof),
+                // No new work was admitted by this exact assertion. The core
+                // refresh state requires a later benign same-floor heartbeat;
+                // it never retries assignment, registration or physical work.
+                SourcePreparationAuthorityRead::NoAdmission(phase) => {
+                    use plurx_core::sharing_source_sessions::SourcePreparationPhase;
+                    let stage = match phase {
+                        SourcePreparationPhase::Activation => "source_preparation.activation_refused",
+                        SourcePreparationPhase::Preparation => "source_preparation.preparation_refused",
+                    };
+                    tracing::warn!(target: "plurxd::transcode", stage, "Source preparation assertion refused; reobserve exact authority");
+                    continue;
+                }
+                SourcePreparationAuthorityRead::Capacity => return Err(SourceWorkerError::Unavailable),
+                SourcePreparationAuthorityRead::Unavailable => {
+                    tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.authority_refused", "Source preparation refused");
+                    return Err(SourceWorkerError::Unavailable);
+                }
+            }
         }
-        Ok(proof)
+        tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.heartbeat_attempts_exhausted", "Source preparation refused");
+        Err(SourceWorkerError::Unavailable)
     }
 
     async fn current_owned(
@@ -1217,6 +1227,7 @@ impl TranscodeManager {
                 master: Arc::clone(&state.sharing.key),
                 registry_boot_id,
                 ingress,
+                preparation_scope: activation.preparation_scope(),
             }),
             retirement_deadline: Default::default(),
             direct: None,

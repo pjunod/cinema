@@ -951,6 +951,7 @@ async fn source_actual_copy_attachment(
         master: Arc::clone(master),
         registry_boot_id: state.sharing.accepted_drivers.boot_id(),
         ingress: ingress_fixture.permission().await,
+        preparation_scope: authority.preparation_scope(),
     });
     authority
         .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
@@ -1184,6 +1185,7 @@ async fn source_actual_actor(
             master: Arc::clone(&state.sharing.key),
             registry_boot_id: state.sharing.accepted_drivers.boot_id(),
             ingress: ingress_permission.clone(),
+            preparation_scope: activation.preparation_scope(),
         };
         assert!(gate.current_preparation(&assignment).await.is_ok());
         ingress_fixture.close().await;
