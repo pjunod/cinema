@@ -273,7 +273,7 @@ impl FittedPublication {
             start_seconds,
             None,
             false,
-            crate::ffmpeg::Pacing::unpaced(),
+            plurx_core::transcode::Pacing::unpaced(),
             self.video,
             None,
         );
@@ -341,7 +341,7 @@ impl FittedPublication {
             ChildWork::background("M7 fitted VOD materialization"),
             &[],
             stdout,
-            descriptors,
+            Some(descriptors),
         ))
         .await
         .map_err(|e| e.to_string())?;

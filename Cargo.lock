@@ -4028,6 +4028,7 @@ dependencies = [
  "syn 2.0.119",
  "tempfile",
  "time",
+ "thiserror 2.0.19",
  "tokenizers",
  "tokio",
  "tokio-rustls",

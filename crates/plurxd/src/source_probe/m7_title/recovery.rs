@@ -480,7 +480,7 @@ mod tests {
         (experiment, measurement)
     }
 
-    fn live(binding: &M7Binding, encoder: &str) -> LiveBinding<'_> {
+    fn live<'a>(binding: &'a M7Binding, encoder: &'a str) -> LiveBinding<'a> {
         LiveBinding {
             file_id: binding.file_id,
             source_size: binding.source_size,

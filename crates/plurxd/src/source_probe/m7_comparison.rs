@@ -51,7 +51,6 @@ use std::{
     fs::File,
     io::{self, BufReader, Read},
     os::unix::fs::FileExt,
-    path::Path,
     process::ExitStatus,
     sync::Arc,
 };

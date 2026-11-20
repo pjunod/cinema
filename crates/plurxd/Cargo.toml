@@ -35,6 +35,7 @@ tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 rayon = "1.12"
 toml = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 axum = { workspace = true }
 # The response-body wrapper that times delivery implements `http_body::Body`
 # directly so it can delegate `size_hint`; the crate is already in the tree
