@@ -855,7 +855,9 @@ int main(int argc, char **argv) {
   if (argc >= 2 && (!strcmp(argv[1], "--refit-stats") || !strcmp(argv[1], "--dump-composed") ||
                     !strcmp(argv[1], "--export-composed-topleft") ||
                     !strcmp(argv[1], "--m7-sample-fel-v1") ||
-                    !strcmp(argv[1], "--m7-sample-candidate-v1")))
+                    !strcmp(argv[1], "--m7-sample-candidate-v1") ||
+                    !strcmp(argv[1], "--m7-census-fel-v1") ||
+                    !strcmp(argv[1], "--m7-census-candidate-v1")))
     return refit_main(argc, argv);
   bool held_origin = argc >= 3 && !strcmp(argv[argc - 2], "--held-source-origin");
   struct rational supplied_origin = {0, 1};

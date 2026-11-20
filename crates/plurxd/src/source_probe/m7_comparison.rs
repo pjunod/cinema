@@ -2,6 +2,9 @@
 //! Callers supply independent censuses and actual publication readbacks. A
 //! renderer capture can corroborate evidence but cannot supply its own census.
 
+mod census;
+pub(super) use census::{observe as observe_census, CensusRequest};
+
 use crate::{
     admission::TranscodeResourceEstimate,
     background_jobs::JobFence,
@@ -553,6 +556,29 @@ async fn capture_window(
     let expected = candidate.authored_sha256;
     let cancel = bounded::cancellation().ok_or(Error::Cancelled)?;
     off_runtime(move || verify_candidate(&held, expected, &cancel)).await?;
+    for (source, plan) in [
+        (
+            &title.source,
+            CapturePlan {
+                layout: window.layout,
+                frames: &window.source_frames,
+            },
+        ),
+        (
+            &candidate.source,
+            CapturePlan {
+                layout: candidate.layout,
+                frames: &candidate.frames,
+            },
+        ),
+    ] {
+        let observed = observe_census(context, source, request(plan)?, scratch).await?;
+        if observed.as_slice() != plan.frames {
+            return Err(Error::Authority(
+                "independent coded census differs from frozen evidence",
+            ));
+        }
+    }
     let source_status = capture(
         context,
         &title.source,
@@ -590,12 +616,34 @@ async fn capture(
     dir: &TempDir,
     max_bytes: usize,
 ) -> Result<ExitStatus, Error> {
-    bounded::check_cancellation().map_err(|_| Error::Cancelled)?;
-    let (first, last, end) = endpoints(plan.frames, plan.layout)?;
-    let mode = match plan.layout.role {
+    let request = request(plan)?;
+    let mode = match request.layout.role {
         CaptureRole::SourceFel => "--m7-sample-fel-v1",
         CaptureRole::AuthoredCandidate => "--m7-sample-candidate-v1",
     };
+    run_renderer(context, source, request, mode, dir, max_bytes).await
+}
+
+fn request(plan: CapturePlan<'_>) -> Result<CensusRequest, Error> {
+    let (first, last, end_pts) = endpoints(plan.frames, plan.layout)?;
+    Ok(CensusRequest {
+        layout: plan.layout,
+        first: first.ordinal,
+        last: last.ordinal,
+        first_pts: first.pts,
+        end_pts,
+    })
+}
+
+async fn run_renderer(
+    context: &TitleContext<'_>,
+    source: &SourceFence,
+    request: CensusRequest,
+    mode: &'static str,
+    dir: &TempDir,
+    max_bytes: usize,
+) -> Result<ExitStatus, Error> {
+    bounded::check_cancellation().map_err(|_| Error::Cancelled)?;
     let dir_handle =
         plurx_core::fs_secure::open_directory_nofollow_blocking(dir.path()).map_err(execution)?;
     let _dir_guard =
@@ -624,13 +672,13 @@ async fn capture(
         .arg(mode)
         .arg(input.url())
         .args([
-            plan.layout.video_index.to_string(),
-            first.ordinal.to_string(),
-            last.ordinal.to_string(),
-            first.pts.to_string(),
-            end.to_string(),
+            request.layout.video_index.to_string(),
+            request.first.to_string(),
+            request.last.to_string(),
+            request.first_pts.to_string(),
+            request.end_pts.to_string(),
         ])
-        .args(plan.layout.roi.map(|n| n.to_string()))
+        .args(request.layout.roi.map(|n| n.to_string()))
         .arg(CAPTURE_OUTPUT);
     let output = async {
         let manifest = Descriptors::default().prepare(
@@ -646,7 +694,7 @@ async fn capture(
             super::FEL_WINDOW_STAGE_DEADLINE,
             DIAGNOSTIC_BYTES,
             max_bytes,
-            ChildWork::background("Dolby Vision M7 sample capture"),
+            ChildWork::background("Dolby Vision M7 renderer observation"),
             &context.tools.renderer_env,
             stdout,
             Some(manifest),

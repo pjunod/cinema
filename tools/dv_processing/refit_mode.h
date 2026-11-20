@@ -32,7 +32,11 @@
 // FIRST/LAST and FIRST_PTS/END_PTS come from the held source's frame census.
 // --m7-sample-candidate-v1 reads the entire selected authored P8.1 clip, with
 // ordinal zero and clocks in that clip. Both modes bind each decoded RPU to
-// its coded access unit. The M7 header defines their distinct binary formats.
+// its coded access unit. The matching --m7-census-fel-v1 and
+// --m7-census-candidate-v1 commands use the same arguments and emit frame
+// identity only. The FEL census verifies absolute presentation ordinals from
+// the start of the held stream, within the finite read and prefix envelope.
+// The M7 header defines the distinct census and sample wire representations.
 //
 // --refit-stats writes JSON lines to stdout: one per pooled scene,
 //   {"kind":"refit_scene","first_frame":N,"frames":K,"first_pts":TICKS,
@@ -85,7 +89,7 @@
 
 #define REFIT_EXIT_CONTENT 3
 
-static bool refit_dump, refit_area_override, refit_topleft, refit_m7;
+static bool refit_dump, refit_area_override, refit_topleft, refit_m7, refit_m7_census;
 static FILE *refit_topleft_output;
 // --resume: the resume point, and the preroll decoded before it.
 static int64_t refit_resume_frame = -1, refit_resume_pts, refit_preroll;
@@ -454,6 +458,9 @@ static void refit_pairs(void) {
     need(last_pts == AV_NOPTS_VALUE || bl->pts > last_pts,
          "duplicate/out-of-order paired frame");
     last_pts = bl->pts;
+    if (refit_m7_census && !base_only && !refit_paired)
+      need((bl->flags & AV_FRAME_FLAG_KEY) && (el->flags & AV_FRAME_FLAG_KEY),
+           "independent first BL/EL pair required for an absolute M7 census");
     if (refit_resume_frame >= 0 && !refit_resume_started) {
       // Decode from an independent random-access picture. FEL windows can
       // seek into preroll. The whole candidate starts on its first picture.
@@ -484,8 +491,11 @@ static void refit_pairs(void) {
       drop_pair();
       return;
     }
-    if (ordinal >= refit_first)
+    if (ordinal >= refit_first) {
+      if (refit_m7_census && ordinal == refit_first)
+        need(bl->pts == refit_resume_pts, "M7 census first presentation ordinal and PTS disagree");
       refit_frame(bl, el, ordinal);
+    }
     drop_pair();
   }
 }
@@ -543,15 +553,21 @@ static void refit_drain(void) {
 static int refit_main(int argc, char **argv) {
   refit_dump = !strcmp(argv[1], "--dump-composed");
   refit_topleft = !strcmp(argv[1], "--export-composed-topleft");
-  base_only = !strcmp(argv[1], "--m7-sample-candidate-v1");
-  refit_m7 = base_only || !strcmp(argv[1], "--m7-sample-fel-v1");
+  bool candidate_census = !strcmp(argv[1], "--m7-census-candidate-v1");
+  refit_m7_census = candidate_census || !strcmp(argv[1], "--m7-census-fel-v1");
+  base_only = candidate_census || !strcmp(argv[1], "--m7-sample-candidate-v1");
+  refit_m7 = base_only || refit_m7_census || !strcmp(argv[1], "--m7-sample-fel-v1");
   refit_area_override = argc >= 5 && !strcmp(argv[argc - 5], "--area");
   if (refit_area_override) {
     for (int i = 0; i < 4; i++)
       refit_area[i] = number(argv[argc - 4 + i], 0, 4095);
     argc -= 5;
   }
-  if (base_only)
+  if (refit_m7_census)
+    need(argc == 13 && !refit_area_override,
+         "usage: segment_decode_render --m7-census-{fel,candidate}-v1 SOURCE VIDEO_INDEX "
+         "FIRST LAST FIRST_PTS END_PTS X0 Y0 X1 Y1 NEW_OUTPUT");
+  else if (base_only)
     need(argc == 13 && !refit_area_override,
          "usage: segment_decode_render --m7-sample-candidate-v1 AUTHORED VIDEO_INDEX 0 LAST "
          "FIRST_PTS END_PTS X0 Y0 X1 Y1 NEW_OUTPUT");
@@ -581,7 +597,10 @@ static int refit_main(int argc, char **argv) {
       frame_cap = (int)(refit_last - refit_first + 1);
       need(frame_cap <= M7_SAMPLE_MAX_FRAMES, "bounded M7 frame count");
       need(!base_only || refit_first == 0, "M7 candidate ordinals start at zero");
-      refit_resume_frame = refit_first;
+      if (refit_m7_census && !base_only)
+        need(refit_first <= REFIT_MAX_PREROLL, "bounded absolute M7 source census prefix");
+      else
+        refit_resume_frame = refit_first;
       refit_resume_pts = refit_ticks(argv[6]);
       refit_m7_sample.end_pts = refit_ticks(argv[7]);
       need(refit_resume_pts < refit_m7_sample.end_pts, "ordered M7 clock interval");
@@ -713,7 +732,7 @@ static int refit_main(int argc, char **argv) {
                   "M7 requires four-byte hvcC NAL framing for coded AU binding");
     m7_sample_v1_open(&refit_m7_sample, argv[12], stream_index, source_time_base,
                       expected_w[0], expected_h[0], refit_first, refit_last, refit_resume_pts,
-                      base_only);
+                      base_only, refit_m7_census);
   }
   if (refit_topleft) {
     int fd = open(argv[6], O_WRONLY | O_CREAT | O_EXCL, 0600);

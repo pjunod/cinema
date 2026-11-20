@@ -6,6 +6,8 @@ mod dv_title;
 #[cfg(target_os = "linux")]
 pub(crate) mod fel_qualification;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod m7_candidate;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod m7_comparison;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod refit_work;

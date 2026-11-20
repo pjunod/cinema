@@ -5,7 +5,9 @@
 #include <libavutil/intreadwrite.h>
 
 // The little-endian stream starts with PLXM7F01 for calibrated P7 FEL or
-// PLXM7C01 for its separately admitted authored P8.1 candidate.
+// PLXM7C01 for its separately admitted authored P8.1 candidate. Metadata-only
+// census streams use PLXM7S01 and PLXM7A01 respectively. Their samples/frame,
+// bytes/sample, FRM1 sample count and END1 sample total are all zero.
 // Header: eight magic bytes, then sixteen u32s in this order: video stream
 // index, clock numerator/denominator, BL width/height, half-open ROI x0/y0/x1/y1,
 // stride, phase bitmask (on both axes), samples/frame, bytes/sample, frames,
@@ -46,15 +48,17 @@ static void m7_sample_v1_write(FILE *file, const void *bytes, size_t size) {
 static void m7_sample_v1_open(struct m7_sample_v1 *sample, const char *path,
                               int stream_index, AVRational clock, int width, int height,
                               int64_t first, int64_t last, int64_t first_pts,
-                              bool candidate) {
+                              bool candidate, bool census) {
   const int *roi = sample->roi;
   refit_content(roi[2] <= width && roi[3] <= height &&
                     roi[2] - roi[0] >= 2 && roi[3] - roi[1] >= 2,
                 "M7 ROI fits the decoded raster and contains both phases");
   int columns = refit_axis_count(roi[0], roi[2], 0) + refit_axis_count(roi[0], roi[2], 1);
   int rows = refit_axis_count(roi[1], roi[3], 0) + refit_axis_count(roi[1], roi[3], 1);
-  sample->samples_per_frame = (uint32_t)(columns * rows);
-  sample->record_bytes = candidate ? M7_SAMPLE_CANDIDATE_RECORD_BYTES : M7_SAMPLE_FEL_RECORD_BYTES;
+  if (!census) {
+    sample->samples_per_frame = (uint32_t)(columns * rows);
+    sample->record_bytes = candidate ? M7_SAMPLE_CANDIDATE_RECORD_BYTES : M7_SAMPLE_FEL_RECORD_BYTES;
+  }
 
   int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
   need(fd >= 0, "new exclusive M7 sample output");
@@ -67,7 +71,9 @@ static void m7_sample_v1_open(struct m7_sample_v1 *sample, const char *path,
       (uint32_t)(last - first + 1), (uint32_t)first, (uint32_t)last,
   };
   uint8_t header[88];
-  memcpy(header, candidate ? "PLXM7C01" : "PLXM7F01", 8);
+  const char *magic = census ? (candidate ? "PLXM7A01" : "PLXM7S01")
+                             : (candidate ? "PLXM7C01" : "PLXM7F01");
+  memcpy(header, magic, 8);
   for (size_t i = 0; i < sizeof(fields) / sizeof(*fields); i++)
     AV_WL32(header + 8 + 4 * i, fields[i]);
   AV_WL64(header + 72, (uint64_t)first_pts);
@@ -102,35 +108,37 @@ static void m7_sample_v1_frame(const struct m7_sample_v1 *sample, const AVFrame 
 
   uint32_t count = sample->samples_per_frame;
   uint32_t bytes = count * sample->record_bytes;
-  if (!refit_records) {
-    refit_records = malloc(bytes);
-    need(refit_records != NULL, "one-frame M7 sample buffer");
-    refit_records_capacity = bytes;
-  }
-  need(refit_records_capacity == bytes, "stable M7 lattice");
-  uint8_t *record = refit_records;
-  const int *roi = sample->roi;
-  // Visit both phases inside each stride before advancing to the next stride.
-  for (int y = roi[1], dy = 1; y < roi[3]; y += dy, dy = REFIT_STRIDE - dy) {
-    for (int x = roi[0], dx = 1; x < roi[2]; x += dx, dx = REFIT_STRIDE - dx) {
-      uint16_t base[3];
-      AV_WL16(record, x);
-      AV_WL16(record + 2, y);
-      if (el) {
-        uint16_t enhancement[3];
-        refit_sample(bl, el, x, y, base, enhancement);
-        for (int channel = 0; channel < 3; channel++)
-          AV_WL16(record + 10 + 2 * channel, enhancement[channel]);
-      } else {
-        struct refit_sites sites = refit_pair(x, y, bl->width, bl->height);
-        refit_base_sample(bl, x, y, &sites, base);
-      }
-      for (int channel = 0; channel < 3; channel++)
-        AV_WL16(record + 4 + 2 * channel, base[channel]);
-      record += sample->record_bytes;
+  if (bytes) {
+    if (!refit_records) {
+      refit_records = malloc(bytes);
+      need(refit_records != NULL, "one-frame M7 sample buffer");
+      refit_records_capacity = bytes;
     }
+    need(refit_records_capacity == bytes, "stable M7 lattice");
+    uint8_t *record = refit_records;
+    const int *roi = sample->roi;
+    // Visit both phases inside each stride before advancing to the next stride.
+    for (int y = roi[1], dy = 1; y < roi[3]; y += dy, dy = REFIT_STRIDE - dy) {
+      for (int x = roi[0], dx = 1; x < roi[2]; x += dx, dx = REFIT_STRIDE - dx) {
+        uint16_t base[3];
+        AV_WL16(record, x);
+        AV_WL16(record + 2, y);
+        if (el) {
+          uint16_t enhancement[3];
+          refit_sample(bl, el, x, y, base, enhancement);
+          for (int channel = 0; channel < 3; channel++)
+            AV_WL16(record + 10 + 2 * channel, enhancement[channel]);
+        } else {
+          struct refit_sites sites = refit_pair(x, y, bl->width, bl->height);
+          refit_base_sample(bl, x, y, &sites, base);
+        }
+        for (int channel = 0; channel < 3; channel++)
+          AV_WL16(record + 4 + 2 * channel, base[channel]);
+        record += sample->record_bytes;
+      }
+    }
+    need((size_t)(record - refit_records) == bytes, "M7 lattice sample count");
   }
-  need((size_t)(record - refit_records) == bytes, "M7 lattice sample count");
 
   uint8_t frame[8 + M7_SAMPLE_FRAME_FIELDS] = "FRM1";
   AV_WL32(frame + 4, M7_SAMPLE_FRAME_FIELDS + 3 * M7_SAMPLE_DIGEST_BYTES +
@@ -145,7 +153,8 @@ static void m7_sample_v1_frame(const struct m7_sample_v1 *sample, const AVFrame 
   m7_sample_v1_write(sample->file, coded->rpu_sha, M7_SAMPLE_DIGEST_BYTES);
   m7_sample_v1_write(sample->file, coded->base_vcl_sha, M7_SAMPLE_DIGEST_BYTES);
   m7_sample_v1_write(sample->file, nalu, nalu_size);
-  m7_sample_v1_write(sample->file, refit_records, bytes);
+  if (bytes)
+    m7_sample_v1_write(sample->file, refit_records, bytes);
   coded->emitted = true;
 }
 
