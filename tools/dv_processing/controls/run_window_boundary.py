@@ -32,22 +32,33 @@ def author_gops(root, work, ffmpeg, cases):
                         str(work / 'el.mkv'), str(root / case / 'rpus'),
                         str(work / f'{case}.mkv'), 'normal'],
                        check=True, timeout=30, capture_output=True)
-    ffmpeg('-i', work / 'valid.mkv', '-map', '0:v:0', '-c:v', 'copy',
-           '-bsf:v', TIMESTAMPS, work / 'valid18.mkv')
 
 
-def author_valid_source(root, work, ffmpeg_binary):
+def author_valid_source(root, work, ffmpeg_binary, ffprobe, mkvmerge):
     work.mkdir()
+
     def ffmpeg(*args):
         control_ffmpeg(ffmpeg_binary, *args)
 
     author_gops(root, work, ffmpeg, ['valid'])
-    # 49 complete GOPs at 24 fps give 36.75 s, including a real exclusive
-    # boundary picture after the last alternate's 48-picture window.
-    (work / 'repeat.txt').write_text('file valid18.mkv\n' * 49)
-    ffmpeg('-f', 'concat', '-safe', '0', '-i', work / 'repeat.txt',
-           '-map', '0:v:0', '-c:v', 'copy', '-bsf:v', TIMESTAMPS,
-           work / 'source.mkv')
+    # Append complete GOPs without losing the Matroska Profile 7 mapping.
+    # The clip retains an exclusive boundary after the last 48-picture window.
+    source = work / 'source.mkv'
+    gop = work / 'valid.mkv'
+    repeats = 49
+    subprocess.run([mkvmerge, '--quiet', '-o', str(source),
+                    str(gop), *[f'+{gop}'] * (repeats - 1)],
+                   check=True, timeout=60)
+    probe = json.loads(subprocess.check_output(
+        [ffprobe, '-v', 'error', '-select_streams', 'v:0', '-count_packets',
+         '-show_streams', '-of', 'json', source], timeout=30))
+    stream, = probe['streams']
+    config = [record for record in stream.get('side_data_list', [])
+              if record.get('side_data_type') == 'DOVI configuration record']
+    assert len(config) == 1 and config[0]['dv_profile'] == 7, config
+    assert all(config[0][flag] == 1 for flag in (
+        'bl_present_flag', 'el_present_flag', 'rpu_present_flag')), config
+    assert int(stream['nb_read_packets']) == 18 * repeats, stream['nb_read_packets']
 
 
 def test_exclusive_window_metadata_boundary():
@@ -66,6 +77,8 @@ def test_exclusive_window_metadata_boundary():
         control_ffmpeg('ffmpeg', *args)
 
     author_gops(root, work, ffmpeg, ['valid', 'invalid-area'])
+    ffmpeg('-i', work / 'valid.mkv', '-map', '0:v:0', '-c:v', 'copy',
+           '-bsf:v', TIMESTAMPS, work / 'valid18.mkv')
     (work / 'repeat.txt').write_text('file valid18.mkv\n' * 3)
     ffmpeg('-f', 'concat', '-safe', '0', '-i', work / 'repeat.txt',
            '-map', '0:v:0', '-frames:v', '48', '-c:v', 'copy',
@@ -127,8 +140,11 @@ if __name__ == '__main__':
     parser.add_argument('--controls', type=Path, default=Path('/work'),
                         help='existing make_movie and valid/rpus output directory')
     parser.add_argument('--ffmpeg', default='ffmpeg')
+    parser.add_argument('--ffprobe', default='ffprobe')
+    parser.add_argument('--mkvmerge', default='mkvmerge')
     args = parser.parse_args()
     if args.author_valid_only is None:
         test_exclusive_window_metadata_boundary()
     else:
-        author_valid_source(args.controls, args.author_valid_only, args.ffmpeg)
+        author_valid_source(args.controls, args.author_valid_only,
+                            args.ffmpeg, args.ffprobe, args.mkvmerge)

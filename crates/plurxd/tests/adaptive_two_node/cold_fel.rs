@@ -348,7 +348,7 @@ async fn cold_auto_fel_keeps_origin_until_verified_peer_commit() {
     let ffmpeg = required("PLURX_FFMPEG");
     let ffprobe = required("PLURX_FFPROBE");
     let _dovi = required("PLURX_DOVI_TOOL");
-    let _mkvmerge = required("PLURX_MKVMERGE");
+    let mkvmerge = required("PLURX_MKVMERGE");
     let bundle = PathBuf::from(required("PLURX_DV_PROCESSING_DIR"));
     let renderer = bundle
         .join("bin/segment_decode_render")
@@ -366,7 +366,16 @@ async fn cold_auto_fel_keeps_origin_until_verified_peer_commit() {
             .arg(controls().join("run_window_boundary.py"))
             .arg("--author-valid-only")
             .arg(&authored)
-            .args(["--controls", &control_root, "--ffmpeg", &ffmpeg]),
+            .args([
+                "--controls",
+                &control_root,
+                "--ffmpeg",
+                &ffmpeg,
+                "--ffprobe",
+                &ffprobe,
+                "--mkvmerge",
+                &mkvmerge,
+            ]),
     );
     let media = root.path().join("media");
     std::fs::create_dir(&media).expect("media directory");
