@@ -6323,7 +6323,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Two relay fixture timers pace loopback chunks and bound the original pump observation.
 # Cold hardware uses the original placement cutoff for admission. Its fixture
 # observes slot release under a bounded wait.
-expected_occurrences = 2547
+# Local offer classification and post-Busy peer discovery each use existing
+# request cutoffs. One fixture timer separates BOOTTIME expiry from paused Tokio time.
+expected_occurrences = 2550
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

@@ -4522,6 +4522,71 @@ fn create_owner_transition(message: impl Into<String>) -> ApiError {
     }
 }
 
+const HARDWARE_INGRESS_LOST: &str = "the ingress lost serving authority before hardware failover";
+const HARDWARE_CUTOFF_EXPIRED: &str = "hardware failover exceeded the original start deadline";
+
+async fn initial_hardware_peer_after_busy(
+    busy: bool,
+    is_current: impl Fn() -> bool,
+    find_peer: impl std::future::Future<Output = Option<String>>,
+) -> Result<Option<String>, ApiError> {
+    if !busy {
+        return Ok(None);
+    }
+    if !is_current() {
+        return Err(create_owner_transition(HARDWARE_INGRESS_LOST));
+    }
+    let peer = find_peer.await;
+    if !is_current() {
+        return Err(create_owner_transition(HARDWARE_INGRESS_LOST));
+    }
+    Ok(peer)
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn initial_hardware_peer_discovery_waits_for_busy_and_current_ingress() {
+    let current = std::cell::Cell::new(true);
+    let calls = std::cell::Cell::new(0);
+    let find_peer = || async {
+        calls.set(calls.get() + 1);
+        Some("eligible-peer".to_owned())
+    };
+    let transition = |error| {
+        matches!(
+            error,
+            ApiError::TypedRetry {
+                code: "media_owner_transition",
+                ..
+            }
+        )
+    };
+    assert_eq!(
+        initial_hardware_peer_after_busy(false, || current.get(), find_peer())
+            .await
+            .expect("healthy local launch"),
+        None
+    );
+    assert_eq!(calls.get(), 0);
+    assert_eq!(
+        initial_hardware_peer_after_busy(true, || current.get(), find_peer())
+            .await
+            .expect("typed pre-effect Busy"),
+        Some("eligible-peer".to_owned())
+    );
+    assert_eq!(calls.get(), 1);
+    let deferred = initial_hardware_peer_after_busy(true, || current.get(), async {
+        current.set(false);
+        find_peer().await
+    })
+    .await;
+    assert!(deferred.is_err_and(transition));
+    assert_eq!(calls.get(), 2);
+    let fenced = initial_hardware_peer_after_busy(true, || current.get(), find_peer()).await;
+    assert!(fenced.is_err_and(transition));
+    assert_eq!(calls.get(), 2);
+}
+
 /// A create's 503 always names its code: a bare one is a refusal no client
 /// retries, which for a start the next attempt would get is the one answer
 /// that cannot be right. The sites that know their cause say it; a refusal
@@ -5692,36 +5757,57 @@ async fn create_with_purpose_attempt(
             ));
         }
     }
-    #[allow(unused_mut)] // Only Linux finite discovery may already have ranked offers.
-    let mut exact_candidate_offers = None;
+    let exact_local_hardware = owner_candidates.as_slice() == [state.node_id.as_str()]
+        && candidate_owner.as_deref() == Some(state.node_id.as_str())
+        && activation_predecessor.is_none()
+        && matches!(&purpose, ServiceCreatePurpose::Native)
+        && remote_request.initial_hardware_start_shape()
+        && start_plan.as_ref().is_some_and(|plan| {
+            plan.setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED) == Some("1")
+        });
     #[cfg(target_os = "linux")]
-    let adaptive_software_offers: std::collections::HashSet<String> =
-        if let Some(offers) = ranked_software_offers {
-            offers
-        } else if let Some(file) = adaptive_software_source {
-            match MediaOfferRequest::new(
-                file,
-                height,
-                0,
-                request.audio_index,
-                request.subtitle_burn,
-                request.hdr10,
-            ) {
-                Ok(offer) => {
-                    let offers = state.media_pool.offers(&state, offer).await.offers;
-                    let software = offers
-                        .iter()
-                        .filter(|offer| needs_adaptive_software_prepare(offer))
-                        .map(|row| row.node_id.clone())
-                        .collect();
-                    exact_candidate_offers = Some(offers);
-                    software
-                }
-                Err(_) => std::collections::HashSet::new(),
+    let adaptive_software_offers: std::collections::HashSet<String> = if let Some(offers) =
+        ranked_software_offers
+    {
+        offers
+    } else if let Some(file) = adaptive_software_source {
+        match MediaOfferRequest::new(
+            file,
+            height,
+            0,
+            request.audio_index,
+            request.subtitle_burn,
+            request.hdr10,
+        ) {
+            Ok(offer) => {
+                let offers = if exact_local_hardware {
+                    // This classification concerns just the selected local
+                    // worker. Peer discovery belongs to its Busy result.
+                    let deadline = placement_deadline.min(
+                        crate::media_pool::create_stage_deadline(crate::media_pool::OFFER_DEADLINE),
+                    );
+                    tokio::time::timeout_at(
+                        deadline,
+                        crate::media_pool::local_offer(&state, &offer),
+                    )
+                    .await
+                    .ok()
+                    .into_iter()
+                    .collect()
+                } else {
+                    state.media_pool.offers(&state, offer).await.offers
+                };
+                offers
+                    .into_iter()
+                    .filter(|offer| needs_adaptive_software_prepare(offer))
+                    .map(|row| row.node_id)
+                    .collect()
             }
-        } else {
-            std::collections::HashSet::new()
-        };
+            Err(_) => std::collections::HashSet::new(),
+        }
+    } else {
+        std::collections::HashSet::new()
+    };
     // The ordinary catalog names the preferred owner. Only the initial
     // local owner may try one second, positively compatible hardware peer,
     // and only after its own actual pre-native capacity refusal.
@@ -5729,68 +5815,36 @@ async fn create_with_purpose_attempt(
     let software_owns_start = adaptive_software_offers.contains(&state.node_id);
     #[cfg(not(target_os = "linux"))]
     let software_owns_start = false;
-    let initial_hardware_cutoff = if !software_owns_start
-        && owner_candidates.as_slice() == [state.node_id.as_str()]
-        && candidate_owner.as_deref() == Some(state.node_id.as_str())
-        && activation_predecessor.is_none()
-        && matches!(&purpose, ServiceCreatePurpose::Native)
-        && remote_request.initial_hardware_start_shape()
-        && start_plan.as_ref().is_some_and(|plan| {
-            plan.setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED) == Some("1")
-        }) {
-        let exact = remote_request
-            .candidate_catalog
-            .as_ref()
-            .expect("checked candidate");
-        let compatible: std::collections::HashSet<_> = quality_catalog
-            .as_ref()
-            .into_iter()
-            .flat_map(|catalog| &catalog.candidates)
-            .filter(|row| {
-                row.node_id != state.node_id
-                    && row.dispatch_supported
-                    && !row.partial
-                    && row.candidate.decoder_compatible
-                    && row.candidate.id == exact.candidate.id
-                    && row.candidate.recipe_digest == exact.candidate.recipe_digest
-                    && row.candidate.planned_codec == exact.candidate.planned_codec
-                    && row.binding.as_ref() == Some(&exact.binding)
-            })
-            .map(|row| row.node_id.as_str())
-            .collect();
-        let offer = source.as_ref().and_then(|file| {
-            MediaOfferRequest::new(
-                file,
-                height,
-                (request.start_seconds * 1_000.0).round().max(0.0) as i64,
-                request.audio_index,
-                request.subtitle_burn,
-                request.hdr10,
-            )
-            .ok()
-        });
-        let offers = match (exact_candidate_offers, offer) {
-            (Some(offers), _) => offers,
-            (None, Some(offer)) if !compatible.is_empty() => {
-                state.media_pool.offers(&state, offer).await.offers
-            }
-            _ => Vec::new(),
+    let compatible_hardware_peers: std::collections::HashSet<_> =
+        if exact_local_hardware && !software_owns_start {
+            let exact = remote_request
+                .candidate_catalog
+                .as_ref()
+                .expect("checked candidate");
+            quality_catalog
+                .as_ref()
+                .into_iter()
+                .flat_map(|catalog| &catalog.candidates)
+                .filter(|row| {
+                    row.node_id != state.node_id
+                        && row.dispatch_supported
+                        && !row.partial
+                        && row.candidate.decoder_compatible
+                        && row.candidate.id == exact.candidate.id
+                        && row.candidate.recipe_digest == exact.candidate.recipe_digest
+                        && row.candidate.planned_codec == exact.candidate.planned_codec
+                        && row.binding.as_ref() == Some(&exact.binding)
+                })
+                .map(|row| row.node_id.as_str())
+                .collect()
+        } else {
+            std::collections::HashSet::new()
         };
-        offers
-            .into_iter()
-            .find(|offer| {
-                offer.eligible
-                    && offer.initial_hardware_vod
-                    && compatible.contains(offer.node_id.as_str())
-            })
-            .and_then(|peer| {
-                let cutoff =
-                    super::response::resource_deadline_unix_ms(placement_deadline.into_std())?;
-                owner_candidates.push(peer.node_id);
-                Some(cutoff)
-            })
-    } else {
+    let mut initial_hardware = if compatible_hardware_peers.is_empty() {
         None
+    } else {
+        crate::vodserve::InitialHardwareStart::local(placement_deadline)
+            .and_then(|start| Some((start.grant_cutoff_unix_ms()?, start)))
     };
     crate::media_pool::mark_create_phase("placement");
 
@@ -5812,13 +5866,22 @@ async fn create_with_purpose_attempt(
         } else {
             None
         };
-    for candidate in owner_candidates {
+    let mut pending_candidates = std::collections::VecDeque::from(owner_candidates);
+    while let Some(candidate) = pending_candidates.pop_front() {
         if tokio::time::Instant::now() >= placement_deadline {
             last_error = Some(create_still_starting(
                 "media worker placement exceeded its common deadline",
             ));
             break;
         }
+        if initial_hardware
+            .as_ref()
+            .is_some_and(|(_, start)| !start.entry_is_live())
+        {
+            last_error = Some(create_still_starting(HARDWARE_CUTOFF_EXPIRED));
+            break;
+        }
+        let initial_hardware_cutoff = initial_hardware.as_ref().map(|(cutoff, _)| *cutoff);
         #[cfg(target_os = "linux")]
         let adaptive_quote = if initial_hardware_cutoff.is_none()
             && (exact_fel || adaptive_software_offers.contains(&candidate))
@@ -5969,11 +6032,7 @@ async fn create_with_purpose_attempt(
             };
             let worker_serving_authority = ingress_serving_authority.clone();
             let worker_plan = start_plan.clone();
-            let initial_hardware =
-                initial_hardware_cutoff.map(|_| crate::vodserve::InitialHardwareStart {
-                    deadline: placement_deadline,
-                    peer: false,
-                });
+            let initial_hardware = initial_hardware.as_ref().map(|(_, start)| start.clone());
             let mut start_task = crate::media_pool::spawn_create_worker(async move {
                 let worker_start = transcode.create_cluster_session(
                     &worker_request,
@@ -6058,6 +6117,12 @@ async fn create_with_purpose_attempt(
                 }
             }
         } else {
+            if initial_hardware_cutoff.is_some()
+                && !ingress_serving_authority.is_current(ingress_serving_generation)
+            {
+                last_error = Some(create_owner_transition(HARDWARE_INGRESS_LOST));
+                break;
+            }
             if remote_request.candidate_catalog.is_none() && !unbound_confirmed {
                 if let Some(plan) = start_plan.as_deref() {
                     if let Err(error) =
@@ -6074,22 +6139,54 @@ async fn create_with_purpose_attempt(
                 .retained_output_receiver(&candidate)
                 .await
                 .then_some(1);
-            // A reply lost in transit leaves the worker holding a session keyed
-            // by this create's incarnation (the worker request's id). Asking the
-            // same worker again recovers that session (`Recovered`) instead of
-            // placing a second producer elsewhere, so the claim keeps one owner.
-            let remote_start = crate::media_sessions::start_remote_recovering_lost_reply(
-                placement_deadline,
-                || {
-                    state.media_sessions.start_remote(
+            let remote_start = if let Some((cutoff, start)) = initial_hardware.as_ref() {
+                if !ingress_serving_authority.is_current(ingress_serving_generation) {
+                    last_error = Some(create_owner_transition(HARDWARE_INGRESS_LOST));
+                    break;
+                }
+                if start.grant_cutoff_unix_ms().is_none() {
+                    last_error = Some(create_still_starting(HARDWARE_CUTOFF_EXPIRED));
+                    break;
+                }
+                // Only typed local Busy transfers this one attempt. A lost
+                // hardware peer reply ends placement with ownership unsettled.
+                state
+                    .media_sessions
+                    .start_remote(
                         &candidate,
                         &remote_request,
                         placement_deadline,
-                        initial_hardware_cutoff,
+                        Some(*cutoff),
+                        || {
+                            use crate::media_sessions::RemoteStartFailure;
+                            if !ingress_serving_authority.is_current(ingress_serving_generation) {
+                                return Err(RemoteStartFailure::IngressFenced);
+                            }
+                            // Recheck strict grant authority without minting a later wire cutoff.
+                            if start.grant_cutoff_unix_ms().is_none() {
+                                return Err(RemoteStartFailure::OriginalDeadlineExpired);
+                            }
+                            Ok(())
+                        },
                     )
-                },
-            )
-            .await;
+                    .await
+            } else {
+                // Ordinary remote creation can recover a lost reply from
+                // the same worker under this request's original incarnation.
+                crate::media_sessions::start_remote_recovering_lost_reply(
+                    placement_deadline,
+                    || {
+                        state.media_sessions.start_remote(
+                            &candidate,
+                            &remote_request,
+                            placement_deadline,
+                            None,
+                            || Ok(()),
+                        )
+                    },
+                )
+                .await
+            };
             if let Err(failure) = &remote_start {
                 placement_ended = super::start_plan::ends_placement(failure);
             }
@@ -6142,6 +6239,12 @@ async fn create_with_purpose_attempt(
                         format!("media worker {candidate} cannot take this start"),
                     ))
                 }
+                Err(crate::media_sessions::RemoteStartFailure::IngressFenced) => {
+                    Err(create_owner_transition(HARDWARE_INGRESS_LOST))
+                }
+                Err(crate::media_sessions::RemoteStartFailure::OriginalDeadlineExpired) => {
+                    Err(create_still_starting(HARDWARE_CUTOFF_EXPIRED))
+                }
                 Err(crate::media_sessions::RemoteStartFailure::Transport(error)) => {
                     Err(create_owner_transition(format!(
                         "media worker {candidate} could not start the session: {error:?}"
@@ -6156,6 +6259,44 @@ async fn create_with_purpose_attempt(
                     super::start_plan::remote_plan_refused(&state.applied, &candidate),
                 ),
             }
+        };
+        let hardware_peer = if let Some((_, start)) = initial_hardware
+            .as_ref()
+            .filter(|_| candidate == state.node_id)
+        {
+            initial_hardware_peer_after_busy(
+                initial_hardware_busy,
+                || ingress_serving_authority.is_current(ingress_serving_generation),
+                async {
+                    start.grant_cutoff_unix_ms()?;
+                    let offer = MediaOfferRequest::new(
+                        source.as_ref()?,
+                        height,
+                        (request.start_seconds * 1_000.0).round().max(0.0) as i64,
+                        request.audio_index,
+                        request.subtitle_burn,
+                        request.hdr10,
+                    )
+                    .ok()?;
+                    tokio::time::timeout_at(
+                        placement_deadline,
+                        state.media_pool.offers(&state, offer),
+                    )
+                    .await
+                    .ok()?
+                    .offers
+                    .into_iter()
+                    .find(|offer| {
+                        offer.eligible
+                            && offer.initial_hardware_vod
+                            && compatible_hardware_peers.contains(offer.node_id.as_str())
+                    })
+                    .map(|offer| offer.node_id)
+                },
+            )
+            .await?
+        } else {
+            None
         };
         match result {
             Ok((info, guard, serving_generation, degraded))
@@ -6188,9 +6329,28 @@ async fn create_with_purpose_attempt(
                     owner_node_id = %candidate, "media worker start attempt failed"
                 );
                 last_error = Some(error);
-                if placement_ended || (initial_hardware_cutoff.is_some() && !initial_hardware_busy)
-                {
+                if placement_ended {
                     break;
+                }
+                if let Some((_, start)) = initial_hardware.as_ref() {
+                    if !initial_hardware_busy || candidate != state.node_id {
+                        break;
+                    }
+                    if !start.entry_is_live() {
+                        last_error = Some(create_still_starting(HARDWARE_CUTOFF_EXPIRED));
+                        break;
+                    }
+                    if let Some(peer) =
+                        hardware_peer.filter(|_| start.grant_cutoff_unix_ms().is_some())
+                    {
+                        pending_candidates.push_back(peer);
+                    } else {
+                        // Busy precedes all local producer/reader effects.
+                        // Without a signed peer, ordinary local admission may
+                        // still proceed on the original claim and cutoff.
+                        initial_hardware = None;
+                        pending_candidates.push_back(candidate);
+                    }
                 }
             }
         }

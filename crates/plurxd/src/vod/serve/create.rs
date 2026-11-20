@@ -773,7 +773,7 @@ impl VodServe {
                     )
                 }),
                 if capture_before_build && processing_instance.is_none() {
-                    initial_hardware_start().map(|start| start.deadline)
+                    initial_hardware_start()
                 } else {
                     None
                 },

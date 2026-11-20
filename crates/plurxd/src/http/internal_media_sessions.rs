@@ -726,18 +726,14 @@ pub(crate) async fn start(
             let proof = capture
                 .grant_deadline_after(Duration::from_millis(remaining).min(START_DEADLINE))
                 .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-            let inherited = tokio::time::Instant::from_std(
-                proof
-                    .monotonic_cutoff()
-                    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
-            );
-            Ok::<_, StatusCode>(crate::vodserve::InitialHardwareStart {
-                deadline: start_deadline.min(inherited),
-                peer: true,
-            })
+            crate::vodserve::InitialHardwareStart::peer(start_deadline, proof)
+                .ok_or(StatusCode::SERVICE_UNAVAILABLE)
         })
         .transpose()?;
-    let start_deadline = initial_hardware.map_or(start_deadline, |start| start.deadline);
+    let start_deadline = initial_hardware.as_ref().map_or(
+        start_deadline,
+        crate::vodserve::InitialHardwareStart::deadline,
+    );
     // Until the shared ownership store and grant admission are installed,
     // reject a forwarded sharing principal before resource allocation.
     let user_id = request
@@ -827,6 +823,12 @@ pub(crate) async fn start(
     let start_task = plurx_core::store::spawn_in_http_store_scope(|owner_counts| {
         async move {
             let _restart_admission = restart_admission;
+            if initial_hardware
+                .as_ref()
+                .is_some_and(|start| !start.entry_is_live())
+            {
+                return Err(crate::transcode::replacement_deadline_error());
+            }
             let owner_before = owner_counts.snapshot();
             let owner_methods_before = owner_counts.method_snapshot();
             let recovery_identity = crate::transcode::SessionRecoveryIdentity {

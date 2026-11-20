@@ -1550,7 +1550,11 @@ impl Encoding {
     /// last-refusal diagnostics that a different consumer can overwrite.
     pub(crate) async fn try_initial_hardware_permit(
         &self,
+        start: &crate::vodserve::InitialHardwareStart,
     ) -> Result<EncodePermit, InitialHardwareRefusal> {
+        if !start.entry_is_live() {
+            return Err(InitialHardwareRefusal::Unavailable);
+        }
         self.hooks.before_admission().await;
         let (hardware, software) = tokio::time::timeout(
             Duration::from_secs(1),
@@ -1561,6 +1565,9 @@ impl Encoding {
         .and_then(Result::ok)
         .ok_or(InitialHardwareRefusal::Unavailable)?;
         let (hardware_limit, software_budget) = Self::admission_limits(hardware, software);
+        if !start.entry_is_live() {
+            return Err(InitialHardwareRefusal::Unavailable);
+        }
         let _wait = self.admissions.queue_for_slot();
         try_admit_frozen_bundle(
             &self.admissions,

@@ -1503,7 +1503,7 @@ impl Shared {
         settings: &VodSettings,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
         canonical_processing_key: Option<(&str, Option<Arc<ProcessedInstanceAllowance>>)>,
-        initial_hardware_deadline: Option<tokio::time::Instant>,
+        initial_hardware_start: Option<InitialHardwareStart>,
     ) -> Result<Option<RenditionAttachment>, String> {
         if let Some(storage) = private_storage.as_ref() {
             storage.bind(key)?;
@@ -1533,7 +1533,7 @@ impl Shared {
                     build_guard,
                     private_storage,
                     canonical_processing_key,
-                    initial_hardware_deadline,
+                    initial_hardware_start,
                 )
                 .await
         });
@@ -1554,7 +1554,7 @@ impl Shared {
         build_guard: RenditionBuildGuard,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
         canonical_processing_key: Option<(String, Option<Arc<ProcessedInstanceAllowance>>)>,
-        initial_hardware_deadline: Option<tokio::time::Instant>,
+        initial_hardware_start: Option<InitialHardwareStart>,
     ) -> Result<Option<RenditionAttachment>, String> {
         let key = key.as_str();
         #[cfg(target_os = "linux")]
@@ -1671,10 +1671,16 @@ impl Shared {
         // Existing readers, failed predecessors and on-disk output use
         // ordinary admission. Claim a cold recipe before source/output build
         // and before publishing a driver or reader.
-        let initial_hardware = if let Some((deadline, encoding)) = initial_hardware_deadline
+        let initial_hardware = if let Some((start, encoding)) = initial_hardware_start
             .zip(recipe.encoding.as_ref())
             .filter(|(_, encoding)| {
-                cold_owner && encoding.resources.hardware_slot && encoding.subtitle.is_none()
+                cold_owner
+                    && encoding.resources.hardware_slot
+                    && encoding.subtitle.is_none()
+                    && !matches!(
+                        encoding.dv_processing,
+                        plurx_core::transcode::dv_processing::DvSelection::Selected(_)
+                    )
             }) {
             let output = self.base.join(key);
             if !self
@@ -1683,15 +1689,16 @@ impl Shared {
                 .is_some_and(|runtime| runtime.protects_output_path(&output))
                 && matches!(tokio::fs::try_exists(output).await, Ok(false))
             {
-                let attempt =
-                    tokio::time::timeout_at(deadline, encoding.try_initial_hardware_permit()).await;
-                if tokio::time::Instant::now() >= deadline {
+                let attempt = tokio::time::timeout_at(
+                    start.deadline(),
+                    encoding.try_initial_hardware_permit(&start),
+                )
+                .await;
+                if !start.entry_is_live() {
                     return Err(crate::transcode::replacement_deadline_error());
                 }
                 match attempt {
-                    Ok(Ok(permit)) => {
-                        Some(super::session::InitialHardwarePermit { deadline, permit })
-                    }
+                    Ok(Ok(permit)) => Some(super::session::InitialHardwarePermit { start, permit }),
                     Ok(Err(crate::vodencode::InitialHardwareRefusal::Busy)) => {
                         return Err(crate::transcode::initial_hardware_capacity_error());
                     }

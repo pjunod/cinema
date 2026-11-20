@@ -220,7 +220,7 @@ async fn source_generation_registration_close_and_cancel_retain_actual_resources
         let caller = tokio::spawn({
             let shared = Arc::clone(&serve.shared);
             let rendition = Arc::clone(&rendition);
-            async move { spawn_generation(&shared, &rendition, 0, Some(permit)).await }
+            async move { spawn_generation(&shared, &rendition, 0, Some(permit), None).await }
         });
         let registration_held = registration_pause.reached().await;
         let pid = rendition.last_child_pid.load(Relaxed);
@@ -388,7 +388,7 @@ async fn source_physical_build_and_spawn_refuse_identity_drift_and_symlinks() {
         .expect("actual file mutation")
         .write_all(b"changed")
         .expect("drift");
-    spawn_generation(&serve.shared, &rendition, 0, Some(permit)).await;
+    spawn_generation(&serve.shared, &rendition, 0, Some(permit), None).await;
     assert_eq!(
         rendition.last_child_pid.load(Relaxed),
         0,
@@ -440,7 +440,7 @@ async fn source_missing_cached_init_refuses_before_head_regeneration() {
         .try_permit()
         .await
         .expect("actual physical admission");
-    spawn_generation(&serve.shared, &rendition, 0, Some(permit)).await;
+    spawn_generation(&serve.shared, &rendition, 0, Some(permit), None).await;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if rendition.dir.has_init().await

@@ -1069,9 +1069,15 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             next_step(belief, decision.action),
         );
         let step = yield_step(belief, step, contention);
-        if let Some((entry, reservation)) = initial_hardware {
-            if prepared_permit.is_none() && matches!(step, Step::Start { at } if at == entry) {
-                prepared_permit = Some(reservation.permit);
+        let mut initial_start = None;
+        if let Some((initial, permit)) = initial_hardware {
+            if prepared_permit.is_none()
+                && matches!(step, Step::Start { at } if at == initial.entry)
+            {
+                // Keep the original authority even when it expired. This
+                // Start cannot re-enter through ordinary unscoped admission.
+                initial_start = Some(initial);
+                prepared_permit = Some(permit);
             }
         }
         let yielding_for_handoff = handoff_requested
@@ -1286,7 +1292,14 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                                 Release,
                             );
                         }
-                        spawn_generation(shared, rendition, at, prepared_permit.take()).await;
+                        spawn_generation(
+                            shared,
+                            rendition,
+                            at,
+                            prepared_permit.take(),
+                            initial_start.as_ref(),
+                        )
+                        .await;
                     }
                     Ok(Performed::Done) => {}
                     Err(error) => {

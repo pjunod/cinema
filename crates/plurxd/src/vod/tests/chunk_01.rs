@@ -2697,6 +2697,7 @@ fn a_line_logged_by_a_vod_child_keeps_the_vodserve_target() {
     assert_eq!(refused.target, "plurxd::vodserve");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn ordinary_cold_hardware_admission_is_owned_by_the_first_original_reader() {
     use plurx_core::store::SettingsStore as _;
@@ -2735,7 +2736,14 @@ async fn ordinary_cold_hardware_admission_is_owned_by_the_first_original_reader(
     recipe.encoding = Some(Arc::clone(&encoding));
     let identity = SourceIdentity::new(file.size as u64, file.mtime, "hardware-first-fixture");
     let settings_value = settings();
+    let clock = Arc::new(plurx_core::cluster::clock::ClusterClockGuard::new(false));
     let build = |key: &'static str, recipe| {
+        let allowance = Duration::from_secs(10);
+        let proof = clock
+            .capture_continuous()
+            .expect("initial local capture")
+            .deadline_after(allowance)
+            .expect("initial continuous allowance");
         serve.shared.attach_rendition_with_storage(
             key,
             &identity,
@@ -2745,7 +2753,14 @@ async fn ordinary_cold_hardware_admission_is_owned_by_the_first_original_reader(
             &settings_value,
             None,
             None,
-            Some(tokio::time::Instant::now() + Duration::from_secs(10)),
+            Some(
+                InitialHardwareStart::with_continuous(
+                    tokio::time::Instant::now() + allowance,
+                    proof,
+                    false,
+                )
+                .expect("initial hardware gate"),
+            ),
         )
     };
     let refused = match build("busy-cold", recipe.clone()).await {
@@ -2824,12 +2839,88 @@ async fn ordinary_cold_hardware_admission_is_owned_by_the_first_original_reader(
     super::driver::driver_pass(&serve.shared, &rendition).await;
     assert_eq!(encoding.admissions.snapshot().hardware_used, 0);
 
-    let abandoned = build("abandoned-cold", recipe)
+    let abandoned = build("abandoned-cold", recipe.clone())
         .await
         .expect("prepare cancellation fixture")
         .expect("cold rendition plan");
     assert!(abandoned.initial_hardware.is_some());
     drop(abandoned);
+    assert_eq!(encoding.admissions.snapshot().hardware_used, 0);
+
+    let mut replaced = build("replaced-after-handoff", recipe.clone())
+        .await
+        .expect("build the original reader's rendition")
+        .expect("cold rendition plan");
+    let rendition = Arc::clone(&replaced.rendition);
+    let mut original = Reader::new(0);
+    original.initial_hardware = Some((0, replaced.initial_hardware.take().expect("first flight")));
+    let (entry, permit) = {
+        let mut readers = rendition.readers.lock().await;
+        assert!(readers
+            .insert("replaced-reader".to_owned(), original)
+            .is_none());
+        let (entry, permit) = readers
+            .take_initial_hardware()
+            .expect("actual driver handoff");
+        assert!(entry.reader_is_current(&readers));
+        assert!(readers
+            .insert("replaced-reader".to_owned(), Reader::new(0))
+            .is_some());
+        assert!(readers
+            .insert("shared-viewer".to_owned(), Reader::new(0))
+            .is_none());
+        assert!(!entry.reader_is_current(&readers));
+        (entry, permit)
+    };
+    drop(replaced);
+    spawn_generation(&serve.shared, &rendition, 0, Some(permit), Some(&entry)).await;
+    assert_eq!(rendition.last_child_pid.load(Relaxed), 0);
+    assert!(
+        rendition.failure().is_none(),
+        "other readers retain ordinary service"
+    );
+    assert_eq!(encoding.admissions.snapshot().hardware_used, 0);
+    drop(
+        encoding
+            .try_permit()
+            .await
+            .expect("ordinary admission still available"),
+    );
+
+    let mut expired = build("expired-cold", recipe)
+        .await
+        .expect("build the exact first flight")
+        .expect("cold rendition plan");
+    let mut permit = expired.initial_hardware.take().expect("original permit");
+    // Keep the scheduling instant live while BOOTTIME expires, as it can
+    // when the machine suspends. The real driver must never readmit or spawn.
+    permit.start.continuous = clock
+        .capture_continuous()
+        .expect("entry capture")
+        .deadline_after(Duration::from_millis(50))
+        .expect("entry allowance");
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(tokio::time::Instant::now() < permit.start.deadline());
+    assert!(!permit.start.entry_is_live());
+    let mut reader = Reader::new(0);
+    reader.initial_hardware = Some((0, permit));
+    let rendition = Arc::clone(&expired.rendition);
+    assert!(rendition
+        .readers
+        .lock()
+        .await
+        .insert("expired-reader".to_owned(), reader)
+        .is_none());
+    drop(expired);
+    super::driver::driver_pass(&serve.shared, &rendition).await;
+    assert_eq!(rendition.last_child_pid.load(Relaxed), 0);
+    assert_eq!(
+        rendition
+            .failure()
+            .expect("terminal initial start")
+            .decision,
+        crate::playback_control::ProducerDecisionReason::StartupDeadline
+    );
     assert_eq!(encoding.admissions.snapshot().hardware_used, 0);
 }
 

@@ -3371,7 +3371,8 @@ async fn base_local_offer(state: &AppState, request: &MediaOfferRequest) -> Medi
                 cache_hit: probe.cache_hit,
                 source_likely_readable,
                 scratch_bytes_free: probe.scratch_bytes_free,
-                initial_hardware_vod: eligible
+                initial_hardware_vod: cfg!(target_os = "linux")
+                    && eligible
                     && probe.encoder != "software"
                     && (probe.free_hardware_slots > 0 || probe.cache_hit),
                 encoder: probe.encoder,

@@ -1589,8 +1589,28 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
 /// the transaction boundary.
 #[derive(Debug)]
 pub(super) struct InitialHardwarePermit {
-    pub(super) deadline: tokio::time::Instant,
+    pub(super) start: InitialHardwareStart,
     pub(super) permit: crate::vodencode::EncodePermit,
+}
+
+pub(super) struct InitialHardwareEntry {
+    pub(super) entry: u32,
+    pub(super) start: InitialHardwareStart,
+    // Each Reader constructs its own marker ledger Arc and never replaces
+    // it. Holding it can preserve identity, but only the table proves that
+    // the original reader still owns this start.
+    pub(super) reader_identity: Arc<StdMutex<MarkerPrewarmLedger>>,
+}
+
+impl InitialHardwareEntry {
+    pub(super) fn reader_is_current(&self, readers: &ReaderTable) -> bool {
+        readers.values().any(|reader| {
+            Arc::ptr_eq(&self.reader_identity, &reader.marker_prewarm)
+                && !reader.authority_only
+                && !reader.draining_after_prepared_commit
+                && reader.frontier == self.entry
+        })
+    }
 }
 
 pub(super) struct RenditionAttachment {

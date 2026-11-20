@@ -1254,10 +1254,80 @@ impl VodServingAdmissionHooks for NoopVodServingAdmissionHooks {
 
 /// Startup policy for one negotiated ordinary hardware VOD placement.
 /// The original local or remote owner task carries it through preparation.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct InitialHardwareStart {
-    pub deadline: tokio::time::Instant,
-    pub peer: bool,
+    deadline: tokio::time::Instant,
+    continuous: plurx_core::cluster::clock::ContinuousDeadline,
+    pub(crate) peer: bool,
+}
+
+impl std::fmt::Debug for InitialHardwareStart {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InitialHardwareStart")
+            .field("deadline", &self.deadline)
+            .field("peer", &self.peer)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InitialHardwareStart {
+    pub(crate) fn local(deadline: tokio::time::Instant) -> Option<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            Self::with_continuous(
+                deadline,
+                crate::media_pool::create_continuous_activation_deadline()?,
+                false,
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = deadline;
+            None
+        }
+    }
+
+    pub(crate) fn peer(
+        deadline: tokio::time::Instant,
+        proof: plurx_core::cluster::clock::ContinuousDeadline,
+    ) -> Option<Self> {
+        Self::with_continuous(deadline, proof, true)
+    }
+
+    fn with_continuous(
+        deadline: tokio::time::Instant,
+        continuous: plurx_core::cluster::clock::ContinuousDeadline,
+        peer: bool,
+    ) -> Option<Self> {
+        let start = Self {
+            deadline: deadline.min(continuous.monotonic_cutoff().ok()?.into()),
+            continuous,
+            peer,
+        };
+        start.entry_is_live().then_some(start)
+    }
+
+    pub(crate) fn deadline(&self) -> tokio::time::Instant {
+        self.deadline
+    }
+
+    pub(crate) fn entry_is_live(&self) -> bool {
+        tokio::time::Instant::now() < self.deadline && self.continuous.entry_remaining().is_ok()
+    }
+
+    pub(crate) fn grant_cutoff_unix_ms(&self) -> Option<i64> {
+        let now_unix_ms = crate::media_sessions::unix_ms();
+        let remaining = self.continuous.grant_remaining().ok()?.min(
+            self.deadline
+                .checked_duration_since(tokio::time::Instant::now())?,
+        );
+        let remaining_ms = i64::try_from(remaining.as_millis()).ok()?;
+        if remaining_ms == 0 {
+            return None;
+        }
+        now_unix_ms.checked_add(remaining_ms)
+    }
 }
 
 tokio::task_local! {
@@ -1265,10 +1335,7 @@ tokio::task_local! {
 }
 
 pub(crate) fn initial_hardware_start() -> Option<InitialHardwareStart> {
-    INITIAL_HARDWARE_START
-        .try_with(|start| *start)
-        .ok()
-        .flatten()
+    INITIAL_HARDWARE_START.try_with(Clone::clone).ok().flatten()
 }
 
 struct VodCreateFences<'a> {

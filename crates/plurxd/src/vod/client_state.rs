@@ -5,13 +5,12 @@
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
 use plurx_core::adaptive_resources::runtime::finite_vod::{
     FiniteClientSlot, FiniteClientStateLease,
 };
-#[cfg(target_os = "linux")]
-use std::sync::Arc;
 
 /// A share of the original finite role's client partition. The wrapper keeps
 /// diagnostics from treating a private core budget token as a public datum.
@@ -255,7 +254,10 @@ impl<K: Eq + Hash + Ord, V> ClientTable<K, V> {
 impl ClientTable<String, super::Reader> {
     pub(super) fn take_initial_hardware(
         &mut self,
-    ) -> Option<(u32, super::session::InitialHardwarePermit)> {
+    ) -> Option<(
+        super::session::InitialHardwareEntry,
+        crate::vodencode::EncodePermit,
+    )> {
         let Self::Legacy(readers) = self else {
             return None;
         };
@@ -263,9 +265,17 @@ impl ClientTable<String, super::Reader> {
             let (entry, permit) = reader.initial_hardware.take()?;
             (!reader.authority_only
                 && !reader.draining_after_prepared_commit
-                && reader.frontier == entry
-                && tokio::time::Instant::now() < permit.deadline)
-                .then_some((entry, permit))
+                && reader.frontier == entry)
+                .then(|| {
+                    (
+                        super::session::InitialHardwareEntry {
+                            entry,
+                            start: permit.start,
+                            reader_identity: Arc::clone(&reader.marker_prewarm),
+                        },
+                        permit.permit,
+                    )
+                })
         })
     }
 }

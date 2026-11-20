@@ -2939,6 +2939,10 @@ pub(crate) enum RemoteSessionStartOwnership {
 /// Why a remote start produced no session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RemoteStartFailure {
+    /// The exact ingress generation changed before the Start dispatch.
+    IngressFenced,
+    /// The original hardware deadline expired before the Start dispatch.
+    OriginalDeadlineExpired,
     /// The worker answered 503: it cannot take this start now.
     Unavailable,
     /// The worker answered 503 naming a terminal capacity code: no retry of
@@ -5010,6 +5014,7 @@ impl MediaSessionCoordinator {
         request: &RemoteStartRequest,
         deadline: tokio::time::Instant,
         initial_hardware_cutoff: Option<i64>,
+        may_dispatch: impl FnOnce() -> Result<(), RemoteStartFailure>,
     ) -> Result<RemoteSessionStart, RemoteStartFailure> {
         let body = match initial_hardware_cutoff {
             Some(cutoff_unix_ms) => serde_json::to_vec(&InitialHardwareRemoteStart {
@@ -5026,6 +5031,7 @@ impl MediaSessionCoordinator {
             return Err(PeerTransportError::TimedOut.into());
         }
         let base = self.peer_base(owner_node_id, deadline).await?;
+        may_dispatch()?;
         let response = self
             .transport
             .request_with_static_header(

@@ -11,6 +11,7 @@ pub(super) async fn spawn_generation(
     rendition: &Arc<Rendition>,
     at: u32,
     permit: Option<crate::vodencode::EncodePermit>,
+    initial_start: Option<&super::session::InitialHardwareEntry>,
 ) {
     if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
         return;
@@ -50,6 +51,28 @@ pub(super) async fn spawn_generation(
             && rendition.cancelled_preparation_epoch.load(Acquire)
                 != generation_epoch.saturating_add(1)
     };
+    let start_expired = || initial_start.is_some_and(|initial| !initial.start.entry_is_live());
+    let record_expired_start = || {
+        if generation_current() {
+            record_failure(
+                shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::StartupDeadline,
+                "the original hardware startup deadline is closed".to_owned(),
+            );
+        }
+    };
+    if let Some(initial) = initial_start {
+        let readers = rendition.readers.lock().await;
+        if !initial.reader_is_current(&readers) {
+            rendition.kick();
+            return;
+        }
+        if start_expired() {
+            record_expired_start();
+            return;
+        }
+    }
     let private_operation = match rendition.private_storage.as_ref() {
         Some(storage) => match storage.operation() {
             Some(operation) => Some(operation),
@@ -100,6 +123,15 @@ pub(super) async fn spawn_generation(
         return;
     }
     if !generation_current() {
+        return;
+    }
+    if let Some(initial) = initial_start.filter(|_| start_expired()) {
+        let readers = rendition.readers.lock().await;
+        if initial.reader_is_current(&readers) {
+            record_expired_start();
+        } else {
+            rendition.kick();
+        }
         return;
     }
     // A spawn position must be a VIDEO entry — the scheduler can name an
@@ -694,6 +726,23 @@ pub(super) async fn spawn_generation(
         let descriptors = crate::producer_spawn::Descriptors::default();
         let program = recipe_program(recipe);
         let env = recipe_child_env(recipe);
+        // The exact attachment may have gone away during source/engine
+        // work. Serialize its final check with removal, replacement and
+        // seek through the synchronous native dispatch only.
+        let original_readers = if let Some(initial) = initial_start {
+            let readers = rendition.readers.lock().await;
+            if !initial.reader_is_current(&readers) || !generation_current() {
+                drop(readers);
+                if let Some(input) = source_custody.take() {
+                    let _ = input.close_and_wait().await;
+                }
+                rendition.kick();
+                return;
+            }
+            Some(readers)
+        } else {
+            None
+        };
         if let Some(authority) = &source_authority {
             if let Err(cause) = authority.validate_before_spawn() {
                 if !generation_current() {
@@ -722,6 +771,18 @@ pub(super) async fn spawn_generation(
                 return;
             }
         };
+        // This original elapsed-time authority survives every async
+        // source/engine check above. Reserve the original slot before the
+        // last check and perform no more awaited work before native entry.
+        if start_expired() {
+            record_expired_start();
+            drop(empty);
+            drop(original_readers);
+            if let Some(input) = source_custody.take() {
+                let _ = input.close_and_wait().await;
+            }
+            return;
+        }
         output.retain_source(audio_source);
         let writer = VodGenerationOwner {
             shared: Arc::clone(shared),
@@ -733,7 +794,7 @@ pub(super) async fn spawn_generation(
             landing_probe,
             output: Arc::clone(&output),
         };
-        match empty.spawn_registered_owned(
+        let spawned = empty.spawn_registered_owned(
             &program,
             &args,
             crate::producer_spawn::SpawnOptions {
@@ -750,7 +811,9 @@ pub(super) async fn spawn_generation(
             })),
             source_custody,
             move |registration, stdout, stderr| writer.run(registration, stdout, stderr),
-        ) {
+        );
+        drop(original_readers);
+        match spawned {
             Ok(spawned) => spawned,
             Err(error) => {
                 if !generation_current() {
