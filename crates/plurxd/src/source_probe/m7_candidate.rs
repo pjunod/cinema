@@ -34,7 +34,7 @@ const FRAMES: u32 = 48;
 const MAX_TARGET_KBPS: u32 = 125_000;
 const MIN_TARGET_KBPS: u32 = 83_334;
 const BUF_KBIT: u32 = 136_000;
-const MAX_ATTEMPTS: usize = 4;
+const MAX_ATTEMPTS: u8 = 4;
 const PREDICTION_OVERHEAD_MBPS: f64 = 0.03;
 const MAX_ENCODED_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -326,6 +326,7 @@ pub(super) struct RatePlan {
     /// Inclusive bounds on authored video packet bits per second, in kb/s.
     pub authored_band_kbps: [u32; 2],
     pub initial_target_kbps: u32,
+    pub maximum_attempts: u8,
 }
 
 #[derive(Debug, Serialize)]
@@ -375,6 +376,7 @@ impl FrozenRecipe {
         ) || low == 0
             || low > high
             || !admitted_target(rate.initial_target_kbps)
+            || !(1..=MAX_ATTEMPTS).contains(&rate.maximum_attempts)
             || hdr
                 .max_cll_fall
                 .is_some_and(|[cll, fall]| cll == 0 || fall > cll)
@@ -490,7 +492,8 @@ impl FrozenRecipe {
     /// Rebuild the guarded secant sequence from measured encoded packet
     /// payloads. A refused or repeated proposal never becomes an attempt.
     pub(super) fn rate_decision(&self, attempts: &[RateAttempt]) -> Result<RateDecision, Error> {
-        if attempts.len() > MAX_ATTEMPTS {
+        let cap = usize::from(self.rate.maximum_attempts);
+        if attempts.len() > cap {
             return Err(Error::RateHistory);
         }
         let mut previous = None;
@@ -513,7 +516,7 @@ impl FrozenRecipe {
                     target_kbps: attempt.target_kbps,
                     predicted_mbps: predicted,
                 }
-            } else if index + 1 == MAX_ATTEMPTS {
+            } else if index + 1 == cap {
                 RateDecision::Inconclusive(RateStop::AttemptsExhausted)
             } else {
                 let ratio_proposal = current_target * target / predicted;
@@ -712,6 +715,7 @@ mod tests {
             RatePlan {
                 authored_band_kbps: [128_500, 130_000],
                 initial_target_kbps: 115_000,
+                maximum_attempts: 4,
             },
         )
         .unwrap()
@@ -846,6 +850,23 @@ mod tests {
             recipe.rate_decision(&attempts).unwrap(),
             RateDecision::Inconclusive(RateStop::AttemptsExhausted)
         );
+        let three = FrozenRecipe::new(
+            cadence,
+            recipe.hdr,
+            RatePlan {
+                maximum_attempts: 3,
+                ..recipe.rate
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            three.rate_decision(&attempts[..3]).unwrap(),
+            RateDecision::Inconclusive(RateStop::AttemptsExhausted)
+        );
+        assert!(matches!(
+            three.rate_decision(&attempts),
+            Err(Error::RateHistory)
+        ));
         let single_rate = FrozenRecipe::new(
             cadence,
             recipe.hdr,
