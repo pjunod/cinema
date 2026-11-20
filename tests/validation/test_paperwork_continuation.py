@@ -131,8 +131,8 @@ class PaperworkContinuationTests(unittest.TestCase):
 
     def plan(self):
         return {'source_commit': 'a' * 40, 'evidence_sha256': 'c' * 64,
-                'suites': {kind: {'inventory': ['test_case.Case.test_body'],
-                                  'uncovered': ['test_case.Case.test_body'],
+                'suites': {kind: {'inventory': ['test_docs_index.Case.test_body'],
+                                  'uncovered': ['test_docs_index.Case.test_body'],
                                   'retained_source_records': {}} for kind in ('validation', 'operations')}}
 
     def execution(self, plan):
@@ -140,25 +140,25 @@ class PaperworkContinuationTests(unittest.TestCase):
         for kind in ('validation', 'operations'):
             identity = json.dumps(pc.marker(plan, kind))
             text += ('SELECTED-PYTHON-BEGIN ' + identity + '\n'
-                     'test_body (test_case.Case.test_body) ... ok\n\nRan 1 test in 0.01s\n\nOK\n'
+                     'test_body (test_docs_index.Case.test_body) ... ok\n\nRan 1 test in 0.01s\n\nOK\n'
                      'SELECTED-PYTHON-END ' + identity + '\n')
         return text.encode()
 
     def test_direct_current_outcomes_require_complete_exact_selection_and_success(self):
         plan = self.plan(); raw = self.execution(plan)
         self.assertEqual(set(pc.current_outcomes(raw, plan)),
-                         {'validation:test_case.Case.test_body', 'operations:test_case.Case.test_body'})
+                         {'validation:test_docs_index.Case.test_body', 'operations:test_docs_index.Case.test_body'})
         for changed in (raw.replace(b'... ok', b'... FAIL', 1), raw.replace(b'... ok', b'... skipped', 1),
                         raw.replace(b'Ran 1 test', b'Ran 2 tests', 1),
                         raw.replace(b'c' * 64, b'd' * 64, 1), raw + raw,
-                        raw.replace(b'test_body (test_case.Case.test_body) ... ok\n', b'', 1)):
+                        raw.replace(b'test_body (test_docs_index.Case.test_body) ... ok\n', b'', 1)):
             with self.subTest(raw=changed), self.assertRaises(r.ReceiptError):
                 pc.current_outcomes(changed, plan)
 
     def test_green_preflight_without_direct_body_outcomes_cannot_supply_coverage(self):
         plan = self.plan(); value = self.value(); bind = self.scope(); api, pull = self.facts()
         pull['body'] += '\nManual-Source-Gate: 9'
-        inventory = {'operations:test_case.Case.test_body'}
+        inventory = {'operations:test_docs_index.Case.test_body'}
         api.pages.return_value = [{'name': 'fast policy and contract preflight', 'id': 12, 'run_id': 9,
                                    'repo_id': 1, 'owner_id': 3, 'attempt': 1, 'status': 'success'}]
         api.bytes.return_value = b'received task 1 of job preflight, triggered by event: workflow_dispatch\n'
