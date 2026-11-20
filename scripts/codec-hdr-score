@@ -369,6 +369,11 @@ def score(reference, distorted, reference_sha, distorted_sha, ffmpeg, ffprobe, d
 
 
 def main():
+    if sys.argv[1:2] in (["pin-cvvdp-runtime"], ["score-perceptual"]):
+        import runpy
+        adapter = runpy.run_path(str(Path(__file__).with_name("codec-hdr-cvvdp")))
+        adapter["main"](globals(), sys.argv[1:])
+        return
     if sys.argv[1:2] == ["score-sdr"]:
         parser = argparse.ArgumentParser(description="Score SDR only against a separately pinned graded reference")
         for field in ("source", "source-sha256", "reference", "distorted", "distorted-sha256",
