@@ -3020,6 +3020,17 @@ pub trait BackgroundJobStore: Send + Sync {
         scanner: &str,
         after: i64,
         now_ms: i64,
+    ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError> {
+        self.dv_title_demands_through(scanner, after, i64::MAX, now_ms)
+            .await
+    }
+    /// Page the current maintenance demands in a fixed (after, through] revision range.
+    async fn dv_title_demands_through(
+        &self,
+        scanner: &str,
+        after: i64,
+        through: i64,
+        now_ms: i64,
     ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError>;
     async fn bind_dv_title_demand(
         &self,
@@ -4186,13 +4197,14 @@ LIMIT 1
     ) -> Result<Vec<i64>, StoreError> {
         super::dv_title_jobs::stale_fel_titles(self, identity, limit).await
     }
-    async fn dv_title_demands(
+    async fn dv_title_demands_through(
         &self,
         scanner: &str,
         after: i64,
+        through: i64,
         now_ms: i64,
     ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError> {
-        super::dv_title_jobs::demands(self, scanner, after, now_ms).await
+        super::dv_title_jobs::demands(self, scanner, after, through, now_ms).await
     }
     async fn bind_dv_title_demand(
         &self,

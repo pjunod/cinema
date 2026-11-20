@@ -2035,6 +2035,36 @@ async fn title_viewer_bootstraps_current_work_and_keeps_recipe_interest_exact() 
 }
 
 #[tokio::test]
+async fn failed_title_revisit_leaves_the_next_discovery_turn_available() {
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let old = seed(&store, "title-revisit-error").await;
+        let new = seed(&store, "title-after-error").await;
+        let mut cursor = TitleMaintenanceCursor::default();
+        let (rows, after) = cursor
+            .next_page(store.as_ref(), &scanner, 1000)
+            .await
+            .expect("discovery");
+        assert_eq!(rows[0].file_id, old.id, "{backend}");
+        *after = rows[0].probe_revision;
+        // Make just the revisit read fail, before it can return or advance a row.
+        assert!(cursor
+            .next_page(store.as_ref(), "invalid scanner", 1001)
+            .await
+            .is_err());
+        let (rows, _) = cursor
+            .next_page(store.as_ref(), &scanner, 1002)
+            .await
+            .expect("next turn");
+        assert_eq!(
+            rows[0].file_id, new.id,
+            "{backend}: failed historical read pinned forward discovery"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn maintenance_revisits_the_oldest_released_source_while_new_titles_arrive() {
     use plurx_core::store::background_jobs_resources::StorageDomainMapping;
 
