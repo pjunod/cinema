@@ -278,8 +278,12 @@ and one evaluation exposure at early fitted segment boundaries. An independent
 whole-source census proves each disjoint 48-frame interval. Both a film-origin
 generation and a separate nonzero seek materialize real F+ segments through the
 VOD writer. Readback checks the retained base-layer coded bytes, source clock
-and written RPUs against the census. The new protocol scopes the lattice to the
-coded raster. The previous Michael trial used a separately frozen active ROI.
+and written RPUs against the census. Stable Level 5 metadata determines an
+active region when present. The original source RPUs corroborate it, and
+the verified coded raster supplies the region when Level 5 is absent.
+The managed UHD resource ceiling admits the full raster lattice of 518,400
+sites per frame. The historical Michael trial retains the separately frozen
+active region and its 503,040 sites per frame.
 
 Before the first candidate, the route scores only the paired source FEL and
 actual F+ baseline in the calibration exposures. It takes the larger of 0.05

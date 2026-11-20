@@ -11,7 +11,8 @@
 //! and reference mask follow served_refit_eval.py and m7_pair_compare.py.
 
 use dolby_vision::rpu::{
-    dovi_rpu::DoviRpu, rpu_data_mapping::DoviMappingMethod, vdr_dm_data::VdrDmData,
+    dovi_rpu::DoviRpu, extension_metadata::blocks::ExtMetadataBlock,
+    rpu_data_mapping::DoviMappingMethod, vdr_dm_data::VdrDmData,
 };
 
 use super::{
@@ -86,6 +87,8 @@ pub enum ScoreError {
     UnsupportedSourceRpu,
     #[error("M7 requires actual whole and seek Profile 8.1 mappings that match the pinned production curves and source color")]
     UnboundServedCurves,
+    #[error("M7 requires one compatible active area across source and fitted RPU readbacks")]
+    ActiveArea,
     #[error("M7 requires a fresh authored Profile 8.1 RPU with identity mapping and the same frame's source color")]
     UnsupportedCandidateRpu,
     #[error("M7 lattice site contains a decoded code above ten bits")]
@@ -246,6 +249,12 @@ impl FrameScorer {
         if fitted_curves(served_seek, color).as_ref() != Some(&served_curves) {
             return Err(ScoreError::UnboundServedCurves);
         }
+        let source_crop = active_offsets(source)?;
+        if active_offsets(served_whole)? != source_crop
+            || active_offsets(served_seek)? != source_crop
+        {
+            return Err(ScoreError::ActiveArea);
+        }
         Ok((
             Self {
                 served_curves,
@@ -336,6 +345,46 @@ impl FrameScorer {
             score(Model::D)?,
         ])
     }
+}
+
+/// Select the rectangle explicitly described by a fresh RPU's Level 5
+/// offsets. When Level 5 is absent, use the entire verified coded raster.
+pub fn active_area(raw: &[u8], [width, height]: [u16; 2]) -> Result<[u16; 4], ScoreError> {
+    let [left, top, right, bottom] = active_offsets(raw)?;
+    let right = width.checked_sub(right).ok_or(ScoreError::ActiveArea)?;
+    let bottom = height.checked_sub(bottom).ok_or(ScoreError::ActiveArea)?;
+    if left >= right || top >= bottom {
+        return Err(ScoreError::ActiveArea);
+    }
+    Ok([left, top, right, bottom])
+}
+
+fn active_offsets(raw: &[u8]) -> Result<[u16; 4], ScoreError> {
+    if raw.len() > MAX_RPU_BYTES || !raw.starts_with(&RPU_NAL_HEADER) {
+        return Err(ScoreError::ActiveArea);
+    }
+    let rpu = std::panic::catch_unwind(|| DoviRpu::parse_unspec62_nalu(raw))
+        .map_err(|_| ScoreError::ActiveArea)?
+        .map_err(|_| ScoreError::ActiveArea)?;
+    if rpu.header.use_prev_vdr_rpu_flag || !rpu.header.vdr_dm_metadata_present_flag {
+        return Err(ScoreError::ActiveArea);
+    }
+    let dm = rpu.vdr_dm_data.as_ref().ok_or(ScoreError::ActiveArea)?;
+    let mut blocks = dm.level_blocks_iter(5);
+    let area = match blocks.next() {
+        None => [0; 4],
+        Some(ExtMetadataBlock::Level5(area)) => [
+            area.active_area_left_offset,
+            area.active_area_top_offset,
+            area.active_area_right_offset,
+            area.active_area_bottom_offset,
+        ],
+        Some(_) => return Err(ScoreError::ActiveArea),
+    };
+    if blocks.next().is_some() {
+        return Err(ScoreError::ActiveArea);
+    }
+    Ok(area)
 }
 
 fn profile81_rpu(raw: &[u8], color: DmCoefficients) -> Option<DoviRpu> {

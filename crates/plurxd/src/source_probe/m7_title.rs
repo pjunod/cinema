@@ -357,7 +357,8 @@ use super::{
 use plurx_core::transcode::{
     dv_m7_receipt::{CalibrationWindow, M7Receipt, MODEL_VERSION},
     dv_m7_scoring::{
-        aggregation::{Aggregator, FrozenMargin, WindowShape},
+        active_area,
+        aggregation::FrozenMargin,
         capture::{score_baseline_frame, CaptureLayout, CapturePlan, CaptureRole, FrameEvidence},
     },
     Rational,
@@ -405,8 +406,8 @@ async fn measure_new_title(
         },
         async {
             let fitted = FittedPublication::load(context).await?;
-            let source = source_plan(context, &title, &fitted)?;
-            let reserve_bytes = scratch_budget(source.layout)?;
+            let mut source = source_plan(context, &title, &fitted)?;
+            let reserve_bytes = m7_comparison::title_scratch_bytes(source.layout).map_err(string)?;
             let reservation = crate::playback_cache::reserve(scratch.path(), reserve_bytes)
                 .await.map_err(string)?;
             let (_, census) = dv_title::scan_with_m7_census(
@@ -424,6 +425,8 @@ async fn measure_new_title(
                 .ok_or("M7 window does not contain the frozen 48-frame exposure")
             }).collect::<Result<Vec<_>, _>>()?;
             let publications = fitted.readbacks(context, &title, &windows, scratch.path()).await?;
+            source.layout.roi = publication_active_area(&publications, source.layout.raster)?;
+            source.layout.sites_per_frame().map_err(string)?;
             let mut calibration = Vec::new();
             let mut evaluation = Vec::new();
             for (index, (frames, (whole, seek))) in windows.into_iter().zip(publications).enumerate() {
@@ -478,6 +481,13 @@ async fn measure_new_title(
                 let planes = m7_comparison::prepare_planes(
                     context, &title, capture, &scratch, reserve_bytes,
                 ).await.map_err(string)?;
+                for frame in &planes.frames {
+                    if active_area(&frame.source_rpu, source.layout.raster).map_err(string)?
+                        != source.layout.roi
+                    {
+                        return Err("M7 original evaluation RPU active area disagrees with fitted readback".into());
+                    }
+                }
                 let authored = prepare_authored(
                     context, &title, &frozen, &source.recipe, planes, source.dv_level,
                     &scratch, context.cancel,
@@ -565,11 +575,17 @@ fn source_plan(
         video_index,
         time_base,
         raster: [width, height],
-        // The new automatic protocol explicitly scopes its observation to
-        // the coded raster. Historical active-ROI experiments stay separate.
+        // The definitive region comes from stable whole and seek RPU
+        // readback before any lattice capture or candidate preparation.
         roi: [0, 0, width, height],
     };
-    layout.sites_per_frame().map_err(string)?;
+    if !(64..=3840).contains(&width)
+        || !(64..=2160).contains(&height)
+        || !width.is_multiple_of(2)
+        || !height.is_multiple_of(2)
+    {
+        return Err("M7 coded raster is outside the managed full-plane recipe".into());
+    }
     let (primaries_rgbw, max_1e4_nits, min_1e4_nits) =
         crate::decode_facts::mastering::source_st2086(stream)?
             .ok_or("M7 selected source has no exact ST 2086 declarations")?;
@@ -658,6 +674,23 @@ fn source_plan(
         windows,
         recipe,
     })
+}
+
+fn publication_active_area(
+    publications: &[(PublicationReadback, PublicationReadback)],
+    raster: [u16; 2],
+) -> Result<[u16; 4], String> {
+    let mut stable = None;
+    for (whole, seek) in publications {
+        for frame in whole.frames.iter().chain(&seek.frames) {
+            let region = active_area(&frame.rpu_nal, raster).map_err(string)?;
+            if stable.is_some_and(|old| old != region) {
+                return Err("whole or seek RPU active area varies within the M7 experiment".into());
+            }
+            stable = Some(region);
+        }
+    }
+    stable.ok_or("M7 fitted readback has no active area evidence".into())
 }
 
 #[derive(Serialize)]
@@ -808,20 +841,6 @@ fn frozen_margin(evidence: &[CalibrationEvidence]) -> Result<FrozenMargin, Strin
         margin = margin.max(((means[3] - means[0]) * 100.0).ceil() / 100.0);
     }
     FrozenMargin::new(margin).map_err(string)
-}
-
-fn scratch_budget(layout: CaptureLayout) -> Result<u64, String> {
-    let sites = layout.sites_per_frame().map_err(string)?;
-    let spill = Aggregator::required_spill_bytes(&[WindowShape {
-        frames: FRAMES,
-        sites_per_frame: sites,
-    }])
-    .map_err(string)?;
-    let [width, height] = layout.raster.map(u64::from);
-    let full_planes = width * height * 9 * FRAMES as u64;
-    let lattices = sites as u64 * 26 * FRAMES as u64;
-    // Separate bounded video boxes, control/candidate outputs and manifests.
-    Ok(spill + full_planes + lattices + 2 * 1024 * 1024 * 1024)
 }
 
 #[derive(Serialize, Deserialize)]
