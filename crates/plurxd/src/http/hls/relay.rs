@@ -262,6 +262,17 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
         Ok(protection) => protection,
         Err(error) => return error.into_response(),
     };
+    let restart = (!matches!(
+        request.resource,
+        RelayResource::Status | RelayResource::Delete | RelayResource::PassivePresence { .. }
+    ))
+    .then(crate::http::retain_relay_restart_admission)
+    .flatten();
+    let lifetime = crate::http::stream::RelayLifetime::new(
+        restart,
+        #[cfg(target_os = "linux")]
+        protection,
+    );
     let (playlist_deadline, _) = playlist_request_deadlines_before(state, request_deadline);
     // Keep each resource future on the heap. Their combined dispatch frame
     // otherwise overflows a normal Tokio worker stack on a relayed request,
@@ -417,12 +428,7 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
         Ok(response) => response,
         Err(error) => error.into_response(),
     };
-    #[cfg(target_os = "linux")]
-    let response = match protection {
-        Some(lane) => crate::http::stream::protect_body(response, lane),
-        None => response,
-    };
-    response
+    lifetime.protect(response)
 }
 
 #[cfg(test)]

@@ -26,35 +26,30 @@ use crate::state::AppState;
 
 /// Keep the original egress owner through both body polling and any frames
 /// handed to the HTTP connection before cancellation or end-of-stream.
-#[cfg(target_os = "linux")]
-pub(crate) fn protect_body<L: Send + Sync + 'static>(
+pub(crate) fn protect_body<L: Clone + Send + Sync + Unpin + 'static>(
     response: Response,
-    lane: std::sync::Arc<L>,
+    lane: L,
 ) -> Response {
     response.map(|body| Body::new(ProtectedBody { body, lane }))
 }
 
-#[cfg(target_os = "linux")]
 struct ProtectedBody<L> {
     body: Body,
-    lane: std::sync::Arc<L>,
+    lane: L,
 }
 
-#[cfg(target_os = "linux")]
 struct ProtectedFrame<L> {
     bytes: bytes::Bytes,
-    _lane: std::sync::Arc<L>,
+    _lane: L,
 }
 
-#[cfg(target_os = "linux")]
 impl<L> AsRef<[u8]> for ProtectedFrame<L> {
     fn as_ref(&self) -> &[u8] {
         &self.bytes
     }
 }
 
-#[cfg(target_os = "linux")]
-impl<L: Send + Sync + 'static> http_body::Body for ProtectedBody<L> {
+impl<L: Clone + Send + Sync + Unpin + 'static> http_body::Body for ProtectedBody<L> {
     type Data = bytes::Bytes;
     type Error = axum::Error;
 
@@ -68,7 +63,7 @@ impl<L: Send + Sync + 'static> http_body::Body for ProtectedBody<L> {
                 .map_data(|bytes| {
                     bytes::Bytes::from_owner(ProtectedFrame {
                         bytes,
-                        _lane: std::sync::Arc::clone(&self.lane),
+                        _lane: self.lane.clone(),
                     })
                 })))),
             other => other,
@@ -81,6 +76,48 @@ impl<L: Send + Sync + 'static> http_body::Body for ProtectedBody<L> {
 
     fn is_end_stream(&self) -> bool {
         self.body.is_end_stream()
+    }
+}
+
+/// The original lifetimes that follow a relayed response on this node.
+#[derive(Clone, Default)]
+pub(crate) struct RelayLifetime {
+    restart: Option<std::sync::Arc<crate::serving_fence::RestartAdmission>>,
+    #[cfg(target_os = "linux")]
+    playback: Option<std::sync::Arc<crate::admission::ProtectedPlaybackLane>>,
+}
+
+impl RelayLifetime {
+    pub(crate) fn new(
+        restart: Option<std::sync::Arc<crate::serving_fence::RestartAdmission>>,
+        #[cfg(target_os = "linux")] playback: Option<
+            std::sync::Arc<crate::admission::ProtectedPlaybackLane>,
+        >,
+    ) -> Self {
+        Self {
+            restart,
+            #[cfg(target_os = "linux")]
+            playback,
+        }
+    }
+
+    pub(crate) fn is_owned(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self.playback.is_some() {
+            return true;
+        }
+        self.restart.is_some()
+    }
+
+    pub(crate) fn protect(self, response: Response) -> Response {
+        if self.restart.is_some() {
+            return protect_body(response, self);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(lane) = self.playback {
+            return protect_body(response, lane);
+        }
+        response
     }
 }
 

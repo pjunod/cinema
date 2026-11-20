@@ -4651,6 +4651,14 @@ impl LiveTvManager {
         &self,
         request: LiveTvResourceRequest,
     ) -> Result<Response<Body>, LiveTvError> {
+        self.resource_local_with_restart(request, None).await
+    }
+
+    pub(crate) async fn resource_local_with_restart(
+        &self,
+        request: LiveTvResourceRequest,
+        restart: Option<Arc<crate::serving_fence::RestartAdmission>>,
+    ) -> Result<Response<Body>, LiveTvError> {
         validate_capability_owner(request.capability(), &self.node_id)?;
         let session = self.session(request.capability())?;
         // No Store read here (plan L-03): the observer's polled ledger verdict
@@ -4730,10 +4738,12 @@ impl LiveTvManager {
                         .await
                         .map_err(|reason| LiveTvError::OwnerUnavailable(reason.into()))?,
                 );
-                #[cfg(target_os = "linux")]
-                let open = open_protected_bounded_segment(path, expected_len, Arc::clone(&lane));
-                #[cfg(not(target_os = "linux"))]
-                let open = open_bounded_segment(&path, expected_len);
+                let lifetime = crate::http::stream::RelayLifetime::new(
+                    restart,
+                    #[cfg(target_os = "linux")]
+                    Some(lane),
+                );
+                let open = open_owned_bounded_segment(path, expected_len, lifetime.clone());
                 let file = tokio::select! {
                     biased;
                     _ = session.cancel.cancelled() => return Err(LiveTvError::CapabilityExpired("the live-TV session stopped".into())),
@@ -4757,9 +4767,7 @@ impl LiveTvManager {
                     .header(header::CONTENT_LENGTH, expected_len)
                     .body(body)
                     .map_err(|error| LiveTvError::StreamFailed(error.to_string()))?;
-                #[cfg(target_os = "linux")]
-                let response = crate::http::stream::protect_body(response, lane);
-                Ok(response)
+                Ok(lifetime.protect(response))
             }
             LiveTvResourceRequest::Init { .. } => {
                 let permit = Arc::clone(&session.resource_admission)
@@ -4789,11 +4797,12 @@ impl LiveTvManager {
                         .try_acquire_protected_playback_lane()
                         .map_err(|reason| LiveTvError::OwnerUnavailable(reason.into()))?,
                 );
-                #[cfg(target_os = "linux")]
-                let file =
-                    open_protected_bounded_segment(path, expected_len, Arc::clone(&lane)).await?;
-                #[cfg(not(target_os = "linux"))]
-                let file = open_bounded_segment(&path, expected_len).await?;
+                let lifetime = crate::http::stream::RelayLifetime::new(
+                    restart,
+                    #[cfg(target_os = "linux")]
+                    Some(lane),
+                );
+                let file = open_owned_bounded_segment(path, expected_len, lifetime.clone()).await?;
                 let body = bounded_segment_body(file, expected_len, session.cancel.clone(), permit);
                 let response = Response::builder()
                     .status(StatusCode::OK)
@@ -4802,9 +4811,7 @@ impl LiveTvManager {
                     .header(header::CONTENT_LENGTH, expected_len)
                     .body(body)
                     .map_err(|error| LiveTvError::StreamFailed(error.to_string()))?;
-                #[cfg(target_os = "linux")]
-                let response = crate::http::stream::protect_body(response, lane);
-                Ok(response)
+                Ok(lifetime.protect(response))
             }
             LiveTvResourceRequest::Status { .. } => {
                 let mut status = session.status(&self.node_id);
@@ -9727,21 +9734,22 @@ async fn read_bounded_regular_file(path: &Path, max: u64) -> Result<Vec<u8>, Liv
 struct LiveSegmentFile {
     file: tokio::fs::File,
     cache_pin: Option<crate::playback_cache::CachePin>,
-    #[cfg(target_os = "linux")]
-    protection: Option<Arc<crate::admission::ProtectedPlaybackLane>>,
+    lifetime: crate::http::stream::RelayLifetime,
 }
 
-#[cfg(target_os = "linux")]
-async fn open_protected_bounded_segment(
+async fn open_owned_bounded_segment(
     path: PathBuf,
     expected_len: u64,
-    protection: Arc<crate::admission::ProtectedPlaybackLane>,
+    lifetime: crate::http::stream::RelayLifetime,
 ) -> Result<LiveSegmentFile, LiveTvError> {
-    // A cancelled response observer cannot free the lane of a blocking open.
-    // The original task and its unclaimed File result both carry it.
+    if !lifetime.is_owned() {
+        return open_bounded_segment(&path, expected_len).await;
+    }
+    // Keep the original open and any unclaimed file result charged
+    // through cancellation of the response that requested it.
     tokio::spawn(async move {
         let mut file = open_bounded_segment(&path, expected_len).await?;
-        file.protection = Some(protection);
+        file.lifetime = lifetime;
         Ok(file)
     })
     .await
@@ -9774,8 +9782,7 @@ async fn open_bounded_segment(
     Ok(LiveSegmentFile {
         file,
         cache_pin,
-        #[cfg(target_os = "linux")]
-        protection: None,
+        lifetime: crate::http::stream::RelayLifetime::default(),
     })
 }
 
@@ -9939,8 +9946,7 @@ fn bounded_segment_body(
         let LiveSegmentFile {
             mut file,
             cache_pin: _cache_pin,
-            #[cfg(target_os = "linux")]
-            protection,
+            lifetime,
         } = opened;
         let cancel = producer_cancel;
         let mut sent = 0_u64;
@@ -9993,13 +9999,12 @@ fn bounded_segment_body(
                 break 'read;
             }
         }
-        #[cfg(target_os = "linux")]
-        if let Some(protection) = protection {
+        if lifetime.is_owned() {
             // Tokio File can retain an in-flight blocking read after the
-            // cancellation branch wins. Join it before releasing the lane.
+            // cancellation branch wins. Join it before releasing custody.
             drop(file.into_std().await);
             drop(_cache_pin);
-            drop(protection);
+            drop(lifetime);
         }
     });
     Body::from_stream(LocalResourceStream { state, cancel })

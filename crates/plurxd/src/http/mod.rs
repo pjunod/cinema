@@ -3251,9 +3251,52 @@ async fn desktop_http_admission_gate(
         )
             .into_response();
     };
-    next.run(request)
-        .await
-        .map(|body| axum::body::Body::new(RestartAdmissionBody::new(body, Some(admission))))
+    with_http_restart_admission(admission, next.run(request)).await
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+tokio::task_local! {
+    static HTTP_RESTART_ADMISSION: std::cell::RefCell<Option<HttpRestartAdmission>>;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) async fn with_http_restart_admission(
+    admission: crate::serving_fence::RestartAdmission,
+    response: impl std::future::Future<Output = Response>,
+) -> Response {
+    let mut scope = std::pin::pin!(HTTP_RESTART_ADMISSION.scope(
+        std::cell::RefCell::new(Some(HttpRestartAdmission::Original { _owner: admission })),
+        response,
+    ));
+    let response = scope.as_mut().await;
+    let admission = scope
+        .as_mut()
+        .take_value()
+        .and_then(std::cell::RefCell::into_inner);
+    response.map(|body| axum::body::Body::new(RestartAdmissionBody::new(body, admission)))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn retain_relay_restart_admission(
+) -> Option<std::sync::Arc<crate::serving_fence::RestartAdmission>> {
+    HTTP_RESTART_ADMISSION
+        .try_with(|admission| {
+            let mut admission = admission.borrow_mut();
+            let owner = match admission.take()? {
+                HttpRestartAdmission::Original { _owner: owner } => std::sync::Arc::new(owner),
+                HttpRestartAdmission::Shared(owner) => owner,
+            };
+            *admission = Some(HttpRestartAdmission::Shared(std::sync::Arc::clone(&owner)));
+            Some(owner)
+        })
+        .ok()
+        .flatten()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn retain_relay_restart_admission(
+) -> Option<std::sync::Arc<crate::serving_fence::RestartAdmission>> {
+    None
 }
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 async fn desktop_http_admission_gate(
@@ -3264,17 +3307,22 @@ async fn desktop_http_admission_gate(
     next.run(request).await
 }
 
+enum HttpRestartAdmission {
+    Original {
+        _owner: crate::serving_fence::RestartAdmission,
+    },
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Shared(std::sync::Arc<crate::serving_fence::RestartAdmission>),
+}
+
 /// Direct response bodies (including Range reconnects) own admission until
 /// delivery finishes or the connection closes, rather than merely to headers.
 struct RestartAdmissionBody {
     body: axum::body::Body,
-    _admission: Option<crate::serving_fence::RestartAdmission>,
+    _admission: Option<HttpRestartAdmission>,
 }
 impl RestartAdmissionBody {
-    fn new(
-        body: axum::body::Body,
-        mut admission: Option<crate::serving_fence::RestartAdmission>,
-    ) -> Self {
+    fn new(body: axum::body::Body, mut admission: Option<HttpRestartAdmission>) -> Self {
         if http_body::Body::is_end_stream(&body) {
             admission.take();
         }
@@ -3364,8 +3412,12 @@ async fn serving_gate(
     };
     let Some(policy) = state.serving.http_policy(request.uri().path()) else {
         let response = next.run(request).await;
-        return response
-            .map(|body| axum::body::Body::new(RestartAdmissionBody::new(body, restart_admission)));
+        return response.map(|body| {
+            axum::body::Body::new(RestartAdmissionBody::new(
+                body,
+                restart_admission.map(|owner| HttpRestartAdmission::Original { _owner: owner }),
+            ))
+        });
     };
 
     let mut response = (

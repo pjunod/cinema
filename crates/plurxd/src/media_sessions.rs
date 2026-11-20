@@ -5949,12 +5949,19 @@ fn relay_response_with_limits_observed(
     // `closed()`/a failed send so abandoning the public body cancels the peer.
     let body_deadline = tokio::time::Instant::now() + max_lifetime;
     let pump_terminal = terminal.clone();
-    #[cfg(target_os = "linux")]
-    let pump_protection = protection.clone();
+    let lifetime = crate::http::stream::RelayLifetime::new(
+        crate::http::retain_relay_restart_admission(),
+        #[cfg(target_os = "linux")]
+        protection,
+    );
+    // Field order also keeps the original admission until the response
+    // drops if this task is cancelled before its first poll.
+    let original = (response, lifetime.clone());
     tokio::spawn(async move {
         let _completion = RelayPumpCompletion(completion);
-        #[cfg(target_os = "linux")]
-        let _protection = pump_protection;
+        let (response, _lifetime) = original;
+        // The local upstream reader is destroyed before this token. The peer
+        // has its own independent response and native read lifetime.
         let mut upstream = Box::pin(response.bytes_stream());
         let fail = |kind, message: String| pump_terminal.fail(kind, message);
         let mut body_bytes = 0_u64;
@@ -6095,12 +6102,7 @@ fn relay_response_with_limits_observed(
     let response = builder
         .body(Body::from_stream(stream))
         .map_err(|_| PeerTransportError::InvalidResponse)?;
-    #[cfg(target_os = "linux")]
-    let response = match protection {
-        Some(lane) => crate::http::stream::protect_body(response, lane),
-        None => response,
-    };
-    Ok(response)
+    Ok(lifetime.protect(response))
 }
 
 pub(crate) fn unix_ms() -> i64 {

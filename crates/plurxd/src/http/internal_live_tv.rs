@@ -197,7 +197,14 @@ pub(crate) async fn resource(
         LiveTvResourceRequest::Playlist { .. } => Some("application/vnd.apple.mpegurl"),
         _ => Some("application/json"),
     };
-    let response = state.live_tv.resource_local(request).await;
+    let restart = content_type
+        .is_none()
+        .then(super::retain_relay_restart_admission)
+        .flatten();
+    let response = state
+        .live_tv
+        .resource_local_with_restart(request, restart)
+        .await;
     let response = match response {
         Ok(response) => response,
         Err(error) => return Ok(signed_wire_error(&state, &headers, RESOURCE_PATH, error)),

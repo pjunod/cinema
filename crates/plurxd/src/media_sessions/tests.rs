@@ -4377,6 +4377,99 @@ async fn dropping_relay_body_cancels_its_network_pump() {
     server.abort();
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn relay_restart_admission_waits_for_the_pump_and_last_connection_frame() {
+    use crate::serving_fence::ServingFence;
+    use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+    let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+    fence
+        .begin_restart_preparation_until(u64::try_from(unix_ms()).expect("wall time") + 60_000)
+        .await
+        .expect("original rolling preparation");
+    let app = Router::new().route(
+        "/media",
+        get(|| async {
+            Body::from_stream(
+                stream::once(async { Ok::<_, Infallible>(Bytes::from_static(b"queued media")) })
+                    .chain(stream::pending()),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind real peer fixture");
+    let address = listener.local_addr().expect("peer fixture address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve real peer fixture");
+    });
+
+    for retain_frame in [false, true] {
+        let admission = fence
+            .try_desktop_http_admission()
+            .await
+            .expect("continuing read allowed during rolling preparation");
+        let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
+        let mut original = None;
+        let response = crate::http::with_http_restart_admission(admission, async {
+            original = crate::http::retain_relay_restart_admission()
+                .as_ref()
+                .map(Arc::downgrade);
+            let peer = reqwest::Client::new()
+                .get(format!("http://{address}/media"))
+                .send()
+                .await
+                .expect("read original peer response");
+            relay_response_with_limits_observed(
+                peer,
+                Duration::from_secs(30),
+                Duration::from_secs(30),
+                Some(settled_tx),
+                None,
+                None,
+                None,
+                #[cfg(target_os = "linux")]
+                None,
+            )
+            .expect("start real detached relay")
+        })
+        .await;
+        let mut body = response.into_body().into_data_stream();
+        let frame = if retain_frame {
+            Some(
+                body.next()
+                    .await
+                    .expect("connection data")
+                    .expect("relay frame"),
+            )
+        } else {
+            None
+        };
+        let pending = fence.restart_drain_status(0).await;
+        assert_eq!(pending.admissions_in_flight, 1, "same original admission");
+        assert!(!pending.drained);
+        drop(body);
+        assert!(original
+            .expect("original relay admission")
+            .upgrade()
+            .is_some());
+        tokio::time::timeout(Duration::from_secs(2), settled_rx)
+            .await
+            .expect("body cancellation stops the local network pump")
+            .expect("original pump completion");
+        let settled = fence.restart_drain_status(0).await;
+        assert_eq!(settled.drained, !retain_frame);
+        assert_eq!(settled.admissions_in_flight, u64::from(retain_frame));
+        drop(frame);
+        assert!(fence.restart_drain_status(0).await.drained);
+    }
+
+    server.abort();
+}
+
 #[tokio::test]
 async fn terminal_control_relay_accepts_and_replays_the_exact_ended_response() {
     let mut request = terminal_relay_request();
