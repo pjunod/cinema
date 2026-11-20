@@ -2697,6 +2697,142 @@ fn a_line_logged_by_a_vod_child_keeps_the_vodserve_target() {
     assert_eq!(refused.target, "plurxd::vodserve");
 }
 
+#[tokio::test]
+async fn ordinary_cold_hardware_admission_is_owned_by_the_first_original_reader() {
+    use plurx_core::store::SettingsStore as _;
+
+    let base = crate::test_tempdir().expect("hardware build fixture");
+    let (file, mut encoding) = encoded_fixture(base.path()).await;
+    let store = Arc::new(SqliteStore::open_in_memory().expect("capacity policy"));
+    store
+        .put_setting(plurx_core::store::keys::MAX_HW_SESSIONS, "1")
+        .await
+        .expect("one hardware slot");
+    store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "64")
+        .await
+        .expect("CPU budget");
+    let hardware = Arc::get_mut(&mut encoding).expect("new frozen recipe");
+    hardware.plan = encoded_plan(
+        &file,
+        &hardware.options,
+        plurx_core::transcode::Encoder::Qsv,
+    );
+    hardware.resources = crate::admission::TranscodeResourceEstimate::of(
+        &hardware.plan,
+        &crate::admission::Workload::of(&file, hardware.options.target_height),
+    );
+    assert!(hardware.resources.hardware_slot);
+    hardware.store = Arc::clone(&store) as Arc<dyn Store>;
+    let serve = local_serve(base.path().join("hardware-start"), store);
+    let active = encoding
+        .admissions
+        .try_admit_bundle(1, 64, &encoding.resources, crate::admission::Priority::Live)
+        .expect("another producer owns the actual hardware slot");
+    let mut recipe = synthetic_rendition(base.path()).await.recipe.clone();
+    recipe.source_object_version = Some(encoding.source_object_version.clone());
+    recipe.file = file.clone();
+    recipe.encoding = Some(Arc::clone(&encoding));
+    let identity = SourceIdentity::new(file.size as u64, file.mtime, "hardware-first-fixture");
+    let settings_value = settings();
+    let build = |key: &'static str, recipe| {
+        serve.shared.attach_rendition_with_storage(
+            key,
+            &identity,
+            None,
+            recipe,
+            file.duration_ms.expect("fixture duration"),
+            &settings_value,
+            None,
+            None,
+            Some(tokio::time::Instant::now() + Duration::from_secs(10)),
+        )
+    };
+    let refused = match build("busy-cold", recipe.clone()).await {
+        Err(error) => error,
+        Ok(_) => panic!("occupied hardware recipe must refuse before build"),
+    };
+    assert!(crate::transcode::is_initial_hardware_capacity_error(
+        &refused
+    ));
+    assert!(!serve.shared.base.join("busy-cold").exists());
+    assert!(!serve
+        .shared
+        .renditions
+        .lock()
+        .await
+        .contains_key("busy-cold"));
+    assert_eq!(encoding.admissions.snapshot().hardware_used, 1);
+    drop(active);
+
+    let mut attachment = build("accepted-cold", recipe.clone())
+        .await
+        .expect("actual key owner can admit")
+        .expect("cold rendition plan");
+    assert_eq!(encoding.admissions.snapshot().hardware_used, 1);
+    let mut original = Reader::new(0);
+    original.initial_hardware = Some((
+        0,
+        attachment.initial_hardware.take().expect("original permit"),
+    ));
+    let rendition = Arc::clone(&attachment.rendition);
+    assert!(rendition
+        .readers
+        .lock()
+        .await
+        .insert("reader".to_owned(), original)
+        .is_none());
+    drop(attachment);
+    let existing = build("accepted-cold", recipe.clone())
+        .await
+        .expect("same rendition")
+        .expect("shared attachment");
+    assert!(Arc::ptr_eq(&existing.rendition, &rendition));
+    assert!(
+        existing.initial_hardware.is_none(),
+        "a shared viewer must not readmit"
+    );
+    assert_eq!(encoding.admissions.snapshot().hardware_used, 1);
+    drop(existing);
+    // Replace the actual reader with the same key, without ever kicking the
+    // driver. The new reader must never inherit the original slot.
+    drop(
+        rendition
+            .readers
+            .lock()
+            .await
+            .insert("reader".to_owned(), Reader::new(0)),
+    );
+    assert_eq!(encoding.admissions.snapshot().hardware_used, 0);
+    drop(rendition.readers.lock().await.remove("reader"));
+
+    let mut idle = build("idle-cold", recipe.clone())
+        .await
+        .expect("idle fixture build")
+        .expect("cold rendition plan");
+    let mut missed = Reader::new(1);
+    missed.initial_hardware = Some((0, idle.initial_hardware.take().expect("idle permit")));
+    missed.authority_only = true;
+    let rendition = Arc::clone(&idle.rendition);
+    assert!(rendition
+        .readers
+        .lock()
+        .await
+        .insert("paused".to_owned(), missed)
+        .is_none());
+    drop(idle);
+    super::driver::driver_pass(&serve.shared, &rendition).await;
+    assert_eq!(encoding.admissions.snapshot().hardware_used, 0);
+
+    let abandoned = build("abandoned-cold", recipe)
+        .await
+        .expect("prepare cancellation fixture")
+        .expect("cold rendition plan");
+    assert!(abandoned.initial_hardware.is_some());
+    drop(abandoned);
+    assert_eq!(encoding.admissions.snapshot().hardware_used, 0);
+}
+
 /// This is compatibility admission before native entry. A requested hardware
 /// encoder is not evidence of an available device, and no producer is started.
 #[tokio::test]

@@ -545,7 +545,6 @@ async fn idle_reap_and_same_id_resurrection_are_one_reader_transition() {
             .lock()
             .await
             .get("sess-a")
-            .cloned()
             .expect("replacement reader")
             .last_served,
         None,

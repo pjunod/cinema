@@ -677,6 +677,7 @@ impl VodServe {
             return Ok((
                 RenditionAttachment {
                     rendition,
+                    initial_hardware: None,
                     _build_guard: gate,
                 },
                 incoming_logical,
@@ -724,6 +725,7 @@ impl VodServe {
             return Ok((
                 RenditionAttachment {
                     rendition: Arc::clone(expected),
+                    initial_hardware: None,
                     _build_guard: gate,
                 },
                 incoming_logical,
@@ -770,6 +772,11 @@ impl VodServe {
                             .and_then(|admission| admission.instance_allowance.clone()),
                     )
                 }),
+                if capture_before_build && processing_instance.is_none() {
+                    initial_hardware_start().map(|start| start.deadline)
+                } else {
+                    None
+                },
             )
             .await?
             .ok_or_else(|| {
@@ -1254,6 +1261,7 @@ impl VodServe {
             return Ok(Some((
                 RenditionAttachment {
                     rendition: existing,
+                    initial_hardware: None,
                     _build_guard: gate,
                 },
                 artifact,
@@ -1314,6 +1322,7 @@ impl VodServe {
         Ok(Some((
             RenditionAttachment {
                 rendition,
+                initial_hardware: None,
                 _build_guard: gate,
             },
             artifact,
@@ -2128,8 +2137,12 @@ impl VodServe {
                 !continuous,
             )
             .await?;
-        let rendition = Arc::clone(&attachment.rendition);
-        drop(attachment);
+        let RenditionAttachment {
+            rendition,
+            initial_hardware,
+            _build_guard,
+        } = attachment;
+        let initial_build_guard = initial_hardware.as_ref().map(|_| _build_guard);
         let mut media = vec![Arc::clone(&rendition)];
         if let Some(audio) = audio_rendition.as_ref() {
             media.push(Arc::clone(audio));
@@ -2145,13 +2158,18 @@ impl VodServe {
             ));
         }
         let mut build_guards = Vec::with_capacity(media.len());
-        for child in &media {
-            build_guards.push(
-                self.shared
-                    .rendition_build_gate(&child.key)?
-                    .lock_owned()
-                    .await,
-            );
+        if let Some(guard) = initial_build_guard {
+            debug_assert_eq!(media.len(), 1);
+            build_guards.push(guard);
+        } else {
+            for child in &media {
+                build_guards.push(
+                    self.shared
+                        .rendition_build_gate(&child.key)?
+                        .lock_owned()
+                        .await,
+                );
+            }
         }
         {
             let cached = self.shared.renditions.lock().await;
@@ -2632,6 +2650,7 @@ impl VodServe {
             || replacement.children.iter().any(|child| child.controlled);
         authority.admission_priority = admission_priority;
         authority.nonpreemptive_trial = nonpreemptive_trial;
+        authority.initial_hardware = initial_hardware.map(|permit| (start_entry, permit));
         replacement_readers
             .try_insert(prepared_authority.0, authority)
             .expect("preflighted authority insertion remains within guarded table");
@@ -3854,6 +3873,7 @@ impl VodServe {
                 recipe,
                 duration_ms,
                 settings,
+                None,
                 None,
                 None,
             )

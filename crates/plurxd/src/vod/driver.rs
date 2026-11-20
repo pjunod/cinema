@@ -83,6 +83,7 @@ pub(super) fn spawn_driver(
                 rendition.wake.notified().await;
             }
             if rendition.closed.load(Relaxed) {
+                drop(rendition.readers.lock().await.take_initial_hardware());
                 if let Some(encoding) = &rendition.recipe.encoding {
                     encoding.cancel_wait();
                 }
@@ -368,7 +369,13 @@ async fn project_source_sharing(shared: &Shared, rendition: &Rendition) {
         .lock()
         .await
         .iter()
-        .map(|(id, reader)| (id.clone(), reader.clone()))
+        .map(|(id, reader)| {
+            (
+                id.clone(),
+                reader.frontier,
+                reader.authority_only || reader.draining_after_prepared_commit,
+            )
+        })
         .collect::<Vec<_>>();
     let sessions = shared.sessions.lock().await;
     let manifest = rendition.manifest.lock().await;
@@ -377,8 +384,8 @@ async fn project_source_sharing(shared: &Shared, rendition: &Rendition) {
     let mut high = 2_u64;
     let mut fresh = !readers.is_empty();
     let mut telemetry_capable = false;
-    for (id, reader) in &readers {
-        if reader.authority_only || reader.draining_after_prepared_commit {
+    for (id, frontier, inactive) in &readers {
+        if *inactive {
             continue;
         }
         let Some(session) = source_control_session(&sessions, rendition, id) else {
@@ -405,7 +412,7 @@ async fn project_source_sharing(shared: &Shared, rendition: &Rendition) {
         low = low.max(reserve);
         high = high.max(reserve.saturating_add((32_000.0 * rate).ceil() as u64));
         let mut end = None;
-        for index in reader.frontier..rendition.plan.len() as u32 {
+        for index in *frontier..rendition.plan.len() as u32 {
             if !matches!(manifest.state(index), Some(SegState::Materialized { .. })) {
                 break;
             }
@@ -939,12 +946,14 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
     let mut prepared_permit = None;
     loop {
         if rendition.closed.load(Relaxed) {
+            drop(rendition.readers.lock().await.take_initial_hardware());
             if let Some(encoding) = &rendition.recipe.encoding {
                 encoding.cancel_wait();
             }
             return;
         }
         if rendition.failure().is_some() {
+            drop(rendition.readers.lock().await.take_initial_hardware());
             if let Some(encoding) = &rendition.recipe.encoding {
                 encoding.cancel_wait();
             }
@@ -981,8 +990,9 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
         // while this one's manifest is held.
         let permit_wanted = new_start_wants_permit(shared, rendition, belief).await;
         let manifest = rendition.manifest.lock().await;
-        let (demands, prewarm_ledgers) = {
-            let readers = rendition.readers.lock().await;
+        let (demands, prewarm_ledgers, initial_hardware) = {
+            let mut readers = rendition.readers.lock().await;
+            let initial_hardware = readers.take_initial_hardware();
             if !readers.is_empty() {
                 rendition.revoke_preparation();
             }
@@ -992,7 +1002,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 .filter(|reader| !reader.authority_only && !reader.draining_after_prepared_commit)
                 .map(|reader| Arc::clone(&reader.marker_prewarm))
                 .collect::<Vec<_>>();
-            (demands, ledgers)
+            (demands, ledgers, initial_hardware)
         };
         let handoff_requested = handoff.is_some();
         let copy_admissions = rendition.source_owners.copy_admissions();
@@ -1059,6 +1069,11 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             next_step(belief, decision.action),
         );
         let step = yield_step(belief, step, contention);
+        if let Some((entry, reservation)) = initial_hardware {
+            if prepared_permit.is_none() && matches!(step, Step::Start { at } if at == entry) {
+                prepared_permit = Some(reservation.permit);
+            }
+        }
         let yielding_for_handoff = handoff_requested
             && matches!(
                 step,

@@ -1252,6 +1252,25 @@ impl VodServingAdmissionHooks for NoopVodServingAdmissionHooks {
     }
 }
 
+/// Startup policy for one negotiated ordinary hardware VOD placement.
+/// The original local or remote owner task carries it through preparation.
+#[derive(Clone, Copy)]
+pub(crate) struct InitialHardwareStart {
+    pub deadline: tokio::time::Instant,
+    pub peer: bool,
+}
+
+tokio::task_local! {
+    pub(crate) static INITIAL_HARDWARE_START: Option<InitialHardwareStart>;
+}
+
+pub(crate) fn initial_hardware_start() -> Option<InitialHardwareStart> {
+    INITIAL_HARDWARE_START
+        .try_with(|start| *start)
+        .ok()
+        .flatten()
+}
+
 struct VodCreateFences<'a> {
     release_fence: Option<VodReleaseFence<'a>>,
     serving_admission: Option<VodServingAdmission>,

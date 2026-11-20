@@ -991,7 +991,9 @@ impl TranscodeManager {
                     let live_recovery_reason = vod_refusal(&error)
                         .and_then(|(code, _)| LiveRecoveryReason::from_refusal(code));
                     if let Some(reason) = live_recovery_reason {
-                        if !req.vod_only && live_recovery_enabled {
+                        let exact_peer = crate::vodserve::initial_hardware_start()
+                            .is_some_and(|start| start.peer);
+                        if !req.vod_only && live_recovery_enabled && !exact_peer {
                             tracing::warn!(
                                 target: "plurxd::transcode",
                                 file_id = req.file_id,
@@ -4642,6 +4644,15 @@ impl TranscodeManager {
                 plan,
             )
             .await?;
+        if crate::vodserve::initial_hardware_start().is_some_and(|start| start.peer)
+            && !encoding
+                .as_ref()
+                .is_some_and(|encoding| encoding.resources.hardware_slot)
+        {
+            return Err(catalog_input_error(
+                "the exact peer recipe is no longer hardware-encoded",
+            ));
+        }
         let processed_dv_profile = encoding
             .as_ref()
             .filter(|encoding| encoding.preserves_processed_dv())

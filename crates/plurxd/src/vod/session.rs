@@ -1587,8 +1587,15 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
 /// ownership is cancellation-independent; if its requester disappears, the
 /// detached owner finishes any child reap and drops this unused guard only at
 /// the transaction boundary.
+#[derive(Debug)]
+pub(super) struct InitialHardwarePermit {
+    pub(super) deadline: tokio::time::Instant,
+    pub(super) permit: crate::vodencode::EncodePermit,
+}
+
 pub(super) struct RenditionAttachment {
     pub(super) rendition: Arc<Rendition>,
+    pub(super) initial_hardware: Option<InitialHardwarePermit>,
     pub(super) _build_guard: super::shared::RenditionBuildGuard,
 }
 

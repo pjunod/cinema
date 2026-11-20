@@ -694,10 +694,50 @@ pub(crate) async fn start(
         .ok_or(RemoteStartError::RestartDrain)?;
     let (serving_authority, admitted_serving_generation) =
         admit_remote_start_serving_authority(&state)?;
-    let mut request = serde_json::from_slice::<RemoteStartRequest>(&body)
+    let (mut request, hardware_cutoff) = serde_json::from_slice::<RemoteStartRequest>(&body)
+        .map(|request| (request, None))
+        .or_else(|_| {
+            serde_json::from_slice::<
+                crate::media_sessions::InitialHardwareRemoteStart<RemoteStartRequest>,
+            >(&body)
+            .map(|request| (request.start, Some(request.cutoff_unix_ms)))
+        })
         .ok()
-        .filter(RemoteStartRequest::is_valid)
+        .filter(|(request, cutoff)| {
+            request.is_valid()
+                && cutoff.is_none_or(|cutoff| cutoff > 0 && request.initial_hardware_start_shape())
+        })
         .ok_or(StatusCode::BAD_REQUEST)?;
+    let initial_hardware = hardware_cutoff
+        .map(|cutoff| {
+            // The inherited wall ceiling is usable only under the existing
+            // strict cluster offset bound. Remove the full possible skew.
+            let capture = state
+                .membership
+                .clock_guard()
+                .capture_continuous()
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            let remaining = cutoff
+                .checked_sub(crate::media_sessions::unix_ms())
+                .and_then(|ms| ms.checked_sub(plurx_core::cluster::clock::CLOCK_OFFSET_REFUSAL_MS))
+                .and_then(|ms| u64::try_from(ms).ok())
+                .filter(|ms| *ms > 0)
+                .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+            let proof = capture
+                .grant_deadline_after(Duration::from_millis(remaining).min(START_DEADLINE))
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            let inherited = tokio::time::Instant::from_std(
+                proof
+                    .monotonic_cutoff()
+                    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+            );
+            Ok::<_, StatusCode>(crate::vodserve::InitialHardwareStart {
+                deadline: start_deadline.min(inherited),
+                peer: true,
+            })
+        })
+        .transpose()?;
+    let start_deadline = initial_hardware.map_or(start_deadline, |start| start.deadline);
     // Until the shared ownership store and grant admission are installed,
     // reject a forwarded sharing principal before resource allocation.
     let user_id = request
@@ -789,40 +829,41 @@ pub(crate) async fn start(
             let _restart_admission = restart_admission;
             let owner_before = owner_counts.snapshot();
             let owner_methods_before = owner_counts.method_snapshot();
-            let started = start_state
-                .transcode
-                .create_cluster_session_for_receiver(
-                    (
-                        &request.request,
-                        request.retained_output_receiver,
-                        request.retained_output.as_ref(),
-                    ),
-                    // A relayed worker start carries no epoch: `RemoteStartRequest`
-                    // is the recipe the owning node sends, and the epoch is not on
-                    // it. Adding one is a change to a relayed type and therefore a
-                    // fleet rollout, so it is deliberately not taken here — an
-                    // empty epoch is refused by the ledger, which makes this "no
-                    // budget" rather than a second one.
-                    //
-                    // **This gap is inverted, and it is worse than it reads.** The
-                    // owning node runs the same activation for a relayed start as
-                    // for a local one, so the durable row *does* get a real epoch;
-                    // it is only the node holding the producer that does not. And
-                    // ranked placement steers work away from a busy local node, so
-                    // the relayed path is the loaded one — which is where decode
-                    // faults cluster. The durable bound is therefore available on
-                    // the least-loaded path and absent on the most-loaded one.
-                    // Owed until the epoch reaches this recipe.
-                    &crate::transcode::SessionRecoveryIdentity {
-                        principal: request.principal.clone(),
-                        incarnation_id: request.incarnation_id.clone(),
-                        recovery_epoch: String::new(),
-                    },
-                    &user.username,
-                    start_deadline,
-                    admitted_serving_generation,
-                    plan.as_ref(),
-                )
+            let recovery_identity = crate::transcode::SessionRecoveryIdentity {
+                principal: request.principal.clone(),
+                incarnation_id: request.incarnation_id.clone(),
+                recovery_epoch: String::new(),
+            };
+            let worker_start = start_state.transcode.create_cluster_session_for_receiver(
+                (
+                    &request.request,
+                    request.retained_output_receiver,
+                    request.retained_output.as_ref(),
+                ),
+                // A relayed worker start carries no epoch: `RemoteStartRequest`
+                // is the recipe the owning node sends, and the epoch is not on
+                // it. Adding one is a change to a relayed type and therefore a
+                // fleet rollout, so it is deliberately not taken here — an
+                // empty epoch is refused by the ledger, which makes this "no
+                // budget" rather than a second one.
+                //
+                // **This gap is inverted, and it is worse than it reads.** The
+                // owning node runs the same activation for a relayed start as
+                // for a local one, so the durable row *does* get a real epoch;
+                // it is only the node holding the producer that does not. And
+                // ranked placement steers work away from a busy local node, so
+                // the relayed path is the loaded one — which is where decode
+                // faults cluster. The durable bound is therefore available on
+                // the least-loaded path and absent on the most-loaded one.
+                // Owed until the epoch reaches this recipe.
+                &recovery_identity,
+                &user.username,
+                start_deadline,
+                admitted_serving_generation,
+                plan.as_ref(),
+            );
+            let started = crate::vodserve::INITIAL_HARDWARE_START
+                .scope(initial_hardware, worker_start)
                 .await;
             // The owner's own window, by Store method, keyed by the incarnation:
             // the reads and writes a remote start makes that the ingress never

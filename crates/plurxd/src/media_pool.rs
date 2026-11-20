@@ -1511,6 +1511,8 @@ pub(crate) struct MediaOffer {
     pub free_hardware_slots: u32,
     pub free_software_threads: u32,
     pub recent_speed: Option<f64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub initial_hardware_vod: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) finite_service: Option<FiniteServiceEvidence>,
 }
@@ -2863,6 +2865,9 @@ async fn fetch_offer(
         return None;
     }
     let mut offer = serde_json::from_slice::<MediaOffer>(&response.body).ok()?;
+    if !verified || !offer.eligible {
+        offer.initial_hardware_vod = false;
+    }
     if !verified || !offer.eligible || offer.encoder != "software" {
         offer.finite_service = None;
     }
@@ -3264,6 +3269,7 @@ async fn base_local_offer(state: &AppState, request: &MediaOfferRequest) -> Medi
         free_hardware_slots: 0,
         free_software_threads: 0,
         recent_speed: None,
+        initial_hardware_vod: false,
         finite_service: None,
     };
     if !request.is_valid() {
@@ -3365,6 +3371,9 @@ async fn base_local_offer(state: &AppState, request: &MediaOfferRequest) -> Medi
                 cache_hit: probe.cache_hit,
                 source_likely_readable,
                 scratch_bytes_free: probe.scratch_bytes_free,
+                initial_hardware_vod: eligible
+                    && probe.encoder != "software"
+                    && (probe.free_hardware_slots > 0 || probe.cache_hit),
                 encoder: probe.encoder,
                 pipeline: probe.pipeline,
                 free_hardware_slots: bounded_u32(probe.free_hardware_slots),
@@ -4412,6 +4421,7 @@ mod tests {
             free_hardware_slots: 0,
             free_software_threads: 4,
             recent_speed: Some(2.0),
+            initial_hardware_vod: false,
             finite_service: None,
         }
     }

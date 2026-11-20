@@ -1882,9 +1882,36 @@ fn remote_wire_principal(
     }
 }
 
+/// A negotiated transport envelope only. Old strict start parsers refuse
+/// it, and the ordinary durable recipe retains its existing shape.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InitialHardwareRemoteStart<T> {
+    pub cutoff_unix_ms: i64,
+    pub start: T,
+}
+
 impl RemoteStartRequest {
     pub(crate) fn is_valid(&self) -> bool {
         remote_start_envelope_is_valid(self) && worker_session_request_is_valid(&self.request)
+    }
+
+    pub(crate) fn initial_hardware_start_shape(&self) -> bool {
+        self.principal.local_user_id().is_some()
+            && self.library_channel.is_none()
+            && self.request.presentation == crate::transcode::Presentation::Vod
+            && matches!(self.request.kind, SessionKind::Transcode { .. })
+            && self.request.previous_session_id.is_none()
+            && self.request.reopen_reason.is_none()
+            && !self.request.passive_vod
+            && self.request.continuous_media.is_none()
+            && self.request.subtitle_burn.is_none()
+            && self.candidate_catalog.as_ref().is_some_and(|catalog| {
+                !catalog.candidate.processed_dv
+                    && catalog.candidate.decoder_compatible
+                    && catalog.candidate.route
+                        == plurx_core::playback::candidate::CandidateRoute::Encode
+            })
     }
 
     /// Requested capacities of the selected finite software worker envelope
@@ -4982,8 +5009,16 @@ impl MediaSessionCoordinator {
         owner_node_id: &str,
         request: &RemoteStartRequest,
         deadline: tokio::time::Instant,
+        initial_hardware_cutoff: Option<i64>,
     ) -> Result<RemoteSessionStart, RemoteStartFailure> {
-        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        let body = match initial_hardware_cutoff {
+            Some(cutoff_unix_ms) => serde_json::to_vec(&InitialHardwareRemoteStart {
+                cutoff_unix_ms,
+                start: request,
+            }),
+            None => serde_json::to_vec(request),
+        }
+        .map_err(|_| PeerTransportError::InvalidResponse)?;
         if body.len() > MAX_CONTROL_REQUEST_BYTES {
             return Err(PeerTransportError::InvalidResponse.into());
         }

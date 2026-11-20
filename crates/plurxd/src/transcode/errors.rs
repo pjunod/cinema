@@ -1,5 +1,18 @@
 use super::*;
 
+const INITIAL_HARDWARE_CAPACITY_PREFIX: &str =
+    "transcode capacity is temporarily unavailable: initial hardware VOD admission: ";
+
+/// Emitted only by the exact rendition builder before it can open its
+/// producer source or publish an attachment.
+pub(crate) fn initial_hardware_capacity_error() -> String {
+    format!("{INITIAL_HARDWARE_CAPACITY_PREFIX}the selected hardware recipe is busy")
+}
+
+pub(crate) fn is_initial_hardware_capacity_error(error: &str) -> bool {
+    error.starts_with(INITIAL_HARDWARE_CAPACITY_PREFIX)
+}
+
 /// A capacity refusal a retry of the same request can outlive: a hardware
 /// slot, a CPU share, a queue position or a gate that frees on its own.
 pub(super) fn capacity_error(message: impl AsRef<str>) -> String {

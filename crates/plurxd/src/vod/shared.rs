@@ -1416,6 +1416,7 @@ impl Shared {
             settings,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1502,6 +1503,7 @@ impl Shared {
         settings: &VodSettings,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
         canonical_processing_key: Option<(&str, Option<Arc<ProcessedInstanceAllowance>>)>,
+        initial_hardware_deadline: Option<tokio::time::Instant>,
     ) -> Result<Option<RenditionAttachment>, String> {
         if let Some(storage) = private_storage.as_ref() {
             storage.bind(key)?;
@@ -1531,6 +1533,7 @@ impl Shared {
                     build_guard,
                     private_storage,
                     canonical_processing_key,
+                    initial_hardware_deadline,
                 )
                 .await
         });
@@ -1551,6 +1554,7 @@ impl Shared {
         build_guard: RenditionBuildGuard,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
         canonical_processing_key: Option<(String, Option<Arc<ProcessedInstanceAllowance>>)>,
+        initial_hardware_deadline: Option<tokio::time::Instant>,
     ) -> Result<Option<RenditionAttachment>, String> {
         let key = key.as_str();
         #[cfg(target_os = "linux")]
@@ -1594,6 +1598,7 @@ impl Shared {
                 {
                     return Ok(Some(RenditionAttachment {
                         rendition: existing,
+                        initial_hardware: None,
                         _build_guard: build_guard,
                     }));
                 }
@@ -1630,6 +1635,7 @@ impl Shared {
                 None => None,
             }
         };
+        let cold_owner = existing.is_none();
         if let Some(stale) = existing {
             let (claimed, admitted) = {
                 let manifest = stale.manifest.lock().await;
@@ -1662,6 +1668,45 @@ impl Shared {
             }
         }
 
+        // Existing readers, failed predecessors and on-disk output use
+        // ordinary admission. Claim a cold recipe before source/output build
+        // and before publishing a driver or reader.
+        let initial_hardware = if let Some((deadline, encoding)) = initial_hardware_deadline
+            .zip(recipe.encoding.as_ref())
+            .filter(|(_, encoding)| {
+                cold_owner && encoding.resources.hardware_slot && encoding.subtitle.is_none()
+            }) {
+            let output = self.base.join(key);
+            if !self
+                .resource_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.protects_output_path(&output))
+                && matches!(tokio::fs::try_exists(output).await, Ok(false))
+            {
+                let attempt =
+                    tokio::time::timeout_at(deadline, encoding.try_initial_hardware_permit()).await;
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(crate::transcode::replacement_deadline_error());
+                }
+                match attempt {
+                    Ok(Ok(permit)) => {
+                        Some(super::session::InitialHardwarePermit { deadline, permit })
+                    }
+                    Ok(Err(crate::vodencode::InitialHardwareRefusal::Busy)) => {
+                        return Err(crate::transcode::initial_hardware_capacity_error());
+                    }
+                    Ok(Err(crate::vodencode::InitialHardwareRefusal::Unavailable)) | Err(_) => {
+                        return Err(crate::transcode::start_infrastructure_error(
+                            "the initial hardware encoder admission could not be proved",
+                        ));
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let phase_started = Instant::now();
         let plan = self
             .stored_plan(
@@ -1779,6 +1824,7 @@ impl Shared {
         }
         Ok(Some(RenditionAttachment {
             rendition,
+            initial_hardware: initial_hardware.filter(|_| installed),
             _build_guard: build_guard,
         }))
     }

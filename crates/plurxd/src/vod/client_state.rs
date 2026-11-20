@@ -252,6 +252,24 @@ impl<K: Eq + Hash + Ord, V> ClientTable<K, V> {
     }
 }
 
+impl ClientTable<String, super::Reader> {
+    pub(super) fn take_initial_hardware(
+        &mut self,
+    ) -> Option<(u32, super::session::InitialHardwarePermit)> {
+        let Self::Legacy(readers) = self else {
+            return None;
+        };
+        readers.values_mut().find_map(|reader| {
+            let (entry, permit) = reader.initial_hardware.take()?;
+            (!reader.authority_only
+                && !reader.draining_after_prepared_commit
+                && reader.frontier == entry
+                && tokio::time::Instant::now() < permit.deadline)
+                .then_some((entry, permit))
+        })
+    }
+}
+
 impl<V> std::ops::Index<&str> for ClientTable<String, V> {
     type Output = V;
 

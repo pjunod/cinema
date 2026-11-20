@@ -54,8 +54,11 @@ impl Recipe {
 }
 
 /// One attached reader, in plan indexes.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct Reader {
+    /// Move-only credit of this exact reader. Removal or replacement drops
+    /// it even if the driver never polls.
+    pub(super) initial_hardware: Option<(u32, super::session::InitialHardwarePermit)>,
     /// Exact controlled companion attachment. The source-purpose bridge must
     /// survive quality selection, supersession and later producer generations.
     pub(super) companion_bootstrap: bool,
@@ -108,6 +111,7 @@ impl Reader {
         admission_priority: crate::admission::Priority,
     ) -> Self {
         Self {
+            initial_hardware: None,
             companion_bootstrap: false,
             control_required: false,
             quality_required: false,
@@ -171,6 +175,7 @@ impl Reader {
         Ok((
             stored_key,
             Self {
+                initial_hardware: None,
                 companion_bootstrap: false,
                 control_required: false,
                 quality_required: false,

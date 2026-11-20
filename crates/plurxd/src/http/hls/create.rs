@@ -5617,7 +5617,7 @@ async fn create_with_purpose_attempt(
         .candidate_context
         .as_ref()
         .and_then(|context| context.owner_node_id.clone());
-    let mut owner_candidates = if let Some(owner) = candidate_owner.or(pinned_owner) {
+    let mut owner_candidates = if let Some(owner) = candidate_owner.clone().or(pinned_owner) {
         vec![owner]
     } else if !state
         .media_pool
@@ -5692,6 +5692,8 @@ async fn create_with_purpose_attempt(
             ));
         }
     }
+    #[allow(unused_mut)] // Only Linux finite discovery may already have ranked offers.
+    let mut exact_candidate_offers = None;
     #[cfg(target_os = "linux")]
     let adaptive_software_offers: std::collections::HashSet<String> =
         if let Some(offers) = ranked_software_offers {
@@ -5705,20 +5707,91 @@ async fn create_with_purpose_attempt(
                 request.subtitle_burn,
                 request.hdr10,
             ) {
-                Ok(offer) => state
-                    .media_pool
-                    .offers(&state, offer)
-                    .await
-                    .offers
-                    .into_iter()
-                    .filter(needs_adaptive_software_prepare)
-                    .map(|row| row.node_id)
-                    .collect(),
+                Ok(offer) => {
+                    let offers = state.media_pool.offers(&state, offer).await.offers;
+                    let software = offers
+                        .iter()
+                        .filter(|offer| needs_adaptive_software_prepare(offer))
+                        .map(|row| row.node_id.clone())
+                        .collect();
+                    exact_candidate_offers = Some(offers);
+                    software
+                }
                 Err(_) => std::collections::HashSet::new(),
             }
         } else {
             std::collections::HashSet::new()
         };
+    // The ordinary catalog names the preferred owner. Only the initial
+    // local owner may try one second, positively compatible hardware peer,
+    // and only after its own actual pre-native capacity refusal.
+    #[cfg(target_os = "linux")]
+    let software_owns_start = adaptive_software_offers.contains(&state.node_id);
+    #[cfg(not(target_os = "linux"))]
+    let software_owns_start = false;
+    let initial_hardware_cutoff = if !software_owns_start
+        && owner_candidates.as_slice() == [state.node_id.as_str()]
+        && candidate_owner.as_deref() == Some(state.node_id.as_str())
+        && activation_predecessor.is_none()
+        && matches!(&purpose, ServiceCreatePurpose::Native)
+        && remote_request.initial_hardware_start_shape()
+        && start_plan.as_ref().is_some_and(|plan| {
+            plan.setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED) == Some("1")
+        }) {
+        let exact = remote_request
+            .candidate_catalog
+            .as_ref()
+            .expect("checked candidate");
+        let compatible: std::collections::HashSet<_> = quality_catalog
+            .as_ref()
+            .into_iter()
+            .flat_map(|catalog| &catalog.candidates)
+            .filter(|row| {
+                row.node_id != state.node_id
+                    && row.dispatch_supported
+                    && !row.partial
+                    && row.candidate.decoder_compatible
+                    && row.candidate.id == exact.candidate.id
+                    && row.candidate.recipe_digest == exact.candidate.recipe_digest
+                    && row.candidate.planned_codec == exact.candidate.planned_codec
+                    && row.binding.as_ref() == Some(&exact.binding)
+            })
+            .map(|row| row.node_id.as_str())
+            .collect();
+        let offer = source.as_ref().and_then(|file| {
+            MediaOfferRequest::new(
+                file,
+                height,
+                (request.start_seconds * 1_000.0).round().max(0.0) as i64,
+                request.audio_index,
+                request.subtitle_burn,
+                request.hdr10,
+            )
+            .ok()
+        });
+        let offers = match (exact_candidate_offers, offer) {
+            (Some(offers), _) => offers,
+            (None, Some(offer)) if !compatible.is_empty() => {
+                state.media_pool.offers(&state, offer).await.offers
+            }
+            _ => Vec::new(),
+        };
+        offers
+            .into_iter()
+            .find(|offer| {
+                offer.eligible
+                    && offer.initial_hardware_vod
+                    && compatible.contains(offer.node_id.as_str())
+            })
+            .and_then(|peer| {
+                let cutoff =
+                    super::response::resource_deadline_unix_ms(placement_deadline.into_std())?;
+                owner_candidates.push(peer.node_id);
+                Some(cutoff)
+            })
+    } else {
+        None
+    };
     crate::media_pool::mark_create_phase("placement");
 
     let mut started = None;
@@ -5747,7 +5820,9 @@ async fn create_with_purpose_attempt(
             break;
         }
         #[cfg(target_os = "linux")]
-        let adaptive_quote = if exact_fel || adaptive_software_offers.contains(&candidate) {
+        let adaptive_quote = if initial_hardware_cutoff.is_none()
+            && (exact_fel || adaptive_software_offers.contains(&candidate))
+        {
             tokio::time::timeout_at(
                 placement_deadline,
                 state.media_pool.adaptive_worker_quote(&state, &candidate),
@@ -5762,7 +5837,9 @@ async fn create_with_purpose_attempt(
             None
         };
         #[cfg(target_os = "linux")]
-        if (exact_fel || adaptive_software_offers.contains(&candidate)) && adaptive_quote.is_none()
+        if initial_hardware_cutoff.is_none()
+            && (exact_fel || adaptive_software_offers.contains(&candidate))
+            && adaptive_quote.is_none()
         {
             last_error = Some(ApiError::ServiceUnavailable(format!(
                 "media worker {candidate} has no current adaptive admission quote"
@@ -5862,6 +5939,7 @@ async fn create_with_purpose_attempt(
             ));
             continue;
         }
+        let mut initial_hardware_busy = false;
         let result = if candidate == state.node_id {
             if !ingress_serving_authority.is_current(ingress_serving_generation) {
                 last_error = Some(create_owner_transition(
@@ -5891,16 +5969,22 @@ async fn create_with_purpose_attempt(
             };
             let worker_serving_authority = ingress_serving_authority.clone();
             let worker_plan = start_plan.clone();
+            let initial_hardware =
+                initial_hardware_cutoff.map(|_| crate::vodserve::InitialHardwareStart {
+                    deadline: placement_deadline,
+                    peer: false,
+                });
             let mut start_task = crate::media_pool::spawn_create_worker(async move {
-                let started = transcode
-                    .create_cluster_session(
-                        &worker_request,
-                        &worker_recovery,
-                        &user_name,
-                        placement_deadline,
-                        admitted_serving_generation,
-                        worker_plan.as_deref(),
-                    )
+                let worker_start = transcode.create_cluster_session(
+                    &worker_request,
+                    &worker_recovery,
+                    &user_name,
+                    placement_deadline,
+                    admitted_serving_generation,
+                    worker_plan.as_deref(),
+                );
+                let started = crate::vodserve::INITIAL_HARDWARE_START
+                    .scope(initial_hardware, worker_start)
                     .await?;
                 let crate::transcode::ClusterSessionStart {
                     mut info,
@@ -5949,7 +6033,11 @@ async fn create_with_purpose_attempt(
                 ))
             });
             match tokio::time::timeout_at(placement_deadline, &mut start_task).await {
-                Ok(Ok(result)) => result.map_err(|error| session_start_error(id, error)),
+                Ok(Ok(result)) => result.map_err(|error| {
+                    initial_hardware_busy =
+                        crate::transcode::is_initial_hardware_capacity_error(&error);
+                    session_start_error(id, error)
+                }),
                 Ok(Err(error)) => Err(ApiError::Internal(format!(
                     "local media worker task failed: {error}"
                 ))),
@@ -5997,6 +6085,7 @@ async fn create_with_purpose_attempt(
                         &candidate,
                         &remote_request,
                         placement_deadline,
+                        initial_hardware_cutoff,
                     )
                 },
             )
@@ -6069,7 +6158,12 @@ async fn create_with_purpose_attempt(
             }
         };
         match result {
-            Ok((info, guard, serving_generation, degraded)) if info.is_valid() => {
+            Ok((info, guard, serving_generation, degraded))
+                if info.is_valid()
+                    && (initial_hardware_cutoff.is_none()
+                        || candidate == state.node_id
+                        || info.vod) =>
+            {
                 started = Some((candidate, info, guard, serving_generation, degraded));
                 break;
             }
@@ -6084,6 +6178,9 @@ async fn create_with_purpose_attempt(
                 last_error = Some(ApiError::ServiceUnavailable(format!(
                     "media worker {candidate} returned an invalid start contract"
                 )));
+                if initial_hardware_cutoff.is_some() {
+                    break;
+                }
             }
             Err(error) => {
                 tracing::debug!(
@@ -6091,7 +6188,8 @@ async fn create_with_purpose_attempt(
                     owner_node_id = %candidate, "media worker start attempt failed"
                 );
                 last_error = Some(error);
-                if placement_ended {
+                if placement_ended || (initial_hardware_cutoff.is_some() && !initial_hardware_busy)
+                {
                     break;
                 }
             }

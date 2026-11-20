@@ -752,6 +752,12 @@ impl std::fmt::Debug for Encoding {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InitialHardwareRefusal {
+    Busy,
+    Unavailable,
+}
+
 /// One refused encoder admission, with the pool state that refused it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PermitRefusal {
@@ -1539,6 +1545,53 @@ impl Encoding {
         }
     }
 
+    /// One real frozen admission before a cold rendition has any reader or
+    /// producer. Return this call's decision without consulting shared
+    /// last-refusal diagnostics that a different consumer can overwrite.
+    pub(crate) async fn try_initial_hardware_permit(
+        &self,
+    ) -> Result<EncodePermit, InitialHardwareRefusal> {
+        self.hooks.before_admission().await;
+        let (hardware, software) = tokio::time::timeout(
+            Duration::from_secs(1),
+            plurx_core::resource_settings::admission_pair(self.store.as_ref()),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .ok_or(InitialHardwareRefusal::Unavailable)?;
+        let (hardware_limit, software_budget) = Self::admission_limits(hardware, software);
+        let _wait = self.admissions.queue_for_slot();
+        try_admit_frozen_bundle(
+            &self.admissions,
+            hardware_limit,
+            software_budget,
+            &self.resources(),
+            self.admission_software_threads(),
+            Priority::Live,
+            None,
+        )
+        .map(EncodePermit::from)
+        .map_err(|over_budget| {
+            if over_budget {
+                InitialHardwareRefusal::Unavailable
+            } else {
+                InitialHardwareRefusal::Busy
+            }
+        })
+    }
+
+    fn admission_limits(hardware: Option<String>, software: Option<String>) -> (usize, usize) {
+        (
+            hardware
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(crate::admission::DEFAULT_MAX_HW_SESSIONS),
+            software
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or_else(crate::admission::software_budget),
+        )
+    }
+
     pub async fn try_permit(&self) -> Option<EncodePermit> {
         self.hooks.before_admission().await;
         self.try_permit_after(plurx_core::resource_settings::admission_pair(
@@ -1622,12 +1675,7 @@ impl Encoding {
         };
         self.policy_retry
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        let hardware_limit = hardware
-            .and_then(|value| value.trim().parse().ok())
-            .unwrap_or(crate::admission::DEFAULT_MAX_HW_SESSIONS);
-        let software_budget = software
-            .and_then(|value| value.trim().parse().ok())
-            .unwrap_or_else(crate::admission::software_budget);
+        let (hardware_limit, software_budget) = Self::admission_limits(hardware, software);
         let mut queued = self.queued.lock().expect("VOD encoder admission");
         // Preserve ordinary promotion's post-policy-read observation.
         let priority = demand_priority

@@ -540,12 +540,13 @@ pub(crate) async fn offers(
         .filter(MediaOfferRequest::is_valid)
         .ok_or(StatusCode::BAD_REQUEST)?;
     let mut offer = local_offer(&state, &request).await;
-    if offer.finite_service.is_some() {
+    if offer.finite_service.is_some() || offer.initial_hardware_vod {
         let body = serde_json::to_vec(&offer).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         if let Ok(signed) = signed_peer_json(&state, &headers, OFFERS_PATH, body) {
             return Ok(signed);
         }
         offer.finite_service = None;
+        offer.initial_hardware_vod = false;
     }
     Ok(Json(offer).into_response())
 }
