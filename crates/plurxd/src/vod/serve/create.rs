@@ -1,3 +1,4 @@
+use super::shared::AttachmentPurpose;
 use super::*;
 
 /// One request's resolved native recipe, before any rendition is attached.
@@ -441,6 +442,32 @@ impl VodServe {
         ),
         String,
     > {
+        self.resolve_rendition_for_purpose(
+            prepared,
+            file,
+            settings,
+            viewer,
+            private_preparation,
+            AttachmentPurpose::Playback,
+        )
+        .await
+    }
+
+    pub(super) async fn resolve_rendition_for_purpose(
+        &self,
+        prepared: &mut VodRecipeRequest<'_>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        viewer: Option<&crate::state::PlaybackViewerDemand>,
+        private_preparation: Option<Arc<super::copy_preparation::PreparationAllowance>>,
+        purpose: AttachmentPurpose,
+    ) -> Result<
+        (
+            RenditionAttachment,
+            Option<retained_manifest::LogicalOutput>,
+        ),
+        String,
+    > {
         self.shared.pool.set_global_cap(settings.blocked_get_cap);
         let PreparedVodRecipe {
             identity,
@@ -449,7 +476,7 @@ impl VodServe {
             duration_ms,
             incoming_logical,
         } = self
-            .prepare_recipe(prepared, file, settings, viewer)
+            .prepare_recipe(prepared, file, settings, viewer, purpose)
             .await?;
         let canonical_key = rendition_key(&recipe, &identity);
         if let Some(reuse) = prepared
@@ -531,6 +558,7 @@ impl VodServe {
                             .and_then(|admission| admission.instance_allowance.clone()),
                     )
                 }),
+                purpose,
             )
             .await?
             .ok_or_else(|| {
@@ -612,9 +640,15 @@ impl VodServe {
         settings: &VodSettings,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
-        self.prepare_recipe(&mut prepared, file, settings, viewer)
-            .await
-            .map(|prepared| prepared.recipe.encoding)
+        self.prepare_recipe(
+            &mut prepared,
+            file,
+            settings,
+            viewer,
+            AttachmentPurpose::Playback,
+        )
+        .await
+        .map(|prepared| prepared.recipe.encoding)
     }
 
     async fn prepare_recipe(
@@ -623,6 +657,7 @@ impl VodServe {
         file: &MediaFile,
         settings: &VodSettings,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
+        purpose: AttachmentPurpose,
     ) -> Result<PreparedVodRecipe, String> {
         let req = prepared.request;
         let (aac, preserve_dolby_vision, convert_dolby_vision) = match req.kind {
@@ -669,7 +704,18 @@ impl VodServe {
             "rendition preparation phase completed");
         // An encoded rendition never carries the source's parameter sets, so
         // only a copy waits on the census.
-        let probe_json = if prepared.encoding.is_none() {
+        let probe_json = if purpose == AttachmentPurpose::SelectedDetail {
+            let probe = self
+                .shared
+                .store
+                .get_file_probe_json(file.id)
+                .await
+                .map_err(|error| format!("reading the file probe: {error}"))?;
+            if plurx_core::transcode::hevc_census::needs_census(file, probe.as_deref()) {
+                return Err("selected copy needs an HEVC census".into());
+            }
+            Ok(probe)
+        } else if prepared.encoding.is_none() {
             crate::hevc_census::probe_json_for_copy(self.shared.store.as_ref(), file).await
         } else {
             self.shared.store.get_file_probe_json(file.id).await
@@ -2957,6 +3003,7 @@ impl VodServe {
                 settings,
                 None,
                 None,
+                AttachmentPurpose::Playback,
             )
             .await?
             .ok_or_else(|| {

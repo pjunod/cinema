@@ -119,7 +119,7 @@ impl ResumePredictions {
 }
 
 fn startup_window(plan: &SegmentPlan, saved_ms: i64) -> Option<(u32, u32)> {
-    if saved_ms <= 0 || plan.timescale == 0 {
+    if saved_ms < 0 || plan.timescale == 0 {
         return None;
     }
     let ticks =
@@ -189,6 +189,80 @@ impl VodServe {
             .remember(user_id, session, rendition);
     }
 
+    /// Prepare the authenticated detail selection through the same copy recipe,
+    /// index and rendition key as ordinary Play. This call owns a background
+    /// slot before resolving the recipe. It never allocates a player session.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn prepare_selected_copy(
+        &self,
+        mut prepared: VodRecipeRequest<'_>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        user_id: i64,
+        position_ms: i64,
+        shutdown: CancellationToken,
+        slot: ReadPreparationSlot,
+    ) {
+        let Some(node_id) = self.shared.cluster_node_id.as_deref() else {
+            return;
+        };
+        let request = prepared.request;
+        if position_ms < 0
+            || shutdown.is_cancelled()
+            || request.file_id != file.id
+            || !matches!(request.kind, SessionKind::Copy { .. })
+            || request.presentation != crate::transcode::Presentation::Vod
+            || request.passive_vod
+            || request.vod_only
+            || request.source_telemetry.is_some()
+            || request.subtitle_burn.is_some()
+            || request.continuous_media.is_some()
+            || prepared.encoding.is_some()
+            || prepared.soundtrack.is_some()
+            || prepared.companion.is_some()
+            || prepared.root_admission.is_some()
+            || prepared.measured_candidate.is_some()
+            || !matches!(prepared.retained_capture, RetainedOutputCapture::New)
+        {
+            return;
+        }
+        prepared.admission_priority = crate::admission::Priority::Speculative;
+        let attachment = match self
+            .resolve_rendition_for_purpose(
+                &mut prepared,
+                file,
+                settings,
+                None,
+                None,
+                super::shared::AttachmentPurpose::SelectedDetail,
+            )
+            .await
+        {
+            Ok((attachment, _)) => attachment,
+            Err(reason) => {
+                tracing::debug!(target: "plurxd::vodserve", file_id = file.id, %reason,
+                    "selected detail copy prerequisites unavailable");
+                return;
+            }
+        };
+        let rendition = Arc::clone(&attachment.rendition);
+        // Foreground attach must be able to take this same build gate while
+        // a bounded background producer holds its independent source lease.
+        drop(attachment);
+        tracing::debug!(target: "plurxd::vodserve", file_id = file.id, position_ms,
+            rendition = %rendition.key, "selected detail resolved ordinary copy rendition");
+        prepare_startup_window(
+            Arc::clone(&self.shared.store),
+            node_id,
+            &rendition,
+            user_id,
+            StartupPosition::Selected(position_ms),
+            shutdown,
+            slot,
+        )
+        .await;
+    }
+
     pub(crate) fn offer_predicted_resume(
         self: &Arc<Self>,
         user_id: i64,
@@ -213,22 +287,40 @@ impl VodServe {
         let store = Arc::clone(&self.shared.store);
         let shutdown = shutdown.clone();
         tokio::spawn(async move {
-            predict_resume(store, &node_id, &rendition, user_id, watch, shutdown, slot).await;
+            prepare_startup_window(
+                store,
+                &node_id,
+                &rendition,
+                user_id,
+                StartupPosition::Predicted(watch),
+                shutdown,
+                slot,
+            )
+            .await;
         });
     }
 }
 
-async fn predict_resume(
+enum StartupPosition {
+    Predicted(WatchState),
+    Selected(i64),
+}
+
+async fn prepare_startup_window(
     store: Arc<dyn Store>,
     node_id: &str,
     rendition: &Arc<Rendition>,
     user_id: i64,
-    watch: WatchState,
+    position: StartupPosition,
     shutdown: CancellationToken,
     slot: ReadPreparationSlot,
 ) {
     let file = &rendition.recipe.file;
-    let Some((first, last)) = startup_window(&rendition.plan, watch.position_ms) else {
+    let position_ms = match position {
+        StartupPosition::Predicted(watch) => watch.position_ms,
+        StartupPosition::Selected(position_ms) => position_ms,
+    };
+    let Some((first, last)) = startup_window(&rendition.plan, position_ms) else {
         tracing::debug!(target: "plurxd::vodserve", file_id = file.id,
             "no bounded video window for predicted VOD resume");
         return;
@@ -242,7 +334,12 @@ async fn predict_resume(
         !rendition.closed.load(Acquire)
             && rendition.readers.lock().await.is_empty()
             && matches!(store.get_user(user_id).await, Ok(Some(_)))
-            && matches!(store.watch_state(user_id, file.item_id).await, Ok(Some(current)) if current == watch)
+            && match position {
+                StartupPosition::Selected(_) => true,
+                StartupPosition::Predicted(watch) => {
+                    matches!(store.watch_state(user_id, file.item_id).await, Ok(Some(current)) if current == watch)
+                }
+            }
             && matches!(store.get_file(file.id).await, Ok(Some(current))
                 if current.item_id == file.item_id && current.size == file.size
                     && current.mtime == file.mtime && current.path == file.path)
@@ -432,6 +529,8 @@ mod tests {
         media.entries[4].kind = PlanEntryKind::AudioTail;
         media.entries[4].fragments = 0;
 
+        assert_eq!(startup_window(&media, 0), Some((0, 2)));
+        assert_eq!(startup_window(&media, -1), None);
         assert_eq!(startup_window(&media, 13_000), Some((1, 3)));
         assert_eq!(startup_window(&media, 24_000), None);
         assert_eq!(startup_window(&media, 30_000), None);

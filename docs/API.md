@@ -1477,11 +1477,18 @@ cadence.
 | POST | `/files/{id}/decision` | bearer | The same, from a v2 capabilities document; body ≤ 64 KiB |
 | PUT | `/files/{id}/audio-offset` | bearer | Deprecated. Validates and echoes `offset_ms` clamped to ±15 000; persists nothing |
 
-Both decision handlers answer the same question and return the same body; the
-`POST` validates the document, marks the caps as v2, and calls the `GET`
-handler's logic directly. The only difference is where the capabilities live.
+Both decision handlers answer the same question and return the same body.
+`POST` validates the document, marks the caps as v2, and uses the same
+decision logic.
 `force`, `audio` and `subtitle` stay on the query string in both forms,
 because they are request-local choices rather than capabilities.
+
+On a full local login, `POST` accepts an optional `prepare_start_ms` for
+the selected playable file on a playback detail screen. Zero means start
+from the beginning. An eligible indexed copy can prepare a bounded media
+window through the ordinary VOD rendition. This best-effort hint leaves
+the decision response and watch progress alone. A handoff token receives
+the ordinary decision.
 
 The **64 KiB body limit** is the same bound the reading-state route uses. A
 capabilities document is a short list of codecs and a handful of learned

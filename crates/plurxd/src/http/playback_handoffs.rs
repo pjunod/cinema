@@ -412,9 +412,12 @@ pub async fn scoped_decision_post(
     query: Query<super::stream::Caps>,
     headers: HeaderMap,
     remote: RemoteAddress,
-    body: Json<super::stream::DecisionBody>,
+    Json(mut body): Json<super::stream::DecisionBody>,
 ) -> Result<Json<super::stream::DecisionResponse>, ApiError> {
     principal.require_file(id)?;
+    if principal.handoff.is_some() {
+        body.prepare_start_ms = None;
+    }
     super::stream::decision_post(
         AuthUser(principal.user),
         state,
@@ -422,7 +425,7 @@ pub async fn scoped_decision_post(
         query,
         headers,
         remote,
-        body,
+        Json(body),
     )
     .await
 }

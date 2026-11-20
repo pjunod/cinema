@@ -1238,7 +1238,8 @@ final class AppModel: ObservableObject {
         selection: PrePlaySelection = .none,
         quality: PlaybackQuality = .auto,
         audioOffsetMs: Int = 0,
-        fileContext: PlaybackFileContext? = nil
+        fileContext: PlaybackFileContext? = nil,
+        prepareStartMs: Int? = nil
     ) async throws -> (decision: Decision, caps: DeviceCaps) {
         let snapshot = Caps.snapshot()
         var document = snapshot.document
@@ -1252,11 +1253,12 @@ final class AppModel: ObservableObject {
                 caps: document,
                 query: query,
                 legacyQuery: { snapshot.legacyQuery + query },
-                fileContext: fileContext
+                fileContext: fileContext,
+                prepareStartMs: prepareStartMs
             )
             return (decision, document)
         } catch {
-            noteAuthFailure(error)
+            if prepareStartMs == nil { noteAuthFailure(error) }
             throw error
         }
     }

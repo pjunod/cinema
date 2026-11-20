@@ -662,6 +662,15 @@ struct DetailView: View {
 
     #if os(tvOS)
     private enum TVDetailFocus: Hashable { case primaryAction }
+
+    private struct TVStartupPreparation: Equatable {
+        let itemId: Int
+        let fileId: Int
+        let startMs: Int
+        let selection: PrePlaySelection
+        let quality: PlaybackQuality
+        let authorizationGeneration: UInt64
+    }
     #endif
 
     @EnvironmentObject var model: AppModel
@@ -706,6 +715,7 @@ struct DetailView: View {
     #endif
     #if os(tvOS)
     @FocusState private var tvFocusedAction: TVDetailFocus?
+    @State private var tvDetailAuthorizationGeneration: UInt64?
     /// Set once, the first time this item's detail lands. See the `.task`.
     @State private var hasClaimedTVFocus = false
     #endif
@@ -781,7 +791,13 @@ struct DetailView: View {
         #endif
         .task(id: itemId) {
             do {
+                #if os(tvOS)
+                let authorizationGeneration = Session.shared.playbackAuthorization.generation
+                #endif
                 let loaded = try await model.itemDetail(itemId)
+                #if os(tvOS)
+                tvDetailAuthorizationGeneration = authorizationGeneration
+                #endif
                 detail = loaded
                 loadError = nil
                 if loaded.item.kind == "movie" || loaded.item.kind == "show" {
@@ -1576,6 +1592,11 @@ struct DetailView: View {
         let canResume = resumeMs > 3000 && !nearlyDone
         let file = (detail.files ?? []).first(where: { $0.id == selectedMediaFileID }) ?? Self.playbackFile(in: detail, positionMs: canResume ? resumeMs : 0)
 
+        let preparation = tvStartupPreparation(
+            item: item, file: file, durationMs: durationMs ?? 0,
+            resumeMs: resumeMs, canResume: canResume
+        )
+
         return VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .bottomLeading) {
                 tvPlayableBackground(item)
@@ -1669,6 +1690,36 @@ struct DetailView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.bottom, 30)
+        .task(id: preparation) {
+            guard let preparation, !Task.isCancelled,
+                  Session.shared.playbackAuthorization.generation == preparation.authorizationGeneration else { return }
+            _ = try? await model.playbackDecision(
+                fileId: preparation.fileId,
+                selection: preparation.selection,
+                quality: preparation.quality,
+                prepareStartMs: preparation.startMs
+            )
+        }
+    }
+
+    private func tvStartupPreparation(
+        item: Item, file: MediaFile?, durationMs: Int, resumeMs: Int, canResume: Bool
+    ) -> TVStartupPreparation? {
+        let authorization = Session.shared.playbackAuthorization
+        let quality = model.playbackQuality
+        guard play == nil, model.phase == .ready, authorization.token != nil,
+              authorization.generation == tvDetailAuthorizationGeneration,
+              item.id == itemId, item.isPlayable, !item.isAudiobook, !item.isOffloaded,
+              let file, file.id > 0, file.available == true, file.videoCodec != nil,
+              quality.rungHeight == nil else { return nil }
+        let context = primaryPlayContext(
+            item: item, file: file, durationMs: durationMs,
+            resumeMs: resumeMs, canResume: canResume
+        )
+        return TVStartupPreparation(
+            itemId: context.itemId, fileId: context.fileId, startMs: context.startMs,
+            selection: context.selection, quality: quality, authorizationGeneration: authorization.generation
+        )
     }
 
     /// A thin accent bar and the time still to watch, quiet beneath the copy.

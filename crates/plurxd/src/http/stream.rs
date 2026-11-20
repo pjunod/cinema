@@ -2217,6 +2217,8 @@ async fn run_chapter_probe(path: &Path) -> Result<Vec<serde_json::Value>, Chapte
 #[derive(Deserialize)]
 pub struct DecisionBody {
     pub caps: playback::DeviceCaps,
+    /// Explicit startup position from a selected playback detail, including zero.
+    pub prepare_start_ms: Option<i64>,
 }
 
 /// Validate the additive packaging claim before any caller can fall through
@@ -2290,8 +2292,54 @@ pub async fn decision_post(
             playback::DeviceCaps::VERSION
         )));
     }
+    let preparation = body
+        .prepare_start_ms
+        .filter(|position| *position >= 0)
+        .map(|position| {
+            (
+                state.clone(),
+                auth.0.id,
+                position,
+                body.caps.clone(),
+                q.audio_offset_ms,
+            )
+        });
     q.caps_v2 = Some(body.caps);
-    decision(auth, state, path, Query(q), headers, remote).await
+    let response = decision(auth, state, path, Query(q), headers, remote).await?;
+    if let Some((state, user, position, caps, offset)) = preparation {
+        if let DeliveryPlan::Remux {
+            aac,
+            preserve_dolby_vision,
+            audio,
+            ..
+        } = &response.delivery
+        {
+            let allow_copy = response.selection.as_ref().is_none_or(|selection| {
+                !selection.subtitle_requires_burn_in && !selection.subtitle_burn_in_blocked_by_hdr
+            });
+            if allow_copy {
+                super::hls::offer_selected_startup(
+                    state,
+                    user,
+                    response.file_id,
+                    position,
+                    super::hls::CreateSession {
+                        playback_id: uuid::Uuid::new_v4().to_string(),
+                        start: Some(position as f64 / 1_000.0),
+                        copy: Some(true),
+                        aac: Some(*aac),
+                        preserve_dolby_vision: Some(*preserve_dolby_vision),
+                        audio: *audio,
+                        audio_offset_ms: offset,
+                        caps: Some(caps),
+                        transport: Some("native".into()),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
+    Ok(response)
 }
 
 /// Legacy priors have neither completed-body nor candidate-recipe provenance.

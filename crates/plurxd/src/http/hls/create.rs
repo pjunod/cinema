@@ -196,7 +196,7 @@ pub(super) fn explicit_hls_hevc_claim(caps: &plurx_core::playback::DeviceCaps) -
 /// is a trap: GET is idempotent by definition, so anything entitled to replay
 /// one — a retry, a prefetch, an intermediary — could spawn a second encoder
 /// and orphan the first.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct CreateSession {
     /// Stable for one player instance. Supersession is keyed by it, so two
     /// devices on one account no longer kill each other's streams.
@@ -2915,6 +2915,82 @@ pub(crate) fn bind_compatibility_vod_policy(
 }
 /// Resolve compatibility negotiation through the same native plan and prerequisites as create.
 /// This does not claim a session, attach a reader, or reserve a producer.
+pub(in crate::http) fn offer_selected_startup(
+    state: AppState,
+    user_id: i64,
+    file_id: i64,
+    position_ms: i64,
+    body: CreateSession,
+) {
+    let Some(slot) = state
+        .subtitle_models
+        .translation
+        .try_borrow_read_preparation_slot()
+    else {
+        return;
+    };
+    tokio::spawn(async move {
+        let Some(caps) = body.caps.clone() else {
+            return;
+        };
+        let plan = async {
+            let snapshot = state
+                .store
+                .playback_planning_snapshot(file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
+                .await
+                .ok()??;
+            let file = &snapshot.file;
+            let review = review_client_plan(
+                &caps,
+                None,
+                file,
+                &super::super::stream::render_caps_from_snapshot(&state, &snapshot),
+                false,
+                false,
+                unix_ms(),
+            );
+            let resolved = resolve_plan_with_scope(
+                PlanInputs {
+                    network_identity: None,
+                    incumbent_receipt: None,
+                    snapshot: Some(&snapshot),
+                    state: &state,
+                    user_id,
+                    file_id,
+                    source: Some(file),
+                    network_prior: None,
+                },
+                Some(review),
+                body,
+                PlanScope::default(),
+            )
+            .await
+            .ok()?;
+            validate_hevc_copy_transport(&state, file, &caps, &resolved.request, None)
+                .await
+                .ok()?;
+            Some((resolved.request, snapshot.file))
+        };
+        let Some((request, file)) = (tokio::select! {
+            _ = state.shutdown.cancelled() => None,
+            result = tokio::time::timeout(std::time::Duration::from_secs(2), plan) => result.ok().flatten(),
+        }) else {
+            return;
+        };
+        state
+            .transcode
+            .prepare_selected_copy(
+                &request,
+                file,
+                user_id,
+                position_ms,
+                state.shutdown.clone(),
+                slot,
+            )
+            .await;
+    });
+}
+
 pub(crate) async fn preview_for_compatibility(
     state: &AppState,
     user_id: i64,
