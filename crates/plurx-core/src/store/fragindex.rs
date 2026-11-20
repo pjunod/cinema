@@ -1288,9 +1288,16 @@ mod tests {
             .expect("read")
             .expect("retained index");
         assert_eq!(loaded, built);
-        built.dv_refit_cadence.as_mut().unwrap().sample_count = 1;
+        built
+            .dv_refit_cadence
+            .as_mut()
+            .expect("fitted cadence fixture")
+            .sample_count = 1;
         assert!(put(&conn, 7, &built, 2).is_err());
-        assert_eq!(get(&conn, 7, &loaded.source).unwrap(), Some(loaded));
+        assert_eq!(
+            get(&conn, 7, &loaded.source).expect("stored index remains readable"),
+            Some(loaded)
+        );
     }
 
     fn index_with(fingerprint: &str, size: u64, mtime_ms: i64) -> FragmentIndex {

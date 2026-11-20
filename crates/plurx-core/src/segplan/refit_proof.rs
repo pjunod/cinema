@@ -341,11 +341,23 @@ mod tests {
         let mut cadence = FittedCadenceAccumulator::default();
         cadence.observe(&cadence_fragment(video, 100, &[(42, 0), (42, 0)]), &init);
         cadence.observe(&cadence_fragment(video, 179, &[(42, 0)]), &init);
-        assert_eq!(cadence.finish().unwrap().minimum_interval_ticks, 37);
+        assert_eq!(
+            cadence
+                .finish()
+                .expect("complete boundary cadence")
+                .minimum_interval_ticks,
+            37
+        );
 
         let mut cadence = FittedCadenceAccumulator::default();
         cadence.observe(&cadence_fragment(video, 0, &[(2, -1), (42, 15)]), &init);
-        assert_eq!(cadence.finish().unwrap().minimum_interval_ticks, 2);
+        assert_eq!(
+            cadence
+                .finish()
+                .expect("complete sample-duration cadence")
+                .minimum_interval_ticks,
+            2
+        );
     }
 
     #[test]

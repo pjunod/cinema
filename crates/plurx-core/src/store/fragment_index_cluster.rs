@@ -3850,7 +3850,7 @@ mod tests {
         invalid_cadence
             .dv_refit_cadence
             .as_mut()
-            .unwrap()
+            .expect("portable cadence fixture")
             .minimum_interval_ticks = 0;
         assert!(encode_cluster_fragment_index_blob(
             &invalid_cadence,
