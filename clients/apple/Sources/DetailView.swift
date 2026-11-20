@@ -1200,6 +1200,7 @@ struct DetailView: View {
                         Text(item.title).font(.title.bold()).fixedSize(horizontal: false, vertical: true)
                         ratingsRow
                         ItemMetadataBadgeRow(badges: Self.itemMetadataBadges(item, file: file, durationMs: duration, includeSeries: true))
+                        tagsSection(item)
                         if let file { Text(CalmTrackList.englishAvailability(file)).font(.caption).foregroundStyle(Palette.muted) }
                     }
                 }
@@ -1300,6 +1301,7 @@ struct DetailView: View {
                             durationMs: durationMs,
                             includeSeries: ancestors.isEmpty
                         ))
+                        tagsSection(item)
                     }
                 }
                 .padding(.bottom, 16)
@@ -1482,6 +1484,7 @@ struct DetailView: View {
                         durationMs: durationMs,
                         includeSeries: ancestors.isEmpty
                     ))
+                    tagsSection(item)
 
                     #if os(iOS)
                     mobileActions(
@@ -1603,6 +1606,7 @@ struct DetailView: View {
 
                         tvMetadataLine(item, file: file, durationMs: durationMs)
                         ratingsRow
+                        tagsSection(item)
 
                         if let overview = item.overview, !overview.isEmpty {
                             Text(overview)
@@ -1949,6 +1953,8 @@ struct DetailView: View {
                             .font(.system(size: 26, weight: .medium))
                             .foregroundColor(Palette.muted)
                             .lineLimit(1)
+
+                        tagsSection(item)
 
                         if let overview = item.overview, !overview.isEmpty {
                             Text(overview)
@@ -2468,6 +2474,14 @@ struct DetailView: View {
         case "h265", "hevc": return "HEVC"
         case "av1": return "AV1"
         default: return codec.uppercased()
+        }
+    }
+
+    /// Tag chips and "Tags…" for movies and shows only.
+    @ViewBuilder
+    private func tagsSection(_ item: Item) -> some View {
+        if item.kind == "movie" || item.kind == "show" {
+            ItemTagsSection(itemId: item.id)
         }
     }
 

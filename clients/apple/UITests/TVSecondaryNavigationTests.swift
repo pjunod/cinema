@@ -197,7 +197,7 @@ final class TVSecondaryNavigationTests: TVNavigationTestCase {
         reachForSetup(query, in: app, limit: 4)
         assertFocus(query, in: app, context: "Search query opener")
         remote.press(.select)
-        query.typeText("movie")
+        typeInSystemKeyboard("movie", in: app)
         dismissKeyboard(in: app)
         assertFocus(query, in: app, context: "Keyboard Back restores search field")
         let retry = app.buttons["search:retry"]
