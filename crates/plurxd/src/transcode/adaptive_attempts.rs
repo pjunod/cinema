@@ -1323,6 +1323,10 @@ impl AttemptEntry {
     /// table. Its handle stays here through request cancellation and is joined
     /// by the existing manager maintenance cadence.
     async fn join_finished_original(&self, coordinator: bool) -> Result<(), &'static str> {
+        self.join_original_task(coordinator, false).await
+    }
+
+    async fn join_original_task(&self, coordinator: bool, wait: bool) -> Result<(), &'static str> {
         if self
             .task_join_failed
             .load(std::sync::atomic::Ordering::Acquire)
@@ -1341,7 +1345,7 @@ impl AttemptEntry {
             let Some(task) = held.as_mut() else {
                 return std::task::Poll::Ready(Ok(()));
             };
-            if !task.is_finished() {
+            if !wait && !task.is_finished() {
                 return std::task::Poll::Ready(Ok(()));
             }
             match std::pin::Pin::new(task).poll(cx) {
@@ -2688,9 +2692,34 @@ impl super::TranscodeManager {
                     return Err("remote cancellation differs from the original registration".into());
                 }
                 remote.fence = Some(fence);
-                // Drop ONLY the original unsent grant. The SAME coordinator
-                // joins/closes P/M; this response asserts no native extinction.
+                // Only the original unsent grant is dropped. The retained
+                // control task joins the coordinator before driving Close.
                 remote.grant.take();
+                drop(held);
+                if entry
+                    .coordinator_started
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    let manager = Arc::clone(self);
+                    let original = entry.clone();
+                    entry
+                        .spawn_control(admission, async move {
+                            if let Err(error) = original.join_original_task(true, true).await {
+                                original.mark_unknown();
+                                tracing::error!(attempt_id = %original.attempt_id(), error,
+                                    "adaptive original coordinator failure remains held");
+                                return;
+                            }
+                            if let Err(error) =
+                                manager.finish_failed_adaptive_planning(&original).await
+                            {
+                                tracing::warn!(attempt_id = %original.attempt_id(), %error,
+                                    "adaptive cancelled registration retains its original cleanup");
+                            }
+                        })
+                        .map_err(str::to_owned)?;
+                }
+                // This pending reply carries no native extinction or Close fact.
                 let (sender, receiver) = tokio::sync::oneshot::channel();
                 let _ = sender.send(Err(
                     "original ungranted registration cleanup remains pending".into(),
@@ -3214,7 +3243,7 @@ impl super::TranscodeManager {
         {
             return Ok(());
         }
-        let status = self
+        let mut status = self
             .store
             .adaptive_request_status(&failed.claim.binding.key, &failed.claim.binding.principal)
             .await
@@ -3271,7 +3300,10 @@ impl super::TranscodeManager {
                                 && row.last_operation_id == original.context.operation_id
                         }) =>
                 {
-                    return Ok(())
+                    committed.validate().map_err(|error| {
+                        format!("invalid failed-planning Fence outcome: {error}")
+                    })?;
+                    status = committed;
                 }
                 Ok(_) => {
                     return Err(
@@ -3281,6 +3313,11 @@ impl super::TranscodeManager {
                 Err(error) => return Err(format!("failed-planning Fence is unknown: {error}")),
             }
         }
+        let attempt = status
+            .attempts
+            .iter()
+            .find(|row| row.key == failed.claim.key)
+            .ok_or("failed adaptive planning attempt disappeared after Fence")?;
         // A known origin/other-worker Fence may win this race. Close still
         // names that exact committed operation, which Store validates as a
         // cleanup-authorizing Fence; native/application cleanup stays required.

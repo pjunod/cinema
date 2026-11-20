@@ -687,7 +687,8 @@ pub(super) async fn prepare_adaptive_origin(
             }
             let may_retry = may_retry
                 && (!recipe.request.is_exact_adaptive_fel() || processed_capacity)
-                && (!(processed_capacity
+                && (!(claim.binding.source_scope.is_some()
+                    || processed_capacity
                     || error.code() == Some(crate::media_sessions::ADAPTIVE_TRIAL_REFUSED))
                     || adaptive_retry::policy_refusal_retry_ready(state, &claim, cleanup_deadline)
                         .await);
