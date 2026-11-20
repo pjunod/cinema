@@ -187,6 +187,10 @@ impl NodeResourceRuntime {
                 key: stopped.key,
                 verified_at: now,
             });
+            tracing::debug!(
+                target: "plurx_core::adaptive_resources",
+                "original finite native start and close qualified the trial envelope"
+            );
         }
     }
 

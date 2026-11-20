@@ -2338,16 +2338,35 @@ impl Shared {
         let current = original.dir.finite_producer().is_some();
         drop(original);
         if current {
-            self.purge_dormant_inner(key, Duration::ZERO, true).await;
+            self.purge_dormant_inner(key, Duration::ZERO, true, None)
+                .await;
         }
         Some(false)
     }
 
     pub(super) async fn purge_if_dormant(self: &Arc<Shared>, key: &str, ttl: Duration) {
-        self.purge_dormant_inner(key, ttl, false).await;
+        self.purge_dormant_inner(key, ttl, false, None).await;
     }
 
-    async fn purge_dormant_inner(self: &Arc<Shared>, key: &str, ttl: Duration, pressure: bool) {
+    /// An explicit operator Stop may cancel the same unshared partial R
+    /// immediately. Use the normal collector and keep cached or resumable S.
+    #[cfg(target_os = "linux")]
+    pub(super) async fn retire_stopped_finite(
+        self: &Arc<Shared>,
+        key: &str,
+        original: Weak<Rendition>,
+    ) {
+        self.purge_dormant_inner(key, Duration::ZERO, false, Some(original))
+            .await;
+    }
+
+    async fn purge_dormant_inner(
+        self: &Arc<Shared>,
+        key: &str,
+        ttl: Duration,
+        pressure: bool,
+        stopped_original: Option<Weak<Rendition>>,
+    ) {
         let Ok(gate) = self.rendition_build_gate(key) else {
             return;
         };
@@ -2359,7 +2378,9 @@ impl Shared {
         #[cfg(target_os = "linux")]
         if let Some(closing) = existing_closing {
             drop(build_guard);
-            self.retry_finite_closing(key.to_owned(), closing).await;
+            if stopped_original.is_none() {
+                self.retry_finite_closing(key.to_owned(), closing).await;
+            }
             return;
         }
         let rendition = {
@@ -2376,6 +2397,15 @@ impl Shared {
         let current_finite = rendition.dir.finite_producer().is_some();
         #[cfg(not(target_os = "linux"))]
         let current_finite = false;
+        let stop_exact = stopped_original.is_some();
+        if let Some(original) = stopped_original {
+            if !current_finite
+                || !Weak::ptr_eq(&original, &Arc::downgrade(&rendition))
+                || rendition.private_storage.is_some()
+            {
+                return;
+            }
+        }
         if !current_finite && crate::playback_cache::is_pinned(&self.base.join(key)) {
             return;
         }
@@ -2430,6 +2460,17 @@ impl Shared {
         // the node-wide registry while awaiting a rendition-local lock.
         let manifest = rendition.manifest.lock().await;
         if manifest.is_admitted() && !(pressure && current_finite) {
+            return;
+        }
+        if stop_exact
+            && (manifest.materialized_count() == rendition.plan.len()
+                || rendition.preparation().is_some()
+                || rendition
+                    .retained_offer
+                    .lock()
+                    .expect("retained offer lock")
+                    .is_some())
+        {
             return;
         }
         #[cfg(unix)]

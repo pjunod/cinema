@@ -96,9 +96,19 @@ struct Daemon {
 
 impl Daemon {
     fn spawn(config: &Path, log: PathBuf, hostname: &str) -> Self {
+        Self::spawn_configured(config, log, hostname, |_| {})
+    }
+
+    fn spawn_configured(
+        config: &Path,
+        log: PathBuf,
+        hostname: &str,
+        configure: impl FnOnce(&mut Command),
+    ) -> Self {
         let output = File::create(&log).expect("daemon log");
         let errors = output.try_clone().expect("clone daemon log");
-        let child = Command::new(env!("CARGO_BIN_EXE_plurxd"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_plurxd"));
+        command
             .args(["--config", config.to_str().expect("config path"), "run"])
             .env("NO_COLOR", "1")
             .env("PLURX_TEST_SCHEDULER_TICK_MS", "250")
@@ -110,9 +120,9 @@ impl Daemon {
             )
             .stdin(Stdio::null())
             .stdout(Stdio::from(output))
-            .stderr(Stdio::from(errors))
-            .spawn()
-            .expect("spawn plurxd");
+            .stderr(Stdio::from(errors));
+        configure(&mut command);
+        let child = command.spawn().expect("spawn plurxd");
         Self { child, log }
     }
 
@@ -487,19 +497,7 @@ impl Cluster {
     }
 
     async fn get_json(&self, base: &str, path: &str) -> Value {
-        let response = self
-            .client
-            .get(format!("{base}{path}"))
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .unwrap_or_else(|error| panic!("GET {path}: {error}"));
-        assert!(
-            response.status().is_success(),
-            "GET {path}: {}",
-            response.status()
-        );
-        response.json().await.expect("JSON body")
+        get_json(&self.client, base, &self.token, path).await
     }
 
     async fn metrics(&self, base: &str) -> String {
@@ -784,7 +782,22 @@ fn placements(text: &str, outcome: &str) -> u64 {
     )
 }
 
-fn write_fixture(ffmpeg: &str, path: &Path) {
+async fn get_json(client: &reqwest::Client, base: &str, token: &str, path: &str) -> Value {
+    let response = client
+        .get(format!("{base}{path}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("GET {path}: {error}"));
+    assert!(
+        response.status().is_success(),
+        "GET {path}: {}",
+        response.status()
+    );
+    response.json().await.expect("JSON body")
+}
+
+fn write_fixture(ffmpeg: &str, path: &Path, video: &str, audio: &str, gop: &str) {
     let output = Command::new(ffmpeg)
         .args([
             "-hide_banner",
@@ -793,17 +806,17 @@ fn write_fixture(ffmpeg: &str, path: &Path) {
             "-f",
             "lavfi",
             "-i",
-            "testsrc=size=1280x720:rate=24:duration=8",
+            video,
             "-f",
             "lavfi",
             "-i",
-            "sine=frequency=440:sample_rate=48000:duration=8",
+            audio,
             "-c:v",
             "libx264",
             "-preset",
             "ultrafast",
             "-g",
-            "48",
+            gop,
             "-pix_fmt",
             "yuv420p",
             "-c:a",
@@ -821,11 +834,27 @@ fn write_fixture(ffmpeg: &str, path: &Path) {
     );
 }
 
-async fn scan_fixture(cluster: &mut Cluster, media: &Path) -> i64 {
-    let library = cluster
-        .client
-        .post(format!("{}/api/v1/libraries", cluster.a_base))
-        .bearer_auth(&cluster.token)
+async fn scan_fixture(
+    client: &reqwest::Client,
+    node: &mut Daemon,
+    base: &str,
+    token: &str,
+    media: &Path,
+    peer: Option<(&Daemon, &str)>,
+) -> i64 {
+    let logs = |node: &Daemon| {
+        let primary = node.diagnostics();
+        match peer {
+            Some((other, _)) => format!(
+                "\nnode A log:\n{primary}\nnode B log:\n{}",
+                other.diagnostics()
+            ),
+            None => primary,
+        }
+    };
+    let library = client
+        .post(format!("{base}/api/v1/libraries"))
+        .bearer_auth(token)
         .json(&json!({"name":"Adaptive","kind":"movies","paths":[media.to_string_lossy()]}))
         .send()
         .await
@@ -836,52 +865,54 @@ async fn scan_fixture(cluster: &mut Cluster, media: &Path) -> i64 {
         .expect("library id");
     let deadline = Instant::now() + Duration::from_secs(90);
     let file_id = loop {
-        cluster.node_a.assert_running("waiting for the scan");
-        let page = cluster
-            .get_json(
-                &cluster.a_base,
-                &format!("/api/v1/libraries/{library_id}/items"),
-            )
-            .await;
+        node.assert_running("waiting for the scan");
+        let page = get_json(
+            client,
+            base,
+            token,
+            &format!("/api/v1/libraries/{library_id}/items"),
+        )
+        .await;
         if let Some(item_id) = page["items"]
             .as_array()
             .and_then(|items| items.first())
             .and_then(|item| item["id"].as_i64())
         {
-            let detail = cluster
-                .get_json(&cluster.a_base, &format!("/api/v1/items/{item_id}"))
-                .await;
+            let path = format!("/api/v1/items/{item_id}");
+            let detail = get_json(client, base, token, &path).await;
             if let Some(file_id) = detail["files"]
                 .as_array()
                 .and_then(|files| files.first())
                 .and_then(|file| file["id"].as_i64())
             {
-                let replicated = cluster
-                    .get_json(&cluster.b_base, &format!("/api/v1/items/{item_id}"))
-                    .await;
-                if replicated["files"]
-                    .as_array()
-                    .is_some_and(|files| files.iter().any(|file| file["id"] == file_id))
-                {
+                if let Some((_, peer_base)) = peer {
+                    let replicated = get_json(client, peer_base, token, &path).await;
+                    if replicated["files"]
+                        .as_array()
+                        .is_some_and(|files| files.iter().any(|file| file["id"] == file_id))
+                    {
+                        break file_id;
+                    }
+                } else {
                     break file_id;
                 }
             }
         }
         assert!(
             Instant::now() < deadline,
-            "the fixture never reached both voters{}",
-            cluster.logs()
+            "the fixture did not reach the configured voters\n{}",
+            logs(node)
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
-    // VOD refuses to start until the fragment index is durable; either
-    // voter may hold the cluster-wide indexing lease.
+    // VOD refuses to start until the index is durable. With two voters either
+    // may hold the indexing lease.
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
-        let indexed = [cluster.node_a.diagnostics(), cluster.node_b.diagnostics()]
-            .iter()
-            .any(|log| {
-                log.lines().any(|line| {
+        let indexed = std::iter::once(&*node)
+            .chain(peer.map(|(peer, _)| peer))
+            .any(|daemon| {
+                daemon.diagnostics().lines().any(|line| {
                     line.contains("fragment indexing pass finished") && line.contains("built=1")
                 })
             });
@@ -890,8 +921,8 @@ async fn scan_fixture(cluster: &mut Cluster, media: &Path) -> i64 {
         }
         assert!(
             Instant::now() < deadline,
-            "fragment index was not built{}",
-            cluster.logs()
+            "fragment index was not built\n{}",
+            logs(node)
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -906,7 +937,13 @@ async fn adaptive_create_places_on_a_peer_and_falls_back_when_the_grant_cannot_b
     let root = canonical_tempdir();
     let media = root.path().join("media");
     std::fs::create_dir_all(&media).expect("media directory");
-    write_fixture(&ffmpeg, &media.join("Adaptive Two Node (2024).mkv"));
+    write_fixture(
+        &ffmpeg,
+        &media.join("Adaptive Two Node (2024).mkv"),
+        "testsrc=size=1280x720:rate=24:duration=8",
+        "sine=frequency=440:sample_rate=48000:duration=8",
+        "48",
+    );
     let mut cluster = Cluster::start(root).await;
 
     let enabled = cluster
@@ -918,7 +955,15 @@ async fn adaptive_create_places_on_a_peer_and_falls_back_when_the_grant_cannot_b
         .await
         .expect("enable cross-node placement");
     assert_eq!(enabled.status(), StatusCode::OK);
-    let file_id = scan_fixture(&mut cluster, &media).await;
+    let file_id = scan_fixture(
+        &cluster.client,
+        &mut cluster.node_a,
+        &cluster.a_base,
+        &cluster.token,
+        &media,
+        Some((&cluster.node_b, &cluster.b_base)),
+    )
+    .await;
     // One probe round in each direction (10 s interval).
     let (a_base, b_base) = (cluster.a_base.clone(), cluster.b_base.clone());
     cluster
@@ -1065,3 +1110,7 @@ async fn adaptive_create_places_on_a_peer_and_falls_back_when_the_grant_cannot_b
         cluster.logs()
     );
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[path = "adaptive_two_node/singleton_trial.rs"]
+mod singleton_trial;

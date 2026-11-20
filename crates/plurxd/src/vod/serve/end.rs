@@ -234,6 +234,10 @@ impl VodServe {
             let carrier = rendition.dir.borrows_retained_output();
             #[cfg(not(target_os = "linux"))]
             let carrier = false;
+            #[cfg(target_os = "linux")]
+            let stopped_finite = (cause == Terminal::AdminStop
+                && rendition.dir.finite_producer().is_some())
+            .then(|| (rendition.key.clone(), Arc::downgrade(&rendition)));
             if rendition.ephemeral_processing || carrier {
                 serve
                     .shared
@@ -241,12 +245,16 @@ impl VodServe {
                     .await;
             }
             // `TerminalCleanupGuard` publishes completion on drop. Release
-            // the task's own heavyweight captures first so a waiter that
-            // observes completion cannot still race this future's teardown.
+            // the task's own heavyweight captures before requesting physical
+            // retirement or letting a waiter observe cleanup completion.
             drop(rendition);
-            drop(serve);
             #[cfg(target_os = "linux")]
             drop(_finite_cleanup_slot);
+            #[cfg(target_os = "linux")]
+            if let Some((key, original)) = stopped_finite {
+                serve.shared.retire_stopped_finite(&key, original).await;
+            }
+            drop(serve);
             if let Some(reader) = adopted_reader {
                 reader.finish_detach();
             }
