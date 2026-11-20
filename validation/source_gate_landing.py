@@ -32,6 +32,13 @@ JOB_NAMES = {
 }
 
 
+
+def semantic_pr_title(title):
+    """Only the forge's draft-control prefix is excluded from title identity."""
+    r.require(isinstance(title, str), 'Missing source-gate PR title')
+    return re.sub(r'^\s*(?:WIP:|\[WIP\])\s*', '', title, count=1, flags=re.I)
+
+
 def one_job(jobs, name, run, repository, owner):
     found = [job for job in jobs if job['name'] == name]
     r.require(len(found) == 1, 'Missing or ambiguous required source-gate surface: ' + name)
@@ -100,11 +107,12 @@ def require_surfaces(jobs, record, run, repository, owner, retained):
 def completion_census(proof, completion, listing, config, listing_sha256):
     current, due, _ = nextest.current_census(proof, listing, config)
     r.require(set(completion) == {'version', 'kind', 'candidate', 'base', 'source_run',
-              'enrollment_digest', 'selected', 'retained', 'executed', 'current_listing_sha256',
+              'enrollment_digest', 'selection_projection', 'selected', 'retained', 'executed', 'current_listing_sha256',
               'current_universe', 'complete'}, 'Unknown source-gate completion fields')
     r.require(completion['version'] == nextest.POLICY and completion['kind'] == 'selected-pr-rust-source-gate'
               and completion['candidate'] == proof['candidate'] and completion['base'] == proof['base']
               and completion['source_run'] == proof['run'] and completion['enrollment_digest'] == proof['digest']
+              and completion['selection_projection'] == proof['selection_projection']
               and completion['selected'] == proof['selected'] and completion['retained'] == proof['retained_ids']
               and completion['executed'] == sorted(due) and completion['current_universe'] == sorted(current)
               and completion['current_listing_sha256'] == listing_sha256
@@ -181,7 +189,7 @@ def verify(api, number, head, main, root, run_id):
     paperwork = record['source_gate_paperwork']
     r.require(paperwork == {'version': 1, 'head': head, 'base': main, 'pr': number, 'passed': True,
               'body_sha256': retention.digest((pull.get('body') or '').encode()),
-              'title_sha256': retention.digest(pull['title'].encode())},
+              'title_sha256': retention.digest(semantic_pr_title(pull['title']).encode())},
               'Current PR paperwork/body/title evidence differs')
     environment.update(GITHUB_RUN_ID=str(run_id),
         GITHUB_WORKFLOW_REF=repo['full_name'] + '/.github/workflows/ci.yml@refs/heads/' + branch,
@@ -214,7 +222,7 @@ def paperwork():
     record = {'version': 1, 'head': binding['head_sha'], 'base': binding['base_sha'],
               'pr': binding['pull_request'], 'passed': True,
               'body_sha256': retention.digest((pull.get('body') or '').encode()),
-              'title_sha256': retention.digest(pull['title'].encode())}
+              'title_sha256': retention.digest(semantic_pr_title(pull['title']).encode())}
     with open(os.environ['GITHUB_ENV'], 'a') as stream:
         print('PLURX_SOURCE_GATE_PAPERWORK=' + json.dumps(record, separators=(',', ':')), file=stream)
 

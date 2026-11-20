@@ -91,6 +91,27 @@ candidate, preserves original source/run identities, and stops on unknown applic
 instead of replaying valid passes. Main-lane records are never relabelled as
 native ci.yml discoveries.
 
+### Publication without duplicate automatic bodies
+
+Keep the PR draft while publishing the reviewed head. Dispatch its bound manual
+source gate and add exactly `Manual-Source-Gate: <actual-run-id>` to the PR body
+before gate-local paperwork executes; preserve all Regression-Test fields.
+Paperwork binds the semantic title with only the forge's WIP/[WIP] control
+prefix removed, so readying the PR preserves its exact subject/body identity.
+After the manual gate really completes, readying the PR triggers the ordinary
+scope job. That job independently authenticates the actual same-head/current-main
+manual gate, every required surface, enrollment and exact current census before
+omitting duplicate heavy work. Invalid claims fail scope; absent claims preserve
+default routing. Landing still prints real ci provenance and requires the explicit
+source-gate run; no status alias or untested exemption is created.
+
+The source-gate provider uses unchanged `rust_units.Keys` with one closed
+metadata projection: only the scope step's API-token env plumbing is removed.
+Original compile/test recipe bytes must match their reviewed digest. Actual
+workflow hashes and projected recipe hashes are both retained in the completion
+witness. Standard Rust selector/cache keys and ordinary branch behavior are
+unchanged; no projected key is published as a standard crate receipt.
+
 ## 1. What runs when
 
 | Trigger | What happens |

@@ -18,6 +18,8 @@ PRODUCER_INPUTS = {'validation/main_unit_receipts.py': 'b4112a92f0dd6acb63937c83
 def require_producer(prior, candidate):
     for path, digest in PRODUCER_INPUTS.items():
         before, after = retention.git_bytes(prior, path), retention.git_bytes(candidate, path)
+        if path == '.github/workflows/main-fast-lane.yml':
+            before, after = nextest.projected_main_workflow(before), nextest.projected_main_workflow(after)
         r.require(before is not None and retention.digest(before) == digest and before == after,
                   'Original main-Python producer/runtime changed')
 
@@ -106,8 +108,11 @@ def prepare(api, record, binding, candidate, repository):
                   and witness['after'] == (retention.digest(after) if after is not None else None),
                   'Python source impact hashes differ')
         if path.startswith('.github/'):
-            r.require(path == '.github/workflows/ci.yml' and before is not None and after is not None
-                      and metadata_only_workflow(before, after), 'Protected Python CI workflow changed')
+            r.require(before is not None and after is not None
+                      and ((path == '.github/workflows/ci.yml' and metadata_only_workflow(before, after))
+                           or (path == '.github/workflows/main-fast-lane.yml'
+                               and nextest.projected_main_workflow(before) == nextest.projected_main_workflow(after))),
+                      'Protected Python CI workflow changed')
         affected = witness['affected']
         r.require(isinstance(affected, list) and len(affected) == len(set(affected))
                   and set(affected) <= original | universe, 'Unknown Python affected body')

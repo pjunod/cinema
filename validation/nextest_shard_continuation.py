@@ -7,6 +7,7 @@ nextest process isolation; no nextest result is relabelled as Cargo/libtest.
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -41,6 +42,51 @@ HARNESS = {'.config/nextest.toml': 'b68e6d071b1e441727237de221cb60ac32e78f0ddff3
  'rust-toolchain.toml': '03cbfb27fcdc8253524b3e4c71c832457a504f7e9b1da5e6220178404b77f4e4',
  'validation/rust-unit-inputs.toml': '009d3107a038f79ed3986d87c96d247717bb6328a89ec179a5a2cbf0255a2372',
  'validation/rust_units.py': 'c97c1469068209b7b9b2eb0413d8984dd338051a9e4c996843d063683bb3d683'}
+
+
+MAIN_SCOPE_ENV = '        env:\n          VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}\n          MERGE_TRAIN_BOT: ${{ vars.MERGE_TRAIN_BOT }}\n          MERGE_TRAIN: ${{ vars.MERGE_TRAIN }}\n'
+MANUAL_SCOPE_ENV = '        env:\n          GITHUB_TOKEN: ${{ github.token }}\n          VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}\n          MERGE_TRAIN_BOT: ${{ vars.MERGE_TRAIN_BOT }}\n          MERGE_TRAIN: ${{ vars.MERGE_TRAIN }}\n'
+
+
+def projected_main_workflow(raw):
+    r.require(isinstance(raw, bytes), 'Missing main-lane workflow source')
+    projected = raw.replace(MANUAL_SCOPE_ENV.encode(), MAIN_SCOPE_ENV.encode()) if raw.count(MANUAL_SCOPE_ENV.encode()) == 1 else raw
+    r.require(retention.digest(projected) == HARNESS['.github/workflows/main-fast-lane.yml'],
+              'Main-lane compile/test recipe changed beyond exact authenticated-scope credential plumbing')
+    return projected
+
+
+def source_selection(candidate, base, repository='.'):
+    """Unchanged Keys over one closed metadata-only workflow projection.
+
+    Standard rust_units selection/cache keys are never altered or published.
+    This explicitly typed source gate separates the actual workflow hash from
+    its reviewed byte-identical compiler/test recipe before classifying bodies.
+    """
+    trees, keys, witness = [], [], {}
+    for label, revision in (('head', candidate), ('base', base)):
+        tree = units.Tree(revision, repository)
+        path = '.github/workflows/main-fast-lane.yml'
+        actual = tree.text(path).encode()
+        projected = projected_main_workflow(actual)
+        mode, _ = tree.entries[path]
+        blob = hashlib.sha1(b'blob ' + str(len(projected)).encode() + b'\0' + projected).hexdigest()
+        tree.entries[path] = (mode, blob)
+        tree._blobs[path] = projected
+        config = units.Config.load(tree.text(str(units.CONFIG)))
+        trees.append(tree)
+        keys.append(units.Keys(tree, config))
+        witness[label] = {'actual_sha256': retention.digest(actual), 'recipe_sha256': retention.digest(projected)}
+    head, baseline = keys
+    rows = {}
+    for name in head.units:
+        key = head.key(name)
+        base_key = baseline.key(name) if name in baseline.crates else None
+        only = (head.dynamic_tests(name) if base_key is not None and key != base_key
+                and head.key(name, False) == baseline.key(name, False) else None)
+        rows[name] = {'key': key, 'base_key': base_key, 'due': key != base_key, 'only': only}
+    return {'head': trees[0].commit, 'base': trees[1].commit, 'crates': rows,
+            'projection': {'policy': 'authenticated-manual-scope-env-only-v1', 'workflow': witness}}
 
 
 def strict_outcomes(raw):
@@ -106,7 +152,7 @@ def reviewed_changes(record, candidate, universe):
     invalidated = set()
     for path, witness in changes.items():
         r.require((path in TEST_INPUTS or path in retention.PROTOCOL_PATHS)
-                  and (not path.startswith('.github/') or path == '.github/workflows/ci.yml'),
+                  and (not path.startswith('.github/') or path in {'.github/workflows/ci.yml', '.github/workflows/main-fast-lane.yml'}),
                   'Changed protected or unreviewed nextest input')
         r.require(isinstance(witness, dict)
                   and set(witness) == {'before', 'after', 'affected', 'reason'}
@@ -120,6 +166,9 @@ def reviewed_changes(record, candidate, universe):
             from validation.workspace_rust_continuation import metadata_only_workflow
             r.require(before is not None and after is not None and metadata_only_workflow(before, after),
                       'Changed protected workflow execution, beyond exact source-gate metadata')
+        if path == '.github/workflows/main-fast-lane.yml':
+            r.require(projected_main_workflow(before) == projected_main_workflow(after),
+                      'Unreviewed automatic source-gate routing workflow')
         affected = witness['affected']
         r.require(isinstance(affected, list) and len(affected) == len(set(affected))
                   and set(affected) <= universe, 'Unknown nextest affected body')
@@ -144,6 +193,8 @@ def authenticate(api, record, binding, candidate, repository, *, current_run=Non
                                              workspace.CURRENT_JOB)
     for path, digest in HARNESS.items():
         old, new = retention.git_bytes(prior, path), retention.git_bytes(candidate, path)
+        if path == '.github/workflows/main-fast-lane.yml':
+            old, new = projected_main_workflow(old), projected_main_workflow(new)
         r.require(old is not None and retention.digest(old) == digest and old == new,
                   'Unreviewed nextest compiler/workflow/runtime recipe')
     run = api.get(f'/actions/runs/{run_id}')
@@ -151,7 +202,7 @@ def authenticate(api, record, binding, candidate, repository, *, current_run=Non
               and run['workflow_id'] == 'main-fast-lane.yml' and run['trigger_event'] == 'pull_request'
               and run['prettyref'] == '#' + str(binding['pull_request']),
               'Original nextest PR execution differs')
-    current = units.selection(candidate, binding['base_sha'])
+    current = source_selection(candidate, binding['base_sha'])
     selected = {name for name, row in current['crates'].items() if row['due']}
     r.require(all(not current['crates'][name].get('only') for name in selected),
               'Dynamic-only Rust selection needs its own continuation contract')
@@ -253,7 +304,7 @@ def authenticate(api, record, binding, candidate, repository, *, current_run=Non
     retained = sorted(test for test, value in outcomes.items() if value == 'PASS' and test not in invalidated)
     return {'provider': POLICY, 'scope': 'selected-pr-rust-source-gate', 'candidate': candidate,
             'prior': prior, 'base': binding['base_sha'], 'run': run_id, 'logs': logs,
-            'selected': sorted(selected), 'universe': sorted(universe), 'retained_ids': retained,
+            'selection_projection': current['projection'], 'selected': sorted(selected), 'universe': sorted(universe), 'retained_ids': retained,
             'must_pass_ids': sorted(universe - set(retained)),
             'serial_ids': sorted(test for row in plan['crates'].values() for test in row['serial']),
             'outcomes': outcomes, 'root_ownership_passed': False}
@@ -417,7 +468,7 @@ def execute(proof):
     from validation import workspace_rust_continuation as workspace
     workspace.check_workflow_environment(retention.git_bytes(proof['candidate'], '.github/workflows/ci.yml').decode(),
                                          workspace.CURRENT_JOB)
-    selection = units.selection(proof['candidate'], proof['base'])
+    selection = source_selection(proof['candidate'], proof['base'])
     r.require({crate for crate, row in selection['crates'].items() if row['due']} == set(proof['selected']),
               'Current required Rust selection changed')
     output = Path('target/validation/nextest-continuation')
@@ -467,7 +518,7 @@ def execute(proof):
     r.require(set(observed) == due, 'Current nextest due census is incomplete')
     r.atomic_json(output / 'receipt.json', {'version': POLICY, 'kind': 'selected-pr-rust-source-gate',
                   'candidate': proof['candidate'], 'base': proof['base'], 'source_run': proof['run'],
-                  'enrollment_digest': proof['digest'], 'selected': proof['selected'],
+                  'enrollment_digest': proof['digest'], 'selection_projection': proof['selection_projection'], 'selected': proof['selected'],
                   'retained': proof['retained_ids'], 'executed': sorted(observed),
                   'current_listing_sha256': retention.digest(listing_raw), 'current_universe': sorted(current),
                   'complete': True})

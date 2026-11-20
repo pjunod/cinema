@@ -20,6 +20,9 @@ COHORTS = {'rust': {'core', 'daemon', 'workspace-contracts'},
            'android_jvm': {'jvm'}, 'android_device': {'device'},
            'web_preflight': {'node-contracts'}}
 PROTOCOL_PATHS = {
+    '.github/workflows/main-fast-lane.yml',
+    'validation/merge_train.py',
+    'tests/validation/test_manual_source_guard.py',
     'validation/source_gate_landing.py',
     'validation/landing.py',
     'validation/main_python_continuation.py',

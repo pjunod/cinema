@@ -131,6 +131,7 @@ jobs:
       - name: Select affected compile surfaces
         id: scope
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}
           MERGE_TRAIN_BOT: ${{ vars.MERGE_TRAIN_BOT }}
           MERGE_TRAIN: ${{ vars.MERGE_TRAIN }}

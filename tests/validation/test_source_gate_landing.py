@@ -38,13 +38,13 @@ class SourceGateLandingTests(unittest.TestCase):
     def test_source_completion_refuses_release_forgery_stale_head_main_and_missing_census(self):
         proof = {'candidate': 'a' * 40, 'base': 'b' * 40, 'run': 9, 'digest': 'c' * 64,
                  'selected': ['plurxd'], 'universe': ['plurxd::bin/plurxd green', 'plurxd::bin/plurxd red'],
-                 'serial_ids': [], 'retained_ids': ['plurxd::bin/plurxd green']}
+                 'serial_ids': [], 'selection_projection': {}, 'retained_ids': ['plurxd::bin/plurxd green']}
         listing = {'rust-suites': {'plurxd::bin/plurxd': {'testcases': {
                     'green': {'ignored': False}, 'red': {'ignored': False}}}}}
         config = type('Config', (), {'serial_ignored': {}})()
         completion = dict(version=source.nextest.POLICY, kind='selected-pr-rust-source-gate',
             candidate=proof['candidate'], base=proof['base'], source_run=9, enrollment_digest=proof['digest'],
-            selected=proof['selected'], retained=proof['retained_ids'], executed=['plurxd::bin/plurxd red'],
+            selection_projection={}, selected=proof['selected'], retained=proof['retained_ids'], executed=['plurxd::bin/plurxd red'],
             current_listing_sha256='d' * 64, current_universe=proof['universe'], complete=True)
         source.completion_census(proof, completion, listing, config, 'd' * 64)
         for field, value in (('kind', 'effort-qualification'), ('complete', False), ('executed', []),
@@ -60,3 +60,10 @@ class SourceGateLandingTests(unittest.TestCase):
                 source.one_job([{**job, field: value}], job['name'], 10, 1, 3)
         with self.assertRaises(r.ReceiptError):
             source.one_job([], job['name'], 10, 1, 3)
+
+    def test_only_draft_control_prefix_is_excluded_from_semantic_title(self):
+        self.assertEqual(source.semantic_pr_title('WIP: fix(ci): verified'), 'fix(ci): verified')
+        self.assertEqual(source.semantic_pr_title('[WIP] fix(ci): verified'), 'fix(ci): verified')
+        self.assertEqual(source.semantic_pr_title('fix(ci): changed subject'), 'fix(ci): changed subject')
+        self.assertNotEqual(source.semantic_pr_title('WIP: fix(ci): verified'),
+                            source.semantic_pr_title('fix(ci): another subject'))
