@@ -321,13 +321,7 @@ REVIEWED_NATIVE_FEL_EMPTY = {'crates/plurxd/src/copyseg.rs': ('a0b804b7bdc425920
                                                       'e07aaae8857271dfd69d44483670c454849b3b49b45b442d8d8883bc48ca206e'),
  'crates/plurxd/src/transcode/rolling/session.rs': ('3ebaef95422f3499106a2de248a90f85e87d7b75b4764b369ec27d479b82ad00',
                                                     '62b2d2a085afb011a66a03eda00956fbb821370f4669e8af759aa09e56f09580')}
-NATIVE_FEL_CURRENT_ADDITIONS = ['plurx-core segplan::tests::reordered_repeated_copy_lands_on_the_measured_rap_presentation_time',
- 'plurx-core segplan::tests::the_landing_clock_preserves_fractional_index_ticks',
- 'plurx-core '
- 'store::fragindex::tests::ordinary_copy_composition_offsets_round_trip_and_require_every_row',
- 'plurx-core '
- 'store::fragment_index_cluster::tests::cluster_copy_composition_offsets_round_trip_and_bind_v3_identity',
- 'plurx-core::store_contract '
+NATIVE_FEL_CURRENT_ADDITIONS = ['plurx-core::store_contract '
  'dv_title_jobs::fel_head_rebuild_reopens_exact_settled_title_without_remeasurement',
  'plurxd::bin/plurxd copyseg::tests::prepared_fel_defers_first_snapshot_once_and_falls_back',
  'plurxd::bin/plurxd '
@@ -345,6 +339,7 @@ NATIVE_FEL_CURRENT_ADDITIONS = ['plurx-core segplan::tests::reordered_repeated_c
  'plurxd::bin/plurxd '
  'transcode::manager_start::prepared_native_fel_requires_the_full_startup_scratch_grant',
  'plurxd::bin/plurxd transcode::tests::pending_fel_head_only_defers_the_first_playable_snapshot']
+
 
 def compile_only_native_fel(path, witness, before, after, universe):
     pair = REVIEWED_NATIVE_FEL_EMPTY.get(path)
