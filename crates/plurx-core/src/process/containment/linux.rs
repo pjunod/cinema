@@ -761,7 +761,13 @@ impl SetupCustody {
                 if domain.state != EntryState::Sealed {
                     return Err(refuse("original native entry capability remains issued"));
                 }
-                if removed_original(&domain.directory.directory).is_ok() {
+                if removed_original(
+                    &domain.directory.directory,
+                    &domain.directory.parent,
+                    &domain.directory.name,
+                )
+                .is_ok()
+                {
                     domain.state = EntryState::Removed;
                     return Ok(());
                 }
@@ -779,17 +785,81 @@ impl SetupCustody {
     }
 }
 
-fn removed_original(directory: &File) -> io::Result<()> {
+fn removed_original(directory: &File, parent: &File, name: &CStr) -> io::Result<()> {
     let mut stat = MaybeUninit::<libc::stat>::zeroed();
     if unsafe { libc::fstat(directory.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    if unsafe { stat.assume_init() }.st_nlink != 0 {
-        return Err(refuse(
-            "native unlink did not remove the original held directory",
-        ));
+    if unsafe { stat.assume_init() }.st_nlink == 0 {
+        return Ok(());
     }
-    Ok(())
+
+    // Kernfs can retain a nonzero link count after cgroup removal. In that
+    // case require procfs to mark the exact pinned dentry as deleted. A live
+    // directory literally renamed to the marker must still refuse.
+    cgroupfs(directory)?;
+    const MARKER: &[u8] = b" (deleted)";
+    let mut observed = [0; MAX_CGROUP_PATH_BYTES + MARKER.len()];
+    let mut parent_path = [0; MAX_CGROUP_PATH_BYTES];
+    let observed = descriptor_path(directory, &mut observed)?;
+    let parent_path = descriptor_path(parent, &mut parent_path)?;
+    if observed
+        .strip_suffix(MARKER)
+        .and_then(|path| path.strip_suffix(name.to_bytes()))
+        .and_then(|path| path.strip_suffix(b"/"))
+        == Some(parent_path.strip_suffix(b"/").unwrap_or(parent_path))
+    {
+        let mut marked_name = [0; 64];
+        let original_len = name.to_bytes().len();
+        let marked_len = original_len + MARKER.len();
+        if marked_len >= marked_name.len() {
+            return Err(refuse("native directory name exceeds removal proof bound"));
+        }
+        marked_name[..original_len].copy_from_slice(name.to_bytes());
+        marked_name[original_len..marked_len].copy_from_slice(MARKER);
+        let mut linked = MaybeUninit::<libc::stat>::uninit();
+        if unsafe {
+            libc::fstatat(
+                parent.as_raw_fd(),
+                marked_name.as_ptr().cast(),
+                linked.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            let error = io::Error::last_os_error();
+            return if error.raw_os_error() == Some(libc::ENOENT) {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+    }
+    Err(refuse(
+        "native unlink did not remove the original held directory",
+    ))
+}
+
+fn descriptor_path<'a>(file: &File, buffer: &'a mut [u8]) -> io::Result<&'a [u8]> {
+    use std::io::Write;
+
+    let mut proc_path = [0; 32];
+    write!(&mut proc_path[..], "/proc/self/fd/{}", file.as_raw_fd())?;
+    let count = unsafe {
+        libc::readlink(
+            proc_path.as_ptr().cast(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+        )
+    };
+    if count < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let count = count as usize;
+    if count == buffer.len() {
+        return Err(refuse("native descriptor path exceeds removal proof bound"));
+    }
+    Ok(&buffer[..count])
 }
 
 fn remove_unentered(
@@ -799,8 +869,8 @@ fn remove_unentered(
     identity: ObjectIdentity,
 ) -> io::Result<()> {
     // A preceding unlink may have succeeded even if its result/readback was
-    // lost. Only the same held object's zero link count closes that retry.
-    if removed_original(directory).is_ok() {
+    // lost. Only removal readback from the same held object closes that retry.
+    if removed_original(directory, parent, name).is_ok() {
         return Ok(());
     }
     cgroupfs(directory)?;
@@ -827,7 +897,7 @@ fn remove_unentered(
     if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    removed_original(directory)
+    removed_original(directory, parent, name)
 }
 
 struct FactoryLease {
@@ -1365,13 +1435,19 @@ impl NativeDomainCore {
 
     /// Removal requires exclusive controller mutation of this parent/name;
     /// verification and unlink are separate kernel calls. Original-object
-    /// zero-link readback is required before reporting Removed. Failure or an
+    /// removal readback is required before reporting Removed. Failure or an
     /// external replacement race retains uncertain original ownership.
     pub fn remove_extinct(&mut self, proof: NativeDomainExtinction) -> io::Result<()> {
         if proof.identity != self.identity() || self.state != EntryState::Sealed {
             return Err(refuse("extinction proof does not own this sealed domain"));
         }
-        if removed_original(&self.directory.directory).is_ok() {
+        if removed_original(
+            &self.directory.directory,
+            &self.directory.parent,
+            &self.directory.name,
+        )
+        .is_ok()
+        {
             self.state = EntryState::Removed;
             return Ok(());
         }
@@ -1386,7 +1462,11 @@ impl NativeDomainCore {
         {
             return Err(io::Error::last_os_error());
         }
-        removed_original(&self.directory.directory)?;
+        removed_original(
+            &self.directory.directory,
+            &self.directory.parent,
+            &self.directory.name,
+        )?;
         self.state = EntryState::Removed;
         Ok(())
     }
@@ -1407,7 +1487,7 @@ impl NativeDomainCore {
             pids_events,
             memory_events,
         } = self.files;
-        // Once unlink and zero-link readback have both succeeded, consume
+        // Once unlink and original-object readback have both succeeded, consume
         // every original exactly once. A failed close must never be retried
         // by numeric descriptor or converted into successful closure.
         [
@@ -1848,13 +1928,14 @@ mod tests {
         let moved = base.join("moved");
         std::fs::create_dir(&name).unwrap();
         let original = File::open(&name).unwrap();
-        assert!(removed_original(&original).is_err());
+        let parent = File::open(&base).unwrap();
+        assert!(removed_original(&original, &parent, c"original").is_err());
         std::fs::rename(&name, &moved).unwrap();
         std::fs::create_dir(&name).unwrap();
         std::fs::remove_dir(&name).unwrap();
-        assert!(removed_original(&original).is_err());
+        assert!(removed_original(&original, &parent, c"original").is_err());
         std::fs::remove_dir(&moved).unwrap();
-        removed_original(&original).unwrap();
+        removed_original(&original, &parent, c"original").unwrap();
         std::fs::remove_dir(&base).unwrap();
     }
 
