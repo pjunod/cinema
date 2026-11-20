@@ -146,14 +146,62 @@ fn caps() -> Value {
 }
 
 async fn start(cluster: &Cluster, file: i64, playback: &str) -> Value {
+    let decision = cluster
+        .client
+        .post(format!("{}/api/v1/files/{file}/decision", cluster.a_base))
+        .bearer_auth(&cluster.token)
+        .json(&json!({"caps": caps()}))
+        .send()
+        .await
+        .expect("negotiate the ordinary Dolby Vision starter");
+    let status = decision.status();
+    let body = decision.text().await.expect("decision body");
+    assert_eq!(status, StatusCode::OK, "{body}{}", cluster.logs());
+    let decision: Value = serde_json::from_str(&body).expect("decision JSON");
+    let delivery = &decision["delivery"];
+    assert_eq!(delivery["mode"], "remux", "{decision}");
+    assert_eq!(delivery["preserve_dolby_vision"], true, "{decision}");
+    let candidate = decision["quality_candidates"]
+        .as_array()
+        .expect("ordinary playback candidates")
+        .iter()
+        .find(|row| {
+            row["route"] == "remux"
+                && row["decoder_compatible"] == true
+                && row["processed_dv"] != true
+        })
+        .unwrap_or_else(|| panic!("no ordinary compatible Dolby Vision candidate: {decision}"));
+    let candidate_id = candidate["id"].as_str().expect("ordinary candidate ID");
+    let height = candidate["target_height"]
+        .as_i64()
+        .expect("ordinary raster");
+    let sessions = delivery["sessions_url"]
+        .as_str()
+        .expect("negotiated sessions URL");
     let response = cluster
         .client
-        .post(format!(
-            "{}/api/v1/files/{file}/hls/sessions",
-            cluster.a_base
-        ))
+        .post(wire_url(&cluster.a_base, sessions))
         .bearer_auth(&cluster.token)
-        .json(&json!({"playback_id":playback, "quality_auto":true, "caps":caps()}))
+        .json(&json!({
+            "playback_id": playback,
+            "copy": true,
+            "aac": delivery["aac"],
+            "preserve_dolby_vision": delivery["preserve_dolby_vision"],
+            "quality_auto": true,
+            "caps": caps(),
+            "intent": {
+                "lifetime_id": uuid::Uuid::new_v4(),
+                "recipe_revision": 1,
+                "destination_revision": 1,
+                "transport_revision": 1,
+                "selection": {
+                    "quality": {"mode":"auto", "height":height, "candidate_id":candidate_id},
+                    "codec":"hevc", "dynamic_range":"dolby_vision",
+                    "audio_track":null, "audio_offset_ms":0,
+                    "subtitles":{"mode":"off"}
+                }
+            }
+        }))
         .send()
         .await
         .expect("ordinary FEL source start");
@@ -161,6 +209,7 @@ async fn start(cluster: &Cluster, file: i64, playback: &str) -> Value {
     let body = response.text().await.expect("start body");
     assert_eq!(status, StatusCode::OK, "{body}{}", cluster.logs());
     let response: Value = serde_json::from_str(&body).expect("start response");
+    assert_eq!(response["quality_candidate_id"], candidate_id, "{response}");
     assert_eq!(
         response["enhancement"]["active"],
         json!(["DYN"]),
