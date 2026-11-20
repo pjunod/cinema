@@ -207,6 +207,28 @@ fn original_owner_with_producer(
     Arc<NodeResourceRuntime>,
     Result<SoftwareVodOwner, FiniteVodError>,
 ) {
+    let (runtime, request) = original_request_with_producer(
+        root,
+        reject_prepare,
+        generation_epoch,
+        continuous_entry_deadline,
+        producer,
+        loader_env,
+        native_root,
+    );
+    let owner = runtime.prepare_software_vod(request, deadline());
+    (runtime, owner)
+}
+
+fn original_request_with_producer(
+    root: &Path,
+    reject_prepare: bool,
+    generation_epoch: u64,
+    continuous_entry_deadline: Option<crate::cluster::clock::ContinuousDeadline>,
+    producer: SoftwareAvcPumpPlan,
+    loader_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    native_root: Option<&Path>,
+) -> (Arc<NodeResourceRuntime>, SoftwareVodRequest) {
     crate::testfixtures::require_ffmpeg();
     let source = root.join("source.mkv");
     crate::testfixtures::run(
@@ -426,7 +448,8 @@ fn original_owner_with_producer(
     // The original public constructor queues these immutable bounds. The
     // actual journal validator rejects zero file objects; no fixture returns
     // an injected error or replaces the original accepted command/result.
-    let owner = runtime.prepare_software_vod(
+    (
+        runtime,
         SoftwareVodRequest {
             native_plan,
             rendition_id: "original-finite".into(),
@@ -472,9 +495,7 @@ fn original_owner_with_producer(
             },
             continuous_entry_deadline,
         },
-        deadline(),
-    );
-    (runtime, owner)
+    )
 }
 
 fn engine_object_version(path: PathBuf) -> (PathBuf, String) {
@@ -491,6 +512,115 @@ fn engine_object_version(path: PathBuf) -> (PathBuf, String) {
         metadata.ctime_nsec(),
     );
     (path, version)
+}
+
+#[tokio::test]
+async fn exact_recent_service_uses_ordinary_admission_before_local_trial() {
+    use crate::adaptive_resources::MemoryClaim;
+    use crate::resource_history::CostSample;
+    use crate::resource_policy::TrialRefusal;
+
+    let root = tempfile::tempdir().expect("actual software routing fixture");
+    let (runtime, mut request) = original_request_with_producer(
+        root.path(),
+        false,
+        1,
+        None,
+        super::tests::pump_plan(),
+        Vec::new(),
+        None,
+    );
+    let clock = Arc::new(crate::cluster::clock::ClusterClockGuard::new(false));
+    let original = clock
+        .capture_continuous()
+        .expect("actual Linux clock")
+        .deadline_after(Duration::from_secs(30))
+        .expect("original live cutoff");
+    request.continuous_entry_deadline = Some(original.clone());
+
+    let placement_mix = runtime.ledger.prospective_history_mix().expect("idle mix");
+    let roles = [
+        FamilyRoleDemand {
+            role: FamilyRole::Video,
+            demand: WorkloadDemand {
+                resources: Metric::Known(ResourceVector {
+                    processes: 1,
+                    ..ResourceVector::default()
+                }),
+                ..request.demand
+            },
+            retained: None,
+        },
+        FamilyRoleDemand {
+            role: FamilyRole::Companion,
+            demand: WorkloadDemand {
+                resources: Metric::Known(ResourceVector {
+                    peak_memory_bytes: 1024,
+                    ..ResourceVector::default()
+                }),
+                ..request.demand
+            },
+            retained: None,
+        },
+    ];
+    let mut planning = runtime
+        .ledger
+        .reserve_families_claiming(
+            &[FamilyDemand {
+                identity: runtime.new_family().expect("original planning family"),
+                roles: &roles,
+            }],
+            Some(&[
+                MemoryClaim::UnknownProducerPeak,
+                MemoryClaim::PlanningMetadata,
+            ]),
+        )
+        .expect("original planning pair");
+    let (metadata, _metadata_close) = planning.pop().expect("original M");
+    let (producer, _producer_close) = planning.pop().expect("original unstarted P");
+    drop(producer);
+    let placement_request = [42; 32];
+    request.placement_observation = Some(FinitePlacementObservation {
+        request: placement_request,
+        original_metadata: metadata.custody_binding(),
+    });
+
+    let allocate = |request: &SoftwareVodRequest| {
+        runtime.allocate_local_finite_trial(request, &original, Instant::now())
+    };
+    assert!(matches!(
+        allocate(&request),
+        Err(TrialRefusal::UnknownMemory)
+    ));
+    let history_key = pump::history_basis(&request)
+        .expect("exact original recipe")
+        .with_mix(placement_mix);
+    let sample = CostSample {
+        at: Instant::now(),
+        unix_ms: 1000,
+        cpu_ns: 500_000_000,
+        elapsed_ns: 1_000_000_000,
+        completed_units: 1,
+        observed_resident_bytes: 1024,
+    };
+    {
+        let mut history = runtime.history.lock().expect("real resource history");
+        assert!(history.observe(history_key, sample));
+        history.tag_finite_placement_sample(history_key, sample, placement_request, placement_mix);
+    }
+    assert!(matches!(allocate(&request), Ok(None)));
+    request.rendition_id.push_str("-different-recipe");
+    assert!(matches!(
+        allocate(&request),
+        Err(TrialRefusal::UnknownMemory)
+    ));
+
+    drop(metadata);
+    Arc::try_unwrap(runtime)
+        .ok()
+        .expect("sole original runtime")
+        .drain()
+        .expect("original journal drain");
 }
 
 #[tokio::test]
