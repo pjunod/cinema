@@ -1116,7 +1116,12 @@ async fn adaptive_create_places_on_a_peer_and_falls_back_when_the_grant_cannot_b
         continuous_refusals(&after_b, "grant") > continuous_refusals(&before_b, "grant"),
         "B counted its grant-time refusal"
     );
-    assert_eq!(continuous_refusals(&after_b, "entry"), 0);
+    assert_eq!(
+        continuous_refusals(&after_b, "entry"),
+        continuous_refusals(&before_b, "entry"),
+        "the refused Grant must not reach native entry{}",
+        cluster.logs()
+    );
     cluster.proxy_a.block_clock(false);
     // Every placement decision above held; each create must also have been
     // published and served.
