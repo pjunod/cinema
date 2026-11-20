@@ -8,14 +8,16 @@ lab3 learner) · **Written:** 2026-11-14 ·
 **Reviewed:** one adversarial agent review (Fable), 12 findings, all
 addressed in this revision
 
-**Progress, 2026-11-19:** the original measurements and findings below are
-historical. C7 has landed. The facade, applied-mark and learner-discovery
-promotion is still under qualification; the remaining watch, peer-proof,
-catalogue and timing work is implemented in the owned integration branch,
-with final qualification and landing pending. Follow the linked build records
-in [the cluster index](README.md) for each contract and its evidence. C4
-still needs qualified passive instrumentation and actual fleet observations;
-no election-floor change or completed fleet acceptance is claimed.
+**Progress, 2026-11-20:** the original measurements and findings below are
+historical. C7 is on main. The remaining owned facade, applied-mark,
+learner-discovery, watch, peer-proof, catalogue and timing implementation is
+built and independently reviewed. Delivery and qualification evidence is
+tracked in [promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811); this paragraph does not claim a passing final
+qualification receipt. B3/C1 and the cluster-wide source reader (#1597)
+retain their separate owners. C4 instrumentation is built, while actual
+post-C2 voter observations and the election-floor decision remain open.
+C5 is a tracked evaluation, not an upgrade or patch retirement. Paul owns
+deployment; no completed fleet acceptance is claimed.
 
 > **Who reads this.** Paul: §1 for the verdict, §8 for the rulings made.
 > This is the review, not a build plan. The P0 items in §7 are small enough

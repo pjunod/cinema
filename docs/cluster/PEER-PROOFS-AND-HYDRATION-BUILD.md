@@ -1,8 +1,13 @@
 # Peer proofs and artifact hydration
 
-**Status:** open — implementation in progress · **Owner:** Codex peer lane ·
+**Status:** built — implemented and independently reviewed · **Owner:** Codex peer lane ·
 **Executes:** B5 and B3a from [the cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md) ·
 **Written:** 2026-11-19 · **Base:** `09d4d9502`
+
+Delivery and qualification evidence is tracked in
+[promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811). Earlier branch
+names and checkpoint receipts below are historical. Fleet acceptance remains
+after Paul’s deployment.
 
 ## 1. Objective
 

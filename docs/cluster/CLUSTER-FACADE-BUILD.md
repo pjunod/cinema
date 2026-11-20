@@ -1,12 +1,19 @@
 # Cluster facade — one layer, and a test that keeps it one
 
-**Status:** built — slice 1 of the build contract for audit items **B1**
-and **B2** of [CLUSTER-LAYER-AUDIT-2026-11-14.md](CLUSTER-LAYER-AUDIT-2026-11-14.md)
-§7 is built and reviewed (§10.1, §10.2); slices 2–7 follow the PRs named in
-§8.
-**Verified against:** `main @ dd76bb88e`, from source only — nothing was
-compiled or run. Every `file:line` below is **re-verify at build time**.
+**Status:** built — facade slices 1–7 implemented and independently reviewed.
+**Original source-only baseline:** `main @ dd76bb88e`; nothing was compiled
+or run for that historical inspection. Original `file:line` references below
+require re-verification against their named source.
 **Author:** Claude (Fable 5.2), session `01BCWLA3JD1HCNMEid3AZrc3`.
+
+Delivery and qualification evidence is tracked in
+[promotion #1811](http://forge.lan:3000/noirr/plurx/pulls/1811). Earlier branch
+names and checkpoint receipts below are historical. Fleet acceptance remains
+after Paul’s deployment.
+
+This implements B1/B2 of the [cluster audit](CLUSTER-LAYER-AUDIT-2026-11-14.md).
+The contract below retains the original slice-1 design and numbered delivery
+history; the slice ledgers record the complete facade.
 
 Short paths: `mem.rs` = `crates/plurx-core/src/cluster/membership.rs`;
 `d/` = `crates/plurxd/src/`; `ltv.rs` = `d/http/live_tv.rs`.
