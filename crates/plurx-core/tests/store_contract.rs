@@ -21738,8 +21738,9 @@ fn contract_inventory_matches_every_store_method() {
     // +2: claim_job_attempt and claim_verdict, the claim local verdict
     // (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md), in BACKGROUND_JOB_METHODS.
     // +1: cancel_unshared_output_job, the fenced retained-output cleanup.
-    // +2: exact-binding M7 receipt write and lookup on both backends.
-    assert_eq!(declared.len(), 631, "review the Store method count");
+    // +6: fenced M7 receipt write and lookup, title facts, and candidate
+    // anchoring, listing, and reservation on each backend.
+    assert_eq!(declared.len(), 635, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

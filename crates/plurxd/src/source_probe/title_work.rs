@@ -1,4 +1,6 @@
 //! One owned future inside the existing source-probe scheduler. No new daemon.
+#[cfg(test)]
+mod m7_settlement_tests;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "title_work_tests.rs"]
 mod tests;
