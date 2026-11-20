@@ -1,0 +1,156 @@
+name: Qualify Android TV on the M4 Air
+on:
+  push:
+    branches: [codex/qualify-m4-arm64-android]
+
+jobs:
+  android_apks:
+    name: Build Android instrumentation APKs
+    runs-on: [self-hosted, Linux, X64, lab, android-kvm]
+    timeout-minutes: 25
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Reuse the pinned Android toolchain image from Forgejo
+        env:
+          REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+        run: |
+          tag="${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
+          echo "$REGISTRY_TOKEN" | docker login ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }} -u fleet --password-stdin || true
+          if docker pull "$tag"; then
+            docker tag "$tag" plurx-android-build
+            echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
+          else
+            make android-image \
+              && docker tag plurx-android-build "$tag" \
+              && docker push "$tag" || true
+            echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
+          fi
+      - name: Cache Gradle dependencies
+        uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            clients/android/.gradle-validation/caches
+            clients/android/.gradle-validation/wrapper
+          key: gradle-${{ hashFiles('clients/android/build.gradle.kts', 'clients/android/settings.gradle.kts', 'clients/android/app/build.gradle.kts', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+      - name: Build app and instrumentation APKs in the pinned toolchain
+        run: make android-instrumentation-build
+      - name: Upload app and test APKs
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: android-tv-instrumentation-apks
+          path: |
+            clients/android/app/build/outputs/apk/debug/app-debug.apk
+            clients/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          if-no-files-found: error
+          retention-days: 1
+
+  android_device:
+    name: Android TV UI tests on M4 ARM64
+    needs: android_apks
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, primary]
+    concurrency:
+      group: plurx-apple-silicon-heavy
+      cancel-in-progress: false
+    timeout-minutes: 35
+    env:
+      PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify the M4 host and isolate Android SDK and AVD files
+        id: android_temp
+        run: |
+          test "$(uname -m)" = arm64
+          sysctl -n machdep.cpu.brand_string | grep -Fx 'Apple M4'
+          test "$(sysctl -n kern.hv_support)" = 1
+          printf 'ANDROID_HOME=%s/android-sdk\nANDROID_SDK_ROOT=%s/android-sdk\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/android-home"
+          printf 'home=%s/android-home\n' "$RUNNER_TEMP" >> "$GITHUB_OUTPUT"
+      - name: Provision JDK 25 for the Android SDK
+        uses: https://github.com/actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          settings-path: ${{ steps.android_temp.outputs.home }}
+          overwrite-settings: false
+      - name: Download app and test APKs
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
+        with:
+          name: android-tv-instrumentation-apks
+          path: clients/android/app/build/outputs/apk
+      - name: Verify both APK paths
+        run: |
+          test -s clients/android/app/build/outputs/apk/debug/app-debug.apk
+          test -s clients/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+      - name: Provision the vendored emulator action runtime
+        uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24.22.1"
+      - name: Install locked emulator action dependencies
+        run: npm ci --prefix .github/actions/android-emulator-ready --ignore-scripts --omit=dev
+      - name: Run the Compose and TV focus suite on a disposable emulator
+        id: android_instrumentation
+        continue-on-error: true
+        uses: ./.github/actions/android-emulator-ready
+        env:
+          HOME: ${{ steps.android_temp.outputs.home }}
+        with:
+          api-level: 36
+          target: android-tv
+          arch: arm64-v8a
+          profile: tv_1080p
+          force-avd-creation: true
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            mkdir -p target/validation
+            touch target/validation/android-instrumentation-started
+            test "$(adb -s "emulator-${EMULATOR_PORT}" shell getprop ro.product.cpu.abi | tr -d '\r')" = arm64-v8a
+            PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make android-instrumentation-run
+      - name: Freeze whether the first instrumentation script started
+        id: android_instrumentation_first_attempt
+        if: always()
+        run: |
+          if [[ -f target/validation/android-instrumentation-started ]]; then
+            echo "started=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "started=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Retry a pre-test emulator boot failure once
+        if: steps.android_instrumentation.outcome == 'failure' && steps.android_instrumentation_first_attempt.outputs.started == 'false'
+        uses: ./.github/actions/android-emulator-ready
+        env:
+          HOME: ${{ steps.android_temp.outputs.home }}
+        with:
+          # Retry provisioning or boot failure only when our script never
+          # started. Post-boot readiness has its own bounded stage retries;
+          # an instrumentation failure is never retried or hidden.
+          api-level: 36
+          target: android-tv
+          arch: arm64-v8a
+          profile: tv_1080p
+          force-avd-creation: true
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            mkdir -p target/validation
+            touch target/validation/android-instrumentation-started
+            test "$(adb -s "emulator-${EMULATOR_PORT}" shell getprop ro.product.cpu.abi | tr -d '\r')" = arm64-v8a
+            PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make android-instrumentation-run
+      - name: Propagate an instrumented-test failure without retrying it
+        if: steps.android_instrumentation.outcome == 'failure' && steps.android_instrumentation_first_attempt.outputs.started == 'true'
+        run: exit 1
+      - name: Upload Android test reports
+        if: always()
+        continue-on-error: true
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: android-instrumentation-reports
+          path: |
+            clients/android/app/build/reports/androidTests
+            clients/android/app/build/outputs/androidTest-results
+            target/validation/android-instrumentation.txt
+          if-no-files-found: warn
+          retention-days: 1
