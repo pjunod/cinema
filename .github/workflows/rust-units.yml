@@ -157,7 +157,12 @@ jobs:
           path: ab-receipt/
           retention-days: 3
   compare:
+    name: receiver candidate ${{ matrix.slot }}
     if: inputs.phase == 'compare'
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3]
     runs-on: [ci-nonvoter-compile-amd64, incus]
     # The same private CI image as ci.yml's full Rust lane: Rust 1.97.1, the
     # Jellyfin FFmpeg 8 build and the native libraries. Its digest is part of
@@ -171,7 +176,10 @@ jobs:
     timeout-minutes: 300
     steps:
       - name: Confirm physically distinct receiving runner
-        run: test -f "/opt/forgejo-plurx-heavy/tool-cache/archive-ab-neutral-20261120/parent.sha256"
+        run: |
+          stage=/opt/forgejo-plurx-heavy/tool-cache/archive-ab-neutral-20261120
+          if [ ! -f "$stage/parent.sha256" ]; then sleep 12; exit 1; fi
+          mkdir "$stage/claim-$GITHUB_RUN_ID"
       - name: Verify effective nonvoter resource bounds
         shell: sh
         run: |
