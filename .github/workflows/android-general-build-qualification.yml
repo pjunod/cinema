@@ -1,0 +1,45 @@
+name: Qualify Android builds on general Linux CI
+on:
+  push:
+    branches: [codex/qualify-general-android-build]
+jobs:
+  android_build:
+    name: Bounded Android build and JVM tests on general CI
+    runs-on: [self-hosted, Linux, X64, lab, general, incus]
+    timeout-minutes: 30
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/android-build@sha256:42e42068b13e991882ee02f64b49a9517613129c66a99c6ecb579419e7a15239
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Verify resources and isolation
+        run: |
+          test "$(uname -m)" = x86_64
+          test "$(cat /sys/fs/cgroup/memory.max)" = 7516192768
+          test "$(cat /sys/fs/cgroup/cpu.max)" = '300000 100000'
+          test "$(cat /sys/fs/cgroup/pids.max)" = 4096
+          test ! -S /var/run/docker.sock
+          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          java -version
+      - name: Checkout the exact source without retaining credentials
+        env:
+          GIT_TOKEN: ${{ github.token }}
+        run: |
+          apt-get -qq update
+          apt-get -qq install -y --no-install-recommends git
+          auth="$(printf 'x-access-token:%s' "$GIT_TOKEN" | base64 | tr -d '\n')"
+          git init .
+          git -c http.extraheader="Authorization: basic $auth" fetch --no-tags --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Build both APKs and run the Android JVM checks
+        working-directory: clients/android
+        run: |
+          ./gradlew --no-daemon --max-workers=2 assembleDebug assembleDebugAndroidTest testDebugUnitTest lintDebug
+          test -s app/build/outputs/apk/debug/app-debug.apk
+          test -s app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
