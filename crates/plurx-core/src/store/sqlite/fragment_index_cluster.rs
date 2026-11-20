@@ -601,7 +601,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
         ]);
         self.with_conn(move |conn| {
             let transaction = conn.unchecked_transaction()?;
-            transaction.execute(
+            let inserted = transaction.execute(
                 &format!(
                     "INSERT INTO analysis_requests
                     (request_id, file_id, source_size, source_mtime, component,
@@ -718,7 +718,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     super::super::fragment_index_cluster::ANALYSIS_BACKLOG_BOUND_FACTOR,
                 ],
             )?;
-            if request.force_rebuild {
+            if inserted == 1 && request.force_rebuild {
                 transaction.execute(
                     "UPDATE analysis_attempts
                         SET phase = 'canceled', phase_updated_at_ms = ?1,
@@ -856,12 +856,12 @@ impl ClusterFragmentIndexStore for SqliteStore {
             };
             let input = serde_json::to_string(&request)
                 .map_err(|error| StoreError::Task(error.to_string()))?;
-            let reason: usize = transaction.query_row(
+            let reason: u8 = transaction.query_row(
                 &analysis_admission_refusal_sql(),
                 params![input, live, analysis_headroom(&request)],
                 |row| row.get(0),
             )?;
-            Err(analysis_admission_error(reason))
+            Err(analysis_admission_error(usize::from(reason)))
         })
         .await
     }

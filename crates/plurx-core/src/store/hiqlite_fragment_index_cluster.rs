@@ -2159,6 +2159,12 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             super::fragment_index_cluster::ANALYSIS_BACKLOG_BOUND_FACTOR
                         ),
                     ),
+                    // Only a newly inserted force can displace older work. A replay
+                    // or collision on a historical force id must have no side effects.
+                    (
+                        "SELECT changes() = 1 AND $1 = 1 AS supersede".to_owned(),
+                        params!(if request.force_rebuild { 1_i64 } else { 0_i64 }),
+                    ),
                     // A Hiqlite transaction returns the row count of each SELECT.
                     // Encode the bounded refusal code in that count, in the same
                     // snapshot as the INSERT. A successful INSERT skips all diagnosis.
@@ -2183,7 +2189,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             .to_owned(),
                         params!(
                             request.created_at_ms,
-                            if request.force_rebuild { 1_i64 } else { 0_i64 },
+                            hiqlite::Param::StmtOutputIndexed(1, 0),
                             request.file_id,
                             request.source_size,
                             request.source_mtime,
@@ -2207,7 +2213,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             .to_owned(),
                         params!(
                             request.created_at_ms,
-                            if request.force_rebuild { 1_i64 } else { 0_i64 },
+                            hiqlite::Param::StmtOutputIndexed(1, 0),
                             request.file_id,
                             request.source_size,
                             request.source_mtime,
@@ -2235,6 +2241,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                              AND older.state = 'cancelled'
                              AND older.last_error_code = 'publication_superseded'
                              AND older.updated_at_ms = $1)
+                        AND $7 = 1
                         AND NOT EXISTS (SELECT 1 FROM analysis_requests active
                           WHERE active.result_cache_key = cluster_fragment_index_jobs.cache_key
                             AND active.target_node_id = cluster_fragment_index_jobs.target_node_id
@@ -2246,7 +2253,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             request.source_size,
                             request.source_mtime,
                             &request.component,
-                            &request.pipeline_version
+                            &request.pipeline_version,
+                            hiqlite::Param::StmtOutputIndexed(1, 0)
                         ),
                     ),
                 ],
@@ -2303,7 +2311,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             return Ok(active);
         }
         Err(super::fragment_index_cluster::analysis_admission_error(
-            results[1],
+            results[2],
         ))
     }
 
