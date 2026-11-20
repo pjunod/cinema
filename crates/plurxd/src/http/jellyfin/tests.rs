@@ -662,6 +662,13 @@ async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
         StatusCode::OK,
         "the play survives a recovered authority loss"
     );
+    let recovered_bytes = recovered
+        .into_body()
+        .collect()
+        .await
+        .expect("complete recovered fragment")
+        .to_bytes();
+    assert!(!recovered_bytes.is_empty());
     if encoded {
         let response = f
             .app

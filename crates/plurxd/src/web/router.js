@@ -106,6 +106,9 @@ async function render(){
     else if(h.startsWith("#/item/")) await viewItem(h.split("/")[2]);
     else if(h.startsWith("#/library/")) await viewLibrary(h.split("/")[2]);
     else if(h.startsWith("#/list/")) await viewList(h.split("/")[2]);
+    else if(h==="#/tags") await viewTags();
+    else if(h.startsWith("#/tag/")) await viewTag(h.split("/")[2],h.split("/")[3]||"items");
+    else if(h.startsWith("#/row/")) await viewRow(h.split("/")[2]);
     else if(h.startsWith("#/category/")) await viewCategory(decodeURIComponent(h.split("/")[2]||""));
     else if(h.startsWith("#/search/")) await viewSearch(decodeURIComponent(h.split("/")[2]||""));
     else if(h==="#/remote") await viewRemote(generation);

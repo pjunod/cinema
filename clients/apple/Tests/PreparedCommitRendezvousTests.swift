@@ -394,6 +394,7 @@ final class PreparedCommitRendezvousTests: XCTestCase {
             (staged: -1, current: 10_000, origin: 0),
             (staged: 0, current: -1, origin: 0),
             (staged: 0, current: 10_000, origin: -PlaybackControl.maximumMediaMs - 1),
+            (staged: 0, current: 10_000, origin: PlaybackControl.maximumMediaMs + 1),
             (staged: 0, current: Int.max, origin: 0)
         ] {
             XCTAssertNil(PreparedCommitRendezvous.planLoaded(
@@ -728,7 +729,7 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         XCTAssertTrue(prime.contains(
             "guard await alignPrepared(item, to: preparedTimeline.itemPositionMs(filmPositionMs: preparedFilmPositionMs), " +
             "boundMs: remaining)"
-        ))
+        ), "Parking converts the shared film position into the successor item clock within the same bound")
         XCTAssertTrue(prime.contains("coordinator.abandonWithoutFallback(.aborted)"))
         XCTAssertTrue(prime.contains("coordinator.abandon(.failed)"))
         let alignment = try XCTUnwrap(source.range(of: "private func alignPrepared(_ item:"))

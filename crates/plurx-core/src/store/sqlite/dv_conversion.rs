@@ -1776,7 +1776,9 @@ mod tests {
             "INSERT INTO dv_title_jobs_schema VALUES(1,2)",
             // v133: the empty delegation tail is removed first by the shared title rewind.
             "CREATE TABLE IF NOT EXISTS delegation_schema",
-            // v134: the shared title rewind first removes the exact empty F+ curve extension.
+            // v135: remove the exact empty curation extension before the F+ tail.
+            "CREATE TABLE library_curation_schema",
+            // v134: the shared title rewind removes the exact empty F+ curve extension.
             "CREATE TABLE IF NOT EXISTS background_dv_refit_schema",
         ];
 

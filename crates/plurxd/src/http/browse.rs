@@ -415,7 +415,7 @@ async fn watch_lookup(
 
 /// Shows, seasons and folders carry no watch row of their own; their state
 /// is a rollup over the playable leaves beneath them.
-fn is_rollup_container(kind: ItemKind) -> bool {
+pub(crate) fn is_rollup_container(kind: ItemKind) -> bool {
     matches!(kind, ItemKind::Show | ItemKind::Season | ItemKind::Folder)
 }
 
@@ -465,6 +465,13 @@ pub struct ListQuery {
     /// a show with some seasons offloaded is listed under both `disk` and
     /// `offloaded`. Search ignores this and always includes them.
     pub presence: Option<String>,
+    /// Comma-separated tag ids the grid must carry (custom tags). Absent is
+    /// the unchanged grid; only tags visible to the caller ever match.
+    pub tags: Option<String>,
+    /// `any` (default) or `all` of `tags`.
+    pub tag_mode: Option<String>,
+    /// Comma-separated tag ids the grid must not carry.
+    pub not_tags: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -510,6 +517,32 @@ pub async fn list_items(
             )
         })?,
     };
+    // A tag filter (or the recently-tagged sort) is a curation rule over
+    // this library; without one the grid below answers exactly as before.
+    if let Some(page) = super::curation::tag_filtered_grid(
+        &state,
+        &user,
+        library_id,
+        q.tags.as_deref(),
+        q.tag_mode.as_deref(),
+        q.not_tags.as_deref(),
+        genre,
+        q.sort.as_deref(),
+        presence,
+        q.facts == Some(1),
+        offset,
+        limit,
+        read_after,
+    )
+    .await?
+    {
+        return Ok(Json(ItemListResponse {
+            items: page.items,
+            total: page.total,
+            offset,
+            limit,
+        }));
+    }
     let page = state
         .catalogue
         .list_top_items_filtered(library_id, sort, offset, limit, genre, presence)
@@ -1086,6 +1119,13 @@ pub async fn search(
 ) -> Result<Json<SearchResponse>, ApiError> {
     let query = q.q.unwrap_or_default();
     let limit = clamp_limit(q.limit);
+    // `tag:name` / `-tag:name` narrow by the caller's visible tags; a search
+    // that names none is answered below exactly as before.
+    if let Some(results) =
+        super::curation::tag_search(&state, &user, &query, limit, read_after).await?
+    {
+        return Ok(Json(SearchResponse { results }));
+    }
     let hits = state.catalogue.search_items(&query, limit).await?;
     let items: Vec<Item> = hits.iter().map(|r| r.item.clone()).collect();
     let watch = watch_lookup(&state, user.id, &items, read_after).await?;

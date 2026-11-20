@@ -456,7 +456,7 @@ final class SharedPlaybackControlTests: XCTestCase {
 
 @MainActor
 final class SharedBoundedRangeTimelineTests: XCTestCase {
-    func testSignedBoundedOriginMapsInitialSeekAndPreparedReplacement() {
+    func testSignedBoundedOriginMapsInitialSeekAndPreparedReplacement() throws {
         let initial = SharedPlaybackTimeline(vod: false, mediaOriginMs: -83,
             startSeconds: nil, requestedStartMs: 0)
         XCTAssertEqual(initial.mediaOriginMs, -83)
@@ -465,6 +465,10 @@ final class SharedBoundedRangeTimelineTests: XCTestCase {
         XCTAssertEqual(initial.filmPositionMs(itemPositionMs: 0), 0)
         XCTAssertTrue(PreparedSeekPolicy.originalTargetHasRunway(filmPositionMs: 0,
             mediaOriginMs: -83, ranges: [0...5]))
+        let loadedRendezvous = try XCTUnwrap(PreparedCommitRendezvous.planLoaded(stagedFilmPositionMs: 0,
+            incumbentFilmPositionMs: 0, mediaOriginMs: -83, playbackRate: 1,
+            overlapRemainingMs: 12_000, loadedItemRanges: [0...10]))
+        XCTAssertEqual(loadedRendezvous.itemPositionMs - loadedRendezvous.filmPositionMs, 83)
         XCTAssertNil(PreparedCommitRendezvous.planLoaded(stagedFilmPositionMs: 0,
             incumbentFilmPositionMs: 0, mediaOriginMs: -83, playbackRate: 1,
             overlapRemainingMs: 5_000, loadedItemRanges: [0...10]))

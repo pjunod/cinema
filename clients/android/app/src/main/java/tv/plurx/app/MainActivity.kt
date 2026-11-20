@@ -340,6 +340,7 @@ internal fun MainNav(
                 onOpenCollection = { title, libraries ->
                     if (meridian) selectSource(libraries.joinToString(",") { it.id.toString() }, title) else nav.navigate("library/${libraries.joinToString(",") { it.id.toString() }}/${Uri.encode(title)}")
                 },
+                onOpenRow = { id, title -> nav.navigate("row/$id/${Uri.encode(title)}") },
                 onSearch = { nav.navigate("search") },
                 onPlayFeatured = { id ->
                     val owner = entry.id
@@ -372,6 +373,23 @@ internal fun MainNav(
             LibraryScreen(
                 vm = vm,
                 libraryIds = entry.arguments!!.getString("ids").orEmpty().split(',').mapNotNull(String::toLongOrNull),
+                title = entry.arguments!!.getString("name").orEmpty(),
+                onOpenItem = { id -> nav.navigate("detail/$id") },
+                onBack = { nav.popBackStackFrom(entry) },
+            )
+            }
+        }
+        composable(
+            "row/{id}/{name}",
+            arguments = listOf(
+                navArgument("id") { type = NavType.LongType },
+                navArgument("name") { type = NavType.StringType },
+            ),
+        ) { entry ->
+            CompositionLocalProvider(LocalRemoteScope provides entry.id) {
+            RowScreen(
+                vm = vm,
+                rowId = entry.arguments!!.getLong("id"),
                 title = entry.arguments!!.getString("name").orEmpty(),
                 onOpenItem = { id -> nav.navigate("detail/$id") },
                 onBack = { nav.popBackStackFrom(entry) },

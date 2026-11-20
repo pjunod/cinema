@@ -237,6 +237,11 @@ struct SharedLibraryDetailView: View {
     @State private var remoteLoadGeneration = UUID()
     @State private var loading = false
     @State private var aboutPresented = false
+    #if os(tvOS)
+    @FocusState private var focusedPlayFile: String?
+    @State private var playbackFocusOpener: String?
+    @State private var dismissedPlayback = false
+    #endif
     private var detailScope: String { RemoteNavigationCoordinator.routeScope(.sharedItem(reference, library)) }
     var body: some View {
         ScrollView {
@@ -287,6 +292,9 @@ struct SharedLibraryDetailView: View {
                             if let duration = file.durationMs { Text("Duration: \(duration / 1000) seconds") }
                             if detail.deliveryStatus == "available" && file.fileBase != nil {
                                 Button("Play Shared file") { remotePreplay = false; Task { await play(file.fileId) } }.disabled(loading)
+                                    #if os(tvOS)
+                                    .focused($focusedPlayFile, equals: file.fileId)
+                                    #endif
                                     .id("shared:preplay:" + file.id)
                                     .remoteControl("shared:preplay:" + file.id, label: "Prepare Shared file", enabled: !loading, admission: {
                                         !preparingRemote && self.detail?.deliveryStatus == "available" && self.detail?.files.contains(where: { $0.id == file.id && $0.fileBase == file.fileBase }) == true ? nil : .staleContext
@@ -313,9 +321,13 @@ struct SharedLibraryDetailView: View {
         .onChange(of: detail?.files.map(\.id)) { _, _ in navigation.contextChanged(); updateRemoteDetailOrder() }
         .navigationTitle(detail?.item.title ?? "Shared title")
         #if os(tvOS)
-        .fullScreenCover(isPresented: Binding(get: { playbackPlan != nil }, set: { if !$0 { playbackPlan = nil } })) {
+        .fullScreenCover(
+            isPresented: Binding(get: { playbackPlan != nil }, set: { if !$0 { playbackPlan = nil } }),
+            onDismiss: { dismissedPlayback = true; restorePlaybackFocus() }
+        ) {
             if let playbackPlan { SharedPlayerView(plan: playbackPlan, requiresExplicitPlay: remotePreplay).environmentObject(model) }
         }
+        .onChange(of: loading) { _, _ in restorePlaybackFocus() }
         #else
         .sheet(isPresented: Binding(get: { playbackPlan != nil }, set: { if !$0 { playbackPlan = nil } })) {
             if let playbackPlan { SharedPlayerView(plan: playbackPlan, requiresExplicitPlay: remotePreplay).environmentObject(model) }
@@ -324,6 +336,19 @@ struct SharedLibraryDetailView: View {
         .task(id: reference) { await load() }
         .onDisappear { remoteLoadGeneration = UUID(); remoteViewLifetime = UUID(); preparationTask?.cancel(); preparationTask = nil }
     }
+    #if os(tvOS)
+    private func restorePlaybackFocus() {
+        guard dismissedPlayback, playbackPlan == nil, !loading else { return }
+        dismissedPlayback = false
+        guard let opener = playbackFocusOpener else { return }
+        playbackFocusOpener = nil
+        if detail?.deliveryStatus == "available", detail?.files.contains(where: {
+            $0.fileId == opener && $0.fileBase != nil
+        }) == true {
+            focusedPlayFile = opener
+        }
+    }
+    #endif
     private func updateRemoteDetailOrder() {
         var informationKeys: [String] = []
         #if os(tvOS)
@@ -363,6 +388,9 @@ struct SharedLibraryDetailView: View {
         do {
             let plan = try await model.prepareSharedPlayback(reference: reference, fileId: file, current: current)
             guard current() else { return }
+            #if os(tvOS)
+            playbackFocusOpener = file
+            #endif
             playbackPlan = plan; error = nil
         } catch { if current() { self.error = error.localizedDescription } }
     }

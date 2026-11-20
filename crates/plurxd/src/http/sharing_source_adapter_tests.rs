@@ -20,6 +20,7 @@ async fn actual_actor_adapters(encoded: bool) {
         None,
     )
     .await;
+    fixture.keep_fixture_membership_stable().await;
     if encoded {
         fixture.keep_fixture_membership_stable().await;
         let mut recipe: Value =

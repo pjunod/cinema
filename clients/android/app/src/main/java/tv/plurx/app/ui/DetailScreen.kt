@@ -286,6 +286,7 @@ private fun DetailContent(
                                 ratings.forEach { RatingChip(it) }
                             }
                         }
+                        if (item.kind == "movie" || item.kind == "show") ItemTagsSection(vm, item.id)
                     }
                 }
                 item.overview?.takeIf { it.isNotBlank() }?.let { Text(it, color = Muted, style = MaterialTheme.typography.bodyMedium) }

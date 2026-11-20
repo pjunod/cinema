@@ -177,22 +177,24 @@ final class SharedProtocolFixtureTests: XCTestCase {
         XCTAssertEqual(mutations.count, 16)
         for row in mutations {
             let id = try XCTUnwrap(row["id"] as? String)
-            let wire = mutate(base, path: row["path"] as! [String], row: substituted(row) as! [String: Any])
+            let path = try XCTUnwrap(row["path"] as? [String])
+            let mutation = try XCTUnwrap(substituted(row) as? [String: Any])
+            let wire = mutate(base, path: path, row: mutation)
             let result = try? SharedStart.decode(JSONSerialization.data(withJSONObject: wire)).bindInitial(context, request: rangedRequest)
             let expected = (boundedRange ? row["bounded_range_expected"] as? String : nil) ?? (row["expected"] as? String)
             XCTAssertEqual(result != nil, expected == "accepted", "bounded: \(id)")
-        }
-        for row in mutations {
-            let id = try XCTUnwrap(row["id"] as? String)
-            let wire = mutate(wholeTitle, path: row["path"] as! [String], row: substituted(row) as! [String: Any])
-            let bytes = try JSONSerialization.data(withJSONObject: wire)
+
+            let wholeTitleWire = mutate(wholeTitle, path: path, row: mutation)
+            let bytes = try JSONSerialization.data(withJSONObject: wholeTitleWire)
             let rangeCapable = id == "negative-media-origin"
             if rangeCapable {
                 XCTAssertThrowsError(try SharedStart.decode(bytes).bindInitial(context, request: request(rangeCapable: false)))
             }
-            let result = try? SharedStart.decode(bytes).bindInitial(context, request: request(rangeCapable: rangeCapable))
-            XCTAssertEqual(result != nil, row["expected"] as? String == "accepted", "whole: \(id)")
+            let wholeTitleResult = try? SharedStart.decode(bytes).bindInitial(context, request: request(rangeCapable: rangeCapable))
+            XCTAssertEqual(wholeTitleResult != nil, row["expected"] as? String == "accepted", "whole: \(id)")
         }
+        wholeTitle["vod"] = false
+        XCTAssertThrowsError(try SharedStart.decode(JSONSerialization.data(withJSONObject: wholeTitle)).bindInitial(context, request: request(rangeCapable: false)))
         var unadvertised = rangedRequest
         unadvertised.caps = nil
         var whole = base
