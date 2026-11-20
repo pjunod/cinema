@@ -1,0 +1,106 @@
+name: Private focused Linux check for PR 1815
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  RUST_MIN_STACK: "8388608"
+jobs:
+  check:
+    name: Verify Brix1 Rust shard failures on current main
+    runs-on: [self-hosted, Linux, X64, lab, unit-memory-16g]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 14g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 65
+    steps:
+      - name: Verify this job has its own bounded Docker cgroup
+        run: |
+          set -euo pipefail
+          relative="$(awk -F: '$1=="0" { print $3 }' /proc/self/cgroup)"
+          [[ "$relative" = /* ]]
+          root="/sys/fs/cgroup$relative"
+          memory=$(cat "$root/memory.max")
+          swap=$(cat "$root/memory.swap.max")
+          printf 'Effective diagnostic container memory=%s swap=%s\n' "$memory" "$swap"
+          [[ "$memory" =~ ^[0-9]+$ && "$swap" =~ ^[0-9]+$ ]]
+          # This registration's standard inherited swap cap is 4 GiB.
+          # Keep the requested resident-memory limit at 14 GiB.
+          (( memory == 15032385536 && swap <= 4294967296 ))
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: e646979bc92c59060fe15e44e2899b581c9ed36c
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+      - uses: ./.github/actions/rust-native-deps
+        with:
+          desktop: "true"
+      - uses: ./.github/actions/ffmpeg
+        with:
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
+      - name: Verify the candidate and run the named cases
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = e646979bc92c59060fe15e44e2899b581c9ed36c
+          mkdir -p target/queue-1815-brix-diagnostic
+          receipt=target/queue-1815-brix-diagnostic/outcomes.txt
+          {
+            git rev-parse HEAD
+            rustc --version | grep -F 'rustc 1.97.1 '
+            /usr/lib/jellyfin-ffmpeg/ffmpeg -version | sed -n '1p'
+          } | tee "$receipt"
+          run_exact() {
+            local case_id="$1" log="$2"
+            shift 2
+            set +e
+            cargo test --locked -j1 "$@" "$case_id" -- --exact --nocapture --test-threads=1 2>&1 | tee "$log"
+            local result=${PIPESTATUS[0]}
+            set -e
+            if test "$result" = 0 && grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$log" && ! grep -q 'SKIP:' "$log"; then
+              printf 'passed %s\n' "$case_id" | tee -a "$receipt"
+            else
+              printf 'failed %s\n' "$case_id" | tee -a "$receipt"
+            fi
+          }
+          cases=(
+            background_jobs::source::tests::finite_quota_held_scanner_preserves_active_budget_after_verified_stop
+            decode_facts::tests::a_replaced_probe_cannot_reuse_cached_facts
+            decode_facts::tests::flagged_source_runs_idet_on_the_same_descriptor_before_releasing_its_offset_lane
+            decode_facts::tests::persistent_bootstrap_eintr_expires_and_reclaims_supervisor_ownership
+            decode_facts::tests::production_bootstrap_eintr_retries_share_the_absolute_deadline
+            decode_facts::tests::production_probe_executes_sealed_bytes_and_collects_bound_json
+            decode_facts::tests::source_verification_keeps_decoder_refinement_failures_separate
+            http::shared_source_playback::direct::tests::sharing_source_direct_symlink_or_resized_file_refuses
+          )
+          for i in "${!cases[@]}"; do
+            if [[ "${cases[$i]}" == process::* ]]; then
+                run_exact "${cases[$i]}" "target/queue-1815-brix-diagnostic/daemon-$i.log" -p plurx-core --features hiqlite-store --lib
+            else
+            run_exact "${cases[$i]}" "target/queue-1815-brix-diagnostic/daemon-$i.log" -p plurxd --features plurx-core/hiqlite-store --bin plurxd
+            fi
+          done
+          test "$(grep -c '^passed ' "$receipt")" = 8
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
+        if: always()
+        with:
+          name: queue-1815-brix-replay
+          path: target/queue-1815-brix-diagnostic
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
