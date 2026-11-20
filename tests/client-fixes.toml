@@ -8879,3 +8879,12 @@ source = "clients/apple/Sources/SharedLibrariesView.swift"
 source_anchor = "private func restorePlaybackFocus()"
 test = "clients/apple/UITests/TVSharedPlaybackNavigationTests.swift"
 test_anchor = "func testSharedPlaybackRevealQualityReportAndBackRetainSession() throws"
+
+# Normal start and out-of-range seek advertise the same MPV consumer.
+[[fixes]]
+id = "linux-player.mpv-transport-on-create-and-seek"
+commits = ["4bb99be0aa84605373b25402cfd18e4193a4c6b5"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = '"transport": "mpv"'
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_a_film_seek_outside_the_stream_recreates_the_session_there(self):"
