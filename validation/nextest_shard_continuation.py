@@ -23,6 +23,8 @@ from validation import rust_units as units
 POLICY = 'workspace-nextest-shards-v1'
 COMPATIBILITY = 'linux-x64-nextest-0.9.151-isolated-two-8m-v1'
 NEXTEST_SHA256 = '1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4'
+IMAGE_DIGEST = '6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d'
+FFMPEG_VERSION = '8.1.3-Jellyfin'
 TEST_INPUTS = {
     'crates/plurxd/src/http/applied_route_inventory.rs',
     'crates/plurxd/src/http/stream/tests.rs',
@@ -50,6 +52,20 @@ def strict_outcomes(raw):
             result[identity] = 'PASS' if status in {'PASS', 'LEAK'} else 'FAIL'
     r.require(result, 'No original nextest outcomes')
     return result
+
+
+def environment_witness(raw, *, archive=False):
+    text = raw.decode('utf-8', 'strict')
+    lines = re.sub(r'^\d{4}-\d\d-\d\dT[0-9:.]+Z ', '', text, flags=re.M).splitlines()
+    r.require('@sha256:' + IMAGE_DIGEST in text and 'cargo-nextest 0.9.151 ' in text,
+              'Original nextest image or executable witness differs')
+    if archive:
+        r.require(all(value in lines for value in ('release: 1.97.1',
+                  'commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452',
+                  'host: x86_64-unknown-linux-gnu')), 'Original compiler witness differs')
+    else:
+        r.require('expected major=8 resolved=ffmpeg version ' + FFMPEG_VERSION + ' ' in text,
+                  'Original FFmpeg runtime witness differs')
 
 
 class ForgeView:
@@ -171,6 +187,7 @@ def authenticate(api, record, binding, candidate, repository):
             r.require(job['run_id'] == run_id and job['repo_id'] == repository and job['attempt'] == 1,
                       'Original shard execution identity differs')
             if job['id'] not in logs:
+                environment_witness(auth.log(job['id']).encode())
                 rows = strict_outcomes(auth.log(job['id']).encode())
                 r.require(not set(rows) & set(outcomes), 'Body executed in multiple original shards')
                 outcomes.update(rows)
@@ -215,6 +232,7 @@ def authenticate(api, record, binding, candidate, repository):
     r.require(complete_shard_census(plan, shards, logged_by_index) == outcomes,
               'Original complete shard census differs from status rows')
     archive_job = auth.job(run_id, units.JOB_ARCHIVE, {'success'}, 'rust_units_archive')
+    environment_witness(auth.log(archive_job['id']).encode(), archive=True)
     r.require(f"Artifact {plan_meta['name']} has been successfully uploaded!" in auth.log(archive_job['id']),
               'Original archive job did not publish the selected plan')
     universe = {test for row in plan['crates'].values() for test in row['remaining'] + row['serial']}
@@ -329,6 +347,9 @@ def execute(proof):
               'Unexpected nextest compiler environment')
     r.require(not subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no']),
               'Nextest checkout contains changed tracked sources')
+    ffmpeg = os.environ.get('PLURX_FFMPEG', 'ffmpeg')
+    r.require(subprocess.check_output([ffmpeg, '-version'], text=True).splitlines()[0].startswith(
+              'ffmpeg version ' + FFMPEG_VERSION + ' '), 'Current FFmpeg runtime witness differs')
     compiler = subprocess.check_output(['rustc', '-vV'], text=True).splitlines()
     r.require(all(line in compiler for line in ('release: 1.97.1',
               'commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452',

@@ -168,3 +168,17 @@ class NextestShardContinuationTests(unittest.TestCase):
         del listing['rust-suites']['two']['testcases']['same']['filter-match']
         with self.assertRaises(r.ReceiptError):
             proof.selected_listing_ids(listing)
+
+    def test_actual_compiler_image_nextest_and_ffmpeg_witnesses_are_required(self):
+        common = ('image=registry/ci@sha256:' + proof.IMAGE_DIGEST + '\ncargo-nextest 0.9.151 (build)\n')
+        compiler = ('release: 1.97.1\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\n'
+                    'host: x86_64-unknown-linux-gnu\n')
+        probe = 'expected major=8 resolved=ffmpeg version ' + proof.FFMPEG_VERSION + ' Copyright\n'
+        proof.environment_witness((common + compiler).encode(), archive=True)
+        proof.environment_witness((common + probe).encode())
+        for raw, archive in ((compiler, True), (common, True), (common, False),
+                             (common.replace('0.9.151', '0.9.152') + probe, False),
+                             (common + compiler.replace('1.97.1', '1.98.0'), True),
+                             (common + probe.replace(proof.FFMPEG_VERSION, '9.0'), False)):
+            with self.subTest(raw=raw), self.assertRaises(r.ReceiptError):
+                proof.environment_witness(raw.encode(), archive=archive)
