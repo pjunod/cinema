@@ -78,8 +78,11 @@ from the manifest. It binds the interpreter, selected standard-library files,
 installed distribution payloads (including native package libraries, model
 parameters and calibration assets), versions and virtual-environment config.
 A venv's Python symlink is permitted: both its invocation and resolved target
-are pinned. Bytecode, standard-library GUI/tests and transitive OS/framework
-libraries are outside this file closure. A pin records reviewed local bytes;
+are pinned. Installed bytecode is bypassed using a fresh private empty Python cache prefix
+and `-B` for both pin capture and prediction. Actual imported model/torch/numpy
+source files and every resolved model calibration asset must belong to the pin.
+Standard-library GUI/tests and transitive OS/framework libraries are outside
+this file closure. A pin records reviewed local bytes;
 it is neither a signature nor proof that those bytes were originally trusted.
 Changes require a deliberately captured new pin, not automatic acceptance.
 
@@ -119,7 +122,8 @@ python3 scripts/codec-hdr-score score-perceptual \
   --output /owned/new-perceptual-report
 ```
 
-**Additional admission:** two to 600 frames, decoded left-sited chroma, and
+**Additional admission:** two to 600 frames, decoded left-sited chroma,
+explicit 1:1 sample aspect ratio, no nonidentity display matrix/rotation, and
 strictly regular integer-PTS/time-base grids at 1..120 frames/s. Equivalent
 rational time bases are accepted; 24000/1001, 30000/1001 and 60000/1001 remain
 fractional rates. VFR and irregular mux-quantized clocks are explicitly refused,
@@ -132,7 +136,10 @@ this command.
 FFmpeg then explicitly converts limited-range, left-sited BT.2020 NCL/PQ to
 frame-major planar G,B,R float32 little endian, retaining PQ encoding and
 using Lanczos chroma reconstruction without scaling, tone mapping or dither.
-`showinfo` associates every export with the admitted rational source PTS.
+Autorotation is disabled. Named `showinfo` stages before and after conversion
+prove every frame's rational PTS, ordinal, dimensions, square aspect and pixel
+format, preventing an equal-byte-size rotated raster from passing as the
+original geometry.
 Byte lengths, whole-file and per-frame hashes bind the exported frames. The
 CPU model receives reordered R,G,B frames; each component is clamped to
 [0,1] before the declared display model. The receipt records pre-clamp ranges
@@ -143,8 +150,13 @@ read. Model `N_frames`, finite features and finite JOD are required. Temporal
 resampling is disabled. CPU execution uses two intra-op threads and one
 inter-op thread, with no device fallback. Each fresh subprocess has a
 300-second wall/CPU deadline. Combined float exports are limited to 16 GiB;
-choose a shorter window when this or processing time is exceeded. Existing
-code-domain subprocess allowances are unchanged.
+choose a shorter window when this or processing time is exceeded. A separate
+preflight caps the model's dominant test/reference temporal RGB buffers at
+512 MiB using `2 × 3 × (2 × ceil(fps/8) + 1) × width × height × 4` bytes.
+This deliberately refuses large rasters even with few frames; it is not a
+total resident-memory guarantee because feature pyramids, package/runtime
+state and other allocations remain additional. Existing code-domain
+subprocess allowances are unchanged.
 
 **How to read it:** `report.json` and stdout retain the ordinary metrics plus
 `hdr_perceptual_model`, display/runtime/worker identities, exact cadence,
@@ -155,8 +167,10 @@ grading target, physical output acceptance or an automatic encoder decision.
 Logs, request and float exports remain in the new output directory for audit;
 a failure retains its partial evidence and must not be retried into that same
 directory. Runtime/display/source/tool identities are checked again after
-prediction. Network connections are refused by the CPU worker; local package
-assets and the supplied decoded frames are the only intended model inputs.
+prediction. The CPU worker blocks ordinary Python socket `connect` calls and
+sets offline dependency options; it provides no OS network sandbox. The
+standard model uses local pinned calibration assets and supplied decoded
+frames, without a download step.
 
 Authored regression coverage is in
 [`test_codec_hdr_cvvdp.py`](../../tests/operations/test_codec_hdr_cvvdp.py).

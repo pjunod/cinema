@@ -23,6 +23,7 @@ class Refusal(ValueError):
 
 MAX_RAW_BYTES = 16 * 1024**3  # Combined reference and test exports.
 DEADLINE = 300
+TEMPORAL_BUFFER_LIMIT = 512 * 1024**2
 DISPLAY_FIELDS = {"schema", "colorspace", "resolution", "diagonal_size_inches",
                   "viewing_distance_meters", "peak_luminance_cd_m2", "contrast",
                   "ambient_lux", "reflectivity", "exposure"}
@@ -48,12 +49,14 @@ def read_json(path, expected=None):
     path = Path(path).absolute()
     if path.is_symlink() or not path.is_file() or any(p.is_symlink() for p in path.parents):
         raise Refusal("a regular local JSON file without symlinked parents is required")
-    if path.stat().st_size > 32 * 1024**2:
+    with path.open("rb") as stream:
+        payload = stream.read(32 * 1024**2 + 1)
+    if len(payload) > 32 * 1024**2:
         raise Refusal("JSON exceeds its bounded allowance")
-    digest = sha256(path)
+    digest = hashlib.sha256(payload).hexdigest()
     if expected is not None and digest != expected:
         raise Refusal("JSON SHA256 differs from its externally pinned identity")
-    return json.loads(path.read_text()), digest
+    return json.loads(payload), digest
 
 
 def validate_display(display, width=None, height=None):
@@ -80,9 +83,9 @@ def validate_display(display, width=None, height=None):
 
 def inspect_clock(namespace, ffprobe, path, duration):
     entries = ("stream=width,height,pix_fmt,color_range,color_space,color_transfer,color_primaries,"
-               "chroma_location,time_base,side_data_list:frame=best_effort_timestamp,"
+               "chroma_location,time_base,sample_aspect_ratio,side_data_list:stream_tags=rotate,rotation:frame=best_effort_timestamp,"
                "best_effort_timestamp_time,width,height,pix_fmt,color_range,color_space,"
-               "color_transfer,color_primaries,chroma_location,side_data_list")
+               "color_transfer,color_primaries,chroma_location,sample_aspect_ratio,side_data_list:frame_tags=rotate,rotation")
     payload = json.loads(namespace["run"]([
         str(ffprobe), "-v", "error", "-protocol_whitelist", "file,pipe", "-select_streams", "v:0",
         "-read_intervals", f"0%+{duration}", "-show_streams", "-show_frames", "-show_entries",
@@ -93,10 +96,44 @@ def inspect_clock(namespace, ffprobe, path, duration):
     return streams[0], frames
 
 
+def validate_raster(record):
+    if record.get("sample_aspect_ratio") != "1:1":
+        raise Refusal("perceptual conversion requires explicitly square 1:1 sample aspect ratio")
+    tags = record.get("tags", {})
+    if not isinstance(tags, dict):
+        raise Refusal("invalid raster transform tags")
+    for source in [tags, record, *record.get("side_data_list", [])]:
+        for key in ("rotate", "rotation"):
+            if key in source:
+                try:
+                    identity = Fraction(str(source[key])) % 360 == 0
+                except (ValueError, ZeroDivisionError):
+                    identity = False
+                if not identity:
+                    raise Refusal("rotated display metadata is unsupported by the coded-raster policy")
+        if source.get("side_data_type", "").lower() == "display matrix":
+            matrix = source.get("displaymatrix")
+            if not isinstance(matrix, str):
+                raise Refusal("an explicit identity display matrix is required")
+            values = []
+            for row in matrix.strip().splitlines():
+                if ":" not in row:
+                    raise Refusal("malformed display matrix")
+                fields = row.split(":", 1)[1].split()
+                try:
+                    values.extend(int(value) for value in fields)
+                except ValueError:
+                    raise Refusal("malformed display matrix") from None
+            if values != [65536, 0, 0, 0, 65536, 0, 0, 0, 1073741824]:
+                raise Refusal("nonidentity display matrix is unsupported by the coded-raster policy")
+
+
 def validate_clocks(namespace, reference, distorted):
     pairing = namespace["validate_pair"](reference, distorted)
     grids = []
     for stream, frames in (reference, distorted):
+        for record in [stream, *frames]:
+            validate_raster(record)
         if stream.get("chroma_location") not in (None, "left") or any(f.get("chroma_location") != "left" for f in frames):
             raise Refusal("perceptual conversion requires decoded left-sited chroma")
         try:
@@ -119,6 +156,17 @@ def validate_clocks(namespace, reference, distorted):
     pairing["frames_per_second"] = str(1 / (grids[0][1] - grids[0][0]))
     pairing["chroma_location"] = "left"
     return pairing
+
+
+def memory_plan(pairing):
+    # Pinned ordinary CVVDP allocates test/reference temporal RGB buffers with
+    # filter_len = 2*ceil(0.25*fps/2)+1. This is one dominant allocation only.
+    filter_len = 2 * math.ceil(Fraction(pairing["frames_per_second"]) / 8) + 1
+    charged = 2 * 3 * filter_len * pairing["width"] * pairing["height"] * 4
+    if charged > TEMPORAL_BUFFER_LIMIT:
+        raise Refusal("dominant model temporal buffers exceed 512 MiB; choose a smaller source raster")
+    return {"dominant_temporal_buffers_bytes": charged, "limit_bytes": TEMPORAL_BUFFER_LIMIT,
+            "filter_len": filter_len, "scope": "Conservative ordinary-CVVDP temporal RGB buffer preflight, not a total resident-memory guarantee."}
 
 
 def raw_size(pairing):
@@ -149,18 +197,26 @@ def frame_hashes(path, pairing):
 
 
 def validate_export_log(text, pairing):
-    bases = re.findall(r"config in time_base:\s*(\d+/\d+)", text)
-    rows = re.findall(r"Parsed_showinfo_\d+[^\n]*?n:\s*(\d+)\s+pts:\s*(-?\d+)\s", text)
-    if len(bases) != 1 or len(rows) != pairing["frames"]:
-        raise Refusal("RGB export lacks complete source PTS attribution")
-    base = Fraction(bases[0])
-    if base <= 0 or [int(n) for n, _ in rows] != list(range(pairing["frames"])):
-        raise Refusal("RGB export frame ordinals differ")
-    grid = [str(int(pts) * base) for _, pts in rows]
-    if grid != pairing["exact_timestamps"]:
-        raise Refusal("RGB export presentation grid differs from admitted source")
-    return {"time_base": str(base), "source_pts": [int(pts) for _, pts in rows],
-            "exact_timestamps": grid}
+    result = {}
+    for label, pixel_format in (("source", "yuv420p10le"), ("rgb", "gbrpf32le")):
+        prefix = r"showinfo@plurx_" + label
+        bases = re.findall(prefix + r"[^\n]*config in time_base:\s*(\d+/\d+)", text)
+        rows = re.findall(prefix + r"[^\n]*?\bn:\s*(\d+)\s+pts:\s*(-?\d+)\s[^\n]*?fmt:(\S+)[^\n]*?\bsar:(\S+)[^\n]*?\bs:(\d+)x(\d+)", text)
+        if len(bases) != 1 or len(rows) != pairing["frames"]:
+            raise Refusal("RGB export lacks complete source/output frame attribution")
+        base = Fraction(bases[0])
+        if base <= 0 or [int(row[0]) for row in rows] != list(range(pairing["frames"])):
+            raise Refusal("RGB export frame ordinals differ")
+        grid = [str(int(row[1]) * base) for row in rows]
+        if grid != pairing["exact_timestamps"]:
+            raise Refusal("RGB export presentation grid differs from admitted source")
+        if any(fmt != pixel_format or sar != "1/1" or [int(w), int(h)] != [pairing["width"], pairing["height"]]
+               for _, _, fmt, sar, w, h in rows):
+            raise Refusal("RGB export source/output geometry or pixel interpretation differs")
+        result[label] = {"time_base": str(base), "source_pts": [int(row[1]) for row in rows],
+                         "exact_timestamps": grid, "width": pairing["width"], "height": pairing["height"],
+                         "pixel_format": pixel_format, "sample_aspect_ratio": "1:1"}
+    return result
 
 
 def validate_result(result, frames):
@@ -172,6 +228,19 @@ def validate_result(result, frames):
         raise Refusal("perceptual model did not consume every admitted frame")
     if result.get("features_finite") is not True or not result.get("model_info") or not result.get("model_version"):
         raise Refusal("missing model identity or finite-feature evidence")
+    return result
+
+
+def assert_pinned_paths(manifest, paths):
+    records = {item["resolved"]: item for item in manifest["files"]}
+    result = []
+    for name, path in paths.items():
+        path = Path(path)
+        resolved = str(path.resolve(strict=True))
+        item = records.get(resolved)
+        if item is None or not path.is_file() or sha256(path) != item["sha256"]:
+            raise Refusal("actually loaded module or calibration asset lies outside its runtime pin: " + name)
+        result.append({"name": name, "resolved": resolved, "sha256": item["sha256"]})
     return result
 
 
@@ -214,11 +283,14 @@ def runtime_snapshot():
             raise Refusal("runtime closure exceeds 100000 files or 8 GiB")
         records.append({"path": str(path), "resolved": str(path.resolve(strict=True)),
                         "bytes": path.stat().st_size, "sha256": sha256(path)})
-    return {"schema": 1, "python_invocation": str(Path(sys.executable).absolute()),
+    snapshot = {"schema": 1, "python_invocation": str(Path(sys.executable).absolute()),
             "python_version": sys.version, "prefix": sys.prefix,
             "pycvvdp_module": str(Path(pycvvdp.__file__).absolute()),
             "versions": versions, "torch_version": torch.__version__, "numpy_version": numpy.__version__,
             "files": records, "scope": "Interpreter, selected stdlib files and installed distribution payloads; excludes bytecode, stdlib GUI/tests and transitive operating-system/framework dependencies."}
+    snapshot["imported_modules"] = assert_pinned_paths(snapshot, {
+        "pycvvdp": pycvvdp.__file__, "torch": torch.__file__, "numpy": numpy.__file__})
+    return snapshot
 
 
 def verify_runtime(manifest):
@@ -270,12 +342,21 @@ def new_directory(path):
     return path
 
 
+def isolated_python(python, directory, label, *arguments):
+    cache = Path(directory) / ("pycache-" + label)
+    cache.mkdir(mode=0o700)
+    # -B prevents writes, but ordinarily still reads installed .pyc files.
+    # A fresh private prefix ensures this invocation reads source instead.
+    return [python, "-I", "-B", "-X", "pycache_prefix=" + str(cache),
+            str(Path(__file__).absolute()), *arguments]
+
+
 def pin_runtime(python, destination):
     python = Path(python).absolute()
     if not python.is_file():
         raise Refusal("a preinstalled local Python executable is required")
     out = new_directory(destination)
-    execute([python, "-I", "-B", str(Path(__file__).absolute()), "--describe-runtime"], out, "runtime-pin")
+    execute(isolated_python(python, out, "pin", "--describe-runtime"), out, "runtime-pin")
     manifest, _ = read_json(out / "runtime-pin.stdout")
     verify_runtime(manifest)
     path = out / "runtime.json"
@@ -298,6 +379,7 @@ def score_perceptual(namespace, args):
                               inspect_clock(namespace, ffprobe, distorted, args.duration))
     validate_display(display, pairing["width"], pairing["height"])
     expected = raw_size(pairing)
+    memory = memory_plan(pairing)
     out = new_directory(args.output)
     # The incumbent scorer and all of its metric/census/source checks remain in force.
     result = namespace["score"](reference, distorted, reference_hash, distorted_hash,
@@ -306,9 +388,9 @@ def score_perceptual(namespace, args):
     raw = {}
     for label, source in (("reference", reference), ("test", distorted)):
         path = out / (label + ".gbrpf32le")
-        graph = f"trim=duration={args.duration},showinfo," + CONVERSION
+        graph = f"trim=duration={args.duration},showinfo@plurx_source," + CONVERSION + ",showinfo@plurx_rgb"
         command = [ffmpeg, "-hide_banner", "-v", "info", "-nostdin", "-copyts", "-threads", "1",
-                   "-protocol_whitelist", "file,pipe", "-i", source, "-map", "0:v:0", "-an", "-sn", "-dn",
+                   "-protocol_whitelist", "file,pipe", "-noautorotate", "-i", source, "-map", "0:v:0", "-an", "-sn", "-dn",
                    "-filter_threads", "1", "-vf", graph, "-frames:v", str(pairing["frames"]),
                    "-fps_mode", "passthrough", "-c:v", "rawvideo", "-threads", "1", "-f", "rawvideo", path]
         commands.append(execute(command, out, "export-" + label, max(expected, 64 * 1024**2)))
@@ -318,7 +400,7 @@ def score_perceptual(namespace, args):
     request = {"schema": 1, "runtime": manifest, "display": display, "pairing": pairing, "raw": raw}
     request_path = out / "request.json"
     request_path.write_text(json.dumps(request, indent=2, allow_nan=False) + "\n")
-    commands.append(execute([python, "-I", "-B", str(Path(__file__).absolute()), "--worker", request_path], out, "cvvdp"))
+    commands.append(execute(isolated_python(python, out, "worker", "--worker", request_path), out, "cvvdp"))
     perceptual, _ = read_json(out / "cvvdp.stdout")
     validate_result(perceptual, pairing["frames"])
     verify_runtime(manifest)
@@ -335,7 +417,7 @@ def score_perceptual(namespace, args):
         "pairing": pairing, "conversion": CONVERSION, "clipping_policy": "Float RGB is retained unclipped; model input clamps each PQ RGB component to [0,1], then applies the explicit display model.",
         "raw": raw, "commands": commands, "prediction": perceptual,
         "interpretation": "Display-dependent modeled difference in JOD; identity is normally 10. Not human preference, physical HDR acceptance or an automatic encoder decision.",
-        "runtime_scope": manifest["scope"]}
+        "runtime_scope": manifest["scope"], "memory_preflight": memory}
     report = out / "report.json"
     report.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
     return result
@@ -363,8 +445,18 @@ def worker(request_path):
     torch.set_num_threads(2)
     torch.set_num_interop_threads(1)
     torch.use_deterministic_algorithms(True)
+    loaded_modules = assert_pinned_paths(manifest, {
+        "pycvvdp": pycvvdp.__file__, "torch": torch.__file__, "numpy": np.__file__})
+    resolved_assets = []
+    original_find = pycvvdp.utils.config_files.find
+    def pinned_find(cls, name, config_paths):
+        path = original_find(name, config_paths)
+        resolved_assets.extend(assert_pinned_paths(manifest, {name: path}))
+        return path
+    pycvvdp.utils.config_files.find = classmethod(pinned_find)
     d = validate_display(request["display"])
     p = request["pairing"]
+    memory_plan(p)
     validate_display(d, p["width"], p["height"])
     dm = vvdp_display_photo_eotf(Y_peak=d["peak_luminance_cd_m2"], contrast=d["contrast"], source_colorspace="BT.2020-PQ",
         EOTF="PQ", E_ambient=d["ambient_lux"], k_refl=d["reflectivity"], exposure=d["exposure"], name="plurx-explicit-pq")
@@ -415,7 +507,8 @@ def worker(request_path):
         "frames_read_reference": sorted(source.seen["reference"]), "frames_read_test": sorted(source.seen["test"]),
         "features_finite": bool(np.isfinite(stats["Q_per_ch"]).all()), "feature_shape": list(stats["Q_per_ch"].shape),
         "model_version": model.version, "model_info": model.get_info_string(),
-        "parameters_sha256": sha256(model.parameters_file), "ranges_before_model_clamp": ranges,
+        "parameters_sha256": sha256(model.parameters_file), "resolved_assets": resolved_assets,
+        "loaded_modules": loaded_modules, "ranges_before_model_clamp": ranges,
         "wall_seconds": time.monotonic() - start}
     validate_result(result, p["frames"])
     if runtime_snapshot() != manifest:
