@@ -622,7 +622,9 @@ pub(super) async fn request_fel_head<T: QueueSql>(
     store: &T,
     input: FelHeadRequest,
 ) -> Result<bool, StoreError> {
-    use super::background_jobs::{enqueue_body, EnqueueJob, JobPayload, JobRequest, ENQUEUE_SQL};
+    use super::background_jobs::{
+        enqueue_body, BackgroundJobStore, EnqueueJob, JobPayload, JobRequest, ENQUEUE_SQL,
+    };
     if input.file_id <= 0
         || input.node.is_empty()
         || input.node.len() > 128
