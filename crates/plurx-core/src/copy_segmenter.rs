@@ -263,8 +263,19 @@ pub async fn run_copy_pipe<R: AsyncRead + Unpin, S: CopyPublicationSink>(
     limits: Limits,
     source: &MediaFile,
     video: CopyVideoOptions,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
 ) -> Outcome {
-    run_copy_pipe_with(src, sink, session_id, limits, source, video, None).await
+    run_copy_pipe_with(
+        src,
+        sink,
+        session_id,
+        limits,
+        source,
+        video,
+        None,
+        cancellation,
+    )
+    .await
 }
 
 /// The admitted copy graph moves this exact parser reservation into the
@@ -279,9 +290,23 @@ pub async fn run_copy_pipe_prepared<R: AsyncRead + Unpin, S: CopyPublicationSink
     video: CopyVideoOptions,
     parser: PreparedCopyParser,
 ) -> Outcome {
-    run_copy_pipe_with(src, sink, session_id, limits, source, video, Some(parser)).await
+    run_copy_pipe_with(
+        src,
+        sink,
+        session_id,
+        limits,
+        source,
+        video,
+        Some(parser),
+        None,
+    )
+    .await
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the original copy plan carries both parser and cancellation custody"
+)]
 async fn run_copy_pipe_with<R: AsyncRead + Unpin, S: CopyPublicationSink>(
     mut src: R,
     sink: &mut S,
@@ -290,6 +315,7 @@ async fn run_copy_pipe_with<R: AsyncRead + Unpin, S: CopyPublicationSink>(
     source: &MediaFile,
     video: CopyVideoOptions,
     parser: Option<PreparedCopyParser>,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
 ) -> Outcome {
     let strip_dolby_vision_record = video.leaves_a_stale_dolby_vision_record(source);
     let retain_hevc_parameter_sets = video.retains_hevc_parameter_sets();
@@ -316,6 +342,13 @@ async fn run_copy_pipe_with<R: AsyncRead + Unpin, S: CopyPublicationSink>(
     let mut warned_memory = false;
 
     loop {
+        if cancellation.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+            return Outcome::Cancelled(
+                segmenter
+                    .as_ref()
+                    .map_or_else(SegmentCounts::default, Segmenter::counts),
+            );
+        }
         let n = match src.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => n,
@@ -343,6 +376,13 @@ async fn run_copy_pipe_with<R: AsyncRead + Unpin, S: CopyPublicationSink>(
         }
 
         loop {
+            if cancellation.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+                return Outcome::Cancelled(
+                    segmenter
+                        .as_ref()
+                        .map_or_else(SegmentCounts::default, Segmenter::counts),
+                );
+            }
             let unit = match reader.next_unit() {
                 Ok(Some(unit)) => unit,
                 Ok(None) => break,

@@ -690,6 +690,10 @@ pub struct TranscodeManager {
     pub(crate) source_http_starts: crate::http::shared_source_playback::SourceStartRegistry,
     store: Arc<dyn Store>,
     work_dir: PathBuf,
+    #[cfg(target_os = "linux")]
+    native_fel_head: Mutex<Option<Arc<manager_native_fel::NativeFelHead>>>,
+    #[cfg(target_os = "linux")]
+    native_fel_target: std::sync::Mutex<Option<manager_native_fel::FelHeadTarget>>,
     /// The VOD presentation's serving runtime (plan §2). Sessions created
     /// under `presentation:"vod"` live here rather than in `sessions`; every
     /// serving entry point dispatches to it first and falls through when the
@@ -1225,6 +1229,9 @@ mod manager_create;
 mod manager_describe;
 #[path = "transcode/manager/maintenance.rs"]
 mod manager_maintenance;
+#[cfg(target_os = "linux")]
+#[path = "transcode/manager/native_fel.rs"]
+mod manager_native_fel;
 #[path = "transcode/manager/plan.rs"]
 mod manager_plan;
 #[path = "transcode/manager/produce.rs"]

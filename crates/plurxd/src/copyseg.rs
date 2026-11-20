@@ -205,6 +205,69 @@ pub(crate) struct NativeSplitSegment {
     pub(crate) first_source_frame: u64,
 }
 
+/// A complete replacement of one ordinary video extent. Retain the typed
+/// window proof until a live publication can bind it to its own incarnation.
+#[cfg(target_os = "linux")]
+pub(crate) struct NativeFelSegment {
+    bytes: Vec<u8>,
+    proof: NativeFelSegmentProof,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) struct NativeFelSegmentProof {
+    ordinary_video: [u8; 32],
+    shape: plurx_core::transcode::dv_processing::DvDigest,
+    receipts: Vec<plurx_core::transcode::dv_processing::DvProcessingReceipt>,
+}
+
+#[cfg(target_os = "linux")]
+impl NativeFelSegment {
+    pub(crate) fn into_parts(self) -> (Vec<u8>, NativeFelSegmentProof) {
+        (self.bytes, self.proof)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl NativeFelSegmentProof {
+    pub(crate) fn matches_ordinary(&self, actual: [u8; 32]) -> bool {
+        self.ordinary_video == actual
+    }
+
+    pub(crate) fn report_for_publication(
+        &self,
+        bytes: &[u8],
+        plan: &plurx_core::transcode::dv_processing::DvProcessingPlan,
+        incarnation: &str,
+    ) -> Result<plurx_core::transcode::dv_processing::DvEffectiveProcessingReport, String> {
+        use plurx_core::transcode::dv_processing::{DvDigest, DvProductionRegistry};
+        use sha2::Digest;
+
+        if hex::encode(sha2::Sha256::digest(bytes)) != self.shape.as_str() {
+            return Err("packaged FEL bytes changed before publication".into());
+        }
+        let shape: &DvDigest = &self.shape;
+        let mut reports = self.receipts.iter().cloned().map(|mut receipt| {
+            receipt
+                .bind_publication(incarnation, shape.clone())
+                .map_err(|error| error.to_string())?;
+            receipt
+                .effective_report(&DvProductionRegistry, plan, incarnation, shape)
+                .map_err(|error| error.to_string())?
+                .filter(|report| report.profile81_reconstructed() && report.fel_contributed())
+                .ok_or_else(|| "native splice did not produce a FEL delivery report".to_owned())
+        });
+        let report = reports
+            .next()
+            .ok_or("native splice produced no windows")??;
+        for other in reports {
+            if other? != report {
+                return Err("native splice windows disagree on effective processing".into());
+            }
+        }
+        Ok(report)
+    }
+}
+
 impl NativeSplitSegment {
     /// Plan private encode windows on the source frame grid. The caller has
     /// a continuous film-head copy and verifies every observed picture
@@ -252,21 +315,33 @@ impl NativeSplitSegment {
     pub(crate) fn enhanced_video(
         &self,
         author: &NativeSplitAuthor,
-        windows: &[crate::vodencode::dv_runtime::VerifiedWindow],
+        windows: Vec<crate::vodencode::dv_runtime::NativeFelWindow>,
         first_fragment_sequence: u32,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<NativeFelSegment, String> {
         let ordinary_track = author
             .ordinary_video_init()
             .video()
             .ok_or("ordinary video missing")?;
-        crate::vodencode::dv_runtime::package_fel_segment(
-            windows,
+        let bytes = crate::vodencode::dv_runtime::package_fel_segment(
+            &windows,
             &self.ordinary,
             ordinary_track,
             &self.public_video,
             &author.video,
             first_fragment_sequence,
-        )
+        )?;
+        use plurx_core::transcode::dv_processing::DvDigest;
+        use sha2::Digest;
+        let shape = DvDigest::new(hex::encode(sha2::Sha256::digest(&bytes)))
+            .map_err(|error| error.to_string())?;
+        Ok(NativeFelSegment {
+            bytes,
+            proof: NativeFelSegmentProof {
+                ordinary_video: sha2::Sha256::digest(&self.public_video.bytes).into(),
+                shape,
+                receipts: windows.into_iter().map(|window| window.receipt).collect(),
+            },
+        })
     }
 }
 
@@ -373,6 +448,14 @@ pub(crate) struct NativeSplitInventory {
     reported_presentation: std::sync::atomic::AtomicBool,
     pub(crate) changed: tokio::sync::Notify,
     rendered_fel: std::sync::Mutex<std::collections::BTreeMap<u64, NativeSplitFelReport>>,
+    #[cfg(target_os = "linux")]
+    compare_prepared_head: bool,
+    #[cfg(target_os = "linux")]
+    prepared_head: std::sync::Mutex<PreparedNativeFelHead>,
+    #[cfg(target_os = "linux")]
+    first_snapshot_grace: std::sync::OnceLock<std::time::Instant>,
+    #[cfg(target_os = "linux")]
+    published_head: std::sync::OnceLock<(u64, u64)>,
     segments: std::sync::Mutex<std::collections::BTreeMap<u64, NativeSplitEntry>>,
 }
 
@@ -383,7 +466,7 @@ pub(crate) struct NativeSplitInitIds {
 }
 
 impl NativeSplitInitIds {
-    fn of(author: &NativeSplitAuthor) -> Self {
+    pub(crate) fn of(author: &NativeSplitAuthor) -> Self {
         use sha2::Digest;
         Self {
             video: hex::encode(sha2::Sha256::digest(&author.video.init().bytes)),
@@ -398,6 +481,22 @@ impl NativeSplitInitIds {
             _ => None,
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+enum PreparedNativeFelHead {
+    #[default]
+    Declined,
+    Pending,
+    Ready(u64, Vec<PreparedNativeFelObject>),
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) struct PreparedNativeFelObject {
+    pub(crate) object: String,
+    pub(crate) bytes: i64,
+    pub(crate) report: plurx_core::transcode::dv_processing::DvEffectiveProcessingReport,
 }
 
 struct NativeSplitFelReport {
@@ -417,6 +516,8 @@ pub(crate) struct NativeSplitEntry {
     pub(crate) first_source_frame: u64,
     #[cfg(target_os = "linux")]
     pub(crate) samples: u64,
+    #[cfg(target_os = "linux")]
+    ordinary_video: Option<[u8; 32]>,
 }
 
 impl NativeSplitInventory {
@@ -425,6 +526,112 @@ impl NativeSplitInventory {
             startup_budget,
             ..Self::default()
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn compare_prepared_head(mut self) -> Self {
+        self.compare_prepared_head = true;
+        self.prepared_head = std::sync::Mutex::new(PreparedNativeFelHead::Pending);
+        self
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn observed_video(&self, index: u64, init: &NativeSplitInitIds) -> Option<[u8; 32]> {
+        if self.init_ids.get()?.video != init.video {
+            return None;
+        }
+        self.segments
+            .lock()
+            .expect("split inventory")
+            .get(&index)?
+            .ordinary_video
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn defer_first_snapshot_for_prepared_head(&self, now: std::time::Instant) -> bool {
+        if !matches!(
+            *self.prepared_head.lock().expect("prepared FEL head"),
+            PreparedNativeFelHead::Pending,
+        ) {
+            return false;
+        }
+        // Only a cache hit starts this grace, when ordinary media is already
+        // ready. The normal deadline still owns the start and cannot be reset.
+        let deadline = self
+            .first_snapshot_grace
+            .get_or_init(|| now + std::time::Duration::from_millis(600));
+        now < *deadline
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn decline_prepared_head(&self) {
+        *self.prepared_head.lock().expect("prepared FEL head") = PreparedNativeFelHead::Declined;
+        self.changed.notify_waiters();
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn stage_prepared_head(
+        &self,
+        attempt: u64,
+        objects: Vec<PreparedNativeFelObject>,
+    ) -> Result<(), Vec<PreparedNativeFelObject>> {
+        let mut state = self.prepared_head.lock().expect("prepared FEL head");
+        if !matches!(*state, PreparedNativeFelHead::Pending) || objects.is_empty() {
+            return Err(objects);
+        }
+        *state = PreparedNativeFelHead::Ready(attempt, objects);
+        drop(state);
+        self.changed.notify_waiters();
+        Ok(())
+    }
+
+    /// Called once under the first publication lock after actor acceptance.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn publish_prepared_head(
+        &self,
+        attempt: u64,
+        first: i64,
+        last: i64,
+        incarnation: Option<&str>,
+    ) -> Vec<PreparedNativeFelObject> {
+        let prepared = std::mem::take(&mut *self.prepared_head.lock().expect("prepared FEL head"));
+        let PreparedNativeFelHead::Ready(staged_attempt, staged) = prepared else {
+            return Vec::new();
+        };
+        let Some(incarnation) = incarnation.filter(|_| {
+            staged_attempt == attempt
+                && first == 0
+                && usize::try_from(last).is_ok_and(|last| last < staged.len())
+        }) else {
+            return staged;
+        };
+        let mut entries = self.rendered_fel.lock().expect("split FEL inventory");
+        let last = staged.len() as u64 - 1;
+        if !entries.is_empty() || self.published_head.set((attempt, last)).is_err() {
+            return staged;
+        }
+        entries.extend(staged.into_iter().enumerate().map(|(index, entry)| {
+            (
+                index as u64,
+                NativeSplitFelReport {
+                    bytes: entry.bytes,
+                    attempt,
+                    object: entry.object,
+                    incarnation_id: incarnation.to_owned(),
+                    delivered: false,
+                    report: entry.report,
+                },
+            )
+        }));
+        Vec::new()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn prepared_head_frontier(&self, attempt: u64) -> Option<u64> {
+        self.published_head
+            .get()
+            .filter(|(owner, _)| *owner == attempt)
+            .map(|(_, last)| *last)
     }
 
     #[cfg(test)]
@@ -449,6 +656,8 @@ impl NativeSplitInventory {
                         first_source_frame: 0,
                         #[cfg(target_os = "linux")]
                         samples: 0,
+                        #[cfg(target_os = "linux")]
+                        ordinary_video: None,
                     },
                 )
             }));
@@ -465,6 +674,16 @@ impl NativeSplitInventory {
         } else {
             None
         }
+    }
+
+    pub(crate) fn owns_fel_processing(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self.compare_prepared_head {
+            // A prepared native start has chosen a single media element.
+            // Losing split activation must not start a hidden successor.
+            return true;
+        }
+        self.active_ids().is_some()
     }
 
     pub(crate) fn active_ids(&self) -> Option<&NativeSplitInitIds> {
@@ -971,6 +1190,11 @@ impl SessionDir {
                 first_source_frame: media.first_source_frame,
                 #[cfg(target_os = "linux")]
                 samples: media.ordinary.tracks[0].sample_count() as u64,
+                #[cfg(target_os = "linux")]
+                ordinary_video: inventory.compare_prepared_head.then(|| {
+                    use sha2::Digest;
+                    sha2::Sha256::digest(&media.public_video.bytes).into()
+                }),
             },
         );
         inventory.changed.notify_waiters();
@@ -1165,6 +1389,7 @@ pub(crate) async fn run_observed<R: AsyncRead + Unpin>(
         measurement,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1183,6 +1408,7 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
     >,
     retained: Option<std::sync::Arc<crate::vodserve::retained::RollingCollection>>,
     split_inventory: Option<std::sync::Arc<NativeSplitInventory>>,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
 ) -> Outcome {
     match tokio::fs::metadata(&dir).await {
         Ok(metadata) if metadata.is_dir() => {}
@@ -1211,6 +1437,7 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
         limits,
         source,
         video,
+        cancellation,
     )
     .await
 }
@@ -1262,6 +1489,42 @@ async fn blocking_reserved_write<T: Send + 'static>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prepared_native_fel_keeps_the_single_session_when_split_activation_fails() {
+        let unprepared = super::NativeSplitInventory::with_startup_budget(100);
+        assert!(unprepared.choose(None).is_none());
+        assert!(!unprepared.owns_fel_processing());
+
+        let prepared =
+            super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+        prepared.decline_prepared_head();
+        assert!(prepared.choose(None).is_none());
+        assert!(prepared.owns_fel_processing());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prepared_fel_defers_first_snapshot_once_and_falls_back() {
+        let now = std::time::Instant::now();
+        let ordinary = super::NativeSplitInventory::with_startup_budget(100);
+        assert!(!ordinary.defer_first_snapshot_for_prepared_head(now));
+
+        let warm = super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+        assert!(warm.defer_first_snapshot_for_prepared_head(now));
+        assert!(warm
+            .defer_first_snapshot_for_prepared_head(now + std::time::Duration::from_millis(599)));
+        assert!(!warm
+            .defer_first_snapshot_for_prepared_head(now + std::time::Duration::from_millis(600)));
+        assert!(warm.publish_prepared_head(1, 0, 12, None).is_empty());
+        assert!(!warm.defer_first_snapshot_for_prepared_head(now));
+        assert!(warm.prepared_head_frontier(1).is_none());
+
+        let warm = super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+        warm.decline_prepared_head();
+        assert!(!warm.defer_first_snapshot_for_prepared_head(now));
+    }
+
     use super::*;
     use plurx_core::fmp4::{CutReason, Track, VideoCodec};
     use plurx_core::testfixtures::pipe;

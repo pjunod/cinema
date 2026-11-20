@@ -55,6 +55,29 @@ pub(super) fn producer_request_beyond_frontier(
 ///
 /// `init.mp4` and the playlist are never candidates — neither carries an
 /// EXTINF, so neither appears in the index.
+#[cfg(target_os = "linux")]
+pub(super) fn queue_rejected_native_fel_objects(
+    session: &Session,
+    rejected: Vec<crate::copyseg::PreparedNativeFelObject>,
+) {
+    if rejected.is_empty() {
+        return;
+    }
+    {
+        let mut queue = session
+            .retention_cleanup_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for entry in rejected {
+            session
+                .retention_garbage_bytes
+                .fetch_add(entry.bytes, AcqRel);
+            queue.push((session.dir.join(entry.object), entry.bytes));
+        }
+    }
+    ensure_retention_cleanup(session);
+}
+
 fn ensure_retention_cleanup(session: &Session) {
     let should_start = {
         let queue = session

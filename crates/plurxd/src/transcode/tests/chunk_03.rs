@@ -1091,6 +1091,43 @@
         assert_eq!(session.publication.lock().await.served.as_ref().expect("served JS snapshot").end_ms, 21_897);
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn pending_fel_head_only_defers_the_first_playable_snapshot() {
+        for decline_before_deadline in [false, true] {
+            let directory = crate::test_tempdir().expect("native FEL publication");
+            let mut session = test_session(directory.path().to_path_buf());
+            let split = Arc::new(crate::copyseg::NativeSplitInventory::with_startup_budget(100)
+                .compare_prepared_head());
+            session.native_split = Some(split.clone());
+            session.publication.lock().await.bind_startup_transport(Some("native"));
+            let playlist = rolling_playlist(&[8.0; 7], false)
+                .replace("#EXTM3U\n", "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MAP:URI=\"init.mp4\"\n")
+                .replace(".ts\n", ".m4s\n");
+            tokio::fs::write(directory.path().join("index.m3u8"), playlist)
+                .await.expect("ordinary video inventory");
+
+            let now = Instant::now();
+            session.publication_cycle_at("pending-fel-head", now)
+                .await.expect("ordinary snapshot is otherwise ready");
+            assert!(session.publication.lock().await.served.is_none());
+
+            let next = if decline_before_deadline {
+                split.decline_prepared_head();
+                now + Duration::from_millis(100)
+            } else {
+                now + Duration::from_millis(601)
+            };
+            session.publication_cycle_at("pending-fel-head", next)
+                .await.expect("ordinary startup can proceed");
+            let clock = session.publication.lock().await;
+            let published = clock.served.as_ref().expect("ordinary first snapshot");
+            assert_eq!(published.first_segment, 0);
+            assert!(published.duration_ms >= ROLLING_INITIAL_RUNWAY_MS);
+            assert!(split.prepared_head_frontier(published.producer_attempt).is_none());
+        }
+    }
+
     #[tokio::test]
     async fn native_bootstrap_finishes_short_titles_without_waiting_for_a_live_window() {
         for durations in [&[1.25][..], &[4.380, 8.758, 8.759][..]] {

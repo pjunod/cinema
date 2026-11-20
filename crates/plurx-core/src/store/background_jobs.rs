@@ -230,8 +230,20 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
     WHEN json_extract(body,'$.payload.kind')='dv_title_scan' AND NOT EXISTS(
       SELECT 1 FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
       WHERE d.revision=json_extract(body,'$.payload.probe_revision') AND d.file_id=json_extract(body,'$.payload.file_id')
-      AND d.scanner_digest=json_extract(body,'$.payload.scanner_digest') AND d.terminal=0
-      AND f.size=json_extract(body,'$.payload.source_size') AND f.mtime=json_extract(body,'$.payload.source_mtime')) THEN 'no_demand'
+      AND d.scanner_digest=json_extract(body,'$.payload.scanner_digest')
+      AND f.size=json_extract(body,'$.payload.source_size') AND f.mtime=json_extract(body,'$.payload.source_mtime')
+      AND CASE
+        WHEN json_type(body,'$.native_fel_head_reopen') IS NULL THEN d.terminal=0
+        ELSE json_extract(body,'$.native_fel_head_reopen')=1 AND d.terminal=1 AND prior_job IS NULL
+          AND json_extract(body,'$.request.scope')='dv-native-fel-head'
+          AND json_extract(body,'$.request.consumer_kind')='native_fel_head'
+          AND f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
+          AND json_extract(f.probe_json,'$.plurx_dv_title_v1.complete')=1
+          AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract(body,'$.request.request_digest')||'.request.identity')=json_extract(body,'$.request.request_digest')
+          AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract(body,'$.request.request_digest')||'.verdict.admitted')=1
+          AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan'
+            AND j.state IN ('queued','running','cancelling') AND json_extract(j.payload_json,'$.file_id')=d.file_id)
+      END) THEN 'no_demand'
     WHEN json_type(body, '$.legacy_key') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM background_job_legacy WHERE legacy_key = json_extract(body, '$.legacy_key')
         AND state = 'awaiting_import'
@@ -555,6 +567,16 @@ macro_rules! claim_kind_demand {
     AND d.file_id=json_extract(background_jobs.payload_json,'$.file_id') AND d.terminal=0
     AND d.scanner_digest=json_extract(background_jobs.payload_json,'$.scanner_digest')
     AND f.size=json_extract(background_jobs.payload_json,'$.source_size') AND f.mtime=json_extract(background_jobs.payload_json,'$.source_mtime')))
+  AND (kind!='dv_title_scan' OR NOT EXISTS (
+      SELECT 1 FROM background_job_waiters w
+      WHERE w.job_id=background_jobs.id AND w.consumer_kind='native_fel_head'
+    ) OR EXISTS (
+      SELECT 1 FROM background_job_waiters w WHERE w.job_id=background_jobs.id
+        AND w.state IN ('pending','awaiting_hydration')
+        AND (w.deadline_ms IS NULL OR w.deadline_ms>json_extract($1,'$.now_ms'))
+        AND (w.consumer_kind IN ('playback_qualification','dv_title_scan')
+          OR (w.consumer_kind='native_fel_head' AND w.target_node_id=json_extract($1,'$.node_id')))
+    ))
   AND (kind NOT IN ('subtitle_text_translate','subtitle_text_translate_artifact','subtitle_text_model_operation') OR ("#,
     text_admission!("payload_json", "json_extract($1,'$.now_ms')"),
     r#"))
@@ -3027,6 +3049,10 @@ pub trait BackgroundJobStore: Send + Sync {
         file_id: i64,
         binding: &str,
     ) -> Result<bool, StoreError>;
+    async fn request_dv_fel_head(
+        &self,
+        request: super::dv_title_jobs::FelHeadRequest,
+    ) -> Result<bool, StoreError>;
     async fn dv_fel_verdict_counts(&self, identity: &str) -> Result<(u64, u64), StoreError>;
     /// Settled FEL titles whose verdict another FEL identity measured.
     async fn dv_fel_stale_titles(&self, identity: &str, limit: u32)
@@ -4194,6 +4220,12 @@ LIMIT 1
         binding: &str,
     ) -> Result<bool, StoreError> {
         super::dv_title_jobs::request_requalification(self, file_id, binding).await
+    }
+    async fn request_dv_fel_head(
+        &self,
+        request: super::dv_title_jobs::FelHeadRequest,
+    ) -> Result<bool, StoreError> {
+        super::dv_title_jobs::request_fel_head(self, request).await
     }
     async fn dv_fel_verdict_counts(&self, identity: &str) -> Result<(u64, u64), StoreError> {
         super::dv_title_jobs::fel_verdict_counts(self, identity).await

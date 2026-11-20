@@ -769,6 +769,7 @@ pub(super) async fn spawn_copy_reader_owner(
                 Some(worker_measurement),
                 retained,
                 native_split,
+                None,
             )
             .await
         });

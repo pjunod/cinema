@@ -1942,6 +1942,8 @@ async fn d3_start(
             false,
             false,
             None,
+            #[cfg(target_os = "linux")]
+            None,
         )
         .await
         .expect("ordinary start");
