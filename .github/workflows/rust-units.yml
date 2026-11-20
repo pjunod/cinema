@@ -1,6 +1,10 @@
 name: Rust archive cache experiment
 on:
   workflow_dispatch:
+    inputs:
+      phase:
+        type: string
+        required: true
 
 env:
   CARGO_TERM_COLOR: never
@@ -17,6 +21,7 @@ env:
 
 jobs:
   prime:
+    if: inputs.phase == 'prime'
     runs-on: [ci-nonvoter-compile-amd64, incus]
     # The same private CI image as ci.yml's full Rust lane: Rust 1.97.1, the
     # Jellyfin FFmpeg 8 build and the native libraries. Its digest is part of
@@ -101,6 +106,7 @@ jobs:
           echo "CARGO_TARGET_DIR=/archive-ab/target" >> "$GITHUB_ENV"
           echo "SCCACHE_DIR=/archive-ab/compiler-objects" >> "$GITHUB_ENV"
           echo "SCCACHE_CACHE_SIZE=8G" >> "$GITHUB_ENV"
+          echo "SCCACHE_IDLE_TIMEOUT=0" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
           echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
 
@@ -130,12 +136,13 @@ jobs:
           date +%s.%N > "$GITHUB_WORKSPACE/ab-receipt/publish-start"
           tar -C /archive-ab -cf /archive-ab/compiler-objects.tar compiler-objects
           stat -c %s /archive-ab/compiler-objects.tar
-      - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
-        with:
-          name: compiler-objects
-          path: /archive-ab/compiler-objects.tar
-          compression-level: 0
-          retention-days: 1
+      - name: Save complete immutable cache on priming runner
+        run: |
+          set -eu
+          dest="$RUNNER_TOOL_CACHE/archive-ab-E-F85179CD21"
+          mkdir -p "$dest"
+          cp /archive-ab/compiler-objects.tar "$dest/cache-$GITHUB_RUN_ID.tar"
+          sha256sum "$dest/cache-$GITHUB_RUN_ID.tar" | tee "$GITHUB_WORKSPACE/ab-receipt/prime.sha256"
       - run: date +%s.%N > "$GITHUB_WORKSPACE/ab-receipt/publish-end"
 
       - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
@@ -145,7 +152,7 @@ jobs:
           path: ab-receipt/
           retention-days: 3
   compare:
-    needs: prime
+    if: inputs.phase == 'compare'
     runs-on: [ci-nonvoter-compile-amd64]
     # The same private CI image as ci.yml's full Rust lane: Rust 1.97.1, the
     # Jellyfin FFmpeg 8 build and the native libraries. Its digest is part of
@@ -232,8 +239,36 @@ jobs:
           echo "CARGO_TARGET_DIR=/archive-ab/target" >> "$GITHUB_ENV"
           echo "SCCACHE_DIR=/archive-ab/compiler-objects" >> "$GITHUB_ENV"
           echo "SCCACHE_CACHE_SIZE=8G" >> "$GITHUB_ENV"
+          echo "SCCACHE_IDLE_TIMEOUT=0" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
           echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
+
+      - run: date +%s.%N > "$GITHUB_WORKSPACE/ab-receipt/restore-start"
+      - name: Verify and restore complete parent cache
+        run: |
+          set -eu
+          cd "$RUNNER_TOOL_CACHE/archive-ab-E-F85179CD21"
+          sha256sum -c parent.sha256
+          tar -C /archive-ab -xf parent.tar
+          date +%s.%N > "$GITHUB_WORKSPACE/ab-receipt/restore-end"
+      - name: Build shared archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$GITHUB_WORKSPACE/ab-receipt"
+          test ! -e "$CARGO_TARGET_DIR"
+          mkdir "$CARGO_TARGET_DIR"
+          cp -a --reflink=auto "$BENCH_LOCAL_TARGET/." "$CARGO_TARGET_DIR/"
+          export RUSTC_WRAPPER=/archive-ab/sccache
+          cat /sys/fs/cgroup/cpu.stat > "$receipt/shared.cpu.before"
+          start=$(date +%s.%N)
+          CARGO_LOG=cargo::core::compiler::fingerprint=info cargo nextest archive --locked --workspace --exclude plurx-cluster-check -E 'package(plurxd)' --zstd-level 3 --archive-file /archive-ab/shared.tar.zst > "$receipt/shared.log" 2>&1 || { tail -50 "$receipt/shared.log"; exit 1; }
+          end=$(date +%s.%N)
+          echo "shared $start $end" | tee "$receipt/shared.times"
+          cat /sys/fs/cgroup/cpu.stat > "$receipt/shared.cpu.after"
+          cargo nextest list --archive-file /archive-ab/shared.tar.zst --message-format json > "$receipt/shared-list.json"
+          grep -E 'Finished .test. profile|Archived [0-9]+' "$receipt/shared.log"
+          rm -rf -- /archive-ab/target
 
       - name: Build control archive
         shell: bash
@@ -252,35 +287,6 @@ jobs:
           cat /sys/fs/cgroup/cpu.stat > "$receipt/control.cpu.after"
           cargo nextest list --archive-file /archive-ab/control.tar.zst --message-format json > "$receipt/control-list.json"
           grep -E 'Finished .test. profile|Archived [0-9]+' "$receipt/control.log"
-          rm -rf -- /archive-ab/target
-
-      - run: date +%s.%N > "$GITHUB_WORKSPACE/ab-receipt/restore-start"
-      - uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e
-        with:
-          name: compiler-objects
-          path: /archive-ab
-      - name: Restore compiler outputs
-        run: |
-          tar -C /archive-ab -xf /archive-ab/compiler-objects.tar
-          date +%s.%N > "$GITHUB_WORKSPACE/ab-receipt/restore-end"
-
-      - name: Build shared archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          receipt="$GITHUB_WORKSPACE/ab-receipt"
-          test ! -e "$CARGO_TARGET_DIR"
-          mkdir "$CARGO_TARGET_DIR"
-          cp -a --reflink=auto "$BENCH_LOCAL_TARGET/." "$CARGO_TARGET_DIR/"
-          export RUSTC_WRAPPER=/archive-ab/sccache
-          cat /sys/fs/cgroup/cpu.stat > "$receipt/shared.cpu.before"
-          start=$(date +%s.%N)
-          CARGO_LOG=cargo::core::compiler::fingerprint=info cargo nextest archive --locked --workspace --exclude plurx-cluster-check -E 'package(plurxd)' --zstd-level 3 --archive-file /archive-ab/shared.tar.zst > "$receipt/shared.log" 2>&1 || { tail -50 "$receipt/shared.log"; exit 1; }
-          end=$(date +%s.%N)
-          echo "shared $start $end" | tee "$receipt/shared.times"
-          cat /sys/fs/cgroup/cpu.stat > "$receipt/shared.cpu.after"
-          cargo nextest list --archive-file /archive-ab/shared.tar.zst --message-format json > "$receipt/shared-list.json"
-          grep -E 'Finished .test. profile|Archived [0-9]+' "$receipt/shared.log"
           rm -rf -- /archive-ab/target
 
       - name: Verify identical test inventory and save cache statistics
