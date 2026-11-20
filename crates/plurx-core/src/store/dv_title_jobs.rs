@@ -37,6 +37,58 @@ pub struct TitleDemand {
     #[serde(default)]
     pub fel_head_target: Option<String>,
 }
+/// Node-local maintenance discovery. A source may become admissible after
+/// this worker has passed it, while new revisions keep the forward walk busy.
+#[derive(Default)]
+pub struct TitleMaintenanceCursor {
+    forward_after: i64,
+    revisit_after: i64,
+    revisit_through: i64,
+    revisit_next: bool,
+}
+
+impl TitleMaintenanceCursor {
+    /// Return one page and its position. Advance the position for each row
+    /// examined: the worker may accept a job partway through either page.
+    pub async fn next_page(
+        &mut self,
+        store: &dyn super::BackgroundJobStore,
+        scanner: &str,
+        now_ms: i64,
+    ) -> Result<(Vec<TitleDemand>, &mut i64), StoreError> {
+        if self.revisit_next {
+            // Freeze the end of each revisit. Even a continually growing
+            // outbox cannot postpone the next trip back to the oldest rows.
+            if self.revisit_after >= self.revisit_through {
+                self.revisit_after = 0;
+                self.revisit_through = self.forward_after;
+            }
+            // The next poll must advance independently even if this prefix
+            // contains an observation this worker cannot decode or read.
+            self.revisit_next = false;
+            let rows = store
+                .dv_title_demands_through(scanner, self.revisit_after, self.revisit_through, now_ms)
+                .await?;
+            if !rows.is_empty() {
+                return Ok((rows, &mut self.revisit_after));
+            }
+            // Everything else below the fence settled or disappeared.
+            self.revisit_after = 0;
+            self.revisit_through = 0;
+        }
+
+        let rows = store
+            .dv_title_demands(scanner, self.forward_after, now_ms)
+            .await?;
+        if rows.is_empty() {
+            *self = Self::default();
+        } else {
+            self.revisit_next = true;
+        }
+        Ok((rows, &mut self.forward_after))
+    }
+}
+
 /// Bounded viewer interest in one already registered exact quality recipe.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitleViewerRequest {
@@ -145,30 +197,34 @@ SELECT json_object('file_id',file.id,'probe_revision',file.revision,
 FROM candidates file
 "#;
 
-pub(super) async fn demands<T: QueueSql>(
-    store: &T,
-    scanner: &str,
-    after: i64,
-    now_ms: i64,
-) -> Result<Vec<TitleDemand>, StoreError> {
-    if !digest(scanner) || after < 0 || now_ms < 0 {
-        return Err(StoreError::Task("invalid title demand query".into()));
-    }
-    let sql = format!(
+fn maintenance_demands_sql() -> String {
+    format!(
         "{DEMAND_ROWS} {}",
         r#"
-WHERE file.revision>json_extract($1,'$.after')
+WHERE file.revision>json_extract($1,'$.after') AND file.revision<=json_extract($1,'$.through')
  AND (file.terminal=0 OR file.scanner_digest IS NOT json_extract($1,'$.scanner'))
  AND (json_array_length(file.playback_recipes)>0 OR NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
  THEN json_extract(file.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END))
  OR NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND (j.state='cancelling' OR (j.state='running' AND j.lease_expires_ms>json_extract($1,'$.now')))
   AND json_extract(j.payload_json,'$.file_id')=file.id))
 ORDER BY file.revision LIMIT 128"#
-    );
+    )
+}
+
+pub(super) async fn demands<T: QueueSql>(
+    store: &T,
+    scanner: &str,
+    after: i64,
+    through: i64,
+    now_ms: i64,
+) -> Result<Vec<TitleDemand>, StoreError> {
+    if !digest(scanner) || after < 0 || through < after || now_ms < 0 {
+        return Err(StoreError::Task("invalid title demand query".into()));
+    }
     let rows = store
         .queue_sql(
-            sql,
-            encode(&serde_json::json!({"scanner":scanner,"after":after,"now":now_ms}))?,
+            maintenance_demands_sql(),
+            encode(&serde_json::json!({"scanner":scanner,"after":after,"through":through,"now":now_ms}))?,
             false,
             true,
         )
@@ -1082,4 +1138,30 @@ WHERE job.id=json_extract($1,'$.candidate') AND job.kind='dv_title_scan' AND job
   OR EXISTS(SELECT 1 FROM analysis_source_reservations h WHERE h.resource_key=r.resource_key AND h.expires_at_ms>json_extract($1,'$.now'))))
 "#.into(),encode(&serde_json::json!({"candidate":candidate_id,"current":current_id,"node":node,"now":now}))?,false,true).await?;
     Ok(!rows.is_empty())
+}
+
+#[cfg(test)]
+mod maintenance_query_tests {
+    #[test]
+    fn title_revisit_uses_both_revision_bounds_in_the_store() {
+        use crate::store::sqlite::{SqliteStore, SQLITE_SCHEMA_VERSION};
+        let db = rusqlite::Connection::open_in_memory().expect("fixture");
+        SqliteStore::apply_migrations_for_test(&db, SQLITE_SCHEMA_VERSION).expect("schema");
+        let sql = format!("EXPLAIN QUERY PLAN {}", super::maintenance_demands_sql());
+        let mut statement = db.prepare(&sql).expect("query plan");
+        let plan = statement
+            .query_map(
+                [r#"{"after":7,"through":135,"now":1000,"scanner":"scanner"}"#],
+                |row| row.get::<_, String>(3),
+            )
+            .expect("plan rows")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("plan details");
+        assert!(
+            plan.iter()
+                .any(|line| line
+                    .contains("SEARCH d USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)")),
+            "{plan:?}"
+        );
+    }
 }

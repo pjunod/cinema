@@ -2035,6 +2035,180 @@ async fn title_viewer_bootstraps_current_work_and_keeps_recipe_interest_exact() 
 }
 
 #[tokio::test]
+async fn failed_title_revisit_leaves_the_next_discovery_turn_available() {
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let old = seed(&store, "title-revisit-error").await;
+        let new = seed(&store, "title-after-error").await;
+        let mut cursor = TitleMaintenanceCursor::default();
+        let (rows, after) = cursor
+            .next_page(store.as_ref(), &scanner, 1000)
+            .await
+            .expect("discovery");
+        assert_eq!(rows[0].file_id, old.id, "{backend}");
+        *after = rows[0].probe_revision;
+        // Make just the revisit read fail, before it can return or advance a row.
+        assert!(cursor
+            .next_page(store.as_ref(), "invalid scanner", 1001)
+            .await
+            .is_err());
+        let (rows, _) = cursor
+            .next_page(store.as_ref(), &scanner, 1002)
+            .await
+            .expect("next turn");
+        assert_eq!(
+            rows[0].file_id, new.id,
+            "{backend}: failed historical read pinned forward discovery"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn maintenance_revisits_the_oldest_released_source_while_new_titles_arrive() {
+    use plurx_core::store::background_jobs_resources::StorageDomainMapping;
+
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let old = seed(&store, "title-oldest").await;
+        let (_, independent_id) = seed_file(&store, "title-independent").await;
+        let independent = store
+            .get_file(independent_id)
+            .await
+            .expect("read")
+            .expect("file");
+        let mut domains = Vec::new();
+        for (file, name) in [(&old, "title-oldest"), (&independent, "title-independent")] {
+            let item = store
+                .get_item(file.item_id)
+                .await
+                .expect("read")
+                .expect("item");
+            domains.push(StorageDomainMapping {
+                library_id: item.library_id,
+                root_path: format!("/{name}"),
+                domain_id: name.into(),
+            });
+        }
+        assert!(super::set_storage_domains(store.as_ref(), domains, 1_000)
+            .await
+            .expect("install domains"));
+        let oldest = bound(&store, old.id, &scanner).await;
+        let EnqueueOutcome::Accepted {
+            job_id: old_job, ..
+        } = enqueue(&store, &oldest, &scanner, 1_001).await
+        else {
+            panic!("expected new oldest title")
+        };
+        let mut blocker = None;
+        for index in 1..128 {
+            let id = store
+                .upsert_file(
+                    old.item_id,
+                    &format!("/title-oldest/{index}.mkv"),
+                    old.size,
+                    old.mtime,
+                    &probe(),
+                )
+                .await
+                .expect("populate blocked source");
+            if blocker.is_none() {
+                blocker = Some(active(&store, id, &scanner, 1_002).await);
+            }
+        }
+        let (held_demand, held_job) = blocker.expect("source holder");
+        reprobe(&store, &independent).await;
+
+        let mut cursor = TitleMaintenanceCursor::default();
+        // Both the first discovery page and its first revisit hit the busy disk.
+        // A permanently blocked prefix must leave a discovery turn for the next disk.
+        for _ in 0..2 {
+            let (rows, after) = cursor
+                .next_page(store.as_ref(), &scanner, 1_003)
+                .await
+                .expect("page");
+            assert_eq!(rows.len(), 128, "{backend}");
+            assert_eq!(rows[0].file_id, old.id, "{backend}");
+            let job = store
+                .background_job(&old_job)
+                .await
+                .expect("read")
+                .expect("old job");
+            let verdict = store
+                .explain_job_claim(ClaimJob {
+                    job_id: old_job.clone(),
+                    expected_revision: job.revision,
+                    node_id: "title-node".into(),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::DvTitleScan,
+                    payload_version: 1,
+                    now_ms: 1_003,
+                    dispatched_at_ms: 1_003,
+                })
+                .await
+                .expect("read admission")
+                .expect("known title");
+            assert_eq!(
+                verdict.block,
+                Some(ClaimBlock::MaintenanceReader),
+                "{backend}"
+            );
+            *after = rows.last().expect("full page").probe_revision;
+        }
+        let (rows, after) = cursor
+            .next_page(store.as_ref(), &scanner, 1_004)
+            .await
+            .expect("next disk");
+        let free = rows.first().expect("disjoint title");
+        assert_eq!(free.file_id, independent.id, "{backend}");
+        *after = free.probe_revision;
+        store
+            .bind_dv_title_demand(free.probe_revision, &scanner)
+            .await
+            .expect("bind independent");
+        let EnqueueOutcome::Accepted {
+            job_id: free_job, ..
+        } = enqueue(&store, free, &scanner, 1_004).await
+        else {
+            panic!("expected independent title")
+        };
+        claim(&store, &free_job, 1_004).await;
+
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&held_demand, &held_job, &scanner, 1_005))
+                .await
+                .expect("release old disk"),
+            JobPublishOutcome::Published { .. }
+        ));
+        store
+            .upsert_file(
+                independent.item_id,
+                "/title-independent/new.mkv",
+                old.size,
+                old.mtime,
+                &probe(),
+            )
+            .await
+            .expect("new demand keeps the forward walk nonempty");
+        let (rows, after) = cursor
+            .next_page(store.as_ref(), &scanner, 1_006)
+            .await
+            .expect("revisit released disk");
+        let revisited = rows.first().expect("old demand");
+        assert_eq!(revisited.file_id, old.id, "{backend}");
+        *after = revisited.probe_revision;
+        assert_eq!(
+            claim(&store, &old_job, 1_006).await.id,
+            old_job,
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn title_live_paging_reaches_after_full_page_and_direct_own_interest() {
     for_each_backend(|store, backend| async move {
         let scanner = "a".repeat(64);
