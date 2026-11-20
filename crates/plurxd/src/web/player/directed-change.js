@@ -1275,6 +1275,9 @@ function attachSession(v, t, info, wantSec){
   const into = Math.max(0,(Number(wantSec)||0)-(t.offset||0));
   t.controlPositionHintSec=(t.offset||0)+into;
   attachHls(v, info.playlist_url, into);
+  // The legacy range hint can survive a response that omits its grade.
+  // The quality control uses only this attachment's reported range.
+  if(t.mediaAttachment) t.mediaAttachment.qualityRange=info.delivered_dynamic_range||null;
   startPlaybackControl(v,t,info.control||null);
   t.effectiveProcessing=effectiveHdrProcessing(info.effective_processing,
     t.controlReporter?.bootstrap?.generation,info.delivered_dynamic_range);

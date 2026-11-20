@@ -2314,6 +2314,9 @@ test("the disabled Auto controller leaves every manual ladder rung available", (
     "PlaybackPolicy",
     [
       shippedBinding("const", "QUALITY_MODES"),
+      shippedSource("sourceDynamicRange"),
+      shippedSource("qualitySourceIsHdr"),
+      shippedSource("qualityCapLabel"),
       shippedSource("qualityOptions"),
       "return qualityOptions();",
     ].join("\n"),
@@ -5983,7 +5986,7 @@ test("a session that lands on a different range repaints the badge", () => {
       shippedSource("playbackEnhancementFromWire"),
       shippedSource("attachSession"), "return {attachSession};"].join("\n"),
   );
-  const player = { deliveredRange: "hdr10" };
+  const player = { deliveredRange: "hdr10", mediaAttachment: {} };
   const { attachSession } = build(
     player, () => { repaints += 1; }, () => {}, () => {}, () => {},
   );
@@ -5994,6 +5997,7 @@ test("a session that lands on a different range repaints the badge", () => {
     delivered_dynamic_range: "sdr",
   }, 0);
   assert.equal(player.deliveredRange, "sdr", "the session is the source of truth");
+  assert.equal(player.mediaAttachment.qualityRange, "sdr");
   assert.equal(repaints, 1, "the chip must be repainted, not left at the decision's guess");
 
   // The Dolby Vision profile follows the same rule and needs the stricter
@@ -6028,6 +6032,7 @@ test("a session that lands on a different range repaints the badge", () => {
   const before = repaints;
   attachSession({}, player, { start_seconds: 0, playlist_url: "/x.m3u8" }, 0);
   assert.equal(player.deliveredRange, "sdr");
+  assert.equal(player.mediaAttachment.qualityRange, null, "an ungraded attach clears the quality-control evidence");
   assert.ok(repaints > before, "every attach repaints");
 
   // Caption projection follows the actual attachment origin, including VOD

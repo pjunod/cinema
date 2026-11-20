@@ -247,7 +247,15 @@ test("teardown settles frozen commit then end despite a lost commit response and
 });
 
 test("failed first-frame proof rolls observation ownership back to the incumbent", async () => {
-  const h = harness(); await flush(); h.expose(); h.rollback();
+  const h = harness(); await flush();
+  h.p.mediaAttachment.qualityRange = "hdr10";
+  h.p.qualityCandidates = [{ id: "planned", grade: "sdr", route: "encode" }];
+  h.state.selection = { candidate_id: "planned" };
+  h.expose();
+  assert.equal(h.p.deliveredRange, "sdr", "legacy playback metadata retains the catalog estimate");
+  assert.equal(h.p.mediaAttachment.qualityRange, null, "an ungraded successor cannot borrow its catalog estimate");
+  h.rollback();
+  assert.equal(h.p.mediaAttachment.qualityRange, "hdr10", "rollback restores the incumbent's range evidence");
   assert.equal(h.context.document.getElementById("video"), h.incumbent);
   assert.equal(h.p.sessionId, oldSession); assert.equal(h.p.offset, 2200);
   assert.equal(h.p.preparedCommitting, null);

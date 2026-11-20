@@ -30,12 +30,6 @@ function playerInputSurface(){ return "desktop"; }
 // `_seekPending`, a pointer drag sets `_seekPreview`. Either one means the
 // bar is showing a time the film is not at yet.
 function playerSeekPending(){ return !!(PLAYER&&(PLAYER._seekPending!=null||PLAYER._seekPreview!=null)); }
-// Intrinsic dimensions belong to the presented picture. Requested rungs and
-// source metadata can describe another stream while a change is still pending.
-function playbackQualityResolution(width,height){
-  return [144,240,360,480,540,576,720,1080,1440,2160,4320].includes(height)
-    ?`${height}p`:`${width}×${height}`;
-}
 function updatePlaybackQualityChrome(v,p){
   if(!v||!p||PLAYER!==p||document.getElementById("video")!==v) return;
   const now=performance.now(),presentation=p.transportPresentation;
@@ -45,17 +39,26 @@ function updatePlaybackQualityChrome(v,p){
   if(owns&&!p.preparedCommitting&&!v.seeking&&width>0&&height>0
     &&presentation?.element===v&&presentation.attachment===p.mediaAttachment
     &&Number.isFinite(p.presentationAdvancedAt)&&current?.proof!==p.presentationAdvancedAt){
-    const label=playbackQualityResolution(width,height);
-    const grade=["sdr","hdr10","hdr10plus","hlg","dolby_vision"].includes(p.deliveredRange)?p.deliveredRange:null;
+    // Intrinsic dimensions belong to the presented picture. The menu and
+    // source metadata can describe another stream during a pending change.
+    const label=playbackQualityResolution(width,height)||`${width}×${height}`;
+    const attachedRange=statsStreamFormat(p)?.dynamic_range||p.mediaAttachment?.qualityRange;
+    const grade=["sdr","hdr10","hdr10plus","hlg","dolby_vision"].includes(attachedRange)?attachedRange:null;
     const candidate=(p.qualityCandidates||[]).find(row=>row.id===p.qualityCandidateId);
     const codec=["h264","hevc","av1","vp9","vp8"].includes(candidate?.planned_codec)?candidate.planned_codec:null;
-    const resized=!!current&&(current.width!==width||current.height!==height);
-    const changed=resized||!!current&&(current.grade&&grade&&current.grade!==grade
-      ||current.codec&&codec&&current.codec!==codec);
-    const range=grade&&grade!=="sdr"?` · ${grade==="dolby_vision"?"Dolby Vision":grade.toUpperCase()}`:"";
-    current=p.qualityChrome={width,height,label,grade,codec,proof:p.presentationAdvancedAt,
-      notice:changed?resized?`Quality changed: ${current.label} → ${label}`:`Quality changed: ${label}${range}${codec?` · ${codec.toUpperCase()}`:""}`:current?.notice||"",
-      until:changed?now+3500:current?.until||0};
+    const tierChanged=!!current&&current.label!==label;
+    const rangeChanged=!!current&&current.grade&&grade&&current.grade!==grade;
+    const codecChanged=!!current&&current.codec&&codec&&current.codec!==codec;
+    const changed=tierChanged||rangeChanged||codecChanged;
+    const range=grade?(grade==="dolby_vision"?"Dolby Vision":grade.toUpperCase()):"";
+    const transition=tierChanged?`${current.label} → ${label}`:label;
+    const noticeRange=(rangeChanged||(!tierChanged&&range!=="SDR"))?range:"";
+    const noticeCodec=!tierChanged&&codec?codec.toUpperCase():"";
+    const notice=[transition,noticeRange,noticeCodec].filter(Boolean).join(" · ");
+    const rangeEvidenceLost=!!current?.grade&&!grade;
+    current=p.qualityChrome={width,height,label,grade,range,codec,proof:p.presentationAdvancedAt,
+      notice:changed?`Quality changed: ${notice}`:rangeEvidenceLost?"":current?.notice||"",
+      until:changed?now+3500:rangeEvidenceLost?0:current?.until||0};
   }
   const selected=playQuality();
   const mode=selected==="auto"?"Auto":["original","nomse"].includes(selected)?"Original":"Manual";
@@ -64,7 +67,7 @@ function updatePlaybackQualityChrome(v,p){
   if(resolution) resolution.textContent=current?.label||"—";
   const button=document.getElementById("pbquality");
   if(button){
-    const detail=current?`${mode} · ${current.label} (${current.width}×${current.height})`:`${mode} · awaiting picture`;
+    const detail=current?`${mode} · ${current.label} (${current.width}×${current.height})${current.range?` · ${current.range}`:""}`:`${mode} · awaiting picture`;
     button.title=`Playback quality: ${detail}`;
     button.setAttribute("aria-label",`Playback quality: ${detail}`);
   }

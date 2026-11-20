@@ -697,20 +697,59 @@ function watchDisplayDynamicRange(){
 const QUALITY_MODES=[["auto","Auto"],["original","Original"],
                      ["nomse","Original · one stream"]];
 function playQuality(){ try{ return localStorage.getItem("plurx_quality")||"auto"; }catch(e){ return "auto"; } }
+const STANDARD_QUALITY_HEIGHTS=[144,240,360,480,540,576,720,1080,1440,2160,4320];
+function playbackQualityResolution(width,height){
+  if(!(width>0&&height>0)) return null;
+  const shortEdge=Math.min(width,height);
+  if(shortEdge===4320) return "8K";
+  const tier=resLabel(width,height);
+  if(tier==="2160p") return "4K";
+  if(STANDARD_QUALITY_HEIGHTS.includes(shortEdge)) return `${shortEdge}p`;
+  return ["1440p","1080p","720p","480p"].includes(tier)?tier:null;
+}
+function qualityCapLabel(height){
+  return height===2160?"4K":`${height}p`;
+}
+function qualitySourceIsHdr(){
+  const range=sourceDynamicRange(PLAYER?.source||{})||PLAYER?.deliveredRange;
+  return !!range&&range!=="sdr";
+}
 function qualityOptions(){
   const candidates=PLAYER&&PLAYER.qualityCandidates;
-  if(Array.isArray(candidates)){
-    // The catalog describes this source, selected tracks and decoder. An
-    // empty catalog is authoritative too; do not invent manual encode rungs.
-    const heights=[...new Set(candidates.filter(candidate=>candidate
-      &&candidate.route==='encode'&&candidate.decoder_compatible===true
-      &&Number.isInteger(candidate.target_height)&&candidate.target_height>0
-      &&candidate.target_height<=2160)
-      .map(candidate=>candidate.target_height))].sort((a,b)=>b-a);
-    return QUALITY_MODES.concat(heights.map(height=>[String(height),`${height}p`]));
+  const hdr=qualitySourceIsHdr();
+  const uncertain=hdr?" · may convert to SDR":"";
+  if(!Array.isArray(candidates)){
+    const ladder=PlaybackPolicy.normalizedLadder(PLAYER&&PLAYER.ladder);
+    return QUALITY_MODES.concat(ladder.slice().reverse()
+      .map(({height})=>[String(height),qualityCapLabel(height)+uncertain]));
   }
-  const ladder=PlaybackPolicy.normalizedLadder(PLAYER&&PLAYER.ladder);
-  return QUALITY_MODES.concat(ladder.slice().reverse().map(r=>[String(r.height),`${r.height}p`]));
+  // The request and the remote wire carry a height cap, not a candidate ID.
+  // A grade or raster can describe the option only if its eligible rows agree.
+  const byHeight=new Map();
+  for(const candidate of candidates){
+    if(!candidate||candidate.route!=="encode"||candidate.decoder_compatible!==true) continue;
+    const {target_height:height}=candidate;
+    if(!Number.isInteger(height)||height<=0||height>2160) continue;
+    if(!byHeight.has(height)) byHeight.set(height,[]);
+    byHeight.get(height).push(candidate);
+  }
+  const options=Array.from(byHeight).sort(([a],[b])=>b-a).map(([height,rows])=>{
+    const resolutions=new Set(rows.map(row=>playbackQualityResolution(row.width,row.height)));
+    const tier=resolutions.size===1?[...resolutions][0]:null;
+    const label=tier||`Up to ${qualityCapLabel(height)}`;
+    const consequence=!hdr||rows.every(row=>row.grade==="hdr10")?""
+      :rows.every(row=>row.grade==="sdr")?" · SDR transcode":uncertain;
+    return {height,label,consequence};
+  });
+  const labelCounts=new Map();
+  for(const {label,consequence} of options){
+    const text=label+consequence;
+    labelCounts.set(text,(labelCounts.get(text)||0)+1);
+  }
+  return QUALITY_MODES.concat(options.map(({height,label,consequence})=>{
+    const cap=labelCounts.get(label+consequence)>1?` · ${height}p cap`:"";
+    return [String(height),label+consequence+cap];
+  }));
 }
 function autoLastGoodHeight(){
   try{ const h=Number.parseInt(localStorage.getItem("plurx_auto_rung")||"",10); return h>0?h:null; }
@@ -793,7 +832,7 @@ function qualityLabel(){
   const q=playQuality(), f=qualityOptions().find(x=>x[0]===q);
   if(f) return f[1];
   const h=PlaybackPolicy.transcodeHeight(q);
-  return h?`${h}p`:"Auto";
+  return h?`Saved ${h}p cap${qualitySourceIsHdr()?" · may convert to SDR":""}`:"Auto";
 }
 
 async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt, retryIntent){
