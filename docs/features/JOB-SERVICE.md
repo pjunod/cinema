@@ -42,6 +42,8 @@ The adaptive candidate changes title dispatch, resource claims and source custod
 
 At the deployed revision a four-root library yields four source reservations for a title read from one file. Synthetic disjoint files in that library block each other. Catalog paths establish logical containment. Safely narrowing the durable reservation also requires binding the worker's opened source to the configured physical domain, including aliases, nested mounts and node-specific mount layouts. Preserve the broad reservation whenever the worker cannot establish that binding. Existing reservations must survive migration until their attempts settle.
 
+The local viewer-demand producer now wakes the title worker after the store acknowledges the interest. The periodic poll discovers remote interests and covers restarts. Cross-node wake latency remains a qualification item.
+
 A separate dispatch-turn trigger lets manual library work take precedence over a current title viewer even when source admission passes. A pending enhancement recipe also suppresses discovery of an expired title attempt after its viewer departs. These mechanisms can be reproduced independently. Their individual contribution to the reported 40-hour wait remains unmeasured.
 
 The existing [queue incident ledger](../server/JOB-QUEUE-ROOT-CAUSE-AND-FIX.md) tracks earlier source-custody repairs and scan chunking. This follow-up covers the November 20 incident and service-level acceptance.

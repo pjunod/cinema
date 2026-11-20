@@ -81,7 +81,7 @@ pub(in crate::http::hls) fn hold_viewer_demand(
             })
             .await
         {
-            Ok(true) => {}
+            Ok(true) => state.jobs.title_viewer_wake.notify_one(),
             Ok(false) => tracing::debug!(target: "plurxd::http::hls", file_id,
                 "no title scan is queued yet for a waiting viewer; the next exchange retries"),
             Err(error) => tracing::warn!(target: "plurxd::http::hls", file_id, %error,

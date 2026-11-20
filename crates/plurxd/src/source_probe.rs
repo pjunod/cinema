@@ -268,6 +268,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             };
             tokio::select! {
                 () = shutdown.cancelled() => {},
+                () = state.jobs.title_viewer_wake.notified() => {},
                 _ = title_poll => { title = None; },
                 _ = refit_poll => { refit = None; },
                 () = tokio::time::sleep(idle.after_completion(published)) => {},
