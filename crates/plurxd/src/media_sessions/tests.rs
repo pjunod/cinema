@@ -376,6 +376,7 @@ async fn remote_adaptive_replay_cannot_register_missing_original_or_mint_a_windo
             recovery_epoch: uuid::Uuid::new_v4(),
             planning_generation: 1,
             planning_source_digest: "b".repeat(64),
+            source_scope: None,
             settings_digest: "c".repeat(64),
             intent_digest: "d".repeat(64),
             original_deadline_ms: unix_ms().saturating_add(60_000),

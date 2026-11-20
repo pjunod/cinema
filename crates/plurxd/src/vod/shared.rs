@@ -673,6 +673,12 @@ impl PreparedAttemptRendition {
             .ok_or_else(|| "adaptive application lease was already transferred".into())
     }
 
+    /// This recipe's generation was frozen by the original P source proof
+    /// and rechecked by the same finite producer's registered R input opens.
+    pub(crate) fn held_source_version(&self) -> Result<String, String> {
+        super::finite_profile::source_version(&self.rendition().recipe)
+    }
+
     pub(crate) async fn prepare_worker_binding(
         &mut self,
         deadline: Instant,

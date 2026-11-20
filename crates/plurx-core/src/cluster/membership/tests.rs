@@ -10573,6 +10573,7 @@ mod adaptive_outage_regressions {
             planning_source_digest: "b".repeat(64),
             settings_digest: "c".repeat(64),
             intent_digest: "d".repeat(64),
+            source_scope: None,
             original_deadline_ms: now + 600_000,
             expected_predecessor_incarnation_id: None,
             expected_predecessor_owner_epoch: None,

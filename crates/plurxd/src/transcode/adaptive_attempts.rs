@@ -19,6 +19,7 @@ use plurx_core::store::adaptive_resource_attempts::{
     selected_recipe_digest, AdaptiveStagedAdoption, AdoptedAttemptClose, AttemptAdoption,
     AttemptClaim, AttemptClose, AttemptKey, AttemptMutation, AttemptPhase, AttemptRefusal,
     MutationContext, PreparedAttempt, RequestBinding, RequestDisposition, WorkerBinding,
+    MAX_HELD_SOURCE_VERSION_BYTES,
 };
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -95,6 +96,10 @@ fn prepared_reply_heap(worker: &WorkerBinding, recipe: &String, preview: &String
         worker.planning_source_digest.capacity(),
         worker.selected_recipe_digest.capacity(),
         worker.prepared_handle_digest.capacity(),
+        worker
+            .held_source_version
+            .as_ref()
+            .map_or(0, String::capacity),
         worker.output_digest.capacity(),
         recipe.capacity(),
         preview.capacity(),
@@ -424,6 +429,10 @@ fn control_binding_bytes(
         binding.planning_source_digest.capacity(),
         binding.settings_digest.capacity(),
         binding.intent_digest.capacity(),
+        binding
+            .source_scope
+            .as_ref()
+            .map_or(Some(0), |scope| scope.requested_heap_bytes())?,
     ])
 }
 
@@ -557,6 +566,11 @@ fn adoption_requested_bytes(
         adoption.worker.planning_source_digest.capacity(),
         adoption.worker.selected_recipe_digest.capacity(),
         adoption.worker.prepared_handle_digest.capacity(),
+        adoption
+            .worker
+            .held_source_version
+            .as_ref()
+            .map_or(0, String::capacity),
         adoption.worker.output_digest.capacity(),
         activation.incarnation_id.capacity(),
         activation.session_id.capacity(),
@@ -586,6 +600,10 @@ fn adopted_terminal_requested_bytes(
         worker.planning_source_digest.capacity(),
         worker.selected_recipe_digest.capacity(),
         worker.prepared_handle_digest.capacity(),
+        worker
+            .held_source_version
+            .as_ref()
+            .map_or(0, String::capacity),
         worker.output_digest.capacity(),
     ])?;
     // The original selector and its one replayable Close each retain these
@@ -647,6 +665,12 @@ pub(super) fn projected_application_owner_bytes(
                 .checked_mul(std::mem::size_of::<String>())?,
         )?
         .checked_add(rendition_key_capacity)?
+        .checked_add(
+            binding
+                .source_scope
+                .as_ref()
+                .map_or(Some(0), |scope| scope.requested_heap_bytes())?,
+        )?
         .checked_add(adaptive_prepare_reply_payload_bytes())?
         // One dormant-plan object and its canonical JSON are constructed
         // before Prepared; the retained original and one response copy can
@@ -671,7 +695,12 @@ pub(super) fn projected_application_owner_bytes(
         .checked_add(control_key_bytes(key)?)?
         .checked_add(key.worker_node_id.capacity())?
         .checked_add(binding.planning_source_digest.capacity())?
-        .checked_add(3 * 64)
+        .checked_add(3 * 64)?
+        .checked_add(if binding.source_scope.is_some() {
+            MAX_HELD_SOURCE_VERSION_BYTES
+        } else {
+            0
+        })
 }
 
 pub(super) struct AdaptiveAttemptRegistry {
@@ -1731,6 +1760,15 @@ impl super::TranscodeManager {
             || snapshot.file.mtime != envelope.source_mtime
         {
             return Err("adaptive source scanner row changed before native admission".into());
+        }
+        if claim.binding.source_scope.as_ref().is_some_and(|source| {
+            source.file_id != snapshot.file.id
+                || source.source_size != snapshot.file.size
+                || source.source_mtime != snapshot.file.mtime
+                || snapshot.file.path.to_str() != Some(source.source_path.as_str())
+                || claim.binding.planning_generation != snapshot.generation
+        }) {
+            return Err("adaptive source changed before the original planning open".into());
         }
         if planning_snapshot_requested_heap_bytes(&snapshot)
             .is_none_or(|bytes| bytes > attempt_root::SNAPSHOT_BYTES)
@@ -3917,6 +3955,17 @@ impl super::TranscodeManager {
         };
         let recipe_digest = selected_recipe_digest(&rich.selected_recipe_json)
             .map_err(|error| format!("adaptive route digest: {error}"))?;
+        let held_source_version = match (&rich.claim.binding.source_scope, &rich.pending) {
+            (Some(_), PreparedWorkerProduct::Finite(pending)) => {
+                Some(pending.held_source_version()?)
+            }
+            (Some(_), PreparedWorkerProduct::ProcessedFel(_)) => {
+                return Err(
+                    "adaptive source scope requires the selected ordinary finite owner".into(),
+                );
+            }
+            (None, _) => None,
+        };
         let worker = WorkerBinding {
             node_id: rich.claim.key.worker_node_id.clone(),
             worker_instance_id: rich.claim.worker_instance_id,
@@ -3925,6 +3974,7 @@ impl super::TranscodeManager {
             planning_source_digest: rich.claim.binding.planning_source_digest.clone(),
             selected_recipe_digest: recipe_digest,
             prepared_handle_digest,
+            held_source_version,
             output_digest,
             prepared_expires_at_ms: rich.claim.binding.original_deadline_ms,
         };
@@ -4975,6 +5025,19 @@ impl super::TranscodeManager {
             )
             .expect("retain original coordinator before entry");
         let escaped = prepared_rx.await.expect("actual original Prepared");
+        if claim.binding.source_scope.is_some() {
+            let status = self
+                .store
+                .adaptive_request_status(&claim.binding.key, &claim.binding.principal)
+                .await
+                .expect("original scoped status")
+                .expect("original scoped attempt");
+            assert!(status.attempts[0]
+                .worker
+                .as_ref()
+                .and_then(|worker| worker.held_source_version.as_deref())
+                .is_some_and(|source| source.starts_with("s1:")));
+        }
         assert_eq!(
             self.adaptive_attempt_local_status(claim.key.attempt_id)
                 .await,
@@ -5214,6 +5277,7 @@ mod tests {
                 recovery_epoch: Uuid::new_v4(),
                 planning_generation: 1,
                 planning_source_digest: "b".repeat(64),
+                source_scope: None,
                 settings_digest: "c".repeat(64),
                 intent_digest: "d".repeat(64),
                 original_deadline_ms: crate::media_sessions::unix_ms() + 60_000,

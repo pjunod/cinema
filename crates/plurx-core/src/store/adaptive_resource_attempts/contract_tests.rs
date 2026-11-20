@@ -119,6 +119,7 @@ impl AttemptFixture {
             recovery_epoch: Uuid::new_v4(),
             planning_generation: 7,
             planning_source_digest: "b".repeat(64),
+            source_scope: None,
             settings_digest: "c".repeat(64),
             intent_digest: "d".repeat(64),
             original_deadline_ms: 20_000,
@@ -190,6 +191,7 @@ impl AttemptFixture {
                 planning_source_digest: self.claim.binding.planning_source_digest.clone(),
                 selected_recipe_digest: "e".repeat(64),
                 prepared_handle_digest: "f".repeat(64),
+                held_source_version: None,
                 output_digest: "0".repeat(64),
                 prepared_expires_at_ms: 19_999,
             },
@@ -1282,4 +1284,192 @@ async fn legacy_writer_cannot_reacquire_or_activate_a_live_attempt() {
         ] {assert!(raw_refused(raw.as_ref(),&sql).await,"old SQL must refuse: {sql}");}
         assert_eq!(store.adaptive_request_status(&fixture.claim.binding.key,&fixture.claim.binding.principal).await.expect("debt remains"),Some(before));
     }).await;
+}
+
+#[tokio::test]
+async fn adaptive_shared_source_mapping_waits_for_exact_close_and_preserves_legacy_acquire() {
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+    use plurx_core::store::background_jobs_resources::{StorageDomainApply, StorageDomainMapping};
+
+    for_each_adaptive_strandable_backend(|store, _, raw| async move {
+        let root = format!("/media/adaptive-{}", Uuid::new_v4());
+        let library = store
+            .create_library(&NewLibrary {
+                name: "adaptive shared source".into(),
+                paths: vec![root.clone().into()],
+                kind: LibraryKind::Movies,
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "adaptive source".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let file_id = store
+            .upsert_file(
+                item,
+                &format!("{root}/source.mkv"),
+                10,
+                100,
+                &Default::default(),
+            )
+            .await
+            .expect("scanner row");
+        let mapping = |domain_id: &str| StorageDomainMapping {
+            library_id: library.id,
+            root_path: root.clone(),
+            domain_id: domain_id.to_owned(),
+        };
+        let initial = store
+            .save_storage_domains(vec![mapping("shared-a")], None, 9_000)
+            .await
+            .expect("save initial map")
+            .expect("initial revision");
+        assert_eq!(
+            store
+                .apply_pending_storage_domains(9_001)
+                .await
+                .expect("apply initial map"),
+            StorageDomainApply::Applied { revision: initial },
+        );
+        let snapshot = store
+            .playback_planning_snapshot(file_id, &[])
+            .await
+            .expect("planning row")
+            .expect("scanner input");
+        let scope = store
+            .adaptive_source_scope(file_id, 10, 100, snapshot.generation)
+            .await
+            .expect("authoritative source scope")
+            .expect("mapped ordinary source");
+        assert_eq!(scope.mapping_revision, initial);
+        assert_eq!(scope.resource_keys, ["source_io:shared-a"]);
+
+        let mut current = AttemptFixture::new(store.as_ref()).await;
+        current.claim.domains = scope.attempt_domains(&current.claim.key.worker_node_id);
+        current.claim.binding.source_scope = Some(scope);
+        current.claim.binding.planning_generation = snapshot.generation;
+        let claimed = applied(
+            store
+                .claim_adaptive_attempt(&current.claim)
+                .await
+                .expect("mapped claim"),
+        );
+        let mut prepared = current.prepared(&claimed);
+        assert!(
+            store.record_adaptive_prepared(&prepared).await.is_err(),
+            "required held S1"
+        );
+        prepared.worker.held_source_version = Some("s1:1:2:10:100:0:100:0".into());
+        let ready = applied(
+            store
+                .record_adaptive_prepared(&prepared)
+                .await
+                .expect("mapped prepared"),
+        );
+        assert_eq!(ready.attempts[0].worker.as_ref(), Some(&prepared.worker));
+
+        let legacy = AttemptFixture::new(store.as_ref()).await;
+        let old = applied(
+            store
+                .claim_adaptive_attempt(&legacy.claim)
+                .await
+                .expect("old normal claim"),
+        );
+        assert!(old.binding.source_scope.is_none());
+        assert_eq!(old.attempts[0].phase, AttemptPhase::Provisional);
+        let revision = store
+            .save_storage_domains(vec![mapping("shared-b")], None, 10_100)
+            .await
+            .expect("save affected map")
+            .expect("pending revision");
+        assert_eq!(
+            store
+                .apply_pending_storage_domains(10_101)
+                .await
+                .expect("defer mapping"),
+            StorageDomainApply::Waiting { revision },
+        );
+        let legacy_apply = format!(
+            "INSERT INTO background_job_commands(id,operation,request_json,result_json) \
+             VALUES('{}','storage_domains_apply','{{\"now_ms\":10102}}',\
+             '{{\"revision\":{revision},\"verdict\":\"applied\"}}')",
+            Uuid::new_v4()
+        );
+        assert!(
+            raw_refused(raw.as_ref(), &legacy_apply).await,
+            "the original v1 write cannot apply"
+        );
+        assert_eq!(
+            store.storage_domains().await.expect("old active map"),
+            [mapping("shared-a")]
+        );
+
+        for (fixture, current) in [(current, ready), (legacy, old)] {
+            let fence = AttemptFence {
+                context: MutationContext {
+                    operation_id: Uuid::new_v4(),
+                    expected_request_sequence: current.sequence,
+                    expected_attempt_sequence: current.attempts[0].sequence,
+                    now_ms: 20_001,
+                },
+                binding: fixture.claim.binding.clone(),
+                key: fixture.claim.key.clone(),
+                cancel_request: true,
+            };
+            let cleaning = applied(store.fence_adaptive_attempt(&fence).await.expect("fence"));
+            assert_eq!(
+                store
+                    .apply_pending_storage_domains(20_002)
+                    .await
+                    .expect("unclosed map"),
+                StorageDomainApply::Waiting { revision },
+            );
+            let close = AttemptClose {
+                context: MutationContext {
+                    operation_id: Uuid::new_v4(),
+                    expected_request_sequence: cleaning.sequence,
+                    expected_attempt_sequence: cleaning.attempts[0].sequence,
+                    now_ms: 20_003,
+                },
+                binding: fixture.claim.binding,
+                key: fixture.claim.key,
+                worker_instance_id: fixture.claim.worker_instance_id,
+                serving_generation: fixture.claim.serving_generation,
+                cleanup_operation_id: fence.context.operation_id,
+            };
+            assert_eq!(
+                applied(
+                    store
+                        .close_adaptive_attempt(&close)
+                        .await
+                        .expect("exact logical Close")
+                )
+                .attempts[0]
+                    .phase,
+                AttemptPhase::Closed,
+            );
+        }
+        assert_eq!(
+            store
+                .apply_pending_storage_domains(20_004)
+                .await
+                .expect("apply after Close"),
+            StorageDomainApply::Applied { revision },
+        );
+        assert_eq!(
+            store.storage_domains().await.expect("new active map"),
+            [mapping("shared-b")]
+        );
+    })
+    .await;
 }

@@ -35,6 +35,7 @@ async fn request(state: &AppState) -> (AdaptiveOriginContext, AttemptClaim) {
         recovery_epoch: Uuid::new_v4(),
         planning_generation: 7,
         planning_source_digest: "b".repeat(64),
+        source_scope: None,
         settings_digest: "c".repeat(64),
         intent_digest: "d".repeat(64),
         original_deadline_ms: now + 60_000,
@@ -239,6 +240,7 @@ async fn original_retry_cannot_claim_or_fence_after_actual_store_winner() {
         planning_source_digest: first.binding.planning_source_digest.clone(),
         selected_recipe_digest: "e".repeat(64),
         prepared_handle_digest: "f".repeat(64),
+        held_source_version: None,
         output_digest: "0".repeat(64),
         prepared_expires_at_ms: first.binding.original_deadline_ms - 1,
     };

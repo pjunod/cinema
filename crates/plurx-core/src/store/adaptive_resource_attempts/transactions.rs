@@ -27,6 +27,26 @@ macro_rules! impl_attempt_store {
             > {
                 crate::store::adaptive_resource_attempts::transactions::readiness(self).await
             }
+            async fn adaptive_source_scope(
+                &self,
+                file_id: i64,
+                source_size: i64,
+                source_mtime: i64,
+                planning_generation: i64,
+            ) -> Result<
+                Option<crate::store::adaptive_resource_attempts::AdaptiveSourceScope>,
+                crate::error::StoreError,
+            > {
+                crate::store::adaptive_resource_attempts::source_scope::read(
+                    self,
+                    file_id,
+                    source_size,
+                    source_mtime,
+                    planning_generation,
+                )
+                .await
+            }
+
             async fn claim_adaptive_attempt(
                 &self,
                 input: &crate::store::adaptive_resource_attempts::AttemptClaim,
@@ -683,6 +703,12 @@ pub(crate) async fn claim<B: Backend>(
     }
     let binding = &input.binding;
     let key = &input.key;
+    if let Some(source) = &binding.source_scope {
+        statements.push(schema::assertion(&super::source_scope::claim_guard(
+            source,
+            binding.planning_generation,
+        )?));
+    }
     let user = binding.principal.local_user_id().ok_or_else(invalid)?;
     let owner = layout.owner("root");
     statements.extend(playback_context(binding, layout));
@@ -756,6 +782,12 @@ pub(crate) async fn prepared<B: Backend>(
     let layout = store.attempt_layout().await?;
     let mut statements = operation.open(layout, store.attempt_outage_fence())?;
     statements.push(schema::assertion(&format!("({}) AND ({}) AND EXISTS(SELECT 1 FROM media_resource_requests r WHERE {} AND r.disposition='open' AND r.winner_attempt_id IS NULL) AND EXISTS(SELECT 1 FROM media_resource_attempts WHERE attempt_id={} AND phase='provisional' AND worker_json IS NULL AND worker_instance_id={} AND serving_generation=X'{}')",exact_request(&operation)?,exact_attempt(&operation)?,request_predicate(&input.binding,"r"),quote(&input.key.attempt_id.to_string()),quote(&input.worker.worker_instance_id.to_string()),hex::encode(input.worker.serving_generation.to_le_bytes()))));
+    if let Some(source) = &input.binding.source_scope {
+        statements.push(schema::assertion(&super::source_scope::prepared_guard(
+            source,
+            input.binding.planning_generation,
+        )?));
+    }
     statements.push(advance_attempt(
         &operation,
         &format!(

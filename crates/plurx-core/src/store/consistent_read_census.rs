@@ -580,6 +580,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("shared_caption_schema_version", STARTUP),
     ("source_arbitration_shape", STARTUP),
     ("storage_domain_pending_schema_version", STARTUP),
+    ("install_adaptive_source_scope", STARTUP),
     ("subtitle_managed_schema_version", STARTUP),
     ("subtitle_text_translation_schema_version", STARTUP),
     ("subtitle_translation_schema_version", STARTUP),

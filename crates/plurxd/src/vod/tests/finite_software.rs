@@ -1789,6 +1789,22 @@ async fn finite_attempt_case(case: FiniteAttemptCase) {
         .await
         .expect("real planning snapshot")
         .expect("actual source row");
+    let source_scope = if matches!(case, FiniteAttemptCase::Adopted) {
+        Some(
+            store
+                .adaptive_source_scope(
+                    snapshot.file.id,
+                    snapshot.file.size,
+                    snapshot.file.mtime,
+                    snapshot.generation,
+                )
+                .await
+                .expect("actual source scope authority")
+                .expect("ordinary finite source"),
+        )
+    } else {
+        None
+    };
     let binding = RequestBinding {
         version: 1,
         key: RequestKey {
@@ -1807,6 +1823,7 @@ async fn finite_attempt_case(case: FiniteAttemptCase) {
             fixture.recipe.file.mtime,
         ))
         .expect("actual source row digest"),
+        source_scope,
         settings_digest: crate::media_sessions::bounded_adaptive_digest(&snapshot.settings)
             .expect("actual settings digest"),
         intent_digest: envelope
@@ -1826,6 +1843,10 @@ async fn finite_attempt_case(case: FiniteAttemptCase) {
     let selected_recipe_json =
         serde_json::to_string(&envelope).expect("actual owned worker recipe serializer");
     let node = fixture._selected_store.identity.node_id.clone();
+    let domains = binding.source_scope.as_ref().map_or_else(
+        || vec![node.clone()],
+        |source| source.attempt_domains(&node),
+    );
     let claim = AttemptClaim {
         context: MutationContext {
             operation_id: uuid::Uuid::new_v4(),
@@ -1845,7 +1866,7 @@ async fn finite_attempt_case(case: FiniteAttemptCase) {
         binding,
         worker_instance_id: fixture.runtime.owner().owner_id,
         serving_generation: 1,
-        domains: vec![node.clone()],
+        domains,
     };
     claim.validate().expect("real Store Claim contract");
     let base = fixture._base.path();

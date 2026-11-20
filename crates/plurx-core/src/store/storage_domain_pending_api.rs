@@ -62,6 +62,36 @@ jobs AS (
 SELECT * FROM readers UNION ALL SELECT * FROM jobs
 "#;
 
+const ADAPTIVE_WAITING: &str = r#"
+UNION ALL SELECT 'adaptive_attempt', attempt_id, sequence, worker_node_id, resource_key,
+    library_id, CASE WHEN library_id IS NULL THEN 'adaptive_source_unknown'
+                     ELSE 'adaptive_source_held' END,
+    CASE WHEN phase IN ('losing','cleanup') THEN 1 ELSE 0 END
+FROM adaptive_source_scope_mapping_blockers
+"#;
+
+async fn waiting_sql<T: QueueSql>(store: &T) -> Result<String, StoreError> {
+    use super::adaptive_resource_attempts::source_scope;
+
+    let guard = source_scope::ready_guard();
+    let catalog = source_scope::CATALOG_SQL;
+    let rows = store
+        .queue_sql(
+            format!("SELECT CASE WHEN ({guard}) THEN 'true' WHEN EXISTS({catalog}) THEN 'null' ELSE 'false' END AS result_json WHERE json_valid($1)"),
+            "{}".into(),
+            false,
+            true,
+        )
+        .await?;
+    match rows.as_slice() {
+        [state] if state == "true" => Ok(format!("{WAITING}{ADAPTIVE_WAITING}")),
+        [state] if state == "false" => Ok(WAITING.to_owned()),
+        _ => Err(StoreError::Migration(
+            "adaptive source authority is incomplete during mapping application".into(),
+        )),
+    }
+}
+
 const SAVE: &str = r#"
 INSERT INTO background_storage_domain_pending(singleton, revision, mappings_json, base_json,
     saved_at_ms, saved_by, state, settled_at_ms, settled_reason)
@@ -144,6 +174,7 @@ pub(super) async fn apply<T: QueueSql>(
     if pending.is_empty() {
         return Ok(StorageDomainApply::NothingPending);
     }
+    let waiting = waiting_sql(store).await?;
     let sql = format!(
         r#"
 INSERT INTO background_job_commands(id, operation, request_json, result_json)
@@ -151,7 +182,7 @@ SELECT json_extract($1, '$.id'), 'storage_domains_apply', $1,
  json_object('revision', pending.revision, 'verdict', CASE
    WHEN pending.state != 'pending' THEN 'nothing'
    WHEN ({BASE_DIFFERS}) THEN 'superseded'
-   WHEN EXISTS ({WAITING}) THEN 'waiting' ELSE 'applied' END,
+   WHEN EXISTS ({waiting}) THEN 'waiting' ELSE 'applied' END,
    'reason', CASE WHEN pending.state = 'pending' AND ({BASE_DIFFERS}) THEN 'applied_changed_elsewhere' END)
 FROM background_storage_domain_pending pending WHERE pending.singleton = 1
 RETURNING result_json
@@ -192,9 +223,10 @@ pub(super) async fn state<T: QueueSql>(
     clock(now_ms)?;
     // One authoritative snapshot keeps applied/pending/blocker diagnostics
     // consistent during a concurrent save or application on another node.
+    let waiting = waiting_sql(store).await?;
     let sql = format!(
         r#"
-WITH waiting AS ({WAITING})
+WITH waiting AS ({waiting})
 SELECT json_object(
  'applied', json((SELECT json_group_array(json_object('library_id', library_id, 'root_path', root_path,
    'domain_id', domain_id)) FROM (SELECT * FROM background_storage_domains ORDER BY library_id, root_path))),

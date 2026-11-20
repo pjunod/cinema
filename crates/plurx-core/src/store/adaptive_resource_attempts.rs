@@ -16,8 +16,10 @@ use crate::{
 
 mod codec;
 pub mod schema;
+pub(crate) mod source_scope;
 pub(crate) mod transactions;
 pub use codec::selected_recipe_digest;
+pub const MAX_HELD_SOURCE_VERSION_BYTES: usize = 192;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 pub mod validation;
@@ -43,6 +45,8 @@ pub struct RequestBinding {
     pub recovery_epoch: Uuid,
     pub planning_generation: i64,
     pub planning_source_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_scope: Option<AdaptiveSourceScope>,
     pub settings_digest: String,
     /// Digest of the immutable root-scoped worker wire envelope, before its
     /// route/request IDs are rewritten for a particular physical attempt.
@@ -53,6 +57,61 @@ pub struct RequestBinding {
     pub expected_predecessor_incarnation_id: Option<Uuid>,
     pub expected_predecessor_owner_epoch: Option<i64>,
     pub expected_desired_revision: Option<i64>,
+}
+
+/// Immutable scanner and applied source-domain projection of an ordinary
+/// finite attempt. The original attempt controls the lifetime of the hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdaptiveSourceScope {
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub source_path: String,
+    pub library_id: i64,
+    pub mapping_revision: i64,
+    pub resource_keys: Vec<String>,
+}
+
+impl AdaptiveSourceScope {
+    pub fn attempt_domains(&self, worker_node_id: &str) -> Vec<String> {
+        let mut domains = self.resource_keys.clone();
+        domains.push(worker_node_id.to_owned());
+        domains.sort();
+        domains.dedup();
+        domains
+    }
+
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        self.resource_keys.iter().try_fold(
+            self.resource_keys
+                .capacity()
+                .checked_mul(std::mem::size_of::<String>())?
+                .checked_add(self.source_path.capacity())?,
+            |bytes, key| bytes.checked_add(key.capacity()),
+        )
+    }
+
+    fn validate(&self) -> Result<(), StoreError> {
+        validate_domains(&self.resource_keys)?;
+        if self.file_id <= 0
+            || self.source_size < 0
+            || self.source_mtime < 0
+            || !text(&self.source_path, 4096)
+            || self.library_id <= 0
+            || self.mapping_revision < 0
+            || self.resource_keys.len() >= 32
+            || self.resource_keys.iter().any(|key| {
+                key != "source_io"
+                    && key.strip_prefix("source_io:").is_none_or(|domain| {
+                        domain.len() > 64 || !super::background_jobs::identifier(domain)
+                    })
+            })
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +140,8 @@ pub struct WorkerBinding {
     pub planning_source_digest: String,
     pub selected_recipe_digest: String,
     pub prepared_handle_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_source_version: Option<String>,
     pub output_digest: String,
     pub prepared_expires_at_ms: i64,
 }
@@ -288,6 +349,13 @@ pub struct AttemptInventoryPage {
 #[async_trait]
 pub trait AdaptiveResourceAttemptStore: Send + Sync {
     async fn adaptive_attempt_schema(&self) -> Result<AttemptSchemaReadiness, StoreError>;
+    async fn adaptive_source_scope(
+        &self,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        planning_generation: i64,
+    ) -> Result<Option<AdaptiveSourceScope>, StoreError>;
     async fn claim_adaptive_attempt(
         &self,
         claim: &AttemptClaim,
@@ -395,6 +463,9 @@ impl RequestKey {
 impl RequestBinding {
     pub fn validate(&self) -> Result<(), StoreError> {
         self.key.validate()?;
+        if let Some(scope) = &self.source_scope {
+            scope.validate()?;
+        }
         if self.version != 1
             || !self.principal.valid_admission_shape()
             || !digest(&self.request_fingerprint)
@@ -468,6 +539,10 @@ impl WorkerBinding {
             || self.planning_source_digest != binding.planning_source_digest
             || !digest(&self.selected_recipe_digest)
             || !digest(&self.prepared_handle_digest)
+            || !source_scope::held_source_matches(
+                binding.source_scope.as_ref(),
+                self.held_source_version.as_deref(),
+            )
             || !digest(&self.output_digest)
             || self.prepared_expires_at_ms <= 0
             || self.prepared_expires_at_ms > binding.original_deadline_ms
@@ -495,7 +570,12 @@ impl AttemptClaim {
         self.context.validate()?;
         self.key.validate(&self.binding)?;
         validate_domains(&self.domains)?;
-        if self.worker_instance_id.is_nil() || self.context.expected_attempt_sequence != 0 {
+        if self.worker_instance_id.is_nil()
+            || self.context.expected_attempt_sequence != 0
+            || self.binding.source_scope.as_ref().is_some_and(|scope| {
+                self.domains != scope.attempt_domains(&self.key.worker_node_id)
+            })
+        {
             return Err(invalid());
         }
         Ok(())
@@ -548,7 +628,9 @@ impl RequestStatus {
         for (index, record) in self.attempts.iter().enumerate() {
             record.key.validate(&self.binding)?;
             validate_domains(&record.domains)?;
-            if usize::from(record.key.ordinal) != index + 1
+            if self.binding.source_scope.as_ref().is_some_and(|scope| {
+                record.domains != scope.attempt_domains(&record.key.worker_node_id)
+            }) || usize::from(record.key.ordinal) != index + 1
                 || record.sequence <= 0
                 || record.worker_instance_id.is_nil()
                 || record.last_operation_id.is_nil()

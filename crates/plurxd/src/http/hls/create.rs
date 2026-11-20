@@ -530,7 +530,51 @@ pub(super) async fn prepare_adaptive_origin(
         request_id: request_claim_id.to_owned(),
         request_incarnation_id: root_id,
     };
+    let supports_source_scope = state
+        .media_pool
+        .adaptive_source_scope_supported(&state.node_id, owner_node_id, &quote)
+        .await;
+    if !supports_source_scope
+        && context
+            .as_ref()
+            .is_some_and(|context| context.binding.source_scope.is_some())
+    {
+        return Err(AdaptiveOriginFailure::NextWorker(
+            ApiError::ServiceUnavailable(
+                "adaptive worker cannot accept the original source scope".into(),
+            ),
+        ));
+    }
     if context.is_none() {
+        let source_scope = if supports_source_scope
+            && matches!(
+                purpose,
+                crate::media_sessions::AdaptivePreparePurpose::Create
+            )
+            && funded.recipe.finite_service_request(snapshot).is_some()
+        {
+            Some(
+                tokio::time::timeout_at(
+                    deadline,
+                    state.store.adaptive_source_scope(
+                        source.id,
+                        source.size,
+                        source.mtime,
+                        snapshot.generation,
+                    ),
+                )
+                .await
+                .map_err(|_| ApiError::ServiceUnavailable("adaptive source scope deadline".into()))?
+                .map_err(|error| {
+                    ApiError::ServiceUnavailable(format!("reading adaptive source scope: {error}"))
+                })?
+                .ok_or_else(|| {
+                    ApiError::ServiceUnavailable("adaptive source scope is unavailable".into())
+                })?,
+            )
+        } else {
+            None
+        };
         let binding = RequestBinding {
             version: 1,
             key: key.clone(),
@@ -540,6 +584,7 @@ pub(super) async fn prepare_adaptive_origin(
             recovery_epoch: recovery_id,
             planning_generation: snapshot.generation,
             planning_source_digest: adaptive_digest(&(source.id, source.size, source.mtime))?,
+            source_scope,
             settings_digest: adaptive_digest(&snapshot.settings)?,
             intent_digest: intent_digest.clone(),
             original_deadline_ms: original_claim_deadline_ms,
@@ -583,7 +628,10 @@ pub(super) async fn prepare_adaptive_origin(
         key,
         worker_instance_id: quote.owner_id,
         serving_generation: quote.serving_generation,
-        domains: vec![owner_node_id.to_owned()],
+        domains: context.binding.source_scope.as_ref().map_or_else(
+            || vec![owner_node_id.to_owned()],
+            |source| source.attempt_domains(owner_node_id),
+        ),
     };
     let claim = adaptive_retry::claim_original(state, context, claim, deadline).await?;
     let result = tokio::time::timeout_at(

@@ -34,6 +34,7 @@ async fn fixture() -> (SqliteStore, AttemptClaim) {
         recovery_epoch: Uuid::new_v4(),
         planning_generation: 1,
         planning_source_digest: "b".repeat(64),
+        source_scope: None,
         settings_digest: "c".repeat(64),
         intent_digest: "d".repeat(64),
         original_deadline_ms: 20_000,

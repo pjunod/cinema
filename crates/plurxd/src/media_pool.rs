@@ -231,6 +231,9 @@ pub(crate) struct MediaNodeSnapshot {
     /// the authenticated internal-peer request check in `internal_media`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adaptive_worker_quote: Option<AdaptiveWorkerQuote>,
+    /// Understands exact source bindings in the ordinary adaptive protocol.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adaptive_source_scope: bool,
     /// The negotiated worker can prepare an exact Profile 7 FEL request.
     /// This is capability discovery, independent of cached candidate results.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1533,6 +1536,28 @@ impl MediaPool {
             .filter(AdaptiveWorkerQuote::valid)
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn adaptive_source_scope_supported(
+        &self,
+        local_node_id: &str,
+        node_id: &str,
+        quote: &AdaptiveWorkerQuote,
+    ) -> bool {
+        if node_id == local_node_id {
+            return true;
+        }
+        self.snapshots
+            .read()
+            .await
+            .get(node_id)
+            .is_some_and(|cached| {
+                tokio::time::Instant::now() <= cached.expires_at
+                    && cached.snapshot.protocol_version == PROTOCOL_VERSION
+                    && cached.snapshot.adaptive_source_scope
+                    && cached.snapshot.adaptive_worker_quote.as_ref() == Some(quote)
+            })
+    }
+
     pub(crate) async fn adaptive_fel_stage_quote(
         &self,
         node_id: &str,
@@ -2823,6 +2848,7 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         live_tv_processing: false,
         live_tv_resource_processing: state.serving.is_ready()
             && state.cluster.role().admission != Admission::Maintenance,
+        adaptive_source_scope: cfg!(target_os = "linux") && adaptive_worker_quote.is_some(),
         adaptive_worker_quote,
         adaptive_fel_prepare,
         adaptive_fel_stage: adaptive_fel_prepare,
@@ -3726,6 +3752,7 @@ mod tests {
             live_tv_processing: false,
             live_tv_resource_processing: true,
             adaptive_worker_quote: None,
+            adaptive_source_scope: false,
             adaptive_fel_prepare: false,
             adaptive_fel_stage: false,
             adaptive_fel_stage_retry: false,
@@ -3840,6 +3867,13 @@ mod tests {
             state.media_pool.adaptive_worker_quote(&state, peer).await,
             Some(quote.clone())
         );
+        #[cfg(target_os = "linux")]
+        assert!(
+            !state
+                .media_pool
+                .adaptive_source_scope_supported(&state.node_id, peer, &quote)
+                .await
+        );
         let set = |edit: fn(&mut CachedSnapshot)| {
             let pool = std::sync::Arc::clone(&state.media_pool);
             async move {
@@ -3852,6 +3886,26 @@ mod tests {
                 );
             }
         };
+        set(|cached| cached.snapshot.adaptive_source_scope = true).await;
+        #[cfg(target_os = "linux")]
+        {
+            assert!(
+                state
+                    .media_pool
+                    .adaptive_source_scope_supported(&state.node_id, peer, &quote)
+                    .await
+            );
+            let restarted = AdaptiveWorkerQuote {
+                serving_generation: quote.serving_generation + 1,
+                ..quote.clone()
+            };
+            assert!(
+                !state
+                    .media_pool
+                    .adaptive_source_scope_supported(&state.node_id, peer, &restarted)
+                    .await
+            );
+        }
         set(|cached| cached.snapshot.protocol_version = PROTOCOL_VERSION - 1).await;
         assert!(state
             .media_pool
@@ -4946,6 +5000,7 @@ mod tests {
                     live_tv_processing: false,
                     live_tv_resource_processing: true,
                     adaptive_worker_quote: None,
+                    adaptive_source_scope: false,
                     adaptive_fel_prepare: false,
                     adaptive_fel_stage: false,
                     adaptive_fel_stage_retry: false,
