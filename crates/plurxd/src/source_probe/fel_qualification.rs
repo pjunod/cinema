@@ -979,6 +979,41 @@ pub(crate) enum Qualification {
     Stored(q::FelVerdict),
 }
 
+/// Canonical native-size production recipe. The playback-request path
+/// still uses its explicit recipe, including any lower output raster.
+pub(crate) fn default_native_request(
+    file: &plurx_core::domain::MediaFile,
+    document: &serde_json::Value,
+    clock: Clock,
+    backend_identity: String,
+) -> Result<q::FelRecipeRequest, String> {
+    let held_rate =
+        plurx_core::transcode::enhancement_stream_rate(document, u32::from(clock.video_index));
+    let (target, provenance) =
+        plurx_core::transcode::enhancement_source_budget(file, held_rate).map_err(str::to_owned)?;
+    let envelope = plurx_core::transcode::EnhancementRateEnvelope::resolve(
+        target,
+        provenance,
+        clock.native_raster.0,
+        clock.native_raster.1,
+        clock.rate,
+        true,
+        Default::default(),
+    )
+    .map_err(str::to_owned)?;
+    Ok(q::FelRecipeRequest::new(
+        backend_identity,
+        file.size,
+        file.mtime,
+        envelope,
+        q::FelRecipeOutput::new(
+            u32::from(clock.video_index),
+            clock.native_raster,
+            clock.rate,
+        ),
+    ))
+}
+
 /// The deployed renderer a qualification runs, and whether it is still the
 /// one it started with (`None` skips that check, for fixtures).
 pub(crate) struct Renderer<'a> {
@@ -1172,8 +1207,8 @@ async fn qualify_with_mode(
         .map_err(|e| e.to_string())?
         .unwrap_or_else(|| document.to_owned());
     let pending = q::pending_recipes(&current_document, file.size, file.mtime);
-    let mut clock =
-        Clock::from_document(&serde_json::from_str(document).map_err(|e| e.to_string())?)?;
+    let document: serde_json::Value = serde_json::from_str(document).map_err(|e| e.to_string())?;
+    let mut clock = Clock::from_document(&document)?;
     let request = if let Some(request) = pending.iter().find(|request| {
         request.backend_identity == backend_identity
             && requested_recipes.is_none_or(|recipes| recipes.contains(&request.identity))
@@ -1182,29 +1217,7 @@ async fn qualify_with_mode(
     } else if requested_recipes.is_some() {
         return Ok(Qualification::NotDue);
     } else {
-        let doc: serde_json::Value = serde_json::from_str(document).map_err(|e| e.to_string())?;
-        let held_rate =
-            plurx_core::transcode::enhancement_stream_rate(&doc, u32::from(clock.video_index));
-        let (target, provenance) =
-            plurx_core::transcode::enhancement_source_budget(file, held_rate)
-                .map_err(str::to_owned)?;
-        let envelope = plurx_core::transcode::EnhancementRateEnvelope::resolve(
-            target,
-            provenance,
-            clock.raster.0,
-            clock.raster.1,
-            clock.rate,
-            true,
-            Default::default(),
-        )
-        .map_err(str::to_owned)?;
-        q::FelRecipeRequest::new(
-            backend_identity,
-            file.size,
-            file.mtime,
-            envelope,
-            q::FelRecipeOutput::new(u32::from(clock.video_index), clock.raster, clock.rate),
-        )
+        default_native_request(file, &document, clock, backend_identity)?
     };
     if request.output.video_stream != u32::from(clock.video_index)
         || request.output.rate

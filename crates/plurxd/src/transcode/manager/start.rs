@@ -10,6 +10,8 @@ use super::*;
 pub(super) struct RollingStartInputs {
     pub(super) file: plurx_core::domain::MediaFile,
     pub(super) probe_json: Option<String>,
+    #[cfg(target_os = "linux")]
+    pub(super) generation: i64,
     pub(super) settings: std::collections::BTreeMap<String, String>,
     /// The file's item title from the same statement, for attribution only.
     pub(super) item_title: Option<String>,
@@ -54,6 +56,8 @@ impl TranscodeManager {
             return Ok(RollingStartInputs {
                 file: snapshot.file.clone(),
                 probe_json: snapshot.probe_json.clone(),
+                #[cfg(target_os = "linux")]
+                generation: snapshot.generation,
                 settings: snapshot.settings.clone(),
                 item_title: snapshot.item_title.clone(),
             });
@@ -67,6 +71,8 @@ impl TranscodeManager {
         Ok(RollingStartInputs {
             file: snapshot.file,
             probe_json: snapshot.probe_json,
+            #[cfg(target_os = "linux")]
+            generation: snapshot.generation,
             settings: snapshot.settings,
             item_title: snapshot.item_title,
         })
@@ -666,6 +672,7 @@ impl TranscodeManager {
             probe_json,
             settings,
             item_title,
+            ..
         } = inputs;
         // The server's cache budget governs both reuse of an existing retained
         // copy and new collection. `retain_output: Some(false)` is the
@@ -1808,6 +1815,8 @@ impl TranscodeManager {
             probe_json: stored_probe,
             settings,
             item_title,
+            #[cfg(target_os = "linux")]
+                generation: planning_generation,
         } = self.rolling_start_inputs(file_id, None, plan).await?;
         let native_split = allow_native_split
             && start_seconds == 0.0
@@ -1815,6 +1824,13 @@ impl TranscodeManager {
             && options.convert_dolby_vision
             && takeover.is_none()
             && replacement_deadline.is_none();
+        #[cfg(target_os = "linux")]
+        let warm_head = if native_split && recovery.is_some() {
+            self.warm_native_fel_head(&file, planning_generation, stored_probe.as_deref())
+                .await
+        } else {
+            None
+        };
         // A native split needs a fresh rendition inventory. The ordinary
         // cache budget applies to both reuse and collection on the muxed path.
         let retained_budget = if native_split {
@@ -2124,16 +2140,31 @@ impl TranscodeManager {
         let split_startup_budget = split_sizing
             .grant_bytes(limits)
             .saturating_sub(ordinary_sizing.grant_bytes(limits));
-        let split_reservation = (native_split && segmenting && split_startup_budget > 0)
-            .then(|| self.reserve_rolling_scratch_with(split_sizing, limits))
-            .and_then(Result::ok);
+        let split_eligible = native_split && segmenting && split_startup_budget > 0;
+        #[cfg(target_os = "linux")]
+        let warm_reservation = warm_head.as_ref().filter(|_| split_eligible).and_then(|_| {
+            let sizing = RollingScratchSizing::Startup(startup_bytes.saturating_mul(3));
+            self.reserve_rolling_scratch_with(sizing, limits).ok()
+        });
+        #[cfg(target_os = "linux")]
+        let warm_head = warm_head.filter(|_| warm_reservation.is_some());
+        #[cfg(not(target_os = "linux"))]
+        let warm_reservation = None;
+        let split_reservation = warm_reservation.or_else(|| {
+            split_eligible
+                .then(|| self.reserve_rolling_scratch_with(split_sizing, limits))
+                .and_then(Result::ok)
+        });
         let native_split = split_reservation.is_some();
         let scratch_reservation = match split_reservation {
             Some(reservation) => reservation,
             None => self.reserve_rolling_scratch_with(ordinary_sizing, limits)?,
         };
-        let scratch_envelope = rolling_scratch_envelope(copy_bitrate, 1.0)
-            .saturating_mul(if native_split { 2 } else { 1 });
+        let scratch_factor = if native_split { 2 } else { 1 };
+        #[cfg(target_os = "linux")]
+        let scratch_factor = scratch_factor + i64::from(warm_head.is_some());
+        let scratch_envelope =
+            rolling_scratch_envelope(copy_bitrate, 1.0).saturating_mul(scratch_factor);
 
         let session_id = takeover
             .as_ref()
@@ -2289,9 +2320,12 @@ impl TranscodeManager {
             control,
             publication: Mutex::new(RollingPublicationClock::default()),
             native_split: native_split.then(|| {
-                Arc::new(crate::copyseg::NativeSplitInventory::with_startup_budget(
+                let split = crate::copyseg::NativeSplitInventory::with_startup_budget(
                     split_startup_budget as u64,
-                ))
+                );
+                #[cfg(target_os = "linux")]
+                let split = if warm_head.is_some() { split.compare_prepared_head() } else { split };
+                Arc::new(split)
             }),
             publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
@@ -2510,6 +2544,14 @@ impl TranscodeManager {
                 )
                 .with_starved_signal(Arc::clone(&self.scratch_starved))
             });
+            #[cfg(target_os = "linux")]
+            if let Some(head) = warm_head {
+                head.stage_for_start(
+                    Arc::clone(&session),
+                    generation,
+                    Arc::clone(&self.scratch_cap),
+                );
+            }
             spawn_copy_reader_owner(
                 Arc::clone(&session),
                 stdout,

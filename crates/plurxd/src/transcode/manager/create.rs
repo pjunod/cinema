@@ -1639,6 +1639,47 @@ impl TranscodeManager {
             .await
     }
 
+    /// Freeze the same completed-window encoder for live and prepared media.
+    #[cfg(target_os = "linux")]
+    pub(super) async fn resolve_completed_dv_window_plan(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &mut TranscodeOptions,
+        source: &crate::fragment_index_cluster::SourceFence,
+        envelope: Option<plurx_core::transcode::EnhancementRateEnvelope>,
+        grid: plurx_core::transcode::VodFrameGrid,
+        planning: &plurx_core::store::PlaybackPlanningSnapshot,
+    ) -> Result<(plurx_core::transcode::ResolvedTranscode, Encoder), String> {
+        if let Some(envelope) = envelope {
+            options.video_bitrate_kbps = envelope.target_kbps();
+        }
+        let held = source
+            .handle
+            .try_clone()
+            .map(Arc::new)
+            .map_err(|error| error.to_string())?;
+        let mut plan = self
+            .resolve_vod_movie_plan(file, options, Encoder::Software, held)
+            .await?;
+        if let Some(envelope) = envelope {
+            plan = plan
+                .with_enhancement_rate_envelope(envelope)
+                .map_err(str::to_owned)?;
+        }
+        let preference = planning
+            .settings
+            .get(keys::HWACCEL)
+            .map(String::as_str)
+            .unwrap_or("");
+        let encoder = crate::vodencode::dv_runtime::completed_window_encoder(
+            self.encoder_for_preference(preference),
+            self.hdr10_passthrough_vaapi,
+            &plan,
+            grid,
+        );
+        Ok((plan, encoder))
+    }
+
     /// Whether this node has a hardware completed-output encoder that can
     /// measure its own reconstructed recipe. This permits a trial, not serving:
     /// every actual encoder/driver/device still needs its own quality verdict.
@@ -1676,7 +1717,7 @@ impl TranscodeManager {
     /// to be measured.
     #[cfg(target_os = "linux")]
     #[allow(clippy::too_many_arguments)]
-    async fn reconstruction_qualified(
+    pub(super) async fn reconstruction_qualified(
         &self,
         planning: &plurx_core::store::PlaybackPlanningSnapshot,
         envelope: plurx_core::transcode::EnhancementRateEnvelope,
@@ -2043,8 +2084,10 @@ impl TranscodeManager {
         let slot = self
             .try_qualification_slot(preempt)
             .ok_or_else(Self::reconstruction_slot_busy)?;
-        self.extend_fragment_admission(admission, &resources, Some(1))
-            .await?;
+        drop(
+            self.extend_fragment_admission(admission, &resources, Some(1))
+                .await?,
+        );
         Ok((slot, decode))
     }
 
@@ -3709,17 +3752,16 @@ impl TranscodeManager {
                             &processed_options, retained.0.options().input_has_audio,
                             crate::ffmpeg::has_dovi_rpu().await, destination,
                             plurx_core::transcode::enhancement_stream_rate(&document,retained.0.decode().input_video_stream()))?;
-                        processed_options.video_bitrate_kbps = envelope.target_kbps();
                         Some(envelope)
                     } else { None };
-                    let held = source.handle.try_clone().map(Arc::new).map_err(|e| e.to_string())?;
-                    let mut processed_plan = self.resolve_vod_movie_plan(file, &processed_options, Encoder::Software, held).await?;
-                    if let Some(envelope) = enhancement_envelope {
-                        processed_plan = processed_plan.with_enhancement_rate_envelope(envelope).map_err(str::to_owned)?;
-                    }
-                    let worker_encoder = self.encoder_for_preference(planning.settings.get(keys::HWACCEL).map(String::as_str).unwrap_or(""));
-                    let processed_encoder = crate::vodencode::dv_runtime::completed_window_encoder(
-                        worker_encoder, self.hdr10_passthrough_vaapi, &processed_plan, grid);
+                    let (processed_plan, processed_encoder) = self.resolve_completed_dv_window_plan(
+                        file,
+                        &mut processed_options,
+                        &source,
+                        enhancement_envelope,
+                        grid,
+                        &planning,
+                    ).await?;
                     if destination == plurx_core::transcode::dv_processing::DvDestination::Profile81 {
                         self.reconstruction_qualified(&planning,
                             enhancement_envelope.ok_or("FEL recipe lost its frozen envelope")?,

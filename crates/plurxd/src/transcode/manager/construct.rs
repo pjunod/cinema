@@ -66,6 +66,8 @@ impl TranscodeManager {
             vod: crate::vodserve::VodServe::new(work_dir.join("renditions"), Arc::clone(&store)),
             store,
             work_dir,
+            #[cfg(target_os = "linux")]
+            native_fel_head: Mutex::new(None),
             runtime_cache,
             subtitle_cache,
             subtitle_membership: None,
@@ -1673,7 +1675,7 @@ impl TranscodeManager {
         admission: &FragmentAdmission,
         resources: &TranscodeResourceEstimate,
         software_threads: Option<u32>,
-    ) -> Result<(), String> {
+    ) -> Result<crate::vodencode::EncodePermit, String> {
         if !self.fragment_worker_idle(admission) {
             return Err("foreground work is waiting for this node's capacity".into());
         }
@@ -1691,10 +1693,9 @@ impl TranscodeManager {
             None,
         )
         .map_err(|_| "the GPU slot or CPU this step needs is in use".to_owned())?;
-        if !admission.install_extension(permit) {
-            return Err("this job already holds an extended admission".into());
-        }
-        Ok(())
+        admission
+            .install_extension(permit)
+            .ok_or_else(|| "this job already holds an extended admission".into())
     }
 
     /// Own the existing heavy-worker lane, not an encoder estimate invented

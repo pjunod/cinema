@@ -870,7 +870,7 @@ async fn qualify_owned(
                 )
                 .await
             } else {
-                super::fel_qualification::qualify_if_due(
+                let verdict = super::fel_qualification::qualify_if_due(
                     state,
                     file,
                     &demand.probe_json,
@@ -878,7 +878,24 @@ async fn qualify_owned(
                     admission,
                     &qualification,
                 )
-                .await
+                .await;
+                if verdict.is_ok() {
+                    if let Some(version) = source_version.as_deref() {
+                        let prepared = Box::pin(state.transcode.prepare_native_fel_head(
+                            file,
+                            version,
+                            Arc::new(tools.clone()),
+                            admission,
+                            &qualification,
+                        ))
+                        .await;
+                        if let Err(reason) = prepared {
+                            tracing::debug!(target: "plurxd::dv", file_id = file.id, %reason,
+                                "native FEL head preparation deferred");
+                        }
+                    }
+                }
+                verdict
             }
         },
     )

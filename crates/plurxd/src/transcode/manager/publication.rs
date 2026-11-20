@@ -1767,7 +1767,6 @@ impl TranscodeManager {
         root: &crate::vodserve::PreparedRootAdmission,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<bool, String> {
-        use crate::vodencode::dv_runtime::{NativeFelWindow, WindowOutcome};
         use plurx_core::fmp4::{segment_name, FragmentReader, Unit};
         let session = self
             .sessions
@@ -1820,8 +1819,8 @@ impl TranscodeManager {
             plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling,
         );
         let mut had_commit = false;
-        let mut last_attempted = 0;
-        let mut last_committed: Option<u64> = None;
+        let mut last_committed = split.prepared_head_frontier(attempt);
+        let mut last_attempted = last_committed.unwrap_or(0);
         loop {
             let changed = split.changed.notified();
             tokio::pin!(changed);
@@ -1891,10 +1890,7 @@ impl TranscodeManager {
             };
             last_attempted = index;
             let prepared = async {
-                use plurx_core::transcode::dv_processing::{
-                    DvDigest, DvProductionRegistry, DvSelection,
-                };
-                use sha2::Digest;
+                use plurx_core::transcode::dv_processing::DvSelection;
                 let raw = tokio::fs::read(session.dir.join(segment_name(index)))
                     .await
                     .map_err(|err| err.to_string())?;
@@ -1925,81 +1921,26 @@ impl TranscodeManager {
                 }
                 segment.first_source_frame = entry.first_source_frame;
                 let entries = segment.fel_windows(encoding.grid)?;
-                let mut windows: Vec<NativeFelWindow> = Vec::with_capacity(entries.len());
-                for entry in &entries {
-                    let worker = root
-                        .permit
-                        .clone()
-                        .try_claim_worker()
-                        .ok_or("FEL worker is occupied")?;
-                    let input = crate::source_input::SourceInput::open_current_held(
-                        &runtime.source.handle,
-                        "native-fel",
-                    )
-                    .await?
-                    .ok_or("native splice has no original source custody")?;
-                    let outcome = runtime
-                        .execute_with_source_input(
-                            file,
-                            &encoding.plan,
-                            &encoding.options,
-                            encoding.grid,
-                            entry,
-                            &encoding.executable.path,
-                            crate::dv_segment::SegmentAdmission::Retained(worker),
-                            Arc::new(crate::prodrun::ProducerSlot::new()),
-                            cancellation.child_token(),
-                            None,
-                            input,
-                            None,
-                            None,
-                        )
-                        .await?;
-                    let WindowOutcome::Completed((window, decision)) = outcome else {
-                        return Err("native splice render cancelled".into());
-                    };
-                    match &encoding.dv_processing {
-                        plurx_core::transcode::dv_processing::DvSelection::Selected(frozen)
-                            if decision.semantic_digest() == frozen.semantic_digest() =>
-                        {
-                            windows.push(window.into_native_fel_window()?)
-                        }
-                        _ => {
-                            return Err(
-                                "native splice changed the qualified rendering recipe".into()
-                            )
-                        }
-                    }
-                }
-                let bytes = segment.enhanced_video(&author, &windows, first_sequence)?;
                 let DvSelection::Selected(plan) = &encoding.dv_processing else {
                     return Err("native splice has no verified processing plan".into());
                 };
-                let shape = DvDigest::new(hex::encode(sha2::Sha256::digest(&bytes)))
-                    .map_err(|err| err.to_string())?;
-                let mut reports = windows.iter().map(|window| {
-                    let mut receipt = window.receipt.clone();
-                    receipt
-                        .bind_publication(incarnation_id, shape.clone())
-                        .map_err(|err| err.to_string())?;
-                    receipt
-                        .effective_report(&DvProductionRegistry, plan, incarnation_id, &shape)
-                        .map_err(|err| err.to_string())?
-                        .filter(|report| {
-                            report.profile81_reconstructed() && report.fel_contributed()
-                        })
-                        .ok_or_else(|| {
-                            "native splice did not produce a FEL delivery report".to_owned()
-                        })
-                });
-                let report = reports
-                    .next()
-                    .ok_or("native splice produced no windows")??;
-                for other in reports {
-                    if other? != report {
-                        return Err("native splice windows disagree on effective processing".into());
-                    }
-                }
+                let (windows, _) = runtime
+                    .render_native_fel_windows(
+                        file,
+                        &encoding.plan,
+                        &encoding.options,
+                        encoding.grid,
+                        &entries,
+                        &encoding.executable.path,
+                        &root.permit,
+                        &cancellation,
+                        Some(plan),
+                    )
+                    .await?;
+                let (bytes, proof) = segment
+                    .enhanced_video(&author, windows, first_sequence)?
+                    .into_parts();
+                let report = proof.report_for_publication(&bytes, plan, incarnation_id)?;
                 Ok::<_, String>((bytes, report))
             };
             let (bytes, report) = match crate::source_custody::with_request(

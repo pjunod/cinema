@@ -1431,6 +1431,27 @@ impl Session {
             }
             segments.revision = segments.revision.wrapping_add(1);
         }
+        #[cfg(target_os = "linux")]
+        if clock.served.is_none() {
+            if let Some(split) = &self.native_split {
+                let rejected = split.publish_prepared_head(
+                    producer_attempt,
+                    served_first,
+                    served_last,
+                    self.recovery
+                        .as_ref()
+                        .map(|owner| owner.incarnation_id.as_str()),
+                );
+                if !rejected.is_empty() {
+                    let dir = self.dir.clone();
+                    tokio::spawn(async move {
+                        for name in rejected {
+                            let _ = tokio::fs::remove_file(dir.join(name)).await;
+                        }
+                    });
+                }
+            }
+        }
         clock.deferred_since = None;
         clock.served = Some(ServedPlaylistSnapshot {
             raw: Arc::from(served_raw),

@@ -1076,6 +1076,81 @@ pub(crate) struct RuntimeRecipe {
 
 #[cfg(target_os = "linux")]
 impl RuntimeRecipe {
+    /// Render exact source intervals under an already owned admission. The
+    /// first accepted decision freezes the output for an unpublished prefix.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn render_native_fel_windows(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+        options: &plurx_core::transcode::TranscodeOptions,
+        grid: plurx_core::transcode::VodFrameGrid,
+        entries: &[plurx_core::segplan::PlanEntry],
+        executable: &Path,
+        permit: &crate::vodencode::EncodePermit,
+        cancellation: &tokio_util::sync::CancellationToken,
+        required: Option<&plurx_core::transcode::dv_processing::DvProcessingPlan>,
+    ) -> Result<
+        (
+            Vec<NativeFelWindow>,
+            plurx_core::transcode::dv_processing::DvProcessingPlan,
+        ),
+        String,
+    > {
+        let mut selected = required.cloned();
+        let mut windows = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if cancellation.is_cancelled() || !self.source.unchanged() {
+                return Err("native splice lost its source or owner".into());
+            }
+            let worker = permit
+                .clone()
+                .try_claim_worker()
+                .ok_or("FEL worker is occupied")?;
+            let input = crate::source_input::SourceInput::open_current_held(
+                &self.source.handle,
+                "native-fel",
+            )
+            .await?
+            .ok_or("native splice has no original source custody")?;
+            let outcome = self
+                .execute_with_source_input(
+                    file,
+                    plan,
+                    options,
+                    grid,
+                    entry,
+                    executable,
+                    crate::dv_segment::SegmentAdmission::Retained(worker),
+                    Arc::new(crate::prodrun::ProducerSlot::new()),
+                    cancellation.child_token(),
+                    None,
+                    input,
+                    None,
+                    None,
+                )
+                .await?;
+            let WindowOutcome::Completed((window, decision)) = outcome else {
+                return Err("native splice render cancelled".into());
+            };
+            if let Some(frozen) = &selected {
+                if decision.semantic_digest() != frozen.semantic_digest() {
+                    return Err("native splice changed the qualified rendering recipe".into());
+                }
+            } else {
+                selected = Some(decision);
+            }
+            windows.push(window.into_native_fel_window()?);
+        }
+        if windows.is_empty() {
+            return Err("native splice produced no windows".into());
+        }
+        Ok((
+            windows,
+            selected.ok_or("native splice has no verified processing plan")?,
+        ))
+    }
+
     /// The cache key and the window encoder must use the same destination and driver policy.
     fn completed_output_for<'a>(
         &self,
@@ -1506,6 +1581,7 @@ impl RuntimeRecipe {
                 &crate::ffmpeg::ffmpeg_bin(),
             );
             let request = crate::dv_segment::StreamingSegmentRequest {
+                background: crate::background_jobs::source_budget().is_some(),
                 mode: self.mode,
                 decode: self.decode,
                 export_raster: Some(export_raster),
