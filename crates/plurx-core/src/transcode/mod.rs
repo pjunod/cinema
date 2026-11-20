@@ -17,6 +17,7 @@ mod decode;
 pub mod decoder_inventory;
 mod dolby;
 pub mod dv_fel_qualification;
+pub mod dv_m7_scoring;
 pub mod dv_processing;
 pub mod dv_refit;
 pub mod dv_refit_serve;
