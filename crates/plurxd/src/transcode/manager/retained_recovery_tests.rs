@@ -1,5 +1,81 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
+#[test]
+fn ready_native_fel_admission_is_limited_to_the_original_auto_copy() {
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+
+    let route = crate::media_sessions::takeover_eligible_route(
+        "native-fel-admission",
+        "00000000-0000-4000-8000-0000000000a1",
+    );
+    let start: crate::media_sessions::RemoteStartRequest =
+        serde_json::from_str(&route.recipe_json).expect("durable fixture");
+    let mut req = start.request;
+    req.presentation = Presentation::Vod;
+    req.kind = SessionKind::Copy {
+        aac: true,
+        preserve_dolby_vision: true,
+        convert_dolby_vision: true,
+        dual_layer_as_copied: false,
+    };
+    req.automatic = true;
+    req.start_seconds = 0.0;
+    req.audio_offset_ms = 0;
+    req.audio_delivery = None;
+    req.transport = Some("native".into());
+    let digest = [42; 32];
+    let mut context = TranscodeManager::candidate_context(&QualityCandidate {
+        id: CandidateId::for_recipe_digest(digest),
+        recipe_digest: digest,
+        route: CandidateRoute::Remux,
+        planned_codec: Some("hevc".into()),
+        processed_dv: false,
+        normalized_geometry: false,
+        width: 3840,
+        height: 2160,
+        target_height: 2160,
+        average_bps: None,
+        peak_bps: None,
+        grade: OutputGrade::Hdr10,
+        decoder_compatible: true,
+        complete_cache: true,
+        sustainable: true,
+    });
+    context.canonical_caps = Some(
+        serde_json::from_value(serde_json::json!({
+            "v": 2, "video": [{"codec": "hevc", "profiles": ["main10"], "present": ["pq"]}],
+            "containers": ["mp4"], "transports": ["hls"], "audio": ["aac"],
+            "hls_hevc_sample_entries": ["hvc1", "hev1"]
+        }))
+        .expect("native HLS caps"),
+    );
+    req.candidate_context = Some(Box::new(context));
+    assert!(may_prefer_prepared_native_fel(&req));
+
+    let exclusions: [fn(&mut SessionRequest); 8] = [
+        |req| req.vod_only = true,
+        |req| req.passive_vod = true,
+        |req| req.start_seconds = 1.0,
+        |req| req.audio_offset_ms = 1,
+        |req| req.automatic = false,
+        |req| req.transport = Some("hlsjs".into()),
+        |req| req.control_sequence = Some(1),
+        |req| {
+            req.candidate_context
+                .as_mut()
+                .unwrap()
+                .selected_candidate
+                .processed_dv = true
+        },
+    ];
+    for exclude in exclusions {
+        let mut changed = req.clone();
+        exclude(&mut changed);
+        assert!(!may_prefer_prepared_native_fel(&changed));
+    }
+}
+
 #[test]
 fn prepared_bootstrap_purpose_refuses_voluntary_upward_foreign_and_missing_decoder() {
     use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};

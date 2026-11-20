@@ -786,6 +786,16 @@ impl NativeSplitInventory {
         }
     }
 
+    pub(crate) fn owns_fel_processing(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self.compare_prepared_head {
+            // A prepared native start has chosen a single media element.
+            // Losing split activation must not start a hidden successor.
+            return true;
+        }
+        self.active_ids().is_some()
+    }
+
     pub(crate) fn active_ids(&self) -> Option<&NativeSplitInitIds> {
         if self.chosen.get() == Some(&true) {
             self.init_ids.get()
@@ -2119,6 +2129,20 @@ async fn blocking_reserved_write<T: Send + 'static>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prepared_native_fel_keeps_the_single_session_when_split_activation_fails() {
+        let unprepared = super::NativeSplitInventory::with_startup_budget(100);
+        assert!(unprepared.choose(None).is_none());
+        assert!(!unprepared.owns_fel_processing());
+
+        let prepared =
+            super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+        prepared.decline_prepared_head();
+        assert!(prepared.choose(None).is_none());
+        assert!(prepared.owns_fel_processing());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn prepared_fel_defers_first_snapshot_once_and_falls_back() {

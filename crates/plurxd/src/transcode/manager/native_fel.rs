@@ -401,6 +401,7 @@ impl TranscodeManager {
 /// qualification, settings and actual ordinary split still agree.
 pub(super) struct NativeFelHead {
     pub(super) required: PendingFelQualification,
+    pub(super) audio_index: Option<i64>,
     pub(super) init: copyseg::NativeSplitInitIds,
     pub(super) return_video: [u8; 32],
     pub(super) plan: plurx_core::transcode::dv_processing::DvProcessingPlan,
@@ -631,6 +632,7 @@ impl TranscodeManager {
         let plan = selected.ok_or("native FEL preparation did not complete any windows")?;
         Ok(NativeFelHead {
             required: recipe.required,
+            audio_index: recipe.audio_index,
             init,
             return_video,
             plan,

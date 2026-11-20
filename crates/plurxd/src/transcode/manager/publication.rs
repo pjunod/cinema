@@ -1749,13 +1749,13 @@ impl TranscodeManager {
     /// response stream, and opening it *here* closes the window where the
     /// retention sweep could unlink the path between resolving it and reading
     /// it: an unlinked file that is already open stays readable.
-    pub(crate) async fn native_split_active(&self, session_id: &str) -> bool {
+    pub(crate) async fn native_split_owns_fel(&self, session_id: &str) -> bool {
         self.sessions
             .lock()
             .await
             .get(session_id)
             .and_then(|session| session.native_split.as_ref())
-            .is_some_and(|inventory| inventory.active_ids().is_some())
+            .is_some_and(|inventory| inventory.owns_fel_processing())
     }
 
     #[cfg(target_os = "linux")]
