@@ -392,6 +392,7 @@ const SETTINGS_METHODS: &[&str] = &[
     "put_setting_if_absent_if_artwork_repair_current",
     "prune_unreferenced_book_cover_origins",
     "put_settings",
+    "put_auth_token_policy",
     // The generation-fenced settings write. It belongs beside `put_settings`
     // rather than in a Live TV group: nothing about it is Live TV specific,
     // and any caller that needs a settings batch to land only against an
@@ -445,6 +446,7 @@ const USER_METHODS: &[&str] = &[
     "create_token_if_password_matches",
     "authenticate_token",
     "authenticate_token_for",
+    "authenticate_token_proof_for",
     "user_for_token",
     "delete_token",
     "delete_token_with_cache_admin_claim",
@@ -21555,7 +21557,12 @@ fn contract_inventory_matches_every_store_method() {
     // +2: claim_job_attempt and claim_verdict, the claim local verdict
     // (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md), in BACKGROUND_JOB_METHODS.
     // +1: cancel_unshared_output_job, the fenced retained-output cleanup.
-    assert_eq!(declared.len(), 607, "review the Store method count");
+    // 607 -> 609: source-bound token proofs (2c2557edf) add
+    // `put_auth_token_policy` to SETTINGS_METHODS and
+    // `authenticate_token_proof_for` to USER_METHODS. Both are exercised on
+    // each backend by token_proofs::token_proof_uses_the_authoritative_audience_and_policy_read_on_each_backend.
+    // No existing method, trait or supertrait is removed.
+    assert_eq!(declared.len(), 609, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

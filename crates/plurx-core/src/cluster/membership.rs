@@ -10552,7 +10552,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<ActivityAuthNodeRow, _>(
-                "verify_live_peer_authority_counted",
+                "read_live_peer_authority",
                 "SELECT node.raft_id, node.last_seen_at \
                  FROM cluster_nodes node \
                  WHERE node.node_id = $1 AND node.removed_at IS NULL \
