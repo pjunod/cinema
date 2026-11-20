@@ -2,7 +2,7 @@ use super::*;
 
 #[cfg(target_os = "linux")]
 pub(super) struct PreparedNativeFelStart {
-    head: Arc<super::native_fel::NativeFelHead>,
+    head: Arc<super::manager_native_fel::NativeFelHead>,
     scratch: crate::scratch_ledger::ScratchPermit,
 }
 
@@ -1799,12 +1799,12 @@ impl TranscodeManager {
     pub(super) fn reserve_prepared_native_fel_start(
         &self,
         planning: &plurx_core::store::PlaybackPlanningSnapshot,
-        head: Arc<super::native_fel::NativeFelHead>,
+        head: Arc<super::manager_native_fel::NativeFelHead>,
     ) -> Option<PreparedNativeFelStart> {
         if !copyseg::supports(planning.file.video_codec.as_deref()) {
             return None;
         }
-        let startup_bytes = copy_startup_bytes(&planning.file);
+        let startup_bytes = rolling_startup_bytes(copy_bitrate(&planning.file), 1.0);
         let limits = self.ahead_limits_for_start(&planning.settings);
         if native_split_startup_budget(startup_bytes, limits) <= 0 {
             return None;
@@ -1846,12 +1846,16 @@ impl TranscodeManager {
             #[cfg(target_os = "linux")]
                 generation: planning_generation,
         } = self.rolling_start_inputs(file_id, None, plan).await?;
+        #[cfg(target_os = "linux")]
+        let prepared_start = prepared_native_fel.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let prepared_start = false;
         let native_split = allow_native_split
             && start_seconds == 0.0
             && audio_offset_ms == 0
             && options.convert_dolby_vision
             && takeover.is_none()
-            && replacement_deadline.is_none();
+            && (prepared_start || replacement_deadline.is_none());
         #[cfg(target_os = "linux")]
         let (warm_head, prepared_scratch) = if let Some(prepared) = prepared_native_fel {
             (Some(prepared.head), Some(prepared.scratch))
@@ -2160,7 +2164,8 @@ impl TranscodeManager {
             }
         }
         let limits = self.ahead_limits_for_start(&settings);
-        let startup_bytes = copy_startup_bytes(&file);
+        let copy_bitrate = copy_bitrate(&file);
+        let startup_bytes = rolling_startup_bytes(copy_bitrate, 1.0);
         // Keep the original mux and both role objects alive through their
         // ordinary grace. Reserve startup for both copies before exposing the
         // alternate layout so it cannot spend the incumbent's startup grant.
@@ -2669,12 +2674,10 @@ impl TranscodeManager {
 /// before buffering it, then strips only identical definitions. A contradiction
 /// terminates that stream before the unsafe fragment can be published.
 /// Non-HEVC sources and VOD's whole-source admission are unaffected.
-fn copy_startup_bytes(file: &plurx_core::domain::MediaFile) -> i64 {
-    let bitrate = file
-        .bitrate
+fn copy_bitrate(file: &plurx_core::domain::MediaFile) -> Option<f64> {
+    file.bitrate
         .filter(|rate| *rate > 0)
-        .map(|rate| rate as f64);
-    rolling_startup_bytes(bitrate, 1.0)
+        .map(|rate| rate as f64)
 }
 
 fn native_split_startup_budget(startup_bytes: i64, limits: AheadLimits) -> i64 {

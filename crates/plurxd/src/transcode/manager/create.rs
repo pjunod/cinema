@@ -965,8 +965,10 @@ impl TranscodeManager {
             Some((vod_lookup_at, vod_settings, live_recovery_enabled))
         };
         #[cfg(target_os = "linux")]
+        // The clustered initial start also carries a serving deadline.
+        // Live priority and the original request identify this startup.
         let prepared_native_fel = if takeover.is_none()
-            && replacement_deadline.is_none()
+            && matches!(priority, Priority::Live)
             && recovery.is_some_and(|identity| identity.principal.local_user_id().is_some())
             && matches!(
                 retained_capture,

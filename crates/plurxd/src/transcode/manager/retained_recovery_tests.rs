@@ -1,8 +1,7 @@
 use super::*;
 
 #[cfg(target_os = "linux")]
-#[test]
-fn ready_native_fel_admission_is_limited_to_the_original_auto_copy() {
+fn ready_native_fel_request() -> SessionRequest {
     use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
 
     let route = crate::media_sessions::takeover_eligible_route(
@@ -51,6 +50,16 @@ fn ready_native_fel_admission_is_limited_to_the_original_auto_copy() {
         .expect("native HLS caps"),
     );
     req.candidate_context = Some(Box::new(context));
+    req.previous_session_id = None;
+    req.reopen_reason = None;
+    req.control_sequence = None;
+    req
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ready_native_fel_admission_is_limited_to_the_original_auto_copy() {
+    let req = ready_native_fel_request();
     assert!(may_prefer_prepared_native_fel(&req));
 
     let exclusions: [fn(&mut SessionRequest); 8] = [
@@ -74,6 +83,99 @@ fn ready_native_fel_admission_is_limited_to_the_original_auto_copy() {
         exclude(&mut changed);
         assert!(!may_prefer_prepared_native_fel(&changed));
     }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn clustered_initial_vod_start_primes_a_cold_native_fel_head() {
+    use plurx_core::{
+        domain::{DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult},
+        store::{LibraryStore, MediaStore, SettingsStore, ViewSource},
+    };
+    let directory = crate::test_tempdir().expect("cold native start");
+    let store = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let library = store
+        .create_library(&NewLibrary {
+            name: "native-fel".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![directory.path().to_string_lossy().into_owned()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "cold native FEL".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let missing = directory.path().join("source-unavailable.mkv");
+    let file_id = store
+        .upsert_file(
+            item,
+            missing.to_str().expect("path"),
+            100,
+            1,
+            &ProbeResult {
+                video_codec: Some("hevc".into()),
+                dolby_vision: DolbyVisionFacts {
+                    profile: Some(7),
+                    rpu_present: Some(true),
+                    el_present: Some(true),
+                    ..Default::default()
+                },
+                raw_json: Some("{}".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("file facts");
+    store
+        .put_setting(keys::DV_FEL_REENCODE, "1")
+        .await
+        .expect("enable FEL processing");
+    let manager = TranscodeManager::new(
+        store.clone(),
+        directory.path().join("work"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    let snapshot = store
+        .playback_planning_snapshot(file_id, &QUALITY_PLANNING_KEYS)
+        .await
+        .expect("planning")
+        .expect("file");
+    let plan = crate::http::hls::start_plan::StartPlan::new(snapshot, ViewSource::Authority);
+    let mut req = ready_native_fel_request();
+    req.file_id = file_id;
+    req.request_id = Some(uuid::Uuid::new_v4().to_string());
+    let recovery = SessionRecoveryIdentity {
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+        incarnation_id: uuid::Uuid::new_v4().to_string(),
+        recovery_epoch: uuid::Uuid::new_v4().to_string(),
+    };
+    assert!(!manager.native_fel_head_is_target(file_id));
+    let result = manager
+        .create_cluster_session(
+            &req,
+            &recovery,
+            "viewer",
+            tokio::time::Instant::now() + Duration::from_secs(5),
+            manager.serving_authority.state().loss_generation,
+            Some(&plan),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "the ordinary source in this fixture is unavailable"
+    );
+    assert!(manager.native_fel_head_is_target(file_id));
 }
 
 #[test]

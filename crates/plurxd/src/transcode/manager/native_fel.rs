@@ -869,7 +869,7 @@ impl TranscodeManager {
         }
     }
 
-    fn native_fel_head_is_target(&self, file_id: i64) -> bool {
+    pub(super) fn native_fel_head_is_target(&self, file_id: i64) -> bool {
         self.native_fel_target
             .lock()
             .expect("native FEL head target")
