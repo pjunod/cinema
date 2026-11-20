@@ -30,7 +30,7 @@ def display():
 
 def export_log(width=64, height=64):
     text = ""
-    for name, pixel_format in (("source", "yuv420p10le"), ("rgb", "gbrpf32le")):
+    for name, pixel_format in (("source", "yuv420p10le"), ("rgb", "rgb48le")):
         text += f"[showinfo@plurx_{name}] config in time_base: 1/60000, frame_rate: 60000/1001\n"
         text += "".join(f"[showinfo@plurx_{name}] n: {i} pts: {i * 1001} pts_time:ignored fmt:{pixel_format} sar:1/1 s:{width}x{height}\n" for i in range(3))
     return text
@@ -38,7 +38,7 @@ def export_log(width=64, height=64):
 
 def prediction(frames=3):
     return {"schema": 1, "device": "cpu", "temporal_resampling": False, "jod": 10.0,
-            "N_frames": frames, "frames_read_reference": list(range(frames)),
+            "N_frames": frames, "rgb16_packing_control": True, "frames_read_reference": list(range(frames)),
             "frames_read_test": list(range(frames)), "features_finite": True,
             "model_info": "authored control, not model execution", "model_version": "control"}
 
@@ -96,20 +96,20 @@ class CodecHdrCvvdpTests(unittest.TestCase):
 
     def test_raw_budget_length_and_frame_hashes(self):
         p = {"width": 3840, "height": 2160, "frames": 48}
-        self.assertEqual(self.ns["raw_size"](p), 3840 * 2160 * 48 * 12)
+        self.assertEqual(self.ns["raw_size"](p), 3840 * 2160 * 48 * 6)
         with self.assertRaises(self.ns["Refusal"]):
             self.ns["raw_size"](dict(p, frames=600))
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "raw"
-            path.write_bytes(b"a" * 12 + b"b" * 12)
+            path.write_bytes(b"a" * 6 + b"b" * 6)
             q = {"width": 1, "height": 1, "frames": 2}
             hashes = self.ns["frame_hashes"](path, q)
             self.assertNotEqual(*hashes)
-            self.ns["verify_raw"](path, 24)
-            for data in (b"a" * 23, b"a" * 25):
+            self.ns["verify_raw"](path, 12)
+            for data in (b"a" * 11, b"a" * 13):
                 path.write_bytes(data)
                 with self.assertRaises(self.ns["Refusal"]):
-                    self.ns["verify_raw"](path, 24)
+                    self.ns["verify_raw"](path, 12)
                 with self.assertRaises(self.ns["Refusal"]):
                     self.ns["frame_hashes"](path, q)
 
@@ -119,7 +119,7 @@ class CodecHdrCvvdpTests(unittest.TestCase):
         self.assertEqual(self.ns["validate_export_log"](text, p)["source"]["source_pts"], [0, 1001, 2002])
         for changed in (text.replace("2002", "2003"), text.replace("n: 2", "n: 1"),
                         "\n".join(text.splitlines()[:-1]), text.replace("1/60000", "1/60"),
-                        text.replace("fmt:gbrpf32le", "fmt:rgb48le"), text.replace("sar:1/1", "sar:2/1")):
+                        text.replace("fmt:rgb48le", "fmt:gbrpf32le"), text.replace("sar:1/1", "sar:2/1")):
             with self.assertRaises(self.ns["Refusal"]):
                 self.ns["validate_export_log"](changed, p)
         # Rotation can preserve total byte count, so prove per-frame dimensions.
@@ -203,12 +203,32 @@ class CodecHdrCvvdpTests(unittest.TestCase):
                 value, _ = self.ns["read_json"](path, hashlib.sha256(original).hexdigest())
             self.assertEqual(value["value"], "original")
 
+    def test_conversion_reuses_the_exact_shared_measurement_inverse(self):
+        shared = ROOT / "tools/dv_quality/bt2020_pq_rgb48.filter"
+        conversion = self.ns["load_conversion"]()
+        self.assertEqual(conversion["graph"], shared.read_text().strip())
+        self.assertEqual(conversion["sha256"], self.ns["sha256"](shared))
+        self.assertIn("filter=bicubic", conversion["graph"])
+        self.assertIn("format=rgb48le", conversion["graph"])
+
+    def test_rgb16_worker_known_channel_and_normalization_control(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("optional NumPy runtime unavailable; actual worker also runs this packing control")
+        self.assertTrue(self.ns["validate_rgb16_packing"](np))
+        raw = bytes.fromhex("00000080ffff ffff39300100")
+        frame = np.frombuffer(raw, dtype="<u2").reshape(1, 2, 3)
+        actual = self.ns["normalize_rgb16"](frame, np)
+        expected = [[[0.0, 1.0]], [[32768 / 65535, 12345 / 65535]], [[1.0, 1 / 65535]]]
+        self.assertTrue(np.allclose(actual, expected, rtol=0, atol=1e-7))
+
     def test_model_result_requires_finite_complete_cpu_prediction(self):
         self.ns["validate_result"](prediction(), 3)
         for key, value in [("N_frames", 2), ("frames_read_reference", [0, 2]),
                            ("frames_read_test", [0, 1]), ("jod", float("inf")),
                            ("features_finite", False), ("device", "mps"),
-                           ("temporal_resampling", True), ("model_version", "")]:
+                           ("temporal_resampling", True), ("model_version", ""), ("rgb16_packing_control", False)]:
             with self.subTest(key=key):
                 p = prediction(); p[key] = value
                 with self.assertRaises(self.ns["Refusal"]):
@@ -275,8 +295,10 @@ class CodecHdrCvvdpTests(unittest.TestCase):
                     self.assertNotIn("-r", command)
                     self.assertIn("-noautorotate", command)
                     self.assertEqual(command[command.index("-fps_mode") + 1], "passthrough")
-                    self.assertIn("showinfo", command[command.index("-vf") + 1])
-                    Path(command[-1]).write_bytes(bytes(64 * 64 * 3 * 12 - (1 if alteration == "raw" else 0)))
+                    graph = command[command.index("-vf") + 1]
+                    self.assertIn("showinfo", graph)
+                    self.assertIn((ROOT / "tools/dv_quality/bt2020_pq_rgb48.filter").read_text().strip(), graph)
+                    Path(command[-1]).write_bytes(bytes(64 * 64 * 3 * 6 - (1 if alteration == "raw" else 0)))
                     log = export_log()
                     (out / (name + ".stderr")).write_text(log)
                 else:

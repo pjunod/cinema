@@ -27,10 +27,25 @@ TEMPORAL_BUFFER_LIMIT = 512 * 1024**2
 DISPLAY_FIELDS = {"schema", "colorspace", "resolution", "diagonal_size_inches",
                   "viewing_distance_meters", "peak_luminance_cd_m2", "contrast",
                   "ambient_lux", "reflectivity", "exposure"}
-CONVERSION = ("zscale=matrixin=2020_ncl:rangein=limited:transferin=smpte2084:"
-              "primariesin=2020:chromalin=left:matrix=gbr:range=full:"
-              "transfer=smpte2084:primaries=2020:filter=lanczos:dither=none,"
-              "format=gbrpf32le")
+FILTER_PATH = Path(__file__).absolute().parents[1] / "tools/dv_quality/bt2020_pq_rgb48.filter"
+
+
+def load_conversion():
+    # This is the same fixed inverse used by the production FEL qualifier.
+    # Never accept a caller filter or silently use a different scaler.
+    path = FILTER_PATH
+    if path.is_symlink() or not path.is_file() or any(parent.is_symlink() for parent in path.parents):
+        raise Refusal("shared PQ-to-RGB48 filter must be a regular repository file")
+    with path.open("rb") as stream:
+        data = stream.read(4097)
+    if not data or len(data) > 4096:
+        raise Refusal("invalid shared PQ-to-RGB48 filter size")
+    graph = data.decode("utf-8").strip()
+    if not graph or "\n" in graph or "\r" in graph:
+        raise Refusal("shared PQ-to-RGB48 filter must be one fixed line")
+    return {"path": str(path), "sha256": hashlib.sha256(data).hexdigest(), "graph": graph,
+            "packing": "Frame-major packed R,G,B unsigned 16-bit little endian; normalize each component by 65535.",
+            "contract": "Shared limited left-sited BT.2020 NCL/PQ inverse; bicubic chroma, no resize/tone-map/dither; RGB16 quantization/clipping already applied."}
 
 
 def sha256(path):
@@ -170,35 +185,35 @@ def memory_plan(pairing):
 
 
 def raw_size(pairing):
-    size = pairing["width"] * pairing["height"] * pairing["frames"] * 12
+    size = pairing["width"] * pairing["height"] * pairing["frames"] * 6
     if size * 2 > MAX_RAW_BYTES:
-        raise Refusal("combined float RGB exports exceed 16 GiB; choose a shorter window")
+        raise Refusal("combined RGB48 exports exceed 16 GiB; choose a shorter window")
     return size
 
 
 def verify_raw(path, expected):
     if not Path(path).is_file() or Path(path).stat().st_size != expected:
-        raise Refusal("float RGB export length differs from its validated frame count")
+        raise Refusal("RGB48 export length differs from its validated frame count")
     return sha256(path)
 
 
 def frame_hashes(path, pairing):
-    size = pairing["width"] * pairing["height"] * 12
+    size = pairing["width"] * pairing["height"] * 6
     hashes = []
     with Path(path).open("rb") as stream:
         for _ in range(pairing["frames"]):
             frame = stream.read(size)
             if len(frame) != size:
-                raise Refusal("truncated float RGB frame")
+                raise Refusal("truncated RGB48 frame")
             hashes.append(hashlib.sha256(frame).hexdigest())
         if stream.read(1):
-            raise Refusal("extra float RGB frame bytes")
+            raise Refusal("extra RGB48 frame bytes")
     return hashes
 
 
 def validate_export_log(text, pairing):
     result = {}
-    for label, pixel_format in (("source", "yuv420p10le"), ("rgb", "gbrpf32le")):
+    for label, pixel_format in (("source", "yuv420p10le"), ("rgb", "rgb48le")):
         prefix = r"showinfo@plurx_" + label
         bases = re.findall(prefix + r"[^\n]*config in time_base:\s*(\d+/\d+)", text)
         rows = re.findall(prefix + r"[^\n]*?\bn:\s*(\d+)\s+pts:\s*(-?\d+)\s[^\n]*?fmt:(\S+)[^\n]*?\bsar:(\S+)[^\n]*?\bs:(\d+)x(\d+)", text)
@@ -226,6 +241,8 @@ def validate_result(result, frames):
         raise Refusal("nonfinite perceptual score")
     if result.get("N_frames") != frames or result.get("frames_read_reference") != list(range(frames)) or result.get("frames_read_test") != list(range(frames)):
         raise Refusal("perceptual model did not consume every admitted frame")
+    if result.get("rgb16_packing_control") is not True:
+        raise Refusal("missing RGB16 packing/channel/normalization control")
     if result.get("features_finite") is not True or not result.get("model_info") or not result.get("model_version"):
         raise Refusal("missing model identity or finite-feature evidence")
     return result
@@ -378,6 +395,7 @@ def score_perceptual(namespace, args):
     pairing = validate_clocks(namespace, inspect_clock(namespace, ffprobe, reference, args.duration),
                               inspect_clock(namespace, ffprobe, distorted, args.duration))
     validate_display(display, pairing["width"], pairing["height"])
+    conversion = load_conversion()
     expected = raw_size(pairing)
     memory = memory_plan(pairing)
     out = new_directory(args.output)
@@ -387,8 +405,8 @@ def score_perceptual(namespace, args):
     commands = []
     raw = {}
     for label, source in (("reference", reference), ("test", distorted)):
-        path = out / (label + ".gbrpf32le")
-        graph = f"trim=duration={args.duration},showinfo@plurx_source," + CONVERSION + ",showinfo@plurx_rgb"
+        path = out / (label + ".rgb48le")
+        graph = f"trim=duration={args.duration},showinfo@plurx_source," + conversion["graph"] + ",showinfo@plurx_rgb"
         command = [ffmpeg, "-hide_banner", "-v", "info", "-nostdin", "-copyts", "-threads", "1",
                    "-protocol_whitelist", "file,pipe", "-noautorotate", "-i", source, "-map", "0:v:0", "-an", "-sn", "-dn",
                    "-filter_threads", "1", "-vf", graph, "-frames:v", str(pairing["frames"]),
@@ -397,7 +415,7 @@ def score_perceptual(namespace, args):
         raw[label] = {"path": str(path), "sha256": verify_raw(path, expected), "bytes": expected,
                       "frame_sha256": frame_hashes(path, pairing),
                       "source_attribution": validate_export_log((out / ("export-" + label + ".stderr")).read_text(), pairing)}
-    request = {"schema": 1, "runtime": manifest, "display": display, "pairing": pairing, "raw": raw}
+    request = {"schema": 1, "runtime": manifest, "display": display, "pairing": pairing, "raw": raw, "conversion": conversion}
     request_path = out / "request.json"
     request_path.write_text(json.dumps(request, indent=2, allow_nan=False) + "\n")
     commands.append(execute(isolated_python(python, out, "worker", "--worker", request_path), out, "cvvdp"))
@@ -409,18 +427,33 @@ def score_perceptual(namespace, args):
     for path, digest in ((reference, reference_hash), (distorted, distorted_hash), (ffmpeg, ffmpeg_hash), (ffprobe, probe_hash)):
         if sha256(path) != digest:
             raise Refusal("input or decoder changed during perceptual scoring")
+    if load_conversion() != conversion:
+        raise Refusal("shared PQ-to-RGB48 filter changed during perceptual scoring")
     for item in raw.values():
         if verify_raw(item["path"], expected) != item["sha256"]:
-            raise Refusal("float export changed during perceptual scoring")
+            raise Refusal("RGB48 export changed during perceptual scoring")
     result["hdr_perceptual_model"] = {"name": "ColorVideoVDP", "runtime_manifest_sha256": manifest_hash,
         "worker_sha256": sha256(__file__), "display_sha256": display_hash, "display": display,
-        "pairing": pairing, "conversion": CONVERSION, "clipping_policy": "Float RGB is retained unclipped; model input clamps each PQ RGB component to [0,1], then applies the explicit display model.",
+        "pairing": pairing, "conversion": conversion, "clipping_policy": "The shared inverse quantizes/clips into RGB16 codes before model normalization. Reported ranges describe that RGB48 export, not pre-export out-of-range values.",
         "raw": raw, "commands": commands, "prediction": perceptual,
         "interpretation": "Display-dependent modeled difference in JOD; identity is normally 10. Not human preference, physical HDR acceptance or an automatic encoder decision.",
         "runtime_scope": manifest["scope"], "memory_preflight": memory}
     report = out / "report.json"
     report.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
     return result
+
+
+def normalize_rgb16(frame, np):
+    return np.array(frame, dtype=np.float32, copy=True).transpose(2, 0, 1) / 65535.0
+
+
+def validate_rgb16_packing(np):
+    # Independent known R,G,B code values exercise the exact worker transform.
+    frame = np.array([[[0, 32768, 65535], [65535, 12345, 1]]], dtype="<u2")
+    expected = np.array([[[0, 1]], [[32768 / 65535, 12345 / 65535]], [[1, 1 / 65535]]], dtype=np.float32)
+    if not np.allclose(normalize_rgb16(frame, np), expected, rtol=0, atol=1e-7):
+        raise Refusal("RGB16 packing/channel/normalization control failed")
+    return True
 
 
 def worker(request_path):
@@ -442,6 +475,7 @@ def worker(request_path):
     import pycvvdp
     from pycvvdp.video_source import video_source_dm
     from pycvvdp.display_model import vvdp_display_photo_eotf, vvdp_display_geometry
+    packing_passed = validate_rgb16_packing(np)
     torch.set_num_threads(2)
     torch.set_num_interop_threads(1)
     torch.use_deterministic_algorithms(True)
@@ -464,20 +498,21 @@ def worker(request_path):
     model = pycvvdp.cvvdp(display_photometry=dm, display_geometry=geometry, device=torch.device("cpu"), heatmap="none", quiet=True, temp_padding="replicate")
     if model.temp_resample:
         raise Refusal("model temporal resampling must be disabled")
-    shape = (p["frames"], 3, p["height"], p["width"])
+    shape = (p["frames"], p["height"], p["width"], 3)
     arrays, ranges = {}, {}
     expected = raw_size(p)
     for label, item in request["raw"].items():
         if verify_raw(item["path"], expected) != item["sha256"] or frame_hashes(item["path"], p) != item["frame_sha256"]:
             raise Refusal("worker raw source identity mismatch")
-        a = np.memmap(item["path"], dtype="<f4", mode="r", shape=shape)
-        below, above, minimum, maximum = 0, 0, float("inf"), float("-inf")
+        a = np.memmap(item["path"], dtype="<u2", mode="r", shape=shape)
+        minimum, maximum, zeros, saturated = 65535, 0, 0, 0
         for frame in a:
-            if not np.isfinite(frame).all():
-                raise Refusal("nonfinite float RGB conversion")
-            below += int(np.count_nonzero(frame < 0)); above += int(np.count_nonzero(frame > 1))
-            minimum = min(minimum, float(frame.min())); maximum = max(maximum, float(frame.max()))
-        ranges[label] = {"minimum": minimum, "maximum": maximum, "below_zero_samples": below, "above_one_samples": above}
+            minimum = min(minimum, int(frame.min())); maximum = max(maximum, int(frame.max()))
+            zeros += int(np.count_nonzero(frame == 0)); saturated += int(np.count_nonzero(frame == 65535))
+        ranges[label] = {"minimum_code": minimum, "maximum_code": maximum,
+                         "minimum_normalized": minimum / 65535, "maximum_normalized": maximum / 65535,
+                         "zero_code_samples": zeros, "maximum_code_samples": saturated,
+                         "domain": "After shared RGB16 quantization/clipping; prior out-of-range values are unobserved."}
         arrays[label] = a
     class Source(video_source_dm):
         def __init__(self):
@@ -491,7 +526,7 @@ def worker(request_path):
             if type(index) is not int or not 0 <= index < p["frames"]:
                 raise Refusal("model requested an invalid source frame")
             self.seen[label].add(index)
-            data = np.array(arrays[label][index, [2, 0, 1]], copy=True)
+            data = normalize_rgb16(arrays[label][index], np)
             frame = torch.from_numpy(data).to(device).reshape(1, 3, 1, p["height"], p["width"])
             return self.apply_dm_and_color_transform(frame.clamp(0, 1), colorspace)
         def get_test_frame(self, index, device, colorspace):
@@ -503,12 +538,12 @@ def worker(request_path):
     with torch.no_grad():
         value, stats = model.predict_video_source(source)
     result = {"schema": 1, "device": "cpu", "cpu_threads": 2, "temporal_resampling": False,
-        "jod": float(value.detach().cpu()), "N_frames": stats["N_frames"],
+        "jod": float(value.detach().cpu()), "N_frames": stats["N_frames"], "rgb16_packing_control": packing_passed,
         "frames_read_reference": sorted(source.seen["reference"]), "frames_read_test": sorted(source.seen["test"]),
         "features_finite": bool(np.isfinite(stats["Q_per_ch"]).all()), "feature_shape": list(stats["Q_per_ch"].shape),
         "model_version": model.version, "model_info": model.get_info_string(),
         "parameters_sha256": sha256(model.parameters_file), "resolved_assets": resolved_assets,
-        "loaded_modules": loaded_modules, "ranges_before_model_clamp": ranges,
+        "loaded_modules": loaded_modules, "normalized_rgb16_ranges": ranges,
         "wall_seconds": time.monotonic() - start}
     validate_result(result, p["frames"])
     if runtime_snapshot() != manifest:
