@@ -6561,6 +6561,14 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNil(PlaybackWaitPresentation.detail(for: stagedOpen, live: live))
     }
 
+    func testNativeStartupSeekRequiresTheRequestedItemClock() {
+        XCTAssertTrue(PlayerController.initialItemSeekLanded(.finished(true), positionMs: 6_174, targetMs: 6_200))
+        XCTAssertFalse(PlayerController.initialItemSeekLanded(.finished(true), positionMs: 5_172, targetMs: 6_200))
+        XCTAssertFalse(PlayerController.initialItemSeekLanded(.finished(false), positionMs: 6_200, targetMs: 6_200))
+        XCTAssertFalse(PlayerController.initialItemSeekLanded(.timedOut, positionMs: 6_200, targetMs: 6_200))
+        XCTAssertFalse(PlayerController.initialItemSeekLanded(.cancelled, positionMs: 6_200, targetMs: 6_200))
+    }
+
     func testLiveCopyRecoverySeeksPastThePrecedingKeyframe() {
         XCTAssertEqual(
             PlayerController.sessionAttachSeekMs(

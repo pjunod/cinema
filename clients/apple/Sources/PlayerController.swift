@@ -4400,6 +4400,29 @@ final class PlayerController: ObservableObject {
         let item = makePlayerItem(url)
         Self.configureBuffering(item, growingHLS: sessionId != nil && !isVOD)
         installSeekVideoOutput(on: item)
+        // Configure a fresh native VOD item before AVPlayer begins acquiring
+        // it. Otherwise the playlist hint and the post-readiness seek can
+        // independently acquire the same media.
+        let initialSeek: AsyncStream<Bool>?
+        #if os(tvOS)
+        if case .normal = intent, sessionId != nil, isVOD,
+           superseded == nil, player.currentItem == nil, wantsPlayback, let seekAfterAttach {
+            let stream = AsyncStream.makeStream(of: Bool.self, bufferingPolicy: .bufferingNewest(1))
+            item.seek(
+                to: CMTime(value: Int64(seekAfterAttach), timescale: 1_000),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            ) { finished in
+                stream.continuation.yield(finished)
+                stream.continuation.finish()
+            }
+            initialSeek = stream.stream
+        } else {
+            initialSeek = nil
+        }
+        #else
+        initialSeek = nil
+        #endif
         #if os(iOS)
         // The tvOS 26 SDK exposes this setter, but some shipping Apple TV
         // runtimes do not implement it and abort on the Objective-C selector.
@@ -4453,7 +4476,22 @@ final class PlayerController: ObservableObject {
         isPlaying = wantsPlayback
         if let seekAfterAttach {
             do {
-                try await seekWhenReady(item, ms: seekAfterAttach, owner: seekOwner)
+                var positioned = false
+                if let initialSeek {
+                    let result = await PlayerSeekCompletion.run(operation: {
+                        var replies = initialSeek.makeAsyncIterator()
+                        return await replies.next() ?? false
+                    }, waitForDeadline: waitNativeSeekDeadline)
+                    guard ownsSeekPreparation(item, owner: seekOwner, lifecycle: lifecycle,
+                                              generation: generation) else { return }
+                    positioned = Self.initialItemSeekLanded(
+                        result, positionMs: realPositionMs(), targetMs: seekAfterAttach
+                    )
+                    if !positioned { item.cancelPendingSeeks() }
+                }
+                if !positioned {
+                    try await seekWhenReady(item, ms: seekAfterAttach, owner: seekOwner)
+                }
                 ttffMeasurement.rebasePosition(at: realPositionMs())
             } catch {
                 if isSuperseded(generation) { return }
@@ -8299,19 +8337,24 @@ final class PlayerController: ObservableObject {
         SeekPreparationOwner(actionEpoch: viewerActionEpoch, seekGeneration: seekState.generation, targetMs: targetMs)
     }
 
+    private func ownsSeekPreparation(
+        _ item: AVPlayerItem, owner: SeekPreparationOwner, lifecycle: Int, generation: Int
+    ) -> Bool {
+        isCurrentLifecycle(lifecycle) && !isSuperseded(generation)
+            && player.currentItem === item
+            // Pause changes transport authority, not the resume point.
+            // A newer same-position selection also still needs this seek.
+            && (viewerActionEpoch == owner.actionEpoch
+                || seekState.generation == owner.seekGeneration
+                || seekState.pendingMs == owner.targetMs)
+            && !Task.isCancelled
+    }
+
     func seekWhenReady(_ item: AVPlayerItem, ms: Int, owner: SeekPreparationOwner) async throws {
         let generation = openGeneration
         let lifecycle = lifecycleGeneration
         let ownsSeek = { [weak self] in
-            guard let self else { return false }
-            return self.isCurrentLifecycle(lifecycle) && !self.isSuperseded(generation)
-                && self.player.currentItem === item
-                // Pause changes transport authority, not the resume point.
-                // A newer same-position selection also still needs this seek.
-                && (self.viewerActionEpoch == owner.actionEpoch
-                    || self.seekState.generation == owner.seekGeneration
-                    || self.seekState.pendingMs == owner.targetMs)
-                && !Task.isCancelled
+            self?.ownsSeekPreparation(item, owner: owner, lifecycle: lifecycle, generation: generation) == true
         }
         guard ownsSeek() else { return }
         do { try await itemPreparation.ready(item, readinessContext(for: item)) }
@@ -8544,6 +8587,15 @@ final class PlayerController: ObservableObject {
         if vod { return 0 }
         if let mediaOriginMs { return mediaOriginMs }
         return Int((startSeconds ?? Double(requestedStartMs) / 1000.0) * 1000)
+    }
+
+    /// Confirm the exact item seek on the current item clock. A successful
+    /// callback alone does not establish that the item honored the position.
+    nonisolated static func initialItemSeekLanded(
+        _ outcome: PlayerSeekCompletion.Outcome, positionMs: Int, targetMs: Int
+    ) -> Bool {
+        let (difference, overflow) = positionMs.subtractingReportingOverflow(targetMs)
+        return outcome == .finished(true) && !overflow && (-250...250).contains(difference)
     }
 
     /// Item-local seek needed after a live copy session opens on a keyframe
