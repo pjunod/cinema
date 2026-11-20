@@ -128,6 +128,7 @@ APPLE_PATHS = (
     "clients/apple/**",
     # The required TV navigation gate's own inputs.
     "scripts/apple-tv-navigation-test",
+    "validation/apple_simulator_runtime.py",
     "tests/operations/test_apple_tv_navigation_runner.py",
     "tests/contracts/native-api.json",
     "tests/playback/player-input-contract.json",

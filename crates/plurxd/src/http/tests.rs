@@ -2248,7 +2248,8 @@ fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
         );
     }
     assert_catalogue_methods(
-        &compact_handler(browse, "pub async fn search", "Ok(Json(SearchResponse"),
+        // The whole handler, through its `tag:` early return.
+        &compact_handler(browse, "pub async fn search", "#[cfg(test)]"),
         &["search_items"],
     );
 
@@ -23606,4 +23607,376 @@ async fn get_it_back_asks_curator_and_says_what_it_answered() {
     let viewer = login["token"].as_str().expect("token");
     let (status, _) = call(&app, post(&uri, Some(viewer), json!({}))).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "Get it back is for admins");
+}
+
+// ---------------------------------------------------------------------------
+// Custom tags, rows and Home layout (docs/features/CUSTOM-TAGS-PLAN.md §3, §7)
+// ---------------------------------------------------------------------------
+
+async fn curation_viewer(app: &Router, admin: &str, name: &str) -> (i64, String) {
+    let (status, created) = call(
+        app,
+        post(
+            "/api/v1/users",
+            Some(admin),
+            json!({"username": name, "password": "longenough"}),
+        ),
+    )
+    .await;
+    assert!(status.is_success(), "{created}");
+    let (_, login) = call(
+        app,
+        post(
+            "/api/v1/auth/login",
+            None,
+            json!({"username": name, "password": "longenough"}),
+        ),
+    )
+    .await;
+    (
+        created["id"].as_i64().expect("user id"),
+        login["token"].as_str().expect("token").to_owned(),
+    )
+}
+
+/// §3: private tags are anyone's; household tags need the grant (admins hold
+/// it implicitly); someone else's private tag is invisible, not forbidden;
+/// a viewer's checklist can never strip or add a household tag it cannot edit.
+#[tokio::test]
+async fn curation_permissions_follow_scope_and_the_manage_tags_grant() {
+    let state = test_state_without_router();
+    let app = router(state.clone());
+    let seed = seed_content(&state).await;
+    let admin = setup_admin(&app).await;
+    let (viewer_id, viewer) = curation_viewer(&app, &admin, "viewer").await;
+
+    let (status, _) = call(
+        &app,
+        post(
+            "/api/v1/tags",
+            Some(&viewer),
+            json!({"name": "Gay-themed", "scope": "household"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "no grant, no household tag");
+    let (status, mine) = call(
+        &app,
+        post(
+            "/api/v1/tags",
+            Some(&viewer),
+            json!({"name": "rewatch", "scope": "private"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{mine}");
+    let (status, house) = call(
+        &app,
+        post(
+            "/api/v1/tags",
+            Some(&admin),
+            json!({"name": "Gay-themed", "scope": "household", "color": "violet"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{house}");
+    let (status, _) = call(
+        &app,
+        post(
+            "/api/v1/tags",
+            Some(&admin),
+            json!({"name": " gay-THEMED ", "scope": "household"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "one key per scope");
+    let house_id = house["id"].as_i64().expect("id");
+    let mine_id = mine["id"].as_i64().expect("id");
+
+    // The admin cannot see the viewer's private tag at all.
+    let (_, admin_tags) = call(&app, get("/api/v1/tags", Some(&admin))).await;
+    let ids: Vec<i64> = admin_tags["tags"]
+        .as_array()
+        .expect("tags")
+        .iter()
+        .map(|t| t["id"].as_i64().expect("id"))
+        .collect();
+    assert_eq!(ids, vec![house_id], "{admin_tags}");
+    assert_eq!(
+        call(
+            &app,
+            get(&format!("/api/v1/tags/{mine_id}/items"), Some(&admin))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+
+    // Without the grant the viewer sees the household tag but cannot apply it.
+    let (_, viewer_tags) = call(&app, get("/api/v1/tags", Some(&viewer))).await;
+    assert_eq!(viewer_tags["can_manage_household"], false, "{viewer_tags}");
+    let item_tags = format!("/api/v1/items/{}/tags", seed.movie);
+    let (status, _) = call(
+        &app,
+        put(&item_tags, Some(&viewer), json!({"tag_ids": [house_id]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = call(
+        &app,
+        put(&item_tags, Some(&admin), json!({"tag_ids": [house_id]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The viewer's own checklist (private tag only) leaves the household tag on.
+    let (status, body) = call(
+        &app,
+        put(&item_tags, Some(&viewer), json!({"tag_ids": [mine_id]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let names: Vec<&str> = body["tags"]
+        .as_array()
+        .expect("tags")
+        .iter()
+        .map(|t| t["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(names, vec!["Gay-themed", "rewatch"], "{body}");
+    // Episodes follow their show; they are not tagged on their own.
+    let (status, _) = call(
+        &app,
+        put(
+            &format!("/api/v1/items/{}/tags", seed.ep),
+            Some(&admin),
+            json!({"tag_ids": [house_id]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Granting manage_tags lets the viewer curate household tags; revoking takes it back.
+    let grants = format!("/api/v1/users/{viewer_id}/grants");
+    assert_eq!(
+        call(
+            &app,
+            put(&grants, Some(&viewer), json!({"grants": ["manage_tags"]}))
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, body) = call(
+        &app,
+        put(&grants, Some(&admin), json!({"grants": ["manage_tags"]})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["grants"].clone()),
+        (StatusCode::OK, json!(["manage_tags"]))
+    );
+    let (status, _) = call(
+        &app,
+        post(
+            &format!("/api/v1/tags/{house_id}/items"),
+            Some(&viewer),
+            json!({"add": [seed.show]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = call(&app, put(&grants, Some(&admin), json!({"grants": []}))).await;
+    assert_eq!(
+        (status, body["grants"].clone()),
+        (StatusCode::OK, json!([]))
+    );
+    let (status, _) = call(
+        &app,
+        post(
+            &format!("/api/v1/tags/{house_id}/items"),
+            Some(&viewer),
+            json!({"remove": [seed.show]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+/// §4: the grid filter, `tag:` search, saved rows, Home rows, and a delete
+/// that is refused while a row uses the tag.
+#[tokio::test]
+async fn tags_filter_the_grid_drive_search_and_fill_home_rows() {
+    let state = test_state_without_router();
+    let app = router(state.clone());
+    let seed = seed_content(&state).await;
+    let admin = setup_admin(&app).await;
+    let (_, house) = call(
+        &app,
+        post(
+            "/api/v1/tags",
+            Some(&admin),
+            json!({"name": "date night", "scope": "household"}),
+        ),
+    )
+    .await;
+    let tag = house["id"].as_i64().expect("id");
+    call(
+        &app,
+        post(
+            &format!("/api/v1/tags/{tag}/items"),
+            Some(&admin),
+            json!({"add": [seed.movie]}),
+        ),
+    )
+    .await;
+
+    let (status, grid) = call(
+        &app,
+        get(
+            &format!("/api/v1/libraries/{}/items?tags={tag}", seed.lib),
+            Some(&admin),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{grid}");
+    assert_eq!(grid["total"], 1, "{grid}");
+    assert_eq!(grid["items"][0]["id"], seed.movie, "{grid}");
+    let (_, grid) = call(
+        &app,
+        get(
+            &format!("/api/v1/libraries/{}/items?not_tags={tag}", seed.lib),
+            Some(&admin),
+        ),
+    )
+    .await;
+    assert!(
+        grid["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .all(|i| i["id"] != seed.movie),
+        "{grid}"
+    );
+    let (_, plain) = call(
+        &app,
+        get(
+            &format!("/api/v1/libraries/{}/items", seed.lib),
+            Some(&admin),
+        ),
+    )
+    .await;
+    assert!(
+        plain["total"].as_i64().expect("total") >= 2,
+        "the unfiltered grid is unchanged: {plain}"
+    );
+
+    let (status, found) = call(
+        &app,
+        get("/api/v1/search?q=tag:%22date%20night%22", Some(&admin)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(
+        found["results"].as_array().expect("results").len(),
+        1,
+        "{found}"
+    );
+    let (_, none) = call(&app, get("/api/v1/search?q=tag:nonexistent", Some(&admin))).await;
+    assert_eq!(none["results"], json!([]));
+
+    // No stored layout: Home is today's Home, then visible rows.
+    let (_, layout) = call(&app, get("/api/v1/home/layout", Some(&admin))).await;
+    assert_eq!(layout["source"], "builtin", "{layout}");
+    let keys: Vec<&str> = layout["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|e| e["key"].as_str().expect("key"))
+        .collect();
+    assert_eq!(
+        keys,
+        plurx_core::curation::BUILTIN_HOME.to_vec(),
+        "{layout}"
+    );
+
+    let (status, row) = call(
+        &app,
+        post("/api/v1/rows", Some(&admin), json!({"title": "Date night", "scope": "household", "spec": {"all_of": [{"tag": tag}]}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    let row_id = row["id"].as_i64().expect("id");
+    let (_, home) = call(&app, get("/api/v1/home/rows", Some(&admin))).await;
+    assert_eq!(home["rows"][row_id.to_string()]["total"], 1, "{home}");
+    assert_eq!(
+        home["layout"]
+            .as_array()
+            .expect("layout")
+            .last()
+            .expect("row")["key"],
+        format!("row:{row_id}"),
+        "{home}"
+    );
+
+    // Move the row first and hide Next up.
+    let (status, _) = call(
+        &app,
+        put("/api/v1/home/layout", Some(&admin), json!({"entries": [{"key": format!("row:{row_id}")}, {"key": "next_up", "hidden": true}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, home) = call(&app, get("/api/v1/home/rows", Some(&admin))).await;
+    let keys: Vec<&str> = home["layout"]
+        .as_array()
+        .expect("layout")
+        .iter()
+        .map(|e| e["key"].as_str().expect("key"))
+        .collect();
+    assert_eq!(keys[0], format!("row:{row_id}"), "{home}");
+    assert!(!keys.contains(&"next_up"), "{home}");
+    let (status, _) = call(
+        &app,
+        put(
+            "/api/v1/home/layout",
+            Some(&admin),
+            json!({"entries": [{"key": "bogus"}]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Deleting a tag a row uses is refused with the row named; archive is fine.
+    let (status, body) = call(
+        &app,
+        delete_req(&format!("/api/v1/tags/{tag}"), Some(&admin)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.to_string().contains("Date night"), "{body}");
+    // Forcing it leaves the row alone: its condition now matches nothing, so
+    // it leaves Home instead of widening to everything.
+    let (status, _) = call(
+        &app,
+        delete_req(&format!("/api/v1/tags/{tag}?force=1"), Some(&admin)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, rows) = call(&app, get("/api/v1/rows", Some(&admin))).await;
+    assert_eq!(rows["rows"].as_array().expect("rows").len(), 1, "{rows}");
+    let (_, home) = call(&app, get("/api/v1/home/rows", Some(&admin))).await;
+    assert!(home["rows"].get(row_id.to_string()).is_none(), "{home}");
+}
+
+/// §2.3: nothing outside the native API reads curation, so a tag cannot
+/// reach Jellyfin, Plex or a shared-library receiver.
+#[test]
+fn compatibility_and_federation_dtos_never_read_curation() {
+    for (name, source) in [
+        ("jellyfin.rs", include_str!("jellyfin.rs")),
+        ("plex.rs", include_str!("plex.rs")),
+        ("shared_library.rs", include_str!("shared_library.rs")),
+    ] {
+        for needle in ["curation", "item_tag_ids", "visible_tags", "rule_items"] {
+            assert!(!source.contains(needle), "{name} must not read {needle}");
+        }
+    }
 }

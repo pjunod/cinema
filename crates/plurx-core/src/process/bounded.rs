@@ -926,7 +926,8 @@ mod tests {
         let leader = directory.path().join("leader.pid");
         let helper = directory.path().join("helper.pid");
         let progress = directory.path().join("progress");
-        let control = SourcePauseController::new(Duration::from_secs(8));
+        let active_budget = Duration::from_secs(15);
+        let control = SourcePauseController::new(Duration::from_secs(30));
         let cancellation = CancellationToken::new();
         let worker_control = control.clone();
         let worker_cancel = cancellation.clone();
@@ -938,7 +939,7 @@ mod tests {
                 worker_control,
                 cancellable(
                     worker_cancel,
-                    output("/bin/sh", &args, Duration::from_secs(2), 1024, TEST_WORK),
+                    output("/bin/sh", &args, active_budget, 1024, TEST_WORK),
                 ),
             )
             .await
@@ -971,7 +972,12 @@ mod tests {
             .await
             .expect("progress")
             .len();
-        tokio::time::sleep(Duration::from_millis(2200)).await;
+        // Observe the real stopped group before advancing the budget clock.
+        // Actual stop, resume and reap still use the running clock.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::pause();
+        tokio::time::advance(active_budget + Duration::from_secs(1)).await;
+        tokio::time::resume();
         assert_eq!(
             before,
             tokio::fs::metadata(&progress)
@@ -981,7 +987,7 @@ mod tests {
         );
         assert!(
             !child.is_finished(),
-            "verified holds do not consume the two-second active budget"
+            "the verified hold outlasts the active budget without spending it"
         );
         assert!(!control.resume(first + 1));
         assert!(control.resume(first));

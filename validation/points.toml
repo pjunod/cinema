@@ -522,6 +522,11 @@ paths = [
   "crates/plurx-core/src/store/sqlite/annotations.rs",
   "crates/plurx-core/src/store/library_annotations.sql",
   "crates/plurx-core/src/store/library_annotations_schema.rs",
+  "crates/plurx-core/src/curation.rs",
+  "crates/plurx-core/src/store/curation_sql.rs",
+  "crates/plurx-core/src/store/sqlite/curation.rs",
+  "crates/plurx-core/src/store/library_curation.sql",
+  "crates/plurx-core/src/store/library_curation_schema.rs",
   "crates/plurx-core/src/store/dv_title_jobs{,_schema}.rs",
   "crates/plurx-core/src/store/dv_title_jobs{,_v2}.sql",
   "crates/plurx-core/src/store/dv_refit_jobs{,_tests}.rs",
@@ -711,6 +716,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/background_jobs.rs",
   "crates/plurx-core/src/store/hiqlite_reading.rs",
   "crates/plurx-core/src/store/hiqlite_annotations.rs",
+  "crates/plurx-core/src/store/hiqlite_curation.rs",
   "crates/plurx-core/src/store/hiqlite_sessions.rs",
   "crates/plurx-core/src/store/hiqlite_sharing.rs",
   "crates/plurx-core/src/store/sqlite/sharing.rs",
@@ -945,6 +951,7 @@ paths = [
   "crates/plurxd/tests/cluster_activity.rs",
   "crates/plurxd/src/http/browse.rs",
   "crates/plurxd/src/http/annotations.rs",
+  "crates/plurxd/src/http/curation.rs",
   "crates/plurxd/src/http/extract.rs",
   "crates/plurxd/src/http/mod.rs",
   "crates/plurxd/src/http/system.rs",
@@ -1536,7 +1543,7 @@ checks = ["desktop-macos"]
 id = "apple.client"
 title = "Native iOS and tvOS clients"
 contract = "The Apple clients preserve the shared API, navigation, preferences, and playback policies on both platforms."
-paths = ["clients/apple/**", "scripts/apple-tv-navigation-test", "tests/operations/test_apple_tv_navigation_runner.py"]
+paths = ["clients/apple/**", "scripts/apple-tv-navigation-test", "validation/apple_simulator_runtime.py", "tests/operations/test_apple_tv_navigation_runner.py"]
 checks = ["apple-simulators", "apple-tv-navigation", "player-input-fence", "playback-surface-fence"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline", "offline.viewing"]
 
