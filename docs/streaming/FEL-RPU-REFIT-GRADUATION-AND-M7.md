@@ -313,6 +313,34 @@ repeat proofs without executing the encoder or scorer. File publication,
 authored readback, resource limits and the automatic protocol still require
 integrated qualification.
 
+The managed implementation has now passed 35 focused checks on arm64 macOS
+with Rust 1.97.1: 13 scoring/capture/aggregation cases, 19 daemon lifecycle and
+recovery cases, two Store matrices and the declared/covered Store inventory.
+Both matrices ran with `hiqlite-store,hiqlite-contract-tests`, using both
+SQLite modes and an isolated three-voter Hiqlite fixture. Earlier successful
+bodies were retained through verified source equivalence; only failed fixture
+setup or compilation and previously unrun bodies were retried. These checks
+do not constitute full-workspace qualification or an integrated native-daemon
+playback observation.
+
+The owned macOS encoder bundle also passed finite synthetic interoperability
+controls: the independent CLI, no-ROI and zero-ROI encodes have identical VCL,
+and a 48-frame candidate encodes and reads back with exact clocks. Loader
+observations bind the actual shared libraries to that owned bundle. The input
+frame duration is preserved by the encoder API; returned packet durations are
+still checked exactly. Installed dependencies and the original qualified
+processing bundle are unchanged. Linux processing bundles currently retain
+the decoder-only path; managed candidate encoding there remains unsupported
+until its own encoder closure is packaged and qualified. No result is
+extrapolated from the macOS controls to Linux.
+
+The next runtime check uses the intended integrated source and the isolated
+instance. It must read back the imported historical rejection and repeated
+fixture bindings without another Michael encode or score. New-title native
+orchestration, complete report publication and source-bound recovery still
+require integrated evidence. The frozen rejected candidate remains rejected;
+passing the new implementation tests supplies no new picture-quality gain.
+
 ## Execution ledger
 
 | Item | State | Next evidence |
@@ -322,7 +350,7 @@ integrated qualification.
 | Physical matrix | tvOS fitted handoff and seek retained; earlier 52-second completion retained; full matrix open | Unresolved cold timeout, mapping, drops and remaining client/device scopes |
 | M7 baseline | Two calibration windows and frozen evaluation192–239 bound and scored once in all four models | Retain source-bound scores |
 | Numeric margin | Frozen at 0.05 with strict shadow-tail limits before candidate work | Apply unchanged to paired outputs |
-| NP1 trials/integration | Three controls retained; frozen candidate rejected in four models; author/readback/rate admitted; integration open | Existing-job comparison integration and exact result reuse |
+| NP1 trials/integration | Frozen candidate rejected in four models; author/readback/rate admitted; 35 focused managed checks and finite macOS encoder controls pass | Intended-base native daemon, historical receipt reuse and new-title runtime qualification; Linux encoder packaging remains open |
 
 Adversarial review happens when the change is ready to merge. Afterwards run
 only the remaining required fast-lane checks, preserving every valid pass.
