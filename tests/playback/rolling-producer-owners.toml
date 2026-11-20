@@ -4158,7 +4158,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Recovery fixture union: +1 request task held at Source preparation.
 # The fixture awaits this exact task before inspecting its Direct response.
 # Shared-DV + main8630 source union; existing reviewed sites/pattern unchanged.
-expected_occurrences = 1188
+expected_occurrences = 1189
 # F+ (#1565) on main 59022fd2a: main's 1166 plus 10 F+-only task shapes, each awaited
 # or joined by its owner:
 #  +2 dv_disk.rs: spawn_blocking for fitted-RPU authoring and the frame-by-frame readback,
@@ -4172,6 +4172,7 @@ expected_occurrences = 1188
 # Shared: both sides carried the Twilight/reader source (title-lane scheduling and reader
 # reclamation), so main's figure already counts admission.rs +1 and source_probe/title_work_tests.rs +4.
 # Union 1153 + 15 (F+) + 13 (main) = 1181, less those 5 counted twice = 1176.
+# The scanner deadline fixture owns a task so it can observe the actual probe child.
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -6149,6 +6150,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # The native FEL loop adds the idle lifecycle sleep reviewed under all-async-
 # sleeps above. It wakes the existing splice task.
 # Main adds bounded artwork, offline worker, voter and heartbeat fixture waits.
+# The scanner deadline fixture bounds cleanup after advancing the test clock.
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6171,7 +6173,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 
 
 # The merged source inventories 2286 occurrences.
-expected_occurrences = 2287
+expected_occurrences = 2288
 
 [[module_structures]]
 id = "bare-time-constructor"
