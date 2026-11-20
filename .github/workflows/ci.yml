@@ -275,7 +275,8 @@ jobs:
   preflight:
     name: fast policy and contract preflight
     needs: scope
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    # History and bounded TLC share this job; use high-cpu general workers.
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
