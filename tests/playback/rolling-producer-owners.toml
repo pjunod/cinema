@@ -1,3 +1,9 @@
+# Prepared native FEL startup. One source-copy command is run and reaped by
+# the existing bounded background child owner under a source job. The one
+# startup staging task holds a scratch writer and may only offer a complete
+# batch under the current producer transition and first-publication lock.
+# Its timer limits a private wait and does not authorize publication or
+# establish process settlement. Rejected objects go through rolling retention.
 # Subtitle identity fixture: +1 time shape is the one-millisecond sleep while
 # waiting for an observable ctime mutation, bounded by a two-second assertion.
 # It runs on the existing test thread; no production work or settlement owner.
@@ -852,7 +858,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # S10 rolling retained attachment: one false initializer, not a replacement election.
 # The native FEL publisher reads the mask under the existing transition lock
 # before selecting an unpublished video object.
-expected_occurrences = 39
+expected_occurrences = 40
 kind = "recovery_election"
 replacement = "retained process-replacement serialization projection; actor decisions and exact attempts own transcode prepublication"
 
@@ -880,7 +886,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # failure message. A test-only, non-blocking probe whose guard drops at once; no transition owner.
 # The native FEL publisher shares this lock for the final exact-attempt video
 # choice.
-expected_occurrences = 21
+expected_occurrences = 22
 kind = "mixed_ownership_lock"
 replacement = "specific attempt, response-admission, copy replacement, published cleanup, retirement, resource, or catalog-revision fences"
 
@@ -1217,7 +1223,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # observe_until, and an observer timeout leaves the task holding the counted
 # guard so Source retirement waits for real child/reader settlement. It decides
 # no recovery and retries nothing. +1 joined test caller in tests/source_actor.rs.
-expected_occurrences = 121
+expected_occurrences = 122
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -1528,7 +1534,7 @@ pattern = "child_transition"
 # 36 -> 38 with bee39df0e: the same test-only debug helper names `child_transition` twice
 # (its `child_transition_available` label and the `try_lock()` probe above). No new owner.
 # The native FEL publication guard is the same lock use reviewed above.
-expected_occurrences = 39
+expected_occurrences = 40
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -1547,7 +1553,7 @@ pattern = "replacing_child"
 # test-only stores of the mask in the path-owner position test. No production owner added.
 # S10 retained attachment initializes false; no replacement owner is introduced.
 # The same native FEL commit checks the existing replacement fence.
-expected_occurrences = 39
+expected_occurrences = 40
 
 [[module_symbols]]
 id = "legacy-downgrade-owner"
@@ -4111,11 +4117,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 #  +1 source_probe/refit_work.rs: spawn_blocking for the curve fit, awaited by the job.
 #  +2 source_probe/refit_work_tests.rs: test-only execute() tasks, each awaited under a
 #     timeout and cancelled by the test.
-# PR #1640 and main #1777 source union: recovery owns and joins the Start
-# admission tasks, the offline fixture awaits its one queue pass, and the
-# scanner fixture owns the task used to observe the actual probe child.
-# Canonical structural census of the merged source, not parent-count sums.
-expected_occurrences = 1185
+# Recovery tasks join Start admission, and the offline fixture joins its queue pass.
+# The scanner fixture owns the task observing the actual probe child.
+# Existing title-lane and reader ownership classifications are retained.
+expected_occurrences = 1186
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4371,7 +4376,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 103
+# The Linux FEL evidence test runs one command site with /bin/true or
+# /bin/false. ProducerSlot owns it through exit and writer settlement.
+expected_occurrences = 104
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6076,11 +6083,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 #     unpolled fit.
 #  +6 source_probe/refit_work_tests.rs: test pacing sleeps and the 20 s bounds on the
 #     joined execute() tasks.
-# PR #1640 and main #1777 source union: pause observations retain their
-# bounded host-clock waits, and the scanner owns its bounded cleanup wait.
-# The immutable HEVC fixture removes the cold encoder's setup timeout.
-# Canonical structural census of the merged source, not parent-count sums.
-expected_occurrences = 2266
+# Process pause and scanner fixtures retain bounded observation and cleanup waits.
+# The native FEL idle wait wakes its existing splice task. Existing title-lane,
+# reader, artwork, offline, voter and heartbeat waits retain their ownership.
+# The checked-in HEVC fixture removes its former encode setup timeout.
+expected_occurrences = 2267
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6619,7 +6626,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Union at 0d501cae6: 349 + 13 + 3 = 365, less those 3 counted twice = 362; the spool
 # registration test adds one isolated test image: 363.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 368
+# The Linux FEL evidence test runs one command site with /bin/true or
+# /bin/false. ProducerSlot owns it through exit and writer settlement.
+expected_occurrences = 370
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7356,14 +7365,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # F+ (#1565) contributes five awaited test-only launches:
 # dv_disk/tests.rs +1, fragindex/refit_acceptance_tests.rs +1,
 # fragindex/tests.rs +1, and source_probe/dv_refit.rs +2.
-# Recovery and native collision tests observe HTTP replies.
-# The prepared VOD status call reads its existing owner publication.
-# The voter fixture starts one subprocess and joins it before retrying a
-# clean bind collision.
-# PR #1802 adds two relay, seven retain-output test and two other route-test
-# response status reads. It removes the membership status read and retired
-# parser-floor response assertion.
-expected_occurrences = 962
+# Recovery, native collision, prepared VOD and retained route status reads
+# observe existing responses or publications. The voter fixture joins its child.
+# ProducerSlot owns the Linux FEL evidence command through writer settlement.
+expected_occurrences = 963
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7936,9 +7941,9 @@ pattern = "kill_on_drop\\s*\\("
 # Union at 0d501cae6: 126 + 2 + 1 = 129, less 1 counted twice = 128; the spool
 # registration test adds one: 129.
 # The owned voter fixture process is joined before a collision can retry.
-# PR #1640 removes the runtime placeholder encoder and its cancellation
-# backstop; playback still uses the verified real HEVC fixture.
-expected_occurrences = 131
+# The immutable HEVC fixture removes the runtime encoder backstop.
+# ProducerSlot owns the Linux FEL evidence command through writer settlement.
+expected_occurrences = 132
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
