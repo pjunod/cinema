@@ -2085,8 +2085,8 @@ pub(crate) fn analysis_request_stranded_sql(live: &str) -> String {
 pub(crate) fn analysis_admission_refusal_sql() -> String {
     let stranded = analysis_request_stranded_sql("input.engines");
     format!(
-        "WITH input AS (SELECT $1 AS req, $2 AS engines, $3 AS headroom)
-         SELECT CASE
+        "WITH input AS (SELECT $1 AS req, $2 AS engines, $3 AS headroom, $4 AS inserted)
+         SELECT CASE WHEN inserted THEN 0
            WHEN NOT EXISTS (SELECT 1 FROM files WHERE id = json_extract(req,'$.file_id')
                AND size = json_extract(req,'$.source_size') AND mtime = json_extract(req,'$.source_mtime'))
              THEN 1

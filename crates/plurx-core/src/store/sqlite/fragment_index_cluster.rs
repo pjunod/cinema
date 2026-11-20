@@ -858,7 +858,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 .map_err(|error| StoreError::Task(error.to_string()))?;
             let reason: u8 = transaction.query_row(
                 &analysis_admission_refusal_sql(),
-                params![input, live, analysis_headroom(&request)],
+                params![input, live, analysis_headroom(&request), false],
                 |row| row.get(0),
             )?;
             Err(analysis_admission_error(usize::from(reason)))

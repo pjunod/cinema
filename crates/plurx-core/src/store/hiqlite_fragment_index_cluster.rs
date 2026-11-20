@@ -2049,6 +2049,10 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 "enqueue_analysis_request_with",
                 vec![
                     (
+                        "SELECT NOT EXISTS (SELECT 1 FROM analysis_requests WHERE request_id = $1) AS fresh".to_owned(),
+                        params!(&request.request_id),
+                    ),
+                    (
                         format!(
                             "INSERT INTO analysis_requests
                 (request_id, file_id, source_size, source_mtime, component,
@@ -2162,15 +2166,16 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     // Only a newly inserted force can displace older work. A replay
                     // or collision on a historical force id must have no side effects.
                     (
-                        "SELECT changes() = 1 AND $1 = 1 AS supersede".to_owned(),
-                        params!(if request.force_rebuild { 1_i64 } else { 0_i64 }),
+                        "WITH result AS (SELECT $1 AND EXISTS (SELECT 1 FROM analysis_requests WHERE request_id = $2) AS inserted)
+                         SELECT inserted, inserted AND $3 AS supersede FROM result".to_owned(),
+                        params!(hiqlite::Param::StmtOutputIndexed(0, 0), &request.request_id, request.force_rebuild),
                     ),
                     // A Hiqlite transaction returns the row count of each SELECT.
                     // Encode the bounded refusal code in that count, in the same
                     // snapshot as the INSERT. A successful INSERT skips all diagnosis.
                     (
-                        format!("SELECT 1 FROM (VALUES (1),(2),(3),(4),(5)) LIMIT CASE WHEN changes() = 0 THEN ({refusal}) ELSE 0 END"),
-                        params!(input, live, super::fragment_index_cluster::analysis_headroom(request)),
+                        format!("SELECT 1 FROM (VALUES (1),(2),(3),(4),(5)) LIMIT ({refusal})"),
+                        params!(input, live, super::fragment_index_cluster::analysis_headroom(request), hiqlite::Param::StmtOutputIndexed(2, 0)),
                     ),
                     (
                         "UPDATE analysis_attempts
@@ -2189,7 +2194,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             .to_owned(),
                         params!(
                             request.created_at_ms,
-                            hiqlite::Param::StmtOutputIndexed(1, 0),
+                            hiqlite::Param::StmtOutputIndexed(2, 1),
                             request.file_id,
                             request.source_size,
                             request.source_mtime,
@@ -2213,7 +2218,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             .to_owned(),
                         params!(
                             request.created_at_ms,
-                            hiqlite::Param::StmtOutputIndexed(1, 0),
+                            hiqlite::Param::StmtOutputIndexed(2, 1),
                             request.file_id,
                             request.source_size,
                             request.source_mtime,
@@ -2254,7 +2259,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             request.source_mtime,
                             &request.component,
                             &request.pipeline_version,
-                            hiqlite::Param::StmtOutputIndexed(1, 0)
+                            hiqlite::Param::StmtOutputIndexed(2, 1)
                         ),
                     ),
                 ],
@@ -2311,7 +2316,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             return Ok(active);
         }
         Err(super::fragment_index_cluster::analysis_admission_error(
-            results[2],
+            results[3],
         ))
     }
 
