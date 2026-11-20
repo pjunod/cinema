@@ -1,6 +1,7 @@
 //! Adapt the established all-track extractor to one common durable owner.
 use super::*;
 use crate::background_jobs::{ActiveBackgroundJob, JobFence};
+use plurx_core::process::bounded::{self, OriginalWorkKeeper, OriginalWorkUncertainty};
 use plurx_core::store::background_jobs::{
     BackgroundJob, EnqueueOutcome, JobKind, JobPayload, JobSettlement,
 };
@@ -10,10 +11,13 @@ use plurx_core::store::background_jobs::{
 async fn admit_foreground_subtitle(
     admissions: &crate::admission::Admissions,
     budget: usize,
+    deadline: tokio::time::Instant,
 ) -> Option<crate::admission::TranscodePermit> {
     let mut waiting = admissions.software_pool().queue_for_capacity();
-    let deadline = tokio::time::Instant::now() + crate::admission::QUEUE_WAIT;
     loop {
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
         if let Some(permit) = admissions.try_admit_bundle(
             0,
             budget,
@@ -27,12 +31,47 @@ async fn admit_foreground_subtitle(
             return Some(permit);
         }
         waiting.mark_capacity_blocked();
+        #[cfg(target_os = "linux")]
+        let _ = waiting.request_disposable_background_yield();
         let now = tokio::time::Instant::now();
         if now >= deadline {
             return None;
         }
         tokio::time::sleep(crate::transcode::ADMISSION_POLL.min(deadline - now)).await;
     }
+}
+
+struct OriginalForegroundSubtitleRead {
+    permit: Arc<crate::admission::TranscodePermit>,
+    cleanup_unknown: std::sync::atomic::AtomicBool,
+}
+
+impl OriginalWorkKeeper for OriginalForegroundSubtitleRead {
+    fn retain_uncertainty(&self, _reason: OriginalWorkUncertainty) {
+        if !self.cleanup_unknown.swap(true, Ordering::AcqRel) {
+            std::mem::forget(Arc::clone(&self.permit));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn requires_group_quiescence(&self) -> bool {
+        true
+    }
+}
+
+async fn yield_unadmitted_subtitle(active: ActiveBackgroundJob) {
+    if let Err(error) = active
+        .fence()
+        .settle(JobSettlement::Yield {
+            error_code: None,
+            checkpoint: None,
+            not_before_ms: clock_ms().saturating_add(5_000),
+        })
+        .await
+    {
+        tracing::warn!(%error, "yielding an unadmitted subtitle claim");
+    }
+    active.finish().await;
 }
 
 async fn await_subtitle_work<F, C, CF, N, NF, B>(
@@ -59,38 +98,32 @@ where
         tokio::select! {
             biased;
             () = loss.cancelled() => { cancellation.cancel(); return work.await; }
+            () = cancellation.cancelled() => break,
             preempted = async {
                 pressure.tick().await;
                 background_preempted() || !source_may_continue().await
             } => {
-                if preempted {
-                    cancellation.cancel();
-                    // A completion write can retire its own source authority
-                    // before this observation returns. Preserve that committed
-                    // success after the worker has joined; permit no new reads.
-                    if work.await.is_ok() {
-                        return Ok(());
-                    }
-                    return Err(AnalysisResolutionError::Retry { code: "foreground_preempted", charge_attempt: false });
-                }
+                if preempted { break; }
             }
             preempted = async {
                 source_changed().await;
                 !source_may_continue().await
             } => {
-                if preempted {
-                    cancellation.cancel();
-                    // A completion write can retire its own source authority
-                    // before this observation returns. Preserve that committed
-                    // success after the worker has joined; permit no new reads.
-                    if work.await.is_ok() {
-                        return Ok(());
-                    }
-                    return Err(AnalysisResolutionError::Retry { code: "foreground_preempted", charge_attempt: false });
-                }
+                if preempted { break; }
             }
             result = &mut work => return result,
         }
+    }
+    cancellation.cancel();
+    // An original completion can retire its own source authority before
+    // pressure arrives. Preserve that committed success after joining.
+    if work.await.is_ok() {
+        Ok(())
+    } else {
+        Err(AnalysisResolutionError::Retry {
+            code: "foreground_preempted",
+            charge_attempt: false,
+        })
     }
 }
 
@@ -172,49 +205,33 @@ impl JobManager {
                 Err(error) => tracing::warn!(%error, "reading subtitle outbox"),
             }
         }
-        // Claim first, then take the pool. The claim walks a candidate page
-        // — store reads, a file open per row, and a 30 s ambiguity wait for
-        // every claim the store cannot answer — none of which looks at the
-        // encoder pool. Holding the whole software budget across that walk
-        // is how a Live TV start on this node was refused for "capacity"
-        // with every tuner idle. The pre-check is the admission's own
-        // predicate, so a viewer or another heavy worker holding the box
-        // costs no claim (a claim charges the demand an attempt and two
-        // replicated writes); the admission after the claim is the real
-        // reservation, and the window between the two is the only case the
-        // Yield below exists for.
+        // Walking candidate pages and resolving a claim does not own a
+        // codec. Check the existing idle/heavy lane first, then reserve the
+        // actual worker after the durable claim.'
         if !transcode.fragment_worker_may_start() {
             return false;
         }
         let Some((job, active)) = self.claim_subtitle_work(None).await else {
             return false;
         };
-        let Some(admission) = transcode.admit_fragment().await else {
-            // A viewer arrived between the claim and the admission. Hand the
-            // job back for the next quiet moment rather than running it
-            // beside the viewer or leaving it leased to nobody.
-            if let Err(error) = active
-                .fence()
-                .settle(JobSettlement::Yield {
-                    error_code: None,
-                    checkpoint: None,
-                    not_before_ms: clock_ms().saturating_add(5_000),
-                })
-                .await
-            {
-                tracing::warn!(%error, "yielding an unadmitted subtitle claim");
-            }
-            active.finish().await;
+        let Some(admission) = transcode.admit_subtitle_source().await.map(Arc::new) else {
+            yield_unadmitted_subtitle(active).await;
             return false;
         };
+        let Some(original) = OriginalDisposableSourceRead::register(Arc::clone(&admission)) else {
+            yield_unadmitted_subtitle(active).await;
+            return false;
+        };
+        let cancellation = original.pressure.cancel.clone();
         self.run_subtitle_work(
             job,
             active,
             transcode.runtime_cache_dir(),
             Some((transcode, &admission)),
+            original,
+            cancellation,
         )
         .await;
-        drop(admission);
         true
     }
 
@@ -252,17 +269,33 @@ impl JobManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let Some(_admission) = admit_foreground_subtitle(&admissions, budget).await else {
+        let deadline = tokio::time::Instant::now() + crate::admission::QUEUE_WAIT;
+        let Some((job, active)) = self.claim_subtitle_work(Some(request_id)).await else {
             return false;
         };
-        let Some((job, active)) = self.claim_subtitle_work(Some(request_id)).await else {
+        let Some(permit) = admit_foreground_subtitle(&admissions, budget, deadline).await else {
+            yield_unadmitted_subtitle(active).await;
             return false;
         };
         crate::telemetry::record_subtitle_source(
             crate::telemetry::SubtitleSourceMetric::ForegroundSelfClaim,
         );
-        self.run_subtitle_work(job, active, runtime_cache, None)
-            .await
+        let original = Arc::new(OriginalForegroundSubtitleRead {
+            permit: Arc::new(permit),
+            cleanup_unknown: std::sync::atomic::AtomicBool::new(false),
+        });
+        let jobs = Arc::clone(self);
+        let runtime_cache = runtime_cache.to_owned();
+        let cancellation = CancellationToken::new();
+        // The route can stop waiting at any point. Its departure requests
+        // cleanup from this same worker, which still owns the job and permit.
+        let _demand = cancellation.clone().drop_guard();
+        tokio::spawn(async move {
+            jobs.run_subtitle_work(job, active, &runtime_cache, None, original, cancellation)
+                .await
+        })
+        .await
+        .unwrap_or(false)
     }
 
     async fn claim_subtitle_work(
@@ -296,7 +329,10 @@ impl JobManager {
         active: ActiveBackgroundJob,
         runtime_cache: &Path,
         background: Option<(&TranscodeManager, &crate::transcode::FragmentAdmission)>,
+        keeper: Arc<dyn OriginalWorkKeeper>,
+        cancellation: CancellationToken,
     ) -> bool {
+        let mut close = OriginalSourceReadClose(Some(Arc::clone(&keeper)));
         let fence = active.fence();
         let JobPayload::SubtitleExtract {
             source_generation, ..
@@ -315,7 +351,6 @@ impl JobManager {
                     request.source_size.max(0) as u64,
                     0,
                 );
-                let cancellation = CancellationToken::new();
                 let loss = fence.loss_token();
                 let work = crate::background_jobs::budgeted(
                     fence.source_budget(),
@@ -329,6 +364,7 @@ impl JobManager {
                         ),
                     ),
                 );
+                let work = bounded::with_original_work_keeper(keeper, work);
                 tokio::pin!(work);
                 let mut pressure = tokio::time::interval(Duration::from_millis(250));
                 await_subtitle_work(
@@ -382,6 +418,7 @@ impl JobManager {
             }
         }
         active.finish().await;
+        close.0 = None;
         succeeded
     }
 
@@ -544,6 +581,71 @@ mod foreground_admission_tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn requested_subtitle_yield_keeps_cpu_until_original_work_returns() {
+        let admissions = Admissions::new();
+        let held = admissions
+            .try_admit_software(2, 1, Priority::Background)
+            .expect("actual background reservation");
+        let registered = held
+            .register_disposable_background()
+            .expect("registered original work");
+        let cancellation = registered.cancel.clone();
+        let (stop_seen, saw_stop) = tokio::sync::oneshot::channel();
+        let (allow_original_close, original_may_close) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let _held = held;
+            let _registered = registered;
+            let work = async {
+                cancellation.cancelled().await;
+                stop_seen.send(()).expect("report actual cancellation");
+                original_may_close.await.expect("allow actual closure");
+                Err(super::AnalysisResolutionError::ClaimLost)
+            };
+            tokio::pin!(work);
+            let mut ordinary_pressure = tokio::time::interval_at(
+                tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+                std::time::Duration::from_secs(60),
+            );
+            super::await_subtitle_work(
+                work.as_mut(),
+                &super::CancellationToken::new(),
+                &cancellation,
+                &mut ordinary_pressure,
+                std::future::pending,
+                || async { true },
+                || false,
+            )
+            .await
+        });
+        let shared = admissions.clone();
+        let deadline = tokio::time::Instant::now() + crate::admission::QUEUE_WAIT;
+        let waiter =
+            tokio::spawn(async move { admit_foreground_subtitle(&shared, 2, deadline).await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), saw_stop)
+            .await
+            .expect("direct registered yield, before polling pressure")
+            .expect("original observed the request");
+        assert_eq!(admissions.software_in_use(), 1);
+        assert!(
+            !waiter.is_finished(),
+            "cancellation is not refund authority"
+        );
+        allow_original_close.send(()).expect("owner can close");
+        assert!(matches!(
+            worker.await.expect("original worker joined"),
+            Err(super::AnalysisResolutionError::Retry {
+                code: "foreground_preempted",
+                charge_attempt: false,
+            }),
+        ));
+        let foreground = waiter.await.expect("foreground waiter joined");
+        assert!(foreground.is_some());
+        drop(foreground);
+        assert_eq!(admissions.software_in_use(), 0);
+    }
+
     fn background(admissions: &Admissions) -> crate::admission::TranscodePermit {
         admissions
             .try_admit_bundle(
@@ -564,7 +666,10 @@ mod foreground_admission_tests {
         let admissions = Admissions::new();
         let held = background(&admissions);
         let started = tokio::time::Instant::now();
-        assert!(admit_foreground_subtitle(&admissions, 2).await.is_none());
+        let deadline = started + crate::admission::QUEUE_WAIT;
+        assert!(admit_foreground_subtitle(&admissions, 2, deadline)
+            .await
+            .is_none());
         assert_eq!(started.elapsed(), crate::admission::QUEUE_WAIT);
         assert!(!admissions.live_is_waiting());
         assert_eq!(admissions.software_in_use(), 2);
@@ -577,7 +682,9 @@ mod foreground_admission_tests {
         let admissions = Admissions::new();
         let held = background(&admissions);
         let shared = admissions.clone();
-        let waiting = tokio::spawn(async move { admit_foreground_subtitle(&shared, 2).await });
+        let deadline = tokio::time::Instant::now() + crate::admission::QUEUE_WAIT;
+        let waiting =
+            tokio::spawn(async move { admit_foreground_subtitle(&shared, 2, deadline).await });
         tokio::task::yield_now().await;
         assert!(
             admissions.live_is_waiting(),

@@ -1467,6 +1467,13 @@ impl TranscodeManager {
             .await
     }
 
+    /// The standalone subtitle pass probes and decodes with one configured
+    /// codec thread. The same heavy lane and idle policy still cover its
+    /// wider source, parser, and native costs.
+    pub(crate) async fn admit_subtitle_source(&self) -> Option<FragmentAdmission> {
+        self.admit_source_work(1).await
+    }
+
     pub(crate) async fn admit_targeted_probe(&self) -> Option<FragmentAdmission> {
         Some(FragmentAdmission::probe_only(
             self.serving_authority.try_restart_admission().await?,

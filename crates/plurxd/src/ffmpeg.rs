@@ -1337,6 +1337,8 @@ async fn held_source_probe_json_with_limits(
         command.args([
             "-v",
             "error",
+            "-threads",
+            "1",
             "-print_format",
             "json",
             "-show_format",

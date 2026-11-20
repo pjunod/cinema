@@ -2645,12 +2645,22 @@ fn measured_index_budget_secs(
     )
 }
 
-struct OriginalLocalIndexRead {
+struct OriginalDisposableSourceRead {
     admission: Arc<crate::transcode::FragmentAdmission>,
     pressure: Arc<crate::admission::DisposableBackground>,
 }
 
-impl plurx_core::process::bounded::OriginalWorkKeeper for OriginalLocalIndexRead {
+impl OriginalDisposableSourceRead {
+    fn register(admission: Arc<crate::transcode::FragmentAdmission>) -> Option<Arc<Self>> {
+        let pressure = admission.register_disposable_background()?;
+        Some(Arc::new(Self {
+            admission,
+            pressure,
+        }))
+    }
+}
+
+impl plurx_core::process::bounded::OriginalWorkKeeper for OriginalDisposableSourceRead {
     fn retain_uncertainty(&self, reason: plurx_core::process::bounded::OriginalWorkUncertainty) {
         plurx_core::process::bounded::OriginalWorkKeeper::retain_uncertainty(
             self.admission.as_ref(),
@@ -2662,11 +2672,16 @@ impl plurx_core::process::bounded::OriginalWorkKeeper for OriginalLocalIndexRead
             std::mem::forget((Arc::clone(&self.admission), Arc::clone(&self.pressure)));
         }
     }
+
+    #[cfg(target_os = "linux")]
+    fn requires_group_quiescence(&self) -> bool {
+        true
+    }
 }
 
-struct LocalIndexClose(Option<Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper>>);
+struct OriginalSourceReadClose(Option<Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper>>);
 
-impl Drop for LocalIndexClose {
+impl Drop for OriginalSourceReadClose {
     fn drop(&mut self) {
         if let Some(original) = self.0.take() {
             original.retain_uncertainty(
@@ -2695,14 +2710,10 @@ pub(crate) async fn local_index_until_foreground<T>(
     admission: &Arc<crate::transcode::FragmentAdmission>,
     build: impl std::future::Future<Output = T>,
 ) -> Option<T> {
-    let pressure = admission.register_disposable_background()?;
-    let cancel = pressure.cancel.clone();
-    let keeper: Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper> =
-        Arc::new(OriginalLocalIndexRead {
-            admission: Arc::clone(admission),
-            pressure,
-        });
-    let mut close = LocalIndexClose(Some(Arc::clone(&keeper)));
+    let original = OriginalDisposableSourceRead::register(Arc::clone(admission))?;
+    let cancel = original.pressure.cancel.clone();
+    let keeper: Arc<dyn plurx_core::process::bounded::OriginalWorkKeeper> = original;
+    let mut close = OriginalSourceReadClose(Some(Arc::clone(&keeper)));
     let build = plurx_core::process::bounded::with_original_work_keeper(keeper, build);
     #[cfg(target_os = "linux")]
     let build = plurx_core::process::bounded::pausable(
@@ -3721,6 +3732,7 @@ fn subtitle_source_argv(
     ];
     args.extend(input_args.iter().cloned());
     args.extend(["-i".to_owned(), input.to_owned()]);
+    args.extend(["-threads", "1"].map(str::to_owned));
     args.extend(plan.args());
     args
 }
@@ -3800,6 +3812,25 @@ async fn join_subtitle_source_child(child: &mut tokio::process::Child) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn join_subtitle_source_group(pid: Option<u32>) {
+    let Some(group) = pid.and_then(|pid| i32::try_from(pid).ok()) else {
+        if let Some(keeper) = plurx_core::process::bounded::original_keeper() {
+            keeper.retain_uncertainty(
+                plurx_core::process::bounded::OriginalWorkUncertainty::LeaderReapFailed,
+            );
+        }
+        return;
+    };
+    // The leader may return while a descendant still owns source or output.
+    while !plurx_core::process::bounded::source_group_quiescent(group, false)
+        .await
+        .unwrap_or(false)
+    {
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -3885,10 +3916,17 @@ async fn run_subtitle_source_pass_owned(
             code: "source_process_failed",
             charge_attempt: true,
         })?;
-    let mut stderr = child.stderr.take().ok_or(AnalysisResolutionError::Retry {
-        code: "source_process_failed",
-        charge_attempt: true,
-    })?;
+    #[cfg(target_os = "linux")]
+    let original_pid = child.id();
+    let Some(mut stderr) = child.stderr.take() else {
+        join_subtitle_source_child(&mut child).await;
+        #[cfg(target_os = "linux")]
+        join_subtitle_source_group(original_pid).await;
+        return Err(AnalysisResolutionError::Retry {
+            code: "source_process_failed",
+            charge_attempt: true,
+        });
+    };
     let mut scan = plan.stderr_scan();
     let stderr_task = tokio::spawn(async move {
         let mut chunk = [0_u8; 8192];
@@ -3906,29 +3944,21 @@ async fn run_subtitle_source_pass_owned(
     tokio::pin!(deadline);
     let status = loop {
         tokio::select! {
-            () = lost.cancelled() => {
-                join_subtitle_source_child(&mut child).await;
-                stderr_task.abort();
-                return Err(AnalysisResolutionError::ClaimLost);
-            }
+            () = lost.cancelled() => break Err(AnalysisResolutionError::ClaimLost),
             () = &mut deadline => {
-                join_subtitle_source_child(&mut child).await;
-                stderr_task.abort();
-                return Err(AnalysisResolutionError::Retry {
+                break Err(AnalysisResolutionError::Retry {
                     code: "source_pass_timeout",
                     charge_attempt: true,
                 });
             }
             status = child.wait() => match status {
-                Ok(status)=>break status,
+                Ok(status)=>break Ok(status),
                 Err(error)=>{tracing::warn!(%error,"subtitle source wait failed; retaining claim and retrying");tokio::time::sleep(Duration::from_millis(100)).await;},
             },
             () = tokio::time::sleep(Duration::from_millis(500)) => {
                 progress();
                 if preempt_when_busy.is_some_and(|manager| !manager.pretranscode_worker_idle()) {
-                    join_subtitle_source_child(&mut child).await;
-                    stderr_task.abort();
-                    return Err(AnalysisResolutionError::Retry {
+                    break Err(AnalysisResolutionError::Retry {
                         code: "foreground_preempted",
                         charge_attempt: false,
                     });
@@ -3936,9 +3966,16 @@ async fn run_subtitle_source_pass_owned(
             }
         }
     };
-    progress();
+    if status.is_err() {
+        join_subtitle_source_child(&mut child).await;
+        stderr_task.abort();
+    } else {
+        progress();
+    }
+    #[cfg(target_os = "linux")]
+    join_subtitle_source_group(original_pid).await;
     let scan = stderr_task.await.ok().flatten();
-    if !status.success() {
+    if !status?.success() {
         return Err(AnalysisResolutionError::Retry {
             code: "source_process_failed",
             charge_attempt: true,

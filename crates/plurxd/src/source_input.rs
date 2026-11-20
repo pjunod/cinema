@@ -789,19 +789,30 @@ impl SourceInput {
                 tracing::warn!(%error,"source input listener owner ended; joining descriptor reads");
             }
         }
-        let permit = Arc::clone(&self.state.read_slot)
-            .acquire_owned()
+        let result = async {
+            let permit = Arc::clone(&self.state.read_slot)
+                .acquire_owned()
+                .await
+                .map_err(std::io::Error::other)?;
+            let state = Arc::clone(&self.state);
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                drop(state.source.lock().expect("source input").take());
+                drop(state.custody.lock().expect("source custody").take());
+            })
             .await
-            .map_err(std::io::Error::other)?;
-        let state = Arc::clone(&self.state);
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            drop(state.source.lock().expect("source input").take());
-            drop(state.custody.lock().expect("source custody").take());
-        })
-        .await
-        .map_err(std::io::Error::other)?;
-        Ok(())
+            .map_err(std::io::Error::other)
+        }
+        .await;
+        if let Err(error) = &result {
+            if let Some(keeper) = plurx_core::process::bounded::original_keeper() {
+                keeper.retain_uncertainty(
+                    plurx_core::process::bounded::OriginalWorkUncertainty::RuntimeUnavailable,
+                );
+            }
+            tracing::warn!(%error, "original source input closure remains uncertain");
+        }
+        result
     }
     pub(crate) fn cleanup_pending(mut self) {
         drop(self.observer_publication.take());
