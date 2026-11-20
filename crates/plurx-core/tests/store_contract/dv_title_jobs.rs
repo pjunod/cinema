@@ -2038,7 +2038,7 @@ fn m7_receipt(
             seek_rpu_sha256: [19; 32],
         }],
     };
-    let scratch = tempfile::tempdir_in(plurx_core::testfixtures::fixture_dir()).expect("scratch");
+    let scratch = tempfile::tempdir().expect("scratch");
     let plan = [WindowShape {
         frames: 1,
         sites_per_frame: 2,
