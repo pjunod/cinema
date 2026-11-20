@@ -15,12 +15,18 @@ fn visible(alias: &str, viewer: &str) -> String {
 }
 
 /// `TOP_LEVEL_ITEM_PREDICATE` as a literal, so constant statements can embed
-/// it (a test pins the two equal): tags go on titles, never on seasons or
-/// episodes, and suggestions offer only what a grid could show.
+/// it (a test pins the two equal). Suggestions offer only what a grid
+/// could show.
 macro_rules! top_level {
     () => {
         "(kind IN ('movie','show','book','audiobook') OR \
      (kind IN ('folder','video','photo') AND parent_id IS NULL))"
+    };
+}
+
+macro_rules! taggable_titles {
+    () => {
+        concat!("(", top_level!(), " OR kind = 'video')")
     };
 }
 
@@ -79,7 +85,7 @@ pub(crate) const MERGE_REJECTIONS: &str = "INSERT INTO library_curation_rejectio
 pub(crate) const ADD_MEMBERS: &str = concat!(
     "INSERT INTO library_curation_item_tags(tag_id, item_id, added_by, added_at_ms, source) \
      SELECT $1, j.value, $2, $3, $4 FROM json_each($5) j WHERE EXISTS (SELECT 1 FROM items WHERE id = j.value AND ",
-    top_level!(),
+    taggable_titles!(),
     ") ON CONFLICT(tag_id, item_id) DO NOTHING"
 );
 pub(crate) const REMOVE_MEMBERS: &str = "DELETE FROM library_curation_item_tags \
@@ -211,9 +217,14 @@ pub(crate) fn rule_sql(query: &RuleQuery<'_>, page: Option<(i64, i64)>) -> (Stri
         viewer: None,
     };
     let spec = query.spec;
-    // As written, so SQLite can serve the scan from the partial top-level
-    // index exactly as it does for a library grid.
-    let mut wheres = vec![super::TOP_LEVEL_ITEM_PREDICATE.to_owned()];
+    // A positive tag can name a video in a folder. Keep the original root
+    // predicate for library grids and rules without positive tags.
+    let positive_tags = spec.positive_tag_ids();
+    let mut wheres = vec![if !query.top_level_only && !positive_tags.is_empty() {
+        taggable_titles!().to_owned()
+    } else {
+        super::TOP_LEVEL_ITEM_PREDICATE.to_owned()
+    }];
     if query.presence != ItemPresence::Everything {
         wheres.push(query.presence.sql().to_owned());
     }
@@ -285,10 +296,9 @@ pub(crate) fn rule_sql(query: &RuleQuery<'_>, page: Option<(i64, i64)>) -> (Stri
     }
     match spec.sort {
         RowSort::RecentlyTagged => {
-            let tags = spec.positive_tag_ids();
-            if !tags.is_empty() {
+            if !positive_tags.is_empty() {
                 let ids = b.bind(Arg::Text(
-                    serde_json::to_string(&tags).expect("ids serialize"),
+                    serde_json::to_string(&positive_tags).expect("ids serialize"),
                 ));
                 // Only memberships of tags the viewer can see may order the
                 // page; otherwise a private tag id would leak its titles
@@ -379,6 +389,7 @@ mod tests {
                 viewer: 7,
                 spec: &spec,
                 only_items: Some(&ids),
+                top_level_only: false,
                 day: 20_000,
                 presence: ItemPresence::OnDisk,
             };
@@ -421,6 +432,7 @@ mod tests {
             viewer: 7,
             spec: &spec,
             only_items: None,
+            top_level_only: false,
             day: 0,
             presence: ItemPresence::Everything,
         };
@@ -452,6 +464,7 @@ mod tests {
             viewer: 7,
             spec: &spec,
             only_items: None,
+            top_level_only: false,
             day: 0,
             presence: ItemPresence::Everything,
         };

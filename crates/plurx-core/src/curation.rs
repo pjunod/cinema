@@ -344,6 +344,8 @@ pub struct RuleQuery<'a> {
     pub spec: &'a RowSpec,
     /// Restrict to these ids (a `tag:` search narrows a text search's hits).
     pub only_items: Option<&'a [i64]>,
+    /// A library grid stays at its root when it applies tag filters.
+    pub top_level_only: bool,
     /// Seed for `ShuffleDaily`: the same order all day, a new one tomorrow.
     pub day: i64,
     /// Offload presence, as a library grid has it: Home rows and search show

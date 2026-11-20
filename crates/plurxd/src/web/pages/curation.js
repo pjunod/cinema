@@ -68,7 +68,8 @@ function homeRegions(p,previews){
   };
   const lead=installBannerHtml()+(p.hubsError?`<div class="hint">Home recommendations are unavailable right now.</div>`:"")
     +`<div class="home-customize"><button class="ghost sm" onclick="openCustomizeHome()">Customize Home</button></div>`;
-  let out=`<div data-home-region="hubs" data-home-slot="lead">${lead}</div>`;
+  const rowsStatus=p.rowsError?`<div class="hint">Custom rows and Home order are unavailable right now.</div>`:"";
+  let out=`<div data-home-region="hubs" data-home-slot="lead">${lead}</div><div data-home-region="rows" data-home-slot="status">${rowsStatus}</div>`;
   for(const key of homeOrder(p)){
     if(shelves[key]) out+=`<div data-home-region="${shelves[key][0]}" data-home-slot="${key}">${shelves[key][1]}</div>`;
     else if(/^row:\d+$/.test(key)){
@@ -102,6 +103,7 @@ async function openCustomizeHome(){
   const d=curationDialog("customize-home","Customize Home",`<p class="muted">Loading…</p>`);
   try{
     const r=await api("/home/layout");
+    if(!d.open)return;
     HOME_EDIT={entries:r.entries.map(e=>({key:e.key,hidden:!!e.hidden})),rows:r.rows||[],canManage:r.can_manage_household,isAdmin:r.is_admin,source:r.source};
     paintCustomizeHome();
   }catch(e){if(d.isConnected)d.querySelector(".curation-body").textContent=e.message;}
@@ -161,13 +163,15 @@ async function resetHomeLayout(){
 // ---- row editor --------------------------------------------------------------
 let ROW_EDIT=null;
 async function openRowEditor(rowId){
+  if(ROW_EDIT?.saving)return;
   const [tags,libs]=await Promise.all([curationTags(true),libsCached()]);
+  if(ROW_EDIT?.saving||!dialogById("customize-home")?.open)return;
   const existing=rowId?(HOME_EDIT&&HOME_EDIT.rows||[]).find(r=>r.id===rowId):null;
   const spec=existing?JSON.parse(JSON.stringify(existing.spec)):{all_of:[],any_of:[],none_of:[],libraries:[],kinds:[],sort:"recently_tagged",unwatched:"first"};
   // A deleted tag's condition matches nothing; editing the row drops it.
   const known=new Set(tags.map(t=>t.id));
   for(const g of ["all_of","any_of","none_of"]) spec[g]=(spec[g]||[]).filter(t=>t.tag==null||known.has(t.tag));
-  ROW_EDIT={id:rowId||null,title:existing?existing.title:"",scope:existing?existing.scope:"private",spec,tags:tags.filter(t=>!t.archived),libs};
+  ROW_EDIT={id:rowId||null,title:existing?existing.title:"",scope:existing?existing.scope:"private",spec,tags:tags.filter(t=>!t.archived),libs,saving:false};
   const d=curationDialog("row-editor",rowId?"Edit row":"New row","");
   paintRowEditor(d);
 }
@@ -197,7 +201,7 @@ function paintRowEditor(d){
     ${CURATION.canManage&&!ROW_EDIT.id?`<div class="row" style="gap:12px"><span>Who sees it</span><label class="row" style="gap:4px"><input type="radio" name="row-scope" ${ROW_EDIT.scope!=="household"?"checked":""} onchange="ROW_EDIT.scope='private'">Just me</label><label class="row" style="gap:4px"><input type="radio" name="row-scope" ${ROW_EDIT.scope==="household"?"checked":""} onchange="ROW_EDIT.scope='household'">Household</label></div>`:""}
     <div class="row" style="gap:8px;margin-top:10px"><span id="row-preview" class="muted" aria-live="polite"></span><span style="flex:1"></span>
       ${ROW_EDIT.id?`<button class="ghost" onclick="deleteRow(${ROW_EDIT.id})">Delete row</button>`:""}
-      <button onclick="saveRow()">${ROW_EDIT.id?"Save row":"Add to Home"}</button></div>
+      <button id="row-save" ${ROW_EDIT.saving?"disabled":""} onclick="saveRow()">${ROW_EDIT.id?"Save row":"Add to Home"}</button></div>
     <p id="row-editor-error" role="status"></p>`;
   rowPreview();
 }
@@ -221,24 +225,35 @@ function rowPreview(){
   ROW_PREVIEW_TIMER=setTimeout(async()=>{
     const el=document.getElementById("row-preview");if(!el)return;
     try{const r=await api("/rows/preview",{method:"POST",body:{spec:ROW_EDIT.spec,limit:1}});
-      el.textContent=`${r.total} matching title${r.total===1?"":"s"}`;}
+      el.textContent=r.total?`${r.total} matching title${r.total===1?"":"s"}`:"No playable titles match. This row will appear on Home when a title matches.";}
     catch(e){el.textContent=e.message;}
   },250);
 }
 async function saveRow(){
-  const err=document.getElementById("row-editor-error");
+  const d=dialogById("row-editor"),edit=ROW_EDIT,home=HOME_EDIT;
+  if(!d?.open||!edit||edit.saving)return;
+  edit.saving=true;
+  const button=inputIn(d,"#row-save");
+  if(button)button.disabled=true;
   try{
-    const body={title:ROW_EDIT.title,spec:ROW_EDIT.spec};
-    const row=ROW_EDIT.id?await api(`/rows/${ROW_EDIT.id}`,{method:"PATCH",body})
-      :await api("/rows",{method:"POST",body:{...body,scope:ROW_EDIT.scope}});
-    dialogById("row-editor")?.close();
-    if(HOME_EDIT){
-      HOME_EDIT.rows=HOME_EDIT.rows.filter(r=>r.id!==row.id).concat([row]);
-      if(!HOME_EDIT.entries.some(e=>e.key===`row:${row.id}`)) HOME_EDIT.entries.push({key:`row:${row.id}`,hidden:false});
+    const body={title:edit.title,spec:edit.spec};
+    const row=edit.id?await api(`/rows/${edit.id}`,{method:"PATCH",body})
+      :await api("/rows",{method:"POST",body:{...body,scope:edit.scope}});
+    d.close();
+    if(HOME_EDIT===home&&home){
+      home.rows=home.rows.filter(r=>r.id!==row.id).concat([row]);
+      if(!home.entries.some(e=>e.key===`row:${row.id}`)) home.entries.push({key:`row:${row.id}`,hidden:false});
       paintCustomizeHome();
+      render();
     }
-    toast(ROW_EDIT.id?"Row saved":"Row added — Save to keep its place on Home");
-  }catch(e){if(err)err.textContent=e.message;}
+    toast(edit.id?"Row saved":"Row added. Save in Customize Home to keep any changes to the order.");
+  }catch(e){
+    const err=d.querySelector("#row-editor-error");if(err)err.textContent=e.message;
+  }finally{
+    edit.saving=false;
+    const currentButton=inputIn(d,"#row-save");
+    if(currentButton)currentButton.disabled=false;
+  }
 }
 async function deleteRow(id){
   if(!confirm("Delete this row? Its tags stay as they are."))return;
@@ -290,7 +305,7 @@ async function setItemTag(itemId,tagId,on){
     const ids=new Set((current.tags||[]).filter(t=>t.editable).map(t=>t.id));
     on?ids.add(tagId):ids.delete(tagId);
     await api(`/items/${itemId}/tags`,{method:"PUT",body:{tag_ids:[...ids]}});
-    CURATION.at=0;paintItemTags(itemId,PAGE_RENDER_GENERATION);
+    LIB_TAGS.sets.delete(tagId);CURATION.at=0;paintItemTags(itemId,PAGE_RENDER_GENERATION);
   }catch(e){toast(e.message);}
 }
 async function openTagPicker(itemId){

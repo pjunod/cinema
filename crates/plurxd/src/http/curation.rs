@@ -160,15 +160,17 @@ async fn rule_page(
     state: &AppState,
     user: &User,
     spec: &RowSpec,
-    offset: i64,
-    limit: i64,
+    page: (i64, i64),
     presence: ItemPresence,
+    top_level_only: bool,
     read_after: ReadAfter,
 ) -> Result<ItemPage, ApiError> {
+    let (offset, limit) = page;
     let query = RuleQuery {
         viewer: user.id,
         spec,
         only_items: None,
+        top_level_only,
         day: today(),
         presence,
     };
@@ -635,9 +637,9 @@ pub async fn tag_items(
             &state,
             &user,
             &spec,
-            offset,
-            limit,
+            (offset, limit),
             ItemPresence::Everything,
+            false,
             read_after,
         )
         .await?,
@@ -666,6 +668,7 @@ pub async fn tag_item_ids(
         viewer: user.id,
         spec: &spec,
         only_items: None,
+        top_level_only: false,
         day: 0,
         presence: ItemPresence::Everything,
     };
@@ -865,7 +868,16 @@ pub(crate) async fn tag_filtered_grid(
     if let Some(genre) = genre {
         spec.all_of.push(Term::Genre(genre.to_owned()));
     }
-    let mut page = rule_page(state, user, &spec, offset, limit, presence, read_after).await?;
+    let mut page = rule_page(
+        state,
+        user,
+        &spec,
+        (offset, limit),
+        presence,
+        true,
+        read_after,
+    )
+    .await?;
     if facts {
         // The same opt-in spec columns the unfiltered grid gives.
         let file_backed: Vec<i64> = page
@@ -984,9 +996,9 @@ pub(crate) async fn tag_search(
                 state,
                 user,
                 &spec,
-                0,
-                limit,
+                (0, limit),
                 ItemPresence::OnDisk,
+                false,
                 read_after,
             )
             .await?
@@ -999,6 +1011,7 @@ pub(crate) async fn tag_search(
         viewer: user.id,
         spec: &spec,
         only_items: Some(&hit_ids),
+        top_level_only: false,
         day: today(),
         presence: ItemPresence::Everything,
     };
@@ -1207,9 +1220,9 @@ pub async fn row_items(
             &state,
             &user,
             &row.spec,
-            offset,
-            limit,
+            (offset, limit),
             ItemPresence::OnDisk,
+            false,
             read_after,
         )
         .await?,
@@ -1237,9 +1250,9 @@ pub async fn preview_row(
             &state,
             &user,
             &body.spec,
-            0,
-            limit,
+            (0, limit),
             ItemPresence::OnDisk,
+            false,
             read_after,
         )
         .await?,
@@ -1448,9 +1461,9 @@ pub async fn home_rows(
                 state,
                 user,
                 &row.spec,
-                0,
-                limit,
+                (0, limit),
                 ItemPresence::OnDisk,
+                false,
                 read_after,
             )
             .await?;

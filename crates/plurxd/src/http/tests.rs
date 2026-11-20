@@ -23966,6 +23966,84 @@ async fn tags_filter_the_grid_drive_search_and_fill_home_rows() {
     assert!(home["rows"].get(row_id.to_string()).is_none(), "{home}");
 }
 
+#[tokio::test]
+async fn tagged_video_inside_a_folder_appears_in_its_reordered_home_row() {
+    let state = test_state_without_router();
+    let app = router(state.clone());
+    let seed = seed_home(&state).await;
+    let admin = setup_admin(&app).await;
+    let (status, tag) = call(
+        &app,
+        post("/api/v1/tags", Some(&admin), json!({"name": "Trips"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{tag}");
+    let tag = tag["id"].as_i64().expect("tag id");
+
+    let path = format!("/api/v1/items/{}/tags", seed.video);
+    let (status, tags) = call(&app, put(&path, Some(&admin), json!({"tag_ids": [tag]}))).await;
+    assert_eq!(status, StatusCode::OK, "{tags}");
+    assert_eq!(tags["tags"][0]["id"], tag, "{tags}");
+
+    let (status, grid) = call(
+        &app,
+        get(
+            &format!("/api/v1/libraries/{}/items?tags={tag}", seed.lib),
+            Some(&admin),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{grid}");
+    assert_eq!(grid["total"], 0, "{grid}");
+
+    let spec = json!({
+        "all_of": [{"tag": tag}],
+        "sort": "recently_tagged",
+        "unwatched": "first",
+    });
+    let (status, preview) = call(
+        &app,
+        post("/api/v1/rows/preview", Some(&admin), json!({"spec": spec})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["total"], 1, "{preview}");
+
+    let (status, row) = call(
+        &app,
+        post(
+            "/api/v1/rows",
+            Some(&admin),
+            json!({"title": "Trips", "spec": spec}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    let id = row["id"].as_i64().expect("row id");
+    let key = format!("row:{id}");
+    let (status, _) = call(
+        &app,
+        put(
+            "/api/v1/home/layout",
+            Some(&admin),
+            json!({"entries": [{"key": key}, {"key": "next_up", "hidden": true}]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, home) = call(&app, get("/api/v1/home/rows", Some(&admin))).await;
+    assert_eq!(status, StatusCode::OK, "{home}");
+    assert_eq!(home["layout"][0]["key"], key, "{home}");
+    let layout = home["layout"].as_array().expect("layout");
+    assert_eq!(layout.iter().filter(|entry| entry["key"] == key).count(), 1);
+    assert!(layout.iter().all(|entry| entry["key"] != "next_up"));
+    assert_eq!(
+        home["rows"][id.to_string()]["items"][0]["id"],
+        seed.video,
+        "{home}"
+    );
+}
+
 /// §2.3: nothing outside the native API reads curation, so a tag cannot
 /// reach Jellyfin, Plex or a shared-library receiver.
 #[test]
