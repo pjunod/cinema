@@ -1,4 +1,54 @@
 import SwiftUI
+#if os(tvOS)
+import UIKit
+#endif
+
+#if os(tvOS)
+/// The player is presented as a full-screen cover in this same window.
+private struct TVFullscreenTargetProbe: UIViewRepresentable {
+    let report: (PresentationTarget?) -> Void
+
+    final class ProbeView: UIView {
+        var report: ((PresentationTarget?) -> Void)?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            measure()
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            measure()
+        }
+
+        func measure() {
+            let target: PresentationTarget?
+            if let window, window.isKeyWindow,
+               window.windowScene?.activationState == .foregroundActive,
+               window.bounds.size == window.screen.bounds.size,
+               let size = backingPresentationSize(window.bounds.size, scale: window.screen.scale) {
+                target = PresentationTarget(widthPx: Int(size.width.rounded()),
+                    heightPx: Int(size.height.rounded()), revision: 1)
+            } else {
+                target = nil
+            }
+            // Layout can run during SwiftUI view updates.
+            Task { @MainActor [weak self] in self?.report?(target) }
+        }
+    }
+
+    func makeUIView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.isUserInteractionEnabled = false
+        return view
+    }
+
+    func updateUIView(_ view: ProbeView, context: Context) {
+        view.report = report
+        view.measure()
+    }
+}
+#endif
 
 struct ItemMetadataBadge: Equatable, Identifiable {
     enum Kind: String, Equatable {
@@ -670,6 +720,10 @@ struct DetailView: View {
         let selection: PrePlaySelection
         let quality: PlaybackQuality
         let authorizationGeneration: UInt64
+        let presentationTarget: PresentationTarget?
+        let routeV1: Bool
+        let deviceSubtitlesOff: Bool
+        let subtitleReadiness: SubtitleReadiness
     }
     #endif
 
@@ -716,6 +770,8 @@ struct DetailView: View {
     #if os(tvOS)
     @FocusState private var tvFocusedAction: TVDetailFocus?
     @State private var tvDetailAuthorizationGeneration: UInt64?
+    @State private var tvFullscreenTarget: PresentationTarget?
+    @Environment(\.scenePhase) private var tvScenePhase
     /// Set once, the first time this item's detail lands. See the `.task`.
     @State private var hasClaimedTVFocus = false
     #endif
@@ -1690,15 +1746,36 @@ struct DetailView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.bottom, 30)
+        .background {
+            if model.displayAwareAuto, tvScenePhase == .active {
+                TVFullscreenTargetProbe { target in
+                    if tvFullscreenTarget != target { tvFullscreenTarget = target }
+                }
+            }
+        }
         .task(id: preparation) {
             guard let preparation, !Task.isCancelled,
                   Session.shared.playbackAuthorization.generation == preparation.authorizationGeneration else { return }
-            _ = try? await model.playbackDecision(
-                fileId: preparation.fileId,
-                selection: preparation.selection,
-                quality: preparation.quality,
-                prepareStartMs: preparation.startMs
-            )
+            do {
+                let preview = try await Caps.PresentationContext.$target.withValue(preparation.presentationTarget) {
+                    try await model.playbackDecision(
+                        fileId: preparation.fileId, selection: preparation.selection,
+                        quality: preparation.quality, speculative: true
+                    )
+                }
+                guard !Task.isCancelled,
+                      Session.shared.playbackAuthorization.generation == preparation.authorizationGeneration,
+                      let body = PlayerController.startupPreparationRequest(
+                        decision: preview.decision, caps: preview.caps, selection: preparation.selection,
+                        quality: preparation.quality, startMs: preparation.startMs,
+                        deviceSubtitlesOff: preparation.deviceSubtitlesOff,
+                        subtitleReadiness: preparation.subtitleReadiness, routeV1: preparation.routeV1,
+                        playbackId: UUID().uuidString
+                      ) else { return }
+                try await model.prepareHlsStartup(fileId: preparation.fileId, body: body)
+            } catch {
+                // Preparation is opportunistic. Play still requests a current decision.
+            }
         }
     }
 
@@ -1707,7 +1784,9 @@ struct DetailView: View {
     ) -> TVStartupPreparation? {
         let authorization = Session.shared.playbackAuthorization
         let quality = model.playbackQuality
-        guard play == nil, model.phase == .ready, authorization.token != nil,
+        let target = model.displayAwareAuto ? tvFullscreenTarget : nil
+        guard play == nil, tvScenePhase == .active, model.phase == .ready, authorization.token != nil,
+              !model.displayAwareAuto || target != nil,
               authorization.generation == tvDetailAuthorizationGeneration,
               item.id == itemId, item.isPlayable, !item.isAudiobook, !item.isOffloaded,
               let file, file.id > 0, file.available == true, file.videoCodec != nil,
@@ -1718,7 +1797,9 @@ struct DetailView: View {
         )
         return TVStartupPreparation(
             itemId: context.itemId, fileId: context.fileId, startMs: context.startMs,
-            selection: context.selection, quality: quality, authorizationGeneration: authorization.generation
+            selection: context.selection, quality: quality, authorizationGeneration: authorization.generation,
+            presentationTarget: target, routeV1: model.displayAwareAuto && model.displayAwareAutoProtocol == "route-v1",
+            deviceSubtitlesOff: model.subLang == "off", subtitleReadiness: model.subtitleReadiness
         )
     }
 

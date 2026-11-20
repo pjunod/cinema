@@ -496,7 +496,6 @@ struct PlurxAPI {
 
     private struct DecisionBody: Encodable {
         let caps: DeviceCaps
-        let prepareStartMs: Int?
     }
 
     /// Ask with caps v2, then use the unchanged query only when the peer is
@@ -508,19 +507,17 @@ struct PlurxAPI {
         caps: DeviceCaps,
         query: [URLQueryItem],
         legacyQuery: () -> [URLQueryItem],
-        fileContext: PlaybackFileContext? = nil,
-        prepareStartMs: Int? = nil
+        fileContext: PlaybackFileContext? = nil
     ) async throws -> Decision {
         let context = try PlaybackFileContext.localCall(fileId, context: fileContext)
         do {
             return try await post(
                 try context.apiPath("decision"),
                 query: query,
-                body: DecisionBody(caps: caps, prepareStartMs: prepareStartMs)
+                body: DecisionBody(caps: caps)
             )
         } catch {
-            guard prepareStartMs == nil,
-                  Self.shouldFallBackToLegacyDecision(after: error, caps: caps) else { throw error }
+            guard Self.shouldFallBackToLegacyDecision(after: error, caps: caps) else { throw error }
             return try await get(try context.apiPath("decision"), query: legacyQuery())
         }
     }
@@ -642,6 +639,14 @@ struct PlurxAPI {
             using: preparationSession
         )
         return Self.acceptHlsSessionPresentation(started)
+    }
+
+    func prepareHlsStartup(fileId: Int, body: CreateSessionRequest) async throws {
+        let context = try PlaybackFileContext.local(fileId)
+        var request = try jsonRequest(try context.apiPath("hls/prepare-startup"), body: body)
+        Session.shared.authorize(&request)
+        let (data, response) = try await ReadAfterHTTP.shared.data(for: request, using: preparationSession)
+        try Self.check(response, data: data)
     }
 
     // MARK: - Library channels

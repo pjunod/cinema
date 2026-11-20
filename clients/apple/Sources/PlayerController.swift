@@ -3809,6 +3809,161 @@ final class PlayerController: ObservableObject {
         PlaybackQuality(rawValue: String(height)) ?? .p1080
     }
 
+    private static func initialSessionAudio(decision: Decision, selection: PrePlaySelection) -> Int? {
+        selection.audioIndex ?? decision.audio?.first(where: { $0.default })?.index
+    }
+
+    private static func nativeIntentSelection(_ selection: ClientSelection) -> MediaIntentSelection {
+        MediaIntentSelection(quality: selection.quality, codec: selection.codec,
+            dynamicRange: selection.dynamicRange, audioTrack: selection.audioTrack,
+            audioOffsetMs: selection.audioOffsetMs, subtitles: selection.subtitle)
+    }
+
+    private static func initialSessionSubtitle(
+        decision: Decision, selection: PrePlaySelection, deviceSubtitlesOff: Bool
+    ) -> (index: Int?, blockedByHDR: Bool, wantsRenditions: Bool) {
+        let tracks = decision.subtitles ?? []
+        let wanted = initialSubtitleIndex(
+            prePlay: selection.subtitleIndex, serverSelection: decision.selection,
+            tracks: tracks, deviceSubtitlesOff: deviceSubtitlesOff
+        )
+        let blocked = startingSubtitleBlockedByHDR(
+            prePlaySubtitle: selection.subtitleIndex, wanted: wanted,
+            serverSelection: decision.selection, tracks: tracks, deliveredRange: decision.deliveredDynamicRange
+        )
+        let index = blocked ? nil : wanted
+        let wantsRenditions = selection.subtitleIndex != nil
+            && index.map { !subtitleRequiresBurn($0, in: tracks) } == true
+        return (index, blocked, wantsRenditions)
+    }
+
+    private struct NativeSessionRoute {
+        let burn: Int?
+        let native: Int?
+        let forceTranscode: Bool
+        let direct: Bool
+        let copy: Bool
+    }
+
+    private static func nativeSessionRoute(
+        decision: Decision, height: Int?, audioOverride: Int?, subtitle: Int?,
+        subtitleReadiness: SubtitleReadiness, wantsRenditions: Bool, forceCompatibilityTranscode: Bool
+    ) -> NativeSessionRoute {
+        let mode = playbackMode(decision)
+        let tracks = decision.subtitles ?? []
+        let fields = sessionSubtitleFields(selected: subtitle, tracks: tracks)
+        let forceTranscode = fields.burn != nil || height != nil || forceCompatibilityTranscode
+        // AVFoundation's language choice cannot distinguish duplicate-language tracks.
+        let ordinalBoundAudio = needsOrdinalBoundAudioSession(
+            audioTrackCount: decision.audio?.count ?? 0, explicitAudio: audioOverride
+        )
+        // The on-demand policy leaves direct playback in place until native subtitles are used.
+        let needsRenditions = needsNativeSubtitleSession(
+            hasNativeTextTrack: tracks.contains(where: \.isNativeHLS),
+            readiness: subtitleReadiness, subtitlesInUse: wantsRenditions
+        )
+        return NativeSessionRoute(
+            burn: fields.burn, native: fields.native, forceTranscode: forceTranscode,
+            direct: mode == "direct" && !forceTranscode && !ordinalBoundAudio
+                && fields.native == nil && !needsRenditions,
+            copy: !forceTranscode && (mode == "direct" || mode == "remux" || audioOverride != nil)
+        )
+    }
+
+    private static func nativeSessionRequest(
+        decision: Decision, caps: DeviceCaps, route: NativeSessionRoute, startMs: Int,
+        playbackId: String, controlSequence: UInt64?, height: Int?, original: Bool,
+        chosenAudio: Int?, preserveDolbyVision: Bool, forceCompatibilityTranscode: Bool
+    ) -> CreateSessionRequest {
+        // The server derives whether a burn would discard HDR from the session recipe.
+        CreateSessionRequest(
+            playbackId: playbackId,
+            controlSequence: controlSequence,
+            height: burnSessionHeight(burnSubtitle: route.burn, mode: playbackMode(decision),
+                                      selectedHeight: height, sourceHeight: decision.source?.height),
+            qualityAuto: height == nil && !original,
+            start: Double(startMs) / 1000.0,
+            audio: chosenAudio,
+            subtitleBurn: route.burn,
+            nativeSubtitles: true,
+            subtitle: route.native,
+            copy: route.copy ? true : nil,
+            aac: route.copy ? needsAAC(audioIndex: chosenAudio, decision: decision) : nil,
+            preserveDolbyVision: route.copy ? preserveDolbyVision : nil,
+            hdr10: sessionHDR10Request(copy: route.copy, deliveredRange: decision.deliveredDynamicRange,
+                                       forcesSDR: forceCompatibilityTranscode || route.burn != nil),
+            caps: caps
+        )
+    }
+
+    private static func applyNativeRoute(
+        to body: inout CreateSessionRequest, target: PresentationTarget?, envelope: MediaIntentEnvelope,
+        candidate: QualityCandidate?, selectedHeight: Int?, original: Bool
+    ) {
+        body.caps?.display.presentationTarget = target
+        body.intent = envelope
+        if let candidate, selectedHeight == nil, !original {
+            body.height = (PlaybackControl.minimumHeight...PlaybackControl.maximumHeight)
+                .contains(candidate.targetHeight) ? candidate.targetHeight : nil
+            body.qualityAuto = true
+        }
+    }
+
+    #if os(tvOS)
+    static func startupPreparationRequest(
+        decision: Decision, caps: DeviceCaps, selection: PrePlaySelection, quality: PlaybackQuality,
+        startMs: Int, deviceSubtitlesOff: Bool, subtitleReadiness: SubtitleReadiness,
+        routeV1: Bool, playbackId: String
+    ) -> CreateSessionRequest? {
+        let height = startingHeight(for: quality, ladder: decision.ladder ?? [])
+        let original = quality == .original
+        let subtitle = initialSessionSubtitle(
+            decision: decision, selection: selection, deviceSubtitlesOff: deviceSubtitlesOff
+        )
+        let route = nativeSessionRoute(
+            decision: decision, height: height, audioOverride: nil, subtitle: subtitle.index,
+            subtitleReadiness: subtitleReadiness, wantsRenditions: subtitle.wantsRenditions,
+            forceCompatibilityTranscode: false
+        )
+        guard route.copy, !route.direct else { return nil }
+        let selectedAudio = initialSessionAudio(decision: decision, selection: selection)
+        let audio = sessionAudioIndex(explicit: nil, plan: decision.delivery?.audio, selected: selectedAudio)
+        var body = nativeSessionRequest(
+            decision: decision, caps: caps, route: route, startMs: startMs, playbackId: playbackId,
+            controlSequence: nil, height: height, original: original, chosenAudio: audio,
+            preserveDolbyVision: shouldPreserveDolbyVision(decision), forceCompatibilityTranscode: false
+        )
+        if routeV1, decision.displayAwareAutoProtocol == "route-v1" {
+            guard let target = caps.display.presentationTarget else { return nil }
+            let candidate = quality == .auto ? initialAutoCandidate(decision) : nil
+            let intentQuality: QualitySelection
+            if original {
+                intentQuality = .original
+            } else {
+                intentQuality = autoControlQualitySelection(desired: candidate,
+                    installedId: decision.qualityCandidateId, candidates: decision.qualityCandidates)
+                // An unnamed or encoded route does not prove a reusable copy recipe.
+                guard case .autoCandidate = intentQuality, candidate?.route == "remux" else { return nil }
+            }
+            let mode: SubtitleMode = subtitle.index.map {
+                subtitleUsesOverlay($0, in: decision.subtitles ?? []) ? .overlay : .native
+            } ?? .off
+            let envelope = MediaIntentEnvelope(lifetimeId: playbackId, recipeRevision: 1,
+                destinationRevision: 1, transportRevision: 1,
+                selection: nativeIntentSelection(sessionControlSelection(
+                    quality: intentQuality, audio: selectedAudio, subtitleMode: mode, subtitle: subtitle.index
+                )))
+            applyNativeRoute(to: &body, target: target, envelope: envelope, candidate: candidate,
+                selectedHeight: height, original: original)
+        }
+        return body
+    }
+    #endif
+
+    private static func initialAutoCandidate(_ decision: Decision) -> QualityCandidate? {
+        decision.qualityCandidates?.first { $0.hasValidIdentity && $0.id == decision.qualityCandidateId }
+    }
+
     private func load(
         startMs: Int, lifecycle: Int, generation: Int,
         file: Int, request: InitialDecisionRequest
@@ -3854,47 +4009,23 @@ final class PlayerController: ObservableObject {
             if request.quality == .auto, selectedHeight == nil,
                model.displayAwareAuto, model.displayAwareAutoProtocol == "route-v1",
                decision.displayAwareAutoProtocol == "route-v1" {
-                autoDesiredCandidate = decision.qualityCandidates?.first {
-                    $0.hasValidIdentity && $0.id == decision.qualityCandidateId
-                }
+                autoDesiredCandidate = Self.initialAutoCandidate(decision)
             }
             // `default` on a decision track is the server's own shared-policy
             // pick, not the muxer's flag (crates/plurxd http/stream.rs
             // overwrites both lists from `select_tracks`) — and for a
             // selection-aware request it is the *effective* pick, so a pre-play
             // audio choice already arrives marked here.
-            selectedAudio = request.selection.audioIndex
-                ?? decision.audio?.first(where: { $0.default })?.index
+            selectedAudio = Self.initialSessionAudio(decision: decision, selection: request.selection)
             configureProgressiveCaptions()
-            let wantedSubtitle = Self.initialSubtitleIndex(
-                prePlay: request.selection.subtitleIndex,
-                serverSelection: decision.selection,
-                tracks: decision.subtitles ?? [],
-                deviceSubtitlesOff: model.subLang == "off"
+            let subtitle = Self.initialSessionSubtitle(
+                decision: decision, selection: request.selection, deviceSubtitlesOff: model.subLang == "off"
             )
-            let blockedByHDR = Self.startingSubtitleBlockedByHDR(
-                prePlaySubtitle: request.selection.subtitleIndex,
-                wanted: wantedSubtitle,
-                serverSelection: decision.selection,
-                tracks: decision.subtitles ?? [],
-                deliveredRange: decision.deliveredDynamicRange
-            )
-            selectedSubtitle = blockedByHDR ? nil : wantedSubtitle
-            // Say so rather than starting silently with no subtitles: the
-            // viewer asked for these on the detail screen.
-            if blockedByHDR, prePlaySelection.subtitleIndex != nil {
+            selectedSubtitle = subtitle.index
+            if subtitle.blockedByHDR, prePlaySelection.subtitleIndex != nil {
                 showPlaybackNotice(Self.hdrSubtitleNotice)
             }
-            // A native pre-play choice enters the session on this very open, so
-            // record it the way `selectSubtitle` does — otherwise turning
-            // subtitles off later would drop back to direct play and charge the
-            // next selection a restart this path already paid for. Scoped to
-            // the pre-play arm so the automatic path keeps its behaviour.
-            if prePlaySelection.subtitleIndex != nil,
-               let selectedSubtitle,
-               !Self.subtitleRequiresBurn(selectedSubtitle, in: decision.subtitles ?? []) {
-                wantsNativeSubtitleRenditions = true
-            }
+            if subtitle.wantsRenditions { wantsNativeSubtitleRenditions = true }
             updatePGSOverlaySelection(selectedSubtitle)
             // Use the same drain as later replacements. A remote command can
             // arrive while the decision request or first item is preparing;
@@ -4062,39 +4193,18 @@ final class PlayerController: ObservableObject {
         // Captured once: `selectedSubtitle` may change while the awaits below
         // run, and the difference is reconciled when this open completes (P1-2).
         let requestedSubtitle = selectedSubtitle
-        let subtitleFields = Self.sessionSubtitleFields(
-            selected: requestedSubtitle,
-            tracks: subtitles
+        let route = Self.nativeSessionRoute(
+            decision: decision, height: requestedHeight, audioOverride: requestedAudioOverride,
+            subtitle: requestedSubtitle, subtitleReadiness: subtitleReadiness,
+            wantsRenditions: wantsNativeSubtitleRenditions, forceCompatibilityTranscode: forceCompatibilityTranscode
         )
-        let burnSubtitle = subtitleFields.burn
-        let nativeSubtitle = subtitleFields.native
-        let forceTranscode = burnSubtitle != nil || requestedHeight != nil || forceCompatibilityTranscode
-        // A direct multi-audio asset lets AVFoundation choose by language,
-        // which cannot identify duplicate-language/commentary tracks. Bind
-        // the server's actual audio ordinal from the first attachment instead.
-        let customAudio = requestedAudioOverride != nil
-        let ordinalBoundAudio = Self.needsOrdinalBoundAudioSession(
-            audioTrackCount: audioTracks.count, explicitAudio: requestedAudioOverride
-        )
-        // Whether this open has to be a session for no reason other than making
-        // the file's text subtitles selectable. Sticky once true, so leaving
-        // subtitles again does not buy a second restart.
-        let needsSubtitleRenditions = Self.needsNativeSubtitleSession(
-            hasNativeTextTrack: subtitles.contains(where: \.isNativeHLS),
-            readiness: subtitleReadiness,
-            subtitlesInUse: wantsNativeSubtitleRenditions
-        )
-        canRetryCurrentItemWithTranscode = normalMode != "transcode" && !forceTranscode && !customAudio
+        let burnSubtitle = route.burn
+        let nativeSubtitle = route.native
+        let forceTranscode = route.forceTranscode
+        canRetryCurrentItemWithTranscode = normalMode != "transcode" && !forceTranscode
+            && requestedAudioOverride == nil
         canRetryCurrentItemWithHDRBase = false
-        // P2-7, decided by Paul on 2026-08-02 (plan §2.5): stay direct until
-        // the first native selection. Merely *having* native text tracks no
-        // longer abolishes true direct play — every such file used to become a
-        // copy session, and on Bedroom that path degrades to a compatibility
-        // transcode. Entering the session is deferred to the moment a native
-        // subtitle is actually chosen, which costs exactly one reopen there
-        // (routed explicitly by `subtitleSelectionRoute`).
-        let direct = normalMode == "direct" && !forceTranscode && !ordinalBoundAudio
-            && nativeSubtitle == nil && !needsSubtitleRenditions
+        let direct = route.direct
         let url: URL?
         var seekAfterAttach: Int?
         var nextBaseMs = 0
@@ -4132,8 +4242,7 @@ final class PlayerController: ObservableObject {
             guard let decisionCaps else {
                 throw APIError.transport("Playback decision capabilities were not retained.")
             }
-            let copy = !forceTranscode
-                && (normalMode == "direct" || normalMode == "remux" || customAudio)
+            let copy = route.copy
             canRetryCurrentItemWithHDRBase = copy
                 && preserveDolbyVision
                 && Self.hasCompatibleDolbyVisionBase(decision.source?.hdrFormat)
@@ -4147,43 +4256,17 @@ final class PlayerController: ObservableObject {
                 plan: decision.delivery?.audio,
                 selected: selectedAudio
             )
-            let aac = copy ? Self.needsAAC(audioIndex: chosenAudio, decision: decision)
-                : nil
             let reporterControlSequence = await readControlSequence(playbackControl)
             guard !Task.isCancelled, isCurrentLifecycle(lifecycle), !isSuperseded(generation) else { return }
             let orderedControlSequence = [reporterControlSequence, pendingControlSequence]
                 .compactMap { $0 }
                 .max()
             var body = Self.applyOpenIntent(
-                to: CreateSessionRequest(
-                    playbackId: playbackId,
-                    controlSequence: orderedControlSequence,
-                    height: Self.burnSessionHeight(
-                        burnSubtitle: burnSubtitle,
-                        mode: normalMode,
-                        selectedHeight: requestedHeight,
-                        sourceHeight: decision.source?.height
-                    ),
-                    start: Double(startMs) / 1000.0,
-                    audio: chosenAudio,
-                    subtitleBurn: burnSubtitle,
-                    // No SDR acknowledgement. The server computes the grade
-                    // this session would deliver without the burn and decides
-                    // for itself; a client's assertion about that grade was
-                    // never evidence about it, and this one was computed from
-                    // the decision's range rather than the session's anyway.
-                    subtitleBurnSDR: nil,
-                    nativeSubtitles: true,
-                    subtitle: nativeSubtitle,
-                    copy: copy ? true : nil,
-                    aac: copy ? aac : nil,
-                    preserveDolbyVision: copy ? preserveDolbyVision : nil,
-                    hdr10: Self.sessionHDR10Request(
-                        copy: copy,
-                        deliveredRange: decision.deliveredDynamicRange,
-                        forcesSDR: forceCompatibilityTranscode || burnSubtitle != nil
-                    ),
-                    caps: decisionCaps
+                to: Self.nativeSessionRequest(
+                    decision: decision, caps: decisionCaps, route: route, startMs: startMs,
+                    playbackId: playbackId, controlSequence: orderedControlSequence,
+                    height: requestedHeight, original: requestedOriginal, chosenAudio: chosenAudio,
+                    preserveDolbyVision: preserveDolbyVision, forceCompatibilityTranscode: forceCompatibilityTranscode
                 ),
                 intent: intent,
                 currentSessionId: superseded,
@@ -4201,25 +4284,16 @@ final class PlayerController: ObservableObject {
             }
             if model.displayAwareAuto, model.displayAwareAutoProtocol == "route-v1",
                decision.displayAwareAutoProtocol == "route-v1" {
-                if var caps = body.caps {
-                    caps.display.presentationTarget = presentationTarget
-                    body.caps = caps
-                }
-                let selection = playbackControlSelection()
-                let envelopeSelection = MediaIntentSelection(quality: selection.quality, codec: selection.codec,
-                    dynamicRange: selection.dynamicRange, audioTrack: selection.audioTrack,
-                    audioOffsetMs: selection.audioOffsetMs, subtitles: selection.subtitle)
+                let envelopeSelection = Self.nativeIntentSelection(playbackControlSelection())
                 if let prior = autoEnvelopeSelection, prior != envelopeSelection {
                     autoRecipeRevision = min(autoRecipeRevision + 1, 9_007_199_254_740_991)
                 }
                 autoEnvelopeSelection = envelopeSelection
-                body.intent = MediaIntentEnvelope(lifetimeId: playbackId,
+                let envelope = MediaIntentEnvelope(lifetimeId: playbackId,
                     recipeRevision: autoRecipeRevision, destinationRevision: autoDestinationRevision,
                     transportRevision: autoTransportRevision, selection: envelopeSelection)
-                if let candidate = autoDesiredCandidate, selectedHeight == nil, !selectedQualityIsOriginal {
-                    body.height = (PlaybackControl.minimumHeight...PlaybackControl.maximumHeight).contains(candidate.targetHeight) ? candidate.targetHeight : nil
-                    body.qualityAuto = true
-                }
+                Self.applyNativeRoute(to: &body, target: presentationTarget, envelope: envelope,
+                    candidate: autoDesiredCandidate, selectedHeight: selectedHeight, original: selectedQualityIsOriginal)
             }
             // The rung this open is stepping down *from*, read before the
             // successor overwrites it. Only a strictly lower answer proves the
@@ -9530,19 +9604,24 @@ extension PlayerController {
     }
 
     func playbackControlSelection() -> ClientSelection {
-        let mode = playbackControlSubtitleMode()
-        return ClientSelection(
+        Self.sessionControlSelection(
             quality: manualQualityRetention.retained?.incumbent ?? selectedHeight.map { .manual(height: $0) }
                 ?? (selectedQualityIsOriginal ? .original :
                     (model?.displayAwareAuto == true &&
                      model?.displayAwareAutoProtocol == "route-v1" && autoRouteProtocol == "route-v1"
                         ? autoControlQualitySelection(desired: autoDesiredCandidate,
                             installedId: autoActiveCandidateId, candidates: decision?.qualityCandidates) : .auto)),
-            audioTrack: selectedAudio,
-            subtitle: SubtitleSelection(
-                mode: mode,
-                track: mode == .off ? nil : selectedSubtitle
-            ),
+            audio: selectedAudio, subtitleMode: playbackControlSubtitleMode(), subtitle: selectedSubtitle
+        )
+    }
+
+    private static func sessionControlSelection(
+        quality: QualitySelection, audio: Int?, subtitleMode: SubtitleMode, subtitle: Int?
+    ) -> ClientSelection {
+        ClientSelection(
+            quality: quality,
+            audioTrack: audio,
+            subtitle: SubtitleSelection(mode: subtitleMode, track: subtitleMode == .off ? nil : subtitle),
             audioOffsetMs: 0,
             codec: .auto,
             dynamicRange: .auto
