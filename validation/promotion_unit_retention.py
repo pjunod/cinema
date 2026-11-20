@@ -27,6 +27,8 @@ PROTOCOL_PATHS = {
     'validation/landing.py',
     'validation/main_python_continuation.py',
     'validation/selected_pr_android_capture.py',
+    'validation/jvm_unit_discovery.py',
+    'tests/validation/test_jvm_unit_discovery.py',
     'validation/nonrust_unit_cohort.py',
     'tests/validation/test_selected_pr_android_capture.py',
     'validation/native_python_execute.py',

@@ -1143,7 +1143,9 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
         metadata = receipts.bounded_json(blob(proof, item['inventory']['metadata']))
         owners = sorted([row['class'], row['source_path'], row['source_sha256']] for row in metadata['classes'])
         source_owners = retention.digest(json.dumps(owners, separators=(',', ':')).encode())
-    return {'mode': 'retained-source-cohort-v1', 'commands': [kind],
+    from validation.jvm_unit_discovery import SELECTED_PR_DISCOVERY
+    return {**({'selected_pr_discovery_contract': SELECTED_PR_DISCOVERY} if kind == 'android_jvm' and selected_pr else {}),
+            'mode': 'retained-source-cohort-v1', 'commands': [kind],
             'jvm_source_owners_sha256': source_owners,
             'ids_sha256': retention.digest(json.dumps(ids, separators=(',', ':')).encode()), 'ids_count': len(ids),
             'opaque_source_cohorts': cohort_summaries,
