@@ -11,6 +11,9 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
+import sys
+import time
 import subprocess
 import tarfile
 import urllib.request
@@ -329,16 +332,55 @@ def install_nextest(directory):
 
 
 
+def _pidfd_observe(descriptor, child_pid, flags, code, status, deadline):
+    while time.monotonic() < deadline:
+        observed = os.waitid(os.P_PIDFD, descriptor, flags | os.WNOWAIT | os.WNOHANG)
+        if observed is not None:
+            r.require(observed.si_pid == child_pid and observed.si_code == code
+                      and observed.si_status == status, 'Owned PIDfd probe observed another lifecycle')
+            return
+        time.sleep(0.01)
+    raise r.ReceiptError('Owned PIDfd capability probe exceeded its deadline; no bodies executed')
+
+
 def require_pidfd_environment():
-    """Read-only host eligibility; no body may run on an ENOSYS worker."""
+    """Probe the actual owned-child identity/stop/continue/exit primitives.
+
+    Signals target only the owned probe's PIDfd. Popen cleanup retains ownership
+    of an unreaped child; it is not a production process-identity fallback.
+    """
     print('Nextest kernel:', os.uname().release, flush=True)
-    r.require(hasattr(os, 'pidfd_open'), 'Python has no pidfd_open; source gate is ineligible')
+    r.require(all(hasattr(os, name) for name in ('pidfd_open', 'waitid', 'P_PIDFD', 'WNOWAIT',
+              'WNOHANG', 'WSTOPPED', 'WCONTINUED', 'WEXITED', 'CLD_STOPPED', 'CLD_CONTINUED', 'CLD_KILLED'))
+              and hasattr(signal, 'pidfd_send_signal'), 'Required Python PIDfd primitives are unavailable')
+    child, descriptor = None, None
+    deadline = time.monotonic() + 5.0
     try:
-        descriptor = os.pidfd_open(os.getpid())
-    except OSError as error:
-        raise r.ReceiptError('pidfd_open unavailable (errno ' + str(error.errno) + '); no bodies executed') from None
-    os.close(descriptor)
-    print('Nextest pidfd_open: available; self descriptor closed', flush=True)
+        self_descriptor = os.pidfd_open(os.getpid())
+        os.close(self_descriptor)
+        child = subprocess.Popen([sys.executable, '-I', '-S', '-c', 'import time; time.sleep(30)'],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        descriptor = os.pidfd_open(child.pid)
+        signal.pidfd_send_signal(descriptor, signal.SIGSTOP)
+        _pidfd_observe(descriptor, child.pid, os.WSTOPPED, os.CLD_STOPPED, signal.SIGSTOP, deadline)
+        signal.pidfd_send_signal(descriptor, signal.SIGCONT)
+        _pidfd_observe(descriptor, child.pid, os.WCONTINUED, os.CLD_CONTINUED, signal.SIGCONT, deadline)
+        signal.pidfd_send_signal(descriptor, signal.SIGTERM)
+        _pidfd_observe(descriptor, child.pid, os.WEXITED, os.CLD_KILLED, signal.SIGTERM, deadline)
+        child.wait(timeout=max(0.01, deadline - time.monotonic()))
+    except (OSError, subprocess.SubprocessError) as error:
+        raise r.ReceiptError('Owned PIDfd capability is unavailable (' + type(error).__name__
+                             + ', errno ' + str(getattr(error, 'errno', None)) + '); no bodies executed') from None
+    finally:
+        try:
+            if child is not None:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=5.0)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+    print('Nextest PIDfd: self/child open, signal STOP/CONT/TERM, waitid stop/continue/exit passed; child reaped', flush=True)
 
 
 def execute(proof):

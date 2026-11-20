@@ -76,9 +76,11 @@ used. The fast-lane-only worker proof is retained only across the closed
 reviewed test/protocol manifest. Gate-local paperwork binds the current PR
 body/title. Release publishers still reject schema2 source-gate receipts.
 
-Before any Rust body, a read-only self `pidfd_open` probe logs kernel/capability,
-closes its descriptor and refuses unsupported environments without fallback
-or skip. Placement uses an empirically eligible worker; pools are unchanged.
+Before any Rust body, a bounded owned-child capability probe logs the kernel,
+checks self/child `pidfd_open`, PIDfd STOP/CONT/TERM signals and nonblocking
+`waitid(P_PIDFD)` stop/continue/exit observations, then reaps the child and
+closes its descriptors. Unsupported environments refuse without fallback or
+skip. Placement uses an empirically eligible worker; pools are unchanged.
 
 The separately typed `main-python-journal-continuation-v1` provider uses the
 unchanged original main-unit start/final journal authenticator and source

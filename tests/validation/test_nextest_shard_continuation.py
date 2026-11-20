@@ -187,15 +187,46 @@ class NextestShardContinuationTests(unittest.TestCase):
 
     def test_pidfd_capability_refuses_enosys_before_any_body(self):
         import errno
-        with patch.object(proof.os, 'pidfd_open', create=True, return_value=123) as opened, \
-                patch.object(proof.os, 'close') as closed:
-            proof.require_pidfd_environment()
-            opened.assert_called_once_with(proof.os.getpid())
-            closed.assert_called_once_with(123)
         with patch.object(proof.os, 'pidfd_open', create=True, side_effect=OSError(errno.ENOSYS, 'unavailable')), \
-                patch.object(proof.os, 'close') as closed, self.assertRaises(r.ReceiptError):
+                patch.object(proof.subprocess, 'Popen') as child, self.assertRaises(r.ReceiptError):
             proof.require_pidfd_environment()
-        closed.assert_not_called()
+        child.assert_not_called()
+
+    def test_owned_child_pidfd_probe_observes_full_lifecycle_and_reaps(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, call
+        child = Mock(pid=777)
+        child.poll.return_value = 0
+        events = [SimpleNamespace(si_pid=777, si_code=code, si_status=status) for code, status in (
+            (proof.os.CLD_STOPPED, proof.signal.SIGSTOP), (proof.os.CLD_CONTINUED, proof.signal.SIGCONT),
+            (proof.os.CLD_KILLED, proof.signal.SIGTERM))]
+        with patch.object(proof.os, 'pidfd_open', create=True, side_effect=[100, 101]) as opened, \
+                patch.object(proof.os, 'close') as closed, \
+                patch.object(proof.os, 'waitid', side_effect=events), \
+                patch.object(proof.signal, 'pidfd_send_signal', create=True) as sent, \
+                patch.object(proof.subprocess, 'Popen', return_value=child):
+            proof.require_pidfd_environment()
+        self.assertEqual(opened.call_args_list, [call(proof.os.getpid()), call(777)])
+        self.assertEqual(closed.call_args_list, [call(100), call(101)])
+        self.assertEqual(sent.call_args_list, [call(101, proof.signal.SIGSTOP),
+                         call(101, proof.signal.SIGCONT), call(101, proof.signal.SIGTERM)])
+        child.kill.assert_not_called()
+        self.assertEqual(child.wait.call_count, 2)
+
+    def test_failed_child_pidfd_signal_still_kills_reaps_and_closes_owned_probe(self):
+        import errno
+        from unittest.mock import Mock, call
+        child = Mock(pid=777)
+        child.poll.return_value = None
+        with patch.object(proof.os, 'pidfd_open', create=True, side_effect=[100, 101]), \
+                patch.object(proof.os, 'close') as closed, \
+                patch.object(proof.signal, 'pidfd_send_signal', create=True,
+                             side_effect=OSError(errno.ENOSYS, 'unavailable')), \
+                patch.object(proof.subprocess, 'Popen', return_value=child), self.assertRaises(r.ReceiptError):
+            proof.require_pidfd_environment()
+        child.kill.assert_called_once_with()
+        child.wait.assert_called_once_with(timeout=5.0)
+        self.assertEqual(closed.call_args_list, [call(100), call(101)])
 
     def test_workflow_projection_accepts_only_exact_metadata_blocks(self):
         from validation import workspace_rust_continuation as workspace
