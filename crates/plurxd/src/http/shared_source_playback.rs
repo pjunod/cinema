@@ -1817,52 +1817,17 @@ async fn start(
     clock
         .answer(owned.actor.wait_ready(deadline))
         .await?
-        .inspect_err(|_error| {
-            #[cfg(test)]
-            eprintln!(
-                "Source HTTP startup failure: phase=wait_ready error={_error:?} actor={}",
-                owned.actor.startup_diagnostic()
-            );
-        })
         .map_err(|e| SourceStartFailure::from(e).response())?;
     let (response, guard) = owned
         .actor
         .open_start_response(deadline)
         .await
-        .inspect_err(|_error| {
-            #[cfg(test)]
-            eprintln!(
-                "Source HTTP startup failure: phase=open_start_response error={_error:?} actor={}",
-                owned.actor.startup_diagnostic()
-            );
-        })
         .map_err(|e| SourceStartFailure::from(e).response())?;
-    let (_, current_grant) = current_reference(&state, &headers, &target)
-        .await
-        .inspect_err(|_error| {
-            #[cfg(test)]
-            eprintln!(
-                "Source HTTP startup failure: phase=current_reference actor={}",
-                owned.actor.startup_diagnostic()
-            );
-        })?;
+    let (_, current_grant) = current_reference(&state, &headers, &target).await?;
     if current_grant != grant {
-        #[cfg(test)]
-        eprintln!(
-            "Source HTTP startup failure: phase=current_grant_mismatch actor={}",
-            owned.actor.startup_diagnostic()
-        );
         return Err(unavailable());
     }
-    ingress::publication_allowed(&state, &owned.assignment)
-        .await
-        .inspect_err(|_error| {
-            #[cfg(test)]
-            eprintln!(
-                "Source HTTP startup failure: phase=publication_allowed actor={}",
-                owned.actor.startup_diagnostic()
-            );
-        })?;
+    ingress::publication_allowed(&state, &owned.assignment).await?;
     entry
         .observe_published(&owned, &response)
         .map_err(SourceStartFailure::response)?;
@@ -2411,10 +2376,6 @@ fn fixture_task_diagnostic(entry: &SourceStartEntry) -> Value {
         .lock()
         .expect("diagnostic Source result")
         .clone();
-    let actor_startup = result
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .map(|owned| owned.actor.startup_diagnostic());
     let (result, actor_settlement) = match result {
         None => ("pending".to_owned(), None),
         Some(Err(error)) => (format!("{error:?}"), None),
@@ -2447,7 +2408,6 @@ fn fixture_task_diagnostic(entry: &SourceStartEntry) -> Value {
         // Its absence cannot establish freshness at the earlier claim write.
         "claim_members_observation_retained":false,
         "actor_settlement":actor_settlement,
-        "actor_startup":actor_startup,
         "cleanup":cleanup,
         "cleanup_confirmed":entry.task.cleanup_confirmation.lock().expect("diagnostic cleanup confirmation").is_some(),
     })

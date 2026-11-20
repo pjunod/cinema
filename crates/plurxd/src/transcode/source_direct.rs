@@ -323,8 +323,6 @@ impl TranscodeManager {
             state: std::sync::Mutex::new(SourceViewerState {
                 backing: SourceBacking::ImmutableVod,
                 start: None,
-                #[cfg(test)]
-                startup_failure: None,
                 retirement_requested: false,
                 retirement_mode: crate::sharing_connection_custody::DriverCloseMode::Drain,
                 settled: None,
