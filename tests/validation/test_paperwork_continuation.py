@@ -74,7 +74,7 @@ class PaperworkContinuationTests(unittest.TestCase):
         api, pull = self.facts(); pull['head']['sha'] = 'a' * 40
         api.pages.return_value = [{'name': 'codex/work', 'commit': {'id': 'a' * 40}}]
         repo = pull['head']['repo']; event = {'pull_request': copy.deepcopy(pull)}
-        run = {'repository': repo, 'commit_sha': 'a' * 40, 'status': 'running',
+        run = {'id': 9, 'repository': repo, 'commit_sha': 'a' * 40, 'status': 'running',
                'workflow_id': 'main-fast-lane.yml', 'trigger_event': 'pull_request',
                'event_payload': json.dumps(event)}
         main = {'commit': {'id': 'b' * 40}}
@@ -89,7 +89,7 @@ class PaperworkContinuationTests(unittest.TestCase):
                     patch.object(pc.retention, 'git_bytes', return_value=workflow):
                 self.assertEqual(pc.binding(api, self.value(), env, '.', 'preliminary')[0],
                                  {**self.scope(), 'base_ref': 'main'})
-                for field, bad in (('commit_sha', 'e' * 40), ('workflow_id', 'ci.yml'),
+                for field, bad in (('id', 10), ('commit_sha', 'e' * 40), ('workflow_id', 'ci.yml'),
                                    ('trigger_event', 'workflow_dispatch'), ('status', 'failure')):
                     old = run[field]; run[field] = bad
                     with self.subTest(field=field), self.assertRaises(r.ReceiptError):

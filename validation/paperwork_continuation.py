@@ -79,8 +79,9 @@ def binding(api, value, environment, root, mode):
         r.require(environment.get('GITHUB_RUN_ATTEMPT') == '1'
                   and environment.get('GITHUB_SHA') == candidate and pull['head']['sha'] == candidate,
                   'CI paperwork must bind the actual published event head')
-        run = api.get('/actions/runs/' + str(r.positive(int(environment['GITHUB_RUN_ID']))))
-        r.require(run['repository']['id'] == repo['id'] and run['commit_sha'] == candidate
+        run_id = r.positive(int(environment['GITHUB_RUN_ID']))
+        run = api.get('/actions/runs/' + str(run_id))
+        r.require(run['id'] == run_id and run['repository']['id'] == repo['id'] and run['commit_sha'] == candidate
                   and run['status'] in {'running', 'success'}
                   and run['workflow_id'] == ('main-fast-lane.yml' if mode == 'preliminary' else 'ci.yml')
                   and run['trigger_event'] == ('pull_request' if mode == 'preliminary' else 'workflow_dispatch'),
