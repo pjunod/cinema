@@ -17,8 +17,30 @@ SPEC = importlib.util.spec_from_loader("tv_navigation_runner", importlib.machine
 RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
 
+from validation import apple_simulator_runtime
+
 
 class TVNavigationRunnerTests(unittest.TestCase):
+    def test_runtime_selection_uses_the_active_sdk(self):
+        for platform, sdk in apple_simulator_runtime.SDKS.items():
+            current = f"com.apple.CoreSimulator.SimRuntime.{platform}-28-1"
+            older = f"com.apple.CoreSimulator.SimRuntime.{platform}-27-2"
+            inventory = [
+                {"identifier": older, "version": "27.2", "isAvailable": True},
+                {"identifier": current + "-special", "version": "28.1", "isAvailable": True},
+                {"identifier": current, "version": "28.1", "isAvailable": True},
+            ]
+            with self.subTest(platform=platform):
+                with patch.object(apple_simulator_runtime.subprocess, "check_output",
+                                  side_effect=["28.1\n", json.dumps({"runtimes": inventory})]) as command:
+                    self.assertEqual(apple_simulator_runtime.current_runtime(platform), current)
+                    command.assert_any_call(["xcrun", "--sdk", sdk, "--show-sdk-version"], text=True)
+                inventory[-1]["isAvailable"] = False
+                with patch.object(apple_simulator_runtime.subprocess, "check_output",
+                                  side_effect=["28.1\n", json.dumps({"runtimes": inventory})]):
+                    with self.assertRaisesRegex(RuntimeError, f"available {platform} 28.1"):
+                        apple_simulator_runtime.current_runtime(platform)
+
     def test_exported_screenshots_use_portable_distinct_names(self):
         # This real capture name rejected the entire CI evidence upload.
         name = RUNNER.screenshot_name("Down reaches library:filter.png")
@@ -97,16 +119,35 @@ class TVNavigationResumeTests(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 0, stdout='device' if args[:3] == ('xcrun', 'simctl', 'create') else '')
                 with patch.object(RUNNER, 'REQUIRED', selected), \
                         patch.object(RUNNER, 'source_snapshot', side_effect=[snapshot, final]), \
+                        patch.object(RUNNER, 'current_runtime', return_value='resolved-tvos-sdk'), \
                         patch.object(RUNNER, 'run', side_effect=command), \
                         patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout=json.dumps(summary))), \
                         patch.dict(os.environ, {}, clear=True), \
                         patch.object(RUNNER.sys, 'argv', ['runner', '--output', str(output)]):
                     self.assertEqual(RUNNER.main(), 1)
                 receipt = json.loads((output / 'receipt.json').read_text())
+                self.assertEqual(receipt['runtime'], 'resolved-tvos-sdk')
                 self.assertEqual(receipt['source_unchanged'], final == snapshot)
                 self.assertEqual(receipt['case_results'], {'Suite/testOne': 'passed', 'Suite/testTwo': 'failed'}
                                  if final == snapshot else {})
 
+
+    def test_resume_receipt_preserves_simulator_setup_failure(self):
+        required = ['Suite/testOne']
+        plan = {'current_commit': 'head', 'current_run': 4,
+                'tv_cases': {'required_tests': required, 'passes': {}, 'pending': required}}
+        with tempfile.TemporaryDirectory() as directory:
+            path, output = Path(directory) / 'plan.json', Path(directory) / 'result'
+            path.write_text(json.dumps(plan))
+            with patch.object(RUNNER, 'REQUIRED', required), \
+                    patch.object(RUNNER, 'source_snapshot', return_value=('head', False, 'digest')), \
+                    patch.object(RUNNER, 'current_runtime', side_effect=RuntimeError('Current tvOS runtime unavailable')), \
+                    patch.dict(os.environ, {'GITHUB_RUN_ID': '4', 'PLURX_TV_NAVIGATION_PLAN': str(path)}), \
+                    patch.object(RUNNER.sys, 'argv', ['runner', '--output', str(output)]):
+                self.assertEqual(RUNNER.main(), 1)
+            receipt = json.loads((output / 'receipt.json').read_text())
+            self.assertEqual(receipt['error'], 'Current tvOS runtime unavailable')
+            self.assertFalse(receipt['native_suite_complete'])
 
     def test_complete_retained_union_executes_no_native_case(self):
         required = ['Suite/testOne']
@@ -118,6 +159,7 @@ class TVNavigationResumeTests(unittest.TestCase):
             path.write_text(json.dumps(plan))
             with patch.object(RUNNER, 'REQUIRED', required), \
                     patch.object(RUNNER, 'source_snapshot', return_value=('head', False, 'digest')), \
+                    patch.object(RUNNER, 'current_runtime', return_value='resolved-tvos-sdk'), \
                     patch.object(RUNNER, 'run', return_value=subprocess.CompletedProcess([], 0, stdout='Xcode')) as command, \
                     patch.dict(os.environ, {'GITHUB_RUN_ID': '4', 'PLURX_TV_NAVIGATION_PLAN': str(path)}), \
                     patch.object(RUNNER.sys, 'argv', ['runner', '--output', str(output)]):

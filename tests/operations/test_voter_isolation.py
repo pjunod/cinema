@@ -296,6 +296,25 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                                     env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
             return result, marker.exists()
 
+    def assert_bounded_container_options(self, header, *, daemon_identity_mounts=False):
+        options = re.findall(r"(?m)^      options: ([^\n]+)((?:\n        [^\n]+)*)", header)
+        self.assertEqual(len(options), 1)
+        inline, folded = options[0]
+        expected_mounts = []
+        if daemon_identity_mounts:
+            self.assertEqual(inline, ">-")
+            inline = folded
+            expected_mounts = [
+                "--mount", "type=bind,src=/etc/machine-id,dst=/run/plurx-host-machine-id,readonly",
+                "--mount", "type=bind,src=/proc/sys/kernel/random/boot_id,dst=/run/plurx-host-boot-id,readonly",
+            ]
+        else:
+            self.assertFalse(folded)
+        argv = shlex.split(inline)
+        cap_end = 2 * len(self.CAPS)
+        self.assertEqual(dict(zip(argv[:cap_end:2], argv[1:cap_end:2])), self.CAPS)
+        self.assertEqual(argv[cap_end:], expected_mounts)
+
     def test_every_compile_pool_job_runs_in_an_exactly_bounded_container(self):
         # The pool spans two hosts, so its only resource bound is the job's own
         # container; a host-mode job on this label would escape it.
@@ -311,11 +330,9 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                 with self.subTest(workflow=path.name, job=name):
                     self.assertEqual(re.findall(r"(?m)^    runs-on: (.+)$", header), [self.COMPILE_ROUTE])
                     self.assertIn("    container:\n", header)
-                    options = re.findall(r"(?m)^      options: (.+)$", header)
-                    self.assertEqual(len(options), 1)
-                    argv = shlex.split(options[0])
-                    self.assertEqual(dict(zip(argv[::2], argv[1::2])), self.CAPS)
-                    self.assertEqual(len(argv), len(self.CAPS) * 2)
+                    self.assert_bounded_container_options(
+                        header, daemon_identity_mounts=(path.name, name) == ("ci.yml", "cluster_daemon")
+                    )
                     self.verifier(block)
         self.assertEqual({name for _, name in found}, self.COMPILE_JOBS)
 
@@ -331,12 +348,9 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                                       else self.COMPILE_ROUTE if name in self.COMPILE_JOBS else self.ROUTE)
                     self.assertEqual(re.findall(r"(?m)^    runs-on: (.+)$", header), [expected_route])
                     if "    container:\n" in header:
-                        options = re.findall(r"(?m)^      options: (.+)$", header)
-                        self.assertEqual(len(options), 1)
-                        argv = shlex.split(options[0])
-                        self.assertEqual(len(argv), len(self.CAPS) * 2)
-                        self.assertEqual(len(set(argv[::2])), len(self.CAPS))
-                        self.assertEqual(dict(zip(argv[::2], argv[1::2])), self.CAPS)
+                        self.assert_bounded_container_options(
+                            header, daemon_identity_mounts=(path, name) == (self.WORKFLOWS[0], "cluster_daemon")
+                        )
                     else:
                         self.assertIn(name, {"cluster_wal", "deep-validation", "mutation", "publish_main", "worker_control_proof"})
                     if (path, name) in self.SIZED_JOBS:

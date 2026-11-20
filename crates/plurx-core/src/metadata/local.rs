@@ -788,31 +788,19 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cancelling_a_thumbnail_reaps_the_encoder() {
-        use std::os::unix::fs::PermissionsExt;
+        use std::num::NonZeroU32;
         use std::time::Duration;
 
         let dir = canonical_tempdir();
-        let script = dir.path().join("hung-ffmpeg");
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/metadata/fixtures/ffmpeg-partial-thumbnail");
         let pid_file = dir.path().join("encoder.pid");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf partial > \"$output\"\necho $$ > \"{}\"\nexec sleep 30\n",
-                pid_file.display()
-            ),
-        )
-        .expect("script");
-        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).expect("chmod");
-
-        let task_script = script.clone();
         let task_artwork = dir.path().to_path_buf();
         let task_media = dir.path().join("video.mp4");
         let task = tokio::spawn(async move {
             generate_thumb_with(
                 None,
-                task_script.as_os_str(),
+                script.as_os_str(),
                 ThumbnailRequest {
                     artwork_dir: &task_artwork,
                     item_id: 7,
@@ -833,8 +821,11 @@ mod tests {
         // no signal, and a red build that teaches people to re-run.
         let pid_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let pid = loop {
-            if let Ok(value) = std::fs::read_to_string(&pid_file) {
-                break value.trim().to_owned();
+            let published = std::fs::read_to_string(&pid_file).ok();
+            if let Some(value) =
+                published.and_then(|value| value.strip_suffix('\n')?.parse::<NonZeroU32>().ok())
+            {
+                break value.to_string();
             }
             assert!(
                 tokio::time::Instant::now() < pid_deadline,
