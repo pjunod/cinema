@@ -914,6 +914,7 @@ def discover_issues(
     post_boundary: frozenset[str] = frozenset(),
 ) -> tuple[IssueCommit, ...]:
     issues: list[IssueCommit] = []
+    points_for_path: dict[str, frozenset[str]] = {}
     heads = history_heads if history_heads is not None else _history_heads(root)
     history = _git(root, "log", "--no-merges", "--format=%H%x09%s", *heads, "--")
     for line in history.splitlines():
@@ -935,25 +936,25 @@ def discover_issues(
             ).splitlines()
             if path
         )
-        points = tuple(
-            point.id
-            for point in catalog.points
-            if any(matches(path, point.paths) for path in paths)
-        )
-        patch = _git(root, "show", "--format=", "--unified=0", "--no-ext-diff", sha)
-        current_evidence_file = any(
-            (root / path).is_file() for path in paths if _is_test_path(path)
-        )
-        inline_evidence = bool(TEST_ADDITION_RE.search(patch)) and any(
-            (root / path).is_file() for path in paths
-        )
+        affected_points: set[str] = set()
+        for path in paths:
+            if path not in points_for_path:
+                points_for_path[path] = frozenset(
+                    point.id for point in catalog.points if matches(path, point.paths)
+                )
+            affected_points.update(points_for_path[path])
+        points = tuple(point.id for point in catalog.points if point.id in affected_points)
+        direct_evidence = any((root / path).is_file() for path in paths if _is_test_path(path))
+        if not direct_evidence and any((root / path).is_file() for path in paths):
+            patch = _git(root, "show", "--format=", "--unified=0", "--no-ext-diff", sha)
+            direct_evidence = bool(TEST_ADDITION_RE.search(patch))
         issues.append(
             IssueCommit(
                 sha=sha,
                 subject=subject,
                 paths=paths,
                 point_ids=points,
-                direct_test_evidence=current_evidence_file or inline_evidence,
+                direct_test_evidence=direct_evidence,
             )
         )
     return tuple(issues)

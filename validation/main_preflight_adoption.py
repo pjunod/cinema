@@ -118,6 +118,7 @@ _TREE_CACHE = {}
 _DIGEST_CACHE = {}
 _HISTORY_CACHE = {}
 _ENVIRONMENT = None
+MAX_INPUT_PATTERN_LENGTH = 1024
 
 
 def git(*arguments):
@@ -161,7 +162,7 @@ def witness(identity, families, *, optional=False):
 def matches_input(path, pattern):
     """Path globs: ordinary wildcards stay within one path component."""
     components, glob = path.split("/"), pattern.split("/")
-    require(glob.count("**") <= 8 and len(pattern) <= 1024,
+    require(glob.count("**") <= 8 and len(pattern) <= MAX_INPUT_PATTERN_LENGTH,
             "Input glob expansion bound exhausted")
     memo = {}
     def match(i, j):
@@ -179,6 +180,21 @@ def matches_input(path, pattern):
     return match(0, 0)
 
 
+def _matching_tree_paths(files, patterns):
+    selected = set()
+    for pattern in patterns:
+        if len(selected) == len(files):
+            break
+        if any(marker in pattern for marker in "*?["):
+            selected.update(path for path in files
+                            if path not in selected and matches_input(path, pattern))
+        else:
+            require(len(pattern) <= MAX_INPUT_PATTERN_LENGTH, "Input glob expansion bound exhausted")
+            if pattern in files:
+                selected.add(pattern)
+    return sorted(selected)
+
+
 def input_digest(commit, row):
     key = (commit, json.dumps(row, sort_keys=True))
     if key in _DIGEST_CACHE:
@@ -192,19 +208,17 @@ def input_digest(commit, row):
                 files[path] = tuple(header.split())
         _TREE_CACHE[commit] = files
     files = _TREE_CACHE[commit]
-    paths = list(files)
     patterns = row["inputs"]
     require(isinstance(patterns, list) and patterns
             and all(isinstance(p, str) and p and not p.startswith("/")
                 and ".." not in p.split("/") for p in patterns), "Unsafe input path")
-    selected = sorted(p for p in paths if any(matches_input(p, pattern) for pattern in patterns))
+    selected = _matching_tree_paths(files, patterns)
     payload = [(path, files[path]) for path in selected]
     pathsets = row.get("pathsets", [])
     require(isinstance(pathsets, list)
             and all(isinstance(p, str) and p and not p.startswith("/")
                 and ".." not in p.split("/") for p in pathsets), "Unsafe path-set pattern")
-    membership = sorted(path for path in paths if any(matches_input(path, pattern)
-                        for pattern in pathsets))
+    membership = _matching_tree_paths(files, pathsets)
     # The pattern list and membership bind absent/deleted/new matching files.
     if row.get("history"):
         if commit not in _HISTORY_CACHE:

@@ -359,6 +359,39 @@ class MainPreflightAdoptionCase(unittest.TestCase):
         with self.assertRaises(ReceiptError):
             terminal_status({"state": "success", "status": "failure"})
 
+    def test_input_digest_matches_reference_without_scanning_literal_paths(self):
+        import hashlib
+
+        files = {
+            "src/tool": ("100755", "blob", "1" * 40),
+            "src/lib.rs": ("100644", "blob", "2" * 40),
+            "src/nested/mod.rs": ("100644", "blob", "3" * 40),
+            "notes/index.md": ("100644", "blob", "4" * 40),
+        }
+        rows = (
+            {"inputs": ["missing", "src/tool", "src/tool"],
+             "pathsets": ["notes/index.md", "notes/absent.md"]},
+            {"inputs": ["missing", "src/tool", "src/lib.rs", "src/**/*.rs"],
+             "pathsets": ["notes/index.md", "notes/*.md", "src/?ib.rs"]},
+        )
+        for row in rows:
+            with self.subTest(row=row):
+                inputs, pathsets = row["inputs"], row["pathsets"]
+                payload = [(path, files[path]) for path in sorted(files)
+                           if any(adoption.matches_input(path, pattern) for pattern in inputs)]
+                membership = [path for path in sorted(files)
+                              if any(adoption.matches_input(path, pattern) for pattern in pathsets)]
+                expected = hashlib.sha256(
+                    json.dumps([inputs, payload, pathsets, membership], sort_keys=True).encode()
+                ).hexdigest()
+                with mock.patch.object(adoption, "_TREE_CACHE", {CURRENT: files}), \
+                     mock.patch.object(adoption, "_DIGEST_CACHE", {}), \
+                     mock.patch.object(adoption, "matches_input", wraps=adoption.matches_input) as matcher:
+                    self.assertEqual(adoption.input_digest(CURRENT, row), expected)
+                scanned = {call.args[1] for call in matcher.call_args_list}
+                self.assertEqual(scanned, {pattern for pattern in inputs + pathsets
+                                           if any(marker in pattern for marker in "*?[")})
+
     def test_content_and_pathset_changes_are_distinct_declared_inputs(self):
         old, new = "a" * 40, "b" * 40
         saved = dict(adoption._TREE_CACHE)

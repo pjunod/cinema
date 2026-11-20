@@ -188,6 +188,45 @@ class HistoryAuditCase(RepositoryFixture):
         self.assertEqual(report.ignored_count, 0)
         self.assertEqual(report.direct_count, 1)
 
+    def test_issue_discovery_scans_only_needed_patches_and_preserves_point_order(self):
+        from validation import history
+
+        root, _, _ = self.repository()
+        catalog_path = root / "points.toml"
+        catalog_path.write_text(CATALOG + textwrap.dedent("""\
+
+            [[points]]
+            id = "a-detail"
+            title = "Application detail"
+            contract = "Application detail works."
+            paths = ["src/**"]
+            checks = ["baseline"]
+            """), encoding="utf-8")
+        catalog = load_catalog(catalog_path)
+        (root / "src/app.rs").write_text("fn answer() -> u8 { 1 }\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+        (root / "src/app.rs").write_text("fn answer() -> u8 { 2 }\n", encoding="utf-8")
+        (root / "tests/direct").write_text("test fixture\n", encoding="utf-8")
+        direct = self.commit(root, "fix: add a regression fixture")
+        (root / "src/old.rs").write_text("#[test]\n", encoding="utf-8")
+        gone = self.commit(root, "fix: change a temporary source")
+        (root / "src/app.rs").write_text("#[test]\nfn test_answer() {}\n", encoding="utf-8")
+        inline = self.commit(root, "fix: add an inline regression")
+        (root / "src/old.rs").unlink()
+
+        with mock.patch.object(history, "_git", wraps=history._git) as git, \
+             mock.patch.object(history, "matches", wraps=history.matches) as matches:
+            issues = {issue.sha: issue for issue in history.discover_issues(root, catalog)}
+
+        self.assertEqual(set(issues), {direct, gone, inline})
+        self.assertTrue(issues[direct].direct_test_evidence)
+        self.assertFalse(issues[gone].direct_test_evidence)
+        self.assertTrue(issues[inline].direct_test_evidence)
+        self.assertEqual(issues[direct].point_ids, ("app", "a-detail"))
+        self.assertEqual(issues[inline].point_ids, ("app", "a-detail"))
+        self.assertEqual([call.args[-1] for call in git.call_args_list if call.args[1] == "show"], [inline])
+        self.assertEqual(sum(call.args[0] == "src/app.rs" for call in matches.call_args_list), 2)
+
     def test_fix_without_a_test_must_name_current_check_evidence(self):
         root, catalog, coverage = self.repository()
         (root / "src/app.rs").write_text("pub fn answer() -> u8 { 1 }\n", encoding="utf-8")
