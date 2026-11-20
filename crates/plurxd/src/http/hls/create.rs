@@ -326,6 +326,10 @@ pub struct CreateSession {
     /// a whole advertised playlist later. `"native"`, an unrecognized value
     /// and an absent field all keep the original promise.
     ///
+    /// `"mpv"` selects a bounded producer/reload startup window while retaining
+    /// conservative retirement. Native/Safari keeps its fixed-target startup
+    /// window; an unknown or omitted transport remains conservative.
+    ///
     /// The client must send what it actually selected, not a guess from the
     /// user agent, and must choose the conservative class whenever its
     /// transport could still fall back within the session.

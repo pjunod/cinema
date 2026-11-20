@@ -136,7 +136,8 @@ pub(super) struct ServedPlaylistSnapshot {
 
 /// First publication is separate from steady reserve. Native HLS must admit
 /// its fixed advertised target before attachment; the audited hls.js path can
-/// replenish a shorter first reload window. This contract is frozen at create,
+/// replenish a shorter first reload window. MPV admission covers its bounded
+/// producer/reload envelope. This contract is frozen at create,
 /// so a retry or producer replacement cannot shorten native admission.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum RollingStartupPolicy {
@@ -145,8 +146,7 @@ pub(super) enum RollingStartupPolicy {
     #[default]
     NativePresentationWindow,
     FirstReloadWindow,
-    #[cfg(test)]
-    FirstCompleteSegment,
+    MpvReload,
     #[cfg(test)]
     WebFixedHlsV1,
 }
@@ -158,10 +158,27 @@ impl RollingStartupPolicy {
             Self::Conservative => false,
             Self::NativePresentationWindow => false,
             Self::FirstReloadWindow => true,
-            #[cfg(test)]
-            Self::FirstCompleteSegment => true,
+            Self::MpvReload => true,
             #[cfg(test)]
             Self::WebFixedHlsV1 => true,
+        }
+    }
+
+    /// These consumers have a frozen create position that can authorize one
+    /// bounded complete cut beyond the initial floor, even without controls.
+    pub(super) fn owns_bootstrap_position(self) -> bool {
+        matches!(self, Self::NativePresentationWindow | Self::MpvReload)
+    }
+
+    /// Unknown or slow MPV capacity keeps the entire native admission
+    /// contract, including complete-cut rounding, not merely its duration.
+    pub(super) fn admission_policy(self, rate: f64, producer_speed: Option<f64>) -> Self {
+        if self == Self::MpvReload
+            && !producer_speed.is_some_and(|speed| speed.is_finite() && speed >= rate)
+        {
+            Self::NativePresentationWindow
+        } else {
+            self
         }
     }
 
@@ -176,17 +193,40 @@ impl RollingStartupPolicy {
                     ROLLING_RESERVE_MAX_MS,
                 )
             }
-            #[cfg(test)]
-            Self::FirstCompleteSegment => {
-                ((f64::from(plurx_core::transcode::SEGMENT_SECONDS) * 1_000.0 * rate).ceil() as i64)
-                    .clamp(2_000, ROLLING_RESERVE_MAX_MS)
-            }
+            Self::MpvReload => rolling_mpv_reload_runway_ms(rate),
             #[cfg(test)]
             Self::WebFixedHlsV1 => {
                 ((32_000.0 * rate).ceil() as i64).clamp(32_000, ROLLING_RESERVE_MAX_MS)
             }
         }
     }
+}
+
+/// A changed FFmpeg reload can already see an old published endpoint, then
+/// wait the last EXTINF (up to the target) before looking again. The reserve
+/// must cover both endpoint age and that following reload, not only an
+/// unchanged reload's target/2 delay.
+///
+/// A commit can lag its latest endpoint by at most P + poll. The next
+/// endpoint completes within Dmax/rate of that endpoint, but its commit also
+/// waits for the previous commit + P, then another poll. Its delivery age is
+/// therefore max(Dmax/rate, 2P + poll) + poll + margin. Add one target for the
+/// consumer's next reload. No alignment between commit/poll phases is assumed.
+///
+/// The 1s scheduling/delivery margin is an operating assumption informed by
+/// retained snapshot-to-first-frame observations below 0.9s, not a universal
+/// scheduler, network or filesystem guarantee. Selected-player continuity
+/// remains required. No finite reserve covers unbounded production/delivery.
+pub(super) fn rolling_mpv_reload_runway_ms(rate: f64) -> i64 {
+    let target_ms = ROLLING_PUBLICATION_TARGET.as_millis() as f64;
+    let spacing_ms = f64::from(plurx_core::transcode::SEGMENT_SECONDS) * 1_000.0;
+    let poll_ms = ROLLING_PUBLICATION_POLL.as_millis() as f64;
+    let endpoint_age_ms =
+        (ROLLING_SEGMENT_MAX_MS as f64 / rate).max(2.0 * spacing_ms + poll_ms) + poll_ms;
+    // Do not truncate a required floor to the reserve cap and claim coverage.
+    // All supported 0.25x..4x rates fit; an unsupported larger floor stays
+    // unready within the ordinary bounded publication allowance.
+    (rate * (target_ms + endpoint_age_ms + 1_000.0)).ceil() as i64
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -203,6 +243,13 @@ pub(super) struct RollingPublicationClock {
     pub(super) startup_policy: RollingStartupPolicy,
     startup_policy_bound: bool,
     pub(super) reserve_phase: RollingReservePhase,
+    /// A finite sufficient sample paid the fixed initial capacity assessment.
+    /// Until publication, a later sample is still reassessed at that bank.
+    pub(super) initial_capacity_checked: bool,
+    /// Only a short MPV first snapshot carries its unpaid assessment forward.
+    /// Native admission with unknown speed keeps the old post-publication
+    /// deadline behavior without pretending the speed was measured.
+    pub(super) initial_capacity_pending_after_short_admission: bool,
     pub(super) served: Option<ServedPlaylistSnapshot>,
     pub(super) staged_attempt: Option<u64>,
     /// Actual monotonic observation of the writer's first gated inventory.
@@ -238,13 +285,14 @@ impl RollingPublicationClock {
     pub(super) fn bind_startup_transport(&mut self, transport: Option<&str>) {
         // A ready playlist is not native decoder admission. Safari can fetch
         // every object in a short target-16 window yet stay at HAVE_METADATA
-        // until startup expires. Only the audited hls.js path has evidence for
-        // the short reload window; native, omitted and future transports need
+        // until startup expires. MPV uses a producer/reload runway rather
+        // than Safari admission; hls.js has its own window. Other transports need
         // a window derived from that same fixed presentation target. Keep the
         // producer's paid steady reserve and all media validation unchanged.
         if !self.startup_policy_bound && self.served.is_none() {
             self.startup_policy = match transport {
                 Some("hlsjs") => RollingStartupPolicy::FirstReloadWindow,
+                Some("mpv") => RollingStartupPolicy::MpvReload,
                 _ => RollingStartupPolicy::NativePresentationWindow,
             };
             self.startup_policy_bound = true;
@@ -292,11 +340,15 @@ impl RollingPublicationClock {
         &self,
         budget: &RollingPublicationBudget,
         lease: Option<&crate::playback_control::RollingLeaseSnapshot>,
+        producer_speed: Option<f64>,
     ) -> i64 {
         let rate = rolling_playback_rate(lease.and_then(|lease| lease.demand.as_ref()));
+        // A recent average supports this admission assessment, never a
+        // future guarantee. Conservative fallback also governs cut selection.
+        let policy = self.startup_policy.admission_policy(rate, producer_speed);
         budget
             .consumed_end_ms
-            .saturating_add(self.startup_policy.bootstrap_ms(rate))
+            .saturating_add(policy.bootstrap_ms(rate))
     }
 
     pub(super) fn staged_seconds(&self) -> i64 {
@@ -314,6 +366,8 @@ impl RollingPublicationClock {
                 .is_some_and(|snapshot| snapshot.producer_attempt != producer_attempt)
         {
             self.reserve_phase = RollingReservePhase::Prepublication;
+            self.initial_capacity_checked = false;
+            self.initial_capacity_pending_after_short_admission = false;
             self.served = None;
             self.first_staged_at = None;
             self.staged_last_segment = None;
@@ -409,9 +463,7 @@ impl RollingPublicationClock {
             // past the admission floor: rounding down would publish an unsafe
             // short window (or wait forever at a non-segment boundary). Once
             // published, the ordinary fetch frontier owns the allowance again.
-            let allowed_end_ms = if !published
-                && self.startup_policy == RollingStartupPolicy::NativePresentationWindow
-            {
+            let allowed_end_ms = if !published && self.startup_policy.owns_bootstrap_position() {
                 desired_end_ms.saturating_add(ROLLING_SEGMENT_MAX_MS)
             } else {
                 desired_end_ms

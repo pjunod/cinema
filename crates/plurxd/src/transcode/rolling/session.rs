@@ -943,6 +943,9 @@ impl Session {
         // must not retire the session while the hold lasts.
         let held_for_scratch = (*self.suspended_at.lock().await)
             .is_some_and(|held| held.hold.reason == AheadHoldReason::Global);
+        // A global scratch hold explicitly suspends production service. Its
+        // retained speed sample cannot establish the short MPV envelope.
+        let admission_producer_speed = producer_speed.filter(|_| !held_for_scratch);
         let (publish, expired, insufficient, retention_first_segment, budget) = {
             let mut clock = self.publication.lock().await;
             clock.reset_for_attempt(producer_attempt);
@@ -974,7 +977,8 @@ impl Session {
             if clock.served.is_none() {
                 // Keep steady production/allowance intact. Only first snapshot
                 // readiness and endpoint selection use the frozen policy.
-                budget.desired_end_ms = clock.first_ready_end_ms(&budget, lease.as_ref());
+                budget.desired_end_ms =
+                    clock.first_ready_end_ms(&budget, lease.as_ref(), admission_producer_speed);
             }
             let publish = match clock.served.as_ref() {
                 None => end_list || end_ms >= budget.desired_end_ms,
@@ -1003,21 +1007,30 @@ impl Session {
                     clock.hard_deadline.is_some_and(|deadline| now >= deadline)
                         && end_ms <= served.end_ms
                 });
-            let insufficient = !end_list
-                && rolling_insufficient_capacity(playback_rate, producer_speed)
-                && match clock.served.as_ref() {
-                    // Before the first snapshot there is no deadline to
-                    // restart, and a held producer's recent speed is the last
-                    // one it measured before the stop, not a capacity reading.
-                    // Capacity becomes measurable at the fixed initial runway,
-                    // independently of the publication frontier advancing with
-                    // elapsed time. Clearing a hold must not defer rejection.
-                    None => !held_for_scratch && end_ms >= rolling_initial_runway_ms(playback_rate),
-                    Some(served) => {
+            // Keep the original repeated pre-publication assessment. A short
+            // MPV snapshot additionally carries its unpaid initial assessment
+            // to the fixed bank; native/unknown admission already paid its
+            // media bank and retains the old post-publication deadline rules.
+            let initial_capacity_due = !end_list
+                && (clock.served.is_none() || clock.initial_capacity_pending_after_short_admission)
+                && !held_for_scratch
+                && end_ms >= rolling_initial_runway_ms(playback_rate);
+            let initial_insufficient = initial_capacity_due
+                && rolling_insufficient_capacity(playback_rate, producer_speed);
+            if initial_capacity_due
+                && !initial_insufficient
+                && producer_speed.is_some_and(|speed| speed.is_finite())
+            {
+                clock.initial_capacity_checked = true;
+                clock.initial_capacity_pending_after_short_admission = false;
+            }
+            let insufficient = initial_insufficient
+                || (!end_list
+                    && rolling_insufficient_capacity(playback_rate, producer_speed)
+                    && clock.served.as_ref().is_some_and(|served| {
                         clock.hard_deadline.is_some_and(|deadline| now >= deadline)
                             && end_ms <= served.end_ms
-                    }
-                };
+                    }));
             (
                 publish,
                 expired,
@@ -1046,12 +1059,17 @@ impl Session {
         let first_new_segment = previous_served
             .as_ref()
             .map_or(i64::MIN, |served| served.last_segment.saturating_add(1));
-        let native_first_snapshot = previous_served.is_none()
-            && self.publication.lock().await.startup_policy
-                == RollingStartupPolicy::NativePresentationWindow;
+        let initial_admission_policy = self
+            .publication
+            .lock()
+            .await
+            .startup_policy
+            .admission_policy(playback_rate, admission_producer_speed);
+        let frozen_first_snapshot =
+            previous_served.is_none() && initial_admission_policy.owns_bootstrap_position();
         let selected_last = if end_list {
             last_segment
-        } else if budget.demand_sequence.is_none() && !native_first_snapshot {
+        } else if budget.demand_sequence.is_none() && !frozen_first_snapshot {
             // A legacy viewer has no accepted playback position with which to
             // authorize a rounded-up segment.  Its fixed wall/download clock
             // therefore exposes only the last complete endpoint *inside* the
@@ -1065,19 +1083,14 @@ impl Session {
             };
             selected.index
         } else {
-            // Explicit demand and the frozen native bootstrap position can
+            // Explicit demand and the frozen consumer bootstrap position can
             // authorize the first complete cut beyond the admission floor.
             // The producer retains its steady allowance plus that bounded
             // complete-cut envelope. A short candidate may use less of it:
             // keep its first advertised endpoint within the policy ceiling.
-            let first_web_snapshot = previous_served.is_none()
-                && self
-                    .publication
-                    .lock()
-                    .await
-                    .startup_policy
-                    .uses_small_bootstrap();
-            let selection_allowed_end_ms = if first_web_snapshot {
+            let short_first_snapshot =
+                previous_served.is_none() && initial_admission_policy.uses_small_bootstrap();
+            let selection_allowed_end_ms = if short_first_snapshot {
                 budget.allowed_end_ms.min(
                     budget
                         .consumed_end_ms
@@ -1108,7 +1121,7 @@ impl Session {
                     });
                 }
                 budget.demand_sequence.and_then(|_| {
-                    if first_web_snapshot {
+                    if short_first_snapshot {
                         // At the 124s bootstrap ceiling the next complete cut
                         // may be paid for but exceed the first snapshot limit.
                         // Round down by at most one bounded
@@ -1353,8 +1366,9 @@ impl Session {
         // cycle is due.  Publication may have awaited disk and actor work
         // since then, so availability, object grace and the next deadlines
         // begin at the actual commit point rather than being backdated to the
-        // policy observation.
-        let available_at = Instant::now();
+        // policy observation. A test may inject a future policy clock; keep
+        // that clock coherent across commits without backdating real work.
+        let available_at = Instant::now().max(now);
         let mut clock = self.publication.lock().await;
         if self.control.current_producer_attempt() != producer_attempt
             || clock.budget_attempt != Some(producer_attempt)
@@ -1363,6 +1377,10 @@ impl Session {
             return Ok(());
         }
         if clock.served.is_none() {
+            clock.initial_capacity_pending_after_short_admission = initial_admission_policy
+                == RollingStartupPolicy::MpvReload
+                && !clock.initial_capacity_checked
+                && served_end_ms < rolling_initial_runway_ms(playback_rate);
             tracing::info!(
                 target: "plurxd::transcode",
                 session = %session_log_id(session_id),
@@ -1371,7 +1389,12 @@ impl Session {
                 elapsed_ms = clock.first_staged_at.map(|at| available_at.saturating_duration_since(at).as_millis() as u64),
                 produced_end_ms = end_ms,
                 startup_policy = ?clock.startup_policy,
-                bootstrap_ms = clock.startup_policy.bootstrap_ms(playback_rate),
+                admission_policy = ?initial_admission_policy,
+                bootstrap_ms = budget.desired_end_ms.saturating_sub(budget.consumed_end_ms),
+                producer_speed = ?producer_speed,
+                initial_capacity_checked = clock.initial_capacity_checked,
+                initial_capacity_pending_after_short_admission = clock.initial_capacity_pending_after_short_admission,
+                held_for_scratch,
                 consumed_end_ms = budget.consumed_end_ms,
                 demand_sequence = ?budget.demand_sequence,
                 lease_mode = ?lease.as_ref().map(|lease| lease.mode),
