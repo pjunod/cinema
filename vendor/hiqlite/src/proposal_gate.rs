@@ -16,13 +16,15 @@
 //! order: once the exclusive acquirer waits, later proposals queue behind it,
 //! so a steady stream of writers cannot starve it.
 
-use std::sync::Arc;
-use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+use std::sync::{Arc, Mutex};
+use tokio::sync::{Notify, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tokio::time::Instant;
 
 #[derive(Debug, Default)]
 pub(crate) struct ProposalGate {
     lock: Arc<RwLock<()>>,
+    membership: Arc<RwLock<()>>,
+    membership_signal: Arc<MembershipSignal>,
 }
 
 /// Held for the whole of one proposal. Dropping it, on any path, releases it.
@@ -38,11 +40,124 @@ pub struct ProposalHold {
     _hold: OwnedRwLockWriteGuard<()>,
 }
 
+/// Owned by a real local membership proposal, never an RPC observer.
+pub(crate) struct MembershipPermit {
+    _permit: OwnedRwLockReadGuard<()>,
+}
+
+#[derive(Debug, Default)]
+struct MembershipSignal {
+    state: Mutex<MembershipSignalState>,
+    changed: Notify,
+}
+
+#[derive(Debug, Default)]
+struct MembershipSignalState {
+    generation: u64,
+    active: bool,
+    stopped: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct MembershipStop {
+    signal: Arc<MembershipSignal>,
+    generation: u64,
+}
+
+impl MembershipStop {
+    pub(crate) fn is_stopped(&self) -> bool {
+        let Ok(state) = self.signal.state.lock() else {
+            return true;
+        };
+        state.generation != self.generation || !state.active || state.stopped
+    }
+
+    pub(crate) async fn stopped(&self) {
+        loop {
+            let mut changed = std::pin::pin!(self.signal.changed.notified());
+            changed.as_mut().enable();
+            if self.is_stopped() {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+pub(crate) struct MembershipHold {
+    _hold: OwnedRwLockWriteGuard<()>,
+    stop: MembershipStop,
+}
+
+impl MembershipHold {
+    pub(crate) fn stop(&self) -> MembershipStop {
+        self.stop.clone()
+    }
+}
+
+impl Drop for MembershipHold {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.stop.signal.state.lock() {
+            if state.generation == self.stop.generation {
+                state.active = false;
+                self.stop.signal.changed.notify_waiters();
+            }
+        }
+    }
+}
+
 impl ProposalGate {
+    /// Exclude only effective local membership proposals. The ordinary
+    /// database proposal and incoming consensus paths remain independent.
+    pub(crate) fn try_hold_membership(&self) -> Option<MembershipHold> {
+        let mut state = self.membership_signal.state.lock().ok()?;
+        let hold = Arc::clone(&self.membership).try_write_owned().ok()?;
+        let generation = state.generation.checked_add(1)?;
+        *state = MembershipSignalState {
+            generation,
+            active: true,
+            stopped: false,
+        };
+        Some(MembershipHold {
+            _hold: hold,
+            stop: MembershipStop {
+                signal: Arc::clone(&self.membership_signal),
+                generation,
+            },
+        })
+    }
+
+    pub(crate) fn try_membership_permit(&self) -> Result<MembershipPermit, crate::Error> {
+        // Enrollment and an immediately dispatched membership proposal are
+        // serialized here. A refused caller can retry outside its management
+        // locks, with its membership admission still unconsumed.
+        let mut state = self
+            .membership_signal
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Ok(permit) = Arc::clone(&self.membership).try_read_owned() {
+            return Ok(MembershipPermit { _permit: permit });
+        }
+        if state.active {
+            state.stopped = true;
+            self.membership_signal.changed.notify_waiters();
+        }
+        Err(crate::Error::RequestNotDispatched(
+            "local playback still owns membership exclusion".into(),
+        ))
+    }
+
     pub(crate) async fn permit(&self) -> ProposalPermit {
         ProposalPermit {
             _permit: Arc::clone(&self.lock).read_owned().await,
         }
+    }
+
+    /// Sample an idle proposal boundary without queuing ahead of any writer.
+    pub(crate) fn try_hold(&self) -> Option<ProposalHold> {
+        let hold = Arc::clone(&self.lock).try_write_owned().ok()?;
+        Some(ProposalHold { _hold: hold })
     }
 
     /// Take the exclusive side by `deadline`, or not at all. A proposal that is
@@ -61,6 +176,43 @@ mod tests {
     use super::ProposalGate;
     use std::time::Duration;
     use tokio::time::Instant;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_membership_proposal_stops_the_original_without_blocking_sql() {
+        let gate = ProposalGate::default();
+        let hold = gate.try_hold_membership().expect("original authority");
+        let stop = hold.stop();
+        assert!(!stop.is_stopped());
+        assert!(matches!(
+            gate.try_membership_permit(),
+            Err(crate::Error::RequestNotDispatched(_))
+        ));
+        tokio::time::timeout(Duration::from_millis(20), stop.stopped())
+            .await
+            .expect("membership contention signals the original");
+        let sql = tokio::time::timeout(Duration::from_millis(20), gate.permit())
+            .await
+            .expect("same original can submit durable close");
+        assert!(gate.try_hold_membership().is_none());
+
+        // The request's signal is not evidence of closure.
+        assert!(matches!(
+            gate.try_membership_permit(),
+            Err(crate::Error::RequestNotDispatched(_))
+        ));
+        drop(hold);
+        let membership = gate.try_membership_permit().expect("retry after closure");
+        assert!(gate.try_hold_membership().is_none());
+        drop(membership);
+        drop(sql);
+        assert!(
+            !gate
+                .try_hold_membership()
+                .expect("next authority")
+                .stop()
+                .is_stopped()
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn a_hold_waits_for_in_flight_proposals_and_blocks_new_ones() {
@@ -191,8 +343,14 @@ mod tests {
         let append = helper
             .find("{let_permit=self.proposals.permit().await;self.raft.add_learner(id,node,false).await?};")
             .expect("the permit covers a non-blocking append only");
+        let released = helper
+            .find("drop(membership);")
+            .expect("membership released");
         let wait = helper.find(".wait(None)").expect("the catch-up wait");
-        assert!(append < wait, "the catch-up wait runs after the permit drops");
+        assert!(
+            append < released && released < wait,
+            "both permits drop before catch-up"
+        );
     }
 
     #[tokio::test(start_paused = true)]

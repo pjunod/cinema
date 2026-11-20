@@ -1,5 +1,6 @@
 //! Protected playback admission for the node's shared finite trial lane.
 use super::{Admissions, PermitOwner, PermitState, SwPermit};
+use plurx_core::store::{DvrTrialExclusion, DvrTrialInvalidation};
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -21,6 +22,7 @@ pub(super) struct PlaybackTrialSignal {
     cancel: Notify,
     released: AtomicBool,
     changed: Notify,
+    store_invalidation: DvrTrialInvalidation,
 }
 
 impl PlaybackTrialSignal {
@@ -32,19 +34,30 @@ impl PlaybackTrialSignal {
 
 /// Single original driver waits on this signal. The shared allocation is
 /// prepaid in the finite application's own metadata projection.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct PlaybackTrialStop(Arc<PlaybackTrialSignal>);
 
 impl PlaybackTrialStop {
     pub(crate) fn is_cancelled(&self) -> bool {
-        self.0.cancelled.load(Ordering::Acquire)
+        self.0.cancelled.load(Ordering::Acquire) || self.0.store_invalidation.moved()
     }
 
     pub(crate) async fn cancelled(&self) {
         while !self.is_cancelled() {
-            self.0.cancel.notified().await;
+            tokio::select! {
+                () = self.0.cancel.notified() => {},
+                () = self.0.store_invalidation.changed() => return,
+            }
         }
     }
+}
+
+/// The permit book keeps the exclusion with the exact owner, including an
+/// original lane whose physical closure becomes unknown on Drop.
+#[derive(Debug)]
+pub(super) struct PlaybackTrialRegistration {
+    signal: Arc<PlaybackTrialSignal>,
+    exclusion: DvrTrialExclusion,
 }
 
 impl PermitState {
@@ -73,7 +86,7 @@ impl PermitState {
             return false;
         };
         if foreground {
-            trial.cancel();
+            trial.signal.cancel();
         }
         true
     }
@@ -114,6 +127,20 @@ impl Drop for ProtectedPlaybackLane {
 pub(crate) struct CaptureTrialEpoch {
     permits: Arc<Mutex<PermitState>>,
     observed: u64,
+}
+
+pub(crate) struct CaptureTrialProof {
+    epoch: CaptureTrialEpoch,
+    exclusion: DvrTrialExclusion,
+}
+
+impl CaptureTrialEpoch {
+    pub(crate) fn with_exclusion(self, exclusion: DvrTrialExclusion) -> CaptureTrialProof {
+        CaptureTrialProof {
+            epoch: self,
+            exclusion,
+        }
+    }
 }
 
 impl Admissions {
@@ -176,8 +203,8 @@ impl Admissions {
                 .lock()
                 .map_err(|_| "playback admission unavailable")?;
             let trial = permits.playback_trial.as_ref().map(|trial| {
-                trial.cancel();
-                Arc::clone(trial)
+                trial.signal.cancel();
+                Arc::clone(&trial.signal)
             });
             if Instant::now() >= deadline {
                 return Err("protected playback admission deadline elapsed");
@@ -209,7 +236,7 @@ impl Admissions {
 #[derive(Debug)]
 pub(crate) struct PlaybackTrialLane {
     permits: Arc<Mutex<PermitState>>,
-    signal: Arc<PlaybackTrialSignal>,
+    stop: PlaybackTrialStop,
     native_possible: bool,
 }
 
@@ -228,21 +255,27 @@ impl SwPermit {
 
     pub(crate) fn try_acquire_playback_trial_lane(
         &self,
-        capture: CaptureTrialEpoch,
+        capture: CaptureTrialProof,
     ) -> Option<PlaybackTrialLane> {
+        let CaptureTrialProof { epoch, exclusion } = capture;
         let mut permits = self.permits.lock().ok()?;
-        if !Arc::ptr_eq(&capture.permits, &self.permits)
-            || capture.observed != permits.playback_epoch.load(Ordering::Acquire)
+        if !Arc::ptr_eq(&epoch.permits, &self.permits)
+            || epoch.observed != permits.playback_epoch.load(Ordering::Acquire)
             || !permits.idle_with(self)
+            || !exclusion.is_current()
         {
             return None;
         }
         permits.advance_playback_epoch();
-        let signal = Arc::new(PlaybackTrialSignal::default());
-        permits.playback_trial = Some(Arc::clone(&signal));
+        let signal = Arc::new(PlaybackTrialSignal {
+            store_invalidation: exclusion.invalidation(),
+            ..PlaybackTrialSignal::default()
+        });
+        let stop = PlaybackTrialStop(Arc::clone(&signal));
+        permits.playback_trial = Some(PlaybackTrialRegistration { signal, exclusion });
         Some(PlaybackTrialLane {
             permits: Arc::clone(&self.permits),
-            signal,
+            stop,
             native_possible: false,
         })
     }
@@ -250,22 +283,22 @@ impl SwPermit {
 
 impl PlaybackTrialLane {
     pub(crate) fn stop_token(&self) -> PlaybackTrialStop {
-        PlaybackTrialStop(Arc::clone(&self.signal))
+        self.stop.clone()
     }
 
     pub(crate) fn requested_heap_bytes() -> Option<usize> {
-        std::mem::size_of::<PlaybackTrialSignal>().checked_add(2 * std::mem::size_of::<usize>())
+        std::mem::size_of::<PlaybackTrialSignal>()
+            .checked_add(2 * std::mem::size_of::<usize>())?
+            .checked_add(DvrTrialInvalidation::requested_heap_bytes()?)
     }
 
     pub(crate) fn begin_adoption(&self, claim: impl FnOnce() -> bool) -> bool {
         let Ok(permits) = self.permits.lock() else {
             return false;
         };
-        permits
-            .playback_trial
-            .as_ref()
-            .is_some_and(|trial| Arc::ptr_eq(trial, &self.signal))
-            && !self.signal.cancelled.load(Ordering::Acquire)
+        permits.playback_trial.as_ref().is_some_and(|trial| {
+            Arc::ptr_eq(&trial.signal, &self.stop.0) && trial.exclusion.is_current()
+        }) && !self.stop.is_cancelled()
             && claim()
     }
 
@@ -284,11 +317,11 @@ impl PlaybackTrialLane {
         if permits
             .playback_trial
             .as_ref()
-            .is_some_and(|trial| Arc::ptr_eq(trial, &self.signal))
+            .is_some_and(|trial| Arc::ptr_eq(&trial.signal, &self.stop.0))
         {
             permits.playback_trial.take();
-            self.signal.released.store(true, Ordering::Release);
-            self.signal.changed.notify_waiters();
+            self.stop.0.released.store(true, Ordering::Release);
+            self.stop.0.changed.notify_waiters();
         }
     }
 }
@@ -305,16 +338,30 @@ impl Drop for PlaybackTrialLane {
 mod tests {
     use super::*;
     use crate::admission::Priority;
+    use plurx_core::store::{DvrStore, SqliteStore};
     use std::time::Duration;
 
-    #[test]
-    fn finished_capture_commit_cannot_disappear_from_an_earlier_trial_epoch() {
+    async fn proven_capture_epoch(
+        admissions: &Admissions,
+        store: &SqliteStore,
+    ) -> Option<CaptureTrialProof> {
+        let epoch = admissions.capture_trial_epoch()?;
+        let exclusion = store
+            .local_dvr_trial_exclusion(tokio::time::Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("durable capture snapshot")?;
+        Some(epoch.with_exclusion(exclusion))
+    }
+
+    #[tokio::test]
+    async fn finished_capture_commit_cannot_disappear_from_an_earlier_trial_epoch() {
         let admissions = Admissions::new();
+        let store = SqliteStore::open_in_memory().expect("local capture store");
         let hold = admissions
             .try_admit_software(2, 1, Priority::Live)
             .expect("original producer");
-        let observed = admissions
-            .capture_trial_epoch()
+        let observed = proven_capture_epoch(&admissions, &store)
+            .await
             .expect("original idle epoch");
         let intent = admissions
             .begin_capture_intent_update()
@@ -322,8 +369,8 @@ mod tests {
         assert!(admissions.capture_trial_epoch().is_none());
         intent.known_finished();
         assert!(hold.try_acquire_playback_trial_lane(observed).is_none());
-        let snapshot = admissions
-            .capture_trial_epoch()
+        let snapshot = proven_capture_epoch(&admissions, &store)
+            .await
             .expect("next exact local epoch");
         assert!(hold.try_acquire_playback_trial_lane(snapshot).is_some());
     }
@@ -331,29 +378,32 @@ mod tests {
     #[tokio::test]
     async fn protected_lane_preempts_and_waits_for_original_trial_release() {
         let admissions = Admissions::new();
+        let store = SqliteStore::open_in_memory().expect("local capture store");
         let hold = admissions
             .try_admit_software(2, 1, Priority::Live)
             .expect("original producer");
-        let acquire_trial =
-            || hold.try_acquire_playback_trial_lane(admissions.capture_trial_epoch()?);
-        let mut trial = acquire_trial().expect("actual idle lane");
+        let acquire_trial = || async {
+            let proof = proven_capture_epoch(&admissions, &store).await?;
+            hold.try_acquire_playback_trial_lane(proof)
+        };
+        let mut trial = acquire_trial().await.expect("actual idle lane");
         trial.arm_native();
         let incoming =
             admissions.acquire_protected_playback_lane(Instant::now() + Duration::from_secs(1));
         tokio::pin!(incoming);
         assert!(futures_util::poll!(&mut incoming).is_pending());
         assert!(trial.stop_token().is_cancelled());
-        assert!(acquire_trial().is_none());
+        assert!(acquire_trial().await.is_none());
         trial.known_finished();
         assert!(
-            acquire_trial().is_none(),
+            acquire_trial().await.is_none(),
             "new trials cannot overtake a registered protected waiter"
         );
         let mut owner = incoming
             .await
             .expect("original trial settlement released the lane");
         owner.arm_physical();
-        assert!(acquire_trial().is_none());
+        assert!(acquire_trial().await.is_none());
         owner.known_finished();
 
         let mut uncertain = admissions
@@ -363,7 +413,7 @@ mod tests {
         uncertain.arm_physical();
         drop(uncertain);
         assert!(
-            acquire_trial().is_none(),
+            acquire_trial().await.is_none(),
             "lost physical custody remains held"
         );
     }

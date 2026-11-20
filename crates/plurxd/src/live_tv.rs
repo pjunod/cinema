@@ -45,7 +45,7 @@ pub(crate) use guide::{
     GuideFreshness, GuideWindow, LiveTvGuide, LiveTvGuideChannel, LiveTvProgramme,
 };
 
-/// The actual SQLite manager that owns the original durable capture gate.
+/// The serving manager that owns local entry to the durable capture gate.
 #[cfg(target_os = "linux")]
 #[derive(Clone)]
 pub(crate) struct LocalDvrTrialAuthority(Arc<LiveTvManager>);
@@ -55,14 +55,15 @@ impl LocalDvrTrialAuthority {
     pub(crate) async fn capture_exclusion_before(
         &self,
         deadline: std::time::Instant,
-    ) -> Option<crate::admission::CaptureTrialEpoch> {
+    ) -> Option<crate::admission::CaptureTrialProof> {
         let epoch = self.0.transcode.admissions().capture_trial_epoch()?;
-        let clear =
-            tokio::time::timeout_at(deadline.into(), self.0.store.local_dvr_obligations_clear())
-                .await
-                .ok()?
-                .ok()?;
-        (clear && std::time::Instant::now() < deadline).then_some(epoch)
+        let exclusion = self
+            .0
+            .store
+            .local_dvr_trial_exclusion(deadline.into())
+            .await
+            .ok()??;
+        (std::time::Instant::now() < deadline).then(|| epoch.with_exclusion(exclusion))
     }
 }
 

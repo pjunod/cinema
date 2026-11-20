@@ -131,6 +131,7 @@ impl StateRaftDB {
         &self,
         members: impl Into<openraft::ChangeMembers<NodeId, crate::Node>>,
         retain: bool,
+        _membership: crate::proposal_gate::MembershipPermit,
     ) -> Result<
         openraft::raft::ClientWriteResponse<TypeConfigSqlite>,
         openraft::error::RaftError<NodeId, openraft::error::ClientWriteError<NodeId, crate::Node>>,
@@ -144,6 +145,7 @@ impl StateRaftDB {
         id: NodeId,
         node: crate::Node,
         blocking: bool,
+        membership: crate::proposal_gate::MembershipPermit,
     ) -> Result<
         openraft::raft::ClientWriteResponse<TypeConfigSqlite>,
         openraft::error::RaftError<NodeId, openraft::error::ClientWriteError<NodeId, crate::Node>>,
@@ -156,6 +158,7 @@ impl StateRaftDB {
             let _permit = self.proposals.permit().await;
             self.raft.add_learner(id, node, false).await?
         };
+        drop(membership);
         if blocking && self.raft.metrics().borrow().id != id {
             // OpenRaft's `blocking = true` condition, unchanged: done once the
             // membership entry is reported and the learner is removed, this

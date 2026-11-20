@@ -220,6 +220,101 @@ fn classify_core_state(
     }
 }
 
+/// Singleton membership authority owned by the original local caller. A
+/// competing local topology proposal requests closure and can retry admission.
+#[cfg(feature = "sqlite")]
+pub struct LocalSingletonWriteAuthority {
+    _membership: crate::proposal_gate::MembershipHold,
+    watch: LocalSingletonAuthorityWatch,
+}
+
+/// Observes the original authority without retaining its mutation exclusion.
+#[cfg(feature = "sqlite")]
+#[derive(Clone)]
+pub struct LocalSingletonAuthorityWatch {
+    membership_stop: crate::proposal_gate::MembershipStop,
+    state: Arc<AppState>,
+    metrics: watch::Receiver<RaftMetrics<NodeId, Node>>,
+    applied: crate::AppliedMarkHandle,
+    term: u64,
+    membership: openraft::LogId<NodeId>,
+    generation: u64,
+}
+
+#[cfg(feature = "sqlite")]
+impl std::fmt::Debug for LocalSingletonAuthorityWatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalSingletonAuthorityWatch")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl LocalSingletonWriteAuthority {
+    /// An event handle for the original caller's existing driver.
+    #[must_use]
+    pub fn watch(&self) -> LocalSingletonAuthorityWatch {
+        self.watch.clone()
+    }
+
+    /// Whether the original authority still applies.
+    #[must_use]
+    pub fn is_current(&self) -> bool {
+        self.watch.is_current()
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl LocalSingletonAuthorityWatch {
+    /// Check that the same boot, leader term, membership, and applied SQLite
+    /// image still authorize new physical work.
+    #[must_use]
+    pub fn is_current(&self) -> bool {
+        !self.membership_stop.is_stopped()
+            && !self.state.is_shutting_down.load(Ordering::Acquire)
+            && self.metrics.has_changed().is_ok()
+            && singleton_leader(&self.metrics.borrow()) == Some((self.term, self.membership))
+            && self.applied.generation() == self.generation
+    }
+
+    /// Resolve when the exact authority is broken. The caller polls this in
+    /// its existing driver; the watch starts no background task.
+    pub async fn invalidated(&self) {
+        let mut metrics = self.metrics.clone();
+        let image = self.applied.watch(&[]);
+        while self.is_current() {
+            tokio::select! {
+                () = self.membership_stop.stopped() => return,
+                () = image.changed() => return,
+                result = metrics.changed() => {
+                    if result.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn singleton_leader(metrics: &RaftMetrics<NodeId, Node>) -> Option<(u64, openraft::LogId<NodeId>)> {
+    let membership = &metrics.membership_config;
+    (metrics.running_state.is_ok()
+        && metrics.state == ServerState::Leader
+        && metrics.current_leader == Some(metrics.id)
+        && membership.membership().get_joint_config().len() == 1
+        && membership.voter_ids().eq([metrics.id])
+        && membership.nodes().map(|(id, _)| *id).eq([metrics.id])
+        && crate::helpers::membership_is_applied(metrics))
+    .then(|| {
+        (
+            metrics.current_term,
+            membership.log_id().expect("applied membership"),
+        )
+    })
+}
+
 #[cfg(feature = "sqlite")]
 pub(crate) async fn db_quorum_watermark_local(
     state: &Arc<AppState>,
@@ -623,6 +718,97 @@ impl Client {
             }
             rows.swap_remove(0).into_db_quorum_watermark()
         }
+    }
+
+    /// Bind a local leader's completely applied singleton SQLite authority
+    /// while effective local membership proposals request closure and retry.
+    /// Sample the general proposal gate without waiting, then apply an
+    /// ordered fence. SQL and incoming consensus continue during the hold.
+    #[cfg(feature = "sqlite")]
+    pub async fn try_hold_local_singleton_write_authority(
+        &self,
+        deadline: time::Instant,
+    ) -> Result<Option<LocalSingletonWriteAuthority>, Error> {
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Connect("singleton write authority requires the local node client".into())
+        })?;
+        let db = &state.raft_db;
+        let metrics = db.raft.metrics();
+        let Some((term, membership)) = singleton_leader(&metrics.borrow()) else {
+            return Ok(None);
+        };
+        let applied = db.applied_mark.handle();
+        let generation = applied.generation();
+        if time::Instant::now() >= deadline || generation % 2 != 0 {
+            return Ok(None);
+        }
+        let Some(membership_hold) = db.proposals.try_hold_membership() else {
+            return Ok(None);
+        };
+        let Some(proposals) = db.proposals.try_hold() else {
+            return Ok(None);
+        };
+        drop(proposals);
+        let stop = membership_hold.stop();
+        let proof = async {
+            // A prior proposal may have reached the actor before its observer
+            // was cancelled. An ordered RTT entry covers that unapplied tail
+            // without holding back ordinary proposals or changing any rows.
+            let fence = state
+                .raft_db
+                .client_write(QueryWrite::RTT)
+                .await
+                .ok()?
+                .log_id;
+            let watermark = db_quorum_watermark_local(state).await.ok()?;
+            if fence.leader_id.term != term
+                || fence.leader_id.node_id != state.id
+                || watermark.term != term
+                || watermark.leader_id != state.id
+                || watermark.committed_index < fence.index
+                || applied.applied_index() < watermark.committed_index
+            {
+                return None;
+            }
+            // Inspect the same actor that processes membership proposals.
+            // Its watch can still be behind an accepted but uncommitted change.
+            let node_id = state.id;
+            let current = db
+                .raft
+                .with_raft_state(move |raft| {
+                    let vote = raft.vote_ref();
+                    let roster = &raft.membership_state;
+                    raft.server_state == ServerState::Leader
+                        && vote.is_committed()
+                        && vote.leader_id().term == term
+                        && vote.leader_id().node_id == node_id
+                        && roster.committed().log_id() == &Some(membership)
+                        && roster.effective() == roster.committed()
+                })
+                .await
+                .ok()?;
+            current.then_some(())
+        };
+        let proven = tokio::select! {
+            () = stop.stopped() => false,
+            result = time::timeout_at(deadline, proof) => matches!(result, Ok(Some(()))),
+        };
+        if !proven || time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        let authority = LocalSingletonWriteAuthority {
+            watch: LocalSingletonAuthorityWatch {
+                membership_stop: membership_hold.stop(),
+                state: Arc::clone(state),
+                metrics,
+                applied,
+                term,
+                membership,
+                generation,
+            },
+            _membership: membership_hold,
+        };
+        Ok(authority.is_current().then_some(authority))
     }
 
     /// Plurx patch 31: stop new database proposals on this node until the

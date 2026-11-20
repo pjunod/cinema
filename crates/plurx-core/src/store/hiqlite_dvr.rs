@@ -879,6 +879,49 @@ async fn read_reminders(
 
 #[async_trait]
 impl DvrStore for HiqliteAuthStore {
+    #[cfg(target_os = "linux")]
+    fn has_local_dvr_commit_authority(&self) -> bool {
+        self.client().has_local_replica()
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn local_dvr_trial_exclusion(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<super::DvrTrialExclusion>, StoreError> {
+        let Some(owner) = self
+            .client()
+            .try_hold_local_singleton_write_authority(deadline)
+            .await?
+        else {
+            return Ok(None);
+        };
+        // Watch before the single census snapshot. All ordinary SQL can
+        // still commit, including settings, rules and the trial's own rows.
+        let Some(changes) = self.client().dvr_trial_watch() else {
+            return Ok(None);
+        };
+        let snapshot = self.client().query_consistent_map::<CountRow, _>(
+            "local_dvr_trial_exclusion",
+            super::DVR_TRIAL_OBLIGATIONS_CLEAR_SQL,
+            params!(),
+        );
+        let Ok(rows) = tokio::time::timeout_at(deadline, snapshot).await else {
+            return Ok(None);
+        };
+        let rows = rows?;
+        Ok((matches!(rows.as_slice(), [row] if row.count == 1)
+            && tokio::time::Instant::now() < deadline
+            && !changes.moved()
+            && owner.is_current())
+        .then(|| {
+            super::DvrTrialExclusion(super::DvrTrialExclusionKind::Replicated {
+                owner,
+                changes: std::sync::Arc::new(changes),
+            })
+        }))
+    }
+
     async fn list_dvr_rules(&self) -> Result<Vec<DvrRule>, StoreError> {
         self.client()
             .query_consistent_map::<RuleRow, _>(

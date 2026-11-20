@@ -33,10 +33,10 @@
 #[cfg(target_os = "linux")]
 mod playback_trial;
 #[cfg(target_os = "linux")]
-use playback_trial::PlaybackTrialSignal;
+use playback_trial::PlaybackTrialRegistration;
 #[cfg(target_os = "linux")]
 pub(crate) use playback_trial::{
-    CaptureTrialEpoch, PlaybackTrialLane, PlaybackTrialStop, ProtectedPlaybackLane,
+    CaptureTrialProof, PlaybackTrialLane, PlaybackTrialStop, ProtectedPlaybackLane,
     CONSIDER_LOCAL_PLAYBACK_TRIAL,
 };
 
@@ -162,7 +162,7 @@ struct PermitState {
     #[cfg(target_os = "linux")]
     playback_epoch: Arc<AtomicU64>,
     #[cfg(target_os = "linux")]
-    playback_trial: Option<Arc<PlaybackTrialSignal>>,
+    playback_trial: Option<PlaybackTrialRegistration>,
 }
 
 #[derive(Debug, Default)]

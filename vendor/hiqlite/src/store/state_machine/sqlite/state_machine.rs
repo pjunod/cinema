@@ -314,6 +314,57 @@ pub struct StateMachineSqlite {
     pub(crate) write_tx: flume::Sender<WriterRequest>,
 }
 
+fn enforce_read_pool_contract(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    conn.pragma_update(None, "query_only", true)?;
+    // A pooled query cannot turn itself into a writer or leave another
+    // reader on its transaction or attached database. Ordinary queries and
+    // read pragmas still use the same configured connection.
+    conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
+        AuthAction::Pragma {
+            pragma_name,
+            pragma_value: Some(_),
+        } if pragma_name.eq_ignore_ascii_case("query_only") => Authorization::Deny,
+        AuthAction::Attach { .. }
+        | AuthAction::Detach { .. }
+        | AuthAction::Transaction { .. }
+        | AuthAction::Savepoint { .. } => Authorization::Deny,
+        _ => Authorization::Allow,
+    }))
+}
+
+#[cfg(test)]
+#[test]
+fn pooled_reads_cannot_turn_off_query_only_or_leave_transaction_state() {
+    let reader = rusqlite::Connection::open_in_memory().expect("reader");
+    reader
+        .execute_batch("CREATE TABLE test(id INTEGER); INSERT INTO test VALUES(1);")
+        .expect("seed");
+    enforce_read_pool_contract(&reader).expect("read contract");
+    for sql in [
+        "PRAGMA query_only = OFF",
+        "BEGIN",
+        "SAVEPOINT retained",
+        "ATTACH ':memory:' AS extra",
+        "DELETE FROM test",
+    ] {
+        assert!(reader.execute_batch(sql).is_err(), "{sql}");
+    }
+    assert_eq!(
+        reader
+            .query_row("PRAGMA query_only", [], |row| row.get::<_, u32>(0))
+            .expect("read pragma"),
+        1,
+    );
+    assert_eq!(
+        reader
+            .query_row("SELECT id FROM test", [], |row| row.get::<_, u32>(0))
+            .expect("read row"),
+        1,
+    );
+    assert!(reader.is_autocommit());
+}
+
 impl StateMachineSqlite {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
@@ -645,7 +696,7 @@ impl StateMachineSqlite {
 
         // only allow select statements
         if read_only {
-            conn.pragma_update(None, "query_only", true)?;
+            enforce_read_pool_contract(conn)?;
         } else {
             // conn.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
         }

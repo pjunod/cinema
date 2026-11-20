@@ -19,6 +19,85 @@ async fn singleton() -> (tempfile::TempDir, SelectedStore) {
     (directory, selected)
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn normal_replicated_singleton_trial_observes_durable_capture_without_blocking_saves() {
+    startup_observer::run_plural_fixture("singleton-dvr-trial", singleton_dvr_trial);
+}
+
+#[cfg(target_os = "linux")]
+async fn singleton_dvr_trial() {
+    use crate::dvr::{DvrKeepMode, DvrMatchMode, DvrRule};
+    use crate::store::keys;
+
+    let (_directory, selected) = singleton().await;
+    assert_eq!(selected.backend, SelectedBackend::Replicated);
+    let store = &selected.store;
+    let user = store
+        .create_user("dvr-rule-owner", "test-only", true)
+        .await
+        .expect("rule owner");
+    let cutoff = || tokio::time::Instant::now() + Duration::from_secs(5);
+    let original = store
+        .local_dvr_trial_exclusion(cutoff())
+        .await
+        .expect("replicated capture census")
+        .expect("actual clean singleton authority");
+    let invalidation = original.invalidation();
+
+    store
+        .put_settings(&[(keys::DVR_ENABLED, "true")])
+        .await
+        .expect("ordinary Save commits during the trial");
+    assert_eq!(
+        store
+            .get_setting(keys::DVR_ENABLED)
+            .await
+            .expect("saved setting"),
+        Some("true".to_owned())
+    );
+    assert!(original.is_current());
+    assert!(!invalidation.moved());
+
+    let mut rule = DvrRule {
+        id: "future-rule".into(),
+        owner_user_id: user.id,
+        priority: 1,
+        name: "Future programme".into(),
+        match_mode: DvrMatchMode::Title,
+        match_value: "Future programme".into(),
+        channel_id: None,
+        new_only: false,
+        keep_mode: DvrKeepMode::All,
+        keep_value: 0,
+        pad_start_s: 0,
+        pad_end_s: 0,
+        enabled: true,
+        created_at_ms: 1,
+        updated_at_ms: 1,
+    };
+    assert!(store.put_dvr_rule(&rule).await.expect("rule Save commits"));
+    tokio::time::timeout_at(cutoff(), invalidation.changed())
+        .await
+        .expect("applied rule invalidates the original trial");
+    assert!(!original.is_current());
+    drop(original);
+
+    assert!(store
+        .local_dvr_trial_exclusion(cutoff())
+        .await
+        .expect("new census sees durable rule")
+        .is_none());
+    rule.enabled = false;
+    assert!(store.put_dvr_rule(&rule).await.expect("disable exact rule"));
+    assert!(store
+        .local_dvr_trial_exclusion(cutoff())
+        .await
+        .expect("census after disabling")
+        .is_some());
+    selected.shutdown().await.expect("stop real singleton");
+}
+
 fn redemption(token: &crate::cluster::membership::IssuedJoinToken) -> RedeemJoinRequest {
     RedeemJoinRequest {
         token_digest: join_token_digest(&token.token),

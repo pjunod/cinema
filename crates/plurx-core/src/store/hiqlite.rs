@@ -1595,6 +1595,28 @@ impl TimedClient {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    pub(super) fn dvr_trial_watch(&self) -> Option<hiqlite::AppliedWatch> {
+        let applied = self.inner().local_db_applied_mark().ok()?;
+        let [recordings, rules] = super::applied_view::DVR_TRIAL_WATCH_TABLES;
+        let watch = applied.watch(&[applied.slot(recordings)?, applied.slot(rules)?]);
+        watch.trusted().then_some(watch)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) async fn try_hold_local_singleton_write_authority(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<::hiqlite::LocalSingletonWriteAuthority>, StoreError> {
+        if !self.has_local_replica() {
+            return Ok(None);
+        }
+        self.inner()
+            .try_hold_local_singleton_write_authority(deadline)
+            .await
+            .map_err(database_error)
+    }
+
     fn takeover_authority_read_metrics(&self) -> &TakeoverAuthorityReadMetrics {
         #[cfg(test)]
         if let TimedClientInner::InjectedConsistentRead(io) = &self.inner {
@@ -6469,7 +6491,11 @@ impl HiqliteAuthStore {
             // `dvr_recordings` keeps its row when its requester is deleted
             // (ON DELETE SET NULL), so a users-delete does not reach it.
             ("DELETE FROM live_tv_resource_records".to_owned(), params!()),
-            ("DELETE FROM dvr_recordings".to_owned(), params!()),
+            // Keep recorder deletions visible to the applied census watch.
+            (
+                "DELETE FROM dvr_recordings WHERE true".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM items".to_owned(), params!()),
             ("DELETE FROM sharing_delivery_grants".into(), params!()),
             ("DELETE FROM sharing_relay_upstream".into(), params!()),

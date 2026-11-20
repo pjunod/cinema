@@ -981,7 +981,7 @@ impl FiniteSoftwareCompatibility {
 
     pub(crate) fn try_acquire_trial_lane(
         &mut self,
-        capture: crate::admission::CaptureTrialEpoch,
+        capture: crate::admission::CaptureTrialProof,
     ) -> Option<crate::admission::PlaybackTrialStop> {
         let reservation = self.original.as_ref()?.reservation();
         let lane = reservation

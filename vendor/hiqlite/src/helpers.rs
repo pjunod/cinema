@@ -84,8 +84,12 @@ pub async fn add_new_learner(
             if metrics.membership_config.membership().get_node(&node.id) == Some(&node) {
                 return Ok(());
             }
+            let membership = state.raft_db.proposals.try_membership_permit()?;
             redeem_membership_acquisition(state, admission)?;
-            state.raft_db.add_learner(node.id, node, true).await?;
+            state
+                .raft_db
+                .add_learner(node.id, node, true, membership)
+                .await?;
             Ok(())
         }
         #[cfg(feature = "cache")]
@@ -117,6 +121,7 @@ pub async fn change_membership(
     match raft_type {
         #[cfg(feature = "sqlite")]
         RaftType::Sqlite => {
+            let membership = state.raft_db.proposals.try_membership_permit()?;
             let metrics = state.raft_db.raft.metrics().borrow().clone();
             if members.iter().any(|id| {
                 !metrics
@@ -128,7 +133,7 @@ pub async fn change_membership(
             }
             state
                 .raft_db
-                .change_membership(members, retain)
+                .change_membership(members, retain, membership)
                 .await?;
             Ok(())
         }
@@ -215,10 +220,11 @@ pub(crate) async fn remove_learner_with_admission(
     match raft_type {
         #[cfg(feature = "sqlite")]
         RaftType::Sqlite => {
+            let membership = state.raft_db.proposals.try_membership_permit()?;
             redeem_membership_acquisition(state, admission)?;
             state
                 .raft_db
-                .change_membership(ChangeMembers::RemoveNodes(set), false)
+                .change_membership(ChangeMembers::RemoveNodes(set), false, membership)
                 .await?;
             Ok(())
         }
@@ -303,10 +309,11 @@ pub(crate) async fn remove_voter_with_admission(
     match raft_type {
         #[cfg(feature = "sqlite")]
         RaftType::Sqlite => {
+            let membership = state.raft_db.proposals.try_membership_permit()?;
             redeem_membership_acquisition(state, admission)?;
             state
                 .raft_db
-                .change_membership(ChangeMembers::RemoveVoters(set), retain)
+                .change_membership(ChangeMembers::RemoveVoters(set), retain, membership)
                 // .change_membership(ChangeMembers::SetNodes(new_members), retain)
                 .await?;
             Ok(())

@@ -751,7 +751,7 @@ pub(crate) struct CreateRecording {
 }
 
 #[cfg(target_os = "linux")]
-fn capture_commit_protection(
+async fn capture_commit_protection(
     state: &AppState,
 ) -> Result<Option<crate::admission::ProtectedPlaybackLane>, ApiError> {
     if !state.store.has_local_dvr_commit_authority() {
@@ -760,7 +760,8 @@ fn capture_commit_protection(
     state
         .transcode
         .admissions()
-        .try_acquire_protected_playback_lane()
+        .acquire_protected_playback_lane(std::time::Instant::now() + crate::admission::QUEUE_WAIT)
+        .await
         .map(Some)
         .map_err(|reason| ApiError::ServiceUnavailable(reason.into()))
 }
@@ -778,8 +779,8 @@ where
         return write.await.map_err(Into::into);
     };
     protection.arm_physical();
-    // SQLite's blocking transaction can outlive a dropped HTTP observer.
-    // Keep the same guard with the original result, including rollback.
+    // The original write can outlive a dropped HTTP observer. Retain its
+    // local capture epoch guard until the Store returns the result.
     tokio::spawn(async move {
         let result = write.await;
         protection.known_finished();
@@ -837,7 +838,7 @@ pub(crate) async fn create_recording(
     );
     #[cfg(target_os = "linux")]
     let outcome = {
-        let protection = capture_commit_protection(&state)?;
+        let protection = capture_commit_protection(&state).await?;
         let store = state.store.clone();
         let original_row = row.clone();
         run_dvr_write(protection, async move {
@@ -1596,7 +1597,7 @@ pub(crate) async fn restore_recording(
     );
     #[cfg(target_os = "linux")]
     let restored = {
-        let protection = capture_commit_protection(&state)?;
+        let protection = capture_commit_protection(&state).await?;
         let store = state.store.clone();
         let original_id = id.clone();
         run_dvr_write(protection, async move {

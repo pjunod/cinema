@@ -356,23 +356,24 @@ impl DvrStore for SqliteStore {
     }
 
     #[cfg(target_os = "linux")]
-    async fn local_dvr_obligations_clear(&self) -> Result<bool, StoreError> {
-        self.with_read(|conn| {
-            // Disabled settings do not clear existing recordings or rules.
-            // Unknown states block a trial too. These two EXISTS projections
-            // share one SQLite read snapshot and return no inventory payload.
-            Ok(conn.query_row(
-                "SELECT NOT (
-                    EXISTS(SELECT 1 FROM dvr_recordings
-                        WHERE state IS NULL OR state NOT IN
-                            ('done','partial','failed','missed','cancelled','deleted'))
-                    OR EXISTS(SELECT 1 FROM dvr_rules WHERE enabled IS NULL OR enabled != 0)
-                )",
-                [],
-                |row| row.get(0),
-            )?)
-        })
-        .await
+    async fn local_dvr_trial_exclusion(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<crate::store::DvrTrialExclusion>, StoreError> {
+        use crate::store::{DvrTrialExclusion, DvrTrialExclusionKind};
+
+        let snapshot = self.with_read(|conn| {
+            Ok(
+                conn.query_row(crate::store::DVR_TRIAL_OBLIGATIONS_CLEAR_SQL, [], |row| {
+                    row.get::<_, bool>(0)
+                })?,
+            )
+        });
+        let Ok(clear) = tokio::time::timeout_at(deadline, snapshot).await else {
+            return Ok(None);
+        };
+        Ok((clear? && tokio::time::Instant::now() < deadline)
+            .then_some(DvrTrialExclusion(DvrTrialExclusionKind::Sqlite)))
     }
 
     async fn list_dvr_rules(&self) -> Result<Vec<crate::dvr::DvrRule>, StoreError> {
@@ -1555,10 +1556,12 @@ mod catalog_purge_tests {
 
         let store = fixture().await;
         assert!(store.has_local_dvr_commit_authority());
+        let deadline = || tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         assert!(store
-            .local_dvr_obligations_clear()
+            .local_dvr_trial_exclusion(deadline())
             .await
-            .expect("terminal-only state"));
+            .expect("terminal-only state")
+            .is_some());
         for state in DvrState::PENDING
             .iter()
             .copied()
@@ -1575,9 +1578,10 @@ mod catalog_purge_tests {
                 .await
                 .expect("make the original row resumable");
             assert!(!store
-                .local_dvr_obligations_clear()
+                .local_dvr_trial_exclusion(deadline())
                 .await
-                .expect("original recording obligation"));
+                .expect("original recording obligation")
+                .is_some());
         }
         store
             .with_conn(|conn| {
@@ -1615,15 +1619,17 @@ mod catalog_purge_tests {
             .await
             .expect("save a dormant enabled rule"));
         assert!(!store
-            .local_dvr_obligations_clear()
+            .local_dvr_trial_exclusion(deadline())
             .await
-            .expect("enabled rule survives disabled settings"));
+            .expect("enabled rule survives disabled settings")
+            .is_some());
         rule.enabled = false;
         assert!(store.put_dvr_rule(&rule).await.expect("disable exact rule"));
         assert!(store
-            .local_dvr_obligations_clear()
+            .local_dvr_trial_exclusion(deadline())
             .await
-            .expect("no remaining durable capture"));
+            .expect("no remaining durable capture")
+            .is_some());
     }
 
     #[tokio::test]

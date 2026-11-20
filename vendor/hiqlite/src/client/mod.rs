@@ -26,8 +26,9 @@ mod listen_notify;
 mod mgmt;
 #[cfg(feature = "sqlite")]
 pub use mgmt::{
-    DB_LOCAL_READ_PROTOCOL_VERSION, DbQuorumWatermark, LocalDbMembershipSnapshot,
-    LocalDbCoreStop, LocalDbRaftMetrics, LocalDbRaftSnapshot,
+    DB_LOCAL_READ_PROTOCOL_VERSION, DbQuorumWatermark, LocalDbCoreStop, LocalDbMembershipSnapshot,
+    LocalDbRaftMetrics, LocalDbRaftSnapshot, LocalSingletonAuthorityWatch,
+    LocalSingletonWriteAuthority,
 };
 #[cfg(feature = "sqlite")]
 pub(crate) use mgmt::{

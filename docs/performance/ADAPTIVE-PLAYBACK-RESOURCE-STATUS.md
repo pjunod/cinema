@@ -1,6 +1,6 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation active · updated 2026-11-19.
+**Status:** open · implementation active · updated 2026-11-20.
 Draft effort #1248; release qualification and deployment remain open.
 
 [Plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) ·
@@ -11,6 +11,26 @@ Draft effort #1248; release qualification and deployment remain open.
 [attempt root](ADAPTIVE-PLAYBACK-ATTEMPT-ROOT.md) ·
 [retained exit](ADAPTIVE-PLAYBACK-RETAINED-EXIT.md) ·
 [capture](ADAPTIVE-PLAYBACK-CAPTURE-CUSTODY.md).
+
+## 2026-11-20 continuation — singleton capture ordering
+
+The normal embedded Hiqlite route can consider an ordinary finite software
+trial when the local daemon is the sole committed voter and there are no
+learners. The original trial retains the membership admission hold until
+confirmed cleanup or handoff to its surviving, fully charged producer. The
+same original media and output descriptors must prove local noswap tmpfs
+before the contained producer starts.
+
+A single capture census checks durable recording and rule obligations. An
+applied change to either table or to replica authority invalidates that census
+and wakes the original driver. Settings and rule saves can commit while the
+trial drains. Capture entry keeps its original local protection, and a new
+member must wait for the membership hold to clear before it can serve. An
+unknown cleanup result retains the hold.
+
+Multi-member or unproven Hiqlite authority keeps normal conservative
+admission. Singleton runtime acceptance and shared-domain trial authority
+remain open.
 
 ## 2026-11-19 continuation — integrated source, acceptance open
 

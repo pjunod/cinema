@@ -96,6 +96,10 @@ pub const SHARING_WATCH_TABLES: &[&str] = &[
     "sharing_assignments",
 ];
 
+/// Tables that invalidate the finite trial's capture census once applied.
+#[cfg(target_os = "linux")]
+pub(super) const DVR_TRIAL_WATCH_TABLES: [&str; 2] = ["dvr_recordings", "dvr_rules"];
+
 /// Registered tables whose revision moves on a deleted row only: every
 /// active device rewrites its token each minute, and only a removed token
 /// ends a recipient's authority (its idle expiry is a time term).
@@ -103,10 +107,13 @@ pub const APPLIED_MARK_DELETES_ONLY: &[&str] = &["tokens"];
 
 /// Every table the applied mark registers, in slot order.
 pub fn applied_mark_tables() -> impl Iterator<Item = &'static str> {
-    APPLIED_VIEW_TABLES
+    let tables = APPLIED_VIEW_TABLES
         .iter()
         .chain(SHARING_WATCH_TABLES)
-        .copied()
+        .copied();
+    #[cfg(target_os = "linux")]
+    let tables = tables.chain(DVR_TRIAL_WATCH_TABLES);
+    tables
 }
 
 /// A sharing monitor's wait for its next look (A6 M3). Armed before the

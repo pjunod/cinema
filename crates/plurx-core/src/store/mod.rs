@@ -2925,6 +2925,115 @@ pub trait LibraryChannelStore: Send + Sync + 'static {
     ) -> Result<Option<crate::library_channels::LibraryChannelGeneration>, StoreError>;
 }
 
+// Both backends inspect latent and active capture commitments in one snapshot.
+// Unknown states and unknown rule enablement conservatively withhold a trial.
+#[cfg(target_os = "linux")]
+const DVR_TRIAL_OBLIGATIONS_CLEAR_SQL: &str = "SELECT NOT (
+    EXISTS(SELECT 1 FROM dvr_recordings WHERE state IS NULL OR state NOT IN
+        ('done','partial','failed','missed','cancelled','deleted'))
+    OR EXISTS(SELECT 1 FROM dvr_rules WHERE enabled IS NULL OR enabled != 0)
+) AS count";
+
+/// Original database authority retained with a finite trial through its close.
+#[cfg(target_os = "linux")]
+pub struct DvrTrialExclusion(DvrTrialExclusionKind);
+
+#[cfg(target_os = "linux")]
+enum DvrTrialExclusionKind {
+    Sqlite,
+    #[cfg(feature = "hiqlite-store")]
+    Replicated {
+        owner: ::hiqlite::LocalSingletonWriteAuthority,
+        changes: Arc<::hiqlite::AppliedWatch>,
+    },
+}
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Debug for DvrTrialExclusion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DvrTrialExclusion").finish_non_exhaustive()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl DvrTrialExclusion {
+    /// The same boot still owns the database mutation boundary.
+    pub fn is_current(&self) -> bool {
+        match &self.0 {
+            DvrTrialExclusionKind::Sqlite => true,
+            #[cfg(feature = "hiqlite-store")]
+            DvrTrialExclusionKind::Replicated { owner, changes } => {
+                owner.is_current() && !changes.moved()
+            }
+        }
+    }
+
+    /// A non-owning observer for the original trial driver.
+    #[must_use]
+    pub fn invalidation(&self) -> DvrTrialInvalidation {
+        match &self.0 {
+            DvrTrialExclusionKind::Sqlite => DvrTrialInvalidation::default(),
+            #[cfg(feature = "hiqlite-store")]
+            DvrTrialExclusionKind::Replicated { owner, changes } => {
+                DvrTrialInvalidation(Some((owner.watch(), Arc::clone(changes))))
+            }
+        }
+    }
+}
+
+/// Signals durable capture changes or loss of replicated database authority.
+/// This observer retains no authority to hold or release the membership gate.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Default)]
+pub struct DvrTrialInvalidation(
+    #[cfg(feature = "hiqlite-store")]
+    Option<(
+        ::hiqlite::LocalSingletonAuthorityWatch,
+        Arc<::hiqlite::AppliedWatch>,
+    )>,
+);
+
+#[cfg(target_os = "linux")]
+impl DvrTrialInvalidation {
+    #[must_use]
+    pub fn moved(&self) -> bool {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some((membership, changes)) = &self.0 {
+            return !membership.is_current() || changes.moved();
+        }
+        false
+    }
+
+    pub async fn changed(&self) {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some((membership, changes)) = &self.0 {
+            tokio::select! {
+                () = membership.invalidated() => {},
+                () = changes.changed() => {},
+            }
+            return;
+        }
+        std::future::pending::<()>().await;
+    }
+
+    /// The replicated watch's shared allocation and two subscribed revisions.
+    /// The observer and the Arc handle are already in the charged signal.
+    #[must_use]
+    pub fn requested_heap_bytes() -> Option<usize> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let revisions = applied_view::DVR_TRIAL_WATCH_TABLES
+                .len()
+                .checked_mul(std::mem::size_of::<(::hiqlite::AppliedSlot, u64)>())?;
+            std::mem::size_of::<::hiqlite::AppliedWatch>()
+                .checked_add(2 * std::mem::size_of::<usize>())?
+                .checked_add(revisions)
+        }
+        #[cfg(not(feature = "hiqlite-store"))]
+        Some(0)
+    }
+}
+
 /// Recording rules, the airings they and people schedule, and reminders.
 ///
 /// Three habits run through every method here, and each one exists because of
@@ -2941,18 +3050,22 @@ pub trait LibraryChannelStore: Send + Sync + 'static {
 ///   so a 30-second progress write racing a viewer's Stop cannot erase it.
 #[async_trait]
 pub trait DvrStore: Send + Sync + 'static {
-    /// This backend's durable capture writes are owned by one daemon.
-    /// A replicated backend cannot derive this from its current peer count.
+    /// Local capture commits use the serving daemon's protected entry path.
+    /// The backend must separately grant exclusive authority for a trial.
     #[cfg(target_os = "linux")]
     fn has_local_dvr_commit_authority(&self) -> bool {
         false
     }
 
-    /// A single authoritative read of dormant as well as current promises.
-    /// The caller must separately serialize capture commits with its trial.
+    /// Prove the absence of capture obligations while owning the backend's
+    /// relevant writer boundary. The caller retains this through trial close
+    /// and rechecks its local capture epoch before entering physical work.
     #[cfg(target_os = "linux")]
-    async fn local_dvr_obligations_clear(&self) -> Result<bool, StoreError> {
-        Ok(false)
+    async fn local_dvr_trial_exclusion(
+        &self,
+        _deadline: tokio::time::Instant,
+    ) -> Result<Option<DvrTrialExclusion>, StoreError> {
+        Ok(None)
     }
 
     async fn list_dvr_rules(&self) -> Result<Vec<crate::dvr::DvrRule>, StoreError>;
