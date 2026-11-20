@@ -221,6 +221,32 @@ pub(super) async fn master_playlist_response_local_before(
     let context =
         exact_hls_context_before(state, session, context, &owner, playlist_deadline).await?;
     let deadline = response_publication_deadline_before(request_deadline);
+    let native_split = if query.diagnostic.is_none() {
+        state
+            .transcode
+            .native_split_master(session, playlist_deadline)
+            .await
+    } else {
+        None
+    };
+    if let Some(ids) = native_split {
+        let bytes = native_split_master_text(&file, &context, &ids);
+        let bytes = continuous_master_with_subtitles(bytes, &file, query.subtitle)
+            .map_err(ApiError::Internal)?;
+        return complete_buffered_response_before(
+            state,
+            session,
+            &owner,
+            crate::transcode::MediaResponsePublication::attempt_media(
+                "master-playlist",
+                Some("master.m3u8"),
+            ),
+            true,
+            playlist_response(bytes),
+            deadline,
+        )
+        .await;
+    }
     // Apple's multivariant eligibility check rejects UHD Blu-ray-style HEVC
     // High-tier declarations before VideoToolbox sees bytes it can decode.
     // With no native text renditions, the wrapper buys this session nothing:

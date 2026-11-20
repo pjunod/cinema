@@ -1229,6 +1229,15 @@ impl TranscodeManager {
                     req.audio_delivery.as_ref(),
                     req.retain_output,
                     req.source_telemetry == Some(crate::transcode::SourceTelemetry::FilmV1),
+                    cfg!(target_os = "linux")
+                        && req.transport.as_deref() == Some("native")
+                        && req.automatic
+                        && req
+                            .candidate_context
+                            .as_deref()
+                            .and_then(|context| context.canonical_caps.as_ref())
+                            .and_then(|caps| caps.hls_hevc_sample_entries.as_ref())
+                            .is_some_and(|entries| entries.iter().any(|entry| entry == "hev1")),
                     plan,
                 )
                 .await

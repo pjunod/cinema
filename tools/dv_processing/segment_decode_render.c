@@ -486,6 +486,10 @@ static void inspect_coded(AVPacket *packet) {
   // Their Dolby metadata does not describe any picture this window emits.
   if (compare_window(packet->pts, window_end) >= 0)
     return;
+  const int in_window = compare_window(packet->pts, window_start) >= 0;
+  struct AVSHA *base_sha = in_window ? av_sha_alloc() : NULL;
+  need(!in_window || (base_sha && av_sha_init(base_sha, 256) == 0),
+       "base-layer source witness SHA256");
   int bl = 0, el = 0, rpu = 0;
   size_t at = 0;
   const uint8_t *rpu_bytes = NULL;
@@ -504,6 +508,10 @@ static void inspect_coded(AVPacket *packet) {
     if (type < 32) {
       need(n >= 3, "base slice header");
       bl += (p[2] & 128) != 0;
+      // The live P8 copy preserves these base-layer VCL units verbatim.
+      // Include each original four-byte length so boundaries are unambiguous.
+      if (base_sha)
+        av_sha_update(base_sha, p - 4, (size_t)n + 4);
     }
     if (type == 63) {
       need(n >= 4, "enhancement wrapper");
@@ -525,8 +533,7 @@ static void inspect_coded(AVPacket *packet) {
   need(bl == 1 && rpu == 1 &&
            (base_only ? (source_profile == 7 ? el <= 1 : el == 0) : el == 1),
        "one required source picture and fresh RPU per coded AU");
-  if (compare_window(packet->pts, window_start) >= 0 &&
-      compare_window(packet->pts, window_end) < 0) {
+  if (in_window) {
     need(coded_count < (unsigned)frame_cap && coded_count < 64,
          "coded window frame cap exhausted");
     for (unsigned i = 0; i < coded_count; i++)
@@ -536,10 +543,17 @@ static void inspect_coded(AVPacket *packet) {
     input->duration = packet->duration;
     hash_bytes(packet->data, packet->size, input->packet_sha);
     hash_bytes(rpu_bytes, rpu_len, input->rpu_sha);
+    uint8_t base_digest[32];
+    char base_hex[65];
+    av_sha_final(base_sha, base_digest);
+    av_free(base_sha);
+    for (int i = 0; i < 32; i++)
+      snprintf(base_hex + 2 * i, 3, "%02x", base_digest[i]);
     printf("{\"kind\":\"coded_window_input\",\"pts_ticks\":%lld,\"duration_"
-           "ticks\":%lld,\"packet_sha256\":\"%s\",\"rpu_sha256\":\"%s\"}\n",
+           "ticks\":%lld,\"packet_sha256\":\"%s\",\"rpu_sha256\":\"%s\","
+           "\"base_vcl_sha256\":\"%s\"}\n",
            (long long)input->pts, (long long)input->duration, input->packet_sha,
-           input->rpu_sha);
+           input->rpu_sha, base_hex);
   }
 }
 static void render_pairs(void) {
