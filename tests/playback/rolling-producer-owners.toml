@@ -4371,7 +4371,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 103
+# The Linux FEL evidence test runs one command site with /bin/true or
+# /bin/false. ProducerSlot owns it through exit and writer settlement.
+expected_occurrences = 104
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6629,7 +6631,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Union at 0d501cae6: 349 + 13 + 3 = 365, less those 3 counted twice = 362; the spool
 # registration test adds one isolated test image: 363.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 368
+# The Linux FEL evidence test runs one command site with /bin/true or
+# /bin/false. ProducerSlot owns it through exit and writer settlement.
+expected_occurrences = 369
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7376,7 +7380,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # All seven matches inspect HTTP replies and launch no processes.
 # Removing the retired parser-floor refusal drops one HTTP status read.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 955
+# The Linux FEL evidence test runs one command site with /bin/true or
+# /bin/false. ProducerSlot owns it through exit and writer settlement.
+expected_occurrences = 956
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7948,7 +7954,9 @@ pattern = "kill_on_drop\\s*\\("
 # Union at 0d501cae6: 126 + 2 + 1 = 129, less 1 counted twice = 128; the spool
 # registration test adds one: 129.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 132
+# The Linux FEL evidence test runs one command site with /bin/true or
+# /bin/false. ProducerSlot owns it through exit and writer settlement.
+expected_occurrences = 133
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
