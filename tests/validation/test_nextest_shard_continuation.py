@@ -272,3 +272,47 @@ class NextestShardContinuationTests(unittest.TestCase):
         for candidate,row,changed in cases:
             with self.subTest(candidate=candidate,changed=changed),self.assertRaises(r.ReceiptError):
                 proof.compile_only_none(candidate,row,before,changed)
+
+    def ignored_source(self):
+        return (b'async fn measured_landing() -> u64 {\n    1\n}\n'
+                b'#[tokio::test]\n#[ignore = "physical inputs required"]\n'
+                b'async fn real_fitted_index_and_seek_publish_stored_curves() {\n'
+                b'    measured_landing().await;\n}\n'
+                b'fn ordinary() {\n    assert!(true);\n}\n')
+
+    def test_ignored_compile_only_projection_preserves_every_selected_source_byte_and_ignore(self):
+        before=self.ignored_source();after=before.replace(b'    1\n',b'    2\n')
+        self.assertEqual(proof.ignored_source_projection(before),proof.ignored_source_projection(after))
+        for changed in (after.replace(b'#[ignore = "physical inputs required"]\n',b''),
+                        after.replace(b'assert!(true)',b'assert!(false)'),
+                        after+b'fn outside() { measured_landing(); }\n'):
+            with self.subTest(changed=changed):
+                try:projection=proof.ignored_source_projection(changed)
+                except r.ReceiptError:continue
+                self.assertNotEqual(proof.ignored_source_projection(before),projection)
+
+    def test_ignored_compile_only_witness_requires_sealed_original_metadata_and_unselected_status(self):
+        import base64
+        binary,name=proof.IGNORED_COMPILE_ID.split(' ',1)
+        for ignored,included,forged in [(True,False,False),(False,False,False),(True,True,False),(True,False,True)]:
+            listing=self.listing({name:ignored,'green':False});raw=json.dumps(listing).encode()
+            digest=proof.retention.digest(raw)
+            envelope={'sha256':digest,'base64':base64.b64encode(raw+(b' ' if forged else b'')).decode()}
+            witness={'affected':[],'compile_only':{'kind':'ignored-test-only','test':proof.IGNORED_COMPILE_ID,'prior_listing':envelope}}
+            universe={binary+' green'}|({proof.IGNORED_COMPILE_ID} if included else set())
+            with patch.object(proof,'PRIOR_LISTING_SHA256',digest):
+                if ignored and not included and not forged:
+                    proof.compile_only_ignored(proof.IGNORED_COMPILE_PATH,witness,self.ignored_source(),self.ignored_source(),universe)
+                else:
+                    with self.subTest(ignored=ignored,included=included,forged=forged),self.assertRaises(r.ReceiptError):
+                        proof.compile_only_ignored(proof.IGNORED_COMPILE_PATH,witness,self.ignored_source(),self.ignored_source(),universe)
+
+    def test_current_listing_cannot_promote_the_compile_only_ignored_case_into_runtime_coverage(self):
+        binary,name=proof.IGNORED_COMPILE_ID.split(' ',1)
+        record={'selected':['plurxd'],'universe':[binary+' green'],'serial_ids':[],
+                'retained_ids':[binary+' green'],'compile_only_ignored_ids':[proof.IGNORED_COMPILE_ID]}
+        config=type('Config',(),{'serial_ignored':{}})()
+        current,due,_=proof.current_census(record,self.listing({'green':False,name:True}),config)
+        self.assertEqual(current,{binary+' green'});self.assertEqual(due,set())
+        with self.assertRaises(r.ReceiptError):
+            proof.current_census(record,self.listing({'green':False,name:False}),config)

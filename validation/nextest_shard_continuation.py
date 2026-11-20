@@ -6,6 +6,7 @@ nextest process isolation; no nextest result is relabelled as Cargo/libtest.
 """
 from __future__ import annotations
 
+import base64
 import io
 import hashlib
 import json
@@ -194,6 +195,55 @@ def compile_only_none(path, witness, before, after):
               'Compile-only witness changes more than one literal None initializer')
 
 
+IGNORED_COMPILE_PATH = 'crates/plurxd/src/fragindex/refit_acceptance_tests.rs'
+IGNORED_COMPILE_ID = 'plurxd::bin/plurxd fragindex::refit_acceptance_tests::real_fitted_index_and_seek_publish_stored_curves'
+# Actual metadata-only list of authenticated original archive12386, pinned
+# nextest0.9.151/image/Rust1.97.1 on qualified Linux5.15, zero test bodies.
+PRIOR_LISTING_SHA256 = 'f6caa6f7b81d1ab9500358bae8b4867a86f4273664a1017aea0ac3301bbe8abd'
+
+
+def ignored_source_projection(raw):
+    r.require(raw is not None, 'Missing original ignored-only source')
+    text = raw.decode()
+    r.require(re.search(r'(?m)^#\[ignore = "[^"\n]+"\]\nasync fn real_fitted_index_and_seek_publish_stored_curves\(', text),
+              'Physical acceptance test is no longer explicitly ignored')
+    for name in ('measured_landing', 'real_fitted_index_and_seek_publish_stored_curves'):
+        pattern = r'(?ms)^(?:async )?fn ' + name + r'\b.*?^}\r?\n'
+        matches = list(re.finditer(pattern, text))
+        r.require(len(matches) == 1, 'Ambiguous ignored-only top-level function')
+        text = re.sub(pattern, '/* isolated ignored-only function: ' + name + ' */\n', text)
+    r.require(not re.search(r'\bmeasured_landing\b', text.replace('/* isolated ignored-only function: measured_landing */', '')),
+              'Ignored helper has a caller outside the ignored test')
+    return text
+
+
+def compile_only_ignored(path, witness, before, after, universe):
+    item = witness.get('compile_only')
+    r.require(path == IGNORED_COMPILE_PATH and witness['affected'] == []
+              and isinstance(item, dict) and set(item) == {'kind', 'test', 'prior_listing'}
+              and item['kind'] == 'ignored-test-only' and item['test'] == IGNORED_COMPILE_ID
+              and IGNORED_COMPILE_ID not in universe,
+              'Unknown ignored-only empty impact witness')
+    envelope = item['prior_listing']
+    r.require(isinstance(envelope, dict) and set(envelope) == {'sha256', 'base64'}
+              and envelope['sha256'] == PRIOR_LISTING_SHA256
+              and isinstance(envelope['base64'], str) and len(envelope['base64']) <= r.MAX_BYTES,
+              'Missing sealed original full nextest discovery')
+    raw = base64.b64decode(envelope['base64'], validate=True)
+    r.require(retention.digest(raw) == PRIOR_LISTING_SHA256, 'Original full nextest discovery changed')
+    listing = r.bounded_json(raw)
+    binary, name = IGNORED_COMPILE_ID.split(' ', 1)
+    case = listing['rust-suites'][binary]['testcases'][name]
+    r.require(case.get('ignored') is True, 'Original physical test was not ignored')
+    suites = units.nextest_suites(listing)
+    ordinary = {b + ' ' + n for b, cases in suites.items() for n, ignored in cases.items() if not ignored}
+    r.require(ordinary <= universe and all(b + ' ' + n in universe or ignored
+              for b, cases in suites.items() for n, ignored in cases.items()),
+              'Original compiled listing contradicts selected body census')
+    r.require(ignored_source_projection(before) == ignored_source_projection(after),
+              'Empty ignored witness changes selected source outside its isolated functions')
+
+
 def reviewed_changes(record, candidate, universe):
     prior = r.sha(record['prior'])
     changes = record['changes']
@@ -225,7 +275,10 @@ def reviewed_changes(record, candidate, universe):
                   and set(affected) <= universe, 'Unknown nextest affected body')
         r.require(path not in TEST_INPUTS or bool(affected), 'Changed test input has no affected bodies')
         if 'compile_only' in witness:
-            compile_only_none(path, witness, before, after)
+            if witness['compile_only'].get('kind') == 'ignored-test-only':
+                compile_only_ignored(path, witness, before, after, universe)
+            else:
+                compile_only_none(path, witness, before, after)
         else:
             r.require(path not in RUNTIME_INPUTS or bool(affected) or not path.startswith('crates/'),
                       'Changed Rust runtime input has no affected bodies')
@@ -363,7 +416,9 @@ def authenticate(api, record, binding, candidate, repository, *, current_run=Non
             'selection_projection': current['projection'], 'selected': sorted(selected), 'universe': sorted(universe), 'retained_ids': retained,
             'must_pass_ids': sorted(universe - set(retained)),
             'serial_ids': sorted(test for row in plan['crates'].values() for test in row['serial']),
-            'outcomes': outcomes, 'root_ownership_passed': False}
+            'outcomes': outcomes, 'root_ownership_passed': False,
+            'compile_only_ignored_ids': [IGNORED_COMPILE_ID] if any(
+                row.get('compile_only', {}).get('kind') == 'ignored-test-only' for row in record['changes'].values()) else []}
 
 
 
@@ -400,6 +455,12 @@ def current_census(proof, listing, config):
         serial.update(ignored)
     r.require(set(proof['universe']) <= current and set(proof['serial_ids']) == serial,
               'Historical body disappeared, became ignored, or changed serial contract')
+    for identity in proof.get('compile_only_ignored_ids', []):
+        binary, name = identity.split(' ', 1)
+        case = listing['rust-suites'].get(binary, {}).get('testcases', {}).get(name, {})
+        r.require(identity == IGNORED_COMPILE_ID and case.get('ignored') is True
+                  and identity not in current and identity not in serial,
+                  'Compile-only physical test entered current selected or serial bodies')
     retained = set(proof['retained_ids'])
     r.require(retained <= current, 'Retained nextest body disappeared')
     return current, current - retained, serial
