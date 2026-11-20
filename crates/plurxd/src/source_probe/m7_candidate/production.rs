@@ -1,5 +1,6 @@
 //! Held NP1 baseline, ROI controls, encode and author/readback.
 
+use super::journal::{self, AuthoredProof, Binding, EncodeProof, GateProof, Intent, Journal};
 use super::{
     hash, EncoderGrid, FrozenRecipe, Hash, RateAttempt, RateDecision, RateStop, Region, RoiControl,
     FRAMES, MAX_ENCODED_BYTES,
@@ -24,7 +25,9 @@ use plurx_core::{
         source_lifetime::{self, ArgumentProfile},
         ChildWork,
     },
+    store::dv_m7_attempts::{M7CandidateIntent, M7CandidateReservation},
     transcode::{
+        dv_m7_receipt::M7SourceProbe,
         dv_m7_scoring::capture::{
             AuthoringFrameBinding, CaptureLayout, CaptureRole, FrameEvidence,
         },
@@ -39,6 +42,7 @@ use std::{
     io::{Read, Write},
     os::fd::AsRawFd,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 use tempfile::TempDir;
@@ -69,6 +73,8 @@ pub(in crate::source_probe) enum PrepareError {
     RateInconclusive(RateStop),
     #[error("NP1 actual authored video packet rate missed the frozen band")]
     ActualRate,
+    #[error("NP1 candidate slot {slot} was consumed without a recoverable verified result")]
+    IncompleteAttempt { slot: u8 },
 }
 
 type Result<T> = std::result::Result<T, PrepareError>;
@@ -102,6 +108,7 @@ pub(in crate::source_probe) async fn prepare_authored(
     planes: PreparedPlanes,
     source_dv_level: u8,
     scratch: &TempDir,
+    trial_directory: &Path,
     cancel: &CancellationToken,
 ) -> Result<AuthoredClip> {
     let grid = recipe.encoder_grid();
@@ -140,22 +147,65 @@ pub(in crate::source_probe) async fn prepare_authored(
         return Err(PrepareError::Authority("encoder tools moved"));
     }
 
-    let baseline = baseline(context, &ffmpeg, recipe, &planes, scratch).await?;
+    let scope = super::super::m7_title::candidate_scope(context, title);
+    let probe = M7SourceProbe::from_probe_json(&context.demand.probe_json).map_err(execution)?;
+    let mut ledger = context
+        .fence
+        .m7_candidate_slots(&probe, &scope)
+        .await
+        .map_err(execution)?
+        .ok_or(PrepareError::Authority(
+            "live replicated candidate protocol anchor",
+        ))?;
+    if ledger.source_sha256 != frozen.source_sha256
+        || ledger.protocol_sha256 != frozen.protocol_sha256
+        || ledger.recipe_sha256 != frozen.recipe_sha256
+        || ledger.maximum_attempts != recipe.rate.maximum_attempts
+    {
+        return if ledger.slots.is_empty() {
+            Err(PrepareError::Authority(
+                "replicated candidate anchor differs",
+            ))
+        } else {
+            Err(PrepareError::IncompleteAttempt { slot: 0 })
+        };
+    }
+    if ledger.slots.len() > usize::from(recipe.rate.maximum_attempts) {
+        return Err(PrepareError::Authority(
+            "replicated attempt count exceeds frozen cap",
+        ));
+    }
+    let journal = blocking({
+        let path = trial_directory.to_owned();
+        let source = frozen.source_sha256;
+        let protocol = frozen.protocol_sha256;
+        move || {
+            Journal::open(&path, source, protocol)
+                .map(Arc::new)
+                .map_err(journal_error)
+        }
+    })
+    .await?;
+
     let source_rpus: Vec<_> = planes
         .frames
         .iter()
         .map(|row| row.source_rpu.clone())
         .collect();
     let package_sha = package_identity(&planes)?;
-    let mut gates = Sha256::new();
-    gates.update(b"plurx.m7.np1.verified-controls.v1\0");
-    gates.update(package_sha);
-    gates.update(recipe.recipe_sha256());
-    gates.update(parse_hash(&ffmpeg.digest)?);
-    gates.update(mux_sha);
-    gates.update(baseline.closure);
-    gates.update(baseline.receipt_sha);
-
+    let local_binding = Binding {
+        source: frozen.source_sha256,
+        probe: frozen.probe_sha256,
+        protocol: frozen.protocol_sha256,
+        recipe: frozen.recipe_sha256,
+        package: package_sha,
+        bundle: parse_hash(&context.tools.backend_digest())?,
+        muxer: mux_sha,
+        ffmpeg: parse_hash(&ffmpeg.digest)?,
+        source_generation: hash(title.source.object_version().as_bytes()),
+        source_dv_level,
+        maximum_attempts: recipe.rate.maximum_attempts,
+    };
     let runner = EncoderRun {
         context,
         ffmpeg: &ffmpeg,
@@ -167,46 +217,125 @@ pub(in crate::source_probe) async fn prepare_authored(
         scratch,
         cancel,
     };
-    for control in [RoiControl::None, RoiControl::Zero] {
-        let gated = runner
-            .run(recipe.rate.initial_target_kbps, control, [0; 32])
-            .await?;
-        if gated.closure != baseline.closure
-            || gated.packets != baseline.packets
-            || gated.trace_configuration != baseline.trace_configuration
-        {
-            return Err(PrepareError::Authority(
-                "independent same-input elementary stream control",
-            ));
+    let recorded = blocking({
+        let journal = Arc::clone(&journal);
+        move || journal.gate(local_binding).map_err(journal_error)
+    })
+    .await;
+    let gate = match (recorded, ledger.slots.is_empty()) {
+        (Ok(Some(proof)), _) => proof,
+        (Ok(None) | Err(PrepareError::Authority(_)), false) => {
+            return Err(PrepareError::IncompleteAttempt { slot: 0 });
         }
-        gates.update(gated.receipt_sha);
-    }
-    let gate_sha = gates.finalize().into();
-    let closure = baseline.closure;
-    drop(baseline);
+        (Ok(None), true) => {
+            check_publish(context, title, cancel).await?;
+            let gate = runner.verify_controls(local_binding).await?;
+            check_publish(context, title, cancel).await?;
+            blocking({
+                let journal = Arc::clone(&journal);
+                let gate = gate.clone();
+                let allowed = active(context, cancel);
+                move || {
+                    journal
+                        .save_gate(local_binding, &gate, allowed)
+                        .map_err(journal_error)
+                }
+            })
+            .await?;
+            gate
+        }
+        (Err(error), _) => return Err(error),
+    };
+    let gate_sha = gate.identity();
+    let closure = gate.closure;
     let mut attempts = Vec::new();
     let mut candidate = None;
     loop {
         check_cancel(cancel)?;
         match recipe.rate_decision(&attempts).map_err(execution)? {
             RateDecision::Encode(target) => {
-                let encoded = runner.run(target, RoiControl::Candidate, gate_sha).await?;
-                if encoded.closure != closure {
-                    return Err(PrepareError::Authority("linked encode closure changed"));
-                }
+                let slot = attempts.len() as u8;
+                let intent = Intent::new(local_binding, gate_sha, closure, slot, target);
+                let replicated = M7CandidateIntent {
+                    source_sha256: frozen.source_sha256,
+                    protocol_sha256: frozen.protocol_sha256,
+                    recipe_sha256: frozen.recipe_sha256,
+                    binding_sha256: intent.identity(),
+                    slot,
+                    target_kbps: target,
+                    maximum_attempts: recipe.rate.maximum_attempts,
+                };
+                let encoded = if slot_route(&ledger.slots, &replicated)? == SlotRoute::Reuse {
+                    let journal = Arc::clone(&journal);
+                    let raster = planes.layout.raster;
+                    blocking(move || restore_encoded(&journal, intent, grid, raster)).await?
+                } else {
+                    // Capacity/preemption before reservation consumes nothing.
+                    // Once committed, a lost reply or crash cannot authorize
+                    // this slot again, even if there are no local files.
+                    blocking({
+                        let journal = Arc::clone(&journal);
+                        move || journal.admit_bytes().map_err(journal_error)
+                    })
+                    .await?;
+                    check_publish(context, title, cancel).await?;
+                    match context
+                        .fence
+                        .reserve_m7_candidate_slot(&probe, &scope, replicated.clone())
+                        .await
+                        .map_err(execution)?
+                    {
+                        M7CandidateReservation::Reserved => ledger.slots.push(replicated),
+                        M7CandidateReservation::AlreadyConsumed => {
+                            return Err(PrepareError::Authority(
+                                "concurrent replicated slot reservation",
+                            ));
+                        }
+                        M7CandidateReservation::Fenced => return Err(PrepareError::Cancelled),
+                        M7CandidateReservation::Conflict => {
+                            return Err(PrepareError::IncompleteAttempt { slot });
+                        }
+                    }
+                    blocking({
+                        let journal = Arc::clone(&journal);
+                        let allowed = active(context, cancel);
+                        move || journal.begin(intent, allowed).map_err(journal_error)
+                    })
+                    .await?;
+                    check_publish(context, title, cancel).await?;
+                    let encoded = runner.run(target, RoiControl::Candidate, gate_sha).await?;
+                    if encoded.closure != closure {
+                        return Err(PrepareError::IncompleteAttempt { slot });
+                    }
+                    check_publish(context, title, cancel).await?;
+                    blocking({
+                        let journal = Arc::clone(&journal);
+                        let allowed = active(context, cancel);
+                        move || seal_encoded(&journal, intent, encoded, allowed)
+                    })
+                    .await?
+                };
                 attempts.push(RateAttempt {
                     target_kbps: target,
                     encoded_video_packet_bytes: encoded.packets.payload_bytes,
                 });
-                candidate = Some(encoded);
+                candidate = Some((intent, encoded));
             }
             RateDecision::Inconclusive(reason) => {
                 return Err(PrepareError::RateInconclusive(reason))
             }
-            RateDecision::PredictedInBand { .. } => break,
+            RateDecision::PredictedInBand { .. } => {
+                if attempts.len() < ledger.slots.len() {
+                    return Err(PrepareError::IncompleteAttempt {
+                        slot: attempts.len() as u8,
+                    });
+                }
+                break;
+            }
         }
     }
-    let candidate = candidate.ok_or(PrepareError::Authority("completed encoded candidate"))?;
+    let (intent, candidate) =
+        candidate.ok_or(PrepareError::Authority("completed encoded candidate"))?;
     let encoded_sha = hash(&candidate.bytes);
     let encoded_vcl_sha256: Vec<_> = candidate
         .packets
@@ -217,26 +346,43 @@ pub(in crate::source_probe) async fn prepare_authored(
     let raster = planes.layout.raster;
     let encoded = candidate.bytes;
     let stop = cancel.clone();
-    let (authored, packets) = blocking(move || {
-        check_cancel(&stop)?;
-        let authored = dv_author_profile81_window(
-            &encoded,
-            (u32::from(raster[0]), u32::from(raster[1])),
-            grid.timescale,
-            0,
-            grid.frame_ticks,
-            &source_rpus,
-            source_dv_level,
-        )
-        .map_err(execution)?;
-        let packets = packet_book(&authored, grid, raster, true, Some(&source_rpus))?;
-        check_cancel(&stop)?;
-        Ok((authored, packets))
+    let (recovered, authored, packets) = blocking({
+        let journal = Arc::clone(&journal);
+        move || {
+            check_cancel(&stop)?;
+            let recovered = journal
+                .authored(intent, encoded_sha)
+                .map_err(journal_error)?;
+            let (proof, authored) = match recovered {
+                Some((proof, bytes)) => (Some(proof), bytes),
+                None => (
+                    None,
+                    dv_author_profile81_window(
+                        &encoded,
+                        (u32::from(raster[0]), u32::from(raster[1])),
+                        grid.timescale,
+                        0,
+                        grid.frame_ticks,
+                        &source_rpus,
+                        source_dv_level,
+                    )
+                    .map_err(execution)?,
+                ),
+            };
+            let packets = packet_book(&authored, grid, raster, true, Some(&source_rpus)).map_err(
+                |error| {
+                    if proof.is_some() {
+                        PrepareError::IncompleteAttempt { slot: intent.slot }
+                    } else {
+                        error
+                    }
+                },
+            )?;
+            check_cancel(&stop)?;
+            Ok((proof, authored, packets))
+        }
     })
     .await?;
-    if !recipe.authored_rate_in_band(packets.payload_bytes) {
-        return Err(PrepareError::ActualRate);
-    }
     if !packets
         .packets
         .iter()
@@ -249,6 +395,7 @@ pub(in crate::source_probe) async fn prepare_authored(
     }
 
     let authored_sha256 = hash(&authored);
+    let authored_extent = authored.len() as u64;
     let authored_dir = tempfile::tempdir_in(scratch.path()).map_err(execution)?;
     let authored_path = authored_dir.path().join("authored.mp4");
     let source = owned_file(authored_path.clone(), authored).await?;
@@ -321,6 +468,7 @@ pub(in crate::source_probe) async fn prepare_authored(
         closure,
         gate_sha,
         candidate.receipt_sha,
+        intent.identity(),
         encoded_sha,
         authored_sha256,
     ] {
@@ -351,6 +499,36 @@ pub(in crate::source_probe) async fn prepare_authored(
             "source or encoder changed before authored custody",
         ));
     }
+    let proof = AuthoredProof {
+        intent,
+        encoded_mp4_sha: encoded_sha,
+        authored_mp4_sha: authored_sha256,
+        extent: authored_extent,
+        authored_payload_bytes: packets.payload_bytes,
+        packet_census: packet_identity(&packets),
+        receipt_sha: receipt.finalize().into(),
+    };
+    match recovered {
+        Some(saved) if saved == proof => {}
+        Some(_) => return Err(PrepareError::IncompleteAttempt { slot: intent.slot }),
+        None => {
+            check_publish(context, title, cancel).await?;
+            blocking({
+                let journal = Arc::clone(&journal);
+                let allowed = active(context, cancel);
+                move || {
+                    let bytes = read_owned(&authored_path, MAX_ENCODED_BYTES)?;
+                    journal
+                        .seal_authored(&proof, &bytes, allowed)
+                        .map_err(journal_error)
+                }
+            })
+            .await?;
+        }
+    }
+    if !recipe.authored_rate_in_band(packets.payload_bytes) {
+        return Err(PrepareError::ActualRate);
+    }
     // Keep the named private clip under the caller's scratch until comparison
     // and its child reaps finish. Removing the link changes SourceFence.
     let _ = authored_dir.keep();
@@ -365,7 +543,7 @@ pub(in crate::source_probe) async fn prepare_authored(
         encoder_sha256: mux_sha,
         encoded_sha256: encoded_sha,
         authored_sha256,
-        authoring_receipt_sha256: receipt.finalize().into(),
+        authoring_receipt_sha256: proof.receipt_sha,
     })
 }
 
@@ -382,6 +560,33 @@ struct EncoderRun<'a, 'b> {
 }
 
 impl EncoderRun<'_, '_> {
+    async fn verify_controls(&self, binding: Binding) -> Result<GateProof> {
+        let baseline = baseline(
+            self.context,
+            self.ffmpeg,
+            self.recipe,
+            self.planes,
+            self.scratch,
+        )
+        .await?;
+        let target = self.recipe.rate.initial_target_kbps;
+        let none = self.run(target, RoiControl::None, [0; 32]).await?;
+        verify_control(&baseline, &none)?;
+        let none_receipt = none.receipt_sha;
+        drop(none);
+        let zero = self.run(target, RoiControl::Zero, [0; 32]).await?;
+        verify_control(&baseline, &zero)?;
+        Ok(GateProof {
+            binding: binding.identity(),
+            closure: baseline.closure,
+            baseline_receipt: baseline.receipt_sha,
+            none_receipt,
+            zero_receipt: zero.receipt_sha,
+            elementary: packet_identity(&baseline.packets),
+            trace_configuration: baseline.trace_configuration,
+        })
+    }
+
     async fn run(
         &self,
         target: u32,
@@ -461,6 +666,161 @@ impl EncoderRun<'_, '_> {
             trace_configuration,
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SlotRoute {
+    Reuse,
+    Launch,
+}
+
+fn slot_route(held: &[M7CandidateIntent], proposal: &M7CandidateIntent) -> Result<SlotRoute> {
+    let slot = usize::from(proposal.slot);
+    if proposal.slot >= proposal.maximum_attempts || slot > held.len() {
+        return Err(PrepareError::IncompleteAttempt {
+            slot: proposal.slot,
+        });
+    }
+    match held.get(slot) {
+        Some(expected) if expected == proposal => Ok(SlotRoute::Reuse),
+        Some(_) => Err(PrepareError::IncompleteAttempt {
+            slot: proposal.slot,
+        }),
+        None => Ok(SlotRoute::Launch),
+    }
+}
+
+fn verify_control(baseline: &CompletedEncode, control: &CompletedEncode) -> Result<()> {
+    if control.closure != baseline.closure
+        || control.packets != baseline.packets
+        || control.trace_configuration != baseline.trace_configuration
+    {
+        return Err(PrepareError::Authority(
+            "independent same-input elementary stream control",
+        ));
+    }
+    Ok(())
+}
+
+fn packet_identity(packets: &PacketBook) -> Hash {
+    let mut digest = Sha256::new();
+    digest.update(b"plurx.m7.np1.packet-census.v1\0");
+    digest.update(packets.payload_bytes.to_le_bytes());
+    for packet in &packets.packets {
+        let frame = packet.evidence;
+        digest.update(frame.ordinal.to_le_bytes());
+        digest.update(frame.pts.to_le_bytes());
+        digest.update(frame.duration.to_le_bytes());
+        digest.update(frame.time_base.numerator().to_le_bytes());
+        digest.update(frame.time_base.denominator().to_le_bytes());
+        digest.update(frame.access_unit_sha256);
+        digest.update(frame.rpu_sha256);
+        digest.update(frame.bl_vcl_sha256);
+        digest.update(packet.size.to_le_bytes());
+        digest.update([packet.sync as u8]);
+    }
+    digest.finalize().into()
+}
+
+fn restore_encoded(
+    journal: &Journal,
+    intent: Intent,
+    grid: EncoderGrid,
+    raster: [u16; 2],
+) -> Result<CompletedEncode> {
+    let recovered = journal.recover(intent).map_err(journal_error)?;
+    let packets = packet_book(&recovered.bytes, grid, raster, false, None)
+        .map_err(|_| PrepareError::IncompleteAttempt { slot: intent.slot })?;
+    if recovered.proof.packet_census != packet_identity(&packets)
+        || recovered.proof.encoded_payload_bytes != packets.payload_bytes
+    {
+        return Err(PrepareError::IncompleteAttempt { slot: intent.slot });
+    }
+    Ok(CompletedEncode {
+        bytes: recovered.bytes,
+        packets,
+        closure: intent.closure,
+        receipt_sha: recovered.proof.receipt_sha,
+        trace_configuration: recovered.proof.trace_configuration,
+    })
+}
+
+fn seal_encoded(
+    journal: &Journal,
+    intent: Intent,
+    encoded: CompletedEncode,
+    allowed: impl Fn() -> bool,
+) -> Result<CompletedEncode> {
+    let proof = EncodeProof {
+        intent,
+        extent: encoded.bytes.len() as u64,
+        mp4_sha: hash(&encoded.bytes),
+        encoded_payload_bytes: encoded.packets.payload_bytes,
+        receipt_sha: encoded.receipt_sha,
+        packet_census: packet_identity(&encoded.packets),
+        trace_configuration: encoded.trace_configuration.clone(),
+    };
+    journal
+        .seal_encoded(&proof, &encoded.bytes, allowed)
+        .map_err(journal_error)?;
+    Ok(encoded)
+}
+
+fn active(
+    context: &TitleContext<'_>,
+    cancel: &CancellationToken,
+) -> impl Fn() -> bool + Send + 'static {
+    let cancel = cancel.clone();
+    let lost = context.fence.loss_token();
+    let shutdown = context.shutdown.clone();
+    move || !cancel.is_cancelled() && !lost.is_cancelled() && !shutdown.is_cancelled()
+}
+
+async fn check_publish(
+    context: &TitleContext<'_>,
+    title: &HeldTitle,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    check_cancel(cancel)?;
+    if !active(context, cancel)()
+        || !context
+            .fence
+            .source_may_continue()
+            .await
+            .map_err(execution)?
+    {
+        return Err(PrepareError::Cancelled);
+    }
+    if !title.source.unchanged() {
+        return Err(PrepareError::Authority(
+            "held source changed during candidate custody",
+        ));
+    }
+    Ok(())
+}
+
+fn journal_error(error: journal::Error) -> PrepareError {
+    match error {
+        journal::Error::Consumed(slot) => PrepareError::IncompleteAttempt { slot },
+        journal::Error::Binding(reason) => PrepareError::Authority(reason),
+        journal::Error::Io(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+            PrepareError::Cancelled
+        }
+        error => execution(error),
+    }
+}
+
+pub(in crate::source_probe) async fn reclaim_candidate_media(
+    trial_directory: &Path,
+    source: Hash,
+    protocol: Hash,
+) -> Result<()> {
+    let path = trial_directory.to_owned();
+    blocking(move || {
+        let journal = Journal::open(&path, source, protocol).map_err(journal_error)?;
+        journal.reclaim(source, protocol).map_err(journal_error)
+    })
+    .await
 }
 
 fn package_identity(planes: &PreparedPlanes) -> Result<Hash> {
@@ -1423,4 +1783,49 @@ fn check_cancel(cancel: &CancellationToken) -> Result<()> {
 
 fn execution(error: impl std::fmt::Display) -> PrepareError {
     PrepareError::Execution(error.to_string())
+}
+
+#[cfg(test)]
+mod durable_attempt_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn proposal(slot: u8) -> M7CandidateIntent {
+        M7CandidateIntent {
+            source_sha256: [1; 32],
+            protocol_sha256: [2; 32],
+            recipe_sha256: [3; 32],
+            binding_sha256: [slot + 10; 32],
+            slot,
+            target_kbps: 115_000 + u32::from(slot),
+            maximum_attempts: 3,
+        }
+    }
+
+    #[test]
+    fn reusing_occupied_slots_never_calls_the_launch_branch_or_overruns_the_cap() {
+        let held = [proposal(0), proposal(1), proposal(2)];
+        let launches = Cell::new(0);
+        let fake_runner = || launches.set(launches.get() + 1);
+        for occupied in &held {
+            if slot_route(&held, occupied).unwrap() == SlotRoute::Launch {
+                fake_runner();
+            }
+        }
+        assert_eq!(launches.get(), 0);
+        assert!(matches!(
+            slot_route(&held, &proposal(3)),
+            Err(PrepareError::IncompleteAttempt { slot: 3 })
+        ));
+        let mut different = proposal(1);
+        different.binding_sha256[0] ^= 1;
+        assert!(matches!(
+            slot_route(&held, &different),
+            Err(PrepareError::IncompleteAttempt { slot: 1 })
+        ));
+        assert_eq!(
+            slot_route(&held[..2], &proposal(2)).unwrap(),
+            SlotRoute::Launch
+        );
+    }
 }

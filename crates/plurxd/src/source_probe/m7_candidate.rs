@@ -21,8 +21,9 @@ use plurx_core::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+mod journal;
 mod production;
-pub(super) use production::{prepare_authored, PrepareError};
+pub(super) use production::{prepare_authored, reclaim_candidate_media, PrepareError};
 
 type Hash = [u8; 32];
 
