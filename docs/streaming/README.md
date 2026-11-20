@@ -6,12 +6,12 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 
 | File | Answers | |
 |---|---|---|
-| [MPV startup](MPV-LIVE-STARTUP.md) | Admission and latency. | open |
-| [Fleet acceptance](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md) | Hour measurements and attribution limits. | done |
-| [CM4 trim fidelity](CM4-TRIM-FIDELITY.md) | Source-gamut hue and L8 spatial controls. | built |
-| [CM29 gamut](CM29-MEASURED-GAMUT.md) | Measured vertices and qualification. | built |
-| [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md) | Owner, merges, validation and acceptance. | open |
-| [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract: nine lanes. | open |
+| [MPV startup](MPV-LIVE-STARTUP.md) | MPV admission. | open |
+| [Fleet acceptance](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md) | Hour runs and attribution. | done |
+| [CM4 trim fidelity](CM4-TRIM-FIDELITY.md) | Gamut hue and L8 controls. | built |
+| [CM29 gamut](CM29-MEASURED-GAMUT.md) | Gamut vertex qualification. | built |
+| [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md) | Ownership and acceptance. | open |
+| [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1’s nine lanes. | open |
 | [PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) | A1/B1 build contract. | open |
 | [LOCAL-COPY-ENGINE-BUILD.md](LOCAL-COPY-ENGINE-BUILD.md) | Item 6 remainder: build plan. | open |
 | [PLAYBACK-START-E1-BUILD.md](PLAYBACK-START-E1-BUILD.md) | E1 contract; build record: [PLAYBACK-START-E1-RECORD.md](PLAYBACK-START-E1-RECORD.md). | open |
