@@ -198,11 +198,9 @@ async fn bounded_native_software_preclone_refusal_settles_exact_original_arm() {
         .scope((), owner.start(deadline()))
         .await;
     let error = result.expect_err("exact original native setup refuses before clone");
-    assert!(
-        error
-            .to_string()
-            .contains("fixture refusal after original native domain setup"),
-        "{error}"
+    assert_eq!(
+        error.into_io_error().to_string(),
+        "fixture refusal after original native domain setup"
     );
     let binding = preparation.state.lock().await.roles[0].binding;
     let held = runtime.accounting().unwrap();
