@@ -1954,7 +1954,10 @@ assert.equal(context.ACT_TIMER, null);
             "\n  package_smoke:", 1
         )[0]
         self.assertIn("if: needs.scope.outputs.web_layout == 'true'", web_layout)
-        self.assertIn("if: needs.scope.outputs.android_device == 'true'", android_device)
+        self.assertIn("needs.scope.outputs.android_device == 'true'", android_device)
+        self.assertIn("needs: [scope, preflight, android_apks]", android_device)
+        self.assertIn("!cancelled()", android_device)
+        self.assertIn('run: test "$APK_BUILD_RESULT" = success', android_device)
         vod_web = workflow.split("\n  vod_web:", 1)[1].split(
             "\n  web_layout:", 1
         )[0]
@@ -3901,7 +3904,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(
             sum(
                 jobs[name].count("secrets.LOCAL_REGISTRY_TOKEN")
-                for name in ("android_jvm", "android_device")
+                for name in ("android_jvm", "android_apks")
             ),
             2,
         )
@@ -3924,8 +3927,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("-no-snapshot-save", workflow)
         self.assertIn("api-level: 36", workflow)
         self.assertIn("target: android-tv", workflow)
-        self.assertIn("arch: x86", workflow)
-        self.assertNotIn("arch: x86_64", workflow)
+        self.assertEqual(workflow.count("arch: arm64-v8a"), 2)
         self.assertIn("profile: tv_1080p", workflow)
         self.assertNotIn("clients/android/**/*.gradle*", workflow)
         self.assertEqual(workflow.count("clients/android/app/build.gradle.kts"), 2)
@@ -3938,6 +3940,12 @@ assert.equal(context.ACT_TIMER, null);
             ),
             2,
         )
+        apk_build = jobs["android_apks"]
+        self.assertIn("run: make android-instrumentation-build", apk_build)
+        self.assertIn("name: android-tv-instrumentation-apks", apk_build)
+        self.assertIn("name: android-tv-instrumentation-apks", android_device)
+        self.assertIn('ANDROID_ADB_SERVER_PORT: "5138"', android_device)
+        self.assertEqual(android_device.count("emulator-port: 5584"), 2)
         self.assertIn('node-version: "24.22.1"', android_device)
         self.assertIn("npm ci --prefix .github/actions/android-emulator-ready --ignore-scripts --omit=dev", android_device)
         provenance = read(".github/actions/android-emulator-ready/upstream.json")
@@ -3966,6 +3974,8 @@ assert.equal(context.ACT_TIMER, null);
             first_attempt.split(first_script_marker, 1)[1],
             "            mkdir -p target/validation\n"
             "            touch target/validation/android-instrumentation-started\n"
+            "            test \"$(adb -s \"emulator-${EMULATOR_PORT}\" shell getprop "
+            "ro.product.cpu.abi | tr -d '\\r')\" = arm64-v8a\n"
             '            PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" '
             "make android-instrumentation-run\n",
         )
@@ -3997,6 +4007,8 @@ assert.equal(context.ACT_TIMER, null);
             retry_attempt.split(retry_script_marker, 1)[1],
             "            mkdir -p target/validation\n"
             "            touch target/validation/android-instrumentation-started\n"
+            "            test \"$(adb -s \"emulator-${EMULATOR_PORT}\" shell getprop "
+            "ro.product.cpu.abi | tr -d '\\r')\" = arm64-v8a\n"
             '            PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" '
             "make android-instrumentation-run\n",
         )
@@ -4714,6 +4726,7 @@ assert.equal(context.ACT_TIMER, null);
             "Linux", "X64", "lab", "general", "high-cpu", "ffmpeg-6"
         )
         android = local("Linux", "X64", "lab", "android-kvm")
+        android_tv = local("macOS", "ARM64", "lab", "apple", "primary")
         apple = local("macOS", "ARM64", "lab", "apple", "xcode-27.2")
         ci_store = "    runs-on: [ci-nonvoter-store]"
         ci_topology = local("Linux", "X64", "lab", "ci-topology")
@@ -4804,9 +4817,11 @@ assert.equal(context.ACT_TIMER, null);
                     expected = "    runs-on: [ci-nonvoter-compile-amd64]"
                 elif path == ".github/workflows/ci.yml" and name in {
                     "android_jvm",
-                    "android_device",
+                    "android_apks",
                 }:
                     expected = android
+                elif path == ".github/workflows/ci.yml" and name == "android_device":
+                    expected = android_tv
                 elif (
                     path == ".github/workflows/effort-ci.yml"
                     and name == "android_compile"
