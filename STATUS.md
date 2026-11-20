@@ -2,7 +2,7 @@
 
 **Updated:** 2026-11-20 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
-- **2026-11-20 · HDR regression reuse:** fractional-rate/late-grade score-admission controls; [coverage and source-only limits](docs/performance/HDR-REFERENCE-SCORING.md). Parked algorithms and physical acceptance unchanged.
+- **2026-11-20 · HDR offline quality:** admission regressions retained; optional pinned CPU ColorVideoVDP report built, review/qualification pending. [Contract and limits](docs/performance/HDR-REFERENCE-SCORING.md). Algorithms parked.
 
 
 - **2026-11-19 · MPV live opening delay:** Codex. ROG baseline seek passed. Patched Play and seek measurements are pending. [Ledger](docs/streaming/MPV-LIVE-STARTUP.md).

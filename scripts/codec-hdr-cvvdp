@@ -1,0 +1,457 @@
+#!/usr/bin/env python3
+"""Optional CPU ColorVideoVDP adapter for codec-hdr-score's admitted PQ pairs."""
+
+import argparse
+from fractions import Fraction
+import hashlib
+import importlib.metadata
+import json
+import math
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import sysconfig
+import time
+
+
+class Refusal(ValueError):
+    """The optional perceptual comparison is not supported by its evidence."""
+
+
+MAX_RAW_BYTES = 16 * 1024**3  # Combined reference and test exports.
+DEADLINE = 300
+DISPLAY_FIELDS = {"schema", "colorspace", "resolution", "diagonal_size_inches",
+                  "viewing_distance_meters", "peak_luminance_cd_m2", "contrast",
+                  "ambient_lux", "reflectivity", "exposure"}
+CONVERSION = ("zscale=matrixin=2020_ncl:rangein=limited:transferin=smpte2084:"
+              "primariesin=2020:chromalin=left:matrix=gbr:range=full:"
+              "transfer=smpte2084:primaries=2020:filter=lanczos:dither=none,"
+              "format=gbrpf32le")
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def read_json(path, expected=None):
+    path = Path(path).absolute()
+    if path.is_symlink() or not path.is_file() or any(p.is_symlink() for p in path.parents):
+        raise Refusal("a regular local JSON file without symlinked parents is required")
+    if path.stat().st_size > 32 * 1024**2:
+        raise Refusal("JSON exceeds its bounded allowance")
+    digest = sha256(path)
+    if expected is not None and digest != expected:
+        raise Refusal("JSON SHA256 differs from its externally pinned identity")
+    return json.loads(path.read_text()), digest
+
+
+def validate_display(display, width=None, height=None):
+    if set(display) != DISPLAY_FIELDS or display["schema"] != 1 or display["colorspace"] != "BT.2020-PQ":
+        raise Refusal("an explicit complete BT.2020-PQ display configuration is required")
+    res = display["resolution"]
+    if not isinstance(res, list) or len(res) != 2 or any(type(v) is not int or not 8 <= v <= 3840 for v in res):
+        raise Refusal("invalid display resolution")
+    if width is not None and res != [width, height]:
+        raise Refusal("source must fill the declared display without resize or crop")
+    for key in DISPLAY_FIELDS - {"schema", "colorspace", "resolution"}:
+        value = display[key]
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise Refusal("display values must be finite numbers")
+        if key in ("ambient_lux", "reflectivity"):
+            if value < 0 or (key == "reflectivity" and value > 1):
+                raise Refusal("invalid ambient illumination or reflectivity")
+        elif value <= 0:
+            raise Refusal("positive display values are required")
+    if display["contrast"] <= 1 or display["peak_luminance_cd_m2"] > 10000:
+        raise Refusal("invalid display contrast or peak")
+    return display
+
+
+def inspect_clock(namespace, ffprobe, path, duration):
+    entries = ("stream=width,height,pix_fmt,color_range,color_space,color_transfer,color_primaries,"
+               "chroma_location,time_base,side_data_list:frame=best_effort_timestamp,"
+               "best_effort_timestamp_time,width,height,pix_fmt,color_range,color_space,"
+               "color_transfer,color_primaries,chroma_location,side_data_list")
+    payload = json.loads(namespace["run"]([
+        str(ffprobe), "-v", "error", "-protocol_whitelist", "file,pipe", "-select_streams", "v:0",
+        "-read_intervals", f"0%+{duration}", "-show_streams", "-show_frames", "-show_entries",
+        entries, "-of", "json", str(path)]))
+    streams, frames = payload.get("streams", []), payload.get("frames", [])
+    if len(streams) != 1 or not 2 <= len(frames) <= 600:
+        raise Refusal("perceptual video needs one stream and 2..600 decoded frames")
+    return streams[0], frames
+
+
+def validate_clocks(namespace, reference, distorted):
+    pairing = namespace["validate_pair"](reference, distorted)
+    grids = []
+    for stream, frames in (reference, distorted):
+        if stream.get("chroma_location") not in (None, "left") or any(f.get("chroma_location") != "left" for f in frames):
+            raise Refusal("perceptual conversion requires decoded left-sited chroma")
+        try:
+            base = Fraction(stream["time_base"])
+            pts = [int(f["best_effort_timestamp"]) for f in frames]
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            raise Refusal("integer decoded PTS and a rational time base are required") from None
+        if base <= 0 or any(str(v) != str(f["best_effort_timestamp"]) for v, f in zip(pts, frames)):
+            raise Refusal("invalid integer decoded PTS")
+        times = [v * base for v in pts]
+        step = times[1] - times[0]
+        if step <= 0 or any(b - a != step for a, b in zip(times, times[1:])):
+            raise Refusal("VFR or quantized irregular clocks are unsupported; no temporal resampling")
+        if not Fraction(1, 120) <= step <= 1:
+            raise Refusal("perceptual cadence must be within 1..120 frames/s")
+        grids.append(times)
+    if grids[0] != grids[1]:
+        raise Refusal("exact decoded rational presentation grids differ")
+    pairing["exact_timestamps"] = [str(v) for v in grids[0]]
+    pairing["frames_per_second"] = str(1 / (grids[0][1] - grids[0][0]))
+    pairing["chroma_location"] = "left"
+    return pairing
+
+
+def raw_size(pairing):
+    size = pairing["width"] * pairing["height"] * pairing["frames"] * 12
+    if size * 2 > MAX_RAW_BYTES:
+        raise Refusal("combined float RGB exports exceed 16 GiB; choose a shorter window")
+    return size
+
+
+def verify_raw(path, expected):
+    if not Path(path).is_file() or Path(path).stat().st_size != expected:
+        raise Refusal("float RGB export length differs from its validated frame count")
+    return sha256(path)
+
+
+def frame_hashes(path, pairing):
+    size = pairing["width"] * pairing["height"] * 12
+    hashes = []
+    with Path(path).open("rb") as stream:
+        for _ in range(pairing["frames"]):
+            frame = stream.read(size)
+            if len(frame) != size:
+                raise Refusal("truncated float RGB frame")
+            hashes.append(hashlib.sha256(frame).hexdigest())
+        if stream.read(1):
+            raise Refusal("extra float RGB frame bytes")
+    return hashes
+
+
+def validate_export_log(text, pairing):
+    bases = re.findall(r"config in time_base:\s*(\d+/\d+)", text)
+    rows = re.findall(r"Parsed_showinfo_\d+[^\n]*?n:\s*(\d+)\s+pts:\s*(-?\d+)\s", text)
+    if len(bases) != 1 or len(rows) != pairing["frames"]:
+        raise Refusal("RGB export lacks complete source PTS attribution")
+    base = Fraction(bases[0])
+    if base <= 0 or [int(n) for n, _ in rows] != list(range(pairing["frames"])):
+        raise Refusal("RGB export frame ordinals differ")
+    grid = [str(int(pts) * base) for _, pts in rows]
+    if grid != pairing["exact_timestamps"]:
+        raise Refusal("RGB export presentation grid differs from admitted source")
+    return {"time_base": str(base), "source_pts": [int(pts) for _, pts in rows],
+            "exact_timestamps": grid}
+
+
+def validate_result(result, frames):
+    if result.get("schema") != 1 or result.get("device") != "cpu" or result.get("temporal_resampling") is not False:
+        raise Refusal("worker identity/device/resampling contract differs")
+    if type(result.get("jod")) not in (int, float) or not math.isfinite(result["jod"]):
+        raise Refusal("nonfinite perceptual score")
+    if result.get("N_frames") != frames or result.get("frames_read_reference") != list(range(frames)) or result.get("frames_read_test") != list(range(frames)):
+        raise Refusal("perceptual model did not consume every admitted frame")
+    if result.get("features_finite") is not True or not result.get("model_info") or not result.get("model_version"):
+        raise Refusal("missing model identity or finite-feature evidence")
+    return result
+
+
+def runtime_snapshot():
+    """Hash the local interpreter, stdlib and installed distribution payloads.
+
+    Package native libraries are included. Transitive OS/framework libraries,
+    kernel and hardware are recorded as outside this file-identity closure.
+    """
+    import pycvvdp
+    import torch
+    import numpy
+    files = set()
+    versions = {}
+    total = 0
+    for dist in importlib.metadata.distributions():
+        name = dist.metadata.get("Name")
+        if not name:
+            continue
+        versions[name] = dist.version
+        for item in dist.files or []:
+            path = Path(dist.locate_file(item)).absolute()
+            if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc":
+                files.add(path)
+    stdlib = Path(sysconfig.get_path("stdlib"))
+    for parent, dirs, names in os.walk(stdlib):
+        dirs[:] = [d for d in dirs if d not in ("site-packages", "__pycache__", "test", "tests", "idlelib", "tkinter", "turtledemo")]
+        for name in names:
+            path = Path(parent) / name
+            if path.suffix in (".py", ".so", ".dylib", ".json") and path.is_file():
+                files.add(path.absolute())
+    files.add(Path(sys.executable).absolute())
+    for path in (Path(sys.prefix) / "pyvenv.cfg", Path(sys.base_prefix) / "Python"):
+        if path.is_file():
+            files.add(path.absolute())
+    records = []
+    for path in sorted(files, key=str):
+        total += path.stat().st_size
+        if len(records) >= 100000 or total > 8 * 1024**3:
+            raise Refusal("runtime closure exceeds 100000 files or 8 GiB")
+        records.append({"path": str(path), "resolved": str(path.resolve(strict=True)),
+                        "bytes": path.stat().st_size, "sha256": sha256(path)})
+    return {"schema": 1, "python_invocation": str(Path(sys.executable).absolute()),
+            "python_version": sys.version, "prefix": sys.prefix,
+            "pycvvdp_module": str(Path(pycvvdp.__file__).absolute()),
+            "versions": versions, "torch_version": torch.__version__, "numpy_version": numpy.__version__,
+            "files": records, "scope": "Interpreter, selected stdlib files and installed distribution payloads; excludes bytecode, stdlib GUI/tests and transitive operating-system/framework dependencies."}
+
+
+def verify_runtime(manifest):
+    if manifest.get("schema") != 1 or not isinstance(manifest.get("files"), list) or not 1 <= len(manifest["files"]) <= 100000:
+        raise Refusal("invalid runtime manifest")
+    for item in manifest["files"]:
+        p = Path(item["path"])
+        if not p.is_absolute() or not p.is_file() or str(p.resolve(strict=True)) != item["resolved"] or p.stat().st_size != item["bytes"] or sha256(p) != item["sha256"]:
+            raise Refusal("runtime file identity changed")
+    executable = manifest.get("python_invocation")
+    if executable not in {item["path"] for item in manifest["files"]}:
+        raise Refusal("runtime executable is not included in its pin")
+    return executable
+
+
+def environment(directory):
+    env = {key: value for key, value in os.environ.items() if key in ("TMPDIR", "LANG", "LC_ALL", "SYSTEMROOT")}
+    env.update(PATH="", PYTHONDONTWRITEBYTECODE="1", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1",
+               OMP_NUM_THREADS="2", OPENBLAS_NUM_THREADS="2", MKL_NUM_THREADS="2",
+               XDG_CACHE_HOME=str(Path(directory) / "cache"), MPLCONFIGDIR=str(Path(directory) / "cache" / "matplotlib"),
+               HF_HOME=str(Path(directory) / "cache" / "huggingface"), TORCH_HOME=str(Path(directory) / "cache" / "torch"))
+    return env
+
+
+def execute(command, directory, name, file_limit=64 * 1024**2):
+    directory = Path(directory)
+    stdout, stderr = directory / (name + ".stdout"), directory / (name + ".stderr")
+    launcher = [sys.executable, str(Path(__file__).absolute()), "--bounded-exec", str(file_limit), *map(str, command)]
+    with stdout.open("xb") as out, stderr.open("xb") as err:
+        process = subprocess.Popen(launcher, stdout=out, stderr=err, env=environment(directory), start_new_session=True)
+        try:
+            status = process.wait(timeout=DEADLINE)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            raise Refusal("perceptual subprocess exceeded its 300-second deadline") from None
+    if status:
+        raise Refusal(f"perceptual subprocess failed; inspect {stderr}")
+    if stdout.stat().st_size > 32 * 1024**2 or stderr.stat().st_size > 4 * 1024**2:
+        raise Refusal("perceptual subprocess log exceeds its allowance")
+    return {"argv": list(map(str, command)), "stdout_sha256": sha256(stdout), "stderr_sha256": sha256(stderr)}
+
+
+def new_directory(path):
+    path = Path(path).absolute()
+    if path.exists() or any(p.is_symlink() for p in [path, *path.parents]):
+        raise Refusal("choose a new local output directory without symlinked parents")
+    path.mkdir(parents=True)
+    return path
+
+
+def pin_runtime(python, destination):
+    python = Path(python).absolute()
+    if not python.is_file():
+        raise Refusal("a preinstalled local Python executable is required")
+    out = new_directory(destination)
+    execute([python, "-I", "-B", str(Path(__file__).absolute()), "--describe-runtime"], out, "runtime-pin")
+    manifest, _ = read_json(out / "runtime-pin.stdout")
+    verify_runtime(manifest)
+    path = out / "runtime.json"
+    path.write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n")
+    return {"runtime": str(path), "runtime_sha256": sha256(path), "scope": manifest["scope"]}
+
+
+def score_perceptual(namespace, args):
+    manifest, manifest_hash = read_json(args.cvvdp_runtime, args.cvvdp_runtime_sha256)
+    python = verify_runtime(manifest)
+    display, display_hash = read_json(args.cvvdp_display, args.cvvdp_display_sha256)
+    validate_display(display)
+    if not math.isfinite(args.duration) or not 0 < args.duration <= 30:
+        raise Refusal("duration must be finite and within (0,30]")
+    reference, reference_hash = namespace["local_file"](args.reference, args.reference_sha256)
+    distorted, distorted_hash = namespace["local_file"](args.distorted, args.distorted_sha256)
+    ffmpeg, ffmpeg_hash = namespace["local_file"](args.ffmpeg)
+    ffprobe, probe_hash = namespace["local_file"](args.ffprobe)
+    pairing = validate_clocks(namespace, inspect_clock(namespace, ffprobe, reference, args.duration),
+                              inspect_clock(namespace, ffprobe, distorted, args.duration))
+    validate_display(display, pairing["width"], pairing["height"])
+    expected = raw_size(pairing)
+    out = new_directory(args.output)
+    # The incumbent scorer and all of its metric/census/source checks remain in force.
+    result = namespace["score"](reference, distorted, reference_hash, distorted_hash,
+                                 ffmpeg, ffprobe, args.duration, args.shadow_code, args.highlight_code)
+    commands = []
+    raw = {}
+    for label, source in (("reference", reference), ("test", distorted)):
+        path = out / (label + ".gbrpf32le")
+        graph = f"trim=duration={args.duration},showinfo," + CONVERSION
+        command = [ffmpeg, "-hide_banner", "-v", "info", "-nostdin", "-copyts", "-threads", "1",
+                   "-protocol_whitelist", "file,pipe", "-i", source, "-map", "0:v:0", "-an", "-sn", "-dn",
+                   "-filter_threads", "1", "-vf", graph, "-frames:v", str(pairing["frames"]),
+                   "-fps_mode", "passthrough", "-c:v", "rawvideo", "-threads", "1", "-f", "rawvideo", path]
+        commands.append(execute(command, out, "export-" + label, max(expected, 64 * 1024**2)))
+        raw[label] = {"path": str(path), "sha256": verify_raw(path, expected), "bytes": expected,
+                      "frame_sha256": frame_hashes(path, pairing),
+                      "source_attribution": validate_export_log((out / ("export-" + label + ".stderr")).read_text(), pairing)}
+    request = {"schema": 1, "runtime": manifest, "display": display, "pairing": pairing, "raw": raw}
+    request_path = out / "request.json"
+    request_path.write_text(json.dumps(request, indent=2, allow_nan=False) + "\n")
+    commands.append(execute([python, "-I", "-B", str(Path(__file__).absolute()), "--worker", request_path], out, "cvvdp"))
+    perceptual, _ = read_json(out / "cvvdp.stdout")
+    validate_result(perceptual, pairing["frames"])
+    verify_runtime(manifest)
+    if read_json(args.cvvdp_runtime, manifest_hash)[1] != manifest_hash or read_json(args.cvvdp_display, display_hash)[1] != display_hash:
+        raise Refusal("runtime or display pin changed")
+    for path, digest in ((reference, reference_hash), (distorted, distorted_hash), (ffmpeg, ffmpeg_hash), (ffprobe, probe_hash)):
+        if sha256(path) != digest:
+            raise Refusal("input or decoder changed during perceptual scoring")
+    for item in raw.values():
+        if verify_raw(item["path"], expected) != item["sha256"]:
+            raise Refusal("float export changed during perceptual scoring")
+    result["hdr_perceptual_model"] = {"name": "ColorVideoVDP", "runtime_manifest_sha256": manifest_hash,
+        "worker_sha256": sha256(__file__), "display_sha256": display_hash, "display": display,
+        "pairing": pairing, "conversion": CONVERSION, "clipping_policy": "Float RGB is retained unclipped; model input clamps each PQ RGB component to [0,1], then applies the explicit display model.",
+        "raw": raw, "commands": commands, "prediction": perceptual,
+        "interpretation": "Display-dependent modeled difference in JOD; identity is normally 10. Not human preference, physical HDR acceptance or an automatic encoder decision.",
+        "runtime_scope": manifest["scope"]}
+    report = out / "report.json"
+    report.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+    return result
+
+
+def worker(request_path):
+    # Standard CVVDP uses local calibration assets. Refuse outbound network even
+    # if an accidentally selected dependency attempts a remote model fetch.
+    import socket
+    class OfflineSocket(socket.socket):
+        def connect(self, address):
+            raise OSError("network access is disabled in the offline perceptual worker")
+        def connect_ex(self, address):
+            raise OSError("network access is disabled in the offline perceptual worker")
+    socket.socket = OfflineSocket
+    request, _ = read_json(request_path)
+    manifest = request["runtime"]
+    if runtime_snapshot() != manifest:
+        raise Refusal("loaded runtime snapshot differs from its pinned manifest")
+    import numpy as np
+    import torch
+    import pycvvdp
+    from pycvvdp.video_source import video_source_dm
+    from pycvvdp.display_model import vvdp_display_photo_eotf, vvdp_display_geometry
+    torch.set_num_threads(2)
+    torch.set_num_interop_threads(1)
+    torch.use_deterministic_algorithms(True)
+    d = validate_display(request["display"])
+    p = request["pairing"]
+    validate_display(d, p["width"], p["height"])
+    dm = vvdp_display_photo_eotf(Y_peak=d["peak_luminance_cd_m2"], contrast=d["contrast"], source_colorspace="BT.2020-PQ",
+        EOTF="PQ", E_ambient=d["ambient_lux"], k_refl=d["reflectivity"], exposure=d["exposure"], name="plurx-explicit-pq")
+    geometry = vvdp_display_geometry(resolution=d["resolution"], distance_m=d["viewing_distance_meters"], diagonal_size_inches=d["diagonal_size_inches"])
+    model = pycvvdp.cvvdp(display_photometry=dm, display_geometry=geometry, device=torch.device("cpu"), heatmap="none", quiet=True, temp_padding="replicate")
+    if model.temp_resample:
+        raise Refusal("model temporal resampling must be disabled")
+    shape = (p["frames"], 3, p["height"], p["width"])
+    arrays, ranges = {}, {}
+    expected = raw_size(p)
+    for label, item in request["raw"].items():
+        if verify_raw(item["path"], expected) != item["sha256"] or frame_hashes(item["path"], p) != item["frame_sha256"]:
+            raise Refusal("worker raw source identity mismatch")
+        a = np.memmap(item["path"], dtype="<f4", mode="r", shape=shape)
+        below, above, minimum, maximum = 0, 0, float("inf"), float("-inf")
+        for frame in a:
+            if not np.isfinite(frame).all():
+                raise Refusal("nonfinite float RGB conversion")
+            below += int(np.count_nonzero(frame < 0)); above += int(np.count_nonzero(frame > 1))
+            minimum = min(minimum, float(frame.min())); maximum = max(maximum, float(frame.max()))
+        ranges[label] = {"minimum": minimum, "maximum": maximum, "below_zero_samples": below, "above_one_samples": above}
+        arrays[label] = a
+    class Source(video_source_dm):
+        def __init__(self):
+            super().__init__(display_photometry=dm)
+            self.seen = {"reference": set(), "test": set()}
+        def get_video_size(self):
+            return p["height"], p["width"], p["frames"]
+        def get_frames_per_second(self):
+            return float(Fraction(p["frames_per_second"]))
+        def get_frame(self, label, index, device, colorspace):
+            if type(index) is not int or not 0 <= index < p["frames"]:
+                raise Refusal("model requested an invalid source frame")
+            self.seen[label].add(index)
+            data = np.array(arrays[label][index, [2, 0, 1]], copy=True)
+            frame = torch.from_numpy(data).to(device).reshape(1, 3, 1, p["height"], p["width"])
+            return self.apply_dm_and_color_transform(frame.clamp(0, 1), colorspace)
+        def get_test_frame(self, index, device, colorspace):
+            return self.get_frame("test", index, device, colorspace)
+        def get_reference_frame(self, index, device, colorspace):
+            return self.get_frame("reference", index, device, colorspace)
+    source = Source()
+    start = time.monotonic()
+    with torch.no_grad():
+        value, stats = model.predict_video_source(source)
+    result = {"schema": 1, "device": "cpu", "cpu_threads": 2, "temporal_resampling": False,
+        "jod": float(value.detach().cpu()), "N_frames": stats["N_frames"],
+        "frames_read_reference": sorted(source.seen["reference"]), "frames_read_test": sorted(source.seen["test"]),
+        "features_finite": bool(np.isfinite(stats["Q_per_ch"]).all()), "feature_shape": list(stats["Q_per_ch"].shape),
+        "model_version": model.version, "model_info": model.get_info_string(),
+        "parameters_sha256": sha256(model.parameters_file), "ranges_before_model_clamp": ranges,
+        "wall_seconds": time.monotonic() - start}
+    validate_result(result, p["frames"])
+    if runtime_snapshot() != manifest:
+        raise Refusal("runtime changed during model execution")
+    print(json.dumps(result, allow_nan=False))
+
+
+def main(namespace, argv):
+    mode = argv[0]
+    parser = argparse.ArgumentParser(description=__doc__)
+    if mode == "pin-cvvdp-runtime":
+        parser.add_argument("--python", required=True)
+        parser.add_argument("--output", required=True)
+    else:
+        for name in ("reference", "distorted", "reference-sha256", "distorted-sha256", "ffmpeg", "ffprobe", "cvvdp-runtime", "cvvdp-runtime-sha256", "cvvdp-display", "cvvdp-display-sha256", "output"):
+            parser.add_argument("--" + name, required=True)
+        parser.add_argument("--duration", type=float, required=True)
+        parser.add_argument("--shadow-code", type=int, default=80)
+        parser.add_argument("--highlight-code", type=int, default=900)
+    args = parser.parse_args(argv[1:])
+    try:
+        result = pin_runtime(args.python, args.output) if mode == "pin-cvvdp-runtime" else score_perceptual(namespace, args)
+    except (Refusal, namespace["Refusal"], KeyError, ValueError, TypeError, OSError) as error:
+        parser.exit(2, f"refused: {error}\n")
+    print(json.dumps(result, indent=2, allow_nan=False))
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["--bounded-exec"]:
+        import resource
+        resource.setrlimit(resource.RLIMIT_FSIZE, (int(sys.argv[2]), int(sys.argv[2])))
+        resource.setrlimit(resource.RLIMIT_CPU, (DEADLINE, DEADLINE))
+        os.execv(sys.argv[3], sys.argv[3:])
+    elif sys.argv[1:] == ["--describe-runtime"]:
+        print(json.dumps(runtime_snapshot(), allow_nan=False))
+    elif sys.argv[1:2] == ["--worker"] and len(sys.argv) == 3:
+        worker(sys.argv[2])
+    else:
+        raise SystemExit("invoke through codec-hdr-score pin-cvvdp-runtime or score-perceptual")
