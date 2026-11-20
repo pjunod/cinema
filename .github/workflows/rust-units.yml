@@ -344,12 +344,8 @@ jobs:
           retention-days: 3
 
   test-archive:
-    name: test candidate ${{ matrix.slot }}
+    name: Run the saved child tests
     if: inputs.phase == 'test-archive'
-    strategy:
-      fail-fast: false
-      matrix:
-        slot: [1, 2, 3]
     runs-on: [ci-nonvoter-compile-amd64, incus]
     # The same private CI image as ci.yml's full Rust lane: Rust 1.97.1, the
     # Jellyfin FFmpeg 8 build and the native libraries. Its digest is part of
@@ -432,6 +428,7 @@ jobs:
           test "$(git rev-parse HEAD)" = 60443f341dc9ca3a743737d845eae0799803608d
           archive=/opt/forgejo-plurx-heavy/tool-cache/archive-ab-neutral-20261120/child-control.tar.zst
           printf '%s  %s\n' 'e24a399e7453c9ebad605307b2bbd46e6ccaf09750dd7cfc016ed434665b5aec' "$archive" | sha256sum -c -
+          mkdir -p "$PWD/target/archive-ab-test"
           cargo-nextest nextest run --archive-file "$archive" --workspace-remap "$PWD" \
             --extract-to "$PWD/target/archive-ab-test" --profile ci --no-fail-fast --test-threads 2 \
             --status-level fail --final-status-level fail 2>&1 | tee archive-test.log
