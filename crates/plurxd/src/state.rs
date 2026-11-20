@@ -2665,6 +2665,10 @@ impl OriginalDisposableSourceRead {
         self.pressure.cancel.clone()
     }
 
+    pub(crate) fn cleanup_unknown(&self) -> bool {
+        self.pressure.cleanup_unknown()
+    }
+
     /// The caller must join its original source and children before returning.
     /// An abandoned scope retains its exact admissions as unknown.
     pub(crate) async fn run<T>(self: Arc<Self>, work: impl std::future::Future<Output = T>) -> T {

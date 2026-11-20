@@ -610,6 +610,10 @@ impl DisposableBackground {
     pub(crate) fn mark_cleanup_unknown(&self) -> bool {
         !self.cleanup_unknown.swap(true, Ordering::AcqRel)
     }
+
+    pub(crate) fn cleanup_unknown(&self) -> bool {
+        self.cleanup_unknown.load(Ordering::Acquire)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -715,9 +719,7 @@ impl LiveWait {
             .disposable_background
             .upgrade();
         match original {
-            Some(original) if original.cleanup_unknown.load(Ordering::Acquire) => {
-                BackgroundYield::CleanupUnknown
-            }
+            Some(original) if original.cleanup_unknown() => BackgroundYield::CleanupUnknown,
             Some(original) => {
                 original.cancel.cancel();
                 BackgroundYield::Requested

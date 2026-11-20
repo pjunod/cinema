@@ -1,6 +1,6 @@
 //! Opt-in offline whisper.cpp jobs: fixed argv, bounded work, common queue Stop.
 use crate::http::{error::ApiError, extract::AdminUser};
-use crate::state::AppState;
+use crate::state::{AppState, OriginalDisposableSourceRead};
 use axum::{
     extract::{Path as ApiPath, State},
     Json,
@@ -1044,6 +1044,15 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
     } else {
         None
     };
+    let mut decode = tokio::process::Command::new(decoder);
+    // Complete fallible command setup before opening the original source bridge.
+    crate::subtitle_ride_along::configure_stage_file_limit(&mut decode, MAX_WAV_BYTES + 1)
+        .map_err(|error| {
+            input.failure(
+                "output_invalid",
+                &format!("bounded transcription output unavailable: {error}"),
+            )
+        })?;
     let source_input = match source_budget.as_ref() {
         Some(budget) => Some(
             crate::source_input::SourceInput::open_background_held(
@@ -1057,7 +1066,6 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
         ),
         None => None,
     };
-    let mut decode = tokio::process::Command::new(decoder);
     if input.purpose == Purpose::SelfTest {
         decode.args(["-filter_threads", "1"]);
     }
@@ -1117,13 +1125,6 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
             &(MAX_WAV_BYTES + 1).to_string(),
         ])
         .arg(&wav);
-    crate::subtitle_ride_along::configure_stage_file_limit(&mut decode, MAX_WAV_BYTES + 1)
-        .map_err(|error| {
-            input.failure(
-                "output_invalid",
-                &format!("bounded transcription output unavailable: {error}"),
-            )
-        })?;
     let decoding = pipeline_output(
         &input,
         &mut decode,
@@ -1957,8 +1958,21 @@ async fn pass(
             active.finish().await;
             continue;
         };
+        let Some(original) = OriginalDisposableSourceRead::register(Arc::clone(&admission)) else {
+            // The accepted claim has started no physical work.
+            let _ = fence.settle(JobSettlement::Yield {
+                error_code: Some("worker_interrupted".into()),
+                checkpoint: None,
+                not_before_ms: crate::state::clock_ms() + 5000,
+            }).await;
+            active.finish().await;
+            return Ok(());
+        };
         let cancel = fence.loss_token().child_token();
         let operation = async {
+            if cancel.is_cancelled() {
+                return Err(StoreError::Task("worker_interrupted".into()));
+            }
             if file.size != source_size
                 || file.mtime != source_mtime
                 || !eligible(&file)
@@ -1984,9 +1998,22 @@ async fn pass(
             .await
         };
         let operation = crate::background_jobs::budgeted(fence.source_budget(), operation);
-        let result =
-            await_claimed_inference(operation, &state.transcode, &admission, shutdown, &cancel)
-                .await;
+        let pressure = original.cancellation();
+        let result = Arc::clone(&original).run(await_claimed_inference(
+            operation,
+            &state.transcode,
+            &admission,
+            shutdown,
+            &cancel,
+            &pressure,
+        )).await;
+        if original.cleanup_unknown() {
+            // Dropping the controller stops renewal without claiming a clean
+            // finish or settling the durable attempt. Original custody and
+            // physical admission retain their existing uncertainty fences.
+            tracing::warn!(job_id = %job.id, "transcription cleanup remains uncertain");
+            return Ok(());
+        }
         if cancel.is_cancelled() || shutdown.is_cancelled() {
             let _ = fence
                 .settle(JobSettlement::Yield {
@@ -2055,11 +2082,16 @@ async fn await_claimed_inference<T>(
     admission: &crate::transcode::FragmentAdmission,
     shutdown: &CancellationToken,
     cancel: &CancellationToken,
+    pressure: &CancellationToken,
 ) -> Result<T, StoreError> {
+    if pressure.is_cancelled() {
+        cancel.cancel();
+    }
     tokio::pin!(operation);
     tokio::select! {
         result = &mut operation => result,
         () = shutdown.cancelled() => { cancel.cancel(); operation.await },
+        () = pressure.cancelled() => { cancel.cancel(); operation.await },
         () = watch_capacity(transcode, admission) => { cancel.cancel(); operation.await },
     }
 }
@@ -2381,12 +2413,19 @@ mod tests {
 
     #[cfg(unix)]
     async fn process_fixture(root: &Path) -> (MediaFile, Model, PathBuf, PathBuf) {
-        use plurx_core::{
-            domain::{AudioStream, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult},
-            store::{LibraryStore, MediaStore, SqliteStore},
+        let store = plurx_core::store::SqliteStore::open_in_memory().expect("store");
+        process_fixture_on(root, &store).await
+    }
+
+    #[cfg(unix)]
+    async fn process_fixture_on(
+        root: &Path,
+        store: &dyn plurx_core::store::Store,
+    ) -> (MediaFile, Model, PathBuf, PathBuf) {
+        use plurx_core::domain::{
+            AudioStream, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult,
         };
         use std::os::unix::fs::PermissionsExt;
-        let store = SqliteStore::open_in_memory().expect("store");
         let library = store
             .create_library(&NewLibrary {
                 name: "transcription fixture".into(),
@@ -3299,28 +3338,96 @@ mod tests {
     #[tokio::test]
     async fn accepted_advanced_work_survives_disable_but_foreground_yield_reaps() {
         use plurx_core::{
-            store::{SqliteStore, Store},
+            cluster::coordination::UnclusteredJobAuthority,
+            store::{background_jobs::JobState, SqliteStore, Store},
             transcode::{EncoderCaps, Pipeline as VideoPipeline},
         };
         use std::os::unix::fs::PermissionsExt;
         for foreground_yield in [false, true] {
             let root = crate::test_tempdir().expect("root");
-            let (file, model, decoder, whisper) = process_fixture(root.path()).await;
+            let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+            let (file, model, decoder, whisper) =
+                process_fixture_on(root.path(), store.as_ref()).await;
+            std::fs::write(
+                &decoder,
+                format!(
+                    r#"#!/bin/sh
+set -eu
+for arg do
+    if test "${{source_next:-}}" = yes; then
+        case "$arg" in http://127.0.0.1:*/*) ;; *) exit 91 ;; esac
+        break
+    fi
+    if test "$arg" = -i; then source_next=yes; fi
+done
+test "${{source_next:-}}" = yes
+for last do :; done
+/bin/cp '{}' "$last"
+"#,
+                    root.path().join("decoded.wav").display()
+                ),
+            )
+            .expect("decoder expects the claimed source bridge");
             let release = root.path().join("release");
             std::fs::write(&whisper, format!("#!/bin/sh\nset -eu\nfor last do :; done\ntouch \"$last.started\"\nwhile test ! -e '{}'; do /bin/sleep 0.05; done\nprintf 'WEBVTT\\n\\n00:00:00.000 --> 00:00:01.000\\nSynthetic speech.\\n' > \"$last.vtt\"\n", release.display())).expect("adapter");
             std::fs::set_permissions(&whisper, std::fs::Permissions::from_mode(0o700))
                 .expect("executable");
-            let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
             let manager = crate::transcode::TranscodeManager::new(
                 Arc::clone(&store),
                 root.path().join("work"),
                 EncoderCaps::default(),
                 VideoPipeline::Cpu,
             );
-            let admission = manager.admit_fragment().await.expect("idle capacity");
-            let cancel = CancellationToken::new();
+            let admission = Arc::new(manager.admit_fragment().await.expect("idle capacity"));
+            let config = Settings {
+                model_path: root.path().join("model.bin").to_string_lossy().into_owned(),
+                ..Settings::default()
+            };
+            let request = enqueue_request(&file, &config, &model, &whisper).expect("recipe");
+            let id = request.id.clone();
+            assert!(matches!(
+                store.enqueue_job(request).await.expect("enqueue"),
+                EnqueueOutcome::Accepted { .. }
+            ));
+            let candidate = store
+                .background_job(&id)
+                .await
+                .expect("job query")
+                .expect("job");
+            let now = crate::state::clock_ms();
+            let (job, deadline) = crate::background_jobs::claim_with_resolution(
+                store.as_ref(),
+                &candidate,
+                ClaimJob {
+                    job_id: id.clone(),
+                    expected_revision: candidate.revision,
+                    node_id: "transcription".into(),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::SubtitleTranscribe,
+                    payload_version: 1,
+                    now_ms: now,
+                    dispatched_at_ms: now,
+                },
+            )
+            .await
+            .expect("claim")
+            .expect("exact attempt");
+            let token = job.token.expect("original job token");
+            let active = crate::background_jobs::ActiveBackgroundJob::start(
+                Arc::clone(&store),
+                Arc::new(UnclusteredJobAuthority),
+                token.clone(),
+                deadline,
+                JobKind::SubtitleTranscribe,
+            )
+            .await
+            .expect("retained job and source custody");
+            let fence = active.fence();
+            let original = OriginalDisposableSourceRead::register(Arc::clone(&admission))
+                .expect("one original disposable registration");
+            let cancel = fence.loss_token().child_token();
             let shutdown = CancellationToken::new();
-            let config = Settings::default();
             let inference = plurx_core::process::bounded::cancellable(
                 cancel.clone(),
                 transcribe(
@@ -3333,8 +3440,11 @@ mod tests {
                     decoder.to_str().expect("decoder"),
                 ),
             );
-            let operation =
-                await_claimed_inference(inference, &manager, &admission, &shutdown, &cancel);
+            let inference = crate::background_jobs::budgeted(fence.source_budget(), inference);
+            let pressure = original.cancellation();
+            let operation = Arc::clone(&original).run(await_claimed_inference(
+                inference, &manager, &admission, &shutdown, &cancel, &pressure,
+            ));
             tokio::pin!(operation);
             let started = async {
                 loop {
@@ -3370,7 +3480,31 @@ mod tests {
                     .is_err(),
                 "saved disable/mode change cannot cancel accepted work"
             );
-            let demand = foreground_yield.then(|| manager.test_mark_live_waiting());
+            let demand = foreground_yield.then(|| {
+                let waiting = manager.test_mark_live_waiting();
+                #[cfg(target_os = "linux")]
+                let waiting = {
+                    let mut waiting = waiting;
+                    waiting.mark_capacity_blocked();
+                    assert!(matches!(
+                        waiting.request_disposable_background_yield(),
+                        crate::admission::BackgroundYield::Requested
+                    ));
+                    assert!(original.cancellation().is_cancelled());
+                    waiting
+                };
+                waiting
+            });
+            let running = store
+                .background_job(&id)
+                .await
+                .expect("job query")
+                .expect("job");
+            assert_eq!(running.state, JobState::Running);
+            let running_token = running.token.expect("original held claim");
+            assert_eq!(running_token.claim_id, token.claim_id);
+            assert_eq!(running_token.fence, token.fence);
+            assert!(manager.test_software_threads_in_use() > 0);
             if !foreground_yield {
                 std::fs::write(&release, b"done").expect("finish inference");
             }
@@ -3386,6 +3520,26 @@ mod tests {
                 0,
                 "children reaped before scratch retirement"
             );
+            assert!(!original.cleanup_unknown());
+            if foreground_yield {
+                assert!(fence
+                    .settle(JobSettlement::Yield {
+                        error_code: Some("worker_interrupted".into()),
+                        checkpoint: None,
+                        not_before_ms: crate::state::clock_ms() + 5000,
+                    })
+                    .await
+                    .expect("yield after original join"));
+                let queued = store
+                    .background_job(&id)
+                    .await
+                    .expect("job query")
+                    .expect("job");
+                assert_eq!(queued.state, JobState::Queued);
+                assert!(queued.token.is_none());
+                assert_eq!(queued.failed_attempts, 0);
+            }
+            active.finish().await;
             drop(demand);
         }
     }
