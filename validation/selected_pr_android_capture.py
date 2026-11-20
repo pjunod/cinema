@@ -25,6 +25,8 @@ CUSTODY_SHA256 = '3c093595d9189b47de70cf07d7b9c99406fd7b4ebc3937be1d0b1c99f841b3
 
 
 ANDROID_COUNTER_POLICY = 'selected-pr-android-209-to-210-counter-v1'
+ANDROID_COUNTER_TREES = ('cc6de3b1ef616032ff3db660607db107313def47',
+                         'a4e35cfbed3eb388f01befc7c4a09916b61df0ad')
 ANDROID_COUNTER_PATHS = {'clients/android/app/build.gradle.kts', 'clients/android/README.md'}
 ANDROID_209_BUILD_SHA256 = '6f6047608820e873d944ab72e74031f63631a05c9ff3933d23ca4235752a1ba4'
 
@@ -49,8 +51,11 @@ def _counter_literal_projection(before, after, pattern):
 def android_sources_compatible(source, candidate):
     """Preserve209 execution provenance; never claim identical BuildConfig210."""
     from validation.retained_lane_commands import tree_id
-    if tree_id(source, 'clients/android') == tree_id(candidate, 'clients/android'):
+    trees = tree_id(source, 'clients/android'), tree_id(candidate, 'clients/android')
+    if trees[0] == trees[1]:
         return True
+    r.require(trees == ANDROID_COUNTER_TREES,
+              'Counter projection is outside the reviewed1341-test Android source pair')
     changed = {path for path in retention.changed(source, candidate) if path.startswith('clients/android/')}
     r.require(changed == ANDROID_COUNTER_PATHS, 'Android source changed beyond the two counter literals')
     before = {path: retention.git_bytes(source, path) for path in changed}

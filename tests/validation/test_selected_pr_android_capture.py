@@ -207,9 +207,10 @@ class SelectedPrAndroidCaptureTests(unittest.TestCase):
         if mutation:mutation(after)
         return before,after
 
-    def counter_compatible(self,before,after,paths=None,mode='100644'):
+    def counter_compatible(self,before,after,paths=None,mode='100644',trees=None):
         build='clients/android/app/build.gradle.kts'
-        with patch('validation.retained_lane_commands.tree_id',side_effect=lambda revision,path:revision), \
+        with patch('validation.retained_lane_commands.tree_id',side_effect=lambda revision,path: (trees[0] if revision=='a'*40 else trees[1]) if trees else revision), \
+             patch.object(selected,'ANDROID_COUNTER_TREES',('a'*40,'b'*40)), \
              patch.object(selected.retention,'changed',return_value=set(before) if paths is None else paths), \
              patch.object(selected.retention,'git_bytes',side_effect=lambda revision,path:(before if revision=='a'*40 else after)[path]), \
              patch.object(selected,'_android_file_mode',return_value=mode), \
@@ -245,3 +246,10 @@ class SelectedPrAndroidCaptureTests(unittest.TestCase):
             after[path]=after[path]+extra if extra else after[path].replace(b'    versionCode = 210\n',b'')
             with self.assertRaises(receipts.ReceiptError):
                 self.counter_compatible(before,after)
+
+    def test_counter_projection_refuses_unreviewed_or_counter_sensitive_test_trees(self):
+        before,after=self.counter_sources()
+        sensitive='clients/android/app/src/test/java/tv/plurx/app/CounterSensitiveTest.kt'
+        before[sensitive]=after[sensitive]=b'@Test fun counter() { assertEquals(209, BuildConfig.VERSION_CODE) }'
+        with self.assertRaises(receipts.ReceiptError):
+            self.counter_compatible(before,after,paths=selected.ANDROID_COUNTER_PATHS,trees=('c'*40,'d'*40))
