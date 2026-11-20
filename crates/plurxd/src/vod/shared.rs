@@ -1018,6 +1018,7 @@ impl Shared {
             output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
             private_storage,
             copy_preparation: StdMutex::new(None),
+            resume_preparation: StdMutex::new(None),
             preparation_epoch: AtomicU64::new(0),
             retained_offer: StdMutex::new(None),
             cancelled_preparation_epoch: AtomicU64::new(0),

@@ -2719,6 +2719,23 @@ pub async fn create(
     super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
     Json(req): Json<CreateSession>,
 ) -> Result<Json<StartResponse>, ApiError> {
+    let user_id = user.id;
+    let transcode = Arc::clone(&state.transcode);
+    let created = create_native(user, state, id, headers, remote, req).await?;
+    if created.vod {
+        transcode.remember_resume_candidate(user_id, id, &created.session_id);
+    }
+    Ok(created)
+}
+
+pub(in crate::http) async fn create_native(
+    user: plurx_core::domain::User,
+    state: AppState,
+    id: i64,
+    headers: HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+    req: CreateSession,
+) -> Result<Json<StartResponse>, ApiError> {
     let (user_id, start_attempts) = (user.id, Arc::clone(&state.start_attempts));
     let created = create_with_purpose(
         user,

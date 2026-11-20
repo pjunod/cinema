@@ -1376,6 +1376,7 @@ struct Shared {
     /// backlog ([`VodServe::local_index_demand`]). Bounded: it is a priority
     /// hint, and a refused start asks again.
     local_index_demand: StdMutex<VecDeque<i64>>,
+    resume_predictions: vod_startup_prediction::ResumePredictions,
     /// Startup-discovered obsolete encoded generations. The directory remains
     /// present until its exact plan row is deleted, so cancellation or Store
     /// failure remains rediscoverable after either a later tick or restart.
@@ -1711,6 +1712,8 @@ mod vod_serve_construct;
 mod vod_serve_control;
 #[path = "vod/serve/create.rs"]
 mod vod_serve_create;
+#[path = "vod/startup_prediction.rs"]
+mod vod_startup_prediction;
 #[cfg(test)]
 pub(crate) use vod_serve_create::AdmittedSourceVodRendition;
 pub(crate) use vod_serve_create::ReservedSourceVodRendition;
@@ -1754,6 +1757,8 @@ use output_measurement::PublishedOutputMeasurement;
 mod copy_preparation;
 #[path = "vod/preparation_storage.rs"]
 pub(crate) mod preparation_storage;
+#[path = "vod/resume_preparation.rs"]
+mod resume_preparation;
 #[path = "vod/retained.rs"]
 pub(crate) mod retained;
 #[path = "vod/retained_manifest.rs"]

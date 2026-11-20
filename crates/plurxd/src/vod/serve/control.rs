@@ -623,6 +623,16 @@ impl VodServe {
                         kind: session.kind,
                     });
                 if disposition == crate::playback_control::ControlDisposition::Accepted {
+                    if source.is_none()
+                        && control.snapshot.demand
+                            == crate::playback_control::PlaybackDemand::Active
+                        && control.snapshot.render_state
+                            == crate::playback_control::RenderState::Rendering
+                    {
+                        self.shared
+                            .resume_predictions
+                            .confirm_rendered(&session.incarnation);
+                    }
                     #[cfg(target_os = "linux")]
                     if control.snapshot.seek_target_ms.is_some() {
                         if let Some(runtime) = session

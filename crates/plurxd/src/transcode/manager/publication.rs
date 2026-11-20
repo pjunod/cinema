@@ -1708,6 +1708,9 @@ impl TranscodeManager {
             {
                 return Err(MediaResponsePublicationRejection::StateChanged);
             }
+            if let Some(artifact) = &session.rolling_artifact {
+                return Ok(artifact.segment_window_seconds(segment_index));
+            }
             let window = tokio::time::timeout_at(
                 tokio::time::Instant::from_std(deadline),
                 session.segments.lock(),

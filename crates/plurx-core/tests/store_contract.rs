@@ -29029,6 +29029,36 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             .submit_fragment_index_analysis(&forced_claim, &forced_job, 21)
             .await
             .unwrap_or_else(|error| panic!("{backend}: submit forced generation: {error}")));
+        let coordination = plurx_core::store::analysis_coordination::AnalysisCoordinationSource {
+            file_id,
+            source_size: forced_request.source_size,
+            source_mtime: forced_request.source_mtime,
+            origin_node_id: forced_request.target_node_id.clone(),
+            object_version: "fixture-object".to_owned(),
+            video_identity: "a".repeat(64),
+            contract_version: 3,
+            requested_generation: "fixture-coordination".to_owned(),
+        };
+        let newer = NewAnalysisRequest {
+            request_id: "repair-newer-coordination".to_owned(),
+            pipeline_version: coordination.pipeline_marker(),
+            video_identity: coordination.video_marker(),
+            requested_generation: coordination.requested_generation,
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            force_rebuild: false,
+            not_before_ms: 22,
+            created_at_ms: 22,
+            ..forced_request.clone()
+        };
+        assert_eq!(
+            store
+                .enqueue_analysis_request(&newer)
+                .await
+                .expect("newer coordination")
+                .request_id,
+            newer.request_id
+        );
         let forced_worker = store
             .fixture_claim_cluster_fragment_index("analysis-node", &[], 21, 30)
             .await
@@ -29132,7 +29162,7 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
                 .unwrap_or_else(|| panic!("{backend}: forced head artifact"))
                 .cache_key,
             generation_key,
-            "backend {backend}"
+            "backend {backend}: newer v3 coordination does not supersede the legacy head"
         );
         // C-05: item detail's batched lookup resolves the same head, through
         // this node's attestation of the exact observed object version.

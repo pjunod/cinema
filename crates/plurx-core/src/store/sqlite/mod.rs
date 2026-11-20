@@ -1656,6 +1656,7 @@ impl SqliteStore {
         // planning generation too. An idempotent extension, not a migration:
         // `user_version` stays where it is, so an older binary still opens it.
         super::playback_input_keys::install_sqlite(&conn)?;
+        super::fragment_publication::install_sqlite(&conn)?;
         Self::backfill_hdr_format(&conn)?;
         Ok(SqliteStore {
             conn: Arc::new(Mutex::new(conn)),

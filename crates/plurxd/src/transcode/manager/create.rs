@@ -1056,7 +1056,11 @@ impl TranscodeManager {
                             // not include streams nobody ever received.
                             let session =
                                 self.sessions.lock().await.get(&started.session_id).cloned();
-                            if let Some(session) = session {
+                            // A retained reader consumes no source I/O. The
+                            // temporary suspension is restored by its owner.
+                            if let Some(session) =
+                                session.filter(|session| session.rolling_artifact.is_none())
+                            {
                                 fallback_interest.transfer(&session);
                             }
                             record_live_recovery(reason);

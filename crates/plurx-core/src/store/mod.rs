@@ -295,6 +295,7 @@ mod custody_retention;
 pub mod dv_refit_jobs;
 pub mod dv_title_jobs;
 mod dv_title_jobs_schema;
+mod fragment_publication;
 mod library_annotations_schema;
 mod library_curation_schema;
 pub mod offline_claim;

@@ -41,6 +41,8 @@ pub(super) struct Rendition {
     /// Immutable storage domain. Job release cannot turn private bytes ordinary.
     pub(super) private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
     pub(super) copy_preparation: StdMutex<Option<Arc<super::copy_preparation::CopyPreparation>>>,
+    pub(super) resume_preparation:
+        StdMutex<Option<super::resume_preparation::ResumePreparationDispatch>>,
     pub(super) preparation_epoch: AtomicU64,
     /// Identity of the complete output already handed to retained assembly
     /// (in flight or assembled). Maintenance never re-offers it.

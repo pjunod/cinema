@@ -253,13 +253,14 @@ pub(super) async fn load_identity(path: &Path) -> Option<InitIdentity> {
 /// absent or complete, never partial.
 #[cfg(test)]
 pub(super) async fn store_identity(path: &Path, identity: &InitIdentity) -> io::Result<()> {
-    store_identity_observed(path, identity, None).await
+    store_identity_observed(path, identity, None, None).await
 }
 
 pub(super) async fn store_identity_observed(
     path: &Path,
     identity: &InitIdentity,
     allowance: Option<&Arc<super::copy_preparation::PreparationAllowance>>,
+    resume_work: Option<&super::resume_preparation::ResumePreparation>,
 ) -> io::Result<()> {
     let stored = StoredIdentity {
         muxer_init: identity.muxer_init.clone(),
@@ -268,6 +269,9 @@ pub(super) async fn store_identity_observed(
     };
     let bytes = serde_json::to_vec(&stored)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if resume_work.is_some_and(|work| !work.charge(bytes.len() as u64)) {
+        return Err(io::ErrorKind::OutOfMemory.into());
+    }
     let pending = allowance
         .map(|allowance| {
             allowance
@@ -275,7 +279,11 @@ pub(super) async fn store_identity_observed(
                 .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))
         })
         .transpose()?;
-    let reservation = crate::playback_cache::reserve(path, bytes.len() as u64).await?;
+    let reservation = if resume_work.is_some() {
+        crate::playback_cache::reserve_without_eviction(path, bytes.len() as u64).await?
+    } else {
+        crate::playback_cache::reserve(path, bytes.len() as u64).await?
+    };
     let tmp = path.with_extension("json.tmp");
     tokio::fs::write(&tmp, &bytes).await?;
     tokio::fs::rename(&tmp, path).await?;

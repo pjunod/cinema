@@ -261,6 +261,7 @@ impl VodServe {
             output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
             private_storage: None,
             copy_preparation: StdMutex::new(None),
+            resume_preparation: StdMutex::new(None),
             preparation_epoch: AtomicU64::new(0),
             retained_offer: StdMutex::new(None),
             cancelled_preparation_epoch: AtomicU64::new(0),
@@ -458,6 +459,7 @@ impl VodServe {
                 runtime_cache,
                 store,
                 local_index_demand: StdMutex::new(VecDeque::new()),
+                resume_predictions: Default::default(),
                 obsolete_encoded_generations: Mutex::new(VecDeque::from(
                     obsolete_encoded_generations,
                 )),
