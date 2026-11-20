@@ -2,6 +2,21 @@ use super::*;
 use plurx_core::segplan::{self, SEGPLAN_VERSION};
 use plurx_core::testfixtures;
 
+#[cfg(unix)]
+#[test]
+fn an_external_index_process_kill_is_a_bounded_transient_failure() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    let killed = index_process_exit_failure(ExitStatus::from_raw(libc::SIGKILL), 1089);
+    assert_eq!(killed.code, IndexFailureCode::IndexProcessFailed);
+    assert!(killed.transient_allowlisted);
+    assert!(!index_process_exit_failure(ExitStatus::from_raw(256), 0).transient_allowlisted);
+    assert!(
+        !index_process_exit_failure(ExitStatus::from_raw(libc::SIGSEGV), 0).transient_allowlisted
+    );
+}
+
 /// A source with a nonzero start and reordered pictures exercises both parts
 /// of the fitted clock: the source DTS origin removed by the copy muxer and
 /// each sample's signed composition offset. This compares the real ffprobe

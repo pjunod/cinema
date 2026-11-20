@@ -229,6 +229,8 @@ impl FragmentIndexOutcome {
     /// rows were waiting for. Only while the row still says so: an untyped
     /// record (`record_outcome`) replaces the typed disposition, and its legacy
     /// refusal is checked too.
+    /// Revision 3 also reopens process failures caused by an external kill.
+    /// Older workers recorded those interruptions as terminal media failures.
     ///
     /// The retry deadline alone never makes a row terminal. A retryable row
     /// past it is due: the window closes when an attempt after the deadline
@@ -236,9 +238,16 @@ impl FragmentIndexOutcome {
     /// so an indexer starved past the deadline still makes the attempt the
     /// window promised instead of declaring the title unindexable unread.
     pub fn state(&self, now_ms: i64) -> IndexOutcomeState {
-        if self.typed_code == Some(crate::content_analysis::IndexFailureCode::IndexBudgetExceeded)
-            && matches!(self.refusal, IndexRefusal::Truncated { .. })
+        use crate::content_analysis::IndexFailureCode;
+        if matches!(self.refusal, IndexRefusal::Truncated { .. })
             && self.policy_revision < crate::content_analysis::INDEX_FAILURE_POLICY_REVISION
+            && (self.typed_code == Some(IndexFailureCode::IndexBudgetExceeded)
+                || (self.typed_code == Some(IndexFailureCode::IndexProcessFailed)
+                    && self.typed_retryable == Some(false)
+                    && self.retry_deadline_ms == 0
+                    && self.diagnostic.as_ref().is_some_and(|diagnostic| {
+                        diagnostic.exit_category.as_deref() == Some("signal: 9 (SIGKILL)")
+                    })))
         {
             return IndexOutcomeState::Due;
         }
@@ -1459,6 +1468,26 @@ mod tests {
         assert_eq!(old.state(i64::MAX - 1), IndexOutcomeState::Due);
         old.policy_revision = INDEX_FAILURE_POLICY_REVISION;
         assert_eq!(old.state(i64::MAX - 1), IndexOutcomeState::Terminal);
+    }
+
+    #[test]
+    fn an_old_external_kill_is_due_once_without_reopening_content_failures() {
+        let mut old = outcome(Some(false), i64::MAX, 0);
+        old.typed_code = Some(IndexFailureCode::IndexProcessFailed);
+        old.policy_revision = INDEX_FAILURE_POLICY_REVISION - 1;
+        old.diagnostic = Some(crate::content_analysis::IndexDiagnostic {
+            exit_category: Some("signal: 9 (SIGKILL)".into()),
+            ..Default::default()
+        });
+        assert_eq!(old.state(1_000), IndexOutcomeState::Due);
+
+        let mut other = old.clone();
+        if let Some(diagnostic) = &mut other.diagnostic {
+            diagnostic.exit_category = Some("exit status: 1".into());
+        }
+        assert_eq!(other.state(1_000), IndexOutcomeState::Terminal);
+        old.policy_revision = INDEX_FAILURE_POLICY_REVISION;
+        assert_eq!(old.state(1_000), IndexOutcomeState::Terminal);
     }
 
     /// Review of #1299: a retried old-policy budget row that ended
