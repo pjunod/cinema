@@ -705,7 +705,7 @@ impl NativeSplitInventory {
         first: i64,
         last: i64,
         incarnation: Option<&str>,
-    ) -> Vec<String> {
+    ) -> Vec<PreparedNativeFelObject> {
         let prepared = std::mem::take(&mut *self.prepared_head.lock().expect("prepared FEL head"));
         let PreparedNativeFelHead::Ready(staged_attempt, staged) = prepared else {
             return Vec::new();
@@ -715,12 +715,12 @@ impl NativeSplitInventory {
                 && first == 0
                 && usize::try_from(last).is_ok_and(|last| last < staged.len())
         }) else {
-            return staged.into_iter().map(|entry| entry.object).collect();
+            return staged;
         };
         let mut entries = self.rendered_fel.lock().expect("split FEL inventory");
         let last = staged.len() as u64 - 1;
         if !entries.is_empty() || self.published_head.set((attempt, last)).is_err() {
-            return staged.into_iter().map(|entry| entry.object).collect();
+            return staged;
         }
         entries.extend(staged.into_iter().enumerate().map(|(index, entry)| {
             (

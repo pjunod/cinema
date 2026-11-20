@@ -164,7 +164,8 @@ macro_rules! translation_admission {
 
 pub(super) const ENQUEUE_SQL: &str = concat!(
     r#"
-WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
+WITH provided AS (SELECT json($1) AS body
+ WHERE json_extract($1,'$.require_native_fel_reopen') IS NOT 1 OR changes()=1), input AS MATERIALIZED (
  SELECT CASE WHEN EXISTS (SELECT 1 FROM background_predictions WHERE state = 'pending'
    AND request_id = COALESCE(json_extract(body,'$.subtitle_request.request_id'),json_extract(body,'$.analysis_request.request_id')))
  THEN json_set(body, '$.request.deadline_ms', (SELECT expires_ms FROM background_predictions
@@ -554,6 +555,16 @@ macro_rules! claim_kind_demand {
     AND d.file_id=json_extract(background_jobs.payload_json,'$.file_id') AND d.terminal=0
     AND d.scanner_digest=json_extract(background_jobs.payload_json,'$.scanner_digest')
     AND f.size=json_extract(background_jobs.payload_json,'$.source_size') AND f.mtime=json_extract(background_jobs.payload_json,'$.source_mtime')))
+  AND (kind!='dv_title_scan' OR NOT EXISTS (
+      SELECT 1 FROM background_job_waiters w
+      WHERE w.job_id=background_jobs.id AND w.consumer_kind='native_fel_head'
+    ) OR EXISTS (
+      SELECT 1 FROM background_job_waiters w WHERE w.job_id=background_jobs.id
+        AND w.state IN ('pending','awaiting_hydration')
+        AND (w.deadline_ms IS NULL OR w.deadline_ms>json_extract($1,'$.now_ms'))
+        AND (w.consumer_kind IN ('playback_qualification','dv_title_scan')
+          OR (w.consumer_kind='native_fel_head' AND w.target_node_id=json_extract($1,'$.node_id')))
+    ))
   AND (kind NOT IN ('subtitle_text_translate','subtitle_text_translate_artifact','subtitle_text_model_operation') OR ("#,
     text_admission!("payload_json", "json_extract($1,'$.now_ms')"),
     r#"))

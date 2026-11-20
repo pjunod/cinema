@@ -622,7 +622,7 @@ pub(super) async fn request_fel_head<T: QueueSql>(
     store: &T,
     input: FelHeadRequest,
 ) -> Result<bool, StoreError> {
-    use super::background_jobs::{EnqueueJob, EnqueueOutcome, JobPayload, JobRequest};
+    use super::background_jobs::{enqueue_body, EnqueueJob, JobPayload, JobRequest, ENQUEUE_SQL};
     if input.file_id <= 0
         || input.node.is_empty()
         || input.node.len() > 128
@@ -638,8 +638,7 @@ pub(super) async fn request_fel_head<T: QueueSql>(
     struct Revision {
         revision: i64,
     }
-    let rows=store.queue_sql(r#"
-UPDATE dv_title_jobs_demand AS d SET terminal=0
+    const EXACT_SETTLED: &str = r#"
 WHERE d.file_id=json_extract($1,'$.file_id')
  AND d.scanner_digest=json_extract($1,'$.scanner_digest') AND d.terminal=1
  AND NOT EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
@@ -651,71 +650,69 @@ WHERE d.file_id=json_extract($1,'$.file_id')
    AND json_valid(f.probe_json) AND json_extract(f.probe_json,'$.plurx_dv_title_v1.complete')=1
    AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract($1,'$.request.identity')||'.request.identity')=json_extract($1,'$.request.identity')
    AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract($1,'$.request.identity')||'.verdict.admitted')=1)
-RETURNING json_object('revision',revision) AS result_json
-"#.into(),encode(&input)?,true,true).await?;
+"#;
+    let input_json = encode(&input)?;
+    let rows = store.queue_sql(
+        format!("SELECT json_object('revision',d.revision) AS result_json FROM dv_title_jobs_demand d {EXACT_SETTLED}"),
+        input_json.clone(), false, true,
+    ).await?;
     let Some(row) = rows.first() else {
         return Ok(false);
     };
     let revision = decode::<Revision>(row)?.revision;
     let episode = uuid::Uuid::new_v4().to_string();
-    let outcome = store
-        .enqueue_job(EnqueueJob {
-            id: episode.clone(),
-            payload: JobPayload::DvTitleScan {
-                file_id: input.file_id,
-                source_size: input.request.source_size,
-                source_mtime: input.request.source_mtime,
-                probe_revision: revision,
-                scanner_digest: input.scanner_digest.clone(),
-            },
-            dedupe_key: format!(
-                "dv-title-generation:{}:{}:{}",
-                input.file_id, revision, input.scanner_digest
-            ),
-            priority: 0,
-            not_before_ms: input.now_ms,
-            now_ms: input.now_ms,
-            request: JobRequest {
-                scope: "dv-native-fel-head".into(),
-                request_id: episode,
-                request_digest: input.request.identity,
-                consumer_kind: "native_fel_head".into(),
-                consumer_ref: input.file_id.to_string(),
-                target_node_id: Some(input.node),
-                deadline_ms: Some(input.deadline_ms),
-                retain_identity: false,
-            },
-        })
-        .await;
-    if matches!(
-        &outcome,
-        Ok(EnqueueOutcome::Accepted { .. }
-            | EnqueueOutcome::Existing {
-                cancelled: false,
-                ..
-            })
-    ) {
-        return Ok(true);
-    }
-    // A concurrent ordinary job still owns the reopened generation if it
-    // actually enqueued. Keep the old settled state only if there is no owner.
-    let _ = store
-        .queue_sql(
-            r#"
+    let enqueue = EnqueueJob {
+        id: episode.clone(),
+        payload: JobPayload::DvTitleScan {
+            file_id: input.file_id,
+            source_size: input.request.source_size,
+            source_mtime: input.request.source_mtime,
+            probe_revision: revision,
+            scanner_digest: input.scanner_digest.clone(),
+        },
+        dedupe_key: format!(
+            "dv-title-generation:{}:{}:{}",
+            input.file_id, revision, input.scanner_digest
+        ),
+        priority: 0,
+        not_before_ms: input.now_ms,
+        now_ms: input.now_ms,
+        request: JobRequest {
+            scope: "dv-native-fel-head".into(),
+            request_id: episode.clone(),
+            request_digest: input.request.identity,
+            consumer_kind: "native_fel_head".into(),
+            consumer_ref: input.file_id.to_string(),
+            target_node_id: Some(input.node),
+            deadline_ms: Some(input.deadline_ms),
+            retain_identity: false,
+        },
+    };
+    enqueue.validate()?;
+    let mut reopen: serde_json::Value =
+        serde_json::from_str(&input_json).map_err(|error| StoreError::Task(error.to_string()))?;
+    reopen["revision"] = revision.into();
+    reopen["episode"] = episode.clone().into();
+    let reopen = encode(&reopen)?;
+    let mut body = enqueue_body(store, &enqueue).await?;
+    body["require_native_fel_reopen"] = 1.into();
+    // ENQUEUE_SQL consumes the preceding update's row count on the same
+    // transaction/connection. No worker can claim the reopened row before
+    // its targeted waiter exists. A refused enqueue restores settled state.
+    store.queue_transaction(vec![
+        (format!("UPDATE dv_title_jobs_demand AS d SET terminal=0 {EXACT_SETTLED} AND d.revision=json_extract($1,'$.revision')"), reopen.clone()),
+        (ENQUEUE_SQL.to_owned(), encode(&body)?),
+        (r#"
 UPDATE dv_title_jobs_demand AS d SET terminal=1
 WHERE d.file_id=json_extract($1,'$.file_id') AND d.revision=json_extract($1,'$.revision')
+ AND EXISTS(SELECT 1 FROM background_job_commands c WHERE c.id=json_extract($1,'$.episode')
+  AND c.operation='enqueue' AND json_extract(c.result_json,'$.outcome')!='accepted')
  AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan'
   AND j.state IN ('queued','running','cancelling')
   AND json_extract(j.payload_json,'$.file_id')=d.file_id)
-RETURNING json_quote('native FEL head enqueue declined') AS result_json
-"#
-            .into(),
-            encode(&serde_json::json!({"file_id":input.file_id,"revision":revision}))?,
-            true,
-            true,
-        )
-        .await;
-    outcome.map(|_| false)
+"#.to_owned(), reopen),
+    ]).await?;
+    Ok(store.background_job(&episode).await?.is_some())
 }
 
 /// Settled Profile 7 FEL titles whose stored verdict was measured under

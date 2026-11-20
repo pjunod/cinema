@@ -783,9 +783,7 @@ impl NativeFelHead {
             .await;
             if let Err(reason) = result {
                 split.decline_prepared_head();
-                for entry in staged {
-                    let _ = tokio::fs::remove_file(session.dir.join(entry.object)).await;
-                }
+                queue_rejected_native_fel_objects(&session, staged);
                 tracing::debug!(target:"plurxd::dv", file_id=session.file_id, %reason, "native FEL head kept ordinary startup");
             }
         });

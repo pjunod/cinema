@@ -1451,14 +1451,7 @@ impl Session {
                         .as_ref()
                         .map(|owner| owner.incarnation_id.as_str()),
                 );
-                if !rejected.is_empty() {
-                    let dir = self.dir.clone();
-                    tokio::spawn(async move {
-                        for name in rejected {
-                            let _ = tokio::fs::remove_file(dir.join(name)).await;
-                        }
-                    });
-                }
+                queue_rejected_native_fel_objects(self, rejected);
             }
         }
         clock.deferred_since = None;

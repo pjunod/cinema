@@ -72,6 +72,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Native HLS can start with a verified cached FEL prefix from the existing title job, with continuous original audio and ordinary startup when the prefix cannot be used. Rebuilding a missing prefix reuses the current scan and quality verdict.
+
 - Background Dolby Vision FEL measurement can qualify the current renderer
   while requests for an older renderer remain pending.
 

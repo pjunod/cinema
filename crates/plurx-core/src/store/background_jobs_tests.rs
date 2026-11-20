@@ -2578,7 +2578,10 @@ async fn a_viewer_waiting_on_its_titles_measurement_reads_beside_background_work
 async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
     use crate::{
         domain::{DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult},
-        store::{dv_title_jobs::FelHeadRequest, LibraryStore, MediaStore},
+        store::{
+            dv_title_jobs::{FelHeadRequest, PublishTitleJob, TitleOutput},
+            LibraryStore, MediaStore,
+        },
         transcode::{
             dv_fel_qualification as q, EnhancementRateEnvelope, EnhancementRateLimits,
             EnhancementRateProvenance,
@@ -2709,14 +2712,14 @@ async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
     )
     .expect("record already measured fixture");
 
-    assert!(store
-        .request_dv_fel_head(request(1_001))
-        .await
-        .expect("prepare first head"));
-    assert!(!store
-        .request_dv_fel_head(request(1_002))
-        .await
-        .expect("dedupe active rebuild"));
+    let (first, duplicate) = tokio::join!(
+        store.request_dv_fel_head(request(1_001)),
+        store.request_dv_fel_head(request(1_002)),
+    );
+    assert_ne!(
+        first.expect("first head request"),
+        duplicate.expect("concurrent rebuild")
+    );
     let first = store
         .dv_title_demands(&scanner, 0, 1_002)
         .await
@@ -2728,17 +2731,68 @@ async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
     assert_eq!(first.probe_json, probe);
     assert!(q::pending_recipes(&first.probe_json, 100, 1).is_empty());
     let first_id = first.active_job_id.expect("fresh warm job");
+    let expected_revision = store
+        .background_job(&first_id)
+        .await
+        .expect("existing job")
+        .expect("queued rebuild")
+        .revision;
+    let wrong_node = ClaimJob {
+        node_id: "worker-b".into(),
+        kind: JobKind::DvTitleScan,
+        ..claim(&first_id, expected_revision, 1_003)
+    };
+    assert!(!matches!(
+        store
+            .claim_job(wrong_node)
+            .await
+            .expect("wrong owner claim"),
+        ClaimOutcome::Claimed { .. },
+    ));
 
-    db.execute(
-        "UPDATE background_jobs SET state='succeeded' WHERE id=?1",
-        [&first_id],
+    let owner = claimed(
+        &store,
+        ClaimJob {
+            node_id: "worker-a".into(),
+            kind: JobKind::DvTitleScan,
+            ..claim(&first_id, expected_revision, 1_004)
+        },
     )
-    .expect("first episode settled");
-    db.execute(
-        "UPDATE dv_title_jobs_demand SET terminal=1 WHERE file_id=?1",
-        [file],
-    )
-    .expect("no live shift in scanner generation");
+    .await;
+    let stats = crate::scan::dv_title::DvTitleStats::from_probe_json(&probe).expect("stored scan");
+    let result = store
+        .publish_dv_title_job(PublishTitleJob {
+            token: owner.token.expect("target node's claim"),
+            output: TitleOutput {
+                file_id: file,
+                probe_revision: revision,
+                source_size: 100,
+                source_mtime: 1,
+                scanner_digest: scanner.clone(),
+                stats,
+            },
+            now_ms: 1_005,
+        })
+        .await
+        .expect("reused scan publication");
+    assert!(matches!(result, JobPublishOutcome::Published { .. }));
+    let after_settlement = store
+        .get_file_probe_json(file)
+        .await
+        .expect("completed probe")
+        .expect("stored probe");
+    let mut stale = request(1_006);
+    stale.request = q::FelRecipeRequest::new(
+        recipe.backend_identity.clone(),
+        100,
+        2,
+        envelope,
+        q::FelRecipeOutput::new(0, (3840, 2160), (24, 1)),
+    );
+    assert!(!store
+        .request_dv_fel_head(stale)
+        .await
+        .expect("moved source cannot reopen"));
     assert!(store
         .request_dv_fel_head(request(2_000))
         .await
@@ -2750,7 +2804,7 @@ async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
         .remove(0);
     assert_ne!(later.active_job_id.as_deref(), Some(first_id.as_str()));
     assert_eq!(later.probe_revision, revision);
-    assert_eq!(later.probe_json, probe);
+    assert_eq!(later.probe_json, after_settlement);
     assert!(q::pending_recipes(&later.probe_json, 100, 1).is_empty());
 }
 
