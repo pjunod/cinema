@@ -4308,7 +4308,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # reclamation), so main's figure already counts admission.rs +1 and source_probe/title_work_tests.rs +4.
 # Union 1153 + 15 (F+) + 13 (main) = 1181, less those 5 counted twice = 1176.
 # The index-reclaim fixture drives the real paced index in one joined test task.
-expected_occurrences = 1275
+# The scanner deadline fixture owns a task so it can observe the actual probe child.
+expected_occurrences = 1276
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -6316,7 +6317,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # The native FEL loop adds the idle lifecycle sleep reviewed under all-async-
 # sleeps above. It wakes the existing splice task.
 # Main adds bounded artwork, offline worker, voter and heartbeat fixture waits.
-expected_occurrences = 2542
+# The scanner deadline fixture bounds cleanup after advancing the test clock.
+expected_occurrences = 2543
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
