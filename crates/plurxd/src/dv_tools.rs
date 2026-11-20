@@ -18,6 +18,19 @@ struct Artifact {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct M7EncoderManifest {
+    cli: Artifact,
+    libraries: Vec<Artifact>,
+}
+
+#[derive(Clone)]
+struct M7EncoderArtifacts {
+    cli: (PathBuf, String),
+    libraries: Vec<(PathBuf, String)>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Manifest {
     schema: u32,
     graph: String,
@@ -27,12 +40,14 @@ struct Manifest {
     parser_sha256: String,
     source_sha256: String,
     environment: BTreeMap<String, String>,
+    m7_encoder: Option<M7EncoderManifest>,
 }
 #[derive(Clone)]
 pub(crate) struct ToolSet {
     pub(crate) renderer: PathBuf,
     pub(crate) scanner: PathBuf,
     muxer: Option<(PathBuf, String)>,
+    m7_encoder: Option<M7EncoderArtifacts>,
     pub(crate) renderer_env: Vec<(String, std::ffi::OsString)>,
     pub(crate) identity: DvBackendIdentity,
     /// The scanner executable's own digest. It is statically linked, so this
@@ -81,6 +96,7 @@ impl ToolSet {
             renderer: PathBuf::from("/bin/false"),
             scanner: PathBuf::from("/bin/false"),
             muxer: None,
+            m7_encoder: None,
             renderer_env: Vec::new(),
             identity,
             scanner_sha256: hash(b"/bin/false"),
@@ -279,6 +295,52 @@ fn contained(root: &Path, path: &Path) -> Result<PathBuf, String> {
     }
     Ok(resolved)
 }
+fn capture_m7_encoder(root: &Path, manifest: &M7EncoderManifest) -> Option<M7EncoderArtifacts> {
+    if manifest.cli.path != Path::new("encoder/ffmpeg")
+        || !(1..=32).contains(&manifest.libraries.len())
+        || manifest
+            .libraries
+            .iter()
+            .any(|library| library.path.parent() != Some(Path::new("encoder/lib")))
+    {
+        return None;
+    }
+    let verified = |artifact: &Artifact| {
+        let path = contained(root, &artifact.path).ok()?;
+        let bytes = std::fs::metadata(&path).ok()?.len();
+        if path != root.join(&artifact.path) || !(1..=256 * 1024 * 1024).contains(&bytes) {
+            return None;
+        }
+        let sha = hash_file(&path).ok()?;
+        (sha == artifact.sha256).then_some((path, sha))
+    };
+    let cli = verified(&manifest.cli)?;
+    let mut libraries = manifest
+        .libraries
+        .iter()
+        .map(verified)
+        .collect::<Option<Vec<_>>>()?;
+    libraries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    if libraries.windows(2).any(|pair| pair[0].0 == pair[1].0)
+        || ["libavcodec.", "libavformat.", "libavutil.", "libx265."]
+            .iter()
+            .any(|family| {
+                libraries
+                    .iter()
+                    .filter(|(path, _)| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.starts_with(*family))
+                    })
+                    .count()
+                    != 1
+            })
+    {
+        return None;
+    }
+    Some(M7EncoderArtifacts { cli, libraries })
+}
+
 impl ToolSet {
     /// Only parents of the canonical executables accepted by bundle validation.
     /// Never infer trust from the configured bundle root before capture succeeds.
@@ -286,6 +348,7 @@ impl ToolSet {
         let mut directories: Vec<_> = [&self.renderer, &self.scanner]
             .into_iter()
             .chain(self.muxer.iter().map(|(path, _)| path))
+            .chain(self.m7_encoder.iter().map(|encoder| &encoder.cli.0))
             .filter_map(|path| path.parent().map(Path::to_path_buf))
             .collect();
         directories.sort();
@@ -312,8 +375,31 @@ impl ToolSet {
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub(crate) fn verified_artifact(&self, canonical_path: &Path) -> Option<&str> {
-        self.artifacts
+    pub(crate) fn m7_encoder(&self) -> Option<(&Path, &str)> {
+        self.m7_encoder
+            .as_ref()
+            .map(|encoder| (encoder.cli.0.as_path(), encoder.cli.1.as_str()))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn m7_encoder_is_current(&self) -> bool {
+        let Some(encoder) = self.m7_encoder.clone() else {
+            return false;
+        };
+        tokio::task::spawn_blocking(move || {
+            std::iter::once(&encoder.cli)
+                .chain(encoder.libraries.iter())
+                .all(|(path, expected)| hash_file(path).is_ok_and(|actual| actual == *expected))
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn verified_encoder_library(&self, canonical_path: &Path) -> Option<&str> {
+        self.m7_encoder
+            .as_ref()?
+            .libraries
             .iter()
             .find_map(|(path, sha)| (path.as_path() == canonical_path).then_some(sha.as_str()))
     }
@@ -415,6 +501,10 @@ impl ToolSet {
                 let actual = hash_file(&path).ok()?;
                 (actual == artifact.sha256).then_some((path, actual))
             });
+            let m7_encoder = manifest
+                .m7_encoder
+                .as_ref()
+                .and_then(|encoder| capture_m7_encoder(&root, encoder));
             let mut library_identity = Vec::new();
             for artifact in &manifest.libraries {
                 let path = contained(&root, &artifact.path)?;
@@ -484,6 +574,7 @@ impl ToolSet {
                 renderer: tools.remove("renderer").ok_or("missing renderer")?,
                 scanner: tools.remove("scanner").ok_or("missing scanner")?,
                 muxer,
+                m7_encoder,
                 renderer_env: environment,
                 identity,
                 scanner_sha256,
@@ -503,6 +594,48 @@ impl ToolSet {
         })
         .await
         .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod m7_encoder_manifest_tests {
+    use super::*;
+
+    #[test]
+    fn encoder_requires_owned_cli_and_exact_critical_library_hashes() {
+        let output = tempfile::tempdir().unwrap();
+        let root = output.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("encoder/lib")).unwrap();
+        let write = |name: &str| {
+            std::fs::write(root.join(name), name).unwrap();
+            Artifact {
+                path: PathBuf::from(name),
+                sha256: hash(name.as_bytes()),
+            }
+        };
+        let mut encoder = M7EncoderManifest {
+            cli: write("encoder/ffmpeg"),
+            libraries: [
+                "encoder/lib/libavcodec.63.dylib",
+                "encoder/lib/libavformat.63.dylib",
+                "encoder/lib/libavutil.61.dylib",
+                "encoder/lib/libx265.217.dylib",
+            ]
+            .map(write)
+            .into(),
+        };
+        assert!(capture_m7_encoder(&root, &encoder).is_some());
+
+        // A separately installed general CLI cannot stand in for the bundle.
+        let owned_cli = std::mem::replace(&mut encoder.cli, write("general-ffmpeg"));
+        assert!(capture_m7_encoder(&root, &encoder).is_none());
+        encoder.cli = owned_cli;
+
+        let one = encoder.libraries.pop().unwrap();
+        assert!(capture_m7_encoder(&root, &encoder).is_none());
+        std::fs::write(root.join(&one.path), b"different").unwrap();
+        encoder.libraries.push(one);
+        assert!(capture_m7_encoder(&root, &encoder).is_none());
     }
 }
 

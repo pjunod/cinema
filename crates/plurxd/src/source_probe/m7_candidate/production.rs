@@ -132,9 +132,17 @@ pub(in crate::source_probe) async fn prepare_authored(
         ));
     }
     check_cancel(cancel)?;
-    let ffmpeg = EncodedExecutable::capture_program(&context.state.system.ffmpeg)
+    let (encoder_cli, encoder_cli_sha) = context.tools.m7_encoder().ok_or(
+        PrepareError::Authority("verified independent M7 encoder CLI and closure"),
+    )?;
+    let ffmpeg = EncodedExecutable::capture_at(encoder_cli.to_owned())
         .await
         .map_err(PrepareError::Execution)?;
+    if ffmpeg.digest != encoder_cli_sha {
+        return Err(PrepareError::Authority(
+            "M7 encoder CLI differs from its bundle",
+        ));
+    }
     let (muxer, mux_sha) = context
         .tools
         .muxer()
@@ -143,6 +151,7 @@ pub(in crate::source_probe) async fn prepare_authored(
     if !ffmpeg.is_current().await
         || !context.tools.is_current().await
         || !context.tools.muxer_is_current().await
+        || !context.tools.m7_encoder_is_current().await
     {
         return Err(PrepareError::Authority("encoder tools moved"));
     }
@@ -494,6 +503,7 @@ pub(in crate::source_probe) async fn prepare_authored(
         || !ffmpeg.is_current().await
         || !context.tools.is_current().await
         || !context.tools.muxer_is_current().await
+        || !context.tools.m7_encoder_is_current().await
     {
         return Err(PrepareError::Authority(
             "source or encoder changed before authored custody",
@@ -1296,7 +1306,7 @@ async fn loaded_closure(tools: &ToolSet, stderr: &[u8]) -> Result<Hash> {
         })
         .await?;
         let expected = tools
-            .verified_artifact(&file.0)
+            .verified_encoder_library(&file.0)
             .ok_or(PrepareError::Authority(
                 "loaded critical encoder library outside verified bundle",
             ))?;

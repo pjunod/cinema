@@ -49,7 +49,24 @@ def source_identity(source):
     return digest.hexdigest()
 
 
-def build(source, root, darwin=False):
+def encoder_artifacts(root):
+    root = root.resolve(strict=True)
+    entry = root / "encoder/ffmpeg"
+    libraries = sorted((root / "encoder/lib").glob("*.dylib"))
+    if not 1 <= len(libraries) <= 32 or not entry.is_file():
+        raise ValueError("M7 encoder must contain its CLI and between 1 and 32 dylibs")
+    files = [entry, *libraries]
+    if any(path.resolve(strict=True) != root / path.relative_to(root)
+           or not path.is_file() for path in files):
+        raise ValueError("M7 encoder artifacts must be regular owned files")
+    return {
+        "cli": {"path": "encoder/ffmpeg", "sha256": sha(entry)},
+        "libraries": [{"path": path.relative_to(root).as_posix(), "sha256": sha(path)}
+                      for path in libraries],
+    }
+
+
+def build(source, root, darwin=False, m7_encoder=False):
     libraries = (sorted((root / "lib").glob("*.dylib")) if darwin
                  else [root / "lib/libplacebo.so.387"])
     if darwin and not 1 <= len(libraries) <= 32:
@@ -65,13 +82,21 @@ def build(source, root, darwin=False):
         "parser_sha256": sha(root / "sources/libdovi.a"),
         "source_sha256": source_identity(source),
         "environment": {} if darwin else {"LD_LIBRARY_PATH": "lib"}}
+    if m7_encoder:
+        if not darwin:
+            raise ValueError("M7 encoder relocation is currently supported on macOS")
+        manifest["m7_encoder"] = encoder_artifacts(root)
     (root / "build-identity.json").write_text(json.dumps(manifest, indent=2) + "\n")
     verify(source, root, darwin)
 
 
 def verify(source, root, darwin=False):
     manifest = json.loads((root / "build-identity.json").read_text())
-    assert set(manifest) == {"schema", "graph", "abi", "tools", "libraries", "parser_sha256", "source_sha256", "environment"}
+    fields = {"schema", "graph", "abi", "tools", "libraries", "parser_sha256", "source_sha256", "environment"}
+    if "m7_encoder" in manifest:
+        assert darwin and manifest["m7_encoder"] == encoder_artifacts(root)
+        fields.add("m7_encoder")
+    assert set(manifest) == fields
     assert manifest["schema"] == 1 and manifest["graph"] == GRAPH
     assert manifest["abi"] == json.loads((root / "sources/abi.json").read_text())
     assert manifest["abi"].get("libplacebo") == 387
@@ -100,11 +125,15 @@ if __name__ == "__main__":
     parser.add_argument("root", type=Path, nargs="?")
     parser.add_argument("--darwin", action="store_true", help="write or verify a Darwin manifest")
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--m7-encoder", action="store_true",
+                        help="record the relocated independent CLI and shared macOS encoder closure")
     parser.add_argument("--identity", action="store_true", help="print the source identity of SOURCE and exit")
     args = parser.parse_args()
     if args.identity:
         print(source_identity(args.source))
     elif args.root is None:
         parser.error("ROOT is required unless --identity is given")
+    elif args.verify:
+        verify(args.source, args.root, args.darwin)
     else:
-        (verify if args.verify else build)(args.source, args.root, args.darwin)
+        build(args.source, args.root, args.darwin, args.m7_encoder)
