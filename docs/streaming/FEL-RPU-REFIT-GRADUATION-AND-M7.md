@@ -42,10 +42,10 @@ decoder change.
 
 | Platform | Retained evidence | Remaining physical evidence |
 |---|---|---|
-| Web | No F+ plurx playback receipt | Actual browser/OS/display and served copy session |
-| Apple | M3 offscreen mapping passes; M5 replacement host identified | Actual plurx client playback; record macOS/iOS/tvOS coverage separately |
-| Android | Lenovo decoder mapping characterization in Google Photos | Actual plurx client playback; do not extrapolate that experiment to other devices |
-| Linux player | No F+ physical receipt | Actual plurx Player, decoder and display path |
+| Web | Safari fitted handoff, 60 ms seek and natural 206.864 s completion | Optical mapping and wider browser coverage |
+| Apple | Physical tvOS fitted handoff and 65 ms seek; physical iPhone fitted handoff, 69 ms seek and natural 206.864 s completion | Optical mapping; native macOS coverage; unresolved tvOS cold-entry failure |
+| Android | Physical Lenovo corrected fitted handoff, 911 ms seek and natural 206.864 s completion, zero interruptions and dropped frames | Optical mapping and wider device coverage |
+| Linux player | Installed Player native P7 control and retained fitted P8.1 renderer control both reach natural EOF with zero drops | Stock launcher's live fitted successor route and optical mapping |
 
 Each run records the server commit/binary and processing bundle, client build,
 physical device/OS/decoder/display, source content hash, session and rendition,
@@ -154,9 +154,41 @@ curve method so older measurements rebuild through ordinary indexing.
 Android prepared scalar VOD uses a private durable single-variant envelope
 with this attachment-owned bound. Missing evidence stays unknown. Apple
 acquisition and subtitle behavior, the media child timeline, the strict
-readiness predicate and handoff deadlines stay unchanged. Regression checks
-and the corrected physical handoff are pending; this is not an Android
-playback graduation claim.
+readiness predicate and handoff deadlines stay unchanged.
+
+Further physical tracing identified two distinct causes. Ordinary fragment
+landing compared a presentation timestamp against a decode timestamp. With
+reordered frames, the retained fixture differed by 83 ms. The correction
+compares the same presentation clock, retaining the strict uniqueness and
+complete-window checks. Android then committed the fitted successor, but its
+next seek opened an identity session: the active quality ledger still said
+Auto. A proven successor frame now settles that ledger before queued seeks
+are drained. Failed or rolled-back successors do not advance it.
+
+The corrective Lenovo run retained the same fitted session and decoder
+through one backward seek, resumed in 911 ms and naturally completed the
+206.864-second fixture. Diagnostics reported zero buffering interruptions and
+zero dropped of 4,444 frames. All 28 complete fitted segment bodies match the
+immutable cache. The seek refetched one previously fetched segment; this is
+an in-place session seek, not proof of memory-only delivery. The earlier
+failed retention attempt remains recorded separately.
+
+A wired iPhone 17 Pro Max running an isolated Cinema lab build also committed
+fitted copy, resumed one buffered seek in 69 ms and naturally completed
+206.864 seconds with zero reported buffering interruptions. Its final watch
+state marked the complete extent watched; all 18 completely captured fitted
+segment bodies match the cache. Neither this nor the Lenovo observation
+establishes optical mapping.
+
+The installed Linux Player's ordinary native P7 route completed 206.864
+seconds, resumed a buffered seek in 65 ms and reported zero drops. A separate
+physical renderer control played the exact retained fitted P8.1 init and
+fragments to natural EOF at 130.290 seconds with zero drops; all 19 response
+bodies match their retained hashes. Both controls exposed a PQ BT.2020 target.
+The stock launcher advertises native P7 support and lacks the live fitted
+predecessor/successor route. These controls qualify their recorded paths;
+they do not establish a live Linux F+ handoff. Device viewers and test-owned
+endpoints were disconnected after collection.
 
 ## Native M5 test-instance prerequisites
 
