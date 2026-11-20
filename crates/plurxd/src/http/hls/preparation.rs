@@ -45,6 +45,7 @@ pub(super) struct ActivePreparedSuccessor {
     pub(super) preparation: plurx_core::domain::MediaSessionPreparation,
     pub(super) purpose: PreparationPurpose,
     pub(super) deferred_fel: bool,
+    pub(super) owner_epoch: i64,
     // Issued only after local retained-output seal and successful prime.
     cached_recovery_owner: Option<CachedRecoveryOwner>,
     cached_accepted_wait: Option<CachedAcceptedWait>,
@@ -454,6 +455,7 @@ pub(super) fn register_test_preparation(
         preparation,
         purpose,
         deferred_fel: false,
+        owner_epoch: 1,
         cached_recovery_owner: None,
         cached_accepted_wait: None,
         planning_registration: None,
@@ -570,6 +572,7 @@ impl ActivePreparedSuccessor {
             && preparation.incarnation_id == route.incarnation_id
             && preparation.session_id == route.session_id
             && preparation.owner_node_id == route.owner_node_id
+            && self.owner_epoch == route.owner_epoch
             && preparation.playback_id == route.playback_id
             && preparation.recipe_json == route.recipe_json
             && preparation.response_json == route.response_json
@@ -641,6 +644,7 @@ pub(super) async fn settle_cancelled_preparation(
         &active.preparation.owner_node_id,
         &active.preparation.incarnation_id,
         &active.preparation.session_id,
+        active.owner_epoch,
         reason,
         active.deferred_fel,
     )
@@ -2705,6 +2709,7 @@ pub(super) struct DeferredFelStage {
     pub(super) cancellation_key: String,
     pub(super) desired_revision: Option<i64>,
     pub(super) duration_ms: i64,
+    pub(super) owner_epoch: i64,
     #[cfg(target_os = "linux")]
     pub(super) prepared: super::create::AdaptiveOriginPrepared,
     #[cfg(target_os = "linux")]
@@ -2989,6 +2994,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             enhancement.requires_effective_processing = true;
         }
     }
+    let successor_owner_epoch = deferred_fel.map_or(1, |deferred| deferred.owner_epoch);
     let response = StartResponse {
         enhancement,
         effective_processing: None,
@@ -3055,7 +3061,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
         control: crate::playback_control::ControlBootstrap::new(
             &staged_session_id,
             &staged_incarnation_id,
-            1,
+            successor_owner_epoch,
             if staged_request.presentation == crate::transcode::Presentation::Vod {
                 crate::playback_control::VOD_LEASE_TIMEOUT_MS
             } else {
@@ -3230,6 +3236,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
             preparation: preparation.clone(),
             purpose,
             deferred_fel: deferred_fel.is_some(),
+            owner_epoch: successor_owner_epoch,
             cached_recovery_owner: None,
             cached_accepted_wait: None,
             planning_registration: planning_registration.clone(),
@@ -3549,6 +3556,7 @@ pub(super) async fn retire_prepared_worker(
     owner_node_id: &str,
     incarnation_id: &str,
     session_id: &str,
+    owner_epoch: i64,
     reason: &'static str,
     deferred_fel: bool,
 ) -> bool {
@@ -3567,7 +3575,7 @@ pub(super) async fn retire_prepared_worker(
                 &RemoteAbortRequest {
                     incarnation_id: incarnation_id.to_owned(),
                     session_id: session_id.to_owned(),
-                    expected_owner_epoch: 1,
+                    expected_owner_epoch: owner_epoch,
                     reason: deferred_fel
                         .then(|| crate::vodserve::Terminal::Replaced.control_reason().into()),
                 },

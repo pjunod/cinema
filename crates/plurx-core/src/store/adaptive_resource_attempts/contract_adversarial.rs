@@ -770,6 +770,7 @@ async fn adaptive_publication_refuses_mismatched_live_route_and_job_leases() {
 
 async fn ready_staged_adoption(
     store: &dyn Store,
+    retry: bool,
 ) -> (AdaptiveAdoption, AdaptiveStagedAdoption, MediaSessionRoute) {
     let mut fixture = AttemptFixture::new(store).await;
     let incumbent = store
@@ -792,6 +793,51 @@ async fn ready_staged_adoption(
         .await
         .expect("actual viewer ask");
     fixture.claim.binding.expected_desired_revision = Some(desired.revision);
+    if retry {
+        let first = applied(
+            store
+                .claim_adaptive_attempt(&fixture.claim)
+                .await
+                .expect("first Claim"),
+        );
+        let fence = AttemptFence {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: first.sequence,
+                expected_attempt_sequence: attempt_sequence(&first, &fixture.claim.key),
+                now_ms: 10_001,
+            },
+            binding: fixture.claim.binding.clone(),
+            key: fixture.claim.key.clone(),
+            cancel_request: false,
+        };
+        let fenced = applied(
+            store
+                .fence_adaptive_attempt(&fence)
+                .await
+                .expect("first Fence"),
+        );
+        let close = AttemptClose {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: fenced.sequence,
+                expected_attempt_sequence: attempt_sequence(&fenced, &fixture.claim.key),
+                now_ms: 10_001,
+            },
+            binding: fixture.claim.binding.clone(),
+            key: fixture.claim.key.clone(),
+            worker_instance_id: fixture.claim.worker_instance_id,
+            serving_generation: fixture.claim.serving_generation,
+            cleanup_operation_id: fence.context.operation_id,
+        };
+        let closed = applied(
+            store
+                .close_adaptive_attempt(&close)
+                .await
+                .expect("first Close"),
+        );
+        fixture.claim = fixture.second(&closed, false);
+    }
     let activation = ready_adoption(store, &fixture).await;
     let staged = AdaptiveStagedAdoption {
         context: activation.context.clone(),
@@ -849,137 +895,147 @@ fn staged_viewer_commit(
 
 #[tokio::test]
 async fn staged_adopt_keeps_incumbent_current_until_existing_viewer_commit() {
-    for_each_adaptive_backend(|store, _| async move {
-        let (ordinary, staged, incumbent) = ready_staged_adoption(store.as_ref()).await;
-        let p = &staged.preparation;
-        let applied = store
-            .stage_adaptive_winner(&staged)
-            .await
-            .expect("atomic stage");
-        let AttemptAdoption::Applied(applied) = applied else {
-            panic!("expected original staged route");
-        };
-        assert_eq!(applied.predecessor.as_ref(), Some(&incumbent));
-        assert_eq!(applied.route.owner_epoch, 1);
-        assert_eq!(applied.route.incarnation_id, p.incarnation_id);
-        assert_eq!(
-            applied.route.publication_ready_at_ms,
-            MEDIA_SESSION_PUBLICATION_BLOCKED
-        );
-        assert_eq!(applied.route.lease_expires_at_ms, p.deadline_ms);
-        assert_eq!(
-            store
-                .media_session_route_for_playback(&p.principal, &p.playback_id)
-                .await
-                .expect("active pointer"),
-            Some(incumbent.clone())
-        );
-        assert_eq!(
-            store
-                .staged_media_session_for_playback(&p.principal, &p.playback_id)
-                .await
-                .expect("pending ledger")
-                .expect("original staging")
-                .staged_incarnation_id,
-            p.incarnation_id
-        );
-        assert_eq!(
-            store
+    for retry in [false, true] {
+        for_each_adaptive_backend(move |store, _| async move {
+            let (ordinary, staged, incumbent) = ready_staged_adoption(store.as_ref(), retry).await;
+            let p = &staged.preparation;
+            let applied = store
                 .stage_adaptive_winner(&staged)
                 .await
-                .expect("exact replay"),
-            AttemptAdoption::Replay(applied)
-        );
-        assert_eq!(
-            store
-                .adopt_adaptive_winner(&ordinary)
+                .expect("atomic stage");
+            let AttemptAdoption::Applied(applied) = applied else {
+                panic!("expected original staged route");
+            };
+            assert_eq!(applied.predecessor.as_ref(), Some(&incumbent));
+            assert_eq!(applied.route.owner_epoch, if retry { 2 } else { 1 });
+            assert_eq!(applied.route.incarnation_id, p.incarnation_id);
+            assert_eq!(
+                applied.route.publication_ready_at_ms,
+                MEDIA_SESSION_PUBLICATION_BLOCKED
+            );
+            assert_eq!(applied.route.lease_expires_at_ms, p.deadline_ms);
+            assert_eq!(
+                store
+                    .media_session_route_for_playback(&p.principal, &p.playback_id)
+                    .await
+                    .expect("active pointer"),
+                Some(incumbent.clone())
+            );
+            assert_eq!(
+                store
+                    .staged_media_session_for_playback(&p.principal, &p.playback_id)
+                    .await
+                    .expect("pending ledger")
+                    .expect("original staging")
+                    .staged_incarnation_id,
+                p.incarnation_id
+            );
+            assert_eq!(
+                store
+                    .stage_adaptive_winner(&staged)
+                    .await
+                    .expect("exact replay"),
+                AttemptAdoption::Replay(applied)
+            );
+            assert_eq!(
+                store
+                    .adopt_adaptive_winner(&ordinary)
+                    .await
+                    .expect("other mode's receipt"),
+                AttemptAdoption::Refused(AttemptRefusal::Conflict)
+            );
+            let mut changed = staged.clone();
+            changed.preparation.deadline_ms += 1;
+            assert_eq!(
+                store
+                    .stage_adaptive_winner(&changed)
+                    .await
+                    .expect("different replay"),
+                AttemptAdoption::Refused(AttemptRefusal::Conflict)
+            );
+            let current = store
+                .adaptive_request_status(&staged.binding.key, &staged.binding.principal)
                 .await
-                .expect("other mode's receipt"),
-            AttemptAdoption::Refused(AttemptRefusal::Conflict)
-        );
-        let mut changed = staged.clone();
-        changed.preparation.deadline_ms += 1;
-        assert_eq!(
-            store
-                .stage_adaptive_winner(&changed)
+                .expect("attempt ledger")
+                .expect("transferred original");
+            assert_eq!(current.disposition, RequestDisposition::Adopted);
+            let fence = AttemptFence {
+                context: MutationContext {
+                    operation_id: Uuid::new_v4(),
+                    expected_request_sequence: current.sequence,
+                    expected_attempt_sequence: attempt_sequence(&current, &staged.key),
+                    now_ms: p.now_ms + 1,
+                },
+                binding: staged.binding.clone(),
+                key: staged.key.clone(),
+                cancel_request: true,
+            };
+            assert_eq!(
+                store
+                    .fence_adaptive_attempt(&fence)
+                    .await
+                    .expect("attempt Fence after transfer"),
+                AttemptMutation::Refused(AttemptRefusal::WinnerLost)
+            );
+            let commit = staged_viewer_commit(p, &incumbent);
+            let committed = store
+                .commit_media_session_preparation(&p.principal, &p.playback_id, &commit)
                 .await
-                .expect("different replay"),
-            AttemptAdoption::Refused(AttemptRefusal::Conflict)
-        );
-        let current = store
-            .adaptive_request_status(&staged.binding.key, &staged.binding.principal)
-            .await
-            .expect("attempt ledger")
-            .expect("transferred original");
-        assert_eq!(current.disposition, RequestDisposition::Adopted);
-        let fence = AttemptFence {
-            context: MutationContext {
-                operation_id: Uuid::new_v4(),
-                expected_request_sequence: current.sequence,
-                expected_attempt_sequence: attempt_sequence(&current, &staged.key),
-                now_ms: p.now_ms + 1,
-            },
-            binding: staged.binding.clone(),
-            key: staged.key.clone(),
-            cancel_request: true,
-        };
-        assert_eq!(
-            store
-                .fence_adaptive_attempt(&fence)
+                .expect("existing viewer transaction")
+                .expect("same successor");
+            assert_eq!(committed.control_receipt, commit.control_receipt);
+            let replay = store
+                .commit_media_session_preparation(&p.principal, &p.playback_id, &commit)
                 .await
-                .expect("attempt Fence after transfer"),
-            AttemptMutation::Refused(AttemptRefusal::WinnerLost)
-        );
-        let commit = staged_viewer_commit(p, &incumbent);
-        let committed = store
-            .commit_media_session_preparation(&p.principal, &p.playback_id, &commit)
-            .await
-            .expect("existing viewer transaction")
-            .expect("same successor");
-        assert_eq!(committed.control_receipt, commit.control_receipt);
-        let replay = store
-            .commit_media_session_preparation(&p.principal, &p.playback_id, &commit)
-            .await
-            .expect("durable viewer receipt replay")
-            .expect("same committed viewer");
-        assert_eq!(replay.route, committed.route);
-        assert_eq!(replay.control_receipt, commit.control_receipt);
-        assert!(replay.predecessor.is_none());
-        assert_eq!(committed.route.incarnation_id, p.incarnation_id);
-        assert_eq!(
-            committed.route.lease_expires_at_ms,
-            commit.lease_expires_at_ms
-        );
-        assert_eq!(
-            store
-                .media_session_route_for_playback(&p.principal, &p.playback_id)
+                .expect("durable viewer receipt replay")
+                .expect("same committed viewer");
+            assert_eq!(replay.route, committed.route);
+            assert_eq!(replay.control_receipt, commit.control_receipt);
+            assert!(replay.predecessor.is_none());
+            assert_eq!(committed.route.incarnation_id, p.incarnation_id);
+            assert_eq!(committed.route.owner_epoch, staged.key.owner_epoch);
+            assert_eq!(
+                store
+                    .lease_expiry_hint(&format!("session:{}", p.incarnation_id))
+                    .await
+                    .expect("exact staged lease"),
+                Some(commit.lease_expires_at_ms)
+            );
+            assert_eq!(
+                committed.route.lease_expires_at_ms,
+                commit.lease_expires_at_ms
+            );
+            assert_eq!(
+                store
+                    .media_session_route_for_playback(&p.principal, &p.playback_id)
+                    .await
+                    .expect("advanced pointer")
+                    .expect("new route")
+                    .incarnation_id,
+                p.incarnation_id
+            );
+            assert!(store
+                .staged_media_session_for_playback(&p.principal, &p.playback_id)
                 .await
-                .expect("advanced pointer")
-                .expect("new route")
-                .incarnation_id,
-            p.incarnation_id
-        );
-        assert!(store
-            .staged_media_session_for_playback(&p.principal, &p.playback_id)
-            .await
-            .expect("pending slot consumed")
-            .is_none());
-        let draining = store
-            .media_session_route_by_incarnation(&incumbent.incarnation_id)
-            .await
-            .expect("predecessor")
-            .expect("draining predecessor");
-        assert_eq!(draining.state, "active");
-        assert_eq!(draining.lease_expires_at_ms, incumbent.lease_expires_at_ms);
-        assert!(draining.drain_deadline_ms.is_some());
-    })
-    .await;
+                .expect("pending slot consumed")
+                .is_none());
+            let draining = store
+                .media_session_route_by_incarnation(&incumbent.incarnation_id)
+                .await
+                .expect("predecessor")
+                .expect("draining predecessor");
+            assert_eq!(draining.state, "active");
+            assert_eq!(draining.lease_expires_at_ms, incumbent.lease_expires_at_ms);
+            assert!(draining.drain_deadline_ms.is_some());
+        })
+        .await;
+    }
 }
 
 #[tokio::test]
 async fn staged_adopt_refuses_changed_ask_and_abort_keeps_native_debt() {
     for_each_adaptive_backend(|store, _| async move {
-        let (_, staged, incumbent) = ready_staged_adoption(store.as_ref()).await;
+        let (_, staged, incumbent) = ready_staged_adoption(store.as_ref(), false).await;
         let p = &staged.preparation;
         let wrong_owner = {
             let mut wrong = staged.clone();
@@ -1023,7 +1079,7 @@ async fn staged_adopt_refuses_changed_ask_and_abort_keeps_native_debt() {
             .expect("empty preparation slot")
             .is_none());
 
-        let (_, staged, incumbent) = ready_staged_adoption(store.as_ref()).await;
+        let (_, staged, incumbent) = ready_staged_adoption(store.as_ref(), false).await;
         let p = &staged.preparation;
         assert!(matches!(
             store
@@ -1070,7 +1126,7 @@ async fn staged_adopt_refuses_changed_ask_and_abort_keeps_native_debt() {
 async fn staged_adopt_refuses_unproven_or_changed_viewer_commit() {
     for_each_adaptive_backend(|store, _| async move {
         for remove_receipt in [true, false] {
-            let (_, staged, incumbent) = ready_staged_adoption(store.as_ref()).await;
+            let (_, staged, incumbent) = ready_staged_adoption(store.as_ref(), false).await;
             let p = &staged.preparation;
             assert!(matches!(
                 store.stage_adaptive_winner(&staged).await.expect("stage"),

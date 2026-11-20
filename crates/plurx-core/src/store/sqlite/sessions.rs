@@ -3163,10 +3163,10 @@ impl MediaSessionStore for SqliteStore {
                 tx.commit()?;
                 return Ok(None);
             }
-            let staged_owner: String = tx.query_row(
-                "SELECT owner_node_id FROM media_sessions WHERE incarnation_id = ?1",
+            let (staged_owner, staged_epoch): (String, i64) = tx.query_row(
+                "SELECT owner_node_id, owner_epoch FROM media_sessions WHERE incarnation_id = ?1",
                 [staged.staged_incarnation_id.as_str()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
             let predecessor = tx
                 .query_row(
@@ -3220,7 +3220,7 @@ impl MediaSessionStore for SqliteStore {
             tx.execute(
                 &format!("UPDATE job_leases
                     SET expires_at_ms = ?1, revision = revision + 1, updated_at_ms = ?2
-                  WHERE resource = ?3 AND owner_node_id = ?4 AND fence = 1
+                  WHERE resource = ?3 AND owner_node_id = ?4 AND fence = ?6
                     AND revision < 9223372036854775807
                     AND EXISTS(SELECT 1 FROM media_sessions
                       WHERE ('session:' || incarnation_id)=job_leases.resource AND {owner_5})"),
@@ -3230,6 +3230,7 @@ impl MediaSessionStore for SqliteStore {
                     format!("session:{}", staged.staged_incarnation_id),
                     staged_owner,
                     user_id,
+                    staged_epoch,
                 ],
             )?;
             tx.execute(

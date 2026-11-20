@@ -1863,6 +1863,7 @@ impl super::TranscodeManager {
         self.verify_adaptive_claim_for_phases(
             &request.claim,
             &[AttemptPhase::Provisional, AttemptPhase::Prepared],
+            request.purpose == AdaptivePreparePurpose::DeferredFel,
         )
         .await
         .map_err(str::to_owned)?;
@@ -1888,6 +1889,7 @@ impl super::TranscodeManager {
         self.verify_adaptive_claim_for_phases(
             &request.claim,
             &[AttemptPhase::Provisional, AttemptPhase::Prepared],
+            request.purpose == AdaptivePreparePurpose::DeferredFel,
         )
         .await
         .map_err(str::to_owned)?;
@@ -1945,7 +1947,7 @@ impl super::TranscodeManager {
         restart_admission: crate::serving_fence::RestartAdmission,
     ) -> Result<AdaptiveRemoteRegistrationStart, String> {
         preflight_attempt_payload(&request)?;
-        self.verify_adaptive_claim(&request.claim)
+        self.verify_adaptive_claim(&request.claim, request.purpose)
             .await
             .map_err(str::to_owned)?;
         if let Some(existing) = self.adaptive_attempts.get(request.claim.key.attempt_id) {
@@ -2064,6 +2066,7 @@ impl super::TranscodeManager {
         self.verify_adaptive_claim_for_phases(
             claim,
             &[AttemptPhase::Provisional, AttemptPhase::Prepared],
+            false, // Grant must replay a registration that already passed its purpose check.
         )
         .await
         .map_err(str::to_owned)?;
@@ -2105,7 +2108,7 @@ impl super::TranscodeManager {
         restart_admission: crate::serving_fence::RestartAdmission,
     ) -> Result<AdaptivePrepareStart, AdaptivePrepareError> {
         preflight_attempt_payload(&request)?;
-        self.verify_adaptive_claim(&request.claim)
+        self.verify_adaptive_claim(&request.claim, request.purpose)
             .await
             .map_err(str::to_owned)?;
         let attempt_id = request.claim.key.attempt_id;
@@ -4014,9 +4017,14 @@ impl super::TranscodeManager {
     pub(crate) async fn verify_adaptive_claim(
         &self,
         claim: &AttemptClaim,
+        purpose: AdaptivePreparePurpose,
     ) -> Result<(), &'static str> {
-        self.verify_adaptive_claim_for_phases(claim, &[AttemptPhase::Provisional])
-            .await
+        self.verify_adaptive_claim_for_phases(
+            claim,
+            &[AttemptPhase::Provisional],
+            purpose == AdaptivePreparePurpose::DeferredFel,
+        )
+        .await
     }
 
     // Prepared is allowed only by the replay-only API, never fresh native entry.
@@ -4024,6 +4032,7 @@ impl super::TranscodeManager {
         &self,
         claim: &AttemptClaim,
         allowed: &[AttemptPhase],
+        require_closed_prior_attempts: bool,
     ) -> Result<(), &'static str> {
         claim.validate().map_err(|_| "invalid adaptive claim")?;
         let status = self
@@ -4037,6 +4046,13 @@ impl super::TranscodeManager {
             .map_err(|_| "adaptive Store status is invalid")?;
         if status.binding != claim.binding || status.disposition != RequestDisposition::Open {
             return Err("adaptive claim binding or disposition changed");
+        }
+        if require_closed_prior_attempts
+            && status.attempts.iter().any(|attempt| {
+                attempt.key.ordinal < claim.key.ordinal && attempt.phase != AttemptPhase::Closed
+            })
+        {
+            return Err("deferred FEL prior attempt has no confirmed Close");
         }
         let attempt = status
             .attempts
@@ -5584,7 +5600,7 @@ mod tests {
         ));
         state
             .transcode
-            .verify_adaptive_claim(&claim)
+            .verify_adaptive_claim(&claim, AdaptivePreparePurpose::Create)
             .await
             .expect("actual endpoint Store/route prerequisites pass");
         let entry = state

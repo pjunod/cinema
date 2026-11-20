@@ -7,15 +7,13 @@ use crate::store::{
     MEDIA_SESSION_MAX_SESSION_ROWS_PER_USER,
 };
 
-/// The first staged path retains a private verified worker product until
+/// The staged path retains a private verified worker product until
 /// readiness. Its recipe has no mutable first-attachment cache receipt.
 fn exact_preparation(input: &AdaptiveStagedAdoption) -> Result<bool, StoreError> {
     let binding = &input.binding;
     let key = &input.key;
     let p = &input.preparation;
-    if key.ordinal != 1
-        || key.owner_epoch != 1
-        || p.incarnation_id != key.route_incarnation_id.to_string()
+    if p.incarnation_id != key.route_incarnation_id.to_string()
         || p.session_id != key.session_id.to_string()
         || p.principal != binding.principal
         || p.playback_id != binding.playback_id
@@ -112,6 +110,7 @@ pub(crate) async fn stage<B: Backend>(
     store: &B,
     input: &AdaptiveStagedAdoption,
 ) -> Result<AttemptAdoption, StoreError> {
+    input.key.validate(&input.binding)?;
     input.worker.validate(&input.binding, &input.key)?;
     // The replicated transaction and guard use the existing Adopt opcode.
     // The digest separates the staged receipt from an ordinary activation.
@@ -154,6 +153,7 @@ pub(crate) async fn stage<B: Backend>(
     let successor = quote(&p.incarnation_id);
     let session = quote(&p.session_id);
     let worker = quote(&p.owner_node_id);
+    let worker_epoch = input.key.owner_epoch;
     let lease = quote(&format!("session:{}", p.incarnation_id));
     let recovery = quote(&binding.recovery_epoch.to_string());
     let fingerprint = quote(&p.request_fingerprint);
@@ -215,19 +215,25 @@ pub(crate) async fn stage<B: Backend>(
          AND s.incarnation_id!={successor})<{MEDIA_SESSION_MAX_OWNED}",
         quote(&crate::cluster::coordination::removed_job_owner_key(&p.owner_node_id))
     )));
+    statements.push(schema::assertion(&format!(
+        "NOT EXISTS(SELECT 1 FROM media_resource_attempts prior
+         WHERE {} AND prior.ordinal<{} AND prior.phase!='closed')",
+        request_predicate(binding, "prior"),
+        input.key.ordinal
+    )));
     // Convert the one existing route and lease in place under its original epoch.
     statements.push(schema::assertion(&format!(
         "EXISTS(SELECT 1 FROM media_sessions s JOIN job_leases l ON l.resource={lease}
          WHERE s.incarnation_id={successor} AND s.session_id={session} AND s.user_id={user}
          AND {route_owner}={owner} AND s.playback_id={playback} AND s.request_fingerprint={fingerprint}
-         AND s.recovery_epoch={recovery} AND s.owner_node_id={worker} AND s.owner_epoch=1
+         AND s.recovery_epoch={recovery} AND s.owner_node_id={worker} AND s.owner_epoch={worker_epoch}
          AND s.state='starting' AND s.publication_ready_at_ms={blocked}
          AND s.lease_expires_at_ms>{now} AND l.expires_at_ms=s.lease_expires_at_ms
          AND l.owner_node_id=s.owner_node_id AND l.fence=s.owner_epoch AND l.revision<9223372036854775807)"
     )));
     statements.push(format!(
         "UPDATE job_leases SET expires_at_ms={deadline},revision=revision+1,updated_at_ms={now}
-         WHERE resource={lease} AND owner_node_id={worker} AND fence=1"
+         WHERE resource={lease} AND owner_node_id={worker} AND fence={worker_epoch}"
     ));
     statements.push(format!(
         "UPDATE media_sessions SET state='active',recipe_json={recipe},response_json={response},
@@ -265,7 +271,7 @@ pub(crate) async fn stage<B: Backend>(
          JOIN media_session_preparations prep ON prep.staged_incarnation_id=s.incarnation_id
          JOIN quality_preparation_owners q ON q.staged_incarnation_id=s.incarnation_id
          WHERE s.incarnation_id={successor} AND s.session_id={session} AND s.owner_node_id={worker}
-         AND s.owner_epoch=1 AND s.state='active' AND s.publication_ready_at_ms={blocked}
+         AND s.owner_epoch={worker_epoch} AND s.state='active' AND s.publication_ready_at_ms={blocked}
          AND s.recipe_json={recipe} AND s.response_json={response} AND s.lease_expires_at_ms={deadline}
          AND l.owner_node_id=s.owner_node_id AND l.fence=s.owner_epoch AND l.expires_at_ms={deadline}
          AND prep.expected_predecessor_incarnation_id={predecessor} AND prep.deadline_ms={deadline}
@@ -364,7 +370,11 @@ pub(crate) fn viewer_commit_claim(
              JOIN job_leases lease ON lease.resource='session:'||s.incarnation_id
              JOIN job_leases old_lease ON old_lease.resource='session:'||old.incarnation_id
              WHERE a.route_incarnation_id={next} AND r.owner_key={owner} AND a.phase='winner'
-             AND a.ordinal=1 AND r.winner_attempt_id=a.attempt_id AND r.disposition='adopted'
+             AND a.ordinal BETWEEN 1 AND 3 AND r.winner_attempt_id=a.attempt_id AND r.disposition='adopted'
+             AND NOT EXISTS(SELECT 1 FROM media_resource_attempts prior
+                 WHERE prior.owner_key=r.owner_key AND prior.request_id=r.request_id
+                 AND prior.request_incarnation_id=r.request_incarnation_id
+                 AND prior.ordinal<a.ordinal AND prior.phase!='closed')
              AND op.action='adopt' AND op.attempt_id=a.attempt_id
              AND op.owner_key=r.owner_key AND op.request_id=r.request_id
              AND op.request_incarnation_id=r.request_incarnation_id
@@ -384,7 +394,7 @@ pub(crate) fn viewer_commit_claim(
              AND root.state='resolved' AND root.incarnation_id=s.incarnation_id
              AND root.request_fingerprint=s.request_fingerprint AND root.playback_id={playback}
              AND root.owner_node_id=s.owner_node_id
-             AND s.owner_node_id=a.worker_node_id AND s.owner_epoch=a.owner_epoch AND a.owner_epoch=1
+             AND s.owner_node_id=a.worker_node_id AND s.owner_epoch=a.owner_epoch AND a.owner_epoch=a.ordinal
              AND json_extract(a.worker_json,'$.node_id')=s.owner_node_id
              AND json_extract(a.worker_json,'$.worker_instance_id')=a.worker_instance_id
              AND json_extract(a.worker_json,'$.planning_generation')=json_extract(r.binding_json,'$.planning_generation')

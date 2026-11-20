@@ -237,6 +237,9 @@ pub(crate) struct MediaNodeSnapshot {
     pub adaptive_fel_prepare: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub adaptive_fel_stage: bool,
+    /// Supports later exact attempts under the original deferred FEL request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adaptive_fel_stage_retry: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1530,19 +1533,25 @@ impl MediaPool {
             .filter(AdaptiveWorkerQuote::valid)
     }
 
-    pub(crate) async fn adaptive_fel_stage_worker_current(&self, node_id: &str) -> bool {
+    pub(crate) async fn adaptive_fel_stage_quote(
+        &self,
+        node_id: &str,
+        retry: bool,
+    ) -> Option<AdaptiveWorkerQuote> {
         let now = tokio::time::Instant::now();
-        self.snapshots.read().await.get(node_id).is_some_and(|row| {
-            now <= row.expires_at
-                && row.snapshot.protocol_version == PROTOCOL_VERSION
-                && row.snapshot.adaptive_fel_stage
-                && row
-                    .snapshot
-                    .adaptive_worker_quote
-                    .as_ref()
-                    .is_some_and(AdaptiveWorkerQuote::valid)
-                && placement_refusal(&row.snapshot).is_none()
-        })
+        self.snapshots
+            .read()
+            .await
+            .get(node_id)
+            .filter(|row| {
+                now <= row.expires_at
+                    && row.snapshot.protocol_version == PROTOCOL_VERSION
+                    && row.snapshot.adaptive_fel_stage
+                    && (!retry || row.snapshot.adaptive_fel_stage_retry)
+                    && placement_refusal(&row.snapshot).is_none()
+            })
+            .and_then(|row| row.snapshot.adaptive_worker_quote.clone())
+            .filter(AdaptiveWorkerQuote::valid)
     }
 
     #[cfg(target_os = "linux")]
@@ -2817,6 +2826,7 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         adaptive_worker_quote,
         adaptive_fel_prepare,
         adaptive_fel_stage: adaptive_fel_prepare,
+        adaptive_fel_stage_retry: adaptive_fel_prepare,
     }
 }
 
@@ -3718,6 +3728,7 @@ mod tests {
             adaptive_worker_quote: None,
             adaptive_fel_prepare: false,
             adaptive_fel_stage: false,
+            adaptive_fel_stage_retry: false,
         }
     }
 
@@ -4937,6 +4948,7 @@ mod tests {
                     adaptive_worker_quote: None,
                     adaptive_fel_prepare: false,
                     adaptive_fel_stage: false,
+                    adaptive_fel_stage_retry: false,
                 },
                 expires_at: tokio::time::Instant::now() + SNAPSHOT_EXPIRY,
             },

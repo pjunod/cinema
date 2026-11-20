@@ -627,6 +627,16 @@ pub(super) async fn prepare_adaptive_origin(
             // may still be retained even though no new R was admitted.
             let processed_capacity =
                 error.code() == Some(crate::media_sessions::ADAPTIVE_PROCESSED_CAPACITY_REFUSED);
+            if purpose == crate::media_sessions::AdaptivePreparePurpose::DeferredFel {
+                return Err(adaptive_retry::deferred_fel_retry_after_fence(
+                    state,
+                    &claim,
+                    cleanup_deadline,
+                    may_retry,
+                    error,
+                )
+                .await);
+            }
             let may_retry = may_retry
                 && (!recipe.request.is_exact_adaptive_fel() || processed_capacity)
                 && (!(processed_capacity
@@ -5782,7 +5792,10 @@ async fn create_with_purpose_attempt(
                     last_error = Some(error);
                     continue;
                 }
-                Err(AdaptiveOriginFailure::Hold(error)) => return Err(error),
+                Err(
+                    AdaptiveOriginFailure::Hold(error)
+                    | AdaptiveOriginFailure::SettledDeferredFelCapacity(error),
+                ) => return Err(error),
             };
             // The parsed preview's actual capacities were checked before
             // retention. Admit the second and final origin holder BEFORE

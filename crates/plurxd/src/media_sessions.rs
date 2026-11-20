@@ -2418,8 +2418,7 @@ impl AdaptiveAttemptPrepareV1 {
             && self.recipe.is_valid()
             && (self.purpose.is_create()
                 || (self.recipe.request.is_adaptive_fel()
-                    && self.claim.key.ordinal == 1
-                    && self.claim.key.owner_epoch == 1
+                    && self.claim.key.validate(&self.claim.binding).is_ok()
                     && self
                         .claim
                         .binding

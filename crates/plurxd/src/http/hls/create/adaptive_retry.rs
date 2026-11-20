@@ -8,6 +8,7 @@ use plurx_core::store::adaptive_resource_attempts::{
 
 pub(in crate::http::hls) enum AdaptiveOriginFailure {
     NextWorker(ApiError),
+    SettledDeferredFelCapacity(ApiError),
     Hold(ApiError),
 }
 impl From<ApiError> for AdaptiveOriginFailure {
@@ -393,6 +394,23 @@ pub(super) async fn policy_refusal_retry_ready(
             deadline.min(tokio::time::Instant::now() + Duration::from_millis(50)),
         )
         .await;
+    }
+}
+
+pub(super) async fn deferred_fel_retry_after_fence(
+    state: &AppState,
+    claim: &AttemptClaim,
+    deadline: tokio::time::Instant,
+    may_retry: bool,
+    error: ApiError,
+) -> AdaptiveOriginFailure {
+    if may_retry
+        && error.code() == Some(crate::media_sessions::ADAPTIVE_PROCESSED_CAPACITY_REFUSED)
+        && policy_refusal_retry_ready(state, claim, deadline).await
+    {
+        AdaptiveOriginFailure::SettledDeferredFelCapacity(error)
+    } else {
+        AdaptiveOriginFailure::Hold(error)
     }
 }
 

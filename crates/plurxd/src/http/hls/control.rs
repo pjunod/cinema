@@ -1616,6 +1616,7 @@ async fn settle_preparation_control(
                                     &active.preparation.owner_node_id,
                                     staged_incarnation_id,
                                     &active.preparation.session_id,
+                                    active.owner_epoch,
                                     "prepared successor commit refused",
                                     active.deferred_fel,
                                 )
@@ -1673,6 +1674,7 @@ async fn settle_preparation_control(
                                     &active.preparation.owner_node_id,
                                     staged_incarnation_id,
                                     &active.preparation.session_id,
+                                    active.owner_epoch,
                                     "prepared successor aborted",
                                     active.deferred_fel,
                                 )
@@ -1785,6 +1787,7 @@ async fn retire_prepared_incarnation(
             &route.owner_node_id,
             &route.incarnation_id,
             &route.session_id,
+            route.owner_epoch,
             reason,
             deferred_fel,
         )
@@ -2920,8 +2923,9 @@ async fn candidate_snapshot_current(
         return crate::media_pool::PlanningBinding::from_snapshot(&planning) == catalog.binding
             && state
                 .media_pool
-                .adaptive_fel_stage_worker_current(&route.owner_node_id)
-                .await;
+                .adaptive_fel_stage_quote(&route.owner_node_id, route.owner_epoch > 1)
+                .await
+                .is_some();
     }
     let candidates = state.media_pool.quality_candidates(state, query).await;
     candidates.iter().any(|entry| {
@@ -2974,7 +2978,7 @@ async fn staged_successor_action(
         || successor.principal != predecessor.principal
         || successor.playback_id != predecessor.playback_id
         || (successor.owner_node_id != state.node_id && !remote_fel)
-        || successor.owner_epoch != 1
+        || (!remote_fel && successor.owner_epoch != 1)
         || successor.state != "active"
         || successor.publication_ready_at_ms
             != plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED

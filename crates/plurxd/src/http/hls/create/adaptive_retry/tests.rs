@@ -651,7 +651,14 @@ async fn trial_policy_retry_waits_for_original_join_and_close_within_same_cutoff
     fence_original(state, &mut context, &first, deadline)
         .await
         .expect("logical original fence");
-    let ready = policy_refusal_retry_ready(state, &first, deadline);
+    let admission_refusal = crate::media_sessions::AdaptiveProcessedRefusal::AdmissionLimit;
+    let ready = deferred_fel_retry_after_fence(
+        state,
+        &first,
+        deadline,
+        true,
+        admission_refusal.into_api_error(),
+    );
     tokio::pin!(ready);
     assert!(
         tokio::time::timeout(Duration::from_millis(75), &mut ready)
@@ -693,10 +700,19 @@ async fn trial_policy_retry_waits_for_original_join_and_close_within_same_cutoff
         }
     };
     let (ready, status) = tokio::join!(ready, drive_original_close);
-    assert!(
+    assert!(matches!(
         ready,
-        "positive original close releases the already waiting retry"
-    );
+        AdaptiveOriginFailure::SettledDeferredFelCapacity(_)
+    ));
+    for (may_retry, error) in [
+        (false, admission_refusal.into_api_error()),
+        (true, held("unverified peer failure")),
+    ] {
+        assert!(matches!(
+            deferred_fel_retry_after_fence(state, &first, deadline, may_retry, error).await,
+            AdaptiveOriginFailure::Hold(_)
+        ));
+    }
     assert_eq!(status.binding, original_binding);
     assert!(next_claim_slot(Some(&status), "next-worker")
         .expect("next slot")

@@ -576,6 +576,13 @@ impl TranscodeManager {
             || response.duration_ms != preview.duration_ms
             || response.delivered_audio != preview.audio_delivery
             || response.height != preview.target_height
+            || response.control
+                != crate::playback_control::ControlBootstrap::new(
+                    &stage.session_id,
+                    &stage.incarnation_id,
+                    adoption.key.owner_epoch,
+                    crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+                )
             || enhancement.is_none()
             || crate::http::hls::deferred_fel_stage_enhancement(&stage.response_json) != enhancement
             || response.delivered_dynamic_range.as_deref() != Some("dolby_vision")

@@ -1223,18 +1223,10 @@ async fn stage_remote_fel_after_capacity_refusal(
     })?;
     crate::media_pool::create_remote_grant(deadline)
         .map_err(|error| DeferredFelPeerFailure::NotEvaluated(error.to_string()))?;
-    let owner = state
-        .media_pool
-        .adaptive_fel_workers(state, true)
-        .await
-        .into_iter()
-        .next()
-        .ok_or(DeferredFelPeerFailure::NoEligibleOffer)?;
-    let quote = state
-        .media_pool
-        .adaptive_worker_quote(state, &owner)
-        .await
-        .ok_or("deferred FEL worker quote is no longer current")?;
+    let workers = state.media_pool.adaptive_fel_workers(state, true).await;
+    if workers.is_empty() {
+        return Err(DeferredFelPeerFailure::NoEligibleOffer);
+    }
     let planning = state
         .store
         .playback_planning_snapshot(source.id, &crate::transcode::QUALITY_PLANNING_KEYS)
@@ -1366,57 +1358,86 @@ async fn stage_remote_fel_after_capacity_refusal(
     if acquired != root_id {
         return Err("the deferred FEL root claim selected another incarnation".into());
     }
+    use super::create::adaptive_retry::AdaptiveOriginFailure;
+
     let mut context = None;
-    let selected = super::create::prepare_adaptive_origin(
-        state,
-        &mut context,
-        &owner,
-        quote,
-        source,
-        &planning,
-        &pristine,
-        &claim_id,
-        &root_id,
-        &fingerprint,
-        &route.recovery_epoch,
-        Some(route),
-        Some(&route.incarnation_id),
-        desired_revision,
-        claim_expiry,
-        deadline,
-        AdaptivePreparePurpose::DeferredFel,
-    )
-    .await;
-    if context.is_some() {
-        guard.disarm();
-    }
-    let prepared = selected.map_err(|failure| {
-        use super::create::adaptive_retry::AdaptiveOriginFailure;
-        let error = match failure {
-            AdaptiveOriginFailure::NextWorker(error) | AdaptiveOriginFailure::Hold(error) => error,
-        };
-        let detail = format!("{error:?}");
-        if error.code() == Some(crate::media_sessions::ADAPTIVE_PROCESSED_CAPACITY_REFUSED) {
-            DeferredFelPeerFailure::AdmissionRefused(detail)
-        } else {
-            DeferredFelPeerFailure::Unverified(detail)
+    let mut last_refusal = None;
+    for owner in workers {
+        if pending.cancelled() || tokio::time::Instant::now() >= deadline {
+            break;
         }
-    })?;
-    stage_verified_remote_fel(
-        state,
-        intent,
-        run,
-        pending,
-        route,
-        predecessor,
-        source,
-        &owner,
-        prepared,
-        requested_ms,
-        deadline,
-    )
-    .await
-    .map_err(DeferredFelPeerFailure::Unverified)
+        let Some(quote) = state
+            .media_pool
+            .adaptive_fel_stage_quote(&owner, last_refusal.is_some())
+            .await
+        else {
+            continue;
+        };
+        let selected = super::create::prepare_adaptive_origin(
+            state,
+            &mut context,
+            &owner,
+            quote,
+            source,
+            &planning,
+            &pristine,
+            &claim_id,
+            &root_id,
+            &fingerprint,
+            &route.recovery_epoch,
+            Some(route),
+            Some(&route.incarnation_id),
+            desired_revision,
+            claim_expiry,
+            deadline,
+            AdaptivePreparePurpose::DeferredFel,
+        )
+        .await;
+        if context.is_some() {
+            guard.disarm();
+        }
+        match selected {
+            Ok(prepared) => {
+                return stage_verified_remote_fel(
+                    state,
+                    intent,
+                    run,
+                    pending,
+                    route,
+                    predecessor,
+                    source,
+                    &owner,
+                    prepared,
+                    requested_ms,
+                    deadline,
+                )
+                .await
+                .map_err(DeferredFelPeerFailure::Unverified);
+            }
+            Err(AdaptiveOriginFailure::SettledDeferredFelCapacity(error)) => {
+                last_refusal = Some(format!("{error:?}"));
+            }
+            Err(AdaptiveOriginFailure::NextWorker(error) | AdaptiveOriginFailure::Hold(error)) => {
+                return Err(
+                    if error.code()
+                        == Some(crate::media_sessions::ADAPTIVE_PROCESSED_CAPACITY_REFUSED)
+                    {
+                        DeferredFelPeerFailure::AdmissionRefused(format!("{error:?}"))
+                    } else {
+                        DeferredFelPeerFailure::Unverified(format!("{error:?}"))
+                    },
+                );
+            }
+        }
+    }
+    Err(last_refusal.map_or_else(
+        || {
+            DeferredFelPeerFailure::Unverified(
+                "deferred FEL worker quote is no longer current".into(),
+            )
+        },
+        DeferredFelPeerFailure::AdmissionRefused,
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -1515,6 +1536,7 @@ async fn stage_verified_remote_fel(
         desired_revision: prepared.claim.binding.expected_desired_revision,
         cancellation_key,
         duration_ms,
+        owner_epoch: prepared.claim.key.owner_epoch,
         prepared,
         deadline,
     };
