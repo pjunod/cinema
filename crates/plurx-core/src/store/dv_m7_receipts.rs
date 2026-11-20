@@ -130,9 +130,7 @@ fn substitute(sql: &str) -> String {
         .replace("__RECENT_RECEIPTS__", &MAX_RECENT_RECEIPTS.to_string())
 }
 
-static RECORD_SQL: LazyLock<String> = LazyLock::new(|| {
-    substitute(
-        r#"
+const MAINTENANCE_AUTHORITY: &str = r#"
 WITH input AS (SELECT json($1) AS body), owned AS (
  SELECT job.id FROM input JOIN background_jobs job ON job.id=json_extract(body,'$.token.job_id')
  WHERE __TITLE_JOB_OWNS__
@@ -143,6 +141,21 @@ WITH input AS (SELECT json($1) AS body), owned AS (
   AND w.consumer_kind='playback_qualification' AND w.state IN ('pending','awaiting_hydration')
   AND w.deadline_ms>json_extract(body,'$.now_ms'))
 )
+"#;
+
+/// Share the exact live title and current source guards between advisory
+/// measurement publication and irreversible candidate reservations.
+pub(super) fn fenced_maintenance_sql(sql: &str) -> String {
+    sql.replace("__M7_AUTHORITY__", MAINTENANCE_AUTHORITY)
+        .replace("__TITLE_JOB_OWNS__", TITLE_JOB_OWNERSHIP)
+        .replace("__CURRENT_FILE__", CURRENT_FILE)
+        .replace("__SOURCE_PROBE_MATCH__", SOURCE_PROBE_MATCH.as_str())
+}
+
+static RECORD_SQL: LazyLock<String> = LazyLock::new(|| {
+    substitute(&fenced_maintenance_sql(
+        r#"
+__M7_AUTHORITY__
 UPDATE files AS file SET probe_json=json_set(file.probe_json,'$.__PROBE_KEY__',json_set(
  COALESCE((SELECT json_group_object(key,json(value)) FROM (
   SELECT key,value FROM json_each(__RECEIPT_OBJECT__)
@@ -157,8 +170,7 @@ UPDATE files AS file SET probe_json=json_set(file.probe_json,'$.__PROBE_KEY__',j
 WHERE EXISTS(SELECT 1 FROM owned) AND __CURRENT_FILE__
 RETURNING 'true' AS result_json
 "#,
-    )
-    .replace("__TITLE_JOB_OWNS__", TITLE_JOB_OWNERSHIP)
+    ))
     .replace("__SCHEMA__", &SCHEMA.to_string())
     .replace("__PRIOR_LIMIT__", &(MAX_RECENT_RECEIPTS - 1).to_string())
 });

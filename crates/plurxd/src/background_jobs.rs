@@ -14,6 +14,14 @@ use plurx_core::store::background_jobs::{
     TranscodeJobOutput, JOB_LEASE_MS, JOB_RENEW_INTERVAL_MS,
 };
 use plurx_core::store::Store;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use plurx_core::{
+    store::dv_m7_attempts::{
+        M7CandidateAnchor, M7CandidateAuthority, M7CandidateIntent, M7CandidateLedger,
+        M7CandidatePlan, M7CandidateReservation, M7CandidateScope,
+    },
+    transcode::dv_m7_receipt::M7SourceProbe,
+};
 use tokio::sync::{watch, Mutex};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -1712,6 +1720,90 @@ impl JobFence {
             state.token = None;
         }
         Ok(published)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn m7_candidate_authority(
+        &self,
+        state: &ClaimState,
+        probe: &M7SourceProbe,
+        scope: &M7CandidateScope,
+    ) -> Result<Option<M7CandidateAuthority>, StoreError> {
+        if !self.may_publish() || !self.0.authority.may_execute_job(self.0.kind).await {
+            return Ok(None);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(None);
+        };
+        Ok(Some(M7CandidateAuthority {
+            token,
+            source_probe: probe.clone(),
+            scope: scope.clone(),
+            now_ms: unix_ms()?,
+        }))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn record_m7_title_facts(
+        &self,
+        probe: &M7SourceProbe,
+        scope: &M7CandidateScope,
+        stats: &plurx_core::scan::dv_title::DvTitleStats,
+    ) -> Result<bool, StoreError> {
+        let state = self.0.state.lock().await;
+        let Some(authority) = self.m7_candidate_authority(&state, probe, scope).await? else {
+            return Ok(false);
+        };
+        self.0
+            .store
+            .record_dv_m7_title_facts(&authority, stats)
+            .await
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn anchor_m7_candidate(
+        &self,
+        probe: &M7SourceProbe,
+        scope: &M7CandidateScope,
+        plan: M7CandidatePlan,
+    ) -> Result<M7CandidateAnchor, StoreError> {
+        let state = self.0.state.lock().await;
+        let Some(authority) = self.m7_candidate_authority(&state, probe, scope).await? else {
+            return Ok(M7CandidateAnchor::Fenced);
+        };
+        self.0.store.anchor_dv_m7_candidate(&authority, plan).await
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn m7_candidate_slots(
+        &self,
+        probe: &M7SourceProbe,
+        scope: &M7CandidateScope,
+    ) -> Result<Option<M7CandidateLedger>, StoreError> {
+        let state = self.0.state.lock().await;
+        let Some(authority) = self.m7_candidate_authority(&state, probe, scope).await? else {
+            return Ok(None);
+        };
+        self.0.store.dv_m7_candidate_slots(&authority).await
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn reserve_m7_candidate_slot(
+        &self,
+        probe: &M7SourceProbe,
+        scope: &M7CandidateScope,
+        intent: M7CandidateIntent,
+    ) -> Result<M7CandidateReservation, StoreError> {
+        let state = self.0.state.lock().await;
+        let Some(authority) = self.m7_candidate_authority(&state, probe, scope).await? else {
+            return Ok(M7CandidateReservation::Fenced);
+        };
+        // A lost reply may already have consumed this slot. Only an
+        // acknowledged new reservation permits calling the encoder.
+        self.0
+            .store
+            .reserve_dv_m7_candidate_slot(&authority, intent)
+            .await
     }
 
     /// Record the measurement while the title claim remains live.

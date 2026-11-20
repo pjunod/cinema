@@ -391,6 +391,25 @@ impl M7Receipt {
         self.0.payload.summary.disposition
     }
 
+    /// Compact validated receipt for an owned full-report publication journal.
+    pub fn encode_recovery(&self) -> Result<String, M7ReceiptError> {
+        self.encode()
+    }
+
+    /// Restore a pending publication only for the independently checked
+    /// binding and the digest of the already persisted full report.
+    pub fn decode_recovery(
+        encoded: &str,
+        binding: &M7Binding,
+        full_report_sha256: Digest,
+    ) -> Result<Self, M7ReceiptError> {
+        let receipt = Self::decode(encoded, binding)?;
+        if receipt.report_sha256() != full_report_sha256 {
+            return Err(M7ReceiptError::Identity);
+        }
+        Ok(receipt)
+    }
+
     pub(crate) fn encode(&self) -> Result<String, M7ReceiptError> {
         let encoded = serde_json::to_string(&self.0)?;
         if encoded.len() > MAX_RECEIPT_BYTES {

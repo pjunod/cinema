@@ -3009,6 +3009,29 @@ pub trait BackgroundJobStore: Send + Sync {
         request: super::dv_m7_receipts::RecordM7Receipt,
     ) -> Result<bool, StoreError>;
 
+    async fn record_dv_m7_title_facts(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        stats: &crate::scan::dv_title::DvTitleStats,
+    ) -> Result<bool, StoreError>;
+
+    async fn anchor_dv_m7_candidate(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        plan: super::dv_m7_attempts::M7CandidatePlan,
+    ) -> Result<super::dv_m7_attempts::M7CandidateAnchor, StoreError>;
+
+    async fn dv_m7_candidate_slots(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+    ) -> Result<Option<super::dv_m7_attempts::M7CandidateLedger>, StoreError>;
+
+    async fn reserve_dv_m7_candidate_slot(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        intent: super::dv_m7_attempts::M7CandidateIntent,
+    ) -> Result<super::dv_m7_attempts::M7CandidateReservation, StoreError>;
+
     /// Reuse a measurement only for the same current source and experiment.
     async fn dv_m7_receipt(
         &self,
@@ -4185,6 +4208,37 @@ LIMIT 1
         request: super::dv_m7_receipts::RecordM7Receipt,
     ) -> Result<bool, StoreError> {
         super::dv_m7_receipts::record(self, request).await
+    }
+
+    async fn record_dv_m7_title_facts(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        stats: &crate::scan::dv_title::DvTitleStats,
+    ) -> Result<bool, StoreError> {
+        super::dv_m7_attempts::record_title_facts(self, authority, stats).await
+    }
+
+    async fn anchor_dv_m7_candidate(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        plan: super::dv_m7_attempts::M7CandidatePlan,
+    ) -> Result<super::dv_m7_attempts::M7CandidateAnchor, StoreError> {
+        super::dv_m7_attempts::anchor(self, authority, plan).await
+    }
+
+    async fn dv_m7_candidate_slots(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+    ) -> Result<Option<super::dv_m7_attempts::M7CandidateLedger>, StoreError> {
+        super::dv_m7_attempts::lookup(self, authority).await
+    }
+
+    async fn reserve_dv_m7_candidate_slot(
+        &self,
+        authority: &super::dv_m7_attempts::M7CandidateAuthority,
+        intent: super::dv_m7_attempts::M7CandidateIntent,
+    ) -> Result<super::dv_m7_attempts::M7CandidateReservation, StoreError> {
+        super::dv_m7_attempts::reserve(self, authority, intent).await
     }
 
     async fn dv_m7_receipt(

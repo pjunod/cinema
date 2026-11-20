@@ -4,6 +4,7 @@ use super::m7_comparison::{HeldTitle, TitleContext};
 use crate::fragment_index_cluster::{open_source_fence, SourceFence};
 use plurx_core::{
     process::{bounded, source_lifetime},
+    store::dv_m7_attempts::{M7CandidateAnchor, M7CandidatePlan, M7CandidateScope},
     transcode::dv_m7_receipt::M7SourceProbe,
 };
 use serde::Deserialize;
@@ -17,6 +18,30 @@ use tokio::io::AsyncReadExt;
 
 const MAX_HISTORICAL_JSON_BYTES: u64 = 4 * 1024 * 1024;
 const HASH_CHUNK: usize = 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum EvaluationError {
+    #[error("unsupported M7 source: {0}")]
+    Unsupported(String),
+    #[error("M7 candidate inconclusive: {0}")]
+    Inconclusive(String),
+    #[error("M7 deferred: {0}")]
+    Deferred(String),
+}
+
+impl From<String> for EvaluationError {
+    fn from(error: String) -> Self {
+        Self::Deferred(error)
+    }
+}
+
+impl From<&str> for EvaluationError {
+    fn from(error: &str) -> Self {
+        Self::Deferred(error.into())
+    }
+}
+
+pub(super) type EvaluationResult = Result<(), EvaluationError>;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -237,7 +262,7 @@ async fn raw_sha256(context: &TitleContext<'_>, source: &SourceFence) -> Result<
 pub(super) async fn evaluate(
     context: &TitleContext<'_>,
     stats: &plurx_core::scan::dv_title::DvTitleStats,
-) -> Result<(), String> {
+) -> EvaluationResult {
     if context.demand.playback_requested
         || context.admission.is_probe_only()
         || !plurx_core::playback::file_can_convert_to_p81(context.file)
@@ -250,6 +275,7 @@ pub(super) async fn evaluate(
     };
     let title = held_title(context).await?;
     if let Some(result) = historical(root.clone(), title.content_sha256).await? {
+        anchor_historical(context, &title, &result.protocol_sha256).await?;
         tracing::info!(
             file_id = context.file.id,
             origin = ?result.origin,
@@ -269,6 +295,7 @@ pub(super) async fn evaluate(
         return Ok(());
     }
     if let Some(alias) = repetition(root.clone(), title.content_sha256).await? {
+        anchor_historical(context, &title, &alias.protocol_sha256).await?;
         tracing::info!(
             file_id=context.file.id,
             fixture_sha256=%alias.fixture_sha256, source_sha256=%alias.source_sha256,
@@ -281,7 +308,7 @@ pub(super) async fn evaluate(
     if stats.el_kind != TitleConstant::Consistent(TitleElKind::Fel) {
         return Ok(());
     }
-    measure_new_title(context, title, &root).await
+    measure_new_title(context, title, &root, stats).await
 }
 
 #[derive(Deserialize)]
@@ -346,16 +373,15 @@ async fn repetition(root: PathBuf, content: [u8; 32]) -> Result<Option<Repetitio
 }
 
 mod publication;
+mod recovery;
 
 use super::{
     dv_title::{self, M7WindowRange},
-    m7_candidate::{prepare_authored, FrozenRecipe, RatePlan, StaticHdr},
-    m7_comparison::{
-        self, ComparisonInput, EvaluationWindow, FrozenProtocol, Measurement, PublicationReadback,
-    },
+    m7_candidate::{prepare_authored, FrozenRecipe, PrepareError, RatePlan, StaticHdr},
+    m7_comparison::{self, ComparisonInput, EvaluationWindow, FrozenProtocol, PublicationReadback},
 };
 use plurx_core::transcode::{
-    dv_m7_receipt::{CalibrationWindow, M7Receipt, MODEL_VERSION},
+    dv_m7_receipt::{CalibrationWindow, MODEL_VERSION},
     dv_m7_scoring::{
         active_area,
         aggregation::FrozenMargin,
@@ -381,14 +407,29 @@ async fn measure_new_title(
     context: &TitleContext<'_>,
     mut title: HeldTitle,
     root: &Path,
-) -> Result<(), String> {
-    // A prior native terminal report survives changes in the current helper
-    // and the catalogue's bounded cache. A routine rescan cannot reopen it.
-    if let Some(result) = native_terminal(root, title.content_sha256).await? {
-        tracing::info!(file_id=context.file.id, disposition=?result.disposition,
-            protocol_sha256=%result.protocol_sha256, report_sha256=%result.report_sha256,
-            binding_key=%result.binding_key, "retained native M7 experiment");
-        return Ok(());
+    stats: &plurx_core::scan::dv_title::DvTitleStats,
+) -> EvaluationResult {
+    // A sealed source experiment remains terminal even if its current
+    // catalogue receipt was interrupted or its original helper is retired.
+    if let Some(completion) = recovery::find(root, title.content_sha256).await? {
+        return completion.reconcile(context, &title).await;
+    }
+    let source_probe =
+        M7SourceProbe::from_probe_json(&context.demand.probe_json).map_err(string)?;
+    let scope = candidate_scope(context, &title);
+    // F+ demand expects complete title facts. Publishing only the aggregate
+    // lets the existing fitter work while this title claim remains retryable.
+    if plurx_core::scan::dv_title::DvTitleStats::from_probe_json(&context.demand.probe_json)
+        != Some(*stats)
+        && !context
+            .fence
+            .record_m7_title_facts(&source_probe, &scope, stats)
+            .await
+            .map_err(string)?
+    {
+        return Err(EvaluationError::Deferred(
+            "M7 prerequisite title facts lost their publication authority".into(),
+        ));
     }
     let scratch = tempfile::Builder::new()
         .prefix("m7-title-")
@@ -421,10 +462,14 @@ async fn measure_new_title(
             let verified = title.whole_source_census.as_ref().ok_or("M7 title census disappeared")?;
             let (coded_bytes, presentation_ticks, rate_clock) = verified.coded_video_extent();
             if rate_clock != source.layout.time_base {
-                return Err("M7 whole-source rate and window census clocks differ".into());
+                return Err(EvaluationError::Deferred(
+                    "M7 whole-source rate and window census clocks differ".into(),
+                ));
             }
-            let rate = measured_source_rate_plan(coded_bytes, presentation_ticks, rate_clock)?;
-            let recipe = FrozenRecipe::new(source.cadence, source.static_hdr, rate).map_err(string)?;
+            let rate = measured_source_rate_plan(coded_bytes, presentation_ticks, rate_clock)
+                .map_err(EvaluationError::Unsupported)?;
+            let recipe = FrozenRecipe::new(source.cadence, source.static_hdr, rate)
+                .map_err(|error| EvaluationError::Unsupported(error.to_string()))?;
             let windows = source.windows.iter().map(|range| {
                 verified.window(
                     &title.source, context.tools, source.layout, range.first_pts, range.end_pts,
@@ -482,6 +527,20 @@ async fn measure_new_title(
             let protocol_sha: [u8; 32] = Sha256::digest(&freeze).into();
             let directory = root.join("experiments")
                 .join(hex::encode(title.content_sha256)).join(hex::encode(protocol_sha));
+            let plan = M7CandidatePlan {
+                protocol_sha256: protocol_sha,
+                recipe_sha256: recipe_sha,
+                maximum_attempts: rate.maximum_attempts,
+            };
+            match context.fence.anchor_m7_candidate(&source_probe, &scope, plan).await.map_err(string)? {
+                M7CandidateAnchor::Ready => {}
+                M7CandidateAnchor::DifferentProtocol => return Err(EvaluationError::Inconclusive(
+                    "this source already has a different frozen experiment".into(),
+                )),
+                M7CandidateAnchor::Fenced => return Err(EvaluationError::Deferred(
+                    "M7 protocol anchor lost its title authority".into(),
+                )),
+            }
             immutable_write_owned(directory.clone(), "native-protocol.json", freeze).await?;
             let frozen = FrozenProtocol {
                 source_sha256: title.content_sha256, probe_sha256: title.probe_sha256,
@@ -499,49 +558,94 @@ async fn measure_new_title(
                     if active_area(&frame.source_rpu, source.layout.raster).map_err(string)?
                         != source.layout.roi
                     {
-                        return Err("M7 original evaluation RPU active area disagrees with fitted readback".into());
+                        return Err(EvaluationError::Unsupported(
+                            "M7 original evaluation RPU active area disagrees with fitted readback".into(),
+                        ));
                     }
                 }
                 let authored = prepare_authored(
                     context, &title, &frozen, &recipe, planes, source.dv_level,
-                    &scratch, context.cancel,
-                ).await.map_err(string)?;
+                    &scratch, &directory, context.cancel,
+                ).await.map_err(candidate_error)?;
                 prepared_windows.push(EvaluationWindow {
                     layout: source.layout, source_frames: frames, authored, whole, seek,
                 });
             }
-            Ok::<_, String>((directory, ComparisonInput {
+            Ok::<_, EvaluationError>((directory, ComparisonInput {
                 title, frozen, windows: prepared_windows, scratch_bytes: reserve_bytes,
             }, reservation))
         },
     ).await?;
     let (directory, input, _reservation) = prepared;
-    let result = m7_comparison::execute(context, input)
+    let (result, held) = m7_comparison::execute(context, input)
         .await
-        .map_err(string)?;
+        .map_err(comparison_error)?;
     match result {
         m7_comparison::ComparisonRun::Reused(receipt) => {
             tracing::info!(file_id=context.file.id, disposition=?receipt.disposition(),
                 binding_key=%receipt.binding_key(), "reused exact M7 measurement");
+            Ok(())
         }
         m7_comparison::ComparisonRun::Measured(measurement) => {
-            if context.cancel.is_cancelled() {
-                return Err("M7 was cancelled before receipt publication".into());
-            }
-            let receipt = persist_measurement(directory, measurement).await?;
-            let probe =
-                M7SourceProbe::from_probe_json(&context.demand.probe_json).map_err(string)?;
-            let recorded = context
-                .fence
-                .record_dv_m7_receipt(probe, receipt)
-                .await
-                .map_err(string)?;
-            if !recorded {
-                return Err("M7 receipt publication lost its title authority".into());
-            }
+            let completion = recovery::seal(directory, measurement).await?;
+            completion.reconcile(context, &held).await
         }
     }
-    Ok(())
+}
+
+fn candidate_error(error: PrepareError) -> EvaluationError {
+    match error {
+        PrepareError::RateInconclusive(_)
+        | PrepareError::ActualRate
+        | PrepareError::IncompleteAttempt { .. } => {
+            EvaluationError::Inconclusive(error.to_string())
+        }
+        _ => EvaluationError::Deferred(error.to_string()),
+    }
+}
+
+fn comparison_error(error: m7_comparison::Error) -> EvaluationError {
+    match error {
+        m7_comparison::Error::Content(_) => EvaluationError::Unsupported(error.to_string()),
+        _ => EvaluationError::Deferred(error.to_string()),
+    }
+}
+
+pub(super) fn candidate_scope(context: &TitleContext<'_>, title: &HeldTitle) -> M7CandidateScope {
+    M7CandidateScope {
+        file_id: context.file.id,
+        source_size: context.file.size,
+        source_mtime: context.file.mtime,
+        probe_revision: context.demand.probe_revision,
+        scanner_digest: context.tools.title_scanner_digest(),
+        source_sha256: title.content_sha256,
+    }
+}
+
+async fn anchor_historical(
+    context: &TitleContext<'_>,
+    title: &HeldTitle,
+    protocol: &str,
+) -> EvaluationResult {
+    let mut digest = [0; 32];
+    hex::decode_to_slice(protocol, &mut digest).map_err(string)?;
+    let plan = M7CandidatePlan::sealed_historical(digest);
+    let probe = M7SourceProbe::from_probe_json(&context.demand.probe_json).map_err(string)?;
+    match context
+        .fence
+        .anchor_m7_candidate(&probe, &candidate_scope(context, title), plan)
+        .await
+        .map_err(string)?
+    {
+        M7CandidateAnchor::Ready => Ok(()),
+        M7CandidateAnchor::DifferentProtocol => Err(EvaluationError::Deferred(
+            "verified historical M7 result conflicts with a different replicated source experiment"
+                .into(),
+        )),
+        M7CandidateAnchor::Fenced => Err(EvaluationError::Deferred(
+            "historical M7 source anchor lost its title authority".into(),
+        )),
+    }
 }
 
 struct SourcePlan {
@@ -556,11 +660,13 @@ fn source_plan(
     context: &TitleContext<'_>,
     title: &HeldTitle,
     fitted: &FittedPublication,
-) -> Result<SourcePlan, String> {
+) -> Result<SourcePlan, EvaluationError> {
     let document: serde_json::Value =
         serde_json::from_str(&context.demand.probe_json).map_err(string)?;
-    let video_index = crate::decode_facts::first_playable_video_index(&document)
-        .ok_or("M7 source has no selected video stream")?;
+    let video_index =
+        crate::decode_facts::first_playable_video_index(&document).ok_or_else(|| {
+            EvaluationError::Unsupported("M7 source has no selected video stream".into())
+        })?;
     let stream = document["streams"]
         .as_array()
         .and_then(|streams| {
@@ -568,22 +674,26 @@ fn source_plan(
                 .iter()
                 .find(|stream| stream["index"].as_u64() == Some(u64::from(video_index)))
         })
-        .ok_or("M7 selected stream is absent")?;
+        .ok_or_else(|| EvaluationError::Unsupported("M7 selected stream is absent".into()))?;
     let cadence = stream["avg_frame_rate"]
         .as_str()
         .and_then(|rate| {
             let (num, den) = rate.split_once('/')?;
             Rational::new(num.parse().ok()?, den.parse().ok()?)
         })
-        .ok_or("M7 requires an observed average frame cadence")?;
+        .ok_or_else(|| {
+            EvaluationError::Unsupported("M7 requires an observed average frame cadence".into())
+        })?;
     let raster =
         ["width", "height"].map(|axis| stream[axis].as_u64().and_then(|n| u16::try_from(n).ok()));
     let [Some(width), Some(height)] = raster else {
-        return Err("M7 source raster is unspecified".into());
+        return Err(EvaluationError::Unsupported(
+            "M7 source raster is unspecified".into(),
+        ));
     };
     let clock = fitted.clock()?;
     let time_base = Rational::new(clock.source_time_base.0, clock.source_time_base.1)
-        .ok_or("invalid M7 fitted source time base")?;
+        .ok_or_else(|| "invalid M7 fitted source time base".to_owned())?;
     let layout = CaptureLayout {
         role: CaptureRole::SourceFel,
         video_index,
@@ -594,11 +704,18 @@ fn source_plan(
         roi: [0, 0, width, height],
     };
     if !supported_raster(layout.raster) {
-        return Err("M7 coded raster is outside the managed full-plane recipe".into());
+        return Err(EvaluationError::Unsupported(
+            "M7 coded raster is outside the managed full-plane recipe".into(),
+        ));
     }
     let (primaries_rgbw, max_1e4_nits, min_1e4_nits) =
-        crate::decode_facts::mastering::source_st2086(stream)?
-            .ok_or("M7 selected source has no exact ST 2086 declarations")?;
+        crate::decode_facts::mastering::source_st2086(stream)
+            .map_err(EvaluationError::Unsupported)?
+            .ok_or_else(|| {
+                EvaluationError::Unsupported(
+                    "M7 selected source has no exact ST 2086 declarations".into(),
+                )
+            })?;
     let static_hdr = StaticHdr {
         primaries_rgbw,
         max_1e4_nits,
@@ -608,37 +725,37 @@ fn source_plan(
         max_cll_fall: None,
         source_observation_sha256: title.probe_sha256,
     };
-    let dv_level = context
-        .file
-        .dolby_vision
-        .level
-        .ok_or("M7 source Dolby Vision level is absent")?;
+    let dv_level = context.file.dolby_vision.level.ok_or_else(|| {
+        EvaluationError::Unsupported("M7 source Dolby Vision level is absent".into())
+    })?;
     let dv_level = u8::try_from(dv_level).map_err(string)?;
     let numerator =
         FRAMES as u128 * u128::from(cadence.denominator()) * u128::from(time_base.denominator());
     let denominator = u128::from(cadence.numerator()) * u128::from(time_base.numerator());
     if numerator % denominator != 0 {
-        return Err("M7 exposure is not integral on the fitted source clock".into());
+        return Err(EvaluationError::Unsupported(
+            "M7 exposure is not integral on the fitted source clock".into(),
+        ));
     }
     let ticks = i64::try_from(numerator / denominator).map_err(string)?;
     let index = fitted.index();
     let proofs = index
         .dv_refit_proofs
         .as_ref()
-        .ok_or("canonical M7 fitting proof absent")?;
+        .ok_or_else(|| "canonical M7 fitting proof absent".to_owned())?;
     let mut windows: Vec<M7WindowRange> = Vec::new();
     // Start after the opening two entries so the independent control
     // generation must really seek. Use the first complete disjoint covered
     // RAP exposures in plan order. Packet/census validation decides coverage.
     for entry in fitted.plan().entries.iter().skip(2) {
-        let row =
-            plurx_core::segplan::entry_row(index, entry).ok_or("M7 plan is outside its index")?;
+        let row = plurx_core::segplan::entry_row(index, entry)
+            .ok_or_else(|| "M7 plan is outside its index".to_owned())?;
         let start = clock
             .source_pts(i128::from(entry.start_ticks) + i128::from(proofs[row].first_cto()))
             .map_err(string)?;
         let end = start
             .checked_add(ticks)
-            .ok_or("M7 exposure clock overflow")?;
+            .ok_or_else(|| "M7 exposure clock overflow".to_owned())?;
         if windows
             .last()
             .is_some_and(|previous| previous.end_pts > start)
@@ -657,9 +774,9 @@ fn source_plan(
         }
     }
     if windows.len() != BASELINE_WINDOWS + 1 {
-        return Err(
+        return Err(EvaluationError::Unsupported(
             "M7 fitted plan lacks two calibration exposures and one evaluation exposure".into(),
-        );
+        ));
     }
     Ok(SourcePlan {
         layout,
@@ -859,109 +976,6 @@ fn frozen_margin(evidence: &[CalibrationEvidence]) -> Result<FrozenMargin, Strin
     FrozenMargin::new(margin).map_err(string)
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NativeTerminal {
-    source_sha256: String,
-    protocol_sha256: String,
-    binding_key: String,
-    binding_sha256: String,
-    report_sha256: String,
-    disposition: plurx_core::transcode::dv_m7_scoring::aggregation::Disposition,
-}
-
-async fn native_terminal(root: &Path, source: [u8; 32]) -> Result<Option<NativeTerminal>, String> {
-    let source = hex::encode(source);
-    let root = root.join("experiments").join(&source);
-    tokio::task::spawn_blocking(move || {
-        let entries = match std::fs::read_dir(root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(string(error)),
-        };
-        for entry in entries {
-            let entry = entry.map_err(string)?;
-            let path = entry.path();
-            if !entry.file_type().map_err(string)?.is_dir() || !path.join("terminal.json").is_file()
-            {
-                continue;
-            }
-            let result: NativeTerminal =
-                serde_json::from_slice(&load_json(&path.join("terminal.json"), None)?)
-                    .map_err(string)?;
-            if result.source_sha256 != source
-                || entry.file_name().to_str() != Some(result.protocol_sha256.as_str())
-                || !digest_text(&result.protocol_sha256)
-                || !digest_text(&result.binding_key)
-                || !digest_text(&result.binding_sha256)
-                || !digest_text(&result.report_sha256)
-            {
-                return Err("invalid native M7 terminal result".into());
-            }
-            load_json(
-                &path.join("native-protocol.json"),
-                Some(&result.protocol_sha256),
-            )?;
-            load_json(
-                &path.join("comparison-result.json"),
-                Some(&result.report_sha256),
-            )?;
-            load_json(
-                &path.join("measurement-binding.json"),
-                Some(&result.binding_sha256),
-            )?;
-            return Ok(Some(result));
-        }
-        Ok(None)
-    })
-    .await
-    .map_err(string)?
-}
-
-async fn persist_measurement(
-    directory: PathBuf,
-    measurement: Measurement,
-) -> Result<M7Receipt, String> {
-    tokio::task::spawn_blocking(move || {
-        let mut full_report = NamedTempFile::new_in(&directory).map_err(string)?;
-        let receipt = M7Receipt::from_report(
-            measurement.custody,
-            measurement.measured_at_ms,
-            &measurement.report,
-            full_report.as_file_mut(),
-        )
-        .map_err(string)?;
-        full_report.as_file().sync_all().map_err(string)?;
-        let report_sha256 = hex::encode(receipt.report_sha256());
-        let path = directory.join("comparison-result.json");
-        if let Err(error) = full_report.persist_noclobber(&path) {
-            if error.error.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(string(error.error));
-            }
-            load_json(&path, Some(&report_sha256))?;
-        }
-        let binding = serde_json::to_vec(receipt.binding()).map_err(string)?;
-        let binding_sha256 = hex::encode(Sha256::digest(&binding));
-        immutable_write(&directory, "measurement-binding.json", &binding)?;
-        let terminal = NativeTerminal {
-            source_sha256: hex::encode(receipt.binding().source_sha256),
-            protocol_sha256: hex::encode(receipt.binding().protocol_sha256),
-            binding_key: receipt.binding_key().to_owned(),
-            binding_sha256,
-            report_sha256,
-            disposition: receipt.disposition(),
-        };
-        immutable_write(
-            &directory,
-            "terminal.json",
-            &serde_json::to_vec(&terminal).map_err(string)?,
-        )?;
-        Ok(receipt)
-    })
-    .await
-    .map_err(string)?
-}
-
 async fn immutable_write_owned(
     directory: PathBuf,
     name: &'static str,
@@ -985,6 +999,10 @@ fn immutable_write(directory: &Path, name: &str, data: &[u8]) -> Result<(), Stri
             return Err(string(error.error));
         }
     }
+    sync_registry(directory)
+}
+
+fn sync_registry(directory: &Path) -> Result<(), String> {
     // The data directory itself is the last ancestor that can acquire a
     // new entry in this protocol's durable registry.
     for parent in directory.ancestors().take(5) {

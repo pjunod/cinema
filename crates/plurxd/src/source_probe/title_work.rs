@@ -653,6 +653,38 @@ async fn requalify_stale_fel_titles(state: &AppState, tools: &ToolSet, scanner: 
     }
 }
 
+fn m7_settlement(
+    aggregate: &TitleOutput,
+    evaluation: Result<(), super::m7_title::EvaluationError>,
+    interrupted: bool,
+    now: i64,
+) -> Option<JobSettlement> {
+    use super::m7_title::EvaluationError;
+    let deferred = match evaluation {
+        Ok(()) => false,
+        Err(error @ EvaluationError::Deferred(_)) => {
+            tracing::debug!(file_id = aggregate.file_id, %error, "maintenance M7 retry pending");
+            true
+        }
+        Err(error @ (EvaluationError::Unsupported(_) | EvaluationError::Inconclusive(_))) => {
+            tracing::debug!(file_id = aggregate.file_id, %error, "maintenance M7 experiment ended");
+            false
+        }
+    };
+    let (reason, delay) = if interrupted {
+        ("title_interrupted", 5_000)
+    } else if deferred {
+        ("m7_retry_pending", 30_000)
+    } else {
+        return None;
+    };
+    Some(JobSettlement::Yield {
+        error_code: Some(reason.into()),
+        not_before_ms: now.saturating_add(delay),
+        checkpoint: Some(serde_json::json!({"fel_title_aggregate": aggregate})),
+    })
+}
+
 /// The aggregate this title's job may settle with instead of reading the
 /// file: one stored under the generation the worker's bind left unchanged.
 /// Only a publisher bound to that generation's scanner stores one (an index
@@ -839,15 +871,15 @@ async fn execute(
                         cancel: &cancel,
                         shutdown: &shutdown,
                     };
-                    if let Err(error) = super::m7_title::evaluate(&context, &output.stats).await {
-                        tracing::debug!(file_id = file.id, %error, "maintenance M7 experiment unavailable");
-                    }
-                    if cancel.is_cancelled() || shutdown.is_cancelled() {
-                        Some(JobSettlement::Yield {
-                            error_code: Some("title_interrupted".into()),
-                            not_before_ms: now_ms().saturating_add(5000),
-                            checkpoint: Some(serde_json::json!({"fel_title_aggregate": output})),
-                        })
+                    let evaluation = super::m7_title::evaluate(&context, &output.stats).await;
+                    let settlement = m7_settlement(
+                        &output,
+                        evaluation,
+                        cancel.is_cancelled() || shutdown.is_cancelled(),
+                        now_ms(),
+                    );
+                    if settlement.is_some() {
+                        settlement
                     } else {
                         match fence.publish_dv_title(output).await {
                             Ok(true) => {

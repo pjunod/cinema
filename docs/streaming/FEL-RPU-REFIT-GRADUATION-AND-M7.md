@@ -299,12 +299,19 @@ and time base before the recipe is frozen. These bounded exposure measurements
 carry no full-title qualification.
 
 The durable experiment identity combines the raw full-source SHA-256 and the
-frozen protocol SHA-256. A terminal outcome remains visible with its original
-bindings across renderer and scorer updates. Exact current bindings alone
-permit compact measurement reuse. The isolated lab imports the sealed
-historical rejection and the two physical repeat proofs without executing the
-encoder or scorer. File publication, authored readback, resource limits and the
-automatic protocol still require integrated qualification.
+frozen protocol SHA-256. The replicated title authority anchors one protocol per
+source and grants each candidate slot once, including across node changes and
+duplicate catalogue entries. A pending slot with missing coded proof cannot
+supply another candidate trial. The title job can expose complete title facts
+to the existing F+ fitter while its M7 work remains queued.
+
+A completed comparison seals the full report, exact binding and bounded pending
+receipt together. An interrupted catalogue write can resume under a new title
+claim using that receipt. Exact current bindings alone permit catalogue reuse.
+The isolated lab imports the sealed historical rejection and the two physical
+repeat proofs without executing the encoder or scorer. File publication,
+authored readback, resource limits and the automatic protocol still require
+integrated qualification.
 
 ## Execution ledger
 

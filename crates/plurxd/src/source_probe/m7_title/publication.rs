@@ -1,6 +1,9 @@
 //! Actual F+ whole and repositioned VOD materialization in an owned workspace.
 
-use super::super::m7_comparison::{HeldTitle, PublicationFrame, PublicationReadback, TitleContext};
+use super::{
+    super::m7_comparison::{HeldTitle, PublicationFrame, PublicationReadback, TitleContext},
+    EvaluationError,
+};
 use crate::{
     producer_spawn::{ChildStdio, ChildStdios, Descriptors},
     renditiondir::{InitIdentity, RenditionDir, INIT_NAME},
@@ -41,11 +44,33 @@ pub(super) struct FittedPublication {
 }
 
 impl FittedPublication {
-    pub(super) async fn load(context: &TitleContext<'_>) -> Result<Self, String> {
-        let table =
-            crate::dv_refit_serving::current_table(context.state.store.as_ref(), context.file)
-                .await?
-                .ok_or("current fitted F+ table is unavailable")?;
+    pub(super) async fn load(context: &TitleContext<'_>) -> Result<Self, EvaluationError> {
+        let current = context
+            .state
+            .store
+            .dv_refit_curves(context.file.id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let current_method = current.as_ref().filter(|curves| {
+            curves.title.fit_version == plurx_core::transcode::dv_refit::FIT_VERSION
+        });
+        let Some(curves) = current_method else {
+            return if super::super::refit_work::enabled(context.state)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                Err(EvaluationError::Deferred(
+                    "waiting for current fitted F+ table".into(),
+                ))
+            } else {
+                Err(EvaluationError::Unsupported(
+                    "F+ fit is disabled for this title".into(),
+                ))
+            };
+        };
+        let table = crate::dv_refit_serving::served_table(curves)?.ok_or_else(|| {
+            EvaluationError::Unsupported("current F+ outcome has no fitted scenes".into())
+        })?;
         let digest = parse_digest(table.digest())?;
         let video = CopyVideoOptions::from_probe(
             context.file,

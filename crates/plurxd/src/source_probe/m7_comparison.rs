@@ -197,13 +197,13 @@ pub(super) enum ComparisonRun {
 pub(super) async fn execute(
     context: &TitleContext<'_>,
     input: ComparisonInput,
-) -> Result<ComparisonRun, Error> {
+) -> Result<(ComparisonRun, HeldTitle), Error> {
     if context.demand.playback_requested || context.admission.is_probe_only() {
         return Err(Error::Unsupported("maintenance title admission"));
     }
     let cancel = context.cancel.child_token();
     let expected_source = input.title.source.object_version().to_owned();
-    let result = super::run_source_admitted_probe(
+    super::run_source_admitted_probe(
         &context.state.transcode,
         context.admission,
         &cancel,
@@ -218,9 +218,7 @@ pub(super) async fn execute(
         },
         execute_owned(context, input, &cancel),
     )
-    .await;
-    check_cancel(&cancel)?;
-    result
+    .await
 }
 
 struct AdmissionExtension<'a>(&'a FragmentAdmission);
@@ -252,7 +250,7 @@ async fn execute_owned(
     context: &TitleContext<'_>,
     input: ComparisonInput,
     cancel: &CancellationToken,
-) -> Result<ComparisonRun, Error> {
+) -> Result<(ComparisonRun, HeldTitle), Error> {
     let token = verify_authority(context, &input.title, cancel).await?;
     let table = current_table(context, input.frozen.fit_table_sha256).await?;
     let shapes = validate_plan(&input, &table)?;
@@ -275,7 +273,7 @@ async fn execute_owned(
             return Err(Error::Authority("authored clip"));
         }
         revalidate_comparison(context, &input.title, &token, &table, &custody, cancel).await?;
-        return Ok(ComparisonRun::Reused(receipt));
+        return Ok((ComparisonRun::Reused(receipt), input.title));
     }
     let spill = Aggregator::required_spill_bytes(&shapes)?;
     let max_captures = shapes.iter().try_fold(0, |max: u64, &shape| {
@@ -321,11 +319,17 @@ async fn execute_owned(
         return Err(Error::Authority("authored clip"));
     }
     revalidate_comparison(context, &input.title, &token, &table, &custody, cancel).await?;
-    Ok(ComparisonRun::Measured(Measurement {
-        custody,
-        report,
-        measured_at_ms: super::now_ms(),
-    }))
+    // Keep the exact source handle through durable completion. A later loss
+    // of the catalogue claim can defer the sibling write without losing this
+    // already finished comparison.
+    Ok((
+        ComparisonRun::Measured(Measurement {
+            custody,
+            report,
+            measured_at_ms: super::now_ms(),
+        }),
+        input.title,
+    ))
 }
 
 async fn revalidate_comparison(
@@ -348,7 +352,7 @@ async fn revalidate_comparison(
     check_cancel(cancel)
 }
 
-async fn verify_authority(
+pub(super) async fn verify_authority(
     context: &TitleContext<'_>,
     title: &HeldTitle,
     cancel: &CancellationToken,
@@ -1097,7 +1101,7 @@ fn verify_candidate(
     Ok(())
 }
 
-async fn scorer_identity(cancel: &CancellationToken) -> Result<Sha256Digest, Error> {
+pub(super) async fn scorer_identity(cancel: &CancellationToken) -> Result<Sha256Digest, Error> {
     let cancel = cancel.clone();
     off_runtime(move || scorer_binary_sha256(&cancel)).await
 }

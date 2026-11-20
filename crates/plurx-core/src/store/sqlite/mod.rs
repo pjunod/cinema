@@ -1372,6 +1372,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::dv_refit_jobs::SCHEMA,
     // v135: person-curated tags, saved rows, Home layouts and curation grants.
     super::library_curation_schema::SCHEMA,
+    // v136: a source-keyed frozen M7 protocol and single-use candidate slots.
+    super::dv_m7_attempts::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1948,6 +1950,7 @@ impl SqliteStore {
         super::delegation::verify_sqlite(conn)?;
         super::scan_request_v2::verify_sqlite(conn)?;
         super::dv_refit_jobs::verify_sqlite(conn)?;
+        super::dv_m7_attempts::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

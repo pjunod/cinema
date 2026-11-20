@@ -292,6 +292,7 @@ pub mod classification_schedule;
 mod copy_index_v3_tests;
 pub(crate) mod curation_sql;
 mod custody_retention;
+pub mod dv_m7_attempts;
 pub mod dv_m7_receipts;
 pub mod dv_refit_jobs;
 pub mod dv_title_jobs;
