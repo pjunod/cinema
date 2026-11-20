@@ -6113,7 +6113,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # sleeps above. It wakes the existing splice task.
 # Main adds bounded artwork, offline worker, voter and heartbeat fixture waits.
 # The scanner deadline fixture bounds cleanup after advancing the test clock.
-expected_occurrences = 2287
+# The embedded placeholder source removes one test-only encoder setup site.
+expected_occurrences = 2286
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6652,7 +6653,8 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Union at 0d501cae6: 349 + 13 + 3 = 365, less those 3 counted twice = 362; the spool
 # registration test adds one isolated test image: 363.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 368
+# The embedded placeholder source removes one test-only encoder setup site.
+expected_occurrences = 367
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7417,7 +7419,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # All seven matches inspect HTTP replies and launch no processes.
 # Removing the retired parser-floor refusal drops one HTTP status read.
 # The merged source inventories 951 occurrences.
-expected_occurrences = 951
+# The embedded placeholder source removes one test-only encoder setup site.
+expected_occurrences = 950
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7989,7 +7992,8 @@ pattern = "kill_on_drop\\s*\\("
 # Union at 0d501cae6: 126 + 2 + 1 = 129, less 1 counted twice = 128; the spool
 # registration test adds one: 129.
 # The owned voter fixture process is joined before a collision can retry.
-expected_occurrences = 132
+# The embedded placeholder source removes one test-only encoder setup site.
+expected_occurrences = 131
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

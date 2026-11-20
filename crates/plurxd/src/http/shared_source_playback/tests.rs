@@ -1128,9 +1128,8 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
         mode,
         SourceFixtureMode::NativeCopy | SourceFixtureMode::NativeEncoded
     );
-    if native || matches!(mode, SourceFixtureMode::BurnText) {
-        fixture.keep_fixture_membership_stable().await;
-    }
+    // Resource delivery assumes a stable committed test roster.
+    fixture.keep_fixture_membership_stable().await;
     let mut unsupported: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     unsupported["session"]["previous_session_id"] = json!(Uuid::new_v4());
     unsupported["session"]["request_id"] = json!(Uuid::new_v4());
