@@ -110,6 +110,10 @@ def authenticate(api, descriptor, binding, candidate):
     uuid, digest = descriptor['attachment_uuid'], descriptor['sha256']
     raw = retention.attachment_bytes(api, binding['pull_request'], attachment, uuid, digest)
     record, _, repository, _ = retention.verify_identity(api, raw, digest, binding, candidate, attachment, uuid)
+    if record.get('version') == 'workspace-nextest-shards-v1':
+        from validation import nextest_shard_continuation as nextest
+        proof = nextest.authenticate(api, record, binding, candidate, repository)
+        return {**proof, 'digest': digest}
     receipts.require(set(record) == {'version','repository','pr','branch','base_sha','source_commit',
                                     'prior','run','job','log_sha256','changes'}
                      and record['version'] == POLICY and record['source_commit'] == candidate,
@@ -183,7 +187,7 @@ def main():
                          receipts.bounded_json(os.environ['PROMOTION_BINDING'].encode()), candidate)
     destination = Path('target/validation/workspace-rust-selection.json')
     receipts.atomic_json(destination,proof)
-    print('Verified prior Rust passes for', sum(map(len, proof['retained'].values())), 'named target bodies')
+    print('Verified prior Rust passes for', (len(proof['retained_ids']) if 'retained_ids' in proof else sum(map(len, proof['retained'].values()))), 'named target bodies')
     with open(os.environ['GITHUB_OUTPUT'],'a') as output:
         print('root_retained=' + str(proof['root_ownership_passed']).lower(),file=output)
 

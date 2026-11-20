@@ -1,0 +1,392 @@
+"""Authenticated selected-PR Rust continuation; never full-workspace evidence.
+
+The source adapter retains original nextest outcomes under original content
+keys, then applies a writer-reviewed source manifest. Current execution keeps
+nextest process isolation; no nextest result is relabelled as Cargo/libtest.
+"""
+from __future__ import annotations
+
+import io
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tarfile
+import urllib.request
+import zipfile
+
+from validation import promotion_unit_retention as retention
+from validation import python_unit_receipts as r
+from validation import rust_units as units
+
+POLICY = 'workspace-nextest-shards-v1'
+COMPATIBILITY = 'linux-x64-nextest-0.9.151-isolated-two-8m-v1'
+NEXTEST_SHA256 = '1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4'
+TEST_INPUTS = {
+    'crates/plurxd/src/http/applied_route_inventory.rs',
+    'crates/plurxd/src/http/stream/tests.rs',
+    'crates/plurxd/src/transcode/tests/chunk_05.rs',
+}
+# Reviewed recipes, not a source-commit or pull-request exception. Different
+# workflow, selector, feature, image or nextest contracts need a new review.
+HARNESS = {'.config/nextest.toml': 'b68e6d071b1e441727237de221cb60ac32e78f0ddff3d9636d9004f1e8d38c81',
+ '.github/workflows/main-fast-lane.yml': '3ce991087d99bc508988d674d37ca48eb99cec34ce0d18af4fc36ec7c0878e22',
+ '.github/workflows/rust-units.yml': 'e9ea37562c132dcf815336a46fa954fe7e0db841527dcff16f5e98d0b0ef93c2',
+ 'rust-toolchain.toml': '03cbfb27fcdc8253524b3e4c71c832457a504f7e9b1da5e6220178404b77f4e4',
+ 'validation/rust-unit-inputs.toml': '009d3107a038f79ed3986d87c96d247717bb6328a89ec179a5a2cbf0255a2372',
+ 'validation/rust_units.py': 'c97c1469068209b7b9b2eb0413d8984dd338051a9e4c996843d063683bb3d683'}
+
+
+def strict_outcomes(raw):
+    result = {}
+    for line in raw.decode('utf-8', 'strict').splitlines():
+        line = re.sub(r'^\d{4}-\d\d-\d\dT[0-9:.]+Z ', '', line)
+        match = units.STATUS_LINE.fullmatch(line)
+        if match:
+            status, binary, name = match.groups()
+            identity = binary + ' ' + name
+            r.require(identity not in result, 'Duplicate nextest body outcome')
+            result[identity] = 'PASS' if status in {'PASS', 'LEAK'} else 'FAIL'
+    r.require(result, 'No original nextest outcomes')
+    return result
+
+
+class ForgeView:
+    """Reuse the original exact-key authenticator with its bounded API."""
+    def __init__(self, api):
+        self.api = api
+
+    def get(self, path, query=None):
+        return self.api.get(path, query)
+
+    def bytes(self, path, query=None, limit=units.MAX_RECEIPT_BYTES):
+        data = self.api.bytes(path, query)
+        r.require(len(data) <= limit, 'Nextest evidence exceeds original bound')
+        return data
+
+
+def artifact(api, metadata, member):
+    r.require(metadata.get('expired') is False
+              and 0 < metadata['size_in_bytes'] <= units.MAX_RECEIPT_BYTES,
+              'Unavailable nextest artifact')
+    raw = api.bytes(f"/actions/artifacts/{metadata['id']}/zip")
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        entries = archive.infolist()
+        r.require(len(entries) == 1 and entries[0].filename == member
+                  and not entries[0].is_dir() and entries[0].file_size <= units.MAX_RECEIPT_BYTES,
+                  'Ambiguous nextest artifact members')
+        return r.bounded_json(archive.read(entries[0]))
+
+
+def reviewed_changes(record, candidate, universe):
+    prior = r.sha(record['prior'])
+    changes = record['changes']
+    r.require(isinstance(changes, dict) and set(changes) == retention.changed(prior, candidate),
+              'Every nextest source change needs a reviewed witness')
+    invalidated = set()
+    for path, witness in changes.items():
+        r.require((path in TEST_INPUTS or path in retention.PROTOCOL_PATHS)
+                  and not path.startswith('.github/'),
+                  'Changed protected or unreviewed nextest input')
+        r.require(isinstance(witness, dict)
+                  and set(witness) == {'before', 'after', 'affected', 'reason'}
+                  and isinstance(witness['reason'], str) and 0 < len(witness['reason'].strip()) <= 2048,
+                  'Missing nextest source applicability reason')
+        before, after = retention.git_bytes(prior, path), retention.git_bytes(candidate, path)
+        r.require(witness['before'] == (retention.digest(before) if before is not None else None)
+                  and witness['after'] == (retention.digest(after) if after is not None else None),
+                  'Nextest applicability bytes differ')
+        affected = witness['affected']
+        r.require(isinstance(affected, list) and len(affected) == len(set(affected))
+                  and set(affected) <= universe, 'Unknown nextest affected body')
+        r.require(path not in TEST_INPUTS or bool(affected), 'Changed test input has no affected bodies')
+        invalidated.update(affected)
+    return invalidated
+
+
+def authenticate(api, record, binding, candidate, repository):
+    fields = {'version', 'repository', 'pr', 'branch', 'base_sha', 'source_commit',
+              'prior', 'run', 'plan_artifact', 'crate_artifacts', 'shard_artifacts', 'changes', 'compatibility'}
+    r.require(set(record) == fields and record['version'] == POLICY
+              and record['source_commit'] == candidate and record['compatibility'] == COMPATIBILITY
+              and binding.get('schema') == 2
+              and record['repository'] == repository and record['pr'] == binding['pull_request']
+              and record['branch'] == binding['head_ref'] and record['base_sha'] == binding['base_sha'],
+              'Unknown nextest continuation contract')
+    prior, run_id = r.sha(record['prior']), r.positive(record['run'])
+    from validation import workspace_rust_continuation as workspace
+    for revision in (prior, candidate):
+        workspace.check_workflow_environment(retention.git_bytes(revision, '.github/workflows/ci.yml').decode(),
+                                             workspace.CURRENT_JOB)
+    for path, digest in HARNESS.items():
+        old, new = retention.git_bytes(prior, path), retention.git_bytes(candidate, path)
+        r.require(old is not None and retention.digest(old) == digest and old == new,
+                  'Unreviewed nextest compiler/workflow/runtime recipe')
+    run = api.get(f'/actions/runs/{run_id}')
+    r.require(run['repository']['id'] == repository and run['commit_sha'] == prior
+              and run['workflow_id'] == 'main-fast-lane.yml' and run['trigger_event'] == 'pull_request'
+              and run['prettyref'] == '#' + str(binding['pull_request']),
+              'Original nextest PR execution differs')
+    current = units.selection(candidate, binding['base_sha'])
+    selected = {name for name, row in current['crates'].items() if row['due']}
+    r.require(all(not current['crates'][name].get('only') for name in selected),
+              'Dynamic-only Rust selection needs its own continuation contract')
+    artifacts = api.pages(f'/actions/runs/{run_id}/artifacts')
+    by_id = {item['id']: item for item in artifacts}
+    r.require(len(by_id) == len(artifacts), 'Duplicate nextest artifact metadata')
+    plan_meta = by_id[r.positive(record['plan_artifact'])]
+    r.require(plan_meta['name'] == f'rust-units-plan-{run_id}' and plan_meta['run_id'] == run_id,
+              'Original nextest plan identity differs')
+    plan = artifact(api, plan_meta, 'plan.json')
+    r.require(set(plan) == {'schema', 'run', 'head', 'base', 'shards', 'crates', 'absent',
+                            'filters', 'serial_filters'}, 'Unknown original nextest plan fields')
+    r.require(plan['run'] == run_id and plan['head'] == prior and set(plan['crates']) == selected
+              and all(not row['adopted'] and not row.get('only') and not row.get('exact')
+                      for row in plan['crates'].values()), 'Incomplete original selected-crate census')
+    r.require(isinstance(record['crate_artifacts'], dict)
+              and set(record['crate_artifacts']) == selected, 'Missing selected crate receipts')
+    r.require(plan['shards'] in range(1, units.MAX_SHARDS + 1)
+              and not plan.get('absent'), 'Invalid or absent original plan bodies')
+    config = units.Config.load(units.Tree(prior).text(str(units.CONFIG)))
+    auth = units.Authenticator(ForgeView(api), int(os.environ['GITHUB_RUN_ID']), config)
+    jobs = api.pages(f'/actions/runs/{run_id}/jobs')
+    r.require(jobs and len({job['id'] for job in jobs}) == len(jobs)
+              and all(job['run_id'] == run_id and job['repo_id'] == repository and job['attempt'] == 1
+                      for job in jobs), 'Original nextest job census differs')
+    auth._jobs[run_id] = jobs
+    outcomes, logs, log_rows = {}, {}, {}
+    for crate in sorted(selected):
+        meta = by_id[r.positive(record['crate_artifacts'][crate])]
+        r.require(meta['run_id'] == run_id, 'Foreign nextest receipt run')
+        key = auth.key_at(prior, crate)
+        r.require(plan['crates'][crate]['key'] == key, 'Original plan crate key differs from source')
+        claimed = artifact(api, meta, 'receipt.json')
+        units.validate_receipt(claimed, crate, key)
+        verified = auth.authenticate(meta, crate, key)
+        r.require(verified['unproven'] == 0 and verified['listing'] == plan['crates'][crate]['listing'],
+                  'Original receipt lacks authenticated body census')
+        for name in claimed['evidence_jobs']:
+            job = auth.job(run_id, name, {'success', 'failure'}, 'shard')
+            r.require(job['run_id'] == run_id and job['repo_id'] == repository and job['attempt'] == 1,
+                      'Original shard execution identity differs')
+            if job['id'] not in logs:
+                rows = strict_outcomes(auth.log(job['id']).encode())
+                r.require(not set(rows) & set(outcomes), 'Body executed in multiple original shards')
+                outcomes.update(rows)
+                logs[job['id']] = retention.digest(auth.log(job['id']).encode())
+                log_rows[job['id']] = rows
+        planned = set(plan['crates'][crate]['remaining'] + plan['crates'][crate]['serial'])
+        r.require(all(units.crate_of(identity.split(' ', 1)[0]) == crate for identity in planned),
+                  'Original plan contains a foreign crate body')
+        actual = verified['passed'] | verified['failed']
+        r.require(actual == planned and not verified['passed'] & verified['failed']
+                  and verified['listing'] == {'count': len(planned), 'sha256': units.digest_lines(sorted(planned))},
+                  'Original crate receipt is incomplete')
+    r.require(isinstance(record['shard_artifacts'], dict)
+              and set(record['shard_artifacts']) == {str(i) for i in range(1, plan['shards'] + 1)},
+              'Every original shard JSON artifact is required')
+    shards = []
+    for index in range(1, plan['shards'] + 1):
+        meta = by_id[r.positive(record['shard_artifacts'][str(index)])]
+        name = f'rust-units-shard-{run_id}-{index}'
+        r.require(meta['run_id'] == run_id and meta['name'] == name, 'Foreign shard JSON artifact')
+        shard = artifact(api, meta, 'receipt.json')
+        r.require(set(shard) == {'schema', 'producer', 'run', 'index', 'shards', 'head', 'job', 'results'},
+                  'Unknown original nextest shard fields')
+        job = auth.job(run_id, units.JOB_SHARD.format(index=index), {'success', 'failure'}, 'shard')
+        r.require(shard['producer'] == 'validation.rust_units' and shard['job'] == units.JOB_SHARD.format(index=index)
+                  and set(shard['results']) == selected
+                  and f'Artifact {name} has been successfully uploaded!' in auth.log(job['id']),
+                  'Shard JSON publisher identity differs')
+        declared = {}
+        for crate, row in shard['results'].items():
+            r.require(set(row) == {'passed', 'failed', 'skipped'} and not row['skipped'],
+                      'Incomplete original shard execution')
+            for key, status in (('passed', 'PASS'), ('failed', 'FAIL')):
+                for identity in row[key]:
+                    r.require(identity not in declared and units.crate_of(identity.split(' ', 1)[0]) == crate,
+                              'Duplicate or foreign shard body')
+                    declared[identity] = status
+        r.require(declared == log_rows[job['id']], 'Shard JSON contradicts original raw statuses')
+        shards.append(shard)
+    logged_by_index = {shard['index']: log_rows[auth.job(run_id, shard['job'],
+                       {'success', 'failure'}, 'shard')['id']] for shard in shards}
+    r.require(complete_shard_census(plan, shards, logged_by_index) == outcomes,
+              'Original complete shard census differs from status rows')
+    archive_job = auth.job(run_id, units.JOB_ARCHIVE, {'success'}, 'rust_units_archive')
+    r.require(f"Artifact {plan_meta['name']} has been successfully uploaded!" in auth.log(archive_job['id']),
+              'Original archive job did not publish the selected plan')
+    universe = {test for row in plan['crates'].values() for test in row['remaining'] + row['serial']}
+    planned_list = [test for row in plan['crates'].values() for test in row['remaining'] + row['serial']]
+    r.require(len(planned_list) == len(universe), 'Duplicate body in original selected plan')
+    r.require(set(outcomes) == universe and len(logs) == plan['shards'],
+              'Original shard outcomes do not cover the complete census')
+    # A shard receipt is not an outcome source; authenticated original status
+    # rows remain authoritative, including all failures and abnormal exits.
+    invalidated = reviewed_changes(record, candidate, universe)
+    retained = sorted(test for test, value in outcomes.items() if value == 'PASS' and test not in invalidated)
+    return {'provider': POLICY, 'scope': 'selected-pr-rust-source-gate', 'candidate': candidate,
+            'prior': prior, 'base': binding['base_sha'], 'run': run_id, 'logs': logs,
+            'selected': sorted(selected), 'universe': sorted(universe), 'retained_ids': retained,
+            'must_pass_ids': sorted(universe - set(retained)),
+            'serial_ids': sorted(test for row in plan['crates'].values() for test in row['serial']),
+            'outcomes': outcomes, 'root_ownership_passed': False}
+
+
+
+def complete_shard_census(plan, shards, logged):
+    outcomes, problems = units.collect(plan, shards)
+    r.require(not problems and len(shards) == plan['shards']
+              and set(logged) == set(range(1, plan['shards'] + 1)),
+              'Original selected shard census is incomplete')
+    merged = {}
+    for shard in shards:
+        declared = {}
+        for row in shard['results'].values():
+            r.require(not row['skipped'], 'Original shard contains unexecuted bodies')
+            for field, status in (('passed', 'PASS'), ('failed', 'FAIL')):
+                for identity in row[field]:
+                    r.require(identity not in declared, 'Duplicate shard JSON outcome')
+                    declared[identity] = status
+        r.require(declared == logged[shard['index']] and not set(merged) & set(declared),
+                  'Shard JSON/log outcomes disagree or repeat')
+        merged.update(declared)
+    r.require(set(merged) == set(outcomes), 'Original complete body census differs')
+    return merged
+
+
+def current_census(proof, listing, config):
+    """Only original selected crates; every new current body remains due."""
+    suites = units.nextest_suites(listing)
+    r.require({units.crate_of(binary) for binary in suites} == set(proof['selected']),
+              'Current archive differs from the selected crate scope')
+    current, serial = set(), set()
+    for crate in proof['selected']:
+        ordinary, ignored = units.crate_tests(suites, crate, set(config.serial_ignored.get(crate, ())))
+        current.update(ordinary + ignored)
+        serial.update(ignored)
+    r.require(set(proof['universe']) <= current and set(proof['serial_ids']) == serial,
+              'Historical body disappeared, became ignored, or changed serial contract')
+    retained = set(proof['retained_ids'])
+    r.require(retained <= current, 'Retained nextest body disappeared')
+    return current, current - retained, serial
+
+
+
+def selected_listing_ids(listing):
+    identities = set()
+    for binary, suite in listing['rust-suites'].items():
+        for name, case in suite['testcases'].items():
+            match = case.get('filter-match', {})
+            r.require(match.get('status') in {'matches', 'mismatch'}, 'Missing actual nextest filter result')
+            if match['status'] == 'matches':
+                identities.add(binary + ' ' + name)
+    return identities
+
+
+def install_nextest(directory):
+    """Same release asset and digest as the authenticated shard recipe."""
+    directory.mkdir(parents=True, exist_ok=False)
+    url = ('https://github.com/nextest-rs/nextest/releases/download/'
+           'cargo-nextest-0.9.151/cargo-nextest-0.9.151-x86_64-unknown-linux-gnu.tar.gz')
+    with urllib.request.urlopen(url, timeout=60) as response:
+        raw = response.read(64 * 1024 * 1024 + 1)
+    r.require(len(raw) <= 64 * 1024 * 1024 and retention.digest(raw) == NEXTEST_SHA256,
+              'Pinned nextest executable download differs')
+    with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as archive:
+        members = [member for member in archive.getmembers() if member.name == 'cargo-nextest']
+        r.require(len(members) == 1 and members[0].isfile() and members[0].size <= 64 * 1024 * 1024,
+                  'Pinned nextest executable member differs')
+        stream = archive.extractfile(members[0])
+        executable = directory / 'cargo-nextest'
+        executable.write_bytes(stream.read())
+        executable.chmod(0o700)
+    os.environ['PATH'] = str(directory) + os.pathsep + os.environ['PATH']
+    return executable
+
+
+def execute(proof):
+    """Compile selected tests and run only uncovered original/new IDs.
+
+    This source gate preserves the original nextest process isolation and two
+    concurrent bodies, including serial ignored checks. It does not execute or
+    qualify unselected crates or doctests; those are outside the PR unit scope.
+    """
+    r.require(proof['scope'] == 'selected-pr-rust-source-gate'
+              and os.geteuid() == 0 and os.uname().sysname == 'Linux'
+              and os.uname().machine == 'x86_64'
+              and os.environ.get('RUST_MIN_STACK') == '8388608'
+              and os.environ.get('RUST_TEST_THREADS') == '2'
+              and os.environ.get('CARGO_BUILD_JOBS') == '1'
+              and not os.environ.get('CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER')
+              and subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == proof['candidate'],
+              'Nextest source-gate runtime or candidate differs')
+    from validation.qualification_unit_continuation import require_unmodified_cargo_environment
+    require_unmodified_cargo_environment(os.environ)
+    r.require(not any(os.environ.get(key) for key in ('RUSTDOCFLAGS', 'CARGO_ENCODED_RUSTDOCFLAGS',
+              'RUSTDOC', 'CARGO_BUILD_RUSTDOC', 'CARGO_BUILD_TARGET_DIR')),
+              'Unexpected nextest compiler environment')
+    r.require(not subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no']),
+              'Nextest checkout contains changed tracked sources')
+    compiler = subprocess.check_output(['rustc', '-vV'], text=True).splitlines()
+    r.require(all(line in compiler for line in ('release: 1.97.1',
+              'commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452',
+              'host: x86_64-unknown-linux-gnu')), 'Nextest compiler identity differs')
+    from validation import workspace_rust_continuation as workspace
+    workspace.check_workflow_environment(retention.git_bytes(proof['candidate'], '.github/workflows/ci.yml').decode(),
+                                         workspace.CURRENT_JOB)
+    selection = units.selection(proof['candidate'], proof['base'])
+    r.require({crate for crate, row in selection['crates'].items() if row['due']} == set(proof['selected']),
+              'Current required Rust selection changed')
+    output = Path('target/validation/nextest-continuation')
+    output.mkdir(parents=True, exist_ok=False)
+    install_nextest(Path(os.environ['RUNNER_TEMP']) / ('nextest-continuation-' + proof['candidate']))
+    subprocess.run(['make', 'fmt-check', 'spike-lock-check', 'lint', 'test-socket-permission-check'], check=True)
+    archive = output / 'archive.tar.zst'
+    crate_filter = ' | '.join('package(=' + crate + ')' for crate in proof['selected'])
+    subprocess.run(['cargo', 'nextest', 'archive', '--locked', '--workspace', '--exclude',
+                    'plurx-cluster-check', '-E', crate_filter, '--archive-file', str(archive)], check=True)
+    listing_raw = subprocess.check_output(['cargo-nextest', 'nextest', 'list', '--archive-file', str(archive),
+                    '--workspace-remap', '.', '--profile', 'ci', '--run-ignored', 'all', '--message-format', 'json'])
+    (output / 'listing.json').write_bytes(listing_raw)
+    listing = json.loads(listing_raw)
+    config = units.Config.load(units.Tree(proof['candidate']).text(str(units.CONFIG)))
+    current, due, serial = current_census(proof, listing, config)
+    units.require_test_disk()
+    units.bound_cpus()
+    units.EXTRACT = output / 'extract'
+    observed = {}
+    for identities, extra in ((due - serial, ['--test-threads', '2']),
+                              (due & serial, ['--run-ignored', 'only', '--test-threads', '1'])):
+        if not identities:
+            continue
+        filters = units.filter_expressions(sorted(identities), {})
+        list_command = ['cargo-nextest', 'nextest', 'list', '--archive-file', str(archive),
+                        '--workspace-remap', '.', '--profile', 'ci', '--message-format', 'json']
+        if '--run-ignored' in extra:
+            list_command += ['--run-ignored', 'only']
+        for expression in filters:
+            list_command += ['-E', expression]
+        planned = json.loads(subprocess.check_output(list_command))
+        r.require(selected_listing_ids(planned) == identities,
+                  'Actual nextest filter selects applicable passes or omits due bodies')
+        command = units.nextest_command(archive, filters, extra)
+        process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        # Preserve the actual original status log; this is never a libtest/JUnit surrogate.
+        raw = process.stdout
+        print(raw.decode('utf-8', 'strict'), end='', flush=True)
+        with (output / 'execution.log').open('ab') as stream:
+            stream.write(raw)
+        rows = strict_outcomes(raw)
+        r.require(process.returncode == 0 and set(rows) == identities
+                  and set(rows.values()) == {'PASS'} and not set(rows) & set(observed),
+                  'Current nextest execution is failed, incomplete, duplicated, or outside the due set')
+        observed.update(rows)
+    r.require(set(observed) == due, 'Current nextest due census is incomplete')
+    r.atomic_json(output / 'receipt.json', {'version': POLICY, 'kind': 'selected-pr-rust-source-gate',
+                  'candidate': proof['candidate'], 'base': proof['base'], 'source_run': proof['run'],
+                  'enrollment_digest': proof['digest'], 'selected': proof['selected'],
+                  'retained': proof['retained_ids'], 'executed': sorted(observed),
+                  'current_listing_sha256': retention.digest(listing_raw), 'current_universe': sorted(current),
+                  'complete': True})

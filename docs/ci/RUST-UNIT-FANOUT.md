@@ -17,6 +17,56 @@ the code being merged; rebasing must not repeat tests that already passed on
 the same inputs; only what failed runs again; history that cannot be
 authenticated is simply not adopted.
 
+## Reviewed continuation across test-only source repairs
+
+An explicit manual `ci.yml` dispatch may resume an authenticated selected-PR
+Rust run after reviewed test-only repairs. Ordinary same-repository PRs require
+all three immutable promotion inputs, an open PR targeting current `main`, a
+checkout of its exact live branch tip, and ancestry proving that current main
+is included. Automatic branch routing and release qualification still accept
+only their established promotion branches. Ordinary manual dispatches produce
+`selected-pr-source-gate` evidence; that evidence does not establish a release,
+full-workspace unit success, doctest success, or an unaffected crate's result.
+
+The `workspace_rust_evidence` input remains an attachment descriptor with
+`sha256`, `attachment_id`, and `attachment_uuid`. Its enrolled document uses
+`version: workspace-nextest-shards-v1` and supplies `repository`, `pr`, `branch`,
+`base_sha`, `source_commit`, `prior`, `run`, `plan_artifact`, `crate_artifacts`,
+`shard_artifacts`, `changes`, and the closed compatibility identifier
+`linux-x64-nextest-0.9.151-isolated-two-8m-v1`. Artifact maps name every original
+selected crate and every original shard index. Each changed path has its exact
+`before`/`after` SHA256, `affected` nextest IDs (`<binary-id> <test-path>`), and
+reviewed `reason`. The authenticated writer attests that dependency
+classification. Cargo, compiler, workflow, feature, image, and selector
+changes are refused; the adapter admits only its reviewed test-input paths
+and audited protocol paths.
+
+The provider independently authenticates the original repository, PR, run,
+source, complete plan, all shard jobs and raw status logs, uploaded JSON
+receipts, original exact crate keys, and inventory digests. Failures remain
+failures. Missing bodies, repeated identities, conflicting outcomes, unknown
+IDs, changed recipes, and incomplete shards refuse adoption. Source witnesses
+invalidate affected successes without changing the original records. This
+bridge does not change `rust_units.py` or its ordinary exact-key reuse rule.
+
+Current required crates are recomputed with that unchanged selector against
+the bound current main. The archive compiles the workspace with the original
+default feature unification, then lists every selected crate's current test
+binary. Historical bodies must remain present and runnable; new selected
+bodies are due. Only still-applicable passes are omitted. Ordinary tests use
+the original pinned nextest release, one fresh process per body, two concurrent
+bodies, and an 8 MiB stack; required ignored tests remain serial. Native
+Cargo's shared-process two-thread execution is not claimed equivalent.
+Container capacity differs, but compiler, profile, feature unification, image,
+FFmpeg recipe, assertion bodies and nextest isolation remain pinned. Resource
+availability itself is not a cross-run success guarantee; failures still
+require an actual current pass.
+
+The completion receipt names the selected crates, complete current census,
+original evidence enrollment, retained IDs, and actually executed IDs. No
+manual dispatch, publication, or source-gate completion is implied by preparing
+an attachment. Review new adoption code independently before executing it.
+
 ## 1. What runs when
 
 | Trigger | What happens |

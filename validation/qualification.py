@@ -80,14 +80,14 @@ def manual_binding(
         assert pull_request["state"] == "open" and pull_request.get("merged") is False
         assert head["repo"]["full_name"] == repository
         assert base["repo"]["full_name"] == repository
-        assert promotion_ref(head["ref"]) and base["ref"] == "main"
+        assert bool(re.fullmatch(r"[A-Za-z0-9._/-]+", head["ref"])) and base["ref"] == "main"
         assert environment.get("GITHUB_REF") == "refs/heads/" + head["ref"]
         assert head["sha"] == head_tip == expected_head == tested_sha == environment.get("GITHUB_SHA")
         assert base["sha"] == base_tip == expected_base
         assert base_is_ancestor
     except (KeyError, TypeError, AssertionError) as exc:
         raise QualificationError("promotion PR identity, route, immutable tips or ancestry mismatch") from exc
-    return dict(schema=1, repository=repository, pull_request=int(number),
+    return dict(schema=1 if promotion_ref(head["ref"]) else 2, repository=repository, pull_request=int(number),
                 head_ref=head["ref"], base_ref="main", head_sha=head_tip, base_sha=base_tip)
 
 
@@ -128,7 +128,7 @@ def resolve_manual_binding(environment: Mapping[str, str], repository: Path) -> 
     pr = api_document(environment, "/pulls/" + number)
     try:
         head_ref = pr["head"]["ref"]
-        if not isinstance(head_ref, str) or not promotion_ref(head_ref):
+        if not isinstance(head_ref, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", head_ref):
             raise QualificationError("promotion branch route refused")
         head_tip = api_document(environment, "/branches/" + urllib.parse.quote(head_ref, safe=""))["commit"]["id"]
         base_tip = api_document(environment, "/branches/main")["commit"]["id"]
@@ -232,7 +232,7 @@ def build_receipt(
     if environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
         try:
             binding = json.loads(environment["PLURX_PROMOTION_BINDING"])
-            assert binding["schema"] == 1 and binding["repository"] == environment["GITHUB_REPOSITORY"]
+            assert binding["schema"] in (1, 2) and binding["repository"] == environment["GITHUB_REPOSITORY"]
             assert binding["head_sha"] == tested_sha == environment["GITHUB_SHA"]
             assert binding["head_sha"] == environment["PLURX_PROMOTION_HEAD_SHA"]
             assert binding["base_sha"] == environment["PLURX_PROMOTION_BASE_SHA"]
@@ -288,7 +288,7 @@ def build_receipt(
         and head_ref.endswith(integration_suffix)
         and len(head_ref) > len(integration_prefix) + len(integration_suffix)
     )
-    if not (is_effort_head or is_integration_head):
+    if not (is_effort_head or is_integration_head or (binding and binding["schema"] == 2)):
         raise QualificationError(
             "qualification head must match effort/** or "
             f"integration/*-into-main; found {head_ref!r}"
@@ -352,7 +352,7 @@ def build_receipt(
 
     return {
         "schema": 1,
-        "kind": "effort-qualification",
+        "kind": ("selected-pr-source-gate" if binding and binding["schema"] == 2 else "effort-qualification"),
         "repository": environment["GITHUB_REPOSITORY"],
         "pull_request": pull_request_number,
         "head_ref": head_ref,
