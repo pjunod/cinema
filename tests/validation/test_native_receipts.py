@@ -27,7 +27,8 @@ class NativeReceiptTests(unittest.TestCase):
             for key, value in [('source_dirty', True), ('status', 'failed'),
                     ('source_sha', 'b' * 40), ('source_tree_sha256', 'wrong'),
                     ('selected_tests', []), ('required_tests', ['Other/test']),
-                    ('native_suite_complete', False), ('runtime', 'other'), ('xcode', 'other'),
+                    ('native_suite_complete', False),
+                    ('runtime', 'com.apple.CoreSimulator.SimRuntime.tvOS-26-5'), ('xcode', 'other'),
                     ('xcode', 'Xcode 27.1\nBuild version 27A9275'),
                     ('test_summary', {'passedTests': 1, 'failedTests': 0, 'skippedTests': 1}),
                     ('command', ['xcodebuild', 'test'])]:

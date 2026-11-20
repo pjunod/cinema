@@ -12,6 +12,7 @@ use plurx_core::{
     sharing_catalogue_details::CatalogueRevisionKey,
     sharing_source_sessions::*,
     store::{
+        analysis_coordination::SOURCE_COPY_COORDINATION_CAPABILITY,
         media_session_principal_rebuild_schema, sharing_catalogue_details::SourceDetailsRead,
         sharing_source_sessions::candidate_statements, SharingSourceDetailsStore,
         SharingSourceIngressCustodyStore, SharingSourceSessionStore, SharingStore,
@@ -263,12 +264,13 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     for id in 1_i64..=3 {
         client
             .execute(
-                "INSERT INTO cluster_node_capabilities VALUES($1,$2,$3),($1,$4,$3)",
+                "INSERT INTO cluster_node_capabilities VALUES($1,$2,$3),($1,$4,$3),($1,$5,$3)",
                 hiqlite::params!(
                     format!("node-{id}"),
                     plurx_core::cluster::membership::SHARING_INGRESS_CUSTODY_CAPABILITY,
                     now,
-                    "sharing_ingress_boot_v1:01a1128a-944d-4f11-9bf2-c7599d355213"
+                    "sharing_ingress_boot_v1:01a1128a-944d-4f11-9bf2-c7599d355213",
+                    SOURCE_COPY_COORDINATION_CAPABILITY
                 ),
             )
             .await
@@ -278,17 +280,18 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     // Keep integer timestamps observable so a misplaced boot marker cannot hide.
     let ingress_rows = client
         .query_consistent_map::<SchemaText, _>(
-            "SELECT CAST(count(*) AS TEXT) AS value FROM cluster_node_capabilities AS c JOIN cluster_nodes AS n ON n.node_id=c.node_id WHERE c.node_id IN ('node-1','node-2','node-3') AND c.capability IN ($1,$2) AND typeof(c.last_seen_at)='integer' AND c.last_seen_at=$3 AND c.last_seen_at=n.last_seen_at",
+            "SELECT CAST(count(*) AS TEXT) AS value FROM cluster_node_capabilities AS c JOIN cluster_nodes AS n ON n.node_id=c.node_id WHERE c.node_id IN ('node-1','node-2','node-3') AND c.capability IN ($1,$2,$3) AND typeof(c.last_seen_at)='integer' AND c.last_seen_at=$4 AND c.last_seen_at=n.last_seen_at",
             hiqlite::params!(
                 plurx_core::cluster::membership::SHARING_INGRESS_CUSTODY_CAPABILITY,
                 "sharing_ingress_boot_v1:01a1128a-944d-4f11-9bf2-c7599d355213",
+                SOURCE_COPY_COORDINATION_CAPABILITY,
                 now
             ),
         )
         .await
-        .expect("exact ingress capability and boot marker heartbeat witness");
+        .expect("exact routing and Source copy capability heartbeat witness");
     assert_eq!(ingress_rows.len(), 1);
-    assert_eq!(ingress_rows[0].value, "6");
+    assert_eq!(ingress_rows[0].value, "9");
     exec(&client,"INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','true',1) ON CONFLICT(key) DO UPDATE SET value='true'").await;
     for result in client
         .txn(

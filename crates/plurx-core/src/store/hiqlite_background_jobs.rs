@@ -107,7 +107,7 @@ async fn managed_bootstrap_layout(
 
 async fn install_probe_and_managed_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     let (version, observed_view) = managed_bootstrap_layout(client).await?;
-    if matches!(version, Some(1..=5)) {
+    if matches!(version, Some(1..=6)) {
         // Reinstall only idempotent probe objects; never replace a managed view.
         let prefix = super::background_jobs_probe::SCHEMA
             .split_once("-- next statement\nDROP VIEW")
@@ -145,13 +145,61 @@ async fn install_probe_and_managed_schema(client: &hiqlite::Client) -> Result<()
                 .map_err(database_error)
         });
     let (settled, _) = managed_bootstrap_layout(client).await?;
-    if matches!(settled, Some(1..=5)) {
+    if matches!(settled, Some(1..=6)) {
         return Ok(());
     }
     attempt?;
     Err(StoreError::Migration(
         "managed subtitle bootstrap did not settle".into(),
     ))
+}
+
+const CUSTODY_RETENTION_MARKER: &str = "SELECT name FROM sqlite_master WHERE type='table' AND name='background_custody_retention_schema'";
+
+async fn custody_retention_marker_present(client: &hiqlite::Client) -> Result<bool, StoreError> {
+    // authority: committed custody schema ownership decides whether bootstrap may replay legacy triggers.
+    let rows = timeout_store(client.query_consistent(CUSTODY_RETENTION_MARKER, params!())).await?;
+    Ok(!rows.is_empty())
+}
+
+// The newer custody extension owns these same trigger names. Keep the legacy
+// order for a fresh database and fence same-name replay inside the transaction.
+async fn install_legacy_retention_triggers(client: &hiqlite::Client) -> Result<(), StoreError> {
+    if custody_retention_marker_present(client).await? {
+        return Ok(());
+    }
+    let guard = format!(
+        "SELECT CASE WHEN NOT EXISTS({CUSTODY_RETENTION_MARKER}) THEN 1 ELSE json('custody retention already installed') END"
+    );
+    let mut statements = vec![(guard, params!())];
+    for schema in [
+        super::background_jobs::RETENTION_SCHEMA,
+        super::background_jobs::RECEIPT_PRESSURE_SCHEMA,
+    ] {
+        validate_sql(schema)?;
+        statements.extend(
+            schema
+                .split("-- next statement")
+                .map(str::trim)
+                .filter(|sql| !sql.is_empty())
+                .map(|sql| (sql.to_owned(), params!())),
+        );
+    }
+    let result = timeout_store(client.txn(statements))
+        .await
+        .and_then(|results| {
+            results
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(database_error)
+        });
+    if let Err(error) = result {
+        // The ordinary custody installer still validates a concurrent winner.
+        if !custody_retention_marker_present(client).await? {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
@@ -223,19 +271,7 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     for result in timeout_store(client.batch(super::background_jobs_predictions::SCHEMA)).await? {
         result.map_err(database_error)?;
     }
-    // Last, as the v62→v63 upgrade applies it, so a fresh cluster and an
-    // upgraded one load the replaced triggers in the same order.
-    validate_sql(super::background_jobs::RETENTION_SCHEMA)?;
-    for result in timeout_store(client.batch(super::background_jobs::RETENTION_SCHEMA)).await? {
-        result.map_err(database_error)?;
-    }
-    // v64 after v63, as the upgrade chain applies them.
-    validate_sql(super::background_jobs::RECEIPT_PRESSURE_SCHEMA)?;
-    for result in
-        timeout_store(client.batch(super::background_jobs::RECEIPT_PRESSURE_SCHEMA)).await?
-    {
-        result.map_err(database_error)?;
-    }
+    install_legacy_retention_triggers(client).await?;
     // v65 follows v64 on both fresh and upgraded clusters.
     validate_sql(super::background_jobs::VIEWER_ANALYSIS_SCHEMA)?;
     for result in

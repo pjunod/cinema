@@ -37,7 +37,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 430 routes across the registered routers.
+plurx has 446 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -2933,6 +2933,22 @@ valid URL, the only way forward is to release and start over.
 | PUT / DELETE | `/api/v1/items/{id}/watchlist` | bearer | Put a movie or show on, or take it off, the reader's watchlist. 204; 400 for other kinds |
 | PUT / DELETE | `/api/v1/items/{id}/favorite` | bearer | The same for the reader's favorites |
 | GET | `/api/v1/lists/{list}` | bearer | `{items}` (optional `limit`): the reader's list, newest first, at most 500. Finished watchlist entries are left out |
+| GET / POST | `/api/v1/tags` | bearer | Custom tags ([CUSTOM-TAGS-PLAN.md](features/CUSTOM-TAGS-PLAN.md)). GET: `{tags, can_manage_household, colors}`, household tags plus the reader's own. POST `{name, color?, scope:"household"\|"private"}` → 201 tag; household needs the `manage_tags` grant (admins hold it); 409 when the name exists in that scope |
+| PATCH / DELETE | `/api/v1/tags/{id}` | bearer, editable | PATCH `{name?, color?, archived?, suggest_terms?}`. DELETE → 204; 409 `tag_in_use` naming the rows that use it unless `?force=1`, which drops it from those rules |
+| POST | `/api/v1/tags/{id}/merge` | bearer, editable | `{into}`: memberships, rejections and rows move; same scope only |
+| GET / POST | `/api/v1/tags/{id}/items` | bearer | GET a page of the tagged titles (`offset`, `limit`, `sort`); POST (editable) `{add, remove}` item ids, ≤ 5000 |
+| GET | `/api/v1/tags/{id}/item-ids` | bearer | `{item_ids}`: every title carrying the tag |
+| GET / POST | `/api/v1/tags/{id}/suggestions` | bearer, editable | The review queue: titles whose classifier terms match the tag's `suggest_terms`, not tagged, not rejected: `{suggestions:[{item, matched}], total}`. POST `{accept?, reject?, restore?, accept_all?}`. Nothing is tagged until accepted |
+| GET | `/api/v1/tags/{id}/rejected` | bearer, editable | `{items}`: rejected suggestions, newest first |
+| GET / PUT | `/api/v1/items/{id}/tags` | bearer | `{tags}` visible on the title. PUT `{tag_ids}` sets the caller-editable subset exactly; tags the caller cannot edit are untouched; 400 for seasons and episodes |
+| GET / POST | `/api/v1/rows` | bearer | Saved rows: `{rows, can_manage_household}`; POST `{title, spec, scope}` → 201. `spec` is `{all_of, any_of, none_of: [{tag}\|{genre}], libraries, kinds, sort, unwatched, limit}` |
+| POST | `/api/v1/rows/preview` | bearer | `{spec, limit?}` → a page and `total` before saving |
+| PATCH / DELETE | `/api/v1/rows/{id}` | bearer, editable | Edit `{title?, spec?}` or delete |
+| GET | `/api/v1/rows/{id}/items` | bearer | A row's result ("See all"): `{items, total, offset, limit}` |
+| GET | `/api/v1/home/rows` | bearer | What Home draws: `{layout:[{key, kind, row_id}], rows:{id:{title, items, total}}}`, visible entries only, empty rows left out. Built-in keys: `continue_watching`, `next_up`, `watchlist`, `favorites`, `recently_added`, `coming_soon`, `libraries` |
+| GET / PUT / DELETE | `/api/v1/home/layout` | bearer | The reader's order with hidden entries: `{entries:[{key, hidden}], source:"user"\|"household"\|"builtin", rows, can_manage_household, is_admin}`; PUT `{entries}`; DELETE returns to the household default |
+| PUT / DELETE | `/api/v1/home/default-layout` | admin | The household default Home order (household rows only) |
+| GET / PUT | `/api/v1/users/{id}/grants` | admin | `{grants:["manage_tags"]}` |
 
 `POST …/publication` requires a `book` item and a `.epub` file, then parses
 synchronously: verify the file's size and mtime still match the row, then walk

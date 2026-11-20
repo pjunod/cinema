@@ -19,8 +19,9 @@
 // renderers behind the layout chrome until a gate converts them.
 //
 // Turn the fixed-size server batch into the layout-neutral Home model. The
-// browser never fans out by library: every roster size is the same three HTTP
-// requests (/hubs, /home/previews, and /coming-soon).
+// browser never fans out by library: every roster size is the same four HTTP
+// requests (/hubs, /home/previews, /coming-soon, and /home/rows for the
+// reader's order and custom rows).
 function buildHomeSections(batch,group=homeGroup()){
   const previews=(batch&&batch.libraries)||[];
   const libs=previews.map(preview=>preview.library);
@@ -60,13 +61,22 @@ async function viewHome(generation=++PAGE_RENDER_GENERATION){
   const page={kind:"home",
     hubs:{continue_watching:[],next_up:[],recently_added:[]},lists:{watchlist:[],favorite:[]},
     soon:{configured:false,entries:[]},libs:[],group:homeGroup(),sections:[],
-    hubsPending:true,previewsPending:true,soonPending:true,
-    hubsError:false,previewsError:false,soonError:false};
+    hubsPending:true,previewsPending:true,soonPending:true,rowsPending:true,
+    hubsError:false,previewsError:false,soonError:false,rowsError:false,
+    homeRows:null,homeReorder:false};
   registerLayoutPresentation(()=>recomposeHomePresentation(page),()=>!page.hubsPending||!page.previewsPending);
   const current=()=>generation===PAGE_RENDER_GENERATION&&location.hash===route;
   const commit=(name,content=false)=>{
     if(!current()) return;
     const main=document.getElementById("main"); if(!main) return;
+    // The reader's order differs from what was drawn: redraw Home whole
+    // rather than shuffle regions that are already painted.
+    if(name==="rows"&&page.homeReorder){
+      page.homeReorder=false;
+      main.innerHTML=layoutView("home",page)||`<div class="empty">Nothing here yet.</div>`;
+      wireRails();
+      return;
+    }
     const template=document.createElement("template");
     const keepPhotos=name==="previews"?null:PHOTO_SET, keepLightboxAt=LB_AT;
     template.innerHTML=layoutView("home",page)||`<div class="empty">Nothing here yet.</div>`;
@@ -104,6 +114,8 @@ async function viewHome(generation=++PAGE_RENDER_GENERATION){
       return true; // even an empty roster paints the useful "No libraries" state
     }),
     region("soon",api("/coming-soon"),value=>{ page.soon=value; return !!(value.entries||[]).length; }),
+    // The reader's Home order and custom rows (CUSTOM-TAGS-PLAN.md §4).
+    region("rows",api("/home/rows"),value=>{ page.homeReorder=homeRowsArrived(page,value); return false; }),
     // The reader's lists paint into the hubs region, so a person with none
     // sees exactly the Home they always did.
     Promise.all([api("/lists/watchlist?limit=20"),api("/lists/favorite?limit=20")]).then(([w,f])=>{

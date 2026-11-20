@@ -453,6 +453,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **Custom tags and tag-driven Home rows.** Put your own household or private tags on movies and shows, filter and select by them in any library, search with `tag:name`, review suggested matches from TMDB keywords, and build Home rows from tags. Every Home row (Watchlist and Favorites included) can be reordered or hidden with Customize Home; admins can set a household default and grant tag management to other users. Tags never leave the server through Jellyfin, Plex or shared libraries.
+
 - Optional, explicit Curator household login connections with independent local
   accounts, registered HTTPS callbacks, one-use S256 consent codes and revocable
   household-only grants on standalone and replicated storage. Cinema credentials,

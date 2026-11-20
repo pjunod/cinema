@@ -3407,6 +3407,7 @@ impl MediaStore for HiqliteAuthStore {
             // any setting or source data with the baseline statement.
             None => {
                 self.client()
+                    // authority: make one fresh baseline snapshot after the optional shape was unavailable.
                     .query_consistent_map::<PlanningSnapshotRow, _>(
                         "playback_planning_snapshot",
                         capacity::statement(FILE_COLS, true),

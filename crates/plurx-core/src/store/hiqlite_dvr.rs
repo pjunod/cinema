@@ -901,6 +901,7 @@ impl DvrStore for HiqliteAuthStore {
         let Some(changes) = self.client().dvr_trial_watch() else {
             return Ok(None);
         };
+        // authority: census recordings and rules together before native trial entry.
         let snapshot = self.client().query_consistent_map::<CountRow, _>(
             "local_dvr_trial_exclusion",
             super::DVR_TRIAL_OBLIGATIONS_CLEAR_SQL,

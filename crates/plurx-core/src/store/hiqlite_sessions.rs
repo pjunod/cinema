@@ -47,6 +47,7 @@ impl attempts::Backend for HiqliteAuthStore {
         // barrier; the SQL itself includes exact adjunct shape/data admission.
         Ok(self
             .session_client()
+            // authority: read the exact durable attempt through the recognized session layout.
             .query_consistent_map::<AttemptPayload, _>("adaptive_attempt_read", sql, params!())
             .await?
             .into_iter()
@@ -79,7 +80,7 @@ impl attempts::Backend for HiqliteAuthStore {
         plan: &attempts::AdoptionPlan,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
         activate_with_authority(
-            "adopt_adaptive_attempt",
+            "adopt_adaptive_winner",
             self,
             &plan.input.activation,
             None,
@@ -6530,7 +6531,17 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn maintain_media_sessions(&self, now_ms: i64) -> Result<(), StoreError> {
         let owner_column = LocalSessionSql::load(self).await?.column();
-        let adaptive = self.client().query_consistent_map::<PendingMaintenanceRow,_>("maintain_media_sessions", "SELECT count(*) AS pending FROM sqlite_master WHERE type='table' AND name='media_resource_requests'",params!()).await?.first().is_some_and(|row|row.0==1);
+        let adaptive = self
+            .client()
+            // authority: choose maintenance predicates from the committed attempt schema.
+            .query_consistent_map::<PendingMaintenanceRow, _>(
+                "maintain_media_sessions",
+                "SELECT count(*) AS pending FROM sqlite_master WHERE type='table' AND name='media_resource_requests'",
+                params!(),
+            )
+            .await?
+            .first()
+            .is_some_and(|row| row.0 == 1);
         let adaptive_layout = match session_layout(self, true).await? {
             SessionLayout::Legacy => attempt_schema::Layout::Legacy,
             SessionLayout::Principal => attempt_schema::Layout::Principal,

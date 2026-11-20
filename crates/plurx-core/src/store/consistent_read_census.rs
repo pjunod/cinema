@@ -58,20 +58,26 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // Offload: committed column shape before its additive schema migration.
     // Storage-domain pending apply checks its trigger shape and marker: two more.
     // Scoped application login (delegation) checks its shape and marker: two more.
+    // Curation (tags, rows, Home layouts) checks its shape and marker: two more.
     // F+ curve fits check their extension shape and marker: two more.
-    ("hiqlite.rs", 78),
+    // Adaptive attempt/source/settings installation and the typed planning read.
+    ("hiqlite.rs", 86),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.
     ("hiqlite_annotations.rs", 5),
-    // Managed bootstrap validates committed shape and the singleton marker.
-    ("hiqlite_background_jobs.rs", 4),
+    // Curation reads are local replica reads: a person's own tags and rows.
+    ("hiqlite_curation.rs", 0),
+    // Managed bootstrap validates committed shape and marker. Legacy trigger
+    // installation also checks the committed custody-retention marker.
+    ("hiqlite_background_jobs.rs", 5),
     ("hiqlite_catalog.rs", 2),
     ("hiqlite_classification.rs", 1),
     ("hiqlite_coordination.rs", 2),
     ("hiqlite_durable.rs", 29),
     ("hiqlite_dv_conversion.rs", 13),
-    ("hiqlite_dvr.rs", 19),
+    // One capture census for local finite trial admission.
+    ("hiqlite_dvr.rs", 20),
     ("hiqlite_fragment_index_cluster.rs", 35),
     ("hiqlite_import.rs", 4),
     ("hiqlite_remote.rs", 4),
@@ -92,7 +98,8 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_pretranscode.rs", 2),
     ("hiqlite_publication.rs", 7),
     ("hiqlite_reading.rs", 2),
-    ("hiqlite_sessions.rs", 37),
+    // Exact adaptive attempt reads and the maintenance layout guard.
+    ("hiqlite_sessions.rs", 39),
     ("hiqlite_sharing.rs", 1),
     ("hiqlite_shared_cache.rs", 4),
     ("hiqlite_timeline_annotations.rs", 2),
@@ -431,7 +438,8 @@ const RAW_CLIENT_SITES: &[(&str, usize)] = &[
     // Watch-column migration, sharing object shape, the cluster compatibility
     // probe and its two committed-marker readers, two Source/custody shape
     // guards, and the one `TimedClient` wrapper that makes the labelled call.
-    ("hiqlite.rs", 8),
+    // The planning wrapper also preserves the vendor's typed schema error.
+    ("hiqlite.rs", 9),
     // The producer payload column shape before a bootstrap ALTER.
     ("hiqlite_background_jobs.rs", 1),
     // The analysis-component and subtitle-source schema currency probes.
@@ -497,6 +505,7 @@ fn the_label_rule_refuses_an_unlabelled_read_and_admits_labelled_ones() {
 /// vocabulary of `plurx_http_store_operations_by_method_total{method}`.
 const STORE_TRAIT_SOURCES: &[&str] = &[
     include_str!("mod.rs"),
+    include_str!("adaptive_resource_attempts.rs"),
     include_str!("background_jobs.rs"),
     include_str!("classification.rs"),
     include_str!("classification_schedule.rs"),
@@ -563,6 +572,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("dv_title_jobs_schema_version", STARTUP),
     ("invitation_schema_version", STARTUP),
     ("library_annotations_schema_version", STARTUP),
+    ("library_curation_schema_version", STARTUP),
     ("migrate_additive_schema_step", STARTUP),
     ("migrate_playback_inputs", STARTUP),
     ("migrate_schema", STARTUP),
@@ -580,7 +590,17 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("shared_caption_schema_version", STARTUP),
     ("source_arbitration_shape", STARTUP),
     ("storage_domain_pending_schema_version", STARTUP),
+    ("install_adaptive_attempt_schema", STARTUP),
     ("install_adaptive_source_scope", STARTUP),
+    ("install_resource_settings_schema", STARTUP),
+    (
+        "adaptive_attempt_read",
+        "the adaptive backend's original authority read with an exact schema and attempt binding",
+    ),
+    (
+        "adaptive_attempt_transaction",
+        "the adaptive backend's committed transaction with one acknowledgement per guarded statement",
+    ),
     ("subtitle_managed_schema_version", STARTUP),
     ("subtitle_text_translation_schema_version", STARTUP),
     ("subtitle_translation_schema_version", STARTUP),

@@ -238,19 +238,9 @@ function theaterHomeBody(p){
   // simply starts with the install banner — the empty-continue-hub and
   // empty-server paths are the same code path, not a special case.
   let hero = pick ? theaterHeroHtml(pick) : "";
-  let hubs=installBannerHtml(), soon="", previews="";
-
-  // watchCtx on the first two rails: those rows are about where you are in
-  // something, so the card carries "23m left · ends ~10:45 PM".
-  if(hub("continue_watching").length) hubs+=rail("Continue watching", hub("continue_watching").map(i=>card(i,true)).join(""),"watch");
-  if(hub("next_up").length)           hubs+=rail("Next up",           hub("next_up").map(i=>card(i,true)).join(""),"watch");
-  hubs+=listRails(p);
-  if(hub("recently_added").length)    hubs+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
-  // Coming soon: absent entirely when nothing is paired or Curator had nothing
-  // to say — an empty rail is worse than no rail.
-  if(p.soon&&p.soon.entries&&p.soon.entries.length) soon+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
-
-  if(p.hubsError) hubs+=`<div class="hint">Home recommendations are unavailable right now.</div>`;
+  // Shelves, Coming soon and custom rows come from homeRegions() in the
+  // reader's chosen order (CUSTOM-TAGS-PLAN.md §2.2); previews stay per layout.
+  let previews="";
   if(p.previewsPending){
     previews+=`<div class="empty">Loading library previews…</div>`;
   }else if(p.previewsError){
@@ -277,9 +267,7 @@ function theaterHomeBody(p){
     previews+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':""}</div>`;
   }
   return `<div data-home-region="hubs" data-home-slot="hero">${hero}</div>`+
-    `<div class="th-rails"><div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
-    `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
-    `<div data-home-region="previews" data-home-slot="previews">${previews}</div></div>`;
+    `<div class="th-rails">${homeRegions(p,previews)}</div>`;
 }
 // ---------------------------------------------------------------------------
 // 4. Library — shell only (items and count are inherited from classic)

@@ -2,10 +2,11 @@
 import base64
 import copy
 import hashlib
+import json
 import unittest
 import shlex
 import sys
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from validation import qualification_unit_continuation as q
 from validation import python_unit_receipts as receipts
 
@@ -875,6 +876,29 @@ class HistoricalRetentionExecutorCase(unittest.TestCase):
         raw = q.retention.git_bytes(self.SOURCE, '.github/workflows/ci.yml')
         self.assertIsNotNone(raw, 'historical workflow source must be available')
         return raw.decode()
+
+    def test_historical_promotion_scope_accepts_pinned_image_bash_default(self):
+        source = '2d743ba9314a1838143fe15834e51a192c603e3d'
+        raw = q.retention.git_bytes(source, '.github/workflows/ci.yml')
+        self.assertIsNotNone(raw, 'historical pinned-image workflow must be available')
+        workflow = raw.decode()
+        base = 'a' * 40
+        api = Mock()
+        api.pages.return_value = [
+            {'name': 'validation scope', 'status': 'success', 'attempt': 1, 'run_id': 42, 'repo_id': 1},
+        ]
+        run = {'event_payload': json.dumps({'inputs': {
+            'promotion_pr': '1660', 'promotion_head_sha': source, 'promotion_base_sha': base,
+        }})}
+        with patch.object(q.subprocess, 'run', return_value=Mock(returncode=0)), \
+                patch.object(q.retention, 'git_bytes', return_value=b'qualification implementation'):
+            self.assertEqual(q.authenticate_scope(api, 42, run, workflow, {}, source, 1), base)
+            for altered in (
+                workflow.replace('        shell: bash', '        shell: sh', 1),
+                workflow.replace('        shell: bash', '        shell: bash\n        working-directory: elsewhere', 1),
+            ):
+                with self.subTest(altered=altered[:400]), self.assertRaises(receipts.ReceiptError):
+                    q.authenticate_scope(api, 42, run, altered, {}, source, 1)
 
     def test_actual_conditional_rust_executors_keep_the_make_branch_available(self):
         workflow = self.workflow()

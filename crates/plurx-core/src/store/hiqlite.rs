@@ -1664,6 +1664,7 @@ impl TimedClient {
                 timeout_store(async {
                     match self
                         .inner()
+                        // authority: retain the typed optional-schema error for a whole-snapshot retry.
                         .query_consistent_map(sql.clone(), params.clone())
                         .await
                     {
@@ -2492,6 +2493,7 @@ impl HiqliteAuthStore {
         store.install_library_annotations_schema(None).await?;
         store.install_resource_settings_schema(None).await?;
         store.install_adaptive_attempt_schema(None).await?;
+        store.install_library_curation_schema(None).await?;
         store.install_dv_title_jobs_schema(None).await?;
         store.install_playback_handoffs_schema(None).await?;
         store.install_delegation_schema(None).await?;
@@ -2709,6 +2711,7 @@ impl HiqliteAuthStore {
                     self.install_library_annotations_schema(admission).await?;
                     self.install_resource_settings_schema(admission).await?;
                     self.install_adaptive_attempt_schema(admission).await?;
+                    self.install_library_curation_schema(admission).await?;
                     self.install_dv_title_jobs_schema(admission).await?;
                     self.install_playback_handoffs_schema(admission).await?;
                     self.install_delegation_schema(admission).await?;
@@ -5468,6 +5471,7 @@ impl HiqliteAuthStore {
         // again under its original activation admission after membership.
         let membership = self
             .client()
+            // authority: require the current membership outage guard before installing the adjunct.
             .query_consistent_map::<CountRow, _>(
                 "install_adaptive_attempt_schema",
                 format!(
@@ -5480,9 +5484,9 @@ impl HiqliteAuthStore {
         if !matches!(membership.as_slice(), [row] if row.count == 1) {
             return Ok(());
         }
-        // Authority: dispatch before referring to optional adjunct tables.
         let versions = self
             .client()
+            // authority: choose the committed schema before reading optional attempt objects.
             .query_consistent_map::<CountRow, _>(
                 "install_adaptive_attempt_schema",
                 "SELECT schema_version AS count FROM cluster_meta WHERE singleton=1",
@@ -5496,6 +5500,7 @@ impl HiqliteAuthStore {
         };
         let rows = self
             .client()
+            // authority: compare the complete committed attempt object shape.
             .query_consistent_map::<RemoteShapeRow, _>(
                 "install_adaptive_attempt_schema",
                 schema::CATALOG_SQL,
@@ -5575,6 +5580,7 @@ impl HiqliteAuthStore {
         admit_schema_migration(admission)?;
         let read = || async {
             self.client()
+                // authority: settle source-scope installation against the committed catalogue.
                 .query_consistent_map::<RemoteShapeRow, _>(
                     "install_adaptive_source_scope",
                     source_scope::CATALOG_SQL,
@@ -5615,9 +5621,9 @@ impl HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         use super::resource_settings_schema as schema;
         admit_schema_migration(admission)?;
-        // authority: adjunct shape is read consistently before replicated DDL.
         let rows = self
             .client()
+            // authority: read the committed settings object shape before replicated DDL.
             .query_consistent_map::<RemoteShapeRow, _>(
                 "install_resource_settings_schema",
                 schema::SHAPE_SQL,
@@ -5651,6 +5657,63 @@ impl HiqliteAuthStore {
         attempt?;
         Err(StoreError::Migration(
             "resource settings installation did not settle".into(),
+        ))
+    }
+
+    async fn library_curation_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed curation shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "library_curation_schema_version",
+                super::library_curation_schema::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::library_curation_schema::version(&shape)?;
+        if version == Some(1) {
+            let rows = self
+                .client()
+                // authority: admission must observe the committed marker paired with the shape.
+                .query_consistent_map::<CountRow, _>(
+                    "library_curation_schema_version",
+                    super::library_curation_schema::MARKER_SQL,
+                    params!(),
+                )
+                .await?;
+            if !matches!(rows.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration(
+                    "library curation schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+
+    async fn install_library_curation_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.library_curation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::library_curation_schema::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.library_curation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "library curation schema install did not settle".into(),
         ))
     }
 
@@ -6525,6 +6588,18 @@ impl HiqliteAuthStore {
                 "DELETE FROM library_annotations_lists".to_owned(),
                 params!(),
             ),
+            (
+                "DELETE FROM library_curation_item_tags".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM library_curation_rejections".to_owned(),
+                params!(),
+            ),
+            ("DELETE FROM library_curation_rows".to_owned(), params!()),
+            ("DELETE FROM library_curation_home".to_owned(), params!()),
+            ("DELETE FROM library_curation_grants".to_owned(), params!()),
+            ("DELETE FROM library_curation_tags".to_owned(), params!()),
             (
                 "DELETE FROM library_annotations_ratings".to_owned(),
                 params!(),

@@ -313,7 +313,7 @@ class MacosReleaseSigningCase(unittest.TestCase):
             with self.subTest(job=name):
                 for intel in ["x86_64", "macos-15-intel", "lipo -create", "--combine", "universal"]:
                     self.assertNotIn(intel, blocks[name])
-        self.assertIn("- arch: arm64\n            runner: macos-15\n            target: aarch64-apple-darwin", blocks["macos_build"])
+        self.assertIn("- arch: arm64\n            runner: macos-latest\n            target: aarch64-apple-darwin", blocks["macos_build"])
         self.assertFalse(hasattr(self.package_tool, "combine_ffmpeg_packages"))
 
     def test_workflow_isolates_apple_credentials_and_routes_only_signed_release_artifact(self):

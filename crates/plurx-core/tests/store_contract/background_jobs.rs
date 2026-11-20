@@ -4732,6 +4732,30 @@ async fn background_subtitles_source_changes_cancel_selected_candidates() {
     .await;
 }
 
+// The v61 and v62 fixtures replay the two retention migrations. Start
+// with their published triggers and remove the newer extension's claim.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn pre_v63_retention_rewind(client: &hiqlite::Client) -> Vec<(String, hiqlite::Params)> {
+    let mut statements: Vec<_> = super::replicated_custody_retention_rewind(client)
+        .await
+        .into_iter()
+        .map(|sql| (sql, hiqlite::params!()))
+        .collect();
+    let base = include_str!("../../src/store/background_jobs_schema.sql");
+    for name in [
+        "background_job_enqueue_command",
+        "background_job_maintenance_command",
+    ] {
+        let predecessor = base
+            .split("-- next statement\n")
+            .find(|sql| sql.contains(&format!("CREATE TRIGGER IF NOT EXISTS {name}\n")))
+            .expect("published predecessor trigger");
+        statements.push((format!("DROP TRIGGER {name}"), hiqlite::params!()));
+        statements.push((predecessor.to_owned(), hiqlite::params!()));
+    }
+    statements
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test]
 async fn background_subtitles_replicated_ready_orphans_are_refused_and_retired() {
@@ -4796,18 +4820,20 @@ async fn background_subtitles_replicated_ready_orphans_are_refused_and_retired()
         .find(|sql| sql.contains("CREATE TRIGGER IF NOT EXISTS background_subtitle_settled"))
         .expect("predecessor projection trigger");
     super::downgrade_dv_request_provenance(&client).await;
+    let mut rewind = pre_v63_retention_rewind(&client).await;
+    rewind.extend([
+        (
+            "DROP TRIGGER background_subtitle_settled".to_owned(),
+            hiqlite::params!(),
+        ),
+        (old_projection.to_owned(), hiqlite::params!()),
+        (
+            "UPDATE cluster_meta SET schema_version=61 WHERE singleton=1".to_owned(),
+            hiqlite::params!(),
+        ),
+    ]);
     for result in client
-        .txn(vec![
-            (
-                "DROP TRIGGER background_subtitle_settled".to_owned(),
-                hiqlite::params!(),
-            ),
-            (old_projection.to_owned(), hiqlite::params!()),
-            (
-                "UPDATE cluster_meta SET schema_version=61 WHERE singleton=1".to_owned(),
-                hiqlite::params!(),
-            ),
-        ])
+        .txn(rewind)
         .await
         .expect("install predecessor fixture")
     {
@@ -4939,20 +4965,9 @@ async fn background_jobs_replicated_settled_history_yields_after_the_v63_upgrade
     // Put the v62 enqueue and upkeep triggers back and stamp v62, so the
     // migration every deployed node takes is the one under test.
     drop(store);
-    let base = include_str!("../../src/store/background_jobs_schema.sql");
-    let predecessor = |name: &str| {
-        base.split("-- next statement\n")
-            .find(|sql| sql.contains(&format!("CREATE TRIGGER IF NOT EXISTS {name}\n")))
-            .expect("predecessor trigger")
-            .to_owned()
-    };
     super::downgrade_dv_request_provenance(&client).await;
-    for result in client
-        .txn(vec![
-            ("DROP TRIGGER background_job_enqueue_command".to_owned(), hiqlite::params!()),
-            (predecessor("background_job_enqueue_command"), hiqlite::params!()),
-            ("DROP TRIGGER background_job_maintenance_command".to_owned(), hiqlite::params!()),
-            (predecessor("background_job_maintenance_command"), hiqlite::params!()),
+    let mut rewind = pre_v63_retention_rewind(&client).await;
+    rewind.extend([
             ("UPDATE cluster_meta SET schema_version=62 WHERE singleton=1".to_owned(), hiqlite::params!()),
             ("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<9999)
               INSERT INTO background_jobs (id, kind, payload_version, payload_json, dedupe_key, priority,
@@ -4960,7 +4975,9 @@ async fn background_jobs_replicated_settled_history_yields_after_the_v63_upgrade
               SELECT '00000000-0000-4000-8000-'||printf('%012d', i), kind, payload_version, payload_json, 'history-'||i, priority,
                   'succeeded', 1000, 1000, 2000+i FROM n, background_jobs WHERE id = $1".to_owned(),
              hiqlite::params!(template.id.clone())),
-        ])
+    ]);
+    for result in client
+        .txn(rewind)
         .await
         .expect("install predecessor fixture")
     {

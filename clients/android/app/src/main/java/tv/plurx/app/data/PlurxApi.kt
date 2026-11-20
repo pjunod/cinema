@@ -202,6 +202,29 @@ interface PlurxApi {
     @GET("hubs")
     suspend fun hubs(): Hubs
 
+    /** The reader's Home order and custom rows; 404 on a server without custom tags. */
+    @GET("home/rows")
+    suspend fun homeRows(): HomeRows
+
+    @GET("items/{id}/tags")
+    suspend fun itemTags(@Path("id") id: Long): ItemTags
+
+    @GET("tags")
+    suspend fun tags(): TagCatalog
+
+    @PUT("items/{id}/tags")
+    suspend fun setItemTags(@Path("id") id: Long, @Body body: TagIdsBody): ItemTags
+
+    @POST("tags")
+    suspend fun createTag(@Body body: TagCreateBody): Tag
+
+    @GET("rows/{id}/items")
+    suspend fun rowItems(
+        @Path("id") id: Long,
+        @Query("offset") offset: Int = 0,
+        @Query("limit") limit: Int = 60,
+    ): Page
+
     /** Scores and list flags, beside the item page rather than inside it. */
     @GET("items/{id}/annotations")
     suspend fun annotations(@Path("id") id: Long): ItemAnnotations

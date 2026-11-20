@@ -43,6 +43,7 @@ import tv.plurx.app.data.DiscoveredServer
 import tv.plurx.app.data.Features
 import tv.plurx.app.data.HlsStart
 import tv.plurx.app.data.Hubs
+import tv.plurx.app.data.Page
 import tv.plurx.app.data.Item
 import tv.plurx.app.data.ItemDetail
 import tv.plurx.app.data.Library
@@ -60,6 +61,11 @@ import tv.plurx.app.player.PlaybackClientLog
 import tv.plurx.app.player.postPlaybackClientLog
 import tv.plurx.app.player.normalizedPlaybackMethod
 import tv.plurx.app.data.ProgressReq
+import tv.plurx.app.data.HomeRows
+import tv.plurx.app.data.Tag
+import tv.plurx.app.data.TagCatalog
+import tv.plurx.app.data.TagIdsBody
+import tv.plurx.app.data.TagCreateBody
 import tv.plurx.app.data.Session
 import tv.plurx.app.data.ServerDiscovery
 import tv.plurx.app.data.Server
@@ -91,6 +97,8 @@ data class HomeState(
     val favorites: List<Item> = emptyList(),
     val libraries: List<Library> = emptyList(),
     val libraryItems: Map<Long, List<Item>> = emptyMap(),
+    /** The reader's custom-tags Home layout; null until it lands or when the server has none. */
+    val homeRows: HomeRows? = null,
     val loading: Boolean = true,
     val error: String? = null,
 ) {
@@ -392,6 +400,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 coroutineScope {
                     val hubs = async { api().hubs() }
+                    // Beside the hubs, never behind them. A 404 or any error
+                    // leaves Home exactly as it was without custom tags.
+                    launch {
+                        val rows = catchingUnlessCancelled { api().homeRows() }.getOrNull()
+                        if (rows != null) _home.value = _home.value.copy(homeRows = rows)
+                    }
                     // The reader's lists never cost Home its load.
                     val watchlist = async { catchingUnlessCancelled { api().list("watchlist").items }.getOrDefault(emptyList()) }
                     val favorites = async { catchingUnlessCancelled { api().list("favorite").items }.getOrDefault(emptyList()) }
@@ -895,6 +909,25 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun annotations(itemId: Long): ItemAnnotations = api().annotations(itemId)
+
+    suspend fun itemTags(itemId: Long): List<Tag> = api().itemTags(itemId).tags
+
+    suspend fun tagCatalog(): TagCatalog = api().tags()
+
+    /** PUT the ticked editable ids; the answer is the title's tags as the reader now sees them. */
+    suspend fun setItemTags(itemId: Long, tagIds: List<Long>): List<Tag> =
+        api().setItemTags(itemId, TagIdsBody(tagIds)).tags
+
+    /** Create a private tag; a 409 means the name exists, so return that tag instead. */
+    suspend fun createPrivateTag(name: String): Tag = try {
+        api().createTag(TagCreateBody(name.trim(), "private"))
+    } catch (e: HttpException) {
+        if (e.code() != 409) throw e
+        api().tags().tags.firstOrNull { it.name.equals(name.trim(), ignoreCase = true) } ?: throw e
+    }
+
+    suspend fun rowItems(rowId: Long, offset: Int = 0, limit: Int = 60): Page =
+        api().rowItems(rowId, offset, limit)
 
     /** Admin: ask Curator for an offloaded title back. Throws with the server's own sentence on a refusal. */
     suspend fun getItBack(itemId: Long): OffloadAnswer = offloadAnswerOrThrow(api().getItBack(itemId))

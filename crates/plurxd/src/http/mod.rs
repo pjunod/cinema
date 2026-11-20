@@ -10,6 +10,7 @@ mod analysis_reconcile;
 pub(crate) mod annotations;
 mod auth;
 pub(crate) mod background_jobs;
+pub(crate) mod curation;
 mod preparation;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
@@ -118,7 +119,7 @@ use axum::extract::{DefaultBodyLimit, MatchedPath};
 use axum::http::{header, HeaderValue, Method, Request, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
@@ -388,6 +389,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/auth/logout"
         | "/api/v1/users"
         | "/api/v1/users/{id}"
+        | "/api/v1/users/{id}/grants"
         // The device inventory and per-device revocation are account
         // administration on the same rows as login and logout, so they are
         // attributed here rather than opening a group of their own.
@@ -399,7 +401,13 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/keys/{id}" => 0,
 
         // Home projections.
-        "/api/v1/home/previews" | "/api/v1/hubs" | "/api/v1/features" | "/hubs/search" => 1,
+        "/api/v1/home/previews"
+        | "/api/v1/hubs"
+        | "/api/v1/features"
+        | "/hubs/search"
+        | "/api/v1/home/rows"
+        | "/api/v1/home/layout"
+        | "/api/v1/home/default-layout" => 1,
 
         // Library management, catalogue pages and schedules.
         "/api/v1/libraries"
@@ -447,6 +455,18 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/items/{id}/watchlist"
         | "/api/v1/items/{id}/favorite"
         | "/api/v1/lists/{list}"
+        | "/api/v1/items/{id}/tags"
+        | "/api/v1/tags"
+        | "/api/v1/tags/{id}"
+        | "/api/v1/tags/{id}/merge"
+        | "/api/v1/tags/{id}/items"
+        | "/api/v1/tags/{id}/suggestions"
+        | "/api/v1/tags/{id}/rejected"
+        | "/api/v1/tags/{id}/item-ids"
+        | "/api/v1/rows"
+        | "/api/v1/rows/preview"
+        | "/api/v1/rows/{id}"
+        | "/api/v1/rows/{id}/items"
         | "/api/v1/files/{id}/preparation"
         | "/api/v1/files/{id}/analysis"
         | "/api/v1/files/{id}/dv-conversion"
@@ -1821,6 +1841,49 @@ pub fn router(state: AppState) -> Router {
             put(annotations::add_to_favorites).delete(annotations::remove_from_favorites),
         )
         .route("/lists/{list}", get(annotations::list_items))
+        // Custom tags, saved rows and the Home layout (CUSTOM-TAGS-PLAN.md).
+        .route("/tags", get(curation::list_tags).post(curation::create_tag))
+        .route(
+            "/tags/{id}",
+            patch(curation::update_tag).delete(curation::delete_tag),
+        )
+        .route("/tags/{id}/merge", post(curation::merge_tag))
+        .route(
+            "/tags/{id}/items",
+            get(curation::tag_items).post(curation::tag_members),
+        )
+        .route(
+            "/tags/{id}/suggestions",
+            get(curation::tag_suggestions).post(curation::review_suggestions),
+        )
+        .route("/tags/{id}/rejected", get(curation::rejected_items))
+        .route("/tags/{id}/item-ids", get(curation::tag_item_ids))
+        .route(
+            "/items/{id}/tags",
+            get(curation::item_tags).put(curation::put_item_tags),
+        )
+        .route("/rows", get(curation::list_rows).post(curation::create_row))
+        .route("/rows/preview", post(curation::preview_row))
+        .route(
+            "/rows/{id}",
+            patch(curation::update_row).delete(curation::delete_row),
+        )
+        .route("/rows/{id}/items", get(curation::row_items))
+        .route("/home/rows", get(curation::home_rows))
+        .route(
+            "/home/layout",
+            get(curation::home_layout)
+                .put(curation::put_home_layout)
+                .delete(curation::reset_home_layout),
+        )
+        .route(
+            "/home/default-layout",
+            put(curation::put_default_layout).delete(curation::reset_default_layout),
+        )
+        .route(
+            "/users/{id}/grants",
+            get(curation::user_grants).put(curation::put_user_grants),
+        )
         // Watch
         // A playback handoff token may report progress for its file's item.
         .route(
