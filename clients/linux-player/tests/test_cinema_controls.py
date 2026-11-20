@@ -275,6 +275,7 @@ class CinemaControls(LauncherCase):
         self.assertEqual(self.run_launcher(), 0)
         creates = self.server.calls('POST', pattern=r'/hls/sessions$')
         self.assertEqual(len(creates), 2)
+        self.assertEqual([r['body']['transport'] for r in creates], ['mpv', 'mpv'])
         self.assertEqual(creates[1]['body']['start'], 65)
         self.assertEqual(creates[1]['body']['height'], 1080)
         self.assertFalse(creates[1]['body']['quality_auto'])
