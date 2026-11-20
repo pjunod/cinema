@@ -4,11 +4,50 @@ Run inside the existing control image after generating valid/invalid-area RPUs
 and compiling make_movie and the current renderer. All outputs use a new child
 directory so earlier control evidence stays intact.
 """
+import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
+
+
+TIMESTAMPS = 'setts=pts=N/(24*TB):dts=N/(24*TB):duration=1/(24*TB)'
+
+
+def control_ffmpeg(binary, *args):
+    subprocess.run([binary, '-nostdin', '-v', 'error', '-threads', '1',
+                    *map(str, args)], check=True, timeout=60)
+
+
+def author_gops(root, work, ffmpeg, cases):
+    for layer, color in [('bl', 'gray'), ('el', 'black')]:
+        ffmpeg('-f', 'lavfi', '-i', f'color=c={color}:s=64x64:r=24',
+               '-frames:v', '18', '-pix_fmt', 'yuv420p10le', '-c:v', 'libx265',
+               '-x265-params',
+               'pools=none:frame-threads=1:bframes=0:keyint=18:log-level=error',
+               work / f'{layer}.mkv')
+    for case in cases:
+        subprocess.run([str(root / 'make_movie'), str(work / 'bl.mkv'),
+                        str(work / 'el.mkv'), str(root / case / 'rpus'),
+                        str(work / f'{case}.mkv'), 'normal'],
+                       check=True, timeout=30, capture_output=True)
+    ffmpeg('-i', work / 'valid.mkv', '-map', '0:v:0', '-c:v', 'copy',
+           '-bsf:v', TIMESTAMPS, work / 'valid18.mkv')
+
+
+def author_valid_source(root, work, ffmpeg_binary):
+    work.mkdir()
+    def ffmpeg(*args):
+        control_ffmpeg(ffmpeg_binary, *args)
+
+    author_gops(root, work, ffmpeg, ['valid'])
+    # 49 complete GOPs at 24 fps give 36.75 s, including a real exclusive
+    # boundary picture after the last alternate's 48-picture window.
+    (work / 'repeat.txt').write_text('file valid18.mkv\n' * 49)
+    ffmpeg('-f', 'concat', '-safe', '0', '-i', work / 'repeat.txt',
+           '-map', '0:v:0', '-c:v', 'copy', '-bsf:v', TIMESTAMPS,
+           work / 'source.mkv')
 
 
 def test_exclusive_window_metadata_boundary():
@@ -24,29 +63,15 @@ def test_exclusive_window_metadata_boundary():
     (root / 'runtime').chmod(0o700)
 
     def ffmpeg(*args):
-        subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-threads', '1',
-                        *map(str, args)], check=True, timeout=60)
+        control_ffmpeg('ffmpeg', *args)
 
-    for layer, color in [('bl', 'gray'), ('el', 'black')]:
-        ffmpeg('-f', 'lavfi', '-i', f'color=c={color}:s=64x64:r=24',
-               '-frames:v', '18', '-pix_fmt', 'yuv420p10le', '-c:v', 'libx265',
-               '-x265-params',
-               'pools=none:frame-threads=1:bframes=0:keyint=18:log-level=error',
-               work / f'{layer}.mkv')
-    for case in ['valid', 'invalid-area']:
-        subprocess.run([str(root / 'make_movie'), str(work / 'bl.mkv'),
-                        str(work / 'el.mkv'), str(root / case / 'rpus'),
-                        str(work / f'{case}.mkv'), 'normal'],
-                       check=True, timeout=30, capture_output=True)
-    timestamps = 'setts=pts=N/(24*TB):dts=N/(24*TB):duration=1/(24*TB)'
-    ffmpeg('-i', work / 'valid.mkv', '-map', '0:v:0', '-c:v', 'copy',
-           '-bsf:v', timestamps, work / 'valid18.mkv')
+    author_gops(root, work, ffmpeg, ['valid', 'invalid-area'])
     (work / 'repeat.txt').write_text('file valid18.mkv\n' * 3)
     ffmpeg('-f', 'concat', '-safe', '0', '-i', work / 'repeat.txt',
            '-map', '0:v:0', '-frames:v', '48', '-c:v', 'copy',
-           '-bsf:v', timestamps, work / 'first48.mkv')
+           '-bsf:v', TIMESTAMPS, work / 'first48.mkv')
     ffmpeg('-i', work / 'invalid-area.mkv', '-map', '0:v:0', '-c:v', 'copy',
-           '-bsf:v', timestamps, work / 'last18.mkv')
+           '-bsf:v', TIMESTAMPS, work / 'last18.mkv')
     (work / 'concat.txt').write_text('file first48.mkv\nfile last18.mkv\n')
     source = work / 'source.mkv'
     ffmpeg('-f', 'concat', '-safe', '0', '-i', work / 'concat.txt',
@@ -97,4 +122,13 @@ def test_exclusive_window_metadata_boundary():
 
 
 if __name__ == '__main__':
-    test_exclusive_window_metadata_boundary()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--author-valid-only', type=Path, metavar='FRESH_DIRECTORY')
+    parser.add_argument('--controls', type=Path, default=Path('/work'),
+                        help='existing make_movie and valid/rpus output directory')
+    parser.add_argument('--ffmpeg', default='ffmpeg')
+    args = parser.parse_args()
+    if args.author_valid_only is None:
+        test_exclusive_window_metadata_boundary()
+    else:
+        author_valid_source(args.controls, args.author_valid_only, args.ffmpeg)

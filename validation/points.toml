@@ -933,6 +933,7 @@ contract = "Exact voter media requests bind sender, target, timestamp, random no
 paths = [
   "crates/plurxd/tests/adaptive_two_node.rs",
   "crates/plurxd/tests/adaptive_two_node/singleton_trial.rs",
+  "crates/plurxd/tests/adaptive_two_node/cold_fel.rs",
   "crates/plurxd/src/http/test_agents.rs",
   "crates/plurxd/src/http/tests.rs",
   "crates/plurxd/src/startup_tests.rs",

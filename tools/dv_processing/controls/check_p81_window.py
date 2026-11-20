@@ -8,7 +8,7 @@
   source RPU's (L3, L5, L6 and L9-L11 are reported too). Frames are paired by
   presentation rank, not decode order, because the encoder reorders.
 
-usage: check_p81_window.py WORKDIR WINDOW.mp4 SOURCE.mkv FRAMES
+usage: check_p81_window.py WORKDIR WINDOW.mp4 SOURCE.mkv FRAMES [SOURCE_START_FRAME]
 Environment: PLURX_FFPROBE, PLURX_FFMPEG, PLURX_DOVI_TOOL.
 Prints one JSON document; exits 1 on any failed check.
 """
@@ -76,10 +76,11 @@ def blocks(rpu):
 
 
 def main():
-    if len(sys.argv) != 5:
+    if len(sys.argv) not in (5, 6):
         raise SystemExit(__doc__)
     work, window, source = (pathlib.Path(arg) for arg in sys.argv[1:4])
     frames = int(sys.argv[4])
+    start_frame = int(sys.argv[5]) if len(sys.argv) == 6 else 0
     work.mkdir(exist_ok=False)
     stream = json.loads(run([FFPROBE, '-v', 'error', '-select_streams', 'v:0', '-show_entries',
                              'stream=codec_tag_string:stream_side_data', '-of', 'json',
@@ -92,9 +93,11 @@ def main():
     out_pts = packets(window)
     src_rpus = rpus(work, source, 'source')
     src_pts = packets(source)
-    # Presentation rank -> decode index, for the first FRAMES presented pictures.
-    rank = lambda pts: [index for _, index in sorted((p, i) for i, p in enumerate(pts))][:frames]
-    out_order, src_order = rank(out_pts), rank(src_pts)
+    # Presentation rank -> decode index. Match the source range of the
+    # delivered fragment, which need not be at the start of the title.
+    rank = lambda pts: [index for _, index in sorted((p, i) for i, p in enumerate(pts))]
+    out_order = rank(out_pts)[:frames]
+    src_order = rank(src_pts)[start_frame:start_frame + frames]
     mismatches, compared = [], 0
     reported_equal = {level: 0 for level in REPORTED}
     for frame, (o, s) in enumerate(zip(out_order, src_order)):
@@ -126,7 +129,8 @@ def main():
     }
     ok = (config.get('dv_profile') == 8 and config.get('dv_bl_signal_compatibility_id') == 1
           and config.get('el_present_flag') == 0 and result['dvvC_box'] and not result['dvcC_box']
-          and len(out_pts) == frames == len(out_rpus) and set(out_aus) == {1}
+          and len(out_pts) == frames == len(out_rpus) == len(src_order)
+          and set(out_aus) == {1}
           and len(out_aus) == frames and not mismatches and all(present[l] == frames for l in ('Level1',)))
     result['ok'] = ok
     print(json.dumps(result, indent=1))

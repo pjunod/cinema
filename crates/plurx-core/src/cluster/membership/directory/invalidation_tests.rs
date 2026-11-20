@@ -172,6 +172,71 @@ async fn directory_invalidation_fixture() {
         raft_address: learner_ports[1].to_string(),
         api_address: learner_ports[2].to_string(),
     };
+    #[cfg(target_os = "linux")]
+    {
+        let original = selected
+            .store
+            .local_dvr_trial_exclusion(tokio::time::Instant::now() + Duration::from_secs(5))
+            .await
+            .expect("leader-consistent capture census")
+            .expect("the original singleton trial owns the membership exclusion");
+        let invalidation = original.invalidation();
+        let before = leader.local_metrics.membership_snapshot();
+        assert!(before.running && before.committed && original.is_current());
+        assert_eq!(before.members, BTreeSet::from([leader.local.raft_id]));
+        assert_eq!(before.members, before.voters);
+
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .danger_accept_invalid_certs(true) // The isolated fixture uses its own auto certificate.
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("fixture membership client")
+            .post(format!(
+                "https://{}/cluster/add_learner/sqlite",
+                leader.local.api_address
+            ))
+            .header("X-API-SECRET", &leader.secrets.api)
+            .json(&serde_json::json!({
+                "node_id": local.raft_id,
+                "addr_api": local.api_address,
+                "addr_raft": local.raft_address
+            }))
+            .send()
+            .await
+            .expect("actual authenticated learner request");
+        let status = response.status();
+        let error: hiqlite::Error = response.json().await.expect("typed Hiqlite response");
+        assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE, "{error}");
+        assert!(
+            matches!(&error, hiqlite::Error::RequestNotDispatched(reason)
+                if reason.as_ref() == "local playback still owns membership exclusion"),
+            "{error}"
+        );
+        tokio::time::timeout(Duration::from_secs(5), invalidation.changed())
+            .await
+            .expect("the refused proposal signals the original trial");
+        assert!(!original.is_current());
+
+        let key = crate::store::keys::DVR_ENABLED;
+        selected
+            .store
+            .put_settings(&[(key, "true")])
+            .await
+            .expect("ordinary quorum write while the original still holds exclusion");
+        assert_eq!(
+            selected
+                .store
+                .get_setting(key)
+                .await
+                .expect("read quorum write"),
+            Some("true".to_owned())
+        );
+        assert_eq!(leader.local_metrics.membership_snapshot(), before);
+        drop(original);
+    }
+    // Startup retries the same real learner admission after the original
+    // exclusion is released, with the staged raft id and both exact endpoints.
     let learner_client = Box::pin(tokio::time::timeout(
         Duration::from_secs(45),
         Box::pin(hiqlite::start_node_for_clock_observation(

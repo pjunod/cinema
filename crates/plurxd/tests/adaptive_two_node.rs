@@ -95,8 +95,10 @@ struct Daemon {
 }
 
 impl Daemon {
-    fn spawn(config: &Path, log: PathBuf, hostname: &str) -> Self {
-        Self::spawn_configured(config, log, hostname, |_| {})
+    fn spawn(config: &Path, log: PathBuf, hostname: &str, encoder: &str) -> Self {
+        Self::spawn_configured(config, log, hostname, |command| {
+            command.env("PLURX_HWACCEL", encoder);
+        })
     }
 
     fn spawn_configured(
@@ -351,6 +353,10 @@ fn node_config(
 
 impl Cluster {
     async fn start(root: tempfile::TempDir) -> Self {
+        Self::start_with_encoder(root, "software", true).await
+    }
+
+    async fn start_with_encoder(root: tempfile::TempDir, encoder: &str, prefer_peer: bool) -> Self {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(45))
@@ -360,7 +366,7 @@ impl Cluster {
         let [a_http, a_raft, a_api, b_http, b_raft, b_api] =
             std::array::from_fn(|index| reserved[index].port);
         let proxy_a = PeerProxy::start(a_http, false).await;
-        let proxy_b = PeerProxy::start(b_http, true).await;
+        let proxy_b = PeerProxy::start(b_http, prefer_peer).await;
 
         let a_data = root.path().join("node-a");
         std::fs::create_dir_all(&a_data).expect("node A data");
@@ -374,7 +380,12 @@ impl Cluster {
         for port in &mut reserved[..3] {
             port.release();
         }
-        let mut node_a = Daemon::spawn(&a_config, root.path().join("node-a.log"), "adaptive-a");
+        let mut node_a = Daemon::spawn(
+            &a_config,
+            root.path().join("node-a.log"),
+            "adaptive-a",
+            encoder,
+        );
         wait_ready(&client, &mut node_a, a_http).await;
         let a_base = format!("http://127.0.0.1:{a_http}");
         let setup = client
@@ -423,7 +434,12 @@ impl Cluster {
         for port in &mut reserved[3..] {
             port.release();
         }
-        let mut node_b = Daemon::spawn(&b_config, root.path().join("node-b.log"), "adaptive-b");
+        let mut node_b = Daemon::spawn(
+            &b_config,
+            root.path().join("node-b.log"),
+            "adaptive-b",
+            encoder,
+        );
         wait_ready(&client, &mut node_b, b_http).await;
         let b_base = format!("http://127.0.0.1:{b_http}");
 
@@ -1118,3 +1134,7 @@ mod singleton_trial;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[path = "support/hdhomerun_fixture.rs"]
 mod hdhomerun_fixture;
+
+#[cfg(target_os = "linux")]
+#[path = "adaptive_two_node/cold_fel.rs"]
+mod cold_fel;
