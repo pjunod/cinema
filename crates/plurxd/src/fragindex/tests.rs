@@ -2245,8 +2245,8 @@ mod dv_title_companion {
             "argv carries no scan"
         );
         let spawn = source
-            .find("Some(ride) => ride.spawn(source, budget)")
-            .expect("spawn");
+            .find(".spawn(source, runtime_cache, budget)")
+            .expect("spawn with the runtime cache");
         let finish = source
             .find("let pending = ride.finish(file.id, task, lead_built, wait).await;")
             .expect("finish");
