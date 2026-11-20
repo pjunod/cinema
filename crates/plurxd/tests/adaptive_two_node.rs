@@ -1114,3 +1114,7 @@ async fn adaptive_create_places_on_a_peer_and_falls_back_when_the_grant_cannot_b
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[path = "adaptive_two_node/singleton_trial.rs"]
 mod singleton_trial;
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[path = "support/hdhomerun_fixture.rs"]
+mod hdhomerun_fixture;

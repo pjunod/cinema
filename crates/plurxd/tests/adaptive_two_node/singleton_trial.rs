@@ -1,7 +1,12 @@
+use super::hdhomerun_fixture::{private_ipv4, serve_fixture_device, GUIDE_NUMBER};
 use super::*;
+use std::sync::atomic::AtomicU64;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const ORDINARY_QUALIFIED: &str =
     "original finite native start and close qualified the trial envelope";
+const TRIAL_ENTERED: &str = "original finite trial entered its native producer";
+const PROTECTED_WAIT: &str = "protected playback registered behind the original finite trial";
 const TRIAL_VERIFIED: &str =
     "original finite trial verified a sustained output window before Winner";
 
@@ -84,12 +89,21 @@ fn native_delegation() -> PathBuf {
     root
 }
 
-fn native_leaf_count(root: &Path) -> usize {
+fn native_leaves(root: &Path) -> impl Iterator<Item = PathBuf> {
     std::fs::read_dir(root)
         .expect("read the isolated delegated cgroup")
         .map(|entry| entry.expect("inspect cgroup entry"))
         .filter(|entry| entry.file_name().to_string_lossy().starts_with("plurx-"))
-        .count()
+        .map(|entry| entry.path())
+}
+
+fn native_leaf_count(root: &Path) -> usize {
+    native_leaves(root).count()
+}
+
+fn populated(leaf: &Path) -> bool {
+    std::fs::read_to_string(leaf.join("cgroup.events"))
+        .is_ok_and(|events| events.lines().any(|line| line == "populated 1"))
 }
 
 struct Viewer<'a> {
@@ -99,15 +113,18 @@ struct Viewer<'a> {
 }
 
 impl Viewer<'_> {
-    async fn start(&self, file_id: i64, playback_id: &str, node: &Daemon) -> Value {
-        let response = self
-            .client
+    async fn request_start(&self, file_id: i64, playback_id: &str) -> reqwest::Response {
+        self.client
             .post(format!("{}/api/v1/files/{file_id}/hls/sessions", self.base))
             .bearer_auth(self.token)
             .json(&json!({"playback_id":playback_id,"height":480}))
             .send()
             .await
-            .expect("send public HLS Create");
+            .expect("send public HLS Create")
+    }
+
+    async fn start(&self, file_id: i64, playback_id: &str, node: &Daemon) -> Value {
+        let response = self.request_start(file_id, playback_id).await;
         let status = response.status();
         let body = response.text().await.expect("read public Create response");
         assert_eq!(
@@ -194,6 +211,23 @@ impl Viewer<'_> {
         assert!(!response.bytes().await.expect("segment body").is_empty());
     }
 
+    async fn settings(&self, desired: Value) {
+        let response = self
+            .client
+            .put(format!("{}/api/v1/settings", self.base))
+            .bearer_auth(self.token)
+            .json(&desired)
+            .send()
+            .await
+            .expect("public Settings write");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "fixture Settings write: {}",
+            response.text().await.expect("Settings response"),
+        );
+    }
+
     async fn stop(&self, started: &Value, node: &Daemon) {
         let id = started["session_id"].as_str().expect("session capability");
         let response = self
@@ -240,6 +274,22 @@ async fn wait_original_removal(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires private noswap tmpfs, delegated cgroup v2, non-root clone3 and Landlock ABI6, and native FFmpeg/FFprobe"]
 async fn activated_hiqlite_singleton_qualifies_and_adopts_a_real_native_vod_trial() {
+    run_singleton_trial(false).await;
+}
+
+/// Uses PLURX_TEST_FINITE_NOSWAP_TMPFS, PLURX_TEST_FINITE_NATIVE_ROOT,
+/// PLURX_FFMPEG and PLURX_FFPROBE just like the original singleton trial.
+/// The test user also needs exclusive fixture ports 80 and 5004 on an
+/// isolated private IPv4 network.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires the native trial prerequisites and an isolated private IPv4 with non-root access to ports 80 and 5004"]
+async fn activated_hiqlite_singleton_closes_native_trial_before_dvr_capture_opens() {
+    run_singleton_trial(true).await;
+}
+
+async fn run_singleton_trial(with_capture: bool) {
+    static DELEGATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _owned_fixture_slot = DELEGATION.lock().await;
     let ffmpeg = required_path("PLURX_FFMPEG");
     let ffprobe = required_path("PLURX_FFPROBE");
     let delegated = native_delegation();
@@ -290,7 +340,7 @@ async fn activated_hiqlite_singleton_qualifies_and_adopts_a_real_native_vod_tria
                 .env("PLURX_FFPROBE", &ffprobe)
                 .env(
                     "PLURX_LOG",
-                    "info,plurxd::vodserve=debug,plurx_core::adaptive_resources=debug",
+                    "info,plurxd::vodserve=debug,plurxd::admission=debug,plurx_core::adaptive_resources=debug",
                 );
         },
     );
@@ -326,6 +376,11 @@ async fn activated_hiqlite_singleton_qualifies_and_adopts_a_real_native_vod_tria
         base: &base,
         token,
     };
+    let capture = if with_capture {
+        Some(CaptureFixture::start(&viewer, &ffmpeg, root.path()).await)
+    } else {
+        None
+    };
     let renditions = cache.join("renditions");
 
     let ordinary = viewer.start(file_id, "ordinary-qualification", &node).await;
@@ -349,6 +404,13 @@ async fn activated_hiqlite_singleton_qualifies_and_adopts_a_real_native_vod_tria
     viewer.stop(&ordinary, &node).await;
     wait_original_removal(&mut node, &delegated, &output, true).await;
 
+    if let Some(capture) = capture {
+        capture
+            .preempt_native_trial(&viewer, &mut node, file_id, &delegated, &output)
+            .await;
+        return;
+    }
+
     // Same exact source and byte recipe, but a new viewer attempt. A
     // surviving retained output or a normal fallback cannot emit this
     // milestone, which is before the durable Winner may publish.
@@ -363,4 +425,236 @@ async fn activated_hiqlite_singleton_qualifies_and_adopts_a_real_native_vod_tria
     viewer.play(&trial).await;
     viewer.stop(&trial, &node).await;
     wait_original_removal(&mut node, &delegated, &output, false).await;
+}
+
+struct TrialPaths {
+    leaf: PathBuf,
+    output: PathBuf,
+}
+
+struct CaptureFixture {
+    channel_id: String,
+    original: Arc<Mutex<Option<TrialPaths>>>,
+    opens: Arc<AtomicU64>,
+    early_open: Arc<AtomicBool>,
+}
+
+impl CaptureFixture {
+    async fn start(viewer: &Viewer<'_>, ffmpeg: &Path, root: &Path) -> Self {
+        let address = private_ipv4();
+        let original = Arc::new(Mutex::new(None::<TrialPaths>));
+        let opens = Arc::new(AtomicU64::new(0));
+        let early_open = Arc::new(AtomicBool::new(false));
+        let observe_open = {
+            let original = Arc::clone(&original);
+            let early_open = Arc::clone(&early_open);
+            Arc::new(move || {
+                let original = original.lock().expect("current original paths");
+                // This is the actual tuner GET. Require positive absence of
+                // both original paths, including after a failed filesystem read.
+                if original.as_ref().is_none_or(|paths| {
+                    !matches!(paths.leaf.try_exists(), Ok(false))
+                        || !matches!(paths.output.try_exists(), Ok(false))
+                }) {
+                    early_open.store(true, Ordering::Release);
+                }
+            })
+        };
+        serve_fixture_device(
+            address.clone(),
+            ffmpeg.to_owned(),
+            Arc::clone(&opens),
+            Some(observe_open),
+        )
+        .await;
+        let current = get_json(viewer.client, viewer.base, viewer.token, "/api/v1/settings").await;
+        viewer
+            .settings(json!({
+                "live_tv_config_generation": current["live_tv_config_generation"],
+                "live_tv_device_ipv4": address,
+                "live_tv_enabled": true
+            }))
+            .await;
+        let recordings = root.join("recordings");
+        std::fs::create_dir(&recordings).expect("private DVR recordings directory");
+        viewer
+            .settings(json!({
+                "dvr_enabled": false,
+                "dvr_root": recordings,
+                "dvr_free_floor_gb": 0,
+                "dvr_pad_end_s": 0
+            }))
+            .await;
+        // Keep DVR off until the original trial is observably active. Its
+        // enabled scheduler holds the protected admission lane even when
+        // there are no due rows. Discovery and lineup only are safe now.
+        let lineup = get_json(
+            viewer.client,
+            viewer.base,
+            viewer.token,
+            "/api/v1/live-tv/channels",
+        )
+        .await;
+        let channel_id = lineup["channels"]
+            .as_array()
+            .expect("channels")
+            .iter()
+            .find(|row| row["guide_number"] == GUIDE_NUMBER)
+            .expect("fixture tuner channel")["id"]
+            .as_str()
+            .expect("fixture channel id")
+            .to_owned();
+        assert_eq!(
+            opens.load(Ordering::Acquire),
+            0,
+            "lineup is not a tuner open"
+        );
+        Self {
+            channel_id,
+            original,
+            opens,
+            early_open,
+        }
+    }
+
+    async fn preempt_native_trial(
+        self,
+        viewer: &Viewer<'_>,
+        node: &mut Daemon,
+        file_id: i64,
+        delegated: &Path,
+        output: &Path,
+    ) {
+        let request = viewer.request_start(file_id, "dvr-preempts-trial");
+        tokio::pin!(request);
+        let capture_intent = async {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            let leaf = loop {
+                let entered = node.diagnostics().contains(TRIAL_ENTERED);
+                if let Some(leaf) = native_leaves(delegated).find(|leaf| entered && populated(leaf))
+                {
+                    break leaf;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "no active original native trial\n{}",
+                    node.diagnostics()
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            assert!(
+                output.is_dir(),
+                "the new trial must own the same rendition key"
+            );
+            *self.original.lock().expect("record the original paths") = Some(TrialPaths {
+                leaf: leaf.clone(),
+                output: output.to_owned(),
+            });
+            assert_eq!(self.opens.load(Ordering::Acquire), 0);
+            // A real replicated write completes while the exact original
+            // cgroup is still populated. No capture intent exists yet.
+            viewer.settings(json!({"dvr_pad_end_s": 3})).await;
+            assert!(
+                populated(&leaf),
+                "the Settings write must finish while the trial is active"
+            );
+            viewer.settings(json!({"dvr_enabled": true})).await;
+            let now = i64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("wall clock")
+                    .as_secs(),
+            )
+            .expect("unix seconds");
+            let response = viewer
+                .client
+                .post(format!("{}/api/v1/dvr/recordings", viewer.base))
+                .bearer_auth(viewer.token)
+                .json(&json!({
+                    "channel_id": self.channel_id,
+                    "capture_start": now,
+                    "capture_end": now + 180,
+                    "title": "Native trial protected capture fixture"
+                }))
+                .send()
+                .await
+                .expect("schedule actual protected manual capture");
+            let status = response.status();
+            let recording: Value = response.json().await.expect("recording response");
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "{recording}\n{}",
+                node.diagnostics()
+            );
+            (leaf, recording)
+        };
+        let (response, (leaf, recording)) = tokio::join!(&mut request, capture_intent);
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the preempted Create did not refuse: {}\n{}",
+            response.text().await.expect("Create refusal"),
+            node.diagnostics()
+        );
+        let diagnostics = node.diagnostics();
+        assert!(
+            diagnostics.contains(PROTECTED_WAIT),
+            "protected demand did not meet the original trial\n{diagnostics}"
+        );
+        assert!(
+            !diagnostics.contains(TRIAL_VERIFIED),
+            "the preempted trial reached Winner evidence\n{diagnostics}"
+        );
+        wait_original_removal(node, delegated, output, false).await;
+        assert!(!leaf.try_exists().expect("observe original cgroup removal"));
+
+        let id = recording["id"].as_str().expect("original recording id");
+        let route = format!("/api/v1/dvr/recordings/{id}");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            node.assert_running("waiting for the original DVR scheduler capture");
+            let row = get_json(viewer.client, viewer.base, viewer.token, &route).await;
+            if row["state"] == "recording" && row["bytes"].as_i64().is_some_and(|bytes| bytes > 0) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no positive bytes from the recording's real sink: {row}\n{}",
+                node.diagnostics()
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert_eq!(
+            self.opens.load(Ordering::Acquire),
+            1,
+            "one physical tuner request"
+        );
+        assert!(
+            !self.early_open.load(Ordering::Acquire),
+            "tuner opened before exact original cgroup removal"
+        );
+
+        let response = viewer
+            .client
+            .delete(format!("{}{route}", viewer.base))
+            .bearer_auth(viewer.token)
+            .send()
+            .await
+            .expect("request original DVR stop");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let row = get_json(viewer.client, viewer.base, viewer.token, &route).await;
+            if matches!(row["state"].as_str(), Some("done" | "partial" | "failed")) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "capture did not settle: {row}\n{}",
+                node.diagnostics()
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
 }

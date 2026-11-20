@@ -214,6 +214,10 @@ impl Admissions {
             (self.register_protected_lane(&mut permits)?, trial)
         };
         if let Some(trial) = trial {
+            tracing::debug!(
+                target: "plurxd::admission",
+                "protected playback registered behind the original finite trial"
+            );
             let changed = trial.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();

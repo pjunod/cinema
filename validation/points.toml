@@ -1406,6 +1406,7 @@ paths = [
   "scripts/live-tv-browser",
   "scripts/live-tv-endless",
   "crates/plurxd/tests/live_tv_two_node.rs",
+  "crates/plurxd/tests/support/hdhomerun_fixture.rs",
   "scripts/live-tv-hardware",
   "scripts/live-tv-caption-audit",
   "docs/features/HDHOMERUN-LIVE-TV-*.md",

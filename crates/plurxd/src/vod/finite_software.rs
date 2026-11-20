@@ -1548,6 +1548,11 @@ async fn run_body(
     }
     producer.stage.store(RUNNING, Release);
     if let Some(trial) = producer.trial.as_ref() {
+        tracing::debug!(
+            target: "plurxd::vodserve",
+            rendition = %rendition.key,
+            "original finite trial entered its native producer"
+        );
         if !observe_prepared_trial(&shared, &rendition, &producer, &owner, &mut events, trial).await
         {
             trial.complete(FiniteTrialRun::REFUSED);
