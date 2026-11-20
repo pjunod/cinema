@@ -164,8 +164,7 @@ macro_rules! translation_admission {
 
 pub(super) const ENQUEUE_SQL: &str = concat!(
     r#"
-WITH provided AS (SELECT json($1) AS body
- WHERE json_extract($1,'$.require_native_fel_reopen') IS NOT 1 OR changes()=1), input AS MATERIALIZED (
+WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
  SELECT CASE WHEN EXISTS (SELECT 1 FROM background_predictions WHERE state = 'pending'
    AND request_id = COALESCE(json_extract(body,'$.subtitle_request.request_id'),json_extract(body,'$.analysis_request.request_id')))
  THEN json_set(body, '$.request.deadline_ms', (SELECT expires_ms FROM background_predictions
@@ -230,8 +229,20 @@ WITH provided AS (SELECT json($1) AS body
     WHEN json_extract(body,'$.payload.kind')='dv_title_scan' AND NOT EXISTS(
       SELECT 1 FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
       WHERE d.revision=json_extract(body,'$.payload.probe_revision') AND d.file_id=json_extract(body,'$.payload.file_id')
-      AND d.scanner_digest=json_extract(body,'$.payload.scanner_digest') AND d.terminal=0
-      AND f.size=json_extract(body,'$.payload.source_size') AND f.mtime=json_extract(body,'$.payload.source_mtime')) THEN 'no_demand'
+      AND d.scanner_digest=json_extract(body,'$.payload.scanner_digest')
+      AND f.size=json_extract(body,'$.payload.source_size') AND f.mtime=json_extract(body,'$.payload.source_mtime')
+      AND CASE
+        WHEN json_type(body,'$.native_fel_head_reopen') IS NULL THEN d.terminal=0
+        ELSE json_extract(body,'$.native_fel_head_reopen')=1 AND d.terminal=1 AND prior_job IS NULL
+          AND json_extract(body,'$.request.scope')='dv-native-fel-head'
+          AND json_extract(body,'$.request.consumer_kind')='native_fel_head'
+          AND f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
+          AND json_extract(f.probe_json,'$.plurx_dv_title_v1.complete')=1
+          AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract(body,'$.request.request_digest')||'.request.identity')=json_extract(body,'$.request.request_digest')
+          AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract(body,'$.request.request_digest')||'.verdict.admitted')=1
+          AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan'
+            AND j.state IN ('queued','running','cancelling') AND json_extract(j.payload_json,'$.file_id')=d.file_id)
+      END) THEN 'no_demand'
     WHEN json_type(body, '$.legacy_key') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM background_job_legacy WHERE legacy_key = json_extract(body, '$.legacy_key')
         AND state = 'awaiting_import'

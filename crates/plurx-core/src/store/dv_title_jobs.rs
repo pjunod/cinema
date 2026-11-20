@@ -640,24 +640,19 @@ pub(super) async fn request_fel_head<T: QueueSql>(
     struct Revision {
         revision: i64,
     }
-    const EXACT_SETTLED: &str = r#"
-WHERE d.file_id=json_extract($1,'$.file_id')
- AND d.scanner_digest=json_extract($1,'$.scanner_digest') AND d.terminal=1
- AND NOT EXISTS(SELECT 1 FROM background_jobs job WHERE job.kind='dv_title_scan'
-  AND job.state IN ('queued','running','cancelling')
-  AND json_extract(job.payload_json,'$.file_id')=d.file_id)
- AND EXISTS(SELECT 1 FROM files f
-  WHERE f.id=d.file_id AND f.size=json_extract($1,'$.request.source_size')
-   AND f.mtime=json_extract($1,'$.request.source_mtime') AND f.dv_profile=7 AND f.dv_el_present=1
-   AND json_valid(f.probe_json) AND json_extract(f.probe_json,'$.plurx_dv_title_v1.complete')=1
-   AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract($1,'$.request.identity')||'.request.identity')=json_extract($1,'$.request.identity')
-   AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract($1,'$.request.identity')||'.verdict.admitted')=1)
-"#;
-    let input_json = encode(&input)?;
-    let rows = store.queue_sql(
-        format!("SELECT json_object('revision',d.revision) AS result_json FROM dv_title_jobs_demand d {EXACT_SETTLED}"),
-        input_json.clone(), false, true,
-    ).await?;
+    let rows = store
+        .queue_sql(
+            r#"
+SELECT json_object('revision',revision) AS result_json FROM dv_title_jobs_demand
+WHERE file_id=json_extract($1,'$.file_id')
+ AND scanner_digest=json_extract($1,'$.scanner_digest') AND terminal=1
+"#
+            .into(),
+            encode(&input)?,
+            false,
+            true,
+        )
+        .await?;
     let Some(row) = rows.first() else {
         return Ok(false);
     };
@@ -691,29 +686,35 @@ WHERE d.file_id=json_extract($1,'$.file_id')
         },
     };
     enqueue.validate()?;
-    let mut reopen: serde_json::Value =
-        serde_json::from_str(&input_json).map_err(|error| StoreError::Task(error.to_string()))?;
-    reopen["revision"] = revision.into();
-    reopen["episode"] = episode.clone().into();
-    let reopen = encode(&reopen)?;
     let mut body = enqueue_body(store, &enqueue).await?;
-    body["require_native_fel_reopen"] = 1.into();
-    // ENQUEUE_SQL consumes the preceding update's row count on the same
-    // transaction/connection. No worker can claim the reopened row before
-    // its targeted waiter exists. A refused enqueue restores settled state.
-    store.queue_transaction(vec![
-        (format!("UPDATE dv_title_jobs_demand AS d SET terminal=0 {EXACT_SETTLED} AND d.revision=json_extract($1,'$.revision')"), reopen.clone()),
-        (ENQUEUE_SQL.to_owned(), encode(&body)?),
-        (r#"
-UPDATE dv_title_jobs_demand AS d SET terminal=1
-WHERE d.file_id=json_extract($1,'$.file_id') AND d.revision=json_extract($1,'$.revision')
- AND EXISTS(SELECT 1 FROM background_job_commands c WHERE c.id=json_extract($1,'$.episode')
-  AND c.operation='enqueue' AND json_extract(c.result_json,'$.outcome')!='accepted')
- AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan'
-  AND j.state IN ('queued','running','cancelling')
-  AND json_extract(j.payload_json,'$.file_id')=d.file_id)
-"#.to_owned(), reopen),
-    ]).await?;
+    body["native_fel_head_reopen"] = 1.into();
+    let body = encode(&body)?;
+    // Enqueue may admit this exact settled title within the transaction. Only
+    // the resulting job and waiter authorize reopening it. A refusal leaves
+    // the title settled and no worker can observe a job before it reopens.
+    store
+        .queue_transaction(vec![
+            (ENQUEUE_SQL.to_owned(), body.clone()),
+            (
+                r#"
+UPDATE dv_title_jobs_demand AS d SET terminal=0
+WHERE d.file_id=json_extract($1,'$.payload.file_id')
+ AND d.revision=json_extract($1,'$.payload.probe_revision')
+ AND d.scanner_digest=json_extract($1,'$.payload.scanner_digest') AND d.terminal=1
+ AND EXISTS(SELECT 1 FROM background_jobs j JOIN background_job_waiters w ON w.job_id=j.id
+  WHERE j.id=json_extract($1,'$.id') AND j.kind='dv_title_scan' AND j.payload_version=1
+   AND j.payload_json=json_extract($1,'$.payload') AND j.state='queued'
+   AND w.request_scope='dv-native-fel-head' AND w.request_id=json_extract($1,'$.request.request_id')
+   AND w.request_digest=json_extract($1,'$.request.request_digest') AND w.consumer_kind='native_fel_head'
+   AND w.consumer_ref=json_extract($1,'$.request.consumer_ref') AND w.state='pending'
+   AND w.target_node_id=json_extract($1,'$.request.target_node_id')
+   AND w.deadline_ms=json_extract($1,'$.request.deadline_ms'))
+"#
+                .to_owned(),
+                body,
+            ),
+        ])
+        .await?;
     Ok(store.background_job(&episode).await?.is_some())
 }
 
