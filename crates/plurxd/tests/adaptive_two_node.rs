@@ -929,7 +929,14 @@ async fn scan_fixture(
             .chain(peer.map(|(peer, _)| peer))
             .any(|daemon| {
                 daemon.diagnostics().lines().any(|line| {
-                    line.contains("fragment indexing pass finished") && line.contains("built=1")
+                    line.contains("fragment indexing pass finished")
+                        && line
+                            .split_once("built_files=")
+                            .and_then(|(_, tail)| tail.split_once(']'))
+                            .and_then(|(ids, _)| {
+                                serde_json::from_str::<Vec<i64>>(&format!("{ids}]")).ok()
+                            })
+                            .is_some_and(|ids| ids.contains(&file_id))
                 })
             });
         if indexed {
