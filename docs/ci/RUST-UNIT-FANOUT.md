@@ -85,7 +85,9 @@ skip. Placement uses an empirically eligible worker; pools are unchanged.
 The separately typed `main-python-journal-continuation-v1` provider uses the
 unchanged original main-unit start/final journal authenticator and source
 fingerprints, plus reviewed all-path imported-implementation impacts. It
-preserves inherited source/run identities and stops on unknown applicability
+authenticates every inherited pass in its originating run’s own journal, requires
+all-path imported-input impact witnesses from each actual origin to the current
+candidate, preserves original source/run identities, and stops on unknown applicability
 instead of replaying valid passes. Main-lane records are never relabelled as
 native ci.yml discoveries.
 
