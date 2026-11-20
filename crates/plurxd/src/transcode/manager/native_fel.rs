@@ -14,6 +14,8 @@ const COPY_EXTENT_SECS: u32 =
     HEAD_TARGET_SECS + 2 * plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS;
 const COPY_LIMIT_BYTES: usize = 1024 * 1024 * 1024;
 const COPY_WALL_LIMIT: Duration = Duration::from_secs(180);
+const HEAD_TARGET_HINT: &str = "native-fel-head-title";
+const HEAD_RETRY: Duration = Duration::from_secs(90);
 
 struct ObservedHead {
     dir: tempfile::TempDir,
@@ -439,7 +441,8 @@ impl TranscodeManager {
         admission: &FragmentAdmission,
         cancel: &CancellationToken,
     ) -> Result<(), String> {
-        if !self.fel_qualification_capable()
+        if !self.native_fel_head_is_target(file.id)
+            || !self.fel_qualification_capable()
             || file.dolby_vision.profile != Some(7)
             || file.dolby_vision.el_present != Some(true)
             || cancel.is_cancelled()
@@ -523,8 +526,20 @@ impl TranscodeManager {
         {
             return Err("native FEL prefix became stale before it could be retained".into());
         }
+        if !self.native_fel_head_is_target(file.id) {
+            return Ok(());
+        }
         let staged = prepared.objects.len();
         *self.native_fel_head.lock().await = Some(Arc::new(prepared));
+        let hint = async {
+            let cache = plurx_core::fs_secure::SecureDirectory::open(&self.runtime_cache).await?;
+            cache
+                .atomic_write_child(HEAD_TARGET_HINT, file.id.to_string().as_bytes())
+                .await
+        };
+        if let Err(error) = hint.await {
+            tracing::debug!(target:"plurxd::dv", file_id=file.id, %error, "could not retain FEL preparation target hint");
+        }
         tracing::info!(target: "plurxd::dv", file_id = file.id, staged, "admitted native FEL head is ready");
         Ok(())
     }
@@ -805,5 +820,137 @@ impl NativeFelHead {
                 }
             }
         }
+    }
+}
+
+pub(super) struct FelHeadTarget {
+    file_id: i64,
+    retry_after: Instant,
+}
+
+impl FelHeadTarget {
+    pub(super) fn load(root: &Path) -> Option<Self> {
+        // A local hint only locates work. The current snapshot still has to
+        // authorize the exact source and prove its qualifying recipe.
+        use std::io::Read;
+        let path = root.join(HEAD_TARGET_HINT);
+        let file = plurx_core::fs_secure::open_read_nofollow_blocking(&path).ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() || metadata.len() > 24 {
+            return None;
+        }
+        let mut hint = String::new();
+        file.take(24).read_to_string(&mut hint).ok()?;
+        let file_id = hint.parse::<i64>().ok()?;
+        (file_id > 0).then_some(Self {
+            file_id,
+            retry_after: Instant::now(),
+        })
+    }
+}
+
+impl TranscodeManager {
+    pub(super) fn note_native_fel_head_target(&self, file: &MediaFile) {
+        if file.dolby_vision.profile != Some(7) || file.dolby_vision.el_present != Some(true) {
+            return;
+        }
+        let mut target = self
+            .native_fel_target
+            .lock()
+            .expect("native FEL head target");
+        if target
+            .as_ref()
+            .is_none_or(|current| current.file_id != file.id)
+        {
+            *target = Some(FelHeadTarget {
+                file_id: file.id,
+                retry_after: Instant::now(),
+            });
+        }
+    }
+
+    fn native_fel_head_is_target(&self, file_id: i64) -> bool {
+        self.native_fel_target
+            .lock()
+            .expect("native FEL head target")
+            .as_ref()
+            .is_some_and(|target| target.file_id == file_id)
+    }
+
+    pub(crate) async fn queue_missing_native_fel_head(
+        &self,
+        node: &str,
+        tools: &crate::vodencode::dv_runtime::ToolSet,
+        scanner: &str,
+        now_ms: i64,
+    ) -> Result<(), String> {
+        use crate::source_probe::fel_qualification::{default_native_request, Clock};
+        use plurx_core::transcode::dv_fel_qualification::{verdict_state, VerdictState};
+        let file_id = {
+            let mut target = self
+                .native_fel_target
+                .lock()
+                .expect("native FEL head target");
+            let Some(target) = target.as_mut() else {
+                return Ok(());
+            };
+            let now = Instant::now();
+            if now < target.retry_after {
+                return Ok(());
+            }
+            target.retry_after = now + HEAD_RETRY;
+            target.file_id
+        };
+        if !self.fel_qualification_capable() {
+            return Ok(());
+        }
+        let Some(planning) = self
+            .store
+            .playback_planning_snapshot(file_id, &QUALITY_PLANNING_KEYS)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(());
+        };
+        let file = &planning.file;
+        let preferences = Self::vod_dv_preferences_from_snapshot(&planning);
+        if !preferences.fel_reencode
+            || !preferences.conversion_permitted
+            || file.dolby_vision.profile != Some(7)
+            || file.dolby_vision.el_present != Some(true)
+        {
+            return Ok(());
+        }
+        let Some(probe) = planning.probe_json.as_deref() else {
+            return Ok(());
+        };
+        if self
+            .warm_native_fel_head(file, planning.generation, Some(probe))
+            .await
+            .is_some()
+        {
+            return Ok(());
+        }
+        let document = serde_json::from_str(probe).map_err(|error| error.to_string())?;
+        let clock = Clock::from_document(&document)?;
+        let backend = self.fel_identity(&tools.backend_digest()).await?;
+        let request = default_native_request(file, &document, clock, backend)?;
+        if !matches!(verdict_state(Some(probe), file.size, file.mtime, &request.identity),
+            VerdictState::Current(verdict) if verdict.admitted)
+        {
+            return Ok(());
+        }
+        self.store
+            .request_dv_fel_head(plurx_core::store::dv_title_jobs::FelHeadRequest {
+                file_id,
+                node: node.to_owned(),
+                scanner_digest: scanner.to_owned(),
+                request,
+                now_ms,
+                deadline_ms: now_ms.saturating_add(30 * 60 * 1000),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 }

@@ -68,6 +68,10 @@ impl TranscodeManager {
             work_dir,
             #[cfg(target_os = "linux")]
             native_fel_head: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            native_fel_target: std::sync::Mutex::new(
+                super::manager_native_fel::FelHeadTarget::load(&runtime_cache),
+            ),
             runtime_cache,
             subtitle_cache,
             subtitle_membership: None,

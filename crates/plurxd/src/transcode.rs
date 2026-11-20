@@ -671,6 +671,8 @@ pub struct TranscodeManager {
     work_dir: PathBuf,
     #[cfg(target_os = "linux")]
     native_fel_head: Mutex<Option<Arc<manager_native_fel::NativeFelHead>>>,
+    #[cfg(target_os = "linux")]
+    native_fel_target: std::sync::Mutex<Option<manager_native_fel::FelHeadTarget>>,
     /// The VOD presentation's serving runtime (plan §2). Sessions created
     /// under `presentation:"vod"` live here rather than in `sessions`; every
     /// serving entry point dispatches to it first and falls through when the

@@ -137,7 +137,16 @@ impl TitleTask {
             }
             *after = 0;
             #[cfg(target_os = "linux")]
-            requalify_stale_fel_titles(state, &tools, &scanner).await;
+            {
+                if let Err(error) = state
+                    .transcode
+                    .queue_missing_native_fel_head(&state.node_id, &tools, &scanner, now_ms())
+                    .await
+                {
+                    tracing::debug!(target:"plurxd::dv", %error, "native FEL head request deferred");
+                }
+                requalify_stale_fel_titles(state, &tools, &scanner).await;
+            }
             return Ok(None);
         }
         let fel = fel_backend(state, &tools).await;
@@ -151,7 +160,12 @@ impl TitleTask {
                 *after = demand.probe_revision;
                 // Live work was considered independently above; an ordinary
                 // turn must not acquire its more permissive companion class.
-                if demand.playback_requested {
+                if demand.playback_requested
+                    || demand
+                        .fel_head_target
+                        .as_deref()
+                        .is_some_and(|node| node != state.node_id)
+                {
                     continue;
                 }
             }
@@ -870,15 +884,21 @@ async fn qualify_owned(
                 )
                 .await
             } else {
-                let verdict = super::fel_qualification::qualify_if_due(
-                    state,
-                    file,
-                    &demand.probe_json,
-                    tools,
-                    admission,
-                    &qualification,
-                )
-                .await;
+                let verdict = if demand.fel_head_target.is_some() {
+                    // Same-generation rebuilds were enqueued only after proving
+                    // this title already has its admitting quality verdict.
+                    Ok(super::fel_qualification::Qualification::NotDue)
+                } else {
+                    super::fel_qualification::qualify_if_due(
+                        state,
+                        file,
+                        &demand.probe_json,
+                        tools,
+                        admission,
+                        &qualification,
+                    )
+                    .await
+                };
                 if verdict.is_ok() {
                     if let Some(version) = source_version.as_deref() {
                         let prepared = Box::pin(state.transcode.prepare_native_fel_head(

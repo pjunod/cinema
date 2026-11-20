@@ -2575,6 +2575,186 @@ async fn a_viewer_waiting_on_its_titles_measurement_reads_beside_background_work
 }
 
 #[tokio::test]
+async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
+    use crate::{
+        domain::{DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult},
+        store::{dv_title_jobs::FelHeadRequest, LibraryStore, MediaStore},
+        transcode::{
+            dv_fel_qualification as q, EnhancementRateEnvelope, EnhancementRateLimits,
+            EnhancementRateProvenance,
+        },
+    };
+
+    let dir = tempfile::tempdir().expect("local background job store");
+    let path = dir.path().join("jobs.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let db = rusqlite::Connection::open(path).expect("fixture connection");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "prepared title".into(),
+            kind: LibraryKind::Movies,
+            paths: vec!["/media".into()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "prepared title".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let file = store
+        .upsert_file(
+            item,
+            "/media/prepared-title.mkv",
+            100,
+            1,
+            &ProbeResult {
+                video_codec: Some("hevc".into()),
+                dolby_vision: DolbyVisionFacts {
+                    profile: Some(7),
+                    rpu_present: Some(true),
+                    el_present: Some(true),
+                    ..Default::default()
+                },
+                raw_json: Some("{}".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("source");
+    let scanner = "a".repeat(64);
+    db.execute(
+        "UPDATE dv_title_jobs_demand SET scanner_digest=?1,terminal=1 WHERE file_id=?2",
+        rusqlite::params![scanner, file],
+    )
+    .expect("settled generation");
+    let revision = db
+        .query_row(
+            "SELECT revision FROM dv_title_jobs_demand WHERE file_id=?1",
+            [file],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("generation");
+
+    let envelope = EnhancementRateEnvelope::resolve(
+        90_000,
+        EnhancementRateProvenance::ContainerAverageVideoUpperBound,
+        3840,
+        2160,
+        (24, 1),
+        true,
+        EnhancementRateLimits::default(),
+    )
+    .expect("envelope");
+    let recipe = q::FelRecipeRequest::new(
+        "b".repeat(64),
+        100,
+        1,
+        envelope,
+        q::FelRecipeOutput::new(0, (3840, 2160), (24, 1)),
+    );
+    let request = |now_ms| FelHeadRequest {
+        file_id: file,
+        node: "worker-a".into(),
+        scanner_digest: scanner.clone(),
+        request: recipe.clone(),
+        now_ms,
+        deadline_ms: now_ms + 120_000,
+    };
+    assert!(!store
+        .request_dv_fel_head(request(1_000))
+        .await
+        .expect("unmeasured title stays closed"));
+    let window = q::WindowScore {
+        start_ms: 1000,
+        served_mean: 1.0,
+        served_p99: 2.0,
+        dropped_mean: 2.0,
+        dropped_p99: 2.0,
+        samples: 3,
+    };
+    let verdict = q::FelVerdict::from_windows(
+        recipe.identity.clone(),
+        100,
+        1,
+        50,
+        vec![window; q::WINDOWS],
+        &mut [1.0, 1.0, 1.0],
+        &mut [2.0, 2.0, 2.0],
+    )
+    .expect("quality measurement control");
+    assert!(verdict.admitted);
+    let probe = serde_json::json!({
+        "plurx_dv_title_v1": {
+            "schema": 1, "complete": true, "decoded_frames": 3, "valid_l1_frames": 3,
+            "missing_l1_frames": 0, "invalid_l1_frames": 0, "max_l1_pq": 3000,
+            "mastering_luminance": {"state": "unknown"}, "mastering_primaries": {"state": "unknown"}
+        },
+        "plurx_dv_fel_variants_v3": {
+            (recipe.identity.clone()): q::FelRecipeVerdict { request: recipe.clone(), verdict },
+        },
+    })
+    .to_string();
+    db.execute(
+        "UPDATE files SET probe_json=?1 WHERE id=?2",
+        rusqlite::params![probe, file],
+    )
+    .expect("record already measured fixture");
+
+    assert!(store
+        .request_dv_fel_head(request(1_001))
+        .await
+        .expect("prepare first head"));
+    assert!(!store
+        .request_dv_fel_head(request(1_002))
+        .await
+        .expect("dedupe active rebuild"));
+    let first = store
+        .dv_title_demands(&scanner, 0, 1_002)
+        .await
+        .expect("read rebuild demand")
+        .remove(0);
+    assert_eq!(first.probe_revision, revision);
+    assert_eq!(first.fel_head_target.as_deref(), Some("worker-a"));
+    assert!(!first.playback_requested);
+    assert_eq!(first.probe_json, probe);
+    assert!(q::pending_recipes(&first.probe_json, 100, 1).is_empty());
+    let first_id = first.active_job_id.expect("fresh warm job");
+
+    db.execute(
+        "UPDATE background_jobs SET state='succeeded' WHERE id=?1",
+        [&first_id],
+    )
+    .expect("first episode settled");
+    db.execute(
+        "UPDATE dv_title_jobs_demand SET terminal=1 WHERE file_id=?1",
+        [file],
+    )
+    .expect("no live shift in scanner generation");
+    assert!(store
+        .request_dv_fel_head(request(2_000))
+        .await
+        .expect("restart rebuild"));
+    let later = store
+        .dv_title_demands(&scanner, 0, 2_001)
+        .await
+        .expect("fresh demand")
+        .remove(0);
+    assert_ne!(later.active_job_id.as_deref(), Some(first_id.as_str()));
+    assert_eq!(later.probe_revision, revision);
+    assert_eq!(later.probe_json, probe);
+    assert!(q::pending_recipes(&later.probe_json, 100, 1).is_empty());
+}
+
+#[tokio::test]
 async fn a_waiting_viewer_attaches_and_renews_its_demand_on_the_title_scan() {
     use crate::{
         domain::{DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult},

@@ -1826,6 +1826,7 @@ impl TranscodeManager {
             && replacement_deadline.is_none();
         #[cfg(target_os = "linux")]
         let warm_head = if native_split && recovery.is_some() {
+            self.note_native_fel_head_target(&file);
             self.warm_native_fel_head(&file, planning_generation, stored_probe.as_deref())
                 .await
         } else {

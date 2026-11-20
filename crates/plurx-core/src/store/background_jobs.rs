@@ -2982,6 +2982,10 @@ pub trait BackgroundJobStore: Send + Sync {
         file_id: i64,
         binding: &str,
     ) -> Result<bool, StoreError>;
+    async fn request_dv_fel_head(
+        &self,
+        request: super::dv_title_jobs::FelHeadRequest,
+    ) -> Result<bool, StoreError>;
     async fn dv_fel_verdict_counts(&self, identity: &str) -> Result<(u64, u64), StoreError>;
     /// Settled FEL titles whose verdict another FEL identity measured.
     async fn dv_fel_stale_titles(&self, identity: &str, limit: u32)
@@ -4135,6 +4139,12 @@ LIMIT 1
         binding: &str,
     ) -> Result<bool, StoreError> {
         super::dv_title_jobs::request_requalification(self, file_id, binding).await
+    }
+    async fn request_dv_fel_head(
+        &self,
+        request: super::dv_title_jobs::FelHeadRequest,
+    ) -> Result<bool, StoreError> {
+        super::dv_title_jobs::request_fel_head(self, request).await
     }
     async fn dv_fel_verdict_counts(&self, identity: &str) -> Result<(u64, u64), StoreError> {
         super::dv_title_jobs::fel_verdict_counts(self, identity).await
