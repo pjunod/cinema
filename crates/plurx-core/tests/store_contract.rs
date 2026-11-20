@@ -29880,6 +29880,7 @@ async fn fragment_index_contract_runs_through_dyn_store() {
             vec![
                 IndexRow {
                     dts: 0,
+                    first_cto: None,
                     duration: 28_016,
                     bytes: 104_452,
                     video_bytes: 103_836,
@@ -29887,6 +29888,7 @@ async fn fragment_index_contract_runs_through_dyn_store() {
                 },
                 IndexRow {
                     dts: 28_016,
+                    first_cto: None,
                     duration: 28_032,
                     bytes: 110_038,
                     video_bytes: 109_422,
@@ -30110,6 +30112,7 @@ async fn fragment_index_outcome_contract_runs_through_dyn_store() {
             16_000,
             vec![IndexRow {
                 dts: 0,
+                first_cto: None,
                 duration: 28_016,
                 bytes: 104_452,
                 video_bytes: 103_836,

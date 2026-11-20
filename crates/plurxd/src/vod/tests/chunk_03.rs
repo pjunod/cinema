@@ -5623,8 +5623,11 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
     fn a_landing_probe_reads_the_first_packets_pts_and_duration() {
         let framecrc = "#extradata 0:       39, 0xffe00c7b\n#tb 0: 1/1000\n\
                         #media_type 0: video\n0,      29625,      29708,       41,      244, 0x1e5180d4\n";
-        let (pts, duration) = first_packet_time(framecrc).expect("one packet");
-        assert!((pts - 29.708).abs() < 1e-9 && (duration - 0.041).abs() < 1e-9);
+        let packet = first_packet_time(framecrc).expect("one packet");
+        assert_eq!(
+            (packet.pts, packet.duration, packet.time_base),
+            (29_708, 41, (1, 1_000))
+        );
         assert!(first_packet_time("#tb 0: 1/1000\n").is_err());
         assert!(first_packet_time("0, 0, 0, 41, 244, 0x0\n").is_err());
         assert!(first_packet_time("#tb 0: 1/1000\n0, 1, x, 41, 244, 0x0\n").is_err());
@@ -5679,13 +5682,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
             .await
             .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(
-                plurx_core::segplan::match_landing_at(
-                    &index,
-                    &observed,
-                    target,
-                    time.ticks,
-                    time.frame_ticks
-                ),
+                plurx_core::segplan::match_landing_at(&index, &observed, target, time),
                 Ok(truth),
                 "{name}: the time {time:?} must name the row its bytes landed on"
             );

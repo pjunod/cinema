@@ -1188,34 +1188,31 @@ pub(super) async fn measure_landing(
     program: &std::path::Path,
     probe: &LandingProbe,
     source: Option<(&crate::fragment_index_cluster::SourceFence, &MediaFile)>,
-    origin: &tokio::sync::OnceCell<f64>,
+    origin: &tokio::sync::OnceCell<LandingPacket>,
     timescale: u32,
     runtime_cache: &std::path::Path,
     cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<vodgen::LandingTime, String> {
-    let (landed, frame) =
-        run_landing_probe(program, &probe.args, source, runtime_cache, cancel).await?;
+    let landed = run_landing_probe(program, &probe.args, source, runtime_cache, cancel).await?;
     let origin = *origin
-        .get_or_try_init(|| async {
+        .get_or_try_init(|| {
             run_landing_probe(program, &probe.origin_args, source, runtime_cache, cancel)
-                .await
-                .map(|(pts, _)| pts)
         })
         .await?;
-    let seconds = landed - origin;
-    if !seconds.is_finite() || seconds < -frame {
-        return Err(format!(
-            "the probe landed before the film's first keyframe ({landed} s < {origin} s)"
-        ));
+    if landed.time_base != origin.time_base {
+        return Err("the seek changed the selected video packet time base".to_owned());
     }
-    if !(frame.is_finite() && frame > 0.0) {
+    if landed.duration == 0 {
         return Err("the landing packet has no duration to bound the match".to_owned());
     }
-    let ticks = |seconds: f64| (seconds.max(0.0) * f64::from(timescale)).round() as u64;
-    Ok(vodgen::LandingTime {
-        ticks: ticks(seconds),
-        frame_ticks: ticks(frame).max(1),
-    })
+    let delta = i128::from(landed.pts) - i128::from(origin.pts);
+    if delta < -i128::from(landed.duration) {
+        return Err("the probe landed before the film's first keyframe".to_owned());
+    }
+    vodgen::LandingTime::from_source_pts(delta, landed.duration, landed.time_base, timescale)
+        .ok_or_else(|| {
+            "the source landing time cannot be represented on the index clock".to_owned()
+        })
 }
 
 async fn run_landing_probe(
@@ -1224,7 +1221,7 @@ async fn run_landing_probe(
     source: Option<(&crate::fragment_index_cluster::SourceFence, &MediaFile)>,
     runtime_cache: &std::path::Path,
     cancel: Option<&tokio_util::sync::CancellationToken>,
-) -> Result<(f64, f64), String> {
+) -> Result<LandingPacket, String> {
     let reopened = match source {
         Some((source, file)) => Some(source.reopen(file).await?),
         None => None,
@@ -1250,10 +1247,17 @@ async fn run_landing_probe(
 /// A probe prints a handful of header lines and one packet line.
 const LANDING_PROBE_MAX_BYTES: u64 = 64 * 1024;
 
-/// The first packet's PTS and duration, in seconds, from a landing probe's
-/// `framecrc` output: `#tb 0: num/den`, then `stream, dts, pts, duration,
-/// size, crc` for the packet.
-pub(super) fn first_packet_time(framecrc: &str) -> Result<(f64, f64), String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LandingPacket {
+    pub(super) pts: i64,
+    pub(super) duration: u64,
+    pub(super) time_base: (u32, u32),
+}
+
+/// The first packet's PTS, duration and time base from the probe's
+/// `framecrc` output. The packet line is stream, DTS, PTS, duration, size,
+/// and checksum. A seek may synthesize DTS for reordered packets.
+pub(super) fn first_packet_time(framecrc: &str) -> Result<LandingPacket, String> {
     let mut time_base = None;
     for line in framecrc.lines() {
         if let Some(rest) = line.strip_prefix("#tb 0:") {
@@ -1263,16 +1267,16 @@ pub(super) fn first_packet_time(framecrc: &str) -> Result<(f64, f64), String> {
                 .ok_or_else(|| format!("unreadable time base {line:?}"))?;
             let num = num
                 .trim()
-                .parse::<f64>()
+                .parse::<u32>()
                 .map_err(|error| error.to_string())?;
             let den = den
                 .trim()
-                .parse::<f64>()
+                .parse::<u32>()
                 .map_err(|error| error.to_string())?;
-            if den <= 0.0 {
+            if num == 0 || den == 0 {
                 return Err(format!("unreadable time base {line:?}"));
             }
-            time_base = Some(num / den);
+            time_base = Some((num, den));
             continue;
         }
         if line.starts_with('#') || line.trim().is_empty() {
@@ -1285,7 +1289,13 @@ pub(super) fn first_packet_time(framecrc: &str) -> Result<(f64, f64), String> {
                 .and_then(|field| field.trim().parse::<i64>().ok())
                 .ok_or_else(|| format!("unreadable packet line {line:?}"))
         };
-        return Ok((field(2)? as f64 * time_base, field(3)? as f64 * time_base));
+        let duration =
+            u64::try_from(field(3)?).map_err(|_| format!("unreadable packet duration {line:?}"))?;
+        return Ok(LandingPacket {
+            pts: field(2)?,
+            duration,
+            time_base,
+        });
     }
     Err("the probe printed no video packet".to_owned())
 }

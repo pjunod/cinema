@@ -153,6 +153,7 @@ mod tests {
     fn row(dts: u64, bytes: u32, class: CutClass) -> IndexRow {
         IndexRow {
             dts,
+            first_cto: None,
             duration: 1_000,
             bytes,
             // Payload-only bytes are deliberately unlike canonical wire bytes.

@@ -1471,6 +1471,12 @@ fn pipeline_digest_for_transform(
     transform: Option<&str>,
 ) -> String {
     let mut args = plurx_core::transcode::copy_index_pipe_args(file, video);
+    if video.dolby_vision_refit().is_none() {
+        args.push(format!(
+            "{{plurx-copy-landing-clock:{}}}",
+            plurx_core::segplan::COPY_LANDING_CLOCK_REVISION
+        ));
+    }
     if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
         args.push(format!(
             "{{plurx-hdr10-index:{}}}",

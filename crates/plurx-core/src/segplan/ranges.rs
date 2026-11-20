@@ -335,6 +335,7 @@ mod tests {
     fn row(dts: u64) -> IndexRow {
         IndexRow {
             dts,
+            first_cto: None,
             duration: 10,
             bytes: 100,
             video_bytes: 80,
