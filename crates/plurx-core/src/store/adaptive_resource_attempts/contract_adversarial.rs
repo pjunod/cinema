@@ -16,7 +16,7 @@ fn ordinary(fixture: &AttemptFixture) -> MediaSessionActivation {
         owner_node_id: "ordinary-owner".into(),
         recipe_json: "{}".into(),
         response_json: "{}".into(),
-        publication_ready_at_ms: 0,
+        publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
         media_origin_ms: 0,
         now_ms: 10_000,
         lease_expires_at_ms: 30_000,
@@ -146,12 +146,7 @@ async fn simultaneous_winners_preserve_one_winner_and_all_cleanup_debt() {
 async fn initial_claim_rechecks_predecessor_epoch_and_desired_before_acquisition() {
     for_each_adaptive_backend(|store, _| async move {
         let mut fixture = AttemptFixture::new(store.as_ref()).await;
-        let incumbent = store
-            .activate_media_session(&ordinary(&fixture))
-            .await
-            .expect("ordinary activation")
-            .expect("incumbent")
-            .route;
+        let incumbent = activate_ordinary(store.as_ref(), &ordinary(&fixture)).await;
         assert!(
             store.claim_adaptive_attempt(&fixture.claim).await.is_err(),
             "missing expected predecessor"
@@ -212,12 +207,7 @@ async fn initial_claim_rechecks_predecessor_epoch_and_desired_before_acquisition
 async fn failed_desired_adoption_retains_provisional_lease_and_incumbent() {
     for_each_adaptive_backend(|store, _| async move {
         let mut fixture = AttemptFixture::new(store.as_ref()).await;
-        let incumbent = store
-            .activate_media_session(&ordinary(&fixture))
-            .await
-            .expect("ordinary")
-            .expect("incumbent")
-            .route;
+        let incumbent = activate_ordinary(store.as_ref(), &ordinary(&fixture)).await;
         fixture.claim.binding.expected_predecessor_incarnation_id =
             Some(Uuid::parse_str(&incumbent.incarnation_id).expect("UUID"));
         fixture.claim.binding.expected_predecessor_owner_epoch = Some(incumbent.owner_epoch);
@@ -773,12 +763,7 @@ async fn ready_staged_adoption(
     retry: bool,
 ) -> (AdaptiveAdoption, AdaptiveStagedAdoption, MediaSessionRoute) {
     let mut fixture = AttemptFixture::new(store).await;
-    let incumbent = store
-        .activate_media_session(&ordinary(&fixture))
-        .await
-        .expect("ordinary activation")
-        .expect("incumbent")
-        .route;
+    let incumbent = activate_ordinary(store, &ordinary(&fixture)).await;
     fixture.claim.binding.expected_predecessor_incarnation_id =
         Some(Uuid::parse_str(&incumbent.incarnation_id).expect("incumbent identity"));
     fixture.claim.binding.expected_predecessor_owner_epoch = Some(incumbent.owner_epoch);

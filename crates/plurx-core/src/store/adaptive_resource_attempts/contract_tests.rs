@@ -56,11 +56,23 @@ where
     .await;
 }
 
-async fn for_each_adaptive_strandable_backend<F, Fut>(mut contract: F)
+async fn for_each_adaptive_strandable_backend<F, Fut>(contract: F)
 where
     F: FnMut(Arc<dyn Store>, &'static str, Arc<StrandedFieldOrder>) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    for_each_adaptive_strandable_backend_with_source(false, contract).await;
+}
+
+async fn for_each_adaptive_strandable_backend_with_source<F, Fut>(
+    install_source: bool,
+    mut contract: F,
+) where
+    F: FnMut(Arc<dyn Store>, &'static str, Arc<StrandedFieldOrder>) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    #[cfg(not(feature = "hiqlite-contract-tests"))]
+    let _ = install_source;
     let directory = tempfile::tempdir().expect("strandable SQLite directory");
     let path = directory.path().join("plurx.db");
     let store = SqliteStore::open(&path).expect("strandable SQLite store");
@@ -73,6 +85,9 @@ where
     #[cfg(feature = "hiqlite-contract-tests")]
     with_adaptive_cluster(move |cluster| {
         Box::pin(async move {
+            if install_source {
+                cluster.install_source().await;
+            }
             let store = cluster.open_store().await;
             contract(
                 Arc::new(store),
@@ -83,6 +98,28 @@ where
         })
     })
     .await;
+}
+
+async fn activate_ordinary(
+    store: &dyn Store,
+    activation: &MediaSessionActivation,
+) -> MediaSessionRoute {
+    store
+        .activate_media_session(activation)
+        .await
+        .expect("ordinary activation")
+        .expect("original activation accepted");
+    store
+        .settle_media_session_activation(
+            activation,
+            plurx_core::domain::MediaSessionActivationSettlement::Confirm {
+                publication_ready_at_ms: 0,
+            },
+            activation.now_ms,
+        )
+        .await
+        .expect("confirm original ordinary activation")
+        .expect("same activated route")
 }
 
 struct AttemptFixture {
@@ -774,15 +811,10 @@ async fn adopted_terminal_settlement_keeps_live_winner_and_replays_its_exact_clo
         successor.owner_node_id = "successor-worker".into();
         successor.now_ms = 20_099;
         successor.lease_expires_at_ms = 25_000;
-        successor.publication_ready_at_ms = 0;
+        successor.publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED;
         successor.response_json =
             serde_json::json!({"session_id": &successor.session_id}).to_string();
-        let successor_route = store
-            .activate_media_session(&successor)
-            .await
-            .expect("activate a different current successor")
-            .expect("successor accepted")
-            .route;
+        let successor_route = activate_ordinary(store.as_ref(), &successor).await;
         let mut wrong = close.clone();
         wrong.worker.worker_instance_id = Uuid::new_v4();
         assert_eq!(
@@ -1291,7 +1323,7 @@ async fn adaptive_shared_source_mapping_waits_for_exact_close_and_preserves_lega
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
     use plurx_core::store::background_jobs_resources::{StorageDomainApply, StorageDomainMapping};
 
-    for_each_adaptive_strandable_backend(|store, _, raw| async move {
+    for_each_adaptive_strandable_backend_with_source(true, |store, _, raw| async move {
         let root = format!("/media/adaptive-{}", Uuid::new_v4());
         let library = store
             .create_library(&NewLibrary {
