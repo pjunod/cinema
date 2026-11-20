@@ -71,8 +71,13 @@ impl TranscodeManager {
             .map_err(|error| error.to_string())?;
         let _output = process::source_lifetime::register_daemon_file(&stdout, &mux)
             .map_err(|error| error.to_string())?;
-        let video =
-            super::rolling_copy_video_options(file, Some(probe), self.dv_strippable(), false, true);
+        let video = super::manager_start::rolling_copy_video_options(
+            file,
+            Some(probe),
+            self.dv_strippable(),
+            false,
+            true,
+        );
         let start = plurx_core::transcode::copy_pipe_args_with_audio_delivery(
             file,
             0.0,
@@ -653,7 +658,7 @@ impl NativeFelHead {
     /// late or mismatched head leaves the ordinary snapshot available on time.
     pub(super) fn stage_for_start(
         self: Arc<Self>,
-        session: Arc<RollingSession>,
+        session: Arc<Session>,
         attempt: u64,
         scratch_cap: Arc<AtomicI64>,
     ) {
@@ -773,7 +778,7 @@ impl NativeFelHead {
 
     async fn wait_for_ordinary_video(
         &self,
-        session: &RollingSession,
+        session: &Session,
         split: &copyseg::NativeSplitInventory,
         index: u64,
         attempt: u64,
