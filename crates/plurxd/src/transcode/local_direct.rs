@@ -10,10 +10,13 @@ use plurx_core::adaptive_resources::runtime::direct_source::{
 };
 use plurx_core::adaptive_resources::{ResourceVector, WorkloadDemand};
 use plurx_core::domain::MediaFile;
-use plurx_core::process::observation::Metric;
+use plurx_core::process::observation::{Metric, UnknownReason};
+use plurx_core::resource_observation::{
+    ServiceObservation, ServiceUnit, ServiceWindow, WorkPhase, WorkSample,
+};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -26,18 +29,20 @@ type SharedTicket = Arc<AsyncMutex<DirectSourceRetirementTicket>>;
 pub(crate) struct LocalDirectOwners {
     // Fixed inline controller slots do not grow or retain refundable heap.
     entries: Mutex<[Option<LocalDirectRecord>; MAX_LOCAL_DIRECT_OWNERS]>,
+    last_service_generation: AtomicU64,
 }
 impl Default for LocalDirectOwners {
     fn default() -> Self {
         Self {
             entries: Mutex::new(std::array::from_fn(|_| None)),
+            last_service_generation: AtomicU64::new(0),
         }
     }
 }
 
 enum LocalDirectRecord {
     Active {
-        _entry: Arc<LocalDirectEntry>,
+        entry: Arc<LocalDirectEntry>,
         worker: DirectSourceApplicationWorker,
         protection: crate::admission::ProtectedPlaybackLane,
     },
@@ -53,6 +58,14 @@ struct LocalDirectPayload {
     owner: Arc<DirectSourceOwner>,
     body_done: AtomicBool,
     changed: Notify,
+    service_generation: Option<u64>,
+    service: Mutex<DirectDeliveryService>,
+}
+
+#[derive(Default)]
+struct DirectDeliveryService {
+    emitted: u64,
+    window: ServiceWindow,
 }
 
 struct BudgetedWorker<F> {
@@ -68,6 +81,34 @@ impl<F: Future> Future for BudgetedWorker<F> {
 
 /// The original response owns this until its Body ends or is dropped.
 pub(crate) struct LocalDirectGuard(Arc<LocalDirectEntry>);
+impl LocalDirectGuard {
+    /// The sole Body calls this only when returning a verified charged chunk.
+    pub(crate) fn note_emitted(&self, bytes: u64, read_deadline: Instant) {
+        let Some(generation) = self.0.service_generation else {
+            return;
+        };
+        let Ok(mut service) = self.0.service.lock() else {
+            return;
+        };
+        let at = Instant::now();
+        let millis = |span: Duration| i64::try_from(span.as_millis()).unwrap_or(i64::MAX);
+        let slack_ms = read_deadline.checked_duration_since(at).map_or_else(
+            || -millis(at.saturating_duration_since(read_deadline)),
+            millis,
+        );
+        service.emitted = service.emitted.saturating_add(bytes);
+        let completed = service.emitted;
+        service.window.observe(WorkSample {
+            generation,
+            phase: WorkPhase::Producing,
+            unit: ServiceUnit::Bytes,
+            completed,
+            deadline_slack_ms: Metric::Known(slack_ms),
+            queued_bytes: Metric::Unknown(UnknownReason::InsufficientEvidence),
+            at,
+        });
+    }
+}
 impl Drop for LocalDirectGuard {
     fn drop(&mut self) {
         self.0.body_done.store(true, Ordering::Release);
@@ -189,6 +230,7 @@ impl TranscodeManager {
             .map_err(|_| LocalDirectFailure::Unavailable)?;
         // Claim an inline slot and keep its mutex through synchronous core
         // prepare and original task registration. No await separates them.
+        let observe_service = matches!(&binding, DirectSourceBinding::Local { .. });
         let (owner, entry) = {
             let mut entries = self.local_direct_owners.entries.lock().map_err(|_| ())?;
             let slot = entries.iter_mut().find(|slot| slot.is_none()).ok_or(())?;
@@ -210,19 +252,32 @@ impl TranscodeManager {
                 )
                 .map_err(|_| ())?;
             let owner = Arc::new(owner);
+            let service_generation = if observe_service {
+                self.local_direct_owners
+                    .last_service_generation
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+                        last.checked_add(1)
+                    })
+                    .ok()
+                    .map(|last| last + 1)
+            } else {
+                None
+            };
             let entry = Arc::new(
                 lease
                     .wrap(LocalDirectPayload {
                         owner: Arc::clone(&owner),
                         body_done: AtomicBool::new(false),
                         changed: Notify::new(),
+                        service_generation,
+                        service: Mutex::new(DirectDeliveryService::default()),
                     })
                     .expect("one original local direct payload"),
             );
             drop(lease);
             let worker = Self::spawn_original(Arc::clone(&entry));
             *slot = Some(LocalDirectRecord::Active {
-                _entry: Arc::clone(&entry),
+                entry: Arc::clone(&entry),
                 worker,
                 protection: {
                     protection.arm_physical();
@@ -291,6 +346,22 @@ impl TranscodeManager {
         ticket
             .finish_retirement(Instant::now() + Duration::from_secs(305))
             .await
+    }
+
+    /// Sample only active bodies from the existing fixed owner table.
+    /// Body exit removes its service row while original cleanup still owns R.
+    pub(crate) fn local_direct_service(&self, now: Instant) -> Option<Vec<ServiceObservation>> {
+        let entries = self.local_direct_owners.entries.try_lock().ok()?;
+        let mut observations = Vec::new();
+        for entry in entries.iter().flatten() {
+            if let LocalDirectRecord::Active { entry, .. } = entry {
+                let service = entry.service.try_lock().ok()?;
+                if !entry.body_done.load(Ordering::Acquire) {
+                    observations.extend(service.window.snapshot(now));
+                }
+            }
+        }
+        Some(observations)
     }
 
     #[cfg(test)]

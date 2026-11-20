@@ -327,7 +327,8 @@ fn copy_cleanup_holds(
     None
 }
 
-/// Node-local physical accounting only; absence/failure never means zero usage.
+/// Node-local ownership and service diagnostics for the selected playback paths.
+/// Absence or failure carries no physical accounting evidence.
 #[derive(Serialize)]
 pub struct ResourceOwnershipDto {
     pub state: &'static str,
@@ -337,6 +338,9 @@ pub struct ResourceOwnershipDto {
     pub history: Option<plurx_core::resource_history::HistoryDiagnostics>,
     pub planning: Option<plurx_core::adaptive_resources::runtime::PlanningOwnershipDiagnostics>,
     pub copy_cleanup: Option<Vec<CopyCleanupHoldDto>>,
+    /// Active admitted local Linux file bodies. Slack describes the original
+    /// per-read deadline. A service row carries no cleanup authority.
+    pub local_direct_service: Option<Vec<plurx_core::resource_observation::ServiceObservation>>,
 }
 impl ResourceOwnershipDto {
     fn read(state: &AppState) -> Self {
@@ -350,9 +354,14 @@ impl ResourceOwnershipDto {
                 history: None,
                 planning: None,
                 copy_cleanup: None,
+                local_direct_service: None,
             };
         };
         let unreconciled_custody = Some(runtime.has_unreconciled_custody());
+        #[cfg(target_os = "linux")]
+        let local_direct_service = state.transcode.local_direct_service(Instant::now());
+        #[cfg(not(target_os = "linux"))]
+        let local_direct_service = None;
         match runtime.accounting() {
             Ok(accounting) => Self {
                 state: "available",
@@ -362,6 +371,7 @@ impl ResourceOwnershipDto {
                 history: runtime.history_diagnostics(),
                 planning: runtime.planning_ownership_diagnostics(),
                 copy_cleanup: copy_cleanup_holds(runtime),
+                local_direct_service,
             },
             Err(_) => Self {
                 state: "accounting_unavailable",
@@ -371,6 +381,7 @@ impl ResourceOwnershipDto {
                 history: runtime.history_diagnostics(),
                 planning: runtime.planning_ownership_diagnostics(),
                 copy_cleanup: copy_cleanup_holds(runtime),
+                local_direct_service,
             },
         }
     }

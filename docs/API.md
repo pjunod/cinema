@@ -526,6 +526,12 @@ of never storing it.
 | DELETE | `/api/v1/activity/retained/{nonce}` | admin | Releases one retained rolling output this node holds |
 | DELETE | `/api/v1/activity/processes/{pid}` | admin | Kills one child process the Activity page lists |
 
+`GET /api/v1/system` may include `resource_ownership.local_direct_service`.
+It reports bytes emitted from verified ranges by active, admitted local Linux
+file bodies. Deadline slack refers to the original read deadline. `null` means
+observation is unavailable and `[]` means no active bodies were observed.
+Cleanup continues under the original owner independently of this diagnostic.
+
 ### 5.1 Settings
 
 `GET` builds its response from **one** snapshot read, not per-key reads: on

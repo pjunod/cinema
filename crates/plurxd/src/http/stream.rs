@@ -4117,8 +4117,10 @@ fn local_admitted_body(
             let next = offset
                 .checked_add(actual)
                 .ok_or_else(|| std::io::Error::other("direct offset overflow"))?;
+            let bytes = bytes::Bytes::from_owner(buffer);
+            guard.note_emitted(actual, deadline);
             Ok(Some((
-                bytes::Bytes::from_owner(buffer),
+                bytes,
                 (owner, read, guard, next, remaining - actual, transfer),
             )))
         },

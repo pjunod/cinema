@@ -350,3 +350,105 @@ async fn local_direct_original_worker_and_payload_reference_close_after_response
     );
     fixture.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_direct_service_counts_emitted_verified_ranges_and_skips_head_and_stale_reads() {
+    use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+    use futures_util::StreamExt;
+    use plurx_core::process::observation::{Metric, UnknownReason};
+    use plurx_core::resource_observation::ServiceUnit;
+
+    let fixture =
+        super::super::real_source_start_fixture_with(super::super::SourceFixtureMode::Direct, None)
+            .await;
+    let state = &fixture.state;
+    let file = state
+        .store
+        .playback_planning_snapshot(1, &crate::transcode::QUALITY_PLANNING_KEYS)
+        .await
+        .expect("assigned source snapshot")
+        .expect("real fixture file")
+        .file;
+    let mut headers = HeaderMap::new();
+    headers.insert(header::RANGE, HeaderValue::from_static("bytes=0-15"));
+
+    let request = |method: &'static Method| {
+        crate::http::stream::serve_authorized_file_range(state, 1, &file, &headers, method)
+    };
+    let observe = || {
+        state
+            .transcode
+            .local_direct_service(Instant::now())
+            .expect("direct service inventory available")
+    };
+
+    let head = request(&Method::HEAD).await.expect("actual direct HEAD");
+    assert!(head.status().is_success());
+    assert!(observe().is_empty());
+    drop(head);
+
+    let response = request(&Method::GET).await.expect("actual direct range");
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert!(observe().is_empty(), "headers emit no bytes");
+    let mut body = response.into_body().into_data_stream();
+    let bytes = body
+        .next()
+        .await
+        .expect("first emitted range")
+        .expect("verified bytes");
+    assert_eq!(bytes.len(), 16);
+    let rows = observe();
+    let [sample] = rows.as_slice() else {
+        panic!("one original active range observation");
+    };
+    assert_ne!(sample.generation, 0);
+    assert_eq!(sample.unit, ServiceUnit::Bytes);
+    assert_eq!(sample.completed, 16);
+    assert!(matches!(sample.deadline_slack_ms, Metric::Known(_)));
+    assert_eq!(
+        sample.queued_bytes,
+        Metric::Unknown(UnknownReason::InsufficientEvidence)
+    );
+    drop(body);
+    assert!(
+        observe().is_empty(),
+        "the last frame can outlive the observed body"
+    );
+    drop(bytes);
+
+    let stale = request(&Method::GET)
+        .await
+        .expect("open the original range before drift");
+    let changed = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&file.path)
+        .expect("change the exact opened fixture source");
+    changed
+        .set_len(file.size as u64 + 1)
+        .expect("change original inode inventory");
+    drop(changed);
+    let mut body = stale.into_body().into_data_stream();
+    assert!(body
+        .next()
+        .await
+        .expect("source drift is a body failure")
+        .is_err());
+    assert!(
+        observe().is_empty(),
+        "a failed original read emits no service"
+    );
+    drop(body);
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            state.transcode.fixture_drive_local_direct();
+            if state.transcode.fixture_local_direct_custody() == (0, 0) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("same original direct owners settle through their existing workers");
+    fixture.shutdown().await;
+}
