@@ -1,4 +1,4 @@
-name: Rust archive cache experiment
+name: Rust archive cache path comparison
 on:
   workflow_dispatch:
     inputs:
@@ -20,137 +20,6 @@ env:
   NEXTEST_SHA256: 1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4
 
 jobs:
-  prime:
-    if: inputs.phase == 'prime'
-    runs-on: [ci-nonvoter-compile-amd64, incus]
-    # The same private CI image as ci.yml's full Rust lane: Rust 1.97.1, the
-    # Jellyfin FFmpeg 8 build and the native libraries. Its digest is part of
-    # every crate's key through this file.
-    container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
-      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
-      credentials:
-        username: noirr
-        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
-    timeout-minutes: 120
-    steps:
-      - name: Verify effective nonvoter resource bounds
-        shell: sh
-        run: |
-          set -eu
-          cgroup_membership=/proc/self/cgroup
-          cgroup_mount=/sys/fs/cgroup
-          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
-          # VPN's net_cls may precede it on hybrid hosts and are ignored.
-          relative=
-          while IFS=: read -r hierarchy controllers path; do
-            if [ "$hierarchy" = 0 ]; then
-              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
-              relative=$path
-            fi
-          done < "$cgroup_membership"
-          case "$relative" in /*) ;; *) exit 1 ;; esac
-          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
-          cgroup_root="$cgroup_mount$relative"
-          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
-            name=${limit%%=*}
-            expected=${limit#*=}
-            actual="$(cat "$cgroup_root/$name")"
-            if [ "$actual" != "$expected" ]; then
-              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
-              exit 1
-            fi
-          done
-      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          ref: 9056e6f72379e18a23b2e58d1abdffd07cca5533
-      - name: Size Cargo parallelism from the container's limits
-        run: python3 scripts/ci-cargo-jobs >> "$GITHUB_ENV"
-      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
-      - uses: ./.github/actions/rust-native-deps
-        with:
-          desktop: "true"
-      - id: cargo-cache
-        uses: ./.github/actions/cargo-cache
-        with:
-          lane: rust-units
-      - name: Install the pinned cargo-nextest
-        run: |
-          set -euo pipefail
-          dir="$RUNNER_TEMP/nextest-$NEXTEST_VERSION"
-          mkdir -p "$dir"
-          curl -q --fail --location --proto '=https' --proto-redir '=https' --retry 3 \
-            --connect-timeout 20 --max-time 180 --max-filesize 33554432 \
-            --output "$dir/nextest.tar.gz" \
-            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz"
-          printf '%s  %s\n' "$NEXTEST_SHA256" "$dir/nextest.tar.gz" | sha256sum --check --status
-          tar -xzf "$dir/nextest.tar.gz" -C "$dir"
-          rm -- "$dir/nextest.tar.gz"
-          "$dir/cargo-nextest" nextest --version | grep -F "cargo-nextest $NEXTEST_VERSION"
-          echo "$dir" >> "$GITHUB_PATH"
-
-      - name: Prepare isolated compiler experiment
-        run: |
-          set -eu
-          test "$(rustc --version | cut -d' ' -f2)" = 1.97.1
-          git rev-parse HEAD
-          grep -m1 'model name' /proc/cpuinfo
-          mkdir /archive-ab
-          cd /archive-ab
-          curl -fsSL --retry 3 https://github.com/mozilla/sccache/releases/download/v0.12.0/sccache-v0.12.0-x86_64-unknown-linux-musl.tar.gz -o sccache.tar.gz
-          echo 'b0e89ead6899224a4ba2b90e9073bf1ce036d95bab30f3dc33c1e1468bc4ad44  sccache.tar.gz' | sha256sum -c -
-          tar -xzf sccache.tar.gz --strip-components=1 sccache-v0.12.0-x86_64-unknown-linux-musl/sccache
-          mkdir -p "$GITHUB_WORKSPACE/ab-receipt"
-          echo "BENCH_LOCAL_TARGET=$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_DIR=/archive-ab/target" >> "$GITHUB_ENV"
-          echo "SCCACHE_DIR=/archive-ab/compiler-objects" >> "$GITHUB_ENV"
-          echo "SCCACHE_CACHE_SIZE=8G" >> "$GITHUB_ENV"
-          echo "SCCACHE_IDLE_TIMEOUT=0" >> "$GITHUB_ENV"
-          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
-          echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
-
-      - name: Build prime archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          receipt="$GITHUB_WORKSPACE/ab-receipt"
-          test ! -e "$CARGO_TARGET_DIR"
-          mkdir "$CARGO_TARGET_DIR"
-          cp -a --reflink=auto "$BENCH_LOCAL_TARGET/." "$CARGO_TARGET_DIR/"
-          export RUSTC_WRAPPER=/archive-ab/sccache
-          cat /sys/fs/cgroup/cpu.stat > "$receipt/prime.cpu.before"
-          start=$(date +%s.%N)
-          CARGO_LOG=cargo::core::compiler::fingerprint=info cargo nextest archive --locked --workspace --exclude plurx-cluster-check -E 'package(plurxd)' --zstd-level 3 --archive-file /archive-ab/prime.tar.zst > "$receipt/prime.log" 2>&1 || { tail -50 "$receipt/prime.log"; exit 1; }
-          end=$(date +%s.%N)
-          echo "prime $start $end" | tee "$receipt/prime.times"
-          cat /sys/fs/cgroup/cpu.stat > "$receipt/prime.cpu.after"
-          cargo nextest list --archive-file /archive-ab/prime.tar.zst --message-format json > "$receipt/prime-list.json"
-          grep -E 'Finished .test. profile|Archived [0-9]+' "$receipt/prime.log"
-          rm -rf -- /archive-ab/target
-
-      - name: Package compiler outputs
-        run: |
-          /archive-ab/sccache --show-stats | tee "$GITHUB_WORKSPACE/ab-receipt/prime.stats"
-          /archive-ab/sccache --stop-server
-          date +%s.%N > "$GITHUB_WORKSPACE/ab-receipt/publish-start"
-          tar -C /archive-ab -cf /archive-ab/compiler-objects.tar compiler-objects
-          stat -c %s /archive-ab/compiler-objects.tar
-      - name: Save complete immutable cache on priming runner
-        run: |
-          set -eu
-          dest="$RUNNER_TOOL_CACHE/archive-ab-E-F85179CD21"
-          mkdir -p "$dest"
-          cp /archive-ab/compiler-objects.tar "$dest/cache-$GITHUB_RUN_ID.tar"
-          sha256sum "$dest/cache-$GITHUB_RUN_ID.tar" | tee "$GITHUB_WORKSPACE/ab-receipt/prime.sha256"
-      - run: date +%s.%N > "$GITHUB_WORKSPACE/ab-receipt/publish-end"
-
-      - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
-        if: always()
-        with:
-          name: prime-receipt
-          path: ab-receipt/
-          retention-days: 3
   compare:
     if: inputs.phase == 'compare'
     runs-on: [ci-nonvoter-compile-amd64]
@@ -163,7 +32,7 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
-    timeout-minutes: 120
+    timeout-minutes: 300
     steps:
       - name: Confirm physically distinct receiving runner
         run: grep -q 'Ultra 9 185H' /proc/cpuinfo
@@ -197,6 +66,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 2
           ref: 60443f341dc9ca3a743737d845eae0799803608d
       - name: Size Cargo parallelism from the container's limits
         run: python3 scripts/ci-cargo-jobs >> "$GITHUB_ENV"
@@ -235,7 +105,15 @@ jobs:
           echo 'b0e89ead6899224a4ba2b90e9073bf1ce036d95bab30f3dc33c1e1468bc4ad44  sccache.tar.gz' | sha256sum -c -
           tar -xzf sccache.tar.gz --strip-components=1 sccache-v0.12.0-x86_64-unknown-linux-musl/sccache
           mkdir -p "$GITHUB_WORKSPACE/ab-receipt"
-          echo "BENCH_LOCAL_TARGET=$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
+          donor="/opt/forgejo-plurx-heavy/tool-cache/plurx-ci/cargo/gha-lab1-plurx-heavy-01-uid0/rust-1.97.1"
+          mkdir -p "$donor/cargo-home" "$donor/rust-units/target"
+          # Reproduce the donor layout inside this disposable container. Only the
+          # registry and compiled files are copied, so no login material is needed.
+          date +%s.%N > "$GITHUB_WORKSPACE/ab-receipt/prep-start"
+          cp -a --reflink=auto "$CARGO_HOME/registry" "$donor/cargo-home/"
+          cp -a --reflink=auto "$CARGO_TARGET_DIR/." "$donor/rust-units/target/"
+          echo "CARGO_HOME=$donor/cargo-home" >> "$GITHUB_ENV"
+          echo "BENCH_LOCAL_TARGET=$donor/rust-units/target" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_DIR=/archive-ab/target" >> "$GITHUB_ENV"
           echo "SCCACHE_DIR=/archive-ab/compiler-objects" >> "$GITHUB_ENV"
           echo "SCCACHE_CACHE_SIZE=8G" >> "$GITHUB_ENV"
@@ -243,11 +121,47 @@ jobs:
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
           echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
 
+      - name: Warm the receiving runner at the shared path
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$GITHUB_WORKSPACE/ab-receipt"
+          child=$(git rev-parse HEAD)
+          test "$child" = 60443f341dc9ca3a743737d845eae0799803608d
+          git checkout --detach 9056e6f72379e18a23b2e58d1abdffd07cca5533
+          date +%s.%N > "$receipt/warm-start"
+          CARGO_TARGET_DIR="$BENCH_LOCAL_TARGET" cargo nextest archive --locked --workspace --exclude plurx-cluster-check -E 'package(plurxd)' --zstd-level 3 --archive-file /archive-ab/warm.tar.zst > "$receipt/warm.log" 2>&1 || { tail -30 "$receipt/warm.log"; exit 1; }
+          date +%s.%N > "$receipt/warm-end"
+          git checkout --detach "$child"
+          # A CI checkout materializes fresh files. Both measured builds use
+          # this exact checkout and independent copies of the warm parent target.
+          git checkout-index --force --all
+          test -z "$(git status --porcelain --untracked-files=no)"
+          date +%s.%N > "$receipt/prep-end"
+      - name: Build control archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$GITHUB_WORKSPACE/ab-receipt"
+          test ! -e "$CARGO_TARGET_DIR"
+          mkdir "$CARGO_TARGET_DIR"
+          cp -a --reflink=auto "$BENCH_LOCAL_TARGET/." "$CARGO_TARGET_DIR/"
+          unset RUSTC_WRAPPER
+          cat /sys/fs/cgroup/cpu.stat > "$receipt/control.cpu.before"
+          start=$(date +%s.%N)
+          CARGO_LOG=cargo::core::compiler::fingerprint=info cargo nextest archive --locked --workspace --exclude plurx-cluster-check -E 'package(plurxd)' --zstd-level 3 --archive-file /archive-ab/control.tar.zst > "$receipt/control.log" 2>&1 || { tail -50 "$receipt/control.log"; exit 1; }
+          end=$(date +%s.%N)
+          echo "control $start $end" | tee "$receipt/control.times"
+          cat /sys/fs/cgroup/cpu.stat > "$receipt/control.cpu.after"
+          cargo nextest list --archive-file /archive-ab/control.tar.zst --message-format json > "$receipt/control-list.json"
+          grep -E 'Finished .test. profile|Archived [0-9]+' "$receipt/control.log"
+          rm -rf -- /archive-ab/target
+
       - run: date +%s.%N > "$GITHUB_WORKSPACE/ab-receipt/restore-start"
       - name: Verify and restore complete parent cache
         run: |
           set -eu
-          cd "$RUNNER_TOOL_CACHE/archive-ab-E-F85179CD21"
+          cd "$RUNNER_TOOL_CACHE/archive-ab-paths-20261120"
           sha256sum -c parent.sha256
           tar -C /archive-ab -xf parent.tar
           date +%s.%N > "$GITHUB_WORKSPACE/ab-receipt/restore-end"
@@ -268,25 +182,6 @@ jobs:
           cat /sys/fs/cgroup/cpu.stat > "$receipt/shared.cpu.after"
           cargo nextest list --archive-file /archive-ab/shared.tar.zst --message-format json > "$receipt/shared-list.json"
           grep -E 'Finished .test. profile|Archived [0-9]+' "$receipt/shared.log"
-          rm -rf -- /archive-ab/target
-
-      - name: Build control archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          receipt="$GITHUB_WORKSPACE/ab-receipt"
-          test ! -e "$CARGO_TARGET_DIR"
-          mkdir "$CARGO_TARGET_DIR"
-          cp -a --reflink=auto "$BENCH_LOCAL_TARGET/." "$CARGO_TARGET_DIR/"
-          unset RUSTC_WRAPPER
-          cat /sys/fs/cgroup/cpu.stat > "$receipt/control.cpu.before"
-          start=$(date +%s.%N)
-          CARGO_LOG=cargo::core::compiler::fingerprint=info cargo nextest archive --locked --workspace --exclude plurx-cluster-check -E 'package(plurxd)' --zstd-level 3 --archive-file /archive-ab/control.tar.zst > "$receipt/control.log" 2>&1 || { tail -50 "$receipt/control.log"; exit 1; }
-          end=$(date +%s.%N)
-          echo "control $start $end" | tee "$receipt/control.times"
-          cat /sys/fs/cgroup/cpu.stat > "$receipt/control.cpu.after"
-          cargo nextest list --archive-file /archive-ab/control.tar.zst --message-format json > "$receipt/control-list.json"
-          grep -E 'Finished .test. profile|Archived [0-9]+' "$receipt/control.log"
           rm -rf -- /archive-ab/target
 
       - name: Verify identical test inventory and save cache statistics
