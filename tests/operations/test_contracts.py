@@ -4974,13 +4974,16 @@ assert.equal(context.ACT_TIMER, null);
         seen_ephemeral = set()
         for path in workflow_paths:
             workflow = read(path)
+            ephemeral_declarations = []
             parsed: list[tuple[str, ...]] = []
             for name, block in workflow_job_blocks(path).items():
                 profile = ephemeral.get((path, name))
                 if profile:
                     seen_ephemeral.add((path, name))
+                    declaration = f"[{profile['label']}]"
                     self.assertEqual(re.findall(r"(?m)^ +runs-on: (.+)$", block),
-                                     [f"[{profile['label']}]"])
+                                     [declaration])
+                    ephemeral_declarations.append(declaration)
                     self.assertRegex(workflow, r"(?m)^on:\n  workflow_dispatch:\n\njobs:\n")
                     expected = ("github.repository == 'noirr/plurx' && github.ref == 'refs/heads/main'"
                                 f" && github.sha == vars.{profile['commit_variable']}")
@@ -5000,15 +5003,6 @@ assert.equal(context.ACT_TIMER, null);
                             "Give a runner the label before a workflow asks "
                             "for it.",
                         )
-                if profile or path in GITHUB_ONLY_WORKFLOWS:
-                    continue
-                for declaration in re.findall(r"(?m)^ +runs-on: (.+)$", block):
-                    self.assertTrue(
-                        declaration.startswith("[self-hosted, ")
-                        or declaration == "${{ fromJSON(matrix.runs_on) }}"
-                        or bool(self_hosted_label_sets("    runs-on: " + declaration + "\n")),
-                        f"{path} has a non-local runner declaration: {declaration}",
-                    )
             # The per-job parse above has to see every self-hosted selection in
             # the file. A `runs-on` spelling it cannot read would otherwise be
             # quietly exempt, which is the same "nothing was looking" failure
@@ -5019,10 +5013,38 @@ assert.equal(context.ACT_TIMER, null);
                 f"{path} selects a self-hosted runner in a shape this test "
                 "cannot parse; teach self_hosted_label_sets to read it",
             )
+            if path in GITHUB_ONLY_WORKFLOWS:
+                continue
+            for declaration in re.findall(r"(?m)^ +runs-on: (.+)$", workflow):
+                if declaration in ephemeral_declarations:
+                    ephemeral_declarations.remove(declaration)
+                    continue
+                self.assertTrue(
+                    declaration.startswith("[self-hosted, ")
+                    or declaration == "${{ fromJSON(matrix.runs_on) }}"
+                    or bool(self_hosted_label_sets("    runs-on: " + declaration + "\n")),
+                    f"{path} has a non-local runner declaration: {declaration}",
+                )
         # Guard against the parser silently matching nothing at all and the
         # loop above passing vacuously.
         self.assertGreater(selections, 20)
         self.assertEqual(seen_ephemeral, set(ephemeral))
+
+    def test_an_ephemeral_selector_cannot_be_reused_by_a_quoted_job(self):
+        profile = next(profile for profile in runner_fleet()["ephemeral_jobs"]
+                       if profile["job"] == "validation-markers")
+        original_read = read
+
+        def add_job(path):
+            workflow = original_read(path)
+            if path == profile["workflow"]:
+                sibling = f'\n  "unauthorized":\n    runs-on: [{profile["label"]}]\n'
+                workflow = workflow.replace("\njobs:\n", "\njobs:" + sibling, 1)
+            return workflow
+
+        with mock.patch(f"{__name__}.read", side_effect=add_job):
+            with self.assertRaisesRegex(AssertionError, "has a non-local runner declaration"):
+                self.test_every_self_hosted_runs_on_is_satisfiable_by_a_rostered_runner()
 
     def test_the_runner_roster_keeps_heavy_cluster_lanes_off_shared_hosts(self):
         # The roster is only worth what its own shape guarantees. `ci-store`
