@@ -2412,6 +2412,7 @@ impl HiqliteAuthStore {
         store.install_subtitle_text_translation_schema(None).await?;
         store.install_shared_caption_schema(None).await?;
         store.install_library_annotations_schema(None).await?;
+        store.install_library_curation_schema(None).await?;
         store.install_dv_title_jobs_schema(None).await?;
         store.install_playback_handoffs_schema(None).await?;
         store.install_delegation_schema(None).await?;
@@ -2626,6 +2627,7 @@ impl HiqliteAuthStore {
                         .await?;
                     self.install_shared_caption_schema(admission).await?;
                     self.install_library_annotations_schema(admission).await?;
+                    self.install_library_curation_schema(admission).await?;
                     self.install_dv_title_jobs_schema(admission).await?;
                     self.install_playback_handoffs_schema(admission).await?;
                     self.install_delegation_schema(admission).await?;
@@ -5369,6 +5371,63 @@ impl HiqliteAuthStore {
         ))
     }
 
+    async fn library_curation_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed curation shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "library_curation_schema_version",
+                super::library_curation_schema::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::library_curation_schema::version(&shape)?;
+        if version == Some(1) {
+            let rows = self
+                .client()
+                // authority: admission must observe the committed marker paired with the shape.
+                .query_consistent_map::<CountRow, _>(
+                    "library_curation_schema_version",
+                    super::library_curation_schema::MARKER_SQL,
+                    params!(),
+                )
+                .await?;
+            if !matches!(rows.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration(
+                    "library curation schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+
+    async fn install_library_curation_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.library_curation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::library_curation_schema::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.library_curation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "library curation schema install did not settle".into(),
+        ))
+    }
+
     async fn invitation_schema_version(&self) -> Result<Option<i64>, StoreError> {
         let rows = self
             .client()
@@ -6235,6 +6294,18 @@ impl HiqliteAuthStore {
                 "DELETE FROM library_annotations_lists".to_owned(),
                 params!(),
             ),
+            (
+                "DELETE FROM library_curation_item_tags".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM library_curation_rejections".to_owned(),
+                params!(),
+            ),
+            ("DELETE FROM library_curation_rows".to_owned(), params!()),
+            ("DELETE FROM library_curation_home".to_owned(), params!()),
+            ("DELETE FROM library_curation_grants".to_owned(), params!()),
+            ("DELETE FROM library_curation_tags".to_owned(), params!()),
             (
                 "DELETE FROM library_annotations_ratings".to_owned(),
                 params!(),

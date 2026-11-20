@@ -382,13 +382,16 @@ private struct HomeDashboard: View {
     private var remoteKeys: [String] {
         // Shelf ids are stable names, not positions: the list rows sit after
         // Next Up on screen but keep their own ids so Coming Soon stays shelf 3.
-        let shelves: [(Int, [Item])] = [(0, HomeLayoutPolicy.continueWatchingShelfItems(model.hubs.continueWatching ?? [])),
-                                       (1, model.hubs.nextUp ?? []), (4, model.watchlist), (5, model.favorites),
-                                       (2, model.hubs.recentlyAdded ?? [])]
+        let visible = Set(HomeSectionOrder.sections(rows: model.homeRows))
+        let all: [(Int, HomeSection, [Item])] = [
+            (0, .continueWatching, HomeLayoutPolicy.continueWatchingShelfItems(model.hubs.continueWatching ?? [])),
+            (1, .nextUp, model.hubs.nextUp ?? []), (4, .watchlist, model.watchlist), (5, .favorites, model.favorites),
+            (2, .recentlyAdded, model.hubs.recentlyAdded ?? [])]
+        let shelves: [(Int, [Item])] = all.filter { visible.contains($0.1) }.map { ($0.0, $0.2) }
         let featureKeys = theaterFeature == nil ? [] : ["home-feature:play", "home-feature:details"]
         return featureKeys + (model.homeError == nil ? [] : ["home:retry"]) + shelves.flatMap { index, items in
             items.map { "shelf:\(index):item:\($0.id)" }
-        } + model.comingSoon.filter { $0.itemId != nil }.map { "shelf:3:comingsoon:" + $0.id }
+        } + (visible.contains(.comingSoon) ? model.comingSoon.filter { $0.itemId != nil }.map { "shelf:3:comingsoon:" + $0.id } : [])
     }
     private func updateRemoteOrder() { remoteNavigation.setOrder(scope: "home", keys: remoteKeys, columns: 1) }
 
@@ -431,41 +434,9 @@ private struct HomeDashboard: View {
                 .padding(.bottom, 12)
         }
 
-        MediaRow(
-            title: "Continue Watching",
-            remoteShelf: "shelf:0",
-            items: continueWatchingItems,
-            style: .landscape,
-            landscapeCopyStyle: HomeLayoutPolicy.continueWatchingCopyStyle
-        )
-        .id("shelf:0")
-        MediaRow(
-            title: "Next Up",
-            remoteShelf: "shelf:1",
-            items: model.hubs.nextUp ?? [],
-            style: .landscape
-        )
-        .id("shelf:1")
-        MediaRow(
-            title: "Watchlist",
-            remoteShelf: "shelf:4",
-            items: model.watchlist
-        )
-        .id("shelf:4")
-        MediaRow(
-            title: "Favorites",
-            remoteShelf: "shelf:5",
-            items: model.favorites
-        )
-        .id("shelf:5")
-        MediaRow(
-            title: "Recently Added",
-            remoteShelf: "shelf:2",
-            items: model.hubs.recentlyAdded ?? []
-        )
-        .id("shelf:2")
-        ComingSoonRow(entries: model.comingSoon)
-            .id("shelf:3")
+        ForEach(HomeSectionOrder.sections(rows: model.homeRows), id: \.self) { section in
+            homeSection(section)
+        }
 
         if featured == nil,
            (model.hubs.nextUp ?? []).isEmpty,
@@ -477,6 +448,41 @@ private struct HomeDashboard: View {
             )
             .frame(maxWidth: .infinity)
             .padding(.top, 80)
+        }
+    }
+
+    @ViewBuilder
+    private func homeSection(_ section: HomeSection) -> some View {
+        switch section {
+        case .continueWatching:
+            MediaRow(
+                title: "Continue Watching",
+                remoteShelf: "shelf:0",
+                items: continueWatchingItems,
+                style: .landscape,
+                landscapeCopyStyle: HomeLayoutPolicy.continueWatchingCopyStyle
+            )
+            .id("shelf:0")
+        case .nextUp:
+            MediaRow(title: "Next Up", remoteShelf: "shelf:1", items: model.hubs.nextUp ?? [], style: .landscape)
+                .id("shelf:1")
+        case .watchlist:
+            MediaRow(title: "Watchlist", remoteShelf: "shelf:4", items: model.watchlist)
+                .id("shelf:4")
+        case .favorites:
+            MediaRow(title: "Favorites", remoteShelf: "shelf:5", items: model.favorites)
+                .id("shelf:5")
+        case .recentlyAdded:
+            MediaRow(title: "Recently Added", remoteShelf: "shelf:2", items: model.hubs.recentlyAdded ?? [])
+                .id("shelf:2")
+        case .comingSoon:
+            ComingSoonRow(entries: model.comingSoon)
+                .id("shelf:3")
+        case .row(let id):
+            if let body = model.homeRows?.rows[String(id)] {
+                CustomRowRail(rowId: id, body_: body)
+                    .id("row:\(id)")
+            }
         }
     }
 

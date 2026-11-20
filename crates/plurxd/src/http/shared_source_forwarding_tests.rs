@@ -89,7 +89,7 @@ async fn actual_nonowner_forwarding(
         .await
         .expect("worker bind");
     let worker_address = worker_listener.local_addr().expect("worker address");
-    let worker = real_source_start_fixture_at(worker_listener, fixture_body_budget).await;
+    let mut worker = real_source_start_fixture_at(worker_listener, fixture_body_budget).await;
     // Exercise both actual node and sharing routes with the strict sharing
     // fallback once; the ordinary web-shell fallback is irrelevant here.
     let worker_router = super::super::router((*worker.state).clone())
@@ -265,6 +265,9 @@ async fn actual_nonowner_forwarding(
         worker.reference.item_id.as_str(),
         worker.reference.file_id.as_str()
     );
+    // Both real voters and the worker's placement are established above.
+    // Keep the worker roster stable through the cold Start and rejoin.
+    worker.keep_fixture_membership_stable().await;
     if clocked {
         // The owner cannot publish while its software capacity is held.
         let hold = worker

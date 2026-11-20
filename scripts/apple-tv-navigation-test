@@ -17,6 +17,10 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from validation.apple_simulator_runtime import current_runtime
+
 REQUIRED = [
     "TVNavigationTests/testViewModalOwnsFocusAndBackRestoresOpener416",
     "TVNavigationTests/testViewModalOwnsFocusAndBackRestoresOpener5000",
@@ -145,7 +149,7 @@ def main():
     parser.add_argument("--only-testing", action="append", default=[],
                         help="Focused development run; never a complete qualification")
     parser.add_argument("--derived-data", type=Path, help="Reusable isolated build cache")
-    parser.add_argument("--runtime", default="com.apple.CoreSimulator.SimRuntime.tvOS-26-5")
+    parser.add_argument("--runtime", help="Override the active SDK runtime for a local run")
     options = parser.parse_args()
     if (len(options.only_testing) != len(set(options.only_testing))
             or any(test not in REQUIRED for test in options.only_testing)):
@@ -169,8 +173,9 @@ def main():
                "status": "failed", "qualification": False, "coverage_scope": "Native library, root, details, settings, DVR, reporting and playback journeys; physical accessibility and lifecycle acceptance separate",
                "result_bundle": str(output / "navigation.xcresult")}
     if not selected:
+        runtime = options.runtime or current_runtime("tvOS")
         receipt["xcode"] = run("xcodebuild", "-version", capture_output=True).stdout.strip()
-        receipt["runtime"] = options.runtime
+        receipt["runtime"] = runtime
         end_sha, end_dirty, end_hash = source_snapshot()
         receipt["finished_source"] = {"sha": end_sha, "dirty": end_dirty, "tree_sha256": end_hash}
         receipt["source_unchanged"] = (end_sha, end_dirty, end_hash) == (sha, dirty, source_hash)
@@ -183,12 +188,13 @@ def main():
         return 0 if receipt["status"] == "passed" else 1
     device = None
     try:
+        runtime = options.runtime or current_runtime("tvOS")
         receipt["xcode"] = run("xcodebuild", "-version", capture_output=True).stdout.strip()
+        receipt["runtime"] = runtime
         device = run("xcrun", "simctl", "create", "Plurx navigation isolated",
                      "com.apple.CoreSimulator.SimDeviceType.Apple-TV-4K-3rd-generation-4K",
-                     options.runtime, capture_output=True).stdout.strip()
+                     runtime, capture_output=True).stdout.strip()
         receipt["simulator_udid"] = device
-        receipt["runtime"] = options.runtime
         run("xcrun", "simctl", "boot", device)
         run("xcrun", "simctl", "bootstatus", device, "-b")
         run("xcodegen", "generate", "--spec", "clients/apple/project.yml")
@@ -288,7 +294,7 @@ def main():
         (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     if plan_path and not receipt["native_suite_complete"]:
         receipt["status"] = "failed"
-        receipt["error"] = 'Native resume did not cover every required journey'
+        receipt.setdefault("error", 'Native resume did not cover every required journey')
         (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(output / "receipt.json")
     return 0 if receipt["status"] == "passed" else 1

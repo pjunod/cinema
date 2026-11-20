@@ -172,32 +172,29 @@ final class SharedProtocolFixtureTests: XCTestCase {
         XCTAssertNoThrow(try wholeTitleStart.bindInitial(context, request: request(rangeCapable: false)))
 
         let mutations = try XCTUnwrap(start["mutations"] as? [[String: Any]]).filter(clientLayer)
-        let boundedRequest = request()
-        let boundedRange = boundedRequest.caps?.transports.contains(SharedPlaybackTimeline.capability) == true
+        let rangedRequest = request()
+        let boundedRange = rangedRequest.caps?.transports.contains(SharedPlaybackTimeline.capability) == true
         XCTAssertEqual(mutations.count, 16)
         for row in mutations {
             let id = try XCTUnwrap(row["id"] as? String)
-            let wire = mutate(wholeTitle, path: row["path"] as! [String], row: substituted(row) as! [String: Any])
-            let bytes = try JSONSerialization.data(withJSONObject: wire)
+            let path = try XCTUnwrap(row["path"] as? [String])
+            let mutation = try XCTUnwrap(substituted(row) as? [String: Any])
+            let wire = mutate(base, path: path, row: mutation)
+            let result = try? SharedStart.decode(JSONSerialization.data(withJSONObject: wire)).bindInitial(context, request: rangedRequest)
+            let expected = (boundedRange ? row["bounded_range_expected"] as? String : nil) ?? (row["expected"] as? String)
+            XCTAssertEqual(result != nil, expected == "accepted", id)
+
+            let wholeTitleWire = mutate(wholeTitle, path: path, row: mutation)
+            let bytes = try JSONSerialization.data(withJSONObject: wholeTitleWire)
             let rangeCapable = id == "negative-media-origin"
             if rangeCapable {
                 XCTAssertThrowsError(try SharedStart.decode(bytes).bindInitial(context, request: request(rangeCapable: false)))
             }
-            let result = try? SharedStart.decode(bytes).bindInitial(context, request: request(rangeCapable: rangeCapable))
-            XCTAssertEqual(result != nil, row["expected"] as? String == "accepted", id)
-
-            let boundedWire = mutate(base, path: row["path"] as! [String], row: substituted(row) as! [String: Any])
-            let boundedResult = try? SharedStart.decode(JSONSerialization.data(withJSONObject: boundedWire)).bindInitial(context, request: boundedRequest)
-            let expected = (boundedRange ? row["bounded_range_expected"] as? String : nil) ?? (row["expected"] as? String)
-            XCTAssertEqual(boundedResult != nil, expected == "accepted", row["id"] as! String)
+            let wholeTitleResult = try? SharedStart.decode(bytes).bindInitial(context, request: request(rangeCapable: rangeCapable))
+            XCTAssertEqual(wholeTitleResult != nil, row["expected"] as? String == "accepted", id)
         }
-        var unadvertised = boundedRequest
-        unadvertised.caps = nil
-        var whole = base
-        whole["media_origin_ms"] = 0
-        XCTAssertNoThrow(try SharedStart.decode(JSONSerialization.data(withJSONObject: whole)).bindInitial(context, request: unadvertised))
-        whole["vod"] = false
-        XCTAssertThrowsError(try SharedStart.decode(JSONSerialization.data(withJSONObject: whole)).bindInitial(context, request: unadvertised))
+        wholeTitle["vod"] = false
+        XCTAssertThrowsError(try SharedStart.decode(JSONSerialization.data(withJSONObject: wholeTitle)).bindInitial(context, request: request(rangeCapable: false)))
     }
 
     func testDirectStartPublicReplyMimesAndClientMutations() async throws {

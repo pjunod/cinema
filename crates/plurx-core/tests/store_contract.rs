@@ -640,6 +640,30 @@ const ANNOTATION_METHODS: &[&str] = &[
     "listed_items",
     "items_on_list",
 ];
+const CURATION_METHODS: &[&str] = &[
+    "user_grants",
+    "set_user_grant",
+    "visible_tags",
+    "curation_tag",
+    "create_tag",
+    "update_tag",
+    "delete_tag",
+    "merge_tags",
+    "item_tag_ids",
+    "set_tag_members",
+    "rule_items",
+    "tag_suggestions",
+    "set_suggestion_rejections",
+    "rejected_items",
+    "visible_rows",
+    "curation_row",
+    "rows_naming_tag",
+    "create_row",
+    "update_row",
+    "delete_row",
+    "home_layout",
+    "put_home_layout",
+];
 const TRAKT_METHODS: &[&str] = &[
     "get_trakt_auth",
     "list_trakt_auth",
@@ -13049,6 +13073,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
     }
     for scenario in [
         "source-service-epoch",
+        "custody-retention-shape",
         "translation-job",
         "translation-data",
         "translation-shape",
@@ -13070,7 +13095,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
             "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
-            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,5)".to_owned()),
+            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,6)".to_owned()),
             "translation-marker" => ("DELETE FROM subtitle_translation_schema".to_owned(), "INSERT INTO subtitle_translation_schema VALUES(1,1)".to_owned()),
             "text-marker" => ("DELETE FROM subtitle_text_translation_schema".to_owned(), "INSERT INTO subtitle_text_translation_schema VALUES(1,1)".to_owned()),
             "caption-marker" => ("DELETE FROM shared_caption_schema".to_owned(), "INSERT INTO shared_caption_schema VALUES(1,1)".to_owned()),
@@ -13078,8 +13103,12 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
             "unowned-text-index" => ("CREATE INDEX unexpected_text_fixture_index ON subtitle_text_translation_cues(cue_index)".to_owned(), "DROP INDEX unexpected_text_fixture_index".to_owned()),
             "unowned-managed-index" => ("CREATE INDEX unexpected_managed_fixture_index ON subtitle_model_receipts(model_id)".to_owned(), "DROP INDEX unexpected_managed_fixture_index".to_owned()),
             "text-cue" => ("INSERT INTO subtitle_text_translation_cues VALUES('fixture-tail-data',printf('%064d',0),0,printf('%064d',0),0,1,'{}',0)".to_owned(), "DELETE FROM subtitle_text_translation_cues WHERE job_id='fixture-tail-data'".to_owned()),
-            "text-shape" | "caption-shape" => {
-                let index = if scenario == "text-shape" {"subtitle_text_translation_recipe"} else {"shared_caption_read_expiry"};
+            "custody-retention-shape" | "text-shape" | "caption-shape" => {
+                let index = match scenario {
+                    "custody-retention-shape" => "background_source_custody_owner_work",
+                    "text-shape" => "subtitle_text_translation_recipe",
+                    _ => "shared_caption_read_expiry",
+                };
                 let mut rows = client.query_consistent("SELECT sql FROM sqlite_master WHERE name=$1", hiqlite::params!(index)).await.expect("published tail index");
                 assert_eq!(rows.len(), 1);
                 (format!("DROP INDEX {index}"), rows[0].get::<String>("sql"))
@@ -13135,8 +13164,8 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
 }
 
 /// Review #1405 (4): a replicated cluster at managed v4 (the v125 release)
-/// upgrades to v5 on bootstrap — the exact v5 view and marker, with its
-/// managed receipts kept — and a later bootstrap is a no-op.
+/// passes through v5 on bootstrap and reaches the exact current v6 view
+/// and marker, with managed receipts kept. Later bootstrap is a no-op.
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_managed_v4_upgrades_to_v5_and_a_restart_is_a_no_op() {
@@ -13152,12 +13181,15 @@ async fn replicated_managed_v4_upgrades_to_v5_and_a_restart_is_a_no_op() {
     )
     .await
     .expect("managed upgrade client");
-    let telemetry = cluster._root.path().join("managed-v5-upgrade.db");
+    let telemetry = cluster._root.path().join("managed-subtitle-upgrade.db");
     drop(
         HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
             .await
             .expect("bootstrap current"),
     );
+    let custody_shape =
+        queue_fixture::source_extensions_fixture::CUSTODY_RETENTION_FIXTURE_SHAPE_SQL;
+    let custody_before = replicated_fixture_shape(&client, custody_shape).await;
     // Return exactly the managed view and marker to published v4.
     let statements = include_str!("../src/store/subtitle_managed_resources_v4.sql")
         .split("-- next statement")
@@ -13190,11 +13222,16 @@ async fn replicated_managed_v4_upgrades_to_v5_and_a_restart_is_a_no_op() {
                 .await
                 .unwrap_or_else(|error| panic!("{round} bootstrap: {error}")),
         );
-        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 6).await;
         assert_eq!(
             replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
-            queue_fixture::managed_fixture_shape(5),
-            "{round}: exact managed v5 view, marker and guards"
+            queue_fixture::managed_fixture_shape(6),
+            "{round}: exact managed v6 view, marker and guards"
+        );
+        assert_eq!(
+            replicated_fixture_shape(&client, custody_shape).await,
+            custody_before,
+            "{round}: installed custody-retention triggers survive bootstrap"
         );
         let receipts: Vec<I64Value> = client
             .query_consistent_map(
@@ -13241,6 +13278,9 @@ async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exact
         queue_fixture::TRANSLATION_FIXTURE_SHAPE_SQL,
         queue_fixture::MANAGED_FIXTURE_SHAPE_SQL,
     ];
+    let custody_shape =
+        queue_fixture::source_extensions_fixture::CUSTODY_RETENTION_FIXTURE_SHAPE_SQL;
+    let custody_before = replicated_fixture_shape(&client, custody_shape).await;
     let mut before = Vec::new();
     for query in queries {
         before.push(replicated_fixture_shape(&client, query).await);
@@ -13277,7 +13317,12 @@ async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exact
             "bootstrap exact published shape"
         );
     }
-    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
+    assert_eq!(
+        replicated_fixture_shape(&client, custody_shape).await,
+        custody_before
+    );
+    require_replicated_fixture_marker(&client, "background_custody_retention_schema", 1).await;
+    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 6).await;
     require_replicated_fixture_marker(&client, "subtitle_translation_schema", 1).await;
     for marker in queue_fixture::CURRENT_TAIL_FIXTURE_MARKERS {
         require_replicated_fixture_marker(&client, marker, 1).await;
@@ -13328,6 +13373,16 @@ async fn replicated_fixture_shape(client: &Client, sql: &str) -> Vec<(String, St
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_custody_retention_rewind(client: &Client) -> [String; 6] {
+    use queue_fixture::source_extensions_fixture::{
+        validated_custody_retention_rewind, CUSTODY_RETENTION_FIXTURE_SHAPE_SQL,
+    };
+    let shape = replicated_fixture_shape(client, CUSTODY_RETENTION_FIXTURE_SHAPE_SQL).await;
+    require_replicated_fixture_marker(client, "background_custody_retention_schema", 1).await;
+    validated_custody_retention_rewind(&shape)
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
 async fn replicated_source_tail_drops(
     client: &Client,
     remove: impl Fn(&str) -> bool,
@@ -13335,6 +13390,7 @@ async fn replicated_source_tail_drops(
     use queue_fixture::source_extensions_fixture::{
         validated_source_tail_drops, SOURCE_TAIL_SHAPE,
     };
+    let custody_rewind = replicated_custody_retention_rewind(client).await;
     let source_shape: Vec<_> = client
         .query_consistent(SOURCE_TAIL_SHAPE.to_owned(), hiqlite::params!())
         .await
@@ -13347,6 +13403,8 @@ async fn replicated_source_tail_drops(
                 row.get::<String>("sql"),
             )
         })
+        // The exact custody index is already in the validated rewind plan.
+        .filter(|(_, name, _)| name != "background_source_custody_owner_work")
         .collect();
     let mut source_counts = Vec::new();
     for (_, name, _) in source_shape.iter().filter(|(kind, _, _)| kind == "table") {
@@ -13362,7 +13420,15 @@ async fn replicated_source_tail_drops(
         source_counts.push((name.clone(), rows[0].value));
     }
     require_replicated_fixture_marker(client, "background_source_schema", 1).await;
-    validated_source_tail_drops(&source_shape, &source_counts, true, remove)
+    custody_rewind
+        .into_iter()
+        .chain(validated_source_tail_drops(
+            &source_shape,
+            &source_counts,
+            true,
+            remove,
+        ))
+        .collect()
 }
 
 /// The v125 scan request sidecar, validated like the source tail: exact
@@ -13407,6 +13473,75 @@ async fn replicated_scan_request_drops(client: &Client) -> Vec<String> {
     validated_scan_request_drops(&shape, (marker, marker), rows[0].value)
 }
 
+/// Plan removal of an exact, empty replicated fixture extension before an
+/// older migration reconstructs its dependencies.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_empty_extension_rewind(
+    client: &Client,
+    expected: Vec<(String, String, String)>,
+    marker: &str,
+) -> Vec<String> {
+    let names = expected
+        .iter()
+        .map(|(_, name, _)| format!("'{}'", name.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let installed: Vec<_> = client
+        .query_consistent(
+            format!(
+                "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL
+                 AND (name IN ({names}) OR tbl_name IN ({names})) ORDER BY type,name"
+            ),
+            hiqlite::params!(),
+        )
+        .await
+        .expect("replicated fixture extension inventory")
+        .iter_mut()
+        .map(|row| {
+            (
+                row.get::<String>("type"),
+                row.get::<String>("name"),
+                row.get::<String>("sql"),
+            )
+        })
+        .collect();
+    assert_eq!(installed, expected, "exact published fixture extension");
+    require_replicated_fixture_marker(client, marker, 1).await;
+    for (kind, name, _) in &expected {
+        if kind == "table" {
+            let rows: Vec<I64Value> = client
+                .query_consistent_map(
+                    format!(
+                        r#"SELECT count(*) AS value FROM "{}""#,
+                        name.replace('"', "\"\"")
+                    ),
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("complete fixture extension data inventory");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].value,
+                i64::from(name == marker),
+                "accepted data in {name} must not be discarded"
+            );
+        }
+    }
+    let mut drops = Vec::new();
+    for kind in ["trigger", "view", "table"] {
+        for (object_kind, name, _) in expected.iter().rev() {
+            if object_kind == kind {
+                drops.push(format!(
+                    r#"DROP {} "{}""#,
+                    kind.to_ascii_uppercase(),
+                    name.replace('"', "\"\"")
+                ));
+            }
+        }
+    }
+    drops
+}
+
 /// A historical queue fixture cannot retain half of the independent managed
 /// extension after removing its background objects. Rewind only an empty,
 /// unactivated current extension, then let ordinary open reinstall it.
@@ -13424,6 +13559,23 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
             .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
             .collect()
     }
+    use queue_fixture::source_extensions_fixture::{
+        coordination_tail_witness, published_v124_reservation_trigger,
+        storage_domain_pending_fixture_shape,
+    };
+    let storage_domain_drops = replicated_empty_extension_rewind(
+        client,
+        storage_domain_pending_fixture_shape(),
+        "background_storage_domain_pending_schema",
+    )
+    .await;
+    let mut coordination_drops = replicated_empty_extension_rewind(
+        client,
+        coordination_tail_witness(),
+        "analysis_coordination_schema",
+    )
+    .await;
+    coordination_drops.push(published_v124_reservation_trigger().to_owned());
     let scan_request_drops = replicated_scan_request_drops(client).await;
     let source_drops = replicated_source_tail_drops(client, |_| true).await;
     let handoff_shape = extension_shape(client, queue_fixture::HANDOFF_FIXTURE_SHAPE_SQL).await;
@@ -13480,7 +13632,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     require_replicated_fixture_marker(client, "dv_title_jobs_schema", 2).await;
     require_replicated_fixture_marker(client, "library_annotations_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_translation_schema", 1).await;
-    require_replicated_fixture_marker(client, "subtitle_managed_schema", 5).await;
+    require_replicated_fixture_marker(client, "subtitle_managed_schema", 6).await;
     let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
     let title_marker: Vec<I64Value> = client
         .query_consistent_map(
@@ -13517,7 +13669,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     let annotations_drops =
         queue_fixture::validated_empty_annotations_rewind(&annotations_shape, &annotations_counts);
     let rows: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=5) AS value",
+        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=6) AS value",
         hiqlite::params!(),
     ).await.expect("current managed fixture marker");
     assert_eq!(rows.len(), 1);
@@ -13549,7 +13701,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     );
     let managed_shape = extension_shape(client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await;
     let managed_drops =
-        queue_fixture::validated_empty_managed_rewind(&managed_shape, 5, managed_data_count);
+        queue_fixture::validated_empty_managed_rewind(&managed_shape, 6, managed_data_count);
     // The historical queue teardown also removes translation triggers that
     // reference background_jobs. Remove the entire exact empty extension,
     // never leave its marker/tables advertising a partial current shape.
@@ -13589,8 +13741,10 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_eq!(jobs.len(), 1);
     let translation_drops =
         queue_fixture::validated_empty_translation_rewind(&shape, &counts, jobs[0].value);
-    let mut statements: Vec<_> = scan_request_drops
+    let mut statements: Vec<_> = storage_domain_drops
         .into_iter()
+        .chain(coordination_drops)
+        .chain(scan_request_drops)
         .chain(source_drops)
         .chain(tail_drops)
         .chain(handoff_drops)
@@ -14156,7 +14310,7 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         ),
         (
             "SELECT COUNT(*) AS value FROM subtitle_managed_schema \
-             WHERE singleton = 1 AND version = 5",
+             WHERE singleton = 1 AND version = 6",
             1,
         ),
         (
@@ -14183,11 +14337,11 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
             assert_eq!(rows.len(), 1, "{round}: {sql}");
             assert_eq!(rows[0].value, expected, "{round}: {sql}");
         }
-        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 6).await;
         assert_eq!(
             replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
-            queue_fixture::managed_fixture_shape(5),
-            "{round}: exact current managed v5 view, marker and guards",
+            queue_fixture::managed_fixture_shape(6),
+            "{round}: exact current managed v6 view, marker and guards",
         );
         let views: Vec<SchemaText> = client
             .query_consistent_map(
@@ -17648,6 +17802,18 @@ mod managed_bootstrap_regressions {
         assert_eq!(declarations.len(), 2);
         let view = declarations.remove(0).value;
         let trigger = declarations.remove(0).value;
+        let marker: Vec<I64Value> = client
+            .query_consistent_map(
+                "SELECT version AS value FROM subtitle_managed_schema WHERE singleton=1",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("retain the installed managed schema version");
+        assert_eq!(marker.len(), 1);
+        let restore_marker = format!(
+            "INSERT INTO subtitle_managed_schema VALUES(1,{})",
+            marker[0].value
+        );
         for (ordinal, (damage, restore, expected_error)) in [
             (
                 "DROP TRIGGER subtitle_managed_source_changed",
@@ -17661,7 +17827,7 @@ mod managed_bootstrap_regressions {
             ),
             (
                 "DELETE FROM subtitle_managed_schema",
-                "INSERT INTO subtitle_managed_schema VALUES(1,5)".into(),
+                restore_marker,
                 "marker missing",
             ),
         ]
@@ -19376,6 +19542,9 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "api_keys",
             "background_artifact_repairs",
             "background_artwork_locations",
+            "background_dv_refit_outcomes",
+            "background_dv_refit_scenes",
+            "background_dv_refit_titles",
             "background_embeddings",
             "background_fragment_targets",
             "background_job_attempts",
@@ -19433,6 +19602,12 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "library_channel_subject_decisions",
             "library_channel_subject_jobs",
             "library_channels",
+            "library_curation_grants",
+            "library_curation_home",
+            "library_curation_item_tags",
+            "library_curation_rejections",
+            "library_curation_rows",
+            "library_curation_tags",
             "library_roots",
             "live_tv_resource_records",
             "media_classifications",
@@ -21362,6 +21537,7 @@ fn contract_inventory_matches_every_store_method() {
         WATCH_METHODS,
         READING_METHODS,
         ANNOTATION_METHODS,
+        CURATION_METHODS,
         TRAKT_METHODS,
         API_KEY_METHODS,
         OUTBOX_METHODS,
@@ -21551,6 +21727,9 @@ fn contract_inventory_matches_every_store_method() {
     // of a superset of `owned_media_sessions`'s predicate that decides only
     // whether the lease loop takes that inventory; covered on both backends
     // by `media_session_a_committed_successor_can_renew_and_outlives_its_preparation`.
+    // +22: `CurationStore` (custom tags, rows, Home layouts, curation grants),
+    // a new supertrait of `Store`, every method named in `CURATION_METHODS`
+    // and exercised on both backends by `curation_contract_runs_through_dyn_store`.
     // +7: F+ curve-fit demand, publication, current and by-digest curves,
     // rebind, prune and progress remain named in BACKGROUND_JOB_METHODS
     // and covered by store_contract/dv_refit_jobs.rs on both backends.
@@ -21562,7 +21741,9 @@ fn contract_inventory_matches_every_store_method() {
     // `authenticate_token_proof_for` to USER_METHODS. Both are exercised on
     // each backend by token_proofs::token_proof_uses_the_authoritative_audience_and_policy_read_on_each_backend.
     // No existing method, trait or supertrait is removed.
-    assert_eq!(declared.len(), 609, "review the Store method count");
+    // Main's 22 curation methods and both token-proof methods are retained:
+    // 609 + 22 = 631, equivalently Main's 629 + 2.
+    assert_eq!(declared.len(), 631, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -34487,6 +34668,754 @@ async fn home_preview_contract_runs_through_dyn_store() {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from(["book", "audiobook"]),
             "book roots drifted on {backend}"
+        );
+    })
+    .await;
+}
+
+/// Custom tags, rows, Home layouts and grants (docs/features/CUSTOM-TAGS-PLAN.md
+/// §7) behave the same on SQLite and the three-voter store: visibility never
+/// leaks a private tag, keys are unique per scope, merges move memberships,
+/// rejected suggestions never come back, and rules evaluate identically.
+#[tokio::test]
+async fn curation_contract_runs_through_dyn_store() {
+    use plurx_core::curation::{
+        Grant, HomeEntry, HomeLayout, NewTag, RowSort, RowSpec, RuleQuery, TagEdit, TagSource,
+        Term, Unwatched,
+    };
+    use plurx_core::{metadata::classification, store::classification::Record};
+    for_each_backend(|store, backend| async move {
+        let owner = store
+            .create_user("curation-owner", "hash", false)
+            .await
+            .expect("owner");
+        let other = store
+            .create_user("curation-other", "hash", false)
+            .await
+            .expect("other");
+        let movies = store
+            .create_library(&NewLibrary {
+                name: "Curation Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from("/curation/movies")],
+                anime: false,
+            })
+            .await
+            .expect("movies");
+        let mut ids = Vec::new();
+        for title in ["Harbor Lights", "Night Tide", "Salt Harvest", "Iron Reef"] {
+            ids.push(
+                store
+                    .insert_item(&NewItem {
+                        library_id: movies.id,
+                        kind: ItemKind::Movie,
+                        parent_id: None,
+                        title: title.into(),
+                        year: Some(2024),
+                        season_number: None,
+                        episode_number: None,
+                    })
+                    .await
+                    .expect("movie"),
+            );
+        }
+        let (harbor, tide, salt, reef) = (ids[0], ids[1], ids[2], ids[3]);
+
+        // Grants: none, granted (idempotent), revoked.
+        assert!(
+            store
+                .user_grants(other.id)
+                .await
+                .expect("grants")
+                .is_empty(),
+            "{backend}"
+        );
+        store
+            .set_user_grant(other.id, Grant::ManageTags, true, owner.id, 1)
+            .await
+            .expect("grant");
+        store
+            .set_user_grant(other.id, Grant::ManageTags, true, owner.id, 2)
+            .await
+            .expect("again");
+        assert_eq!(
+            store.user_grants(other.id).await.expect("grants"),
+            vec![Grant::ManageTags],
+            "{backend}"
+        );
+        store
+            .set_user_grant(other.id, Grant::ManageTags, false, owner.id, 3)
+            .await
+            .expect("revoke");
+        assert!(
+            store
+                .user_grants(other.id)
+                .await
+                .expect("grants")
+                .is_empty(),
+            "{backend}"
+        );
+
+        // Household tag; the same key in the same scope is refused, a private
+        // tag of the same name is a different tag.
+        let household = store
+            .create_tag(
+                &NewTag {
+                    name: "Gay-Themed".into(),
+                    owner_user_id: None,
+                    color: "violet".into(),
+                    created_by: owner.id,
+                },
+                10,
+            )
+            .await
+            .expect("create")
+            .expect("new household tag");
+        assert!(
+            store
+                .create_tag(
+                    &NewTag {
+                        name: "  gay-themed ".into(),
+                        owner_user_id: None,
+                        color: "blue".into(),
+                        created_by: other.id
+                    },
+                    11
+                )
+                .await
+                .expect("dup")
+                .is_none(),
+            "{backend}: one key per scope"
+        );
+        let private = store
+            .create_tag(
+                &NewTag {
+                    name: "gay-themed".into(),
+                    owner_user_id: Some(owner.id),
+                    color: "red".into(),
+                    created_by: owner.id,
+                },
+                12,
+            )
+            .await
+            .expect("create")
+            .expect("private tag is its own scope");
+
+        // Visibility: `other` never sees owner's private tag, anywhere.
+        let theirs: Vec<i64> = store
+            .visible_tags(other.id)
+            .await
+            .expect("tags")
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(theirs, vec![household.id], "{backend}");
+        let mine: Vec<i64> = store
+            .visible_tags(owner.id)
+            .await
+            .expect("tags")
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        assert!(
+            mine.contains(&household.id) && mine.contains(&private.id),
+            "{backend}"
+        );
+
+        store
+            .set_tag_members(
+                household.id,
+                &[harbor, tide, 9_999_999],
+                &[],
+                owner.id,
+                TagSource::Manual,
+                100,
+            )
+            .await
+            .expect("tag");
+        store
+            .set_tag_members(private.id, &[salt], &[], owner.id, TagSource::Manual, 101)
+            .await
+            .expect("tag");
+        assert_eq!(
+            store.item_tag_ids(other.id, salt).await.expect("ids"),
+            Vec::<i64>::new(),
+            "{backend}"
+        );
+        assert_eq!(
+            store.item_tag_ids(owner.id, salt).await.expect("ids"),
+            vec![private.id],
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .curation_tag(household.id)
+                .await
+                .expect("tag")
+                .expect("exists")
+                .item_count,
+            2,
+            "{backend}: missing items are skipped"
+        );
+
+        // Rules: a private tag id in someone else's rule matches nothing.
+        let spec = RowSpec {
+            any_of: vec![Term::Tag(household.id), Term::Tag(private.id)],
+            sort: RowSort::Title,
+            ..Default::default()
+        };
+        let page = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: other.id,
+                    spec: &spec,
+                    only_items: None,
+                    day: 0,
+                    presence: plurx_core::domain::ItemPresence::Everything,
+                },
+                0,
+                20,
+            )
+            .await
+            .expect("rule");
+        assert_eq!(
+            (page.item_ids.clone(), page.total),
+            (vec![harbor, tide], 2),
+            "{backend}"
+        );
+        let page = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: owner.id,
+                    spec: &spec,
+                    only_items: None,
+                    day: 0,
+                    presence: plurx_core::domain::ItemPresence::Everything,
+                },
+                0,
+                20,
+            )
+            .await
+            .expect("rule");
+        assert_eq!(
+            page.item_ids,
+            vec![harbor, tide, salt],
+            "{backend}: title order"
+        );
+        // none_of and only_items narrow; a page past the end keeps the total.
+        let spec = RowSpec {
+            all_of: vec![Term::Tag(household.id)],
+            none_of: vec![Term::Tag(private.id)],
+            ..Default::default()
+        };
+        let only = [tide, salt];
+        let page = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: owner.id,
+                    spec: &spec,
+                    only_items: Some(&only),
+                    day: 0,
+                    presence: plurx_core::domain::ItemPresence::Everything,
+                },
+                0,
+                20,
+            )
+            .await
+            .expect("rule");
+        assert_eq!(page.item_ids, vec![tide], "{backend}");
+        let page = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: owner.id,
+                    spec: &spec,
+                    only_items: None,
+                    day: 0,
+                    presence: plurx_core::domain::ItemPresence::Everything,
+                },
+                5,
+                20,
+            )
+            .await
+            .expect("rule");
+        assert_eq!((page.item_ids.len(), page.total), (0, 2), "{backend}");
+        // Unwatched: only and first.
+        store
+            .set_watched(owner.id, harbor, true)
+            .await
+            .expect("watched");
+        let only_unwatched = RowSpec {
+            all_of: vec![Term::Tag(household.id)],
+            unwatched: Unwatched::Only,
+            ..Default::default()
+        };
+        let page = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: owner.id,
+                    spec: &only_unwatched,
+                    only_items: None,
+                    day: 0,
+                    presence: plurx_core::domain::ItemPresence::Everything,
+                },
+                0,
+                20,
+            )
+            .await
+            .expect("rule");
+        assert_eq!(page.item_ids, vec![tide], "{backend}");
+        let first = RowSpec {
+            all_of: vec![Term::Tag(household.id)],
+            unwatched: Unwatched::First,
+            sort: RowSort::Title,
+            ..Default::default()
+        };
+        let page = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: owner.id,
+                    spec: &first,
+                    only_items: None,
+                    day: 0,
+                    presence: plurx_core::domain::ItemPresence::Everything,
+                },
+                0,
+                20,
+            )
+            .await
+            .expect("rule");
+        assert_eq!(page.item_ids, vec![tide, harbor], "{backend}");
+        // Shuffle is stable within a day on every backend.
+        let shuffle = RowSpec {
+            all_of: vec![Term::Tag(household.id)],
+            sort: RowSort::ShuffleDaily,
+            ..Default::default()
+        };
+        let a = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: owner.id,
+                    spec: &shuffle,
+                    only_items: None,
+                    day: 20_400,
+                    presence: plurx_core::domain::ItemPresence::Everything,
+                },
+                0,
+                20,
+            )
+            .await
+            .expect("rule");
+        let b = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: owner.id,
+                    spec: &shuffle,
+                    only_items: None,
+                    day: 20_400,
+                    presence: plurx_core::domain::ItemPresence::Everything,
+                },
+                0,
+                20,
+            )
+            .await
+            .expect("rule");
+        assert_eq!(a, b, "{backend}");
+
+        // Suggestions: classifier terms match suggestion terms case-
+        // insensitively; tagged and rejected titles are left out.
+        for (id, keywords) in [
+            (reef, vec!["Gay Theme".to_owned()]),
+            (salt, vec!["lgbt".to_owned()]),
+            (harbor, vec!["gay theme".to_owned()]),
+        ] {
+            let entry = store
+                .classification_page(0, 100)
+                .await
+                .expect("page")
+                .into_iter()
+                .find(|e| e.input().expect("input").id == id)
+                .expect("classification entry");
+            let record = Record {
+                classification: classification::classify(
+                    &entry.input().expect("input").metadata(),
+                    keywords,
+                ),
+                source_json: entry.source_json,
+                overrides: Default::default(),
+                revision: 0,
+            };
+            assert!(
+                store
+                    .write_classification(id, &record)
+                    .await
+                    .expect("classify"),
+                "{backend}"
+            );
+        }
+        store
+            .update_tag(
+                household.id,
+                &TagEdit {
+                    suggest_terms: Some(vec!["gay theme".into(), "lgbt".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("terms");
+        let page = store
+            .tag_suggestions(household.id, 0, 10)
+            .await
+            .expect("suggestions");
+        let found: Vec<i64> = page.suggestions.iter().map(|s| s.item_id).collect();
+        assert_eq!(
+            (found, page.total),
+            (vec![reef, salt], 2),
+            "{backend}: harbor is already tagged"
+        );
+        assert_eq!(
+            page.suggestions[0].matched,
+            vec!["Gay Theme".to_owned()],
+            "{backend}"
+        );
+        store
+            .set_suggestion_rejections(household.id, &[salt], &[], owner.id, 200)
+            .await
+            .expect("reject");
+        let page = store
+            .tag_suggestions(household.id, 0, 10)
+            .await
+            .expect("suggestions");
+        assert_eq!(
+            page.suggestions
+                .iter()
+                .map(|s| s.item_id)
+                .collect::<Vec<_>>(),
+            vec![reef],
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .rejected_items(household.id, 0, 10)
+                .await
+                .expect("rejected"),
+            vec![salt],
+            "{backend}"
+        );
+        store
+            .set_tag_members(
+                household.id,
+                &[reef],
+                &[],
+                owner.id,
+                TagSource::Suggestion,
+                201,
+            )
+            .await
+            .expect("accept");
+        assert_eq!(
+            store
+                .tag_suggestions(household.id, 0, 10)
+                .await
+                .expect("s")
+                .total,
+            0,
+            "{backend}"
+        );
+
+        // Tags go on titles: a season or an episode id is skipped, so a tag's
+        // count can never include something its page cannot show.
+        let show = store
+            .insert_item(&NewItem {
+                library_id: movies.id,
+                kind: ItemKind::Show,
+                parent_id: None,
+                title: "Low Orbit".into(),
+                year: Some(2024),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("show");
+        let season = store
+            .insert_item(&NewItem {
+                library_id: movies.id,
+                kind: ItemKind::Season,
+                parent_id: Some(show),
+                title: "Season 1".into(),
+                year: None,
+                season_number: Some(1),
+                episode_number: None,
+            })
+            .await
+            .expect("season");
+        let episode = store
+            .insert_item(&NewItem {
+                library_id: movies.id,
+                kind: ItemKind::Episode,
+                parent_id: Some(season),
+                title: "Pilot".into(),
+                year: None,
+                season_number: Some(1),
+                episode_number: Some(1),
+            })
+            .await
+            .expect("episode");
+        let before = store
+            .curation_tag(household.id)
+            .await
+            .expect("t")
+            .expect("t")
+            .item_count;
+        store
+            .set_tag_members(
+                household.id,
+                &[season, episode],
+                &[],
+                owner.id,
+                TagSource::Manual,
+                250,
+            )
+            .await
+            .expect("tag");
+        assert_eq!(
+            store
+                .curation_tag(household.id)
+                .await
+                .expect("t")
+                .expect("t")
+                .item_count,
+            before,
+            "{backend}: seasons and episodes are not taggable"
+        );
+
+        // Ids are never reused: a stored layout or a client holding row:N or
+        // tag N must not silently point at something new.
+        let gone = store
+            .create_tag(
+                &NewTag {
+                    name: "ephemeral".into(),
+                    owner_user_id: None,
+                    color: "slate".into(),
+                    created_by: owner.id,
+                },
+                260,
+            )
+            .await
+            .expect("create")
+            .expect("new");
+        assert!(
+            store.delete_tag(gone.id).await.expect("delete"),
+            "{backend}"
+        );
+        let next = store
+            .create_tag(
+                &NewTag {
+                    name: "ephemeral".into(),
+                    owner_user_id: None,
+                    color: "slate".into(),
+                    created_by: owner.id,
+                },
+                261,
+            )
+            .await
+            .expect("create")
+            .expect("new");
+        assert!(next.id > gone.id, "{backend}: tag id {} reused", gone.id);
+        assert!(
+            store.delete_tag(next.id).await.expect("delete"),
+            "{backend}"
+        );
+
+        // Rows and Home layout.
+        let row = store
+            .create_row(
+                Some(owner.id),
+                "Gay-themed",
+                &RowSpec {
+                    all_of: vec![Term::Tag(household.id)],
+                    ..Default::default()
+                },
+                owner.id,
+                300,
+            )
+            .await
+            .expect("row");
+        let shared = store
+            .create_row(
+                None,
+                "Household picks",
+                &RowSpec {
+                    any_of: vec![Term::Tag(household.id)],
+                    ..Default::default()
+                },
+                owner.id,
+                301,
+            )
+            .await
+            .expect("household row");
+        assert_eq!(
+            store
+                .visible_rows(other.id)
+                .await
+                .expect("rows")
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![shared.id],
+            "{backend}"
+        );
+        assert_eq!(
+            store.visible_rows(owner.id).await.expect("rows").len(),
+            2,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .rows_naming_tag(household.id)
+                .await
+                .expect("rows")
+                .len(),
+            2,
+            "{backend}"
+        );
+        assert!(
+            store
+                .update_row(row.id, "Renamed", &row.spec, 302)
+                .await
+                .expect("update"),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .curation_row(row.id)
+                .await
+                .expect("row")
+                .expect("exists")
+                .title,
+            "Renamed",
+            "{backend}"
+        );
+        assert_eq!(
+            store.home_layout(owner.id).await.expect("layout"),
+            None,
+            "{backend}"
+        );
+        let layout = HomeLayout {
+            entries: vec![
+                HomeEntry {
+                    key: format!("row:{}", row.id),
+                    hidden: false,
+                },
+                HomeEntry {
+                    key: "next_up".into(),
+                    hidden: true,
+                },
+            ],
+        };
+        store
+            .put_home_layout(owner.id, Some(&layout), 303)
+            .await
+            .expect("put");
+        assert_eq!(
+            store.home_layout(owner.id).await.expect("layout"),
+            Some(layout),
+            "{backend}"
+        );
+        store
+            .put_home_layout(owner.id, None, 304)
+            .await
+            .expect("clear");
+        assert_eq!(
+            store.home_layout(owner.id).await.expect("layout"),
+            None,
+            "{backend}"
+        );
+
+        // Merge moves memberships and rejections, then the source is gone.
+        let other_tag = store
+            .create_tag(
+                &NewTag {
+                    name: "queer".into(),
+                    owner_user_id: None,
+                    color: "blue".into(),
+                    created_by: owner.id,
+                },
+                400,
+            )
+            .await
+            .expect("create")
+            .expect("new");
+        store
+            .set_tag_members(
+                other_tag.id,
+                &[salt, harbor],
+                &[],
+                owner.id,
+                TagSource::Manual,
+                401,
+            )
+            .await
+            .expect("tag");
+        assert!(
+            store
+                .merge_tags(other_tag.id, household.id)
+                .await
+                .expect("merge"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .curation_tag(other_tag.id)
+                .await
+                .expect("gone")
+                .is_none(),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .curation_tag(household.id)
+                .await
+                .expect("t")
+                .expect("t")
+                .item_count,
+            4,
+            "{backend}"
+        );
+
+        // Archive and cascades.
+        let archived = store
+            .update_tag(
+                household.id,
+                &TagEdit {
+                    archived_at_ms: Some(Some(500)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("archive")
+            .expect("t");
+        assert_eq!(archived.archived_at_ms, Some(500), "{backend}");
+        assert!(
+            store.delete_tag(private.id).await.expect("delete"),
+            "{backend}"
+        );
+        assert_eq!(
+            store.item_tag_ids(owner.id, salt).await.expect("ids"),
+            vec![household.id],
+            "{backend}"
+        );
+        assert!(
+            store.delete_row(shared.id).await.expect("delete row"),
+            "{backend}"
+        );
+        store.delete_user(other.id).await.expect("delete user");
+        assert!(
+            store.delete_tag(household.id).await.expect("delete"),
+            "{backend}"
+        );
+        assert!(
+            store.visible_tags(owner.id).await.expect("tags").is_empty(),
+            "{backend}"
         );
     })
     .await;
