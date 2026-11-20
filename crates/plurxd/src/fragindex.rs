@@ -1226,10 +1226,14 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                         }
                     }
                     let fragment = fragment;
-                    let row = match IndexRow::from_fragment(&fragment, init) {
+                    let mut row = match IndexRow::from_fragment(&fragment, init) {
                         Ok(row) => row,
                         Err(reason) => return IndexOutcome::Unsupported(reason.into()),
                     };
+                    // Fitted rows already retain their own canonical clock proof.
+                    if refit.is_some() {
+                        row.first_cto = None;
+                    }
                     covered_ticks = covered_ticks.saturating_add(row.duration);
 
                     // Only a clean fragment can begin a segment, so only a
@@ -1525,6 +1529,12 @@ fn identity_for_transform(
     transform: Option<&str>,
 ) -> SourceIdentity {
     let mut recipe = transcode::copy_video_args(file, video);
+    if video.dolby_vision_refit().is_none() {
+        recipe.push(format!(
+            "--plurx-copy-landing-clock={}",
+            plurx_core::segplan::COPY_LANDING_CLOCK_REVISION
+        ));
+    }
     if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
         // A failed pre-repair P5 index is a terminal persisted refusal.
         // Move only the affected recipe so it can rebuild after upgrading.
