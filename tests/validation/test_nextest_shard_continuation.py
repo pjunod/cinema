@@ -330,5 +330,4 @@ class NextestShardContinuationTests(unittest.TestCase):
         with patch.object(native,'ANDROID_DEVICE_ROUTE_SHA256',{proof.retention.digest(oldblock),proof.retention.digest(newblock)}):
             self.assertTrue(native.metadata_only_workflow(old,after))
             self.assertFalse(native.metadata_only_workflow(old,after.replace(b'cargo test',b'cargo test --release')))
-            with self.assertRaises(r.ReceiptError):
-                native.metadata_only_workflow(old,after.replace(b'native ARM64 device',b'unreviewed device'))
+            self.assertFalse(native.metadata_only_workflow(old,after.replace(b'native ARM64 device',b'unreviewed device')))

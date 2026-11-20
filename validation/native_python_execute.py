@@ -23,7 +23,7 @@ def prepare(api, descriptor, binding, candidate):
     sha, uuid = descriptor['sha256'], descriptor['attachment_uuid']
     raw = retention.attachment_bytes(api, binding['pull_request'], attachment, uuid, sha)
     document, _, repository, _ = retention.verify_identity(api, raw, sha, binding, candidate, attachment, uuid)
-    if document.get('version') == 'main-python-journal-continuation-v1':
+    if document.get('version') in {'main-python-journal-continuation-v1', 'main-python-journal-continuation-v2'}:
         from validation import main_python_continuation
         proof = main_python_continuation.prepare(api, document, binding, candidate, repository)
         return {**proof, 'evidence_sha256': sha}

@@ -45,3 +45,63 @@ class MainPythonContinuationTests(unittest.TestCase):
             wrong = {path: {**witness[path], 'before': 'f' * 64}}
             with self.assertRaises(r.ReceiptError):
                 source.origin_impacts('a' * 40, 'c' * 40, wrong, {key})
+
+    def main_supplement(self):
+        key='validation:test_fixture.Case.test_body';commit='a'*40
+        item={'pr':7,'branch':'codex/main-ancestor','source_commit':commit,'run':11,'journal_artifact':21,'ids':[key]}
+        pull={'number':7,'state':'closed','merged':True,'merge_commit_sha':'c'*40,
+              'head':{'sha':commit,'ref':item['branch'],'repo':{'id':1}},
+              'base':{'ref':'main','repo':{'id':1}}}
+        listed={'id':11,'commit_sha':commit,'status':'success','workflow_id':source.main.WORKFLOW,
+                'prettyref':'#7','event':'pull_request','event_payload':{'repository':{'id':1},'number':7,'pull_request':pull}}
+        journal={'run':11,'commit':commit,'complete':True,'fixture_errors':[],
+                 'passes':{key:{'run':11,'commit':commit}}}
+        api=Mock();api.get.return_value=pull
+        api.pages.side_effect=[[listed],[{'id':21,'run_id':11}]]
+        return api,item,journal,key
+
+    def read_main_supplement(self,api,item,journal,ancestor=True,job_status='success'):
+        with patch.object(source,'main_ancestor',return_value=ancestor), \
+             patch.object(source,'require_producer'), \
+             patch.object(source.main,'preflight_job',return_value={'status':job_status}), \
+             patch.object(source.main,'journal_from_artifacts',return_value=journal):
+            return source.authenticate_main_journals(api,[item],{'base_sha':'b'*40},'d'*40,1)
+
+    def test_merged_main_scoped_journal_preserves_actual_direct_source_without_relabeling(self):
+        api,item,journal,key=self.main_supplement()
+        records,origins=self.read_main_supplement(api,item,journal)
+        self.assertEqual(records,[{key:{'run':11,'commit':'a'*40}}])
+        self.assertEqual(origins,{11:'a'*40})
+        self.assertEqual(journal['passes'][key],records[0][key])
+
+    def test_main_supplement_refuses_unmerged_foreign_or_nonancestor_sources(self):
+        for kind in ('unmerged','foreign','nonancestor','failed-job'):
+            api,item,journal,_=self.main_supplement()
+            if kind=='unmerged':api.get.return_value['merged']=False
+            if kind=='foreign':api.get.return_value['head']['repo']['id']=2
+            with self.subTest(kind=kind),self.assertRaises(r.ReceiptError):
+                self.read_main_supplement(api,item,journal,ancestor=kind!='nonancestor',
+                                          job_status='failure' if kind=='failed-job' else 'success')
+
+    def test_main_supplement_refuses_partial_inherited_unknown_or_duplicate_selected_rows(self):
+        for kind in ('partial','inherited','unknown','duplicate','forged-commit'):
+            api,item,journal,key=self.main_supplement()
+            if kind=='partial':journal['complete']=False
+            elif kind=='inherited':journal['passes'][key]={'run':10,'commit':'c'*40}
+            elif kind=='unknown':item['ids']=['validation:unknown.Case.test_absent']
+            elif kind=='duplicate':item['ids']=[key,key]
+            else:journal['commit']='f'*40
+            with self.subTest(kind=kind),self.assertRaises(r.ReceiptError):
+                self.read_main_supplement(api,item,journal)
+
+    def test_main_supplement_requires_the_real_listed_run_and_original_artifact(self):
+        for kind in ('status','commit','artifact','event'):
+            api,item,journal,_=self.main_supplement()
+            rows,artifacts=api.pages.side_effect
+            if kind=='status':rows[0]['status']='failure'
+            elif kind=='commit':rows[0]['commit_sha']='f'*40
+            elif kind=='artifact':artifacts[0]['run_id']=99
+            else:rows[0]['event']='workflow_dispatch'
+            api.pages.side_effect=[rows,artifacts]
+            with self.subTest(kind=kind),self.assertRaises(r.ReceiptError):
+                self.read_main_supplement(api,item,journal)

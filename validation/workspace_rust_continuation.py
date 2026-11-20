@@ -107,7 +107,10 @@ def metadata_only_workflow(before, after):
     stripped = after.replace(SOURCE_GATE_UPLOAD.encode(), b'').replace(SOURCE_GATE_PAPERWORK.encode(), b'')
     if stripped == before:
         return True
-    return non_rust_device_projection(stripped) == non_rust_device_projection(before)
+    try:
+        return non_rust_device_projection(stripped) == non_rust_device_projection(before)
+    except receipts.ReceiptError:
+        return False
 
 
 def check_workflow_environment(workflow, expected):

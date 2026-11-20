@@ -11,6 +11,7 @@ from validation import nextest_shard_continuation as nextest
 from validation.workspace_rust_continuation import metadata_only_workflow
 
 POLICY = 'main-python-journal-continuation-v1'
+MAIN_ANCESTOR_POLICY = 'main-python-journal-continuation-v2'
 PRODUCER_INPUTS = {'validation/main_unit_receipts.py': 'b4112a92f0dd6acb63937c837eeb899db76ab8d8dfad8025f12e7924622ac5f4', 'validation/main_preflight_adoption.py': '7741d9786e509de6c3feb8aa69602b065ee37e1ecd6b3236388f468c3dd51b51', 'validation/python_unit_receipts.py': 'fdbcd7ef5c93a47a7ee5b3dbf5a7c5a525e9b5f721a457f3b943fd836ee58a8e', '.github/workflows/main-fast-lane.yml': '3ce991087d99bc508988d674d37ca48eb99cec34ce0d18af4fc36ec7c0878e22'}
 
 
@@ -50,6 +51,62 @@ def authenticate_origins(api, scope, enclosing, runs, candidate):
     return {run: journal['commit'] for run, journal in journals.items()}
 
 
+def main_ancestor(source, base):
+    import subprocess
+    return subprocess.run(['git', 'merge-base', '--is-ancestor', r.sha(source), r.sha(base)],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def authenticate_main_journals(api, items, binding, candidate, repository):
+    """Scoped positive records from an actually merged current-main ancestor."""
+    r.require(isinstance(items, list) and 0 < len(items) <= 4,
+              'Missing or oversized main-ancestor journal inventory')
+    records, origins, runs_seen, ids_seen = [], {}, set(), set()
+    for item in items:
+        r.require(isinstance(item, dict) and set(item) == {
+            'pr', 'branch', 'source_commit', 'run', 'journal_artifact', 'ids'},
+            'Unknown main-ancestor journal descriptor')
+        pr, run = r.positive(item['pr']), r.positive(item['run'])
+        source = r.sha(item['source_commit'])
+        ids = item['ids']
+        r.require(run not in runs_seen and isinstance(ids, list) and ids
+                  and len(ids) == len(set(ids)) and len(ids) <= r.MAX_TESTS
+                  and all(isinstance(key, str) for key in ids) and not ids_seen.intersection(ids),
+                  'Duplicate or unknown scoped main-ancestor identities')
+        runs_seen.add(run); ids_seen.update(ids)
+        pull = api.get(f'/pulls/{pr}')
+        r.require(pull['number'] == pr and pull['state'] == 'closed' and pull['merged'] is True
+                  and pull['head']['repo']['id'] == pull['base']['repo']['id'] == repository
+                  and pull['head']['sha'] == source and pull['head']['ref'] == item['branch']
+                  and pull['base']['ref'] == 'main' and main_ancestor(source, binding['base_sha'])
+                  and main_ancestor(r.sha(pull['merge_commit_sha']), binding['base_sha']),
+                  'Supplement is not an actual merged same-repository current-main ancestor')
+        scope = {'repository': repository, 'pr': pr, 'branch': item['branch'],
+                 'base': 'main', 'workflow': main.WORKFLOW}
+        listed = api.pages('/actions/runs', {'workflow_id': main.WORKFLOW,
+                            'ref': 'refs/pull/' + str(pr) + '/head'}, 'workflow_runs')
+        matches = [row for row in listed if row['id'] == run]
+        r.require(len(matches) == 1 and matches[0]['commit_sha'] == source
+                  and matches[0]['status'] == 'success', 'Unknown or unsuccessful actual main-ancestor run')
+        main.authenticate_run(scope, matches[0])
+        job = main.preflight_job(api, scope, run)
+        r.require(job['status'] == 'success', 'Main-ancestor preflight did not pass')
+        artifacts = api.pages(f'/actions/runs/{run}/artifacts')
+        finals = [row for row in artifacts if row['id'] == item['journal_artifact']]
+        r.require(len(finals) == 1 and finals[0]['run_id'] == run, 'Foreign main-ancestor journal artifact')
+        journal = main.journal_from_artifacts(api, scope, matches[0], finals)
+        direct = {'run': run, 'commit': source}
+        r.require(journal['run'] == run and journal['commit'] == source
+                  and journal['complete'] is True and not journal['fixture_errors']
+                  and all(value == direct for value in journal['passes'].values())
+                  and set(ids) <= set(journal['passes']),
+                  'Main supplement is partial, inherited, unknown or lacks original direct successes')
+        require_producer(source, candidate)
+        records.append({key: journal['passes'][key] for key in ids})
+        origins[run] = source
+    return records, origins
+
+
 def origin_impacts(origin, candidate, changes, known):
     """Writer-reviewed imported-input impact starts at the ACTUAL execution."""
     r.require(isinstance(changes, dict) and set(changes) == retention.changed(origin, candidate),
@@ -71,8 +128,11 @@ def origin_impacts(origin, candidate, changes, known):
 
 
 def prepare(api, record, binding, candidate, repository):
-    r.require(set(record) == {'version', 'repository', 'pr', 'branch', 'base_sha', 'source_commit',
-              'prior', 'run', 'journal_artifact', 'changes', 'source_impacts'} and record['version'] == POLICY
+    fields = {'version', 'repository', 'pr', 'branch', 'base_sha', 'source_commit',
+              'prior', 'run', 'journal_artifact', 'changes', 'source_impacts'}
+    if record.get('version') == MAIN_ANCESTOR_POLICY:
+        fields.add('main_journals')
+    r.require(set(record) == fields and record['version'] in {POLICY, MAIN_ANCESTOR_POLICY}
               and record['source_commit'] == candidate and binding['schema'] == 2,
               'Unknown main-Python continuation contract')
     prior, run = r.sha(record['prior']), r.positive(record['run'])
@@ -91,9 +151,17 @@ def prepare(api, record, binding, candidate, repository):
     r.require(journal['complete'] is True and not journal['fixture_errors'],
               'Original Python journal did not complete cleanly')
     origins = authenticate_origins(api, scope, journal, runs, candidate)
+    supplements = []
+    if record['version'] == MAIN_ANCESTOR_POLICY:
+        supplements, extra_origins = authenticate_main_journals(
+            api, record['main_journals'], binding, candidate, repository)
+        r.require(not set(origins).intersection(extra_origins), 'Supplement duplicates original run authority')
+        origins.update(extra_origins)
     inventories = {kind: sorted(test.id() for test in r.discover(kind)) for kind in r.SUITES}
     universe = {kind + ':' + name for kind, names in inventories.items() for name in names}
     original = set(journal['passes'])
+    r.require(all(set(rows) <= universe for rows in supplements),
+              'Main-ancestor scoped body left actual current inventory')
     changed = retention.changed(prior, candidate)
     r.require(set(record['changes']) == changed, 'Every changed Python input needs reviewed classification')
     invalidated = set()
@@ -126,9 +194,15 @@ def prepare(api, record, binding, candidate, repository):
     applicable = {key: value for key, value in journal['passes'].items()
                   if key in universe and key not in invalidated and key not in invalid_by_origin[value['commit']]
                   and applicability(key, value)}
+    for rows in supplements:
+        for key, value in rows.items():
+            if key not in applicable and key not in invalid_by_origin[value['commit']] and applicability(key, value):
+                applicable[key] = value
+    # Each supplement is evaluated from its actual execution source, rather
+    # than invalidated for changes already executed before that source.
     # Existing automatic discovery may run a body when history is unavailable.
     # Explicit no-replay continuation instead stops if applicability is unknown.
-    r.require(not {key for key in applicability.refusals if key in universe and key not in invalidated},
+    r.require(not {key for key in applicability.refusals if key in universe and key not in invalidated and key not in applicable},
               'Python pass applicability is unknown; refusing broad replay')
     applicability.finish(applicable)
     return {'source_commit': candidate, 'authenticated_origins': origins, 'suites': {kind: {
