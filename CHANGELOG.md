@@ -99,6 +99,8 @@ bump may break compatibility and a **patch** bump never does.
   case. Baseline failures, skipped cases, absent listings and missing workflow
   outputs cannot authorize promotion; a selected but skipped Rust stage also
   blocks the main gate. Compatible passes remain reusable case by case.
+- Safari 27.2 on macOS can select the verified native Dolby Vision HLS splice
+  when the browser supports native HLS and PQ Main10 playback.
 
 - Native HLS can start with a verified cached FEL prefix from the existing title job even when ordinary VOD is available, with continuous original audio and ordinary startup when the prefix cannot be used. Rebuilding a missing prefix reuses the current scan and quality verdict.
 
