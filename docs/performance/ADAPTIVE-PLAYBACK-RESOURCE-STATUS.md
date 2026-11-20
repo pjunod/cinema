@@ -12,10 +12,10 @@ Draft effort #1248; release qualification and deployment remain open.
 [retained exit](ADAPTIVE-PLAYBACK-RETAINED-EXIT.md) ·
 [capture](ADAPTIVE-PLAYBACK-CAPTURE-CUSTODY.md).
 
-## 2026-11-20 continuation — singleton capture ordering
+## 2026-11-20 continuation — singleton capture ordering and service observations
 
-The normal embedded Hiqlite route can consider an ordinary finite software
-trial when the local daemon is the sole committed voter and there are no
+The normal embedded Hiqlite route in `34eecfab` can consider an ordinary finite
+software trial when the local daemon is the sole committed voter and there are no
 learners. The original trial retains the membership admission hold until
 confirmed cleanup or handoff to its surviving, fully charged producer. The
 same original media and output descriptors must prove local noswap tmpfs
@@ -31,6 +31,29 @@ unknown cleanup result retains the hold.
 Multi-member or unproven Hiqlite authority keeps normal conservative
 admission. Singleton runtime acceptance and shared-domain trial authority
 remain open.
+
+`bd53089a` binds supported adaptive attempts to the original file stamp
+and applied shared-source mapping. The existing attempt holds that mapping
+through confirmed physical close. `8140ad6c` merges current main
+`f771a063f`, including MPV short startup, and retains the verified-media
+check before a first-publication unpaced capacity refusal.
+
+`46dcc51a` adds input-paced Live TV observations from committed segments
+and separates the relay pump's downstream queue and upstream body waits.
+Egress capacity remains unknown. `98edcd2d` adds the native singleton
+fixture and routes Activity Stop through retirement of the exact finite
+owner.
+
+The normal pinned macOS hooks passed through `98edcd2d`. Linux Rust 1.97.1
+compiled the daemon and Core fixture targets at `05e9203e` (tree
+`37b3077f`) under the capped non-voter profile. Linux compilation of the
+new layers, including the `adaptive_two_node` target with
+`cluster-integration-tests`, and native runtime acceptance remain open.
+The native fixture requires a non-root process, Landlock ABI 6 or later,
+`clone3`, native FFmpeg and FFprobe, a private noswap tmpfs and an isolated
+delegated cgroup v2. The fixture takes the supplied mount and cgroup paths
+from `PLURX_TEST_FINITE_NOSWAP_TMPFS` and
+`PLURX_TEST_FINITE_NATIVE_ROOT`.
 
 ## 2026-11-19 continuation — integrated source, acceptance open
 

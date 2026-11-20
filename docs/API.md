@@ -971,6 +971,14 @@ Older or unavailable peers have no entry. The signed internal Activity
 snapshot carries this optional projection within its existing byte bound;
 ordinary household responses do not expose it.
 
+Detailed Activity and its signed peer snapshot can include
+`live_tv[].output_service`. The object carries `generation`, `phase`
+(`input_paced`), `committed_segment_bytes` and `sample_age_ms`. The
+original producer counts each complete, verified segment when it first
+enters an accepted playlist. The sample age includes time in the peer
+cache. Older peers and rows without a current sample can omit the object.
+Output follows the live input, so encoder capacity remains unknown.
+
 `GET /api/v1/cluster/jobs` additionally returns `active_jobs` independently of
 the selected queue filter: up to 100 running and 100 cancelling assignments,
 with the same labels and observation fields as `jobs`. `active_truncated`
@@ -3907,6 +3915,17 @@ means two distinct background holders use the same applied domain.
 `unknown` covers unavailable or incomplete evidence. These are advisory
 facts about existing commitments. The worker still checks source access and
 admission when it prepares playback.
+
+`GET /api/v1/cluster/media` can include `nodes[].io.relay_ingress`.
+`POST /api/v1/cluster/media/offers` reports the answering ingress's
+optional `local_relay_ingress` separately from the worker offers. Each
+object reports `downstream_queue` and `upstream_body`, with `waits`,
+`waited_micros` and `no_progress_deadlines` for each. The first measures
+waiting for space in the relay queue. The second measures waiting for the
+peer's response body. `body_bytes_handed_to_http` counts bytes handed to
+the local HTTP body in the same 30-second observation window. Network and
+egress capacity remain unknown, and
+`network_capacity_bytes_per_second` is `null`.
 
 A fragment job retry retains its exact copy-video variant. If the source or
 pipeline changed so that variant cannot be resolved, it returns conflict; use
