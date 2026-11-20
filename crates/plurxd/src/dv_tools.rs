@@ -55,7 +55,7 @@ pub(crate) const REFIT_MODE_VERSION: &str = "plurx-refit-mode-v2";
 /// Their representations are versioned in `refit_topleft.h` and `m7_sample_v1.h`.
 #[cfg(test)]
 pub(crate) const REFIT_MODE_SOURCES: &str =
-    "8b9fec2bfb8f04a05d460f055fe07d0b69a117d1f0abcd44c372aa77d021ead3";
+    "db6d6a082cb74fc87de8777ecbe8c65b55a498d8daedbd849b318ad5669d46c5";
 
 #[cfg(test)]
 impl ToolSet {

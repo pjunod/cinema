@@ -507,6 +507,7 @@ static void inspect_coded_au(const AVPacket *packet, bool in_window, bool trace)
         av_sha_update(base_sha, p - 4, (size_t)n + 4);
     }
     if (type == 63) {
+      need(!(refit_mode && base_only), "M7 candidate has no enhancement-layer NAL units");
       need(n >= 4, "enhancement wrapper");
       int inner = (p[2] >> 1) & 63;
       need(((p[2] & 1) << 5 | (p[3] >> 3)) == 0 && (p[3] & 7) != 0,
@@ -853,7 +854,8 @@ static void send_layer(struct layer *layer, AVPacket *packet) {
 int main(int argc, char **argv) {
   if (argc >= 2 && (!strcmp(argv[1], "--refit-stats") || !strcmp(argv[1], "--dump-composed") ||
                     !strcmp(argv[1], "--export-composed-topleft") ||
-                    !strcmp(argv[1], "--m7-sample-fel-v1")))
+                    !strcmp(argv[1], "--m7-sample-fel-v1") ||
+                    !strcmp(argv[1], "--m7-sample-candidate-v1")))
     return refit_main(argc, argv);
   bool held_origin = argc >= 3 && !strcmp(argv[argc - 2], "--held-source-origin");
   struct rational supplied_origin = {0, 1};
