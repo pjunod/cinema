@@ -26,8 +26,7 @@ fn installed_matches(
 
 impl HiqliteAuthStore {
     async fn dispatch_turns_catalog(&self) -> Result<Vec<RemoteShapeRow>, StoreError> {
-        self
-            .client()
+        self.client()
             // authority: installation and lost-ack reconciliation require the committed dispatch catalog.
             .query_consistent_map::<RemoteShapeRow, _>(
                 "dispatch_turns_installed",
@@ -55,14 +54,16 @@ impl HiqliteAuthStore {
         };
         // Compare the whole observed layout again inside the replicated writer.
         // A concurrent winner is recognized only after reading its complete catalog.
-        let predecessor = serde_json::to_string(&predecessor).expect("schema string pairs serialize");
+        let predecessor =
+            serde_json::to_string(&predecessor).expect("schema string pairs serialize");
         let mut statements = vec![(
             format!("SELECT CASE WHEN (SELECT json_group_array(json_array(name,sql)) FROM ({CATALOG}))=$1 THEN 1 ELSE json('dispatch turn schema raced') END"),
             params!(predecessor),
         )];
         for migration in migrations {
             statements.extend(
-                migration.split("-- next statement\n")
+                migration
+                    .split("-- next statement\n")
                     .filter(|sql| !sql.trim().is_empty())
                     .map(|sql| (sql.to_owned(), params!())),
             );

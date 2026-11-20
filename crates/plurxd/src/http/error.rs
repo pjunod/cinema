@@ -221,6 +221,7 @@ impl From<StoreError> for ApiError {
             SourceChanged => (StatusCode::CONFLICT, "analysis_source_changed"),
             PredictionExpired => (StatusCode::CONFLICT, "analysis_prediction_stale"),
             GenerationConflict => (StatusCode::CONFLICT, "analysis_generation_conflict"),
+            StateChanged => (StatusCode::CONFLICT, "analysis_state_changed"),
         };
         ApiError::Typed {
             status,

@@ -16,9 +16,11 @@ pub(super) fn catalog(conn: &rusqlite::Connection) -> Result<Vec<(String, String
 
 pub(super) fn expected_catalog(live_titles: bool) -> Result<Vec<(String, String)>, StoreError> {
     let conn = rusqlite::Connection::open_in_memory()?;
-    conn.execute_batch("CREATE TABLE background_jobs(id TEXT);
+    conn.execute_batch(
+        "CREATE TABLE background_jobs(id TEXT);
         CREATE TABLE analysis_requests(request_id TEXT);
-        CREATE TABLE background_source_custody(custody_id TEXT);")?;
+        CREATE TABLE background_source_custody(custody_id TEXT);",
+    )?;
     conn.execute_batch(SCHEMA)?;
     if live_titles {
         conn.execute_batch(LIVE_TITLE_MIGRATION)?;
@@ -26,13 +28,17 @@ pub(super) fn expected_catalog(live_titles: bool) -> Result<Vec<(String, String)
     catalog(&conn)
 }
 
-pub(super) fn verify_catalog(conn: &rusqlite::Connection, live_titles: bool) -> Result<(), StoreError> {
+pub(super) fn verify_catalog(
+    conn: &rusqlite::Connection,
+    live_titles: bool,
+) -> Result<(), StoreError> {
     if catalog(conn)? != expected_catalog(live_titles)? {
-        return Err(StoreError::Migration("incompatible dispatch turn schema".into()));
+        return Err(StoreError::Migration(
+            "incompatible dispatch turn schema".into(),
+        ));
     }
     Ok(())
 }
-
 
 pub(super) async fn advertise<T: QueueSql>(
     store: &T,
@@ -128,19 +134,37 @@ mod tests {
             INSERT INTO background_library_requests(request_id,library_id,job_id,input_json) VALUES('scan',1,'manual','{"kind":"full","trigger":"manual"}');
             INSERT INTO dispatch_turn_ready VALUES('manual','node',0,2000,'["/media"]');
         "#).expect("competing title and manual request");
-        let claim = || db.execute(crate::store::background_jobs::CLAIM_SQL, [
+        let claim = || {
+            db.execute(crate::store::background_jobs::CLAIM_SQL, [
             r#"{"job_id":"title","expected_revision":0,"node_id":"node","boot_id":"boot","claim_id":"claim","kind":"dv_title_scan","payload_version":1,"now_ms":1000,"dispatched_at_ms":1000}"#,
-        ]).expect("claim title");
+        ]).expect("claim title")
+        };
         assert_eq!(claim(), 0, "deployed trigger refuses live title");
-        let winner: String = db.query_row("SELECT winner FROM dispatch_turn_attempt", [], |r| r.get(0)).expect("contended turn");
+        let winner: String = db
+            .query_row("SELECT winner FROM dispatch_turn_attempt", [], |r| r.get(0))
+            .expect("contended turn");
         assert_eq!(winner, "manual");
         SqliteStore::apply_next_migration_for_test(&db).expect("upgrade with pending work");
         verify_catalog(&db, true).expect("exact upgraded catalog");
-        db.execute("UPDATE background_job_waiters SET deadline_ms=1000 WHERE request_id='viewer'", []).expect("expire interest");
+        db.execute(
+            "UPDATE background_job_waiters SET deadline_ms=1000 WHERE request_id='viewer'",
+            [],
+        )
+        .expect("expire interest");
         assert_eq!(claim(), 0, "maintenance still waits after viewer expiry");
-        db.execute("UPDATE background_job_waiters SET deadline_ms=2000 WHERE request_id='viewer'", []).expect("renew interest");
+        db.execute(
+            "UPDATE background_job_waiters SET deadline_ms=2000 WHERE request_id='viewer'",
+            [],
+        )
+        .expect("renew interest");
         assert_eq!(claim(), 1, "live title gets the protected turn");
-        let held: i64 = db.query_row("SELECT count(*) FROM dispatch_turn_protected_jobs WHERE job_id='title'", [], |r| r.get(0)).expect("held classification");
+        let held: i64 = db
+            .query_row(
+                "SELECT count(*) FROM dispatch_turn_protected_jobs WHERE job_id='title'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("held classification");
         assert_eq!(held, 1);
     }
 }

@@ -59,6 +59,8 @@ pub enum AnalysisAdmissionRefusal {
     QueueFull,
     #[error("the analysis backlog has reached its hard bound for this priority")]
     BacklogFull,
+    #[error("the admitted analysis request or its source changed before it could be returned")]
+    StateChanged,
     #[error("no matching analysis generation is available to join")]
     GenerationConflict,
 }

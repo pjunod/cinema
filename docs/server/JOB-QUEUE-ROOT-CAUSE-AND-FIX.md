@@ -10,6 +10,13 @@ bounds), and [worker refinement](../cluster/WORKER-REFINEMENT-STATUS.md)
 proposed repair, scheduling contract, queue management design, and remaining
 work. It is the canonical ledger for backlog project P42.
 
+## November 20 recurrence
+
+File 7230 remained queued while other Dolby Vision title jobs completed. Analysis
+intake was saturated and five title rows had expired leases. The [job service
+contract](../features/JOB-SERVICE.md) covers the new incident, the standalone
+and Raft acceptance cases, and the boundary with playback resource management.
+
 ## November 7 recovery and release status
 
 Nine manual Movies requests shared a scan, completed at 18:19:41 UTC. TV completed at 18:19:43 UTC. Three remaining metadata refreshes had scheduled origins. Each accepted request retains a waiter on its shared job.

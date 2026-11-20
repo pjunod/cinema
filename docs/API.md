@@ -3104,7 +3104,8 @@ The preparation status read requires an authenticated viewer; every other route 
 
 A single-file analysis request returns HTTP 409 with `analysis_source_changed`,
 `analysis_prediction_stale` or `analysis_generation_conflict` when the corresponding
-identity check refuses admission. HTTP 429 distinguishes the runnable intake ceiling
+identity check refuses admission. A concurrent change during result lookup can produce
+HTTP 409 with `analysis_state_changed`. HTTP 429 distinguishes the runnable intake ceiling
 (`analysis_queue_full`) from the hard active backlog ceiling (`analysis_backlog_full`).
 For a multi-component request, inspect each component's acceptance and error in the
 202 response when another component was accepted.

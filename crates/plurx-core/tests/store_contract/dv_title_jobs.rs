@@ -444,6 +444,59 @@ async fn title_reprobe_and_scanner_aba_never_reuse_a_request_or_attach_old_resul
 }
 
 #[tokio::test]
+async fn standalone_title_finishes_after_store_reopen_with_a_new_worker_boot() {
+    let dir = tempfile::tempdir().expect("standalone data directory");
+    let path = dir.path().join("title.sqlite");
+    let open = || -> Arc<dyn Store> {
+        Arc::new(plurx_core::store::SqliteStore::open(&path).expect("open standalone store"))
+    };
+    let scanner = "a".repeat(64);
+    let (demand, old) = {
+        let store = open();
+        let file = seed_playback(&store, "title-worker-restart").await;
+        let (demand, job) = active(&store, file.id, &scanner, 1_000).await;
+        assert!(store
+            .request_dv_fel_variant(file.id, &playback_recipe(&demand))
+            .await
+            .expect("retain exact pending recipe"));
+        (demand, job)
+    };
+    let store = open();
+    let now = old.token.as_ref().expect("original lease").lease_expires_ms;
+    let listed = store
+        .dv_title_demands(&scanner, 0, now)
+        .await
+        .expect("discovery after boot");
+    assert!(listed
+        .iter()
+        .any(|d| d.active_job_id.as_ref() == Some(&old.id)));
+    let replacement = claim(&store, &old.id, now).await;
+    assert!(replacement.fence > old.fence);
+    assert!(matches!(
+        store
+            .publish_dv_title_job(publication(&demand, &old, &scanner, now + 1))
+            .await
+            .expect("old publication"),
+        JobPublishOutcome::LostOwnership
+    ));
+    assert!(matches!(
+        store
+            .publish_dv_title_job(publication(&demand, &replacement, &scanner, now + 2))
+            .await
+            .expect("replacement publication"),
+        JobPublishOutcome::Published { .. }
+    ));
+    let attempts = store
+        .job_attempts(&old.id)
+        .await
+        .expect("retained attempts");
+    assert_eq!(attempts.len(), 2);
+    assert!(attempts
+        .iter()
+        .any(|a| a.fence == old.fence && a.outcome.as_deref() == Some("lease_expired")));
+}
+
+#[tokio::test]
 async fn title_demand_and_manual_cancel_suppression_survive_store_reopen() {
     let dir = tempfile::tempdir().expect("durable store fixture");
     let path = dir.path().join("titles.sqlite");

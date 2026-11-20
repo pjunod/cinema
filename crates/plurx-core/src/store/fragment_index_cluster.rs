@@ -2083,7 +2083,7 @@ pub(crate) fn analysis_request_stranded_sql(live: &str) -> String {
 /// decision. Both stores return a matching generation in preference to a cap
 /// refusal, so retries join admitted work even at the hard bound.
 pub(crate) fn analysis_admission_refusal_sql() -> String {
-    let stranded = analysis_request_stranded_sql("$2");
+    let stranded = analysis_request_stranded_sql("input.engines");
     format!(
         "WITH input AS (SELECT $1 AS req, $2 AS engines, $3 AS headroom)
          SELECT CASE
@@ -2123,7 +2123,8 @@ pub(crate) fn analysis_admission_error(reason: usize) -> StoreError {
         2 => PredictionExpired,
         3 => BacklogFull,
         4 => QueueFull,
-        0 | 5 => GenerationConflict,
+        0 => StateChanged,
+        5 => GenerationConflict,
         _ => return StoreError::Database(format!("unknown analysis admission result {reason}")),
     })
 }

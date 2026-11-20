@@ -13159,6 +13159,84 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
     }
 }
 
+/// Reinstall the two published v124 definitions in an owned cluster, then
+/// exercise the replicated predecessor guard and repeat bootstrap after upgrade.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_dispatch_turn_upgrade_preserves_pending_turns() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("dispatch upgrade client");
+    let telemetry = cluster._root.path().join("dispatch-turn-upgrade.db");
+    let bootstrap =
+        || HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry);
+    drop(bootstrap().await.expect("install current catalog"));
+    let catalog =
+        "SELECT name,sql FROM sqlite_master WHERE name GLOB 'dispatch_turn_*' ORDER BY name";
+    let current = replicated_fixture_shape(&client, catalog).await;
+    let original = include_str!("../src/store/background_job_turns.sql");
+    let old_objects: Vec<_> = original
+        .split("-- next statement")
+        .filter(|sql| {
+            sql.contains("CREATE TRIGGER dispatch_turn_job ")
+                || sql.contains("CREATE VIEW dispatch_turn_protected_jobs ")
+        })
+        .collect();
+    assert_eq!(old_objects.len(), 2);
+    let mut rewind = vec![
+        (
+            "DROP TRIGGER dispatch_turn_job".to_owned(),
+            hiqlite::params!(),
+        ),
+        (
+            "DROP VIEW dispatch_turn_protected_jobs".to_owned(),
+            hiqlite::params!(),
+        ),
+    ];
+    rewind.extend(
+        old_objects
+            .into_iter()
+            .map(|sql| (sql.trim().to_owned(), hiqlite::params!())),
+    );
+    rewind.push(("INSERT INTO dispatch_turn_wait(owner,work,keys_json,queued_ms,last_seen_ms,credits) VALUES('job','old-wait','[]',1,2,3)".to_owned(), hiqlite::params!()));
+    client
+        .txn(rewind)
+        .await
+        .expect("restore deployed definitions")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete old catalog and wait");
+    let deployed = replicated_fixture_shape(&client, catalog).await;
+    assert_eq!(current.len(), deployed.len());
+    assert_eq!(
+        current
+            .iter()
+            .zip(&deployed)
+            .filter(|(a, b)| a != b)
+            .count(),
+        2
+    );
+    for _ in 0..2 {
+        drop(bootstrap().await.expect("upgrade or reopen"));
+        assert_eq!(replicated_fixture_shape(&client, catalog).await, current);
+        let rows: Vec<I64Value> = client.query_consistent_map(
+            "SELECT credits AS value FROM dispatch_turn_wait WHERE owner='job' AND work='old-wait'",
+            hiqlite::params!(),
+        ).await.expect("pending wait credits");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value, 3);
+    }
+}
+
 /// Review #1405 (4): a replicated cluster at managed v4 (the v125 release)
 /// passes through v5 on bootstrap and reaches the exact current v6 view
 /// and marker, with managed receipts kept. Later bootstrap is a no-op.
@@ -29432,6 +29510,72 @@ async fn active_legacy_identity_blocks_exact_forced_successor() {
                 .unwrap_or_else(|error| panic!("{backend}: read exact successor: {error}"))
                 .is_none(),
             "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn analysis_admission_rejected_force_keeps_the_other_generation() {
+    use plurx_core::error::{
+        AnalysisAdmissionRefusal::GenerationConflict, StoreError::AnalysisAdmission,
+    };
+    use plurx_core::store::NewAnalysisRequest;
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "rejected-force").await;
+        let original = NewAnalysisRequest {
+            request_id: "existing-force".into(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".into(),
+            pipeline_version: "engine".into(),
+            video_identity: "identity-a".into(),
+            requested_generation: "forced-a".into(),
+            priority: "forced".into(),
+            trigger: "admin".into(),
+            force_rebuild: true,
+            target_node_id: "node-a".into(),
+            not_before_ms: 1,
+            created_at_ms: 1,
+        };
+        let pending = NewAnalysisRequest {
+            request_id: "valid-queue-entry".into(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            video_identity: "identity-b".into(),
+            requested_generation: "normal-b".into(),
+            ..original.clone()
+        };
+        store
+            .enqueue_analysis_request(&original)
+            .await
+            .expect("first force");
+        store
+            .enqueue_analysis_request(&pending)
+            .await
+            .expect("ordinary work");
+        let colliding = NewAnalysisRequest {
+            video_identity: pending.video_identity.clone(),
+            requested_generation: "forced-b".into(),
+            ..original
+        };
+        assert!(
+            matches!(
+                store.enqueue_analysis_request(&colliding).await,
+                Err(AnalysisAdmission(GenerationConflict))
+            ),
+            "{backend}: conflicting id"
+        );
+        let kept = store
+            .analysis_request(&pending.request_id)
+            .await
+            .expect("read")
+            .expect("entry");
+        assert_eq!(
+            kept.state, "queued",
+            "{backend}: refused force preserves ordinary work"
         );
     })
     .await;
