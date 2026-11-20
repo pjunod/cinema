@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 300
     steps:
       - name: Confirm donor runner
-        run: test -f "$RUNNER_TOOL_CACHE/archive-ab-E-F85179CD21/cache-8623.tar"
+        run: test -f "$RUNNER_TOOL_CACHE/archive-ab-neutral-20261120/donor-marker"
       - name: Verify effective nonvoter resource bounds
         shell: sh
         run: |
