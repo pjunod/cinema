@@ -1,0 +1,36 @@
+name: Nynuc heavy Rust qualification
+on:
+  push:
+    branches: [codex/nynuc-heavy-qualification]
+jobs:
+  operations:
+    name: bounded Rust compile qualification
+    runs-on: [ci-nynuc-heavy-qualification]
+    timeout-minutes: 45
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Run the operations resource contracts
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.operations.test_voter_isolation
+      - name: Verify the requested container budget
+        run: |
+          test "$(cat /sys/fs/cgroup/memory.max)" = 21474836480
+          test "$(cat /sys/fs/cgroup/memory.swap.max)" = 0
+          test "$(cat /sys/fs/cgroup/cpu.max)" = '400000 100000'
+          test "$(cat /sys/fs/cgroup/cpuset.cpus.effective)" = '0-3'
+          test "$(cat /sys/fs/cgroup/pids.max)" = 4096
+          test "$(df -PB1 / | awk 'NR==2 {print $4}')" -ge 26843545600
+      - name: Check locked Rust code on the pinned toolchain
+        run: |
+          test "$(rustc --version | cut -d' ' -f2)" = 1.97.1
+          cargo check --locked -j 4 -p plurx-core --lib
