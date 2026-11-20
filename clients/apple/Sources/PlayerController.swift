@@ -3942,8 +3942,8 @@ final class PlayerController: ObservableObject {
             } else {
                 intentQuality = autoControlQualitySelection(desired: candidate,
                     installedId: decision.qualityCandidateId, candidates: decision.qualityCandidates)
-                // An unnamed or encoded route does not prove a reusable copy recipe.
-                guard case .autoCandidate = intentQuality, candidate?.route == "remux" else { return nil }
+                // An unnamed Auto decision is still ordinary Create input.
+                // The server resolves and verifies the actual copy recipe.
             }
             let mode: SubtitleMode = subtitle.index.map {
                 subtitleUsesOverlay($0, in: decision.subtitles ?? []) ? .overlay : .native

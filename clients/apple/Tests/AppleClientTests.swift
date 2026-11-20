@@ -6561,6 +6561,25 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNil(PlaybackWaitPresentation.detail(for: stagedOpen, live: live))
     }
 
+    #if os(tvOS)
+    @MainActor
+    func testUnnamedNativeAutoCanPrepareTheAuthoritativeCopyRecipe() throws {
+        var negotiation = Decision(fileId: 42, method: "remux", playUrl: "/files/42/hls/sessions")
+        negotiation.displayAwareAutoProtocol = "route-v1"
+        var caps = Caps.capsDocument(hevc: true, av1: false, displayHDR: true, dolbyVision: true)
+        caps.display.presentationTarget = PresentationTarget(widthPx: 3840, heightPx: 2160, revision: 1)
+        let request = try XCTUnwrap(PlayerController.startupPreparationRequest(
+            decision: negotiation, caps: caps, selection: .none, quality: .auto,
+            startMs: 1_424_363, deviceSubtitlesOff: false, subtitleReadiness: .onDemand,
+            routeV1: true, playbackId: UUID().uuidString
+        ))
+
+        XCTAssertEqual(request.intent?.selection.quality, .auto)
+        XCTAssertEqual(request.copy, true)
+        XCTAssertEqual(request.start, 1_424.363)
+    }
+    #endif
+
     func testNativeStartupSeekRequiresTheRequestedItemClock() {
         XCTAssertTrue(PlayerController.initialItemSeekLanded(.finished(true), positionMs: 6_174, targetMs: 6_200))
         XCTAssertFalse(PlayerController.initialItemSeekLanded(.finished(true), positionMs: 5_172, targetMs: 6_200))
