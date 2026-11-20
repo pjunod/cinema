@@ -465,18 +465,36 @@ fn source_index_preparation_condition(
     Ok(Some((condition, values)))
 }
 
+enum SourceIndexPermissionRead {
+    Ready,
+    Unavailable,
+    AssertionRefused,
+}
+
 async fn source_index_permission<B: Backend>(
     backend: &B,
     authority: &SourceSessionWriteAuthority,
 ) -> Result<bool, StoreError> {
+    Ok(matches!(
+        source_index_permission_read(backend, authority).await?,
+        SourceIndexPermissionRead::Ready
+    ))
+}
+
+async fn source_index_permission_read<B: Backend>(
+    backend: &B,
+    authority: &SourceSessionWriteAuthority,
+) -> Result<SourceIndexPermissionRead, StoreError> {
     let Some((condition, values)) = source_index_preparation_condition(authority)? else {
-        return Ok(false);
+        // A preflight refusal executed no assertion. It cannot establish the
+        // concrete guarded-write rejection required for heartbeat refresh.
+        return Ok(SourceIndexPermissionRead::Unavailable);
     };
     let assertion = format!("INSERT INTO sharing_source_session_bindings(incarnation_id) SELECT NULL WHERE NOT ({condition})");
     match backend.sharing_txn(vec![(assertion, values)]).await {
-        Ok(counts) if counts.as_slice() == [0] => Ok(true),
+        Ok(counts) if counts.as_slice() == [0] => Ok(SourceIndexPermissionRead::Ready),
         Ok(_) => Err(invalid()),
-        Err(error) if lost_proposal(&error) => Ok(false),
+        Err(error) if lost_proposal(&error) => Ok(SourceIndexPermissionRead::AssertionRefused),
         Err(error) => Err(error),
     }
 }
@@ -787,10 +805,16 @@ async fn prepare_media_authority<B: Backend>(
     }
     let rejected_phase = if rejected {
         Some(SourcePreparationPhase::Activation)
-    } else if !source_index_permission(backend, &authority).await? {
-        Some(SourcePreparationPhase::Preparation)
     } else {
-        None
+        match source_index_permission_read(backend, &authority).await? {
+            SourceIndexPermissionRead::Ready => None,
+            SourceIndexPermissionRead::AssertionRefused => {
+                Some(SourcePreparationPhase::Preparation)
+            }
+            SourceIndexPermissionRead::Unavailable => {
+                return Ok(SourcePreparationAuthorityRead::Unavailable)
+            }
+        }
     };
     if let Some(phase) = rejected_phase {
         refresh.refused(members);

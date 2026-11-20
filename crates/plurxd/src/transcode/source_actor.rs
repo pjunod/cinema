@@ -1057,7 +1057,7 @@ impl SourceProducerAuthority {
                         SourcePreparationPhase::Activation => "source_preparation.activation_refused",
                         SourcePreparationPhase::Preparation => "source_preparation.preparation_refused",
                     };
-                    tracing::warn!(target: "plurxd::transcode", stage, "Source preparation assertion refused; reobserve exact authority");
+                    tracing::debug!(target: "plurxd::transcode", stage, "Source preparation assertion refused; reobserve exact authority");
                     continue;
                 }
                 SourcePreparationAuthorityRead::Capacity => return Err(SourceWorkerError::Unavailable),

@@ -3270,6 +3270,7 @@ enum PreparationInterleave {
     Heartbeat,
     FileChangedWithoutHeartbeat,
     StoreError,
+    ObservationExpiredAfterAssertion,
 }
 /// Executes unchanged production assertions through the actual Store, placing
 /// one metadata operation after SQL clock binding and before its transaction.
@@ -3322,9 +3323,20 @@ impl super::super::sharing::Backend for PreparationInterleavedStore<'_> {
                         .await?;
                 }
                 PreparationInterleave::StoreError => return Err(invalid()),
+                PreparationInterleave::ObservationExpiredAfterAssertion => {}
             }
         }
-        self.store.sharing_txn(statements).await
+        let result = self.store.sharing_txn(statements).await;
+        if result.is_ok()
+            && (self.repeat || call == self.at)
+            && matches!(
+                self.action,
+                PreparationInterleave::ObservationExpiredAfterAssertion
+            )
+        {
+            super::super::sharing::LogicalClock::advance(6000);
+        }
+        result
     }
     async fn sharing_revision_key_rows(&self) -> Result<Vec<String>, StoreError> {
         self.store.sharing_revision_key_rows().await
@@ -3568,6 +3580,65 @@ async fn sharing_source_preparation_refresh_never_retries_errors_unchanged_refus
                 .load(std::sync::atomic::Ordering::SeqCst),
             calls,
             "no additional guarded operation"
+        );
+        assert_preparation_unadmitted(&store).await;
+    }
+}
+
+#[tokio::test]
+async fn sharing_source_preparation_expired_preflight_is_terminal_without_assertion_retry() {
+    let _clock = super::super::sharing::LogicalClock::install();
+    let dir = tempfile::tempdir().expect("directory");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory"),
+        SqliteStore::open(&dir.path().join("preparation-expired.db")).expect("pool"),
+    ] {
+        let (authority, credential) = preparation_seed(&store).await;
+        let mut refresh = authority.preparation_scope().refresh();
+        let interleaved = PreparationInterleavedStore {
+            store: &store,
+            at: 1,
+            repeat: false,
+            action: PreparationInterleave::ObservationExpiredAfterAssertion,
+            assertions: std::sync::atomic::AtomicUsize::new(0),
+        };
+        // The assigned-authority assertion succeeds, then the observation
+        // expires before final preparation builds any SQL. This is terminal;
+        // it is not an assertion rejection and cannot enable another attempt.
+        assert!(matches!(
+            prepare_media_authority(
+                &interleaved,
+                &mut refresh,
+                &credential,
+                &preparation_members(&store).await
+            )
+            .await
+            .expect("expired preparation preflight"),
+            SourcePreparationAuthorityRead::Unavailable
+        ));
+        assert_eq!(
+            interleaved
+                .assertions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(matches!(
+            prepare_media_authority(
+                &interleaved,
+                &mut refresh,
+                &credential,
+                &preparation_members(&store).await
+            )
+            .await
+            .expect("terminal refresh state"),
+            SourcePreparationAuthorityRead::Unavailable
+        ));
+        assert_eq!(
+            interleaved
+                .assertions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "no final assertion or retry executed"
         );
         assert_preparation_unadmitted(&store).await;
     }
