@@ -28,7 +28,14 @@ COMMANDS = {
 }
 LEGACY_JOB_SHA256 = '438b7d51e99d364e7f7ba1c2ea287d1872b9f18d2b0732d1e9eba04a7071f793'
 WRAPPED_JOB_SHA256 = 'b2de0a8b789cc74ba31cb8a4a88fe680dbb22827238267bc04128aa8722194f3'
-MAKEFILE_SHA256 = 'a8dfee1e29ba93b43cf58ee5233a5aef1aeddd381765a759d47b05c8126b23c2'
+# Reviewed pinned-image/Bash producer; original markers remain mandatory.
+CURRENT_JOB_SHA256 = 'fe2c06e2f7313d1bd2471420c201d051ccb1dba8ab9ffb3c3639c4ee539ee641'
+MAKEFILE_SHA256 = 'a7b767c0bc813c46c2fedd64fe465cc44748fb660f088c78a13e30d9a528440b'
+# The exact pre-migration wrapper executed CI8682 originals but could not
+# recognize its own producer. Admit only those reviewed bytes, never an
+# arbitrary older wrapper or a pass under the former Makefile inventory.
+PREDECESSOR_WRAPPER_BLOB = '639abdf4787d1a505743862752d9e1a1f744a466'
+PREDECESSOR_WRAPPER_SHA256 = 'cd9107838332418a6e2e8530a253bda30a2e9f81e4584e537c6c7a30faf5bb76'
 MAX_CANDIDATES = 16
 MAX_ARTIFACT_PAGES = 4
 REPORTS = Path('.main-preflight-receipts/web-unit')
@@ -65,8 +72,8 @@ def producer(commit, current):
     now = git('show', current + ':' + WORKFLOW)
     block = job_block(old, 'web_compile')
     digest = hashlib.sha256(block.encode()).hexdigest()
-    require(digest in (LEGACY_JOB_SHA256, WRAPPED_JOB_SHA256), 'Unknown web command producer')
-    require(hashlib.sha256(job_block(now, 'web_compile').encode()).hexdigest() == WRAPPED_JOB_SHA256,
+    require(digest in (LEGACY_JOB_SHA256, WRAPPED_JOB_SHA256, CURRENT_JOB_SHA256), 'Unknown web command producer')
+    require(hashlib.sha256(job_block(now, 'web_compile').encode()).hexdigest() == CURRENT_JOB_SHA256,
             'Current web command environment/control flow changed')
     # Global env, defaults, permissions and the other producer jobs cannot
     # drift unnoticed while the workflow file is outside the unit closure.
@@ -74,9 +81,15 @@ def producer(commit, current):
         old = old.replace(job_block(old, name), '')
         now = now.replace(job_block(now, name), '')
     require(old == now, 'Shared workflow configuration changed')
-    if digest == WRAPPED_JOB_SHA256:
-        require(git('rev-parse', commit + ':validation/web_unit_receipts.py') ==
-                git('rev-parse', current + ':validation/web_unit_receipts.py'),
+    if digest != LEGACY_JOB_SHA256:
+        old_wrapper = git('rev-parse', commit + ':validation/web_unit_receipts.py')
+        current_wrapper = git('rev-parse', current + ':validation/web_unit_receipts.py')
+        predecessor = (digest == CURRENT_JOB_SHA256
+                       and old_wrapper == PREDECESSOR_WRAPPER_BLOB
+                       and hashlib.sha256(subprocess.check_output(
+                           ['git', 'show', commit + ':validation/web_unit_receipts.py'],
+                           timeout=10)).hexdigest() == PREDECESSOR_WRAPPER_SHA256)
+        require(old_wrapper == current_wrapper or predecessor,
                 'Unknown historical web wrapper implementation')
     return 'legacy' if digest == LEGACY_JOB_SHA256 else 'wrapped'
 

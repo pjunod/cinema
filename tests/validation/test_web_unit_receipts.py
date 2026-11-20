@@ -72,12 +72,54 @@ class WebUnitReceiptTests(unittest.TestCase):
         wrapped = '  web_compile:\n    run: wrapped\n'
         apple = '  apple_compile:\n    run: true\n'
         with patch.object(web, 'LEGACY_JOB_SHA256', hashlib.sha256(legacy.encode()).hexdigest()), \
-                patch.object(web, 'WRAPPED_JOB_SHA256', hashlib.sha256(wrapped.encode()).hexdigest()):
+                patch.object(web, 'WRAPPED_JOB_SHA256', hashlib.sha256(wrapped.encode()).hexdigest()), \
+                patch.object(web, 'CURRENT_JOB_SHA256', hashlib.sha256(wrapped.encode()).hexdigest()):
             with patch.object(web, 'git', side_effect=[legacy + apple, wrapped + apple]):
                 self.assertEqual(web.producer('old', 'current'), 'legacy')
             with patch.object(web, 'git', side_effect=[legacy + apple, wrapped.replace('wrapped', 'changed') + apple]), \
                     self.assertRaises(ReceiptError):
                 web.producer('old', 'current')
+
+    def test_committed_current_web_producer_and_inventory_are_self_compatible(self):
+        current = web.git('rev-parse', 'HEAD')
+        self.assertEqual(web.producer(current, current), 'wrapped')
+        inputs = web.unchanged_inputs(current, current)
+        self.assertEqual(inputs['original_input_digest'], inputs['current_input_digest'])
+        self.assertEqual(inputs['reviewed_transitions'], [])
+
+    def test_exact_pre_migration_originals_remain_compatible(self):
+        prior = 'd2a28aba4b66449865c53c0f44a92251585cdbe2'
+        current = web.git('rev-parse', 'HEAD')
+        self.assertEqual(web.producer(prior, current), 'wrapped')
+        # Freeze the original inventory check without requiring unrelated
+        # future source edits to remain compatible with this historical run.
+        self.assertEqual(web.unchanged_inputs(prior, prior)['reviewed_transitions'], [])
+
+        original_git = web.git
+        for target in ('producer', 'wrapper'):
+            def altered(*args):
+                raw = original_git(*args)
+                if target == 'producer' and args == ('show', prior + ':' + web.WORKFLOW):
+                    return raw.replace('        shell: bash', '        shell: sh')
+                if target == 'wrapper' and args == (
+                        'rev-parse', prior + ':validation/web_unit_receipts.py'):
+                    return 'f' * 40
+                return raw
+            with self.subTest(target=target), patch.object(web, 'git', side_effect=altered), \
+                    self.assertRaises(ReceiptError):
+                web.producer(prior, current)
+
+        original_output = subprocess.check_output
+
+        def altered_wrapper_bytes(args, **kwargs):
+            raw = original_output(args, **kwargs)
+            if args == ['git', 'show', prior + ':validation/web_unit_receipts.py']:
+                return raw + b'\n'
+            return raw
+
+        with patch.object(web.subprocess, 'check_output', side_effect=altered_wrapper_bytes), \
+                self.assertRaises(ReceiptError):
+            web.producer(prior, current)
 
     def test_command_router_falls_back_and_never_marks_adoption_as_original(self):
         with patch.object(web, 'api_context', return_value=(None, {}, 'current', 2)), \
