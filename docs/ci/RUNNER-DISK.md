@@ -87,6 +87,10 @@ Lab2 keeps registration 63 in the second former Android guest with
 settings are parked for rollback. Lab5 supplies Android CI. Running both
 lab2 guests concurrently at those sizes would exceed the host budget.
 
+The approved `media1` exception adds one AMD64 heavy and compile slot in a
+24 GiB Incus VM pinned to four physical cores. The VM uses a 120 GiB local
+root disk. Store and topology CI continue to use nonvoter hosts.
+
 #### Heavy Rust dispatch
 
 Fast Rust gates, unit archive builds and merge-base checks, daemon contracts,

@@ -192,6 +192,15 @@ labels = ["lab", "incus", "ubuntu-24.04", "general"]
 # recreate the obsolete FFmpeg capability. The second lab6 guest serves general jobs.
 
 # --- media1: baremetal, production plurx voter -------------------------------
+# Approved exception for heavy and compile CI in one VM with four pinned
+# physical cores, a 24 GiB VM ceiling, and a 20 GiB job aggregate.
+[[runners]]
+name = "gha-media1-plurx-heavy-01"
+host = "media1"
+os = "Linux"
+arch = "X64"
+labels = ["ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "incus"]
+
 [[runners]]
 name = "gha-media1-general-01"
 host = "media1"
