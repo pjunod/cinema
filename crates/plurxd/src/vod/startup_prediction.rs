@@ -118,7 +118,7 @@ impl ResumePredictions {
     }
 }
 
-fn startup_window(plan: &SegmentPlan, saved_ms: i64) -> Option<(u32, u32)> {
+pub(super) fn startup_window(plan: &SegmentPlan, saved_ms: i64) -> Option<(u32, u32)> {
     if saved_ms < 0 || plan.timescale == 0 {
         return None;
     }
@@ -159,6 +159,35 @@ fn startup_window(plan: &SegmentPlan, saved_ms: i64) -> Option<(u32, u32)> {
 }
 
 impl VodServe {
+    /// The exact playback attachment already has its initialization segment
+    /// and decode window. Cold items keep AVPlayer's ordinary readiness path.
+    /// This remains an optional observation and never delays session creation.
+    pub(crate) fn startup_seek_ready_ms(&self, session_id: &str, requested_ms: i64) -> Option<i64> {
+        if requested_ms <= 0 {
+            return None;
+        }
+        let sessions = self.shared.sessions.try_lock().ok()?;
+        let session = sessions.get(session_id)?;
+        // The manifest's existing hint floors a floating-point timestamp.
+        // The session reply echoes the client's rounded millisecond.
+        if !session
+            .preferred_start_ms
+            .is_some_and(|hint| hint == requested_ms || hint == requested_ms - 1)
+            || !session.children.is_empty()
+            || !matches!(session.kind, SessionKind::Copy { .. })
+        {
+            return None;
+        }
+        let rendition = session.live_rendition()?;
+        let (first, last) = startup_window(&rendition.plan, requested_ms)?;
+        let manifest = rendition.manifest.try_lock().ok()?;
+        if manifest.next_gap(first).is_some_and(|gap| gap <= last) {
+            return None;
+        }
+        let identity = rendition.identity.try_lock().ok()?;
+        identity.identity.as_ref().map(|_| requested_ms)
+    }
+
     /// The native authenticated ingress already authorized this exact file.
     /// A contended registry can skip this hint without delaying the start.
     pub(crate) fn remember_resume_candidate(&self, user_id: i64, file_id: i64, session_id: &str) {

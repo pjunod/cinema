@@ -5268,6 +5268,14 @@ impl TranscodeManager {
             })
     }
 
+    pub(crate) fn vod_startup_seek_ready_ms(
+        &self,
+        session_id: &str,
+        requested_ms: i64,
+    ) -> Option<i64> {
+        self.vod.startup_seek_ready_ms(session_id, requested_ms)
+    }
+
     /// True for an attached VOD capability or one still in the slow
     /// resurrection preparation window. Lease loss uses this classification
     /// to close the stable release generation before a late attachment.

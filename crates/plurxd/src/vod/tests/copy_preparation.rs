@@ -914,13 +914,15 @@ async fn indexed_resume_preparation_reaps_before_releasing_custody_and_play_uses
         .expect("ordinary indexed recipe");
     let rendition = Arc::clone(&attachment.rendition);
     drop(attachment);
-    let (first, last) = (1_u32, 2_u32);
     let start = rendition
         .plan
-        .entry(first)
+        .entry(1)
         .expect("resume entry")
         .start_ticks as f64
         / f64::from(rendition.timescale);
+    let start_ms = (start * 1_000.0).round() as i64;
+    let (first, last) = crate::vodserve::startup_prediction::startup_window(&rendition.plan, start_ms)
+        .expect("startup decode window");
     let next = rendition
         .plan
         .entry(last + 1)
@@ -1010,7 +1012,7 @@ async fn indexed_resume_preparation_reaps_before_releasing_custody_and_play_uses
         let manifest = rendition.manifest.lock().await;
         assert_eq!(
             manifest.materialized_count(),
-            2,
+            usize::try_from(last - first + 1).expect("startup window is bounded"),
             "only the requested range was produced"
         );
         assert!(manifest
@@ -1040,6 +1042,14 @@ async fn indexed_resume_preparation_reaps_before_releasing_custody_and_play_uses
         .cloned()
         .expect("ordinary session rendition");
     assert!(Arc::ptr_eq(&session_rendition, &rendition));
+    assert_eq!(serve.startup_seek_ready_ms("resumed", start_ms + 100), None);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while serve.startup_seek_ready_ms("resumed", start_ms) != Some(start_ms) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the ordinary attachment observes its exact initialized decode window");
     let mut ready = fetch(&serve, "resumed", &prepared_name).await;
     let mut body = Vec::new();
     ready

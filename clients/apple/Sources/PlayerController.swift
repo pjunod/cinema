@@ -4207,6 +4207,9 @@ final class PlayerController: ObservableObject {
         let direct = route.direct
         let url: URL?
         var seekAfterAttach: Int?
+        #if os(tvOS)
+        var startupSeekReady = false
+        #endif
         var nextBaseMs = 0
 
         // Only automatic stall recovery is bounded. Every other open — a seek,
@@ -4409,6 +4412,9 @@ final class PlayerController: ObservableObject {
             nextBaseMs = Self.sessionMediaOriginMs(hls, requestedStartMs: startMs)
             if isVOD {
                 if startMs > 0 { seekAfterAttach = startMs }
+                #if os(tvOS)
+                startupSeekReady = hls.isStartupSeekReady(at: startMs)
+                #endif
             } else if let itemPosition = Self.sessionAttachSeekMs(
                 requestedStartMs: startMs,
                 mediaOriginMs: nextBaseMs
@@ -4474,12 +4480,11 @@ final class PlayerController: ObservableObject {
         let item = makePlayerItem(url)
         Self.configureBuffering(item, growingHLS: sessionId != nil && !isVOD)
         installSeekVideoOutput(on: item)
-        // Configure a fresh native VOD item before AVPlayer begins acquiring
-        // it. Otherwise the playlist hint and the post-readiness seek can
-        // independently acquire the same media.
+        // A VOD startup window prepared for this exact seek can be acquired
+        // once by AVPlayer. Cold items seek after native readiness.
         let initialSeek: AsyncStream<Bool>?
         #if os(tvOS)
-        if case .normal = intent, sessionId != nil, isVOD,
+        if case .normal = intent, sessionId != nil, isVOD, startupSeekReady,
            superseded == nil, player.currentItem == nil, wantsPlayback, let seekAfterAttach {
             let stream = AsyncStream.makeStream(of: Bool.self, bufferingPolicy: .bufferingNewest(1))
             item.seek(

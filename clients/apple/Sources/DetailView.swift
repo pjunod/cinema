@@ -13,6 +13,24 @@ private struct TVFullscreenTargetProbe: UIViewRepresentable {
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
+            let notifications = NotificationCenter.default
+            notifications.removeObserver(self)
+            if let window {
+                for name in [UIWindow.didBecomeKeyNotification, UIWindow.didResignKeyNotification] {
+                    notifications.addObserver(self, selector: #selector(windowStateChanged(_:)),
+                                              name: name, object: window)
+                }
+                if let scene = window.windowScene {
+                    for name in [UIScene.didActivateNotification, UIScene.willDeactivateNotification] {
+                        notifications.addObserver(self, selector: #selector(windowStateChanged(_:)),
+                                                  name: name, object: scene)
+                    }
+                }
+            }
+            measure()
+        }
+
+        @objc private func windowStateChanged(_ notification: Notification) {
             measure()
         }
 

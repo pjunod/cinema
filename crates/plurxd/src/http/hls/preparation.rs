@@ -3042,6 +3042,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
         }
         .to_owned(),
         vod: staged_request.presentation == crate::transcode::Presentation::Vod,
+        startup_seek_ready_ms: None,
         ladder: Vec::new(),
         prior_kbps: None,
         delivered_dynamic_range: delivered_dynamic_range.map(str::to_owned),

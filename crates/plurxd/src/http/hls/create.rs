@@ -4982,6 +4982,14 @@ async fn create_with_purpose_attempt(
         height: info.target_height,
         encoder: info.encoder.clone(),
         vod: info.vod,
+        startup_seek_ready_ms: if owner_node_id == state.node_id && info.vod {
+            state.transcode.vod_startup_seek_ready_ms(
+                &info.session_id,
+                (request.start_seconds * 1_000.0).round() as i64,
+            )
+        } else {
+            None
+        },
         // Capped at what this node can actually serve for this file, not just
         // at the source height: an advertised rung is a promise, and the web
         // ABR controller upgrades into any rung the ladder lists. See
@@ -6822,6 +6830,7 @@ impl PreparedSourcePlayback {
             height: info.target_height,
             encoder: info.encoder.to_owned(),
             vod: info.vod,
+            startup_seek_ready_ms: None,
             ladder: crate::transcode::advertised_ladder(self.file.height, ladder_ceiling),
             prior_kbps: None,
             delivered_dynamic_range: session_delivered_processing_shape(
