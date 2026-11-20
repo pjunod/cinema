@@ -34,7 +34,7 @@ mod source_reads;
 #[cfg(target_os = "linux")]
 mod source_session;
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub(crate) mod mastering;
 
 /// Internal synchronous launcher dispatch; normal daemon startup stays unchanged.

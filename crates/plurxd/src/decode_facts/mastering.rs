@@ -2,6 +2,7 @@
 
 /// SDR consumes only the selected stream's mastering minimum. Missing HDR
 /// primaries do not invalidate this independent floor fact or invent BT.2020.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn source_mastering_minimum(stream: &serde_json::Value) -> Result<Option<u32>, String> {
     let invalid = || "targeted SDR source MDCV minimum malformed or conflicting".to_owned();
     let Some(records) = stream.get("side_data_list") else {
@@ -115,6 +116,7 @@ struct ValidatedSourceMastering {
     max_1e4_nits: u64,
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn source_mastering_metadata(
     stream: &serde_json::Value,
 ) -> Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String> {
