@@ -173,10 +173,12 @@ class TVNavigationTestCase: XCTestCase {
             let sourceIsRail = current.identifier.hasPrefix("viewer-tab-")
             let destination = target.frame
             let source = current.frame
-            if !targetIsRail && sourceIsRail && destination.minX >= source.maxX {
+            // Native focus scaling can overlap the rail and content frames.
+            // Their semantic roles and center order still identify the move.
+            if !targetIsRail && sourceIsRail && destination.midX > source.midX {
                 remote.press(.right); continue
             }
-            if targetIsRail && !sourceIsRail && source.minX >= destination.maxX {
+            if targetIsRail && !sourceIsRail && source.midX > destination.midX {
                 remote.press(.left); continue
             }
             // A sideways press that left focus where it was (the end of a
