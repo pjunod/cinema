@@ -264,7 +264,7 @@ fn reordered_repeated_or_partial_frames_never_complete() {
 
 fn calibrated_rpus() -> (Vec<u8>, DoviRpu, Vec<u8>, ServableCurves) {
     let mut source = DoviRpu::parse_unspec62_nalu(include_bytes!(
-        "../../../tests/fixtures/dv-runtime/frame-000.nal"
+        "../../../../tests/fixtures/dv-runtime/frame-000.nal"
     ))
     .unwrap();
     let mapping = source.rpu_data_mapping.as_mut().unwrap();
