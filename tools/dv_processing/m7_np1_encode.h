@@ -380,7 +380,8 @@ static AVCodecContext *m7_np1_open_codec(const struct m7_np1_recipe *recipe,
   enc->colorspace = AVCOL_SPC_BT2020_NCL;
   enc->field_order = AV_FIELD_PROGRESSIVE;
   enc->bits_per_raw_sample = 10;
-  enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+  // The supplied durations are in enc->time_base; libavcodec otherwise clears them.
+  enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER | AV_CODEC_FLAG_FRAME_DURATION;
   AVDictionary *options = m7_np1_options(recipe, opts_sha);
   m7_np1_av(avcodec_open2(enc, codec, &options), "open pinned libx265 encoder");
   const AVDictionaryEntry *entry = NULL;
