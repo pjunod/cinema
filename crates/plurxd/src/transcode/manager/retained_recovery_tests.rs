@@ -73,7 +73,7 @@ fn ready_native_fel_admission_is_limited_to_the_original_auto_copy() {
         |req| {
             req.candidate_context
                 .as_mut()
-                .unwrap()
+                .expect("native FEL fixture includes a selected candidate")
                 .selected_candidate
                 .processed_dv = true
         },
