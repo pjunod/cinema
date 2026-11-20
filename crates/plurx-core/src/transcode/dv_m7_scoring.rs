@@ -22,6 +22,7 @@ use super::{
 };
 
 pub mod aggregation;
+pub mod capture;
 
 const MAX_RPU_BYTES: usize = 4098;
 const RPU_NAL_HEADER: [u8; 2] = [0x7c, 0x01];
