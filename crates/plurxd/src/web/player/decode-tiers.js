@@ -81,8 +81,11 @@ async function hlsHevcSampleEntries(claimedTiers, claimedPqTiers, injected){
   if(native){
     try{
       const ua=probe.userAgent===undefined?navigator.userAgent:probe.userAgent;
-      const qualified=/Macintosh/.test(ua)&&/Version\/27\.2(?:[. ]|$)/.test(ua)&&/Safari\//.test(ua);
-      const playable=video&&video.canPlayType('video/mp4; codecs="hev1.2.4.L153.B0"');
+      const touchPoints=probe.maxTouchPoints===undefined?navigator.maxTouchPoints:probe.maxTouchPoints;
+      const qualified=/Macintosh/.test(ua)&&!(touchPoints>1)&&/Version\/27\.2(?:[. ]|$)/.test(ua)&&/Safari\//.test(ua);
+      // The qualified Safari build played the actual in-band HEVC HLS splice
+      // while reporting no support for standalone hev1 MP4.
+      const playable=video&&video.canPlayType("application/vnd.apple.mpegurl");
       return qualified&&summary.pq10&&playable?["hvc1","hev1"]:[];
     }catch(e){ return []; }
   }
