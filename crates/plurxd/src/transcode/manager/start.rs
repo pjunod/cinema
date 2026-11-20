@@ -1806,10 +1806,7 @@ impl TranscodeManager {
         }
         let startup_bytes = rolling_startup_bytes(copy_bitrate(&planning.file), 1.0);
         let limits = self.ahead_limits_for_start(&planning.settings);
-        if native_split_startup_budget(startup_bytes, limits) <= 0 {
-            return None;
-        }
-        let sizing = RollingScratchSizing::Startup(startup_bytes.saturating_mul(3));
+        let sizing = prepared_native_fel_sizing(startup_bytes, limits)?;
         let scratch = self.reserve_rolling_scratch_with(sizing, limits).ok()?;
         Some(PreparedNativeFelStart { head, scratch })
     }
@@ -2668,12 +2665,6 @@ impl TranscodeManager {
     }
 }
 
-/// Rolling copies retain HEVC parameter sets by default, avoiding deletion
-/// without a whole-film stability proof. An incomplete dvh1 muxer claim is the
-/// narrow exception: copyseg proves every sample against the repaired init
-/// before buffering it, then strips only identical definitions. A contradiction
-/// terminates that stream before the unsafe fragment can be published.
-/// Non-HEVC sources and VOD's whole-source admission are unaffected.
 fn copy_bitrate(file: &plurx_core::domain::MediaFile) -> Option<f64> {
     file.bitrate
         .filter(|rate| *rate > 0)
@@ -2686,6 +2677,46 @@ fn native_split_startup_budget(startup_bytes: i64, limits: AheadLimits) -> i64 {
         .saturating_sub(RollingScratchSizing::Startup(startup_bytes).grant_bytes(limits))
 }
 
+#[cfg(target_os = "linux")]
+fn prepared_native_fel_sizing(
+    startup_bytes: i64,
+    limits: AheadLimits,
+) -> Option<RollingScratchSizing> {
+    let required = startup_bytes.saturating_mul(3);
+    let sizing = RollingScratchSizing::Startup(required);
+    // An ordinary split can start with a capped grant. A warm start may
+    // replace a ready VOD only if its additional objects have the full grant.
+    (native_split_startup_budget(startup_bytes, limits) > 0
+        && sizing.grant_bytes(limits) >= required)
+        .then_some(sizing)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn prepared_native_fel_requires_the_full_startup_scratch_grant() {
+    let startup = 512 * 1024 * 1024;
+    let capped = AheadLimits {
+        max_secs: 120,
+        max_bytes: startup * 2,
+        global_max_bytes: startup * 4,
+    };
+    assert!(native_split_startup_budget(startup, capped) > 0);
+    assert!(prepared_native_fel_sizing(startup, capped).is_none());
+
+    let enough = AheadLimits {
+        max_bytes: startup * 3,
+        ..capped
+    };
+    let prepared = prepared_native_fel_sizing(startup, enough).expect("full prepared grant");
+    assert_eq!(prepared.grant_bytes(enough), startup * 3);
+}
+
+/// Rolling copies retain HEVC parameter sets by default, avoiding deletion
+/// without a whole-film stability proof. An incomplete dvh1 muxer claim is the
+/// narrow exception: copyseg proves every sample against the repaired init
+/// before buffering it, then strips only identical definitions. A contradiction
+/// terminates that stream before the unsafe fragment can be published.
+/// Non-HEVC sources and VOD's whole-source admission are unaffected.
 pub(crate) fn rolling_copy_video_options(
     file: &plurx_core::domain::MediaFile,
     probe_json: Option<&str>,
