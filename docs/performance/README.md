@@ -17,7 +17,7 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
-| [HDR-REFERENCE-SCORING.md](HDR-REFERENCE-SCORING.md) | Independent bounded PQ metrics/census, optional pinned display-aware CPU ColorVideoVDP, and graded BT.709 provenance for SDR VMAF; corpus/GPU/physical acceptance remains separate. | open |
+| [HDR-REFERENCE-SCORING.md](HDR-REFERENCE-SCORING.md) | Bounded PQ metrics/census, shared RGB48 inverse and pinned CPU ColorVideoVDP component evidence, plus BT.709 provenance for SDR VMAF; one-host perceptual CLI/corpus/physical acceptance remains open. | open |
 | [TONEMAP-SEGMENT-CONSISTENCY.md](TONEMAP-SEGMENT-CONSISTENCY.md) | Exact source-frame and rational-PTS comparison of continuous and restarted tone-map filters; separate from seek, encoded-HLS and display acceptance. | open |
 | [Tone-map reset receipt](evidence/tonemap-reset-20261015.json) | Four authored CPU/Metal campaigns, exact raw-frame and rational-PTS results, the preserved fixture failure and metadata-only correction proof. | done |
 | [PERF-PLAN.md](PERF-PLAN.md) | Round one: where the seconds go, and the plan to get them back. | built |
