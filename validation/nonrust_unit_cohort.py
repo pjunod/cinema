@@ -878,7 +878,7 @@ def require_legacy_chronology(legacy_sequences):
                      'Original JVM negative/clock/Main repair chronology incomplete or reordered')
 
 
-def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archive_digest, *, selection=False):
+def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archive_digest, *, selection=False, selected_pr=False):
     receipts.require(set(item) == {'name', 'invocation', 'protocol', 'contract', 'inventory', 'records', 'obligations'}
                      and item['protocol'] == 'source-cohort-v1' and item['name'] in KINDS
                      and item['contract'] == CONTRACTS[item['name']] and item['obligations'] == [],
@@ -924,7 +924,11 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
         exact_selected_repairs = set()
         source_variant_failure = False
         legacy = execution.get('legacy_capture')
-        if legacy in INCOMING_PYTHON_FULL:
+        if 'selected_pr_local' in execution:
+            from validation import selected_pr_android_capture as selected
+            receipts.require(kind == 'android_jvm', 'Selected JVM capture cannot authorize another kind')
+            actual = selected.outcomes(proof, record, raw, universe, candidate, selected_pr, clean_log)
+        elif legacy in INCOMING_PYTHON_FULL:
             receipts.require(legacy not in incoming_full_sequences, 'Incoming full capture enrolled twice')
             incoming_full_sequences.add(legacy)
             receipts.require(kind in {'validation', 'operations'}, 'Opaque Python cannot qualify another command')

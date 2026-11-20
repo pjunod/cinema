@@ -26,6 +26,9 @@ PROTOCOL_PATHS = {
     'validation/source_gate_landing.py',
     'validation/landing.py',
     'validation/main_python_continuation.py',
+    'validation/selected_pr_android_capture.py',
+    'validation/nonrust_unit_cohort.py',
+    'tests/validation/test_selected_pr_android_capture.py',
     'validation/native_python_execute.py',
     'tests/validation/test_source_gate_landing.py',
     'tests/validation/test_main_python_continuation.py',
@@ -500,7 +503,7 @@ def log_outcomes(log, format_name, *, source_commit=None, source=git_bytes):
     return outcomes
 
 
-def validate(document, candidate, source=git_bytes, differences=changed):
+def validate(document, candidate, source=git_bytes, differences=changed, *, selected_pr=False):
     """The authenticated writer attests dependency classification and local origin.
 
     Every changed input is enumerated and source-hashed. Its affected IDs must
@@ -725,7 +728,7 @@ def validate(document, candidate, source=git_bytes, differences=changed):
         adopted['windows_compile'] = {'mode': 'explicit-human-waiver', **waiver}
     if document['version'] == 2:
         from validation import qualification_unit_continuation as commands
-        adopted_commands = commands.validate(document['command_units'], candidate, existing=document['lanes'])
+        adopted_commands = commands.validate(document['command_units'], candidate, existing=document['lanes'], selected_pr=selected_pr)
         return adopted, adopted_commands
     return adopted
 
@@ -902,7 +905,7 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
     if document.get('version') == 2:
         from validation import qualification_unit_continuation as commands
         commands.authenticate(api, document['command_units'], dispatch_context, repository, live_logs=live_logs)
-        adopted, command_units = validate(document, candidate)
+        adopted, command_units = validate(document, candidate, selected_pr=binding.get('schema') == 2 and 'landing_sha' not in binding)
     else:
         adopted = validate(document, candidate)
     proof = {'version': 1, 'candidate_sha': candidate, 'base_sha': binding['base_sha'],
