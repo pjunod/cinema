@@ -328,6 +328,12 @@ fn clustered_activity_attributes_answered_rows_and_names_missing_nodes() {
                         state: "active".into(),
                         programme_title: Some("City Beat".into()),
                         delivery: None,
+                        output_service: Some(crate::live_tv::LiveTvOutputService {
+                            generation: 2,
+                            phase: plurx_core::resource_observation::WorkPhase::InputPaced,
+                            committed_segment_bytes: 4_096,
+                            sample_age_ms: 500,
+                        }),
                     }],
                     dvr: None,
                 }),
@@ -349,6 +355,11 @@ fn clustered_activity_attributes_answered_rows_and_names_missing_nodes() {
     assert_eq!(live_tv.len(), 1);
     assert_eq!(live_tv[0].owner_node_id, "node-b");
     assert_eq!(live_tv[0].channel_name, "Remote TV");
+    let output = live_tv[0]
+        .output_service
+        .expect("remote owner output service");
+    assert_eq!(output.generation, 2);
+    assert_eq!(output.committed_segment_bytes, 4_096);
     let rows = rows.as_array().expect("delivery array");
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["node_id"], "node-b");

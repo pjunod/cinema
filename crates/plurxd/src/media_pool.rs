@@ -135,13 +135,63 @@ pub(crate) struct MediaIoObservation {
     pub storage_read_micros: Option<u64>,
     pub delivered_bytes_per_second: Option<u64>,
     pub peer_bytes_per_second: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_ingress: Option<RelayIngressObservation>,
 }
+
+/// The two waits inside the bounded ingress body pump. These observations
+/// describe local relay responses, never capacity of a worker or network link.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RelayIngressObservation {
+    pub downstream_queue: RelayWaitObservation,
+    pub upstream_body: RelayWaitObservation,
+    pub body_bytes_handed_to_http: u64,
+    pub network_capacity_bytes_per_second: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RelayWaitObservation {
+    pub waits: u64,
+    pub waited_micros: u64,
+    pub no_progress_deadlines: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RelayIngressLeg {
+    DownstreamQueue,
+    UpstreamBody,
+}
+
+impl RelayIngressObservation {
+    pub(crate) fn record_wait(
+        &mut self,
+        leg: RelayIngressLeg,
+        waited: Option<Duration>,
+        no_progress: bool,
+    ) {
+        let event = match leg {
+            RelayIngressLeg::DownstreamQueue => &mut self.downstream_queue,
+            RelayIngressLeg::UpstreamBody => &mut self.upstream_body,
+        };
+        if let Some(elapsed) = waited {
+            event.waits = event.waits.saturating_add(1);
+            event.waited_micros = event
+                .waited_micros
+                .saturating_add(u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX));
+        }
+        if no_progress {
+            event.no_progress_deadlines = event.no_progress_deadlines.saturating_add(1);
+        }
+    }
+}
+
 struct IoWindow {
     started: std::time::Instant,
     reads: u64,
     read_micros: u64,
     delivered: u64,
     peer: u64,
+    relay_ingress: RelayIngressObservation,
 }
 impl Default for IoWindow {
     fn default() -> Self {
@@ -151,18 +201,45 @@ impl Default for IoWindow {
             read_micros: 0,
             delivered: 0,
             peer: 0,
+            relay_ingress: RelayIngressObservation::default(),
         }
     }
 }
 static MEDIA_IO: std::sync::LazyLock<Mutex<IoWindow>> =
     std::sync::LazyLock::new(|| Mutex::new(IoWindow::default()));
-pub(crate) fn observe_media_io(delivered: u64, peer: u64, storage_read: Option<Duration>) {
+fn active_media_io_window() -> std::sync::MutexGuard<'static, IoWindow> {
     let mut window = MEDIA_IO
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if window.started.elapsed() >= Duration::from_secs(30) {
         *window = IoWindow::default();
     }
+    window
+}
+
+pub(crate) fn observe_relay_ingress_wait(
+    leg: RelayIngressLeg,
+    waited: Option<Duration>,
+    no_progress: bool,
+) {
+    if waited.is_some() || no_progress {
+        active_media_io_window()
+            .relay_ingress
+            .record_wait(leg, waited, no_progress);
+    }
+}
+
+pub(crate) fn observe_relay_http_handoff(bytes: u64) {
+    if bytes > 0 {
+        let mut window = active_media_io_window();
+        let observation = &mut window.relay_ingress;
+        observation.body_bytes_handed_to_http =
+            observation.body_bytes_handed_to_http.saturating_add(bytes);
+    }
+}
+
+pub(crate) fn observe_media_io(delivered: u64, peer: u64, storage_read: Option<Duration>) {
+    let mut window = active_media_io_window();
     window.delivered = window.delivered.saturating_add(delivered);
     window.peer = window.peer.saturating_add(peer);
     if let Some(elapsed) = storage_read {
@@ -187,6 +264,8 @@ fn media_io_observation() -> MediaIoObservation {
         storage_read_micros: (window.reads > 0).then(|| window.read_micros / window.reads.max(1)),
         delivered_bytes_per_second: rate(window.delivered),
         peer_bytes_per_second: rate(window.peer),
+        relay_ingress: (window.relay_ingress != RelayIngressObservation::default())
+            .then_some(window.relay_ingress),
     }
 }
 
@@ -1442,6 +1521,8 @@ pub(crate) struct PlacementDiagnostics {
     pub budget_ms: u64,
     pub selected_node_id: Option<String>,
     pub shared_source_pressure: SourcePlacementPressure,
+    /// This ingress's recent relay events, scoped separately from worker offers.
+    pub local_relay_ingress: Option<RelayIngressObservation>,
     pub offers: Vec<MediaOffer>,
 }
 
@@ -2472,6 +2553,7 @@ impl MediaPool {
                 },
                 selected_node_id: None,
                 shared_source_pressure: SourcePlacementPressure::Unknown,
+                local_relay_ingress: media_io_observation().relay_ingress,
                 offers: Vec::new(),
             };
         }
@@ -2505,6 +2587,7 @@ impl MediaPool {
                 budget_ms: 0,
                 selected_node_id: None,
                 shared_source_pressure: SourcePlacementPressure::Unknown,
+                local_relay_ingress: media_io_observation().relay_ingress,
                 offers: Vec::new(),
             };
         };
@@ -2527,6 +2610,7 @@ impl MediaPool {
             budget_ms: u64::try_from(OFFER_DEADLINE.as_millis()).unwrap_or(u64::MAX),
             selected_node_id,
             shared_source_pressure,
+            local_relay_ingress: media_io_observation().relay_ingress,
             offers,
         }
     }

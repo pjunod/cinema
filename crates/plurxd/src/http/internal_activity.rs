@@ -210,6 +210,11 @@ fn age_dvr_observations(
                 *age = age.saturating_add(elapsed_ms);
             }
         }
+        for row in &mut snapshot.live_tv {
+            if let Some(service) = row.output_service.as_mut() {
+                service.sample_age_ms = service.sample_age_ms.saturating_add(elapsed_ms);
+            }
+        }
         if let Some(dvr) = &mut snapshot.dvr {
             for observation in &mut dvr.observations {
                 observation.observation_age_ms =
@@ -225,7 +230,7 @@ fn age_dvr_observations(
 
 /// Whether re-aging this entry would move anything.
 ///
-/// [`age_dvr_observations`] only ever advances capture observations, so an
+/// [`age_dvr_observations`] advances timed observations, so an
 /// outcome without any is byte-identical before and after. Asking first is
 /// what lets the cache hand out the allocation the single-flight gate exists
 /// to share instead of deep-cloning every peer's whole snapshot per reader.
@@ -236,6 +241,10 @@ fn carries_dvr_observations(entry: &(String, PeerActivityOutcome)) -> bool {
                 .deliveries
                 .iter()
                 .any(|delivery| delivery.vod_observation.is_some())
+                || snapshot
+                    .live_tv
+                    .iter()
+                    .any(|row| row.output_service.is_some())
                 || snapshot
                     .dvr
                     .as_ref()
@@ -642,6 +651,10 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
                 && live.user.len() <= MAX_USER_BYTES
                 && live.encoder.len() <= 32
                 && live.state.len() <= 32
+                && live
+                    .output_service
+                    .as_ref()
+                    .is_none_or(|service| service.bounded())
                 && live
                     .programme_title
                     .as_ref()
@@ -1387,6 +1400,12 @@ mod tests {
             state: "\0".repeat(32),
             delivery: None,
             programme_title: Some("\0".repeat(256)),
+            output_service: Some(crate::live_tv::LiveTvOutputService {
+                generation: u64::MAX,
+                phase: plurx_core::resource_observation::WorkPhase::InputPaced,
+                committed_segment_bytes: u64::MAX,
+                sample_age_ms: u64::MAX,
+            }),
         };
         let delivery = ActivityDelivery {
             vod_observation: None,
@@ -1410,6 +1429,27 @@ mod tests {
         let value = serde_json::to_value(&snapshot).expect("public activity fields");
         assert!(value["live_tv"][0].get("capability").is_none());
         assert!(value["live_tv"][0].get("activation_token").is_none());
+
+        let mut live = snapshot.live_tv[0].clone();
+        let service = live.output_service.as_mut().expect("live output service");
+        service.sample_age_ms = 14_999;
+        let mut aged = bounded_snapshot(node_id.clone(), Vec::new(), Vec::new());
+        aged.live_tv.push(live);
+        let entry = (node_id.clone(), PeerActivityOutcome::Answered(aged));
+        assert!(carries_dvr_observations(&entry));
+        let PeerActivityOutcome::Answered(aged) =
+            age_dvr_observations(entry.1, Duration::from_millis(2))
+        else {
+            panic!("timed Live TV observation remains valid");
+        };
+        let mut sample = aged.live_tv[0].output_service.expect("aged service");
+        assert_eq!(sample.sample_age_ms, 15_001);
+        assert_eq!(sample.committed_segment_bytes, u64::MAX);
+        sample.phase = plurx_core::resource_observation::WorkPhase::Producing;
+        snapshot.live_tv[0].output_service = Some(sample);
+        assert!(!snapshot_is_bounded(&snapshot, &node_id));
+        snapshot.live_tv[0].output_service = None;
+        assert!(snapshot_is_bounded(&snapshot, &node_id));
         snapshot.live_tv[0].owner_node_id = "forged-owner".into();
         assert!(!snapshot_is_bounded(&snapshot, &node_id));
     }

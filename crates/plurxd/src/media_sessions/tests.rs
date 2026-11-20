@@ -4314,6 +4314,100 @@ async fn bounded_relay_rejects_declared_and_chunked_oversize_bodies() {
 }
 
 #[tokio::test]
+async fn relay_pump_observes_downstream_queue_and_upstream_body_deadlines_separately() {
+    let app = Router::new()
+        .route(
+            "/queue",
+            get(|| async {
+                Body::from_stream(
+                    stream::unfold(0, |index| async move {
+                        if index >= 4 {
+                            return None;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        Some((Ok::<_, Infallible>(Bytes::from_static(b"chunk")), index + 1))
+                    })
+                    .chain(stream::pending::<Result<Bytes, Infallible>>()),
+                )
+            }),
+        )
+        .route(
+            "/upstream",
+            get(|| async {
+                Body::from_stream(
+                    stream::iter([Ok::<_, Infallible>(Bytes::from_static(b"first"))])
+                        .chain(stream::pending::<Result<Bytes, Infallible>>()),
+                )
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind relay timing fixture");
+    let address = listener.local_addr().expect("relay fixture address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve relay timing fixture");
+    });
+    let client = reqwest::Client::new();
+    for blocked_leg in ["queue", "upstream"] {
+        let peer = client
+            .get(format!("http://{address}/{blocked_leg}"))
+            .send()
+            .await
+            .expect("request peer body");
+        let (completed, observed) = tokio::sync::oneshot::channel();
+        let response = relay_response_with_limits_observed(
+            peer,
+            Duration::from_secs(3),
+            Duration::from_millis(100),
+            Some(completed),
+            None,
+            None,
+            None,
+            #[cfg(target_os = "linux")]
+            None,
+        )
+        .expect("build timed relay body");
+        let mut body = response.into_body().into_data_stream();
+        if blocked_leg == "upstream" {
+            assert_eq!(
+                body.next()
+                    .await
+                    .expect("first body item")
+                    .expect("forwarded chunk"),
+                Bytes::from_static(b"first"),
+            );
+        }
+        // The queue fixture leaves the body unpolled. The upstream fixture
+        // drains its only chunk, so the next pull owns available queue space.
+        let observation = tokio::time::timeout(Duration::from_secs(2), observed)
+            .await
+            .expect("original pump observes its existing step deadline")
+            .expect("pump completion");
+        let (blocked, other) = if blocked_leg == "queue" {
+            (observation.downstream_queue, observation.upstream_body)
+        } else {
+            (observation.upstream_body, observation.downstream_queue)
+        };
+        assert!(blocked.waits > 0 && blocked.waited_micros > 0);
+        assert_eq!(blocked.no_progress_deadlines, 1);
+        assert_eq!(other.no_progress_deadlines, 0);
+        assert_eq!(observation.network_capacity_bytes_per_second, None);
+        let error = body
+            .next()
+            .await
+            .expect("terminal body item")
+            .expect_err("timeout");
+        assert_eq!(
+            error.to_string().contains("downstream"),
+            blocked_leg == "queue"
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test]
 async fn dropping_relay_body_cancels_its_network_pump() {
     let app = Router::new().route(
         "/media",

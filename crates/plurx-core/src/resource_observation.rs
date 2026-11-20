@@ -9,7 +9,7 @@ use crate::process::observation::{Metric, UnknownReason};
 /// The maximum age of the original accepted sample for current service facts.
 pub const SERVICE_SAMPLE_MAX_AGE: Duration = Duration::from_secs(15);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkPhase {
     Preparing,

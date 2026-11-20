@@ -470,6 +470,7 @@ fn test_session(directory: PathBuf, generation: i64) -> Arc<LiveTvSession> {
             newest_listed: None,
             media_sequence: 0,
             publication: None,
+            output_progress: LiveTvOutputProgress::default(),
             encoder: "software".into(),
             error: None,
             terminal_error: None,
@@ -527,6 +528,7 @@ async fn register_test_session_at(
             newest_listed: None,
             media_sequence: 0,
             publication: None,
+            output_progress: LiveTvOutputProgress::default(),
             encoder: "software".into(),
             error: None,
             terminal_error: None,
@@ -2575,6 +2577,15 @@ async fn a_warm_start_that_disagrees_restarts_cold_and_never_publishes_the_wrong
     .expect("restarted start");
     assert!(requested.elapsed() < STARTUP_FEEDING_TIMEOUT);
 
+    let rows = manager.activities();
+    assert_eq!(rows.len(), 1);
+    let service = rows[0].output_service.expect("restarted worker service");
+    assert_eq!(service.generation, 2);
+    assert_eq!(service.phase, WorkPhase::InputPaced);
+    assert_eq!(
+        service.committed_segment_bytes,
+        (b"transport-stream".len() + b"transport-stream-two".len()) as u64
+    );
     let delivery = provisional.delivery.expect("delivery");
     assert_eq!(delivery.source.video_codec.as_deref(), Some("h264"));
     assert_eq!(delivery.source.height, Some(180));
@@ -5731,8 +5742,8 @@ fn live_capabilities_are_canonical_and_owner_bound() {
 
 #[test]
 fn live_playlist_accepts_only_the_closed_numeric_inventory() {
-    let parsed =
-        parse_playlist_bytes(&live_playlist(41, MAX_LISTED_SEGMENTS)).expect("bounded playlist");
+    let playlist = live_playlist(41, MAX_LISTED_SEGMENTS);
+    let parsed = parse_playlist_bytes(&playlist).expect("bounded playlist");
     assert_eq!(parsed.media_sequence, 41);
     assert_eq!(parsed.target_duration, 1);
     assert_eq!(parsed.listed_seconds, 24.0);
@@ -5770,6 +5781,7 @@ fn the_start_is_answered_at_the_second_listed_segment() {
             listed_seconds,
             target_duration,
             init: None,
+            listed_segment_bytes: Vec::new(),
             segments: (0..files)
                 .map(|offset| {
                     let sequence = 10 + offset as u64;
@@ -5874,6 +5886,7 @@ fn progress_is_the_newest_listed_segment_not_the_window_sliding() {
                 listed_seconds: listed as f64,
                 target_duration: 1,
                 init: None,
+                listed_segment_bytes: Vec::new(),
                 segments: HashMap::new(),
             },
             now,
@@ -5981,7 +5994,19 @@ async fn live_scratch_keeps_playing_during_http_uploads_and_pending_playlist() {
         })
         .await
         .expect("two overlapping uploads");
-        for _ in 0..3 {
+        let session = test_session(temp.path().to_owned(), 1);
+        let observed_at = tokio::time::Instant::now();
+        let sample = |inventory, elapsed| {
+            let now = observed_at + Duration::from_secs(elapsed);
+            let mut state = session.state.lock().expect("session state");
+            record_producer_inventory(&mut state, inventory, now);
+            state.record_output_service(1, now);
+            state
+                .output_progress
+                .snapshot(now.into_std())
+                .expect("verified output service")
+        };
+        for elapsed in 0..3 {
             let inventory = inspect_scratch(temp.path())
                 .await
                 .expect("live scan")
@@ -5989,6 +6014,11 @@ async fn live_scratch_keeps_playing_during_http_uploads_and_pending_playlist() {
             assert_eq!(inventory.media_sequence, 10);
             assert_eq!(inventory.newest_listed(), Some(12));
             assert_eq!(inventory.segments.len(), 3);
+            let service = sample(inventory, elapsed);
+            assert_eq!(service.generation, 1);
+            assert_eq!(service.phase, WorkPhase::InputPaced);
+            assert_eq!(service.committed_segment_bytes, 27);
+            assert_eq!(service.sample_age_ms, elapsed * 1000);
         }
         segment.write_all(b"done").await.expect("finish segment");
         let mut response = Vec::new();
@@ -6004,6 +6034,33 @@ async fn live_scratch_keeps_playing_during_http_uploads_and_pending_playlist() {
         assert_eq!(inventory.media_sequence, 11);
         assert_eq!(inventory.newest_listed(), Some(13));
         assert_eq!(inventory.segments.len(), 4);
+        assert_eq!(sample(inventory, 3).committed_segment_bytes, 35);
+
+        client
+            .put(format!("{base}/segment-000015.{extension}"))
+            .body("after-gap")
+            .send()
+            .await
+            .expect("segment after discontinuity")
+            .error_for_status()
+            .expect("committed after discontinuity");
+        let discontinuous = playlist(12).replace(
+            "#EXTINF:1.000000,\nsegment-000014",
+            "#EXT-X-DISCONTINUITY\n#EXTINF:1.000000,\nsegment-000015",
+        );
+        client
+            .put(format!("{base}/index.m3u8"))
+            .body(discontinuous)
+            .send()
+            .await
+            .expect("discontinuous playlist")
+            .error_for_status()
+            .expect("published discontinuous playlist");
+        let inventory = inspect_scratch(temp.path())
+            .await
+            .expect("discontinuous scan")
+            .expect("published discontinuity");
+        assert_eq!(sample(inventory, 4).committed_segment_bytes, 44);
         assert!(sink.failure().is_none());
     }
 }

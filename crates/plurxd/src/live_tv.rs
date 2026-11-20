@@ -15,6 +15,8 @@ use axum::body::Body;
 use axum::http::{header, Response, StatusCode};
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
+use plurx_core::process::observation::{Metric, UnknownReason};
+use plurx_core::resource_observation::{ServiceUnit, ServiceWindow, WorkPhase, WorkSample};
 use plurx_core::store::{keys, Store};
 use plurx_core::transcode::{
     EffectiveRateControl, Encoder, MacosProcessingAvailability, MacosProcessingContext,
@@ -1224,6 +1226,26 @@ pub(crate) struct LiveTvActivity {
     /// Activity page shows it after the channel name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) programme_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) output_service: Option<LiveTvOutputService>,
+}
+
+/// A sample of final segment bytes first verified in the original owner's
+/// accepted playlists. Tuner-paced output supplies no encoder capacity rate.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct LiveTvOutputService {
+    pub(crate) generation: u64,
+    pub(crate) phase: WorkPhase,
+    pub(crate) committed_segment_bytes: u64,
+    pub(crate) sample_age_ms: u64,
+}
+
+impl LiveTvOutputService {
+    pub(crate) fn bounded(&self) -> bool {
+        self.generation > 0
+            && self.phase == WorkPhase::InputPaced
+            && self.committed_segment_bytes > 0
+    }
 }
 
 /// What a retire did. `Stopped` means a stream was running and is not any
@@ -1340,6 +1362,7 @@ struct LiveTvSessionState {
     newest_listed: Option<u64>,
     media_sequence: u64,
     publication: Option<ScratchInventory>,
+    output_progress: LiveTvOutputProgress,
     encoder: String,
     error: Option<String>,
     terminal_error: Option<LiveTvError>,
@@ -4371,6 +4394,7 @@ impl LiveTvManager {
                 newest_listed: None,
                 media_sequence: 0,
                 publication: None,
+                output_progress: LiveTvOutputProgress::default(),
                 encoder: "pending".to_owned(),
                 error: None,
                 terminal_error: None,
@@ -5476,6 +5500,13 @@ impl LiveTvManager {
                     output_height: session.output().height,
                     state: session_phase_name(state.phase).to_owned(),
                     delivery: session.delivery(),
+                    output_service: if session.cancel.is_cancelled()
+                        || state.phase == LiveTvSessionPhase::Failed
+                    {
+                        None
+                    } else {
+                        state.output_progress.snapshot(now.into_std())
+                    },
                     programme_title: titles
                         .get(&session.channel.guide_number)
                         .and_then(|rows| {
@@ -6694,6 +6725,8 @@ struct ScratchInventory {
     listed_seconds: f64,
     target_duration: u64,
     init: Option<(String, u64)>,
+    /// Bytes of the exact listed names, in ascending segment order.
+    listed_segment_bytes: Vec<(u64, u64)>,
     segments: HashMap<u64, (String, u64)>,
 }
 
@@ -6725,6 +6758,61 @@ fn record_producer_inventory(
     // sample and authorization from another.
     state.publication = Some(inventory);
     publishable
+}
+
+#[derive(Default)]
+struct LiveTvOutputProgress {
+    newest: Option<u64>,
+    completed: u64,
+    window: ServiceWindow,
+}
+
+impl LiveTvOutputProgress {
+    fn record(&mut self, generation: u64, inventory: &ScratchInventory, now: std::time::Instant) {
+        let listed = &inventory.listed_segment_bytes;
+        let seen = listed
+            .partition_point(|(sequence, _)| self.newest.is_some_and(|prior| *sequence <= prior));
+        let new = &listed[seen..];
+        let Some(&(newest, _)) = new.last() else {
+            return;
+        };
+        let Some(completed) = new.iter().try_fold(self.completed, |total, (_, bytes)| {
+            total.checked_add(*bytes)
+        }) else {
+            return;
+        };
+        self.newest = Some(newest);
+        self.completed = completed;
+        self.window.observe(WorkSample {
+            generation,
+            phase: WorkPhase::InputPaced,
+            unit: ServiceUnit::Bytes,
+            completed,
+            deadline_slack_ms: Metric::Unknown(UnknownReason::InsufficientEvidence),
+            queued_bytes: Metric::Unknown(UnknownReason::InsufficientEvidence),
+            at: now,
+        });
+    }
+
+    fn snapshot(&self, now: std::time::Instant) -> Option<LiveTvOutputService> {
+        let (sample, observation) = self.window.snapshot_with_sample(now)?;
+        Some(LiveTvOutputService {
+            generation: observation.generation,
+            phase: observation.phase,
+            committed_segment_bytes: observation.completed,
+            sample_age_ms: u64::try_from(now.duration_since(sample.at).as_millis())
+                .unwrap_or(u64::MAX),
+        })
+    }
+}
+
+impl LiveTvSessionState {
+    fn record_output_service(&mut self, generation: u64, now: tokio::time::Instant) {
+        if let Some(inventory) = self.publication.as_ref() {
+            self.output_progress
+                .record(generation, inventory, now.into_std());
+        }
+    }
 }
 
 async fn wait_for_startup(
@@ -7181,6 +7269,7 @@ async fn run_live_session_inner(
     let support = live_execution_support(&owner.system);
     let system = Arc::clone(&owner.system);
     drop(owner);
+    let mut output_generation = 1;
     loop {
         let owner = manager
             .upgrade()
@@ -7554,7 +7643,11 @@ async fn run_live_session_inner(
                                 .state
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            record_producer_inventory(&mut state, inventory, now)
+                            let publishable = record_producer_inventory(&mut state, inventory, now);
+                            if published {
+                                state.record_output_service(output_generation, now);
+                            }
+                            publishable
                         };
                         if !published && publishable && !verifying {
                             let owner = manager.upgrade().ok_or_else(|| {
@@ -7579,6 +7672,10 @@ async fn run_live_session_inner(
                             state.phase = LiveTvSessionPhase::Provisional;
                             state.provisional_at = Some(now);
                             state.startup = Some(Ok(provisional));
+                            state.record_output_service(
+                                output_generation,
+                                tokio::time::Instant::now(),
+                            );
                             drop(state);
                             session.record_codec_qualification_publication(
                                 &owner.transcode,
@@ -7748,6 +7845,7 @@ async fn run_live_session_inner(
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     state.publication = None;
+                    state.output_progress = LiveTvOutputProgress::default();
                     state.newest_listed = None;
                     state.media_sequence = 0;
                     state.last_progress = tokio::time::Instant::now();
@@ -7770,6 +7868,9 @@ async fn run_live_session_inner(
                 );
                 source = probed;
                 verifying = false;
+                // The old scan is detached and its writer drained before
+                // the replacement can open this scratch directory.
+                output_generation += 1;
                 continue;
             }
             other => other.map(|_| ()),
@@ -9475,12 +9576,16 @@ async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, L
     if parsed.segments.is_empty() {
         return Ok(None);
     }
-    for sequence in &parsed.segments {
-        let Some((_, len)) = final_segments.get(sequence) else {
+    let mut listed_segment_bytes = Vec::with_capacity(parsed.segments.len());
+    for &(sequence, listed_name) in &parsed.segments {
+        let Some((final_name, len)) = final_segments.get(&sequence) else {
             return Ok(None);
         };
         if *len == 0 {
             return Ok(None);
+        }
+        if final_name == listed_name {
+            listed_segment_bytes.push((sequence, *len));
         }
     }
     if parsed.init.is_some() != init.is_some() {
@@ -9488,7 +9593,12 @@ async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, L
     }
     let unlisted = final_segments
         .keys()
-        .filter(|sequence| !parsed.segments.contains(sequence))
+        .filter(|sequence| {
+            !parsed
+                .segments
+                .iter()
+                .any(|(listed, _)| listed == *sequence)
+        })
         .filter(|sequence| {
             !final_segments
                 .get(sequence)
@@ -9501,7 +9611,6 @@ async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, L
         ));
     }
     Ok(Some(ScratchInventory {
-        playlist,
         media_sequence: parsed.media_sequence,
         listed: parsed.segments.len(),
         listed_seconds: parsed.listed_seconds,
@@ -9512,18 +9621,20 @@ async fn inspect_scratch(directory: &Path) -> Result<Option<ScratchInventory>, L
         // current manifest is sampled; discarding it here turned a physically
         // present, valid segment into a false 410.
         segments: final_segments,
+        listed_segment_bytes,
+        playlist,
     }))
 }
 
-struct ParsedPlaylist {
+struct ParsedPlaylist<'a> {
     media_sequence: u64,
     target_duration: u64,
     listed_seconds: f64,
     init: Option<String>,
-    segments: Vec<u64>,
+    segments: Vec<(u64, &'a str)>,
 }
 
-fn parse_playlist_bytes(bytes: &[u8]) -> Result<ParsedPlaylist, LiveTvError> {
+fn parse_playlist_bytes(bytes: &[u8]) -> Result<ParsedPlaylist<'_>, LiveTvError> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| LiveTvError::StreamFailed("live-TV playlist is not UTF-8".into()))?;
     if text
@@ -9617,13 +9728,13 @@ fn parse_playlist_bytes(bytes: &[u8]) -> Result<ParsedPlaylist, LiveTvError> {
             })?;
             if segments
                 .last()
-                .is_some_and(|previous| *previous >= sequence)
+                .is_some_and(|(previous, _)| *previous >= sequence)
             {
                 return Err(LiveTvError::StreamFailed(
                     "live-TV playlist segment order is invalid".into(),
                 ));
             }
-            segments.push(sequence);
+            segments.push((sequence, line));
             expect_segment = false;
         }
     }
@@ -9637,7 +9748,7 @@ fn parse_playlist_bytes(bytes: &[u8]) -> Result<ParsedPlaylist, LiveTvError> {
             "live-TV playlist exceeds {MAX_LISTED_SEGMENTS} segments"
         )));
     }
-    let media_sequence = match (media_sequence, segments.first().copied()) {
+    let media_sequence = match (media_sequence, segments.first()) {
         (Some(sequence), _) => sequence,
         (None, None) => 0,
         (None, Some(_)) => {
@@ -9648,7 +9759,7 @@ fn parse_playlist_bytes(bytes: &[u8]) -> Result<ParsedPlaylist, LiveTvError> {
     };
     if segments
         .first()
-        .is_some_and(|first| *first != media_sequence)
+        .is_some_and(|(first, _)| *first != media_sequence)
     {
         return Err(LiveTvError::StreamFailed(
             "live-TV media sequence does not match its first segment".into(),

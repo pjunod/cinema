@@ -5877,14 +5877,60 @@ pub(crate) fn relay_response_with_limits_counted_bounded(
     )
 }
 
-struct RelayPumpCompletion(Option<tokio::sync::oneshot::Sender<()>>);
+struct RelayPumpCompletion {
+    sender: Option<tokio::sync::oneshot::Sender<crate::media_pool::RelayIngressObservation>>,
+    observed: crate::media_pool::RelayIngressObservation,
+}
+
+impl RelayPumpCompletion {
+    fn record_wait(
+        &mut self,
+        leg: crate::media_pool::RelayIngressLeg,
+        wait: &RelayPumpWait,
+        no_progress: bool,
+    ) {
+        let waited = wait.pending_since.map(|started| started.elapsed());
+        crate::media_pool::observe_relay_ingress_wait(leg, waited, no_progress);
+        if self.sender.is_some() {
+            self.observed.record_wait(leg, waited, no_progress);
+        }
+    }
+}
 
 impl Drop for RelayPumpCompletion {
     fn drop(&mut self) {
-        if let Some(completion) = self.0.take() {
-            let _ = completion.send(());
+        if let Some(completion) = self.sender.take() {
+            let _ = completion.send(self.observed);
         }
     }
+}
+
+/// Observe an actual Pending poll of the original operation. An immediately
+/// ready operation provides no queue or upstream delay sample.
+#[derive(Default)]
+struct RelayPumpWait {
+    pending_since: Option<tokio::time::Instant>,
+}
+
+impl RelayPumpWait {
+    async fn poll<F: Future>(&mut self, operation: F, waiting: impl Fn() -> bool) -> F::Output {
+        let mut operation = std::pin::pin!(operation);
+        std::future::poll_fn(|context| {
+            let result = operation.as_mut().poll(context);
+            if result.is_pending() && self.pending_since.is_none() && waiting() {
+                self.pending_since = Some(tokio::time::Instant::now());
+            }
+            result
+        })
+        .await
+    }
+}
+
+enum RelayPumpStep<T> {
+    Ready(T),
+    Lifetime,
+    NoProgress,
+    DownstreamClosed,
 }
 
 #[derive(Clone)]
@@ -5927,7 +5973,7 @@ fn relay_response_with_limits_observed(
     response: reqwest::Response,
     max_lifetime: Duration,
     no_progress_timeout: Duration,
-    completion: Option<tokio::sync::oneshot::Sender<()>>,
+    completion: Option<tokio::sync::oneshot::Sender<crate::media_pool::RelayIngressObservation>>,
     upstream_pulls: Option<Arc<std::sync::atomic::AtomicUsize>>,
     relayed_bytes: Option<Arc<std::sync::atomic::AtomicU64>>,
     max_body_bytes: Option<u64>,
@@ -5981,12 +6027,23 @@ fn relay_response_with_limits_observed(
     // drops if this task is cancelled before its first poll.
     let original = (response, lifetime.clone());
     tokio::spawn(async move {
-        let _completion = RelayPumpCompletion(completion);
+        use crate::media_pool::RelayIngressLeg::{DownstreamQueue, UpstreamBody};
+
+        let mut completion = RelayPumpCompletion {
+            sender: completion,
+            observed: crate::media_pool::RelayIngressObservation::default(),
+        };
         let (response, _lifetime) = original;
         // The local upstream reader is destroyed before this token. The peer
         // has its own independent response and native read lifetime.
         let mut upstream = Box::pin(response.bytes_stream());
         let fail = |kind, message: String| pump_terminal.fail(kind, message);
+        let fail_lifetime = || {
+            fail(
+                io::ErrorKind::TimedOut,
+                "relayed media response exceeded its post-header total lifetime".to_owned(),
+            );
+        };
         let mut body_bytes = 0_u64;
         loop {
             // Reserve bounded downstream capacity before asking reqwest for
@@ -5995,50 +6052,67 @@ fn relay_response_with_limits_observed(
             // a blocked send future beyond the advertised queue capacity.
             let reserve_deadline =
                 (tokio::time::Instant::now() + no_progress_timeout).min(body_deadline);
-            let permit = tokio::select! {
+            let mut wait = RelayPumpWait::default();
+            let reserve = tokio::select! {
                 biased;
-                _ = tokio::time::sleep_until(body_deadline) => {
-                    fail(
-                        io::ErrorKind::TimedOut,
-                        "relayed media response exceeded its post-header total lifetime".to_owned(),
-                    );
+                _ = tokio::time::sleep_until(body_deadline) => RelayPumpStep::Lifetime,
+                _ = tokio::time::sleep_until(reserve_deadline) => RelayPumpStep::NoProgress,
+                // A cooperative yield with free space is not queue backpressure.
+                permit = wait.poll(sender.reserve(), || sender.capacity() == 0) => RelayPumpStep::Ready(permit),
+            };
+            completion.record_wait(
+                DownstreamQueue,
+                &wait,
+                matches!(reserve, RelayPumpStep::NoProgress),
+            );
+            let permit = match reserve {
+                RelayPumpStep::Ready(Ok(permit)) => permit,
+                RelayPumpStep::Ready(Err(_)) | RelayPumpStep::DownstreamClosed => return,
+                RelayPumpStep::Lifetime => {
+                    fail_lifetime();
                     return;
                 }
-                _ = tokio::time::sleep_until(reserve_deadline) => {
+                RelayPumpStep::NoProgress => {
                     fail(
                         io::ErrorKind::TimedOut,
                         "relayed media response exceeded its post-header downstream no-progress deadline".to_owned(),
                     );
                     return;
                 }
-                permit = sender.reserve() => match permit {
-                    Ok(permit) => permit,
-                    Err(_) => return,
-                },
             };
             let progress_deadline =
                 (tokio::time::Instant::now() + no_progress_timeout).min(body_deadline);
             if let Some(pulls) = upstream_pulls.as_ref() {
                 pulls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             }
+            let mut wait = RelayPumpWait::default();
             let next = tokio::select! {
                 biased;
-                _ = tokio::time::sleep_until(body_deadline) => {
+                _ = tokio::time::sleep_until(body_deadline) => RelayPumpStep::Lifetime,
+                _ = sender.closed() => RelayPumpStep::DownstreamClosed,
+                _ = tokio::time::sleep_until(progress_deadline) => RelayPumpStep::NoProgress,
+                next = wait.poll(upstream.next(), || true) => RelayPumpStep::Ready(next),
+            };
+            completion.record_wait(
+                UpstreamBody,
+                &wait,
+                matches!(next, RelayPumpStep::NoProgress),
+            );
+            let next = match next {
+                RelayPumpStep::Ready(next) => next,
+                RelayPumpStep::DownstreamClosed => return,
+                RelayPumpStep::Lifetime => {
+                    fail_lifetime();
+                    return;
+                }
+                RelayPumpStep::NoProgress => {
                     fail(
                         io::ErrorKind::TimedOut,
-                        "relayed media response exceeded its post-header total lifetime".to_owned(),
+                        "relayed media response exceeded its post-header no-progress deadline"
+                            .to_owned(),
                     );
                     return;
                 }
-                _ = sender.closed() => return,
-                _ = tokio::time::sleep_until(progress_deadline) => {
-                    fail(
-                        io::ErrorKind::TimedOut,
-                        "relayed media response exceeded its post-header no-progress deadline".to_owned(),
-                    );
-                    return;
-                }
-                next = upstream.next() => next,
             };
             let bytes = match next {
                 Some(Ok(bytes)) => bytes,
@@ -6118,6 +6192,11 @@ fn relay_response_with_limits_observed(
                     )
                 });
                 return Some((Err(error), (receiver, terminal, body_deadline, true)));
+            }
+            if let Ok(bytes) = &item {
+                crate::media_pool::observe_relay_http_handoff(
+                    u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                );
             }
             Some((item, (receiver, terminal, body_deadline, false)))
         },
