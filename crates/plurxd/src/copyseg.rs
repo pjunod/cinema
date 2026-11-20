@@ -371,7 +371,7 @@ impl NativeSplitSegment {
     pub(crate) fn enhanced_video(
         &self,
         author: &NativeSplitAuthor,
-        windows: &[crate::vodencode::dv_runtime::VerifiedWindow],
+        windows: &[crate::vodencode::dv_runtime::NativeFelWindow],
         first_fragment_sequence: u32,
     ) -> Result<Vec<u8>, String> {
         let ordinary_track = author
