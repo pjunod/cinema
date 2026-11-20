@@ -1,5 +1,11 @@
 use super::*;
 
+fn test_directory() -> tempfile::TempDir {
+    let parent = crate::testfixtures::fixture_dir();
+    std::fs::create_dir_all(&parent).expect("creating the isolated aggregation fixture parent");
+    tempfile::tempdir_in(parent).expect("creating an isolated aggregation fixture")
+}
+
 fn sample(nits: f64, served: f64, candidate: f64) -> [ModelSampleScore; MODELS] {
     [ModelSampleScore {
         reference_luminance_nits: nits,
@@ -23,7 +29,7 @@ fn open(
 
 #[test]
 fn pooled_percentiles_select_original_samples_at_global_ranks() {
-    let directory = tempfile::tempdir_in(crate::testfixtures::fixture_dir()).unwrap();
+    let directory = test_directory();
     let shape = [WindowShape {
         frames: 1,
         sites_per_frame: 4,
@@ -89,7 +95,7 @@ fn percentiles_have_distinct_zero_based_ranks() {
 
 #[test]
 fn failing_model_takes_precedence_over_missing_band() {
-    let directory = tempfile::tempdir_in(crate::testfixtures::fixture_dir()).unwrap();
+    let directory = test_directory();
     let shape = [WindowShape {
         frames: 2,
         sites_per_frame: 2,
@@ -126,7 +132,7 @@ fn failing_model_takes_precedence_over_missing_band() {
 
 #[test]
 fn window_mean_must_pass_even_if_pooled_mean_gains() {
-    let directory = tempfile::tempdir_in(crate::testfixtures::fixture_dir()).unwrap();
+    let directory = test_directory();
     let shape = [WindowShape {
         frames: 1,
         sites_per_frame: 2,
@@ -144,7 +150,7 @@ fn window_mean_must_pass_even_if_pooled_mean_gains() {
 
 #[test]
 fn refuses_budget_truncated_or_incomplete_capture_and_cancellation() {
-    let directory = tempfile::tempdir_in(crate::testfixtures::fixture_dir()).unwrap();
+    let directory = test_directory();
     let shape = [WindowShape {
         frames: 1,
         sites_per_frame: 1,
