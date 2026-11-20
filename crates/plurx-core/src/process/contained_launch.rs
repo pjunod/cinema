@@ -24,7 +24,9 @@ mod sandbox;
 pub(crate) use finite_profile::{FiniteNativeAllowance, FiniteNativeProfile};
 
 const MAX_ROOTS: usize = 16;
-const MAX_STRINGS: usize = 64;
+// Ordinary two-input AVC/AAC VOD uses 88 argv entries plus the fixed
+// locale and optional loader path. Keep them under the same count bound.
+const MAX_STRINGS: usize = 96;
 const MAX_STRING_BYTES: usize = 16 * 1024;
 // Requested storage for the already-existing standing cleanup thread. This
 // fixes its stack request so its original support owner can prepay that request;
