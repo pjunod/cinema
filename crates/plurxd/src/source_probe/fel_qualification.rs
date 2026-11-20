@@ -1179,7 +1179,7 @@ async fn qualify_with_mode(
             && requested_recipes.is_none_or(|recipes| recipes.contains(&request.identity))
     }) {
         request.clone()
-    } else if requested_recipes.is_some() || !pending.is_empty() {
+    } else if requested_recipes.is_some() {
         return Ok(Qualification::NotDue);
     } else {
         let doc: serde_json::Value = serde_json::from_str(document).map_err(|e| e.to_string())?;
@@ -2717,7 +2717,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_foreign_backend_recipe_request_stays_pending_without_measurement() {
+    async fn foreign_pending_recipe_does_not_block_current_background_qualification() {
+        fn native_measurement<'a>(
+            sample: &'a Sample<'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Measurement, String>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                assert_eq!(sample.clock.raster, (3840, 2160));
+                assert_eq!(sample.clock.rate, (24000, 1001));
+                Ok(Measurement {
+                    windows: Vec::new(),
+                    served: Vec::new(),
+                    dropped: Vec::new(),
+                })
+            })
+        }
         let dir = crate::test_tempdir().expect("scratch");
         let (state, file, document) = qualification_fixture(dir.path()).await;
         let admission = state
@@ -2763,18 +2778,34 @@ mod tests {
             .request_dv_fel_variant(file.id, &request)
             .await
             .expect("durable request"));
-        let outcome = qualify_with(
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let live = qualify_with_mode(
             &state,
             &file,
             &document,
             &renderer,
             &admission,
-            &tokio_util::sync::CancellationToken::new(),
+            &cancel,
             slow_measurement,
+            Some(std::slice::from_ref(&request.identity)),
         )
         .await
-        .expect("wrong backend is not due");
-        assert!(matches!(outcome, Qualification::NotDue));
+        .expect("foreign live recipe is not due");
+        assert!(matches!(live, Qualification::NotDue));
+
+        let background = qualify_with(
+            &state,
+            &file,
+            &document,
+            &renderer,
+            &admission,
+            &cancel,
+            native_measurement,
+        )
+        .await
+        .expect("background qualification uses this node's native recipe");
+        assert!(matches!(background, Qualification::Stored(_)));
+
         let stored = state
             .store
             .get_file_probe_json(file.id)
