@@ -160,15 +160,74 @@ function shipped(name) {
   return ends.length ? rest.slice(0, Math.min(...ends)) : rest;
 }
 
+test("quality menu uses standard tiers and discloses SDR without changing selection IDs",()=>{
+  const modes=bodyScript.match(/const QUALITY_MODES=\[.*?\];/s)[0];
+  const heights=bodyScript.match(/const STANDARD_QUALITY_HEIGHTS=\[.*?\];/s)[0];
+  const player={source:{hdr:"dolby_vision"},deliveredRange:"hdr10"};
+  let saved="1608";
+  const policy={
+    normalizedLadder:ladder=>ladder||[],
+    transcodeHeight:value=>Number(value)||0
+  };
+  const {options,label}=new Function("PLAYER","localStorage","PlaybackPolicy",
+    [modes,heights,...[
+      "sourceDynamicRange","resLabel","playQuality","playbackQualityResolution",
+      "qualityCapLabel","qualitySourceIsHdr","qualityOptions","qualityLabel"
+    ].map(shipped),"return {options:qualityOptions,label:qualityLabel};"].join("\n"))(
+      player,{getItem:key=>key==="plurx_quality"?saved:null},policy);
+  const encode=(target_height,width,height,grade)=>({
+    target_height,width,height,grade,route:"encode",decoder_compatible:true
+  });
+  player.qualityCandidates=[
+    encode(1608,3840,1608,"sdr"),
+    {...encode(1608,3840,1608,"hdr10"),decoder_compatible:false},
+    {...encode(1608,3840,1608,"hdr10"),route:"remux"},
+    encode(1080,1920,800,"hdr10"),
+    encode(720,1728,720,"sdr"),
+    encode(720,1728,720,"hdr10"),
+    encode(480,1152,480,undefined),
+  ];
+  assert.deepEqual(options(),[
+    ["auto","Auto"],["original","Original"],["nomse","Original · one stream"],
+    ["1608","4K · SDR transcode"],["1080","1080p"],
+    ["720","720p · may convert to SDR"],["480","480p · may convert to SDR"],
+  ]);
+  assert.equal(label(),"4K · SDR transcode");
+  player.qualityCandidates.push(encode(2160,3840,2160,"sdr"));
+  assert.deepEqual(options().slice(3,5),[
+    ["2160","4K · SDR transcode · 2160p cap"],["1608","4K · SDR transcode · 1608p cap"]
+  ]);
+  player.qualityCandidates.push(encode(800,800,1920,"hdr10"));
+  assert.deepEqual(options().find(([id])=>id==="800"),["800","1080p · 800p cap"],
+    "rotated 1920×800 keeps its tier without colliding with the 1080 cap");
+  player.qualityCandidates.pop();
+  player.qualityCandidates.push(encode(1608,2560,1440,"sdr"));
+  assert.deepEqual(options()[4],["1608","Up to 1608p · SDR transcode"]);
+  player.source={hdr:""};
+  player.deliveredRange="sdr";
+  assert.deepEqual(options().slice(5,7),[["1080","1080p"],["720","720p"]]);
+  player.source={hdr_format:"Dolby Vision"};
+  player.qualityCandidates=[];
+  assert.equal(options().length,3,"an empty catalog never falls back to an encode ladder");
+  assert.equal(label(),"Saved 1608p cap · may convert to SDR");
+  player.qualityCandidates=null;
+  player.ladder=[{height:1080},{height:2160}];
+  assert.deepEqual(options().slice(3),[["2160","4K · may convert to SDR"],["1080","1080p · may convert to SDR"]]);
+  saved="original";
+  assert.equal(label(),"Original");
+});
+
 test("quality controls describe presented frames and announce only completed quality changes",()=>{
   const nodes=Object.fromEntries(["pbqualitymode","pbqualitycurrent","pqualitynotice","pbquality"]
     .map(id=>[id,{textContent:"",hidden:true,setAttribute(name,value){this[name]=value;}}]));
   const v={videoWidth:1920,videoHeight:800,seeking:false};
   let now=0,mode="auto",video=v,owns=true;
-  const p={mediaAttachment:{id:1},deliveredRange:"sdr",qualityCandidateId:"original"};
+  const p={mediaAttachment:{id:1,qualityRange:"sdr"},deliveredRange:"sdr",qualityCandidateId:"original"};
   const surface={surface:{kind:"none"}};
   const update=new Function("PLAYER","document","performance","playQuality","playbackOwnsAttachedMedia","PLAYBACK_SURFACE",
-    [shipped("playbackQualityResolution"),shipped("updatePlaybackQualityChrome"),"return updatePlaybackQualityChrome;"].join("\n"))(
+    [bodyScript.match(/const STANDARD_QUALITY_HEIGHTS=\[.*?\];/s)[0],shipped("resLabel"),
+      shipped("statsStreamFormat"),shipped("playbackQualityResolution"),shipped("updatePlaybackQualityChrome"),
+      "return updatePlaybackQualityChrome;"].join("\n"))(
       p,{getElementById:id=>id==="video"?video:nodes[id]}, {now:()=>now},()=>mode,()=>owns,surface);
   const present=()=>{p.presentationAdvancedAt=(p.presentationAdvancedAt||0)+1;
     p.transportPresentation={attachment:p.mediaAttachment,element:video};update(video,p);};
@@ -177,24 +236,24 @@ test("quality controls describe presented frames and announce only completed qua
   assert.equal(nodes.pbqualitycurrent.textContent,"—","metadata alone cannot claim a picture");
   present();
   assert.equal(nodes.pbqualitymode.textContent,"Auto");
-  assert.equal(nodes.pbqualitycurrent.textContent,"1920×800","a cropped original is never labelled 800p");
+  assert.equal(nodes.pbqualitycurrent.textContent,"1080p","a cropped original is never labelled 800p");
   assert.equal(nodes.pqualitynotice.hidden,true,"initial playback has no quality-change popup");
   v.videoWidth=1728;v.videoHeight=720;
   update(v,p);
-  assert.equal(nodes.pbqualitycurrent.textContent,"1920×800","a changed intrinsic size needs fresh presentation proof");
+  assert.equal(nodes.pbqualitycurrent.textContent,"1080p","a changed intrinsic size needs fresh presentation proof");
   p.preparedCommitting={};present();
-  assert.equal(nodes.pbqualitycurrent.textContent,"1920×800","an unproven exposed successor remains under rollback");
+  assert.equal(nodes.pbqualitycurrent.textContent,"1080p","an unproven exposed successor remains under rollback");
   delete p.preparedCommitting;
   v.videoWidth=1920;v.videoHeight=800;present();
   assert.equal(nodes.pqualitynotice.hidden,true,"a failed staging and rollback announce nothing");
   v.videoWidth=1728;v.videoHeight=720;p.qualityCandidateId="encode-720";present();
   assert.equal(nodes.pbqualitycurrent.textContent,"720p");
-  assert.equal(nodes.pqualitynotice.textContent,"Quality changed: 1920×800 → 720p");
+  assert.equal(nodes.pqualitynotice.textContent,"Quality changed: 1080p → 720p");
   assert.equal(nodes.pqualitynotice.hidden,false);
   assert.match(nodes.pbquality.title,/1728×720/);
   now=4000;present();
   assert.equal(nodes.pqualitynotice.hidden,true,"the notice expires on the existing sampling tick");
-  p.mediaAttachment={id:2};present();
+  p.mediaAttachment={id:2,qualityRange:"sdr"};present();
   assert.equal(nodes.pqualitynotice.hidden,true,"a same-quality seek or reopen is quiet");
   mode="1080";present();
   assert.equal(nodes.pbqualitymode.textContent,"Manual");
@@ -202,7 +261,7 @@ test("quality controls describe presented frames and announce only completed qua
   assert.equal(nodes.pqualitynotice.hidden,true,"a menu choice alone cannot announce a quality change");
   p.qualityCandidateId="encode-720-new-audio";present();
   assert.equal(nodes.pqualitynotice.hidden,true,"an audio-only candidate change is not a video-quality change");
-  p.deliveredRange="hdr10";p.qualityCandidateId="encode-720-hdr";present();
+  p.mediaAttachment.qualityRange="hdr10";p.deliveredRange="hdr10";p.qualityCandidateId="encode-720-hdr";present();
   assert.equal(nodes.pqualitynotice.textContent,"Quality changed: 720p · HDR10");
   surface.surface={kind:"blocking"};update(v,p);
   assert.equal(nodes.pqualitynotice.hidden,true,"a quality notice cannot compete with the playback failure surface");
@@ -213,6 +272,25 @@ test("quality controls describe presented frames and announce only completed qua
   p.qualityCandidateId="codec-after";present();
   assert.equal(nodes.pqualitynotice.textContent,"Quality changed: 720p · HDR10 · HEVC",
     "a confirmed codec change is visible even when dimensions stay the same");
+  v.videoWidth=3840;v.videoHeight=1608;present();
+  assert.equal(nodes.pbqualitycurrent.textContent,"4K");
+  assert.equal(nodes.pbquality["aria-label"],"Playback quality: Manual · 4K (3840×1608) · HDR10");
+  p.mediaAttachment={id:3,qualityRange:"sdr"};update(v,p);
+  assert.match(nodes.pbquality.title,/HDR10$/,"range changes need attached presentation proof");
+  present();
+  assert.equal(nodes.pqualitynotice.textContent,"Quality changed: 4K · SDR · HEVC");
+  assert.match(nodes.pbquality.title,/SDR$/);
+  p.mediaAttachment={id:4};p.deliveredRange="hdr10";present();
+  assert.equal(nodes.pbquality["aria-label"],"Playback quality: Manual · 4K (3840×1608)",
+    "a new ungraded attachment cannot promote the legacy decision hint");
+  assert.equal(nodes.pqualitynotice.hidden,true,"an ungraded attachment clears the previous range notice");
+  p.sessionId="current";p.health={id:"retired",stream_format:{dynamic_range:"hdr10"}};
+  present();
+  assert.doesNotMatch(nodes.pbquality.title,/HDR10/);
+  p.health={id:"current",stream_format:{dynamic_range:"sdr"}};
+  present();
+  assert.match(nodes.pbquality.title,/SDR$/,"the exact session's stream report can supply missing range");
+  v.videoWidth=1728;v.videoHeight=720;present();
   owns=false;v.videoWidth=1152;v.videoHeight=480;present();
   assert.equal(nodes.pbqualitycurrent.textContent,"720p","a requested destination cannot report predecessor dimensions");
   owns=true;video={videoWidth:1152,videoHeight:480,seeking:false};

@@ -209,6 +209,7 @@ function rollbackPreparedReplacement(p,state,successor){
   p.qualityCandidateId=predecessor.qualityCandidateId;
   clearEffectiveProcessing(p);
   p.deliveredRange=predecessor.deliveredRange;
+  if(p.mediaAttachment) p.mediaAttachment.qualityRange=predecessor.qualityRange??null;
   p.deliveredDvProfile=predecessor.deliveredDvProfile??null;
   p.enhancement=predecessor.enhancement||null;
   // Transport intent belongs to the viewer, including commands made while
