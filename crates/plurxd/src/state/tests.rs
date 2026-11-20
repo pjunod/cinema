@@ -5786,6 +5786,44 @@ fn a_budget_failure_budgets_the_retry_from_the_rate_it_measured() {
     );
 }
 
+#[test]
+fn shared_timeout_budgets_the_first_individual_index_retry() {
+    use crate::fragindex::{IndexFailure, IndexOutcome};
+    use plurx_core::content_analysis::IndexFailureCode;
+
+    let film_ms = 10_700_000;
+    let duration_ms = Some(film_ms);
+    let size_bytes = 52_384_545_280;
+    let measured = budget_exceeded(2_112_000, 8_700_000, film_ms);
+    let shared = IndexFailure {
+        code: IndexFailureCode::IndexBudgetExceeded,
+        reason: measured.reason.clone(),
+        rows: 900,
+        transient_allowlisted: false,
+        diagnostic: measured.diagnostic.clone().unwrap(),
+    };
+    let retry = index_file_budget_after_shared_pass(
+        duration_ms,
+        size_bytes,
+        None,
+        &IndexOutcome::Failed(Box::new(shared.clone())),
+    );
+    assert_eq!(
+        retry,
+        index_file_budget(duration_ms, size_bytes, Some(&measured))
+    );
+    assert!(retry > index_file_budget(duration_ms, size_bytes, None));
+
+    let process_error = IndexOutcome::Failed(Box::new(IndexFailure {
+        code: IndexFailureCode::IndexProcessFailed,
+        ..shared
+    }));
+    assert_eq!(
+        index_file_budget_after_shared_pass(duration_ms, size_bytes, None, &process_error),
+        index_file_budget(duration_ms, size_bytes, None)
+    );
+}
+
 /// A first attempt on a large, high-bitrate remux is budgeted from its size
 /// too: 79 GB at the slowest planned read rate, not 197 minutes at 8x.
 #[test]
