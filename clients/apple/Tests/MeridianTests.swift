@@ -63,8 +63,22 @@ final class MeridianTests: XCTestCase {
         let host = try XCTUnwrap(selectedDestination(controller))
         let navigation = try XCTUnwrap(findNavigation(host))
         state.push = true
-        settle(0.6)
+        // UIKit can install the destination controller before its push animation
+        // delivers the Settings root's disappearance. Let the push finish
+        // before counting lifecycle events caused by resizing the shell.
+        settle(until: {
+            navigation.viewControllers.count == 2
+                && state.detailHasAppeared && navigation.transitionCoordinator == nil
+        })
         XCTAssertEqual(navigation.viewControllers.count, 2, "Fixture must create an actual implicit native push")
+        XCTAssertTrue(state.detailHasAppeared, "The destination must appear before measuring its lifecycle")
+        XCTAssertNil(navigation.transitionCoordinator, "The initial native push must finish before resizing")
+        if #available(iOS 18.0, tvOS 18.0, *) {
+            // The native SwiftUI stack can deliver this callback after UIKit
+            // clears its transition coordinator. Measure from the callback.
+            settle(until: { state.rootDisappearances > 0 })
+            XCTAssertEqual(state.rootDisappearances, 1, "The Settings root must disappear after the push and before resizing")
+        }
         let detail = try XCTUnwrap(navigation.topViewController)
         let disappearances = state.disappearances
         for width in [390, 1200, 700, 390] {
@@ -270,7 +284,7 @@ final class MeridianTests: XCTestCase {
         XCTAssertFalse(tabs.isTabBarHidden)
         XCTAssertEqual(tabs.sidebar.isHidden, nativeSidebarHidden,
             "Standard preserves the native adaptive sidebar choice for this device and geometry")
-        XCTAssertEqual((tabs.viewControllers ?? []).compactMap { $0.tabBarItem.title }, HomeTab.viewerTabs.map(\.title))
+        XCTAssertEqual(tabs.tabs.filter { !$0.isHidden }.map(\.title), HomeTab.viewerTabs.map(\.title))
         XCTAssertEqual(tabs.view.frame, try XCTUnwrap(tabs.view.superview).bounds)
         XCTAssertEqual(tabs.view.convert(tabs.view.bounds, to: hosting.view).width, hosting.view.bounds.width,
             accuracy: 0.5, "Standard must not reserve Meridian's sidebar width")
@@ -302,9 +316,11 @@ final class MeridianTests: XCTestCase {
             hosting.view.setNeedsLayout(); hosting.view.layoutIfNeeded()
             settle()
             XCTAssertTrue(tabs.selectedViewController === settings)
-            model.layout = .standard
             window.frame.size.width = 1024
             hosting.view.setNeedsLayout(); hosting.view.layoutIfNeeded()
+            settle(until: { tabs.view.bounds.width > 900 })
+            XCTAssertGreaterThan(tabs.view.bounds.width, 900, "Restore the wide Meridian geometry before switching layouts")
+            model.layout = .standard
             settleChrome(until: { !tabs.isTabBarHidden && tabs.sidebar.isHidden == sidebarHidden })
             XCTAssertTrue(tabs.selectedViewController === settings)
             XCTAssertTrue(findTabs(hosting) === tabs)
@@ -317,8 +333,8 @@ final class MeridianTests: XCTestCase {
         tabs.sidebar.isHidden = true
         model.features.recordings = false
         settle()
-        XCTAssertFalse((tabs.viewControllers ?? []).contains { $0.tabBarItem.title == HomeTab.recordings.title })
-        XCTAssertEqual(tabs.selectedViewController?.tabBarItem.title, HomeTab.settings.title)
+        XCTAssertFalse(tabs.tabs.contains { !$0.isHidden && $0.title == HomeTab.recordings.title })
+        XCTAssertEqual(tabs.selectedTab?.title, HomeTab.settings.title)
     }
 
     private func findAttentionBadge(_ view: UIView) -> UILabel? {
@@ -574,7 +590,10 @@ private final class NavigationDriver: ObservableObject {
     @Published var push = false
     @Published var layout = ViewerLayout.standard
     @Published var selection = HomeTab.settings
-    var disappearances = 0
+    var detailHasAppeared = false
+    var rootDisappearances = 0
+    var detailDisappearances = 0
+    var disappearances: Int { rootDisappearances + detailDisappearances }
 }
 private struct ImplicitDestinationHostFixture: View {
     @ObservedObject var driver: NavigationDriver
@@ -607,10 +626,11 @@ private struct ImplicitNavigationFixture: View {
                 set: { if title == HomeTab.settings.title { driver.push = $0 } }
             )) {
                 Text("Retained nested editor")
-                    .onDisappear { if title == HomeTab.settings.title { driver.disappearances += 1 } }
+                    .onAppear { driver.detailHasAppeared = true }
+                    .onDisappear { if title == HomeTab.settings.title { driver.detailDisappearances += 1 } }
             } label: { Text(title) }
                 .navigationTitle(title)
-                .onDisappear { if title == HomeTab.settings.title { driver.disappearances += 1 } }
+                .onDisappear { if title == HomeTab.settings.title { driver.rootDisappearances += 1 } }
         }
     }
 }

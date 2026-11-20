@@ -34,7 +34,7 @@ GITHUB_ONLY_WORKFLOWS = frozenset({
 })
 GITHUB_HOSTED_RUNNERS = frozenset(
     # No Intel macOS runner: macOS releases are Apple Silicon only.
-    {"ubuntu-24.04", "ubuntu-24.04-arm", "macos-15", "windows-2022"}
+    {"ubuntu-24.04", "ubuntu-24.04-arm", "macos-latest", "windows-2022"}
 )
 
 
@@ -1796,15 +1796,17 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.2"', workflow)
         self.assertIn('test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.2"', workflow)
         self.assertIn('= "Version: 2.46.0"', workflow)
-        self.assertIn('iOS 26.5 (26.5 - 23F77)', workflow)
-        self.assertIn('tvOS 26.5 (26.5 - 23L470)', workflow)
+        self.assertIn('python3 -m validation.apple_simulator_runtime iOS', workflow)
+        self.assertIn('python3 -m validation.apple_simulator_runtime tvOS', workflow)
+        self.assertNotIn('SimRuntime.iOS-26-5', workflow)
+        self.assertNotIn('SimRuntime.tvOS-26-5', workflow)
         self.assertNotIn("sudo xcode", workflow)
         self.assertEqual(workflow.count("xcrun simctl create"), 3)
         self.assertIn("SimDeviceType.iPhone-17-Pro", workflow)
         self.assertIn("SimDeviceType.iPad-Pro-13-inch-M4-8GB", workflow)
-        self.assertEqual(workflow.count("SimRuntime.iOS-26-5"), 2)
+        self.assertEqual(workflow.count('"$ios_runtime")'), 2)
         self.assertIn("SimDeviceType.Apple-TV-4K-3rd-generation-4K", workflow)
-        self.assertIn("SimRuntime.tvOS-26-5", workflow)
+        self.assertIn('"$tvos_runtime")', workflow)
         self.assertIn('APPLE_IOS_SIM=platform=iOS Simulator,id=$ios_id', workflow)
         self.assertIn('APPLE_IPAD_SIM=platform=iOS Simulator,id=$ipad_id', workflow)
         self.assertIn('APPLE_TVOS_SIM=platform=tvOS Simulator,id=$tvos_id', workflow)
@@ -3368,6 +3370,20 @@ assert.equal(context.ACT_TIMER, null);
             "cluster-harness-check cluster-daemon-check",
             makefile,
         )
+
+    def test_cluster_daemon_fixture_container_mounts_actual_host_identity(self):
+        job = workflow_job_blocks(".github/workflows/ci.yml")["cluster_daemon"]
+        options = job.split("      options: >-\n", 1)[1].split("      credentials:", 1)[0]
+        self.assertIn(
+            "--mount type=bind,src=/etc/machine-id,dst=/run/plurx-host-machine-id,readonly",
+            options,
+        )
+        self.assertIn(
+            "--mount type=bind,src=/proc/sys/kernel/random/boot_id,dst=/run/plurx-host-boot-id,readonly",
+            options,
+        )
+        self.assertIn("--memory 20g --memory-swap 20g --cpus 4", options)
+        self.assertIn("--cpuset-cpus 0-3 --pids-limit 4096", options)
 
     def test_full_unit_suite_has_dedicated_bounded_resident_capacity(self):
         job = workflow_job_blocks(".github/workflows/ci.yml")["check"]

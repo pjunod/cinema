@@ -1236,7 +1236,12 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
         mode,
         SourceFixtureMode::NativeCopy | SourceFixtureMode::NativeEncoded
     );
-    if native || matches!(mode, SourceFixtureMode::BurnText) {
+    if native
+        || matches!(
+            mode,
+            SourceFixtureMode::BurnText | SourceFixtureMode::Hdr10Sdr
+        )
+    {
         fixture.keep_fixture_membership_stable().await;
     }
     let mut unsupported: Value = serde_json::from_slice(&fixture.request).expect("recipe");

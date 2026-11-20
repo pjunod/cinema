@@ -331,7 +331,7 @@
         "table": "review \u00a73 citation crates/plurx-core/src/store/hiqlite.rs:3585",
         "scope": "item",
         "item": "impl HiqliteAuthStore > fn migrate_schema",
-        "item_sha256": "e3ab5c855d6acfa3bc5fc09444fe53801b691aa4cd9dae8581c48e38060b9afc"
+        "item_sha256": "1086932e127367a792df1b105d80cf0f1db3de77759e6f489ac0edad49968d57"
       },
       {
         "anchor": "impl QueueSql for HiqliteAuthStore {",
@@ -587,7 +587,7 @@
         "table": "review \u00a73 citation crates/plurx-core/src/store/sqlite/mod.rs:1255",
         "scope": "item",
         "item": "const MIGRATIONS",
-        "item_sha256": "47e0ae57e8f79c1fdfb1250b299b169b9b7396bbe65a908930e44b4ffc5b576f"
+        "item_sha256": "069aee96bbd8dd2ca2f688bbddef01c9e8a60c919a137b389e16315d795b3753"
       },
       {
         "anchor": "async fn insert_item_fenced(",
