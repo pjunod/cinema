@@ -209,6 +209,74 @@ async fn a_failed_trial_leaves_the_predecessors_route_and_actor_untouched() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn auto_fel_refusal_reports_when_peer_selection_never_started() {
+    let dir = crate::test_tempdir().expect("state dir");
+    let playback = unique_playback_id("fel-peer-not-checked");
+    let (fixture, session_id, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+    let (mut intent, run, _) =
+        upgrade_after_playing_to(&fixture, &session_id, &route, 30_000).await;
+    let mut create = bare_create();
+    create.intent = Some(envelope(
+        1,
+        plurx_core::playback::DesiredQuality::Auto {
+            height: None,
+            candidate_id: None,
+        },
+    ));
+    intent.auto_policy = create.candidate_auto_policy();
+    assert!(intent.auto_policy);
+    let before = fixture
+        .state
+        .store
+        .media_session_route_by_incarnation(&route.incarnation_id)
+        .await
+        .expect("route read");
+    let local_reason = crate::transcode::TranscodeManager::reconstruction_slot_busy();
+    let refusal = crate::transcode::vod_refusal_error(
+        crate::media_sessions::ADAPTIVE_PROCESSED_CAPACITY_REFUSED,
+        &local_reason,
+    );
+    let outcome = super::processed_upgrade::run_upgrade_with(
+        &fixture.state,
+        &intent,
+        &run,
+        |_request, _recovery| async {
+            tokio::time::pause();
+            tokio::time::advance(crate::transcode::PROCESSED_UPGRADE_TRIAL_BUDGET).await;
+            tokio::time::resume();
+            Err(refusal)
+        },
+    )
+    .await;
+    assert_eq!(outcome, "declined");
+    let skip = super::processed_upgrade::processing_skip(&session_id, &route.incarnation_id)
+        .expect("the current ordinary generation has the viewer-safe reason");
+    assert_eq!(
+        skip.reason,
+        format!(
+            "{local_reason}. No same-quality peer was checked under the original preparation deadline."
+        )
+    );
+    assert_eq!(
+        fixture
+            .state
+            .store
+            .media_session_route_by_incarnation(&route.incarnation_id)
+            .await
+            .expect("ordinary route read after the refusal"),
+        before
+    );
+    assert!(fixture
+        .state
+        .store
+        .staged_media_session_for_playback(&route.principal, &route.playback_id)
+        .await
+        .expect("prepared route read")
+        .is_none());
+}
+
 /// A pending first-frame trial leaves only a bounded continuation. A later
 /// accepted exchange may resume it with a newly planned full binding, not the
 /// startup context whose probe metadata the completed receipt changed.

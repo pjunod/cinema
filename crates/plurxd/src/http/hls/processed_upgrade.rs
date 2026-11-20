@@ -935,34 +935,50 @@ where
                 return "declined";
             }
             #[cfg(target_os = "linux")]
-            if intent.auto_policy
-                && crate::transcode::vod_refusal(&reason).is_some_and(|(code, _)| {
-                    code == crate::media_sessions::ADAPTIVE_PROCESSED_CAPACITY_REFUSED
-                })
-            {
-                // The remote successor owns no local yield. Return any
-                // parked producer to the incumbent before considering a peer.
-                drop(incumbent_claim.take());
-                let remote = peer_budget
-                    .scope(stage_remote_fel_after_capacity_refusal(
-                        state,
-                        intent,
-                        run,
-                        &pending,
-                        &route,
-                        &predecessor,
-                        &source,
-                        projected.as_ref(),
-                    ))
-                    .await;
-                match remote {
-                    Ok(outcome) => return outcome,
-                    Err(error) => {
-                        tracing::info!(target: "plurxd::http::hls", error = %error,
-                            "same-quality FEL peer did not stage a successor");
+            let reason = if let Some((_, local_reason)) = crate::transcode::vod_refusal(&reason)
+                .filter(|(code, _)| {
+                    *code == crate::media_sessions::ADAPTIVE_PROCESSED_CAPACITY_REFUSED
+                }) {
+                use super::preparation::PreparationStageOutcome;
+                if !intent.auto_policy {
+                    local_reason.to_owned()
+                } else {
+                    // The remote successor owns no local yield. Return any
+                    // parked producer to the incumbent before considering a peer.
+                    drop(incumbent_claim.take());
+                    let remote = peer_budget
+                        .scope(stage_remote_fel_after_capacity_refusal(
+                            state,
+                            intent,
+                            run,
+                            &pending,
+                            &route,
+                            &predecessor,
+                            &source,
+                            projected.as_ref(),
+                        ))
+                        .await;
+                    match remote {
+                        Ok(PreparationStageOutcome::Staged) => return "staged",
+                        Ok(PreparationStageOutcome::Cancelled) => return "cancelled",
+                        Ok(PreparationStageOutcome::Refused(_)) => {
+                            run.skipped(&format!(
+                                "{}. A verified same-quality peer upgrade could not be staged.",
+                                local_reason.trim_end_matches('.')
+                            ));
+                            return "not_staged";
+                        }
+                        Err(error) => {
+                            let (public_reason, diagnostic) = error.explanation();
+                            tracing::info!(target: "plurxd::http::hls", error = %diagnostic,
+                                "same-quality FEL peer did not stage a successor");
+                            format!("{}. {public_reason}", local_reason.trim_end_matches('.'))
+                        }
                     }
                 }
-            }
+            } else {
+                reason
+            };
             tracing::warn!(target: "plurxd::http::hls", session = %session, %reason,
                 "processed upgrade declined; the ordinary session keeps playing");
             run.skipped(&reason);
@@ -1141,6 +1157,51 @@ where
 }
 
 #[cfg(target_os = "linux")]
+enum DeferredFelPeerFailure {
+    NotEvaluated(String),
+    NoEligibleOffer,
+    AdmissionRefused(String),
+    Unverified(String),
+}
+
+#[cfg(target_os = "linux")]
+impl DeferredFelPeerFailure {
+    fn explanation(&self) -> (&'static str, &str) {
+        match self {
+            Self::NotEvaluated(detail) => (
+                "No same-quality peer was checked under the original preparation deadline.",
+                detail,
+            ),
+            Self::NoEligibleOffer => (
+                "No eligible peer advertised same-quality FEL preparation.",
+                "no eligible worker advertises deferred FEL preparation",
+            ),
+            Self::AdmissionRefused(detail) => {
+                ("An eligible peer also refused FEL admission.", detail)
+            }
+            Self::Unverified(detail) => (
+                "A same-quality peer upgrade could not be verified for this playback.",
+                detail,
+            ),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<&str> for DeferredFelPeerFailure {
+    fn from(detail: &str) -> Self {
+        Self::Unverified(detail.to_owned())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<String> for DeferredFelPeerFailure {
+    fn from(detail: String) -> Self {
+        Self::Unverified(detail)
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 async fn stage_remote_fel_after_capacity_refusal(
     state: &AppState,
@@ -1151,20 +1212,24 @@ async fn stage_remote_fel_after_capacity_refusal(
     predecessor: &RemoteStartRequest,
     source: &MediaFile,
     projected: Option<&plurx_core::playback::candidate::QualityCandidate>,
-) -> Result<&'static str, String> {
+) -> Result<super::preparation::PreparationStageOutcome, DeferredFelPeerFailure> {
     use crate::media_sessions::AdaptivePreparePurpose;
     use plurx_core::transcode::dv_processing::DvDestination;
 
-    let deadline = crate::media_pool::create_preparation_deadline()
-        .ok_or("the original deferred FEL preparation cutoff is absent")?;
-    crate::media_pool::create_remote_grant(deadline).map_err(|error| error.to_string())?;
+    let deadline = crate::media_pool::create_preparation_deadline().ok_or_else(|| {
+        DeferredFelPeerFailure::NotEvaluated(
+            "the original deferred FEL preparation cutoff is absent".into(),
+        )
+    })?;
+    crate::media_pool::create_remote_grant(deadline)
+        .map_err(|error| DeferredFelPeerFailure::NotEvaluated(error.to_string()))?;
     let owner = state
         .media_pool
         .adaptive_fel_workers(state, true)
         .await
         .into_iter()
         .next()
-        .ok_or("no eligible worker advertises deferred FEL preparation")?;
+        .ok_or(DeferredFelPeerFailure::NoEligibleOffer)?;
     let quote = state
         .media_pool
         .adaptive_worker_quote(state, &owner)
@@ -1325,9 +1390,17 @@ async fn stage_remote_fel_after_capacity_refusal(
     if context.is_some() {
         guard.disarm();
     }
-    let prepared = selected.map_err(|failure| match failure {
-        super::create::adaptive_retry::AdaptiveOriginFailure::NextWorker(error)
-        | super::create::adaptive_retry::AdaptiveOriginFailure::Hold(error) => format!("{error:?}"),
+    let prepared = selected.map_err(|failure| {
+        use super::create::adaptive_retry::AdaptiveOriginFailure;
+        let error = match failure {
+            AdaptiveOriginFailure::NextWorker(error) | AdaptiveOriginFailure::Hold(error) => error,
+        };
+        let detail = format!("{error:?}");
+        if error.code() == Some(crate::media_sessions::ADAPTIVE_PROCESSED_CAPACITY_REFUSED) {
+            DeferredFelPeerFailure::AdmissionRefused(detail)
+        } else {
+            DeferredFelPeerFailure::Unverified(detail)
+        }
     })?;
     stage_verified_remote_fel(
         state,
@@ -1343,6 +1416,7 @@ async fn stage_remote_fel_after_capacity_refusal(
         deadline,
     )
     .await
+    .map_err(DeferredFelPeerFailure::Unverified)
 }
 
 #[cfg(target_os = "linux")]
@@ -1359,7 +1433,7 @@ async fn stage_verified_remote_fel(
     prepared: super::create::AdaptiveOriginPrepared,
     requested_ms: i64,
     deadline: tokio::time::Instant,
-) -> Result<&'static str, String> {
+) -> Result<super::preparation::PreparationStageOutcome, String> {
     let ready = async {
         let (start, end) = prepared
             .prepared_window_ms
@@ -1473,7 +1547,7 @@ async fn stage_verified_remote_fel(
     if outcome != super::preparation::PreparationStageOutcome::Staged {
         super::create::cancel_deferred_fel_origin(state, &deferred.prepared).await;
     }
-    Ok(run.finish_staging(outcome))
+    Ok(outcome)
 }
 
 /// Skip reason when a parked incumbent's published runway (or a seek past it)
