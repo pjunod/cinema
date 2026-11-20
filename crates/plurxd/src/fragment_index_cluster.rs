@@ -1496,6 +1496,7 @@ fn pipeline_digest_for_transform(
         args.push(format!("{{plurx-output-transform:{transform}}}"));
         if let Some(digest) = video.dolby_vision_refit() {
             args.push(format!("{{plurx-dv-refit-digest:{}}}", hex::encode(digest)));
+            args.push("{plurx-dv-refit-cadence:1}".into());
         }
     }
     cluster_fragment_index_pipeline_digest(engine_sha256, &args)

@@ -1123,6 +1123,7 @@ where
         super::preparation::PreparationPurpose::SelectionChange,
         super::preparation::AcceptedAsk {
             prepared_proof: None,
+            platform: None,
             film_time_ms,
             desired_digest: None,
             planning_cancellation: Some(pending.cancellation_token()),

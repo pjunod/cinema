@@ -2,7 +2,7 @@
 
 **Status:** open — isolated fit and served baseline acquisition complete;
 the first frozen M7 candidate was rejected; physical graduation and runtime
-comparison integration remain open. **Owner:** Codex. **Updated:** 2026-11-19.
+comparison integration remain open. **Owner:** Codex. **Updated:** 2026-11-20.
 
 Companion to [the build ledger](FEL-RPU-REFIT-BUILD.md): that records the
 merged implementation; this records physical graduation and the next trial.
@@ -135,6 +135,28 @@ five dropped of 1,399 total video frames at the terminal observation.
 Display output was unverified. This is a scoped browser playback witness,
 not optical mapping proof or native macOS/iOS client coverage. Its earlier
 quality-change decline is retained separately from the successful successor.
+
+The Lenovo client completed the identity control with zero dropped frames,
+but its fitted handoff retained the predecessor. A separate diagnostic build
+then observed the fitted successor initialize the Dolby decoder and render
+its first frame, including after the alignment seek. The output metadata
+still had no frame duration, so the existing one-frame alignment predicate
+correctly refused it. The media-playlist entry had lost the HLS variant's
+frame-rate declaration; increasing a decoder deadline would not repair that.
+
+The correction measures the shortest positive presentation gap and declared
+sample duration while the canonical fitted index is built. It sorts each
+fragment's presentation timestamps, checks the boundary to the previous
+fragment and withholds the optional bound for duplicate, overlapping or
+invalid clocks. The summary travels with the immutable index, source clock
+and picture/cadence proofs; fitted index keys advance independently of the
+curve method so older measurements rebuild through ordinary indexing.
+Android prepared scalar VOD uses a private durable single-variant envelope
+with this attachment-owned bound. Missing evidence stays unknown. Apple
+acquisition and subtitle behavior, the media child timeline, the strict
+readiness predicate and handoff deadlines stay unchanged. Regression checks
+and the corrected physical handoff are pending; this is not an Android
+playback graduation claim.
 
 ## Native M5 test-instance prerequisites
 

@@ -346,6 +346,8 @@ struct IndexMetadata {
     dv_refit_origin: Option<crate::segplan::DvRefitOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dv_refit_proofs: Option<Vec<crate::segplan::refit_proof::FittedFragmentProof>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_cadence: Option<crate::segplan::DvRefitCadence>,
 }
 
 pub(crate) fn put(
@@ -362,10 +364,14 @@ pub(crate) fn put(
     {
         return Err(StoreError::Task("fitted proof row count mismatch".into()));
     }
+    if index.dv_refit_cadence.is_some() && index.verified_refit_cadence().is_none() {
+        return Err(StoreError::Task("invalid fitted cadence summary".into()));
+    }
     let metadata = IndexMetadata {
         promotion: index.promotion.clone(),
         dv_refit_origin: index.dv_refit_origin,
         dv_refit_proofs: index.dv_refit_proofs.clone(),
+        dv_refit_cadence: index.dv_refit_cadence,
     };
     let promotion = serde_json::to_string(&metadata)
         .map_err(|error| StoreError::Migration(error.to_string()))?;
@@ -544,6 +550,10 @@ pub(crate) fn get(
     index.promotion = metadata.promotion;
     index.dv_refit_origin = metadata.dv_refit_origin;
     index.dv_refit_proofs = metadata.dv_refit_proofs;
+    index.dv_refit_cadence = metadata.dv_refit_cadence;
+    if index.dv_refit_cadence.is_some() && index.verified_refit_cadence().is_none() {
+        return Ok(None);
+    }
     index.parameter_sets_constant = constant != 0;
     Ok(Some(index))
 }
@@ -1249,6 +1259,7 @@ mod tests {
             promotion: built.promotion.clone(),
             dv_refit_origin: None,
             dv_refit_proofs: None,
+            dv_refit_cadence: None,
         };
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(
@@ -1268,11 +1279,18 @@ mod tests {
         )
         .expect("proof");
         built.dv_refit_proofs = Some(vec![proof; built.rows.len()]);
+        built.dv_refit_cadence = Some(crate::segplan::DvRefitCadence {
+            minimum_interval_ticks: 667,
+            sample_count: 84,
+        });
         put(&conn, 7, &built, 1).expect("publish fitted metadata");
         let loaded = get(&conn, 7, &built.source)
             .expect("read")
             .expect("retained index");
         assert_eq!(loaded, built);
+        built.dv_refit_cadence.as_mut().unwrap().sample_count = 1;
+        assert!(put(&conn, 7, &built, 2).is_err());
+        assert_eq!(get(&conn, 7, &loaded.source).unwrap(), Some(loaded));
     }
 
     fn index_with(fingerprint: &str, size: u64, mtime_ms: i64) -> FragmentIndex {

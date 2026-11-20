@@ -72,6 +72,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Android prepared F+ copy handoffs retain source-bound frame timing in a
+  single-variant playlist. The fitted index measures a conservative sample
+  interval instead of supplying average probe FPS; the existing decoded-frame
+  alignment check and deadline remain unchanged.
+
 - F+ publishes chroma MMR coefficients on the Q12 grid tested on the native path and
   qualifies their actual stored precision. The new fitting method reuses
   existing statistics; new sessions wait for its replacement table while

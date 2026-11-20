@@ -26,6 +26,7 @@ async fn a_staged_successor_resumes_at_the_accepted_playhead_not_the_fetch_front
         &staged_candidate_request(),
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -855,6 +856,7 @@ async fn delivery_preparation_says_offered_with_the_prepare_action() {
         },
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -936,6 +938,7 @@ async fn delivery_preparation_says_none_when_the_slot_is_empty() {
         },
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1196,6 +1199,7 @@ async fn a_second_ask_supersedes_a_preparation_in_the_registration_window() {
             &state.node_id,
             PreparationPurpose::SelectionChange,
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1387,6 +1391,7 @@ async fn a_committed_successor_survives_the_predecessors_retirement() {
         },
         Some(&staged_source_file()),
         AcceptedAsk {
+            platform: None,
             prepared_proof: None,
             planning_registration: None,
             quality_intent: None,
@@ -1527,7 +1532,7 @@ async fn a_processed_successor_commits_with_its_original_copy_catalog_provenance
     predecessor.decoder_caps = Some(decoder.clone());
     fixture.state.transcode.vod_for_test().install_http_test_session(&session_id, source.clone(), dir.path()).await;
     stage_prepared_successor(&fixture.state, &session_id, &route, &predecessor, &processed, Some(source),
-        AcceptedAsk { prepared_proof: None, planning_registration: None, quality_intent: None,
+        AcceptedAsk { platform: None, prepared_proof: None, planning_registration: None, quality_intent: None,
             planning_cancellation: None, film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS, desired_digest: None }).await;
     let staged = fixture.store.staged_media_session_for_playback(&route.principal, &playback).await
         .expect("staged read").expect("successor staged");
@@ -1706,6 +1711,7 @@ async fn a_supersession_in_the_registration_window_still_frees_the_preparation()
             &state.node_id,
             PreparationPurpose::SelectionChange,
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1808,6 +1814,7 @@ async fn same_selection_retry_cannot_revive_cancelled_planning_at_registration()
             &state.node_id,
             PreparationPurpose::SelectionChange,
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,

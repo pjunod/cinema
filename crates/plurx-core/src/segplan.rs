@@ -706,6 +706,10 @@ pub struct FragmentIndex {
     /// Legacy/native/processed indices omit this field entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dv_refit_proofs: Option<Vec<refit_proof::FittedFragmentProof>>,
+    /// Conservative one-picture interval observed across the fitted index.
+    /// The interval is expressed in this index's video track timescale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dv_refit_cadence: Option<DvRefitCadence>,
     pub source: SourceIdentity,
 }
 
@@ -718,6 +722,13 @@ pub struct DvRefitOrigin {
     pub first_pts: i64,
     pub time_base_num: u32,
     pub time_base_den: u32,
+}
+
+/// A lower bound on the interval between presented pictures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DvRefitCadence {
+    pub minimum_interval_ticks: u64,
+    pub sample_count: u64,
 }
 
 impl FragmentIndex {
@@ -738,9 +749,30 @@ impl FragmentIndex {
             parameter_sets_constant: true,
             dv_refit_origin: None,
             dv_refit_proofs: None,
+            dv_refit_cadence: None,
             init_sha256: init_sha256.into(),
             source,
         }
+    }
+
+    /// Use the summary only alongside the full source-clock and row proofs.
+    pub fn verified_refit_cadence(&self) -> Option<DvRefitCadence> {
+        let cadence = self.dv_refit_cadence?;
+        let origin = self.dv_refit_origin?;
+        let proofs = self.dv_refit_proofs.as_ref()?;
+        if self.timescale == 0
+            || self.rows.is_empty()
+            || proofs.len() != self.rows.len()
+            || origin.time_base_num == 0
+            || origin.time_base_den == 0
+            || cadence.sample_count < 2
+            || cadence.sample_count < u64::try_from(self.rows.len()).ok()?
+            || cadence.minimum_interval_ticks == 0
+            || cadence.minimum_interval_ticks > u64::from(u32::MAX)
+        {
+            return None;
+        }
+        Some(cadence)
     }
 
     pub fn is_empty(&self) -> bool {

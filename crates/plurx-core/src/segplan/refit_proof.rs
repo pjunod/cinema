@@ -1,7 +1,8 @@
 //! Fitted-copy pre-conversion identity. This proves equivalence to each
 //! canonical index fragment, not correspondence to an unobserved source PTS
 //! census. Source-clock establishment and source authority remain separate.
-use crate::fmp4::{self, Fragment, Init};
+use super::DvRefitCadence;
+use crate::fmp4::{self, Fragment, Init, SampleTime};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
@@ -120,6 +121,99 @@ impl FittedFragmentProof {
     }
 }
 
+/// Accumulates a conservative picture interval while indexing raw fitted
+/// fragments. Invalid or overlapping presentation ranges disable the summary
+/// without affecting the fitted-copy proof or its publication.
+#[derive(Default)]
+pub struct FittedCadenceAccumulator {
+    state: Option<CadenceState>,
+    invalid: bool,
+}
+
+struct CadenceState {
+    timescale: u32,
+    last_pts: i128,
+    summary: DvRefitCadence,
+}
+
+impl FittedCadenceAccumulator {
+    pub fn observe(&mut self, fragment: &Fragment, init: &Init) {
+        if !self.invalid {
+            self.state = CadenceState::observe(self.state.take(), fragment, init);
+            self.invalid = self.state.is_none();
+        }
+    }
+
+    pub fn finish(self) -> Option<DvRefitCadence> {
+        let summary = self.state?.summary;
+        (summary.sample_count >= 2).then_some(summary)
+    }
+}
+
+impl CadenceState {
+    fn observe(previous: Option<Self>, fragment: &Fragment, init: &Init) -> Option<Self> {
+        let video = init.video()?;
+        let timescale = video.timescale;
+        if timescale == 0
+            || previous
+                .as_ref()
+                .is_some_and(|state| state.timescale != timescale)
+        {
+            return None;
+        }
+        let track = fragment.track(video.id)?;
+        let mut decode = track.base_decode_time;
+        let mut minimum_interval_ticks = previous
+            .as_ref()
+            .map_or(u64::MAX, |state| state.summary.minimum_interval_ticks);
+        // Keep only one fragment's clock in memory. Presentation order may
+        // differ from decode order, including for negative composition offsets.
+        let mut pts = Vec::new();
+        for sample in track.samples() {
+            let duration = u64::from(sample.duration);
+            if duration == 0 {
+                return None;
+            }
+            minimum_interval_ticks = minimum_interval_ticks.min(duration);
+            pts.push(
+                SampleTime {
+                    decode,
+                    cto: sample.cto,
+                }
+                .presentation(),
+            );
+            decode = decode.checked_add(duration)?;
+        }
+        pts.sort_unstable();
+        let first_pts = *pts.first()?;
+        let last_pts = *pts.last()?;
+        if let Some(state) = previous.as_ref() {
+            let gap = Self::positive_gap(state.last_pts, first_pts)?;
+            minimum_interval_ticks = minimum_interval_ticks.min(gap);
+        }
+        for pair in pts.windows(2) {
+            let gap = Self::positive_gap(pair[0], pair[1])?;
+            minimum_interval_ticks = minimum_interval_ticks.min(gap);
+        }
+        let sample_count = previous
+            .map_or(0, |state| state.summary.sample_count)
+            .checked_add(u64::try_from(pts.len()).ok()?)?;
+        Some(Self {
+            timescale,
+            last_pts,
+            summary: DvRefitCadence {
+                minimum_interval_ticks,
+                sample_count,
+            },
+        })
+    }
+
+    fn positive_gap(earlier: i128, later: i128) -> Option<u64> {
+        let gap = u64::try_from(later.checked_sub(earlier)?).ok()?;
+        (gap > 0).then_some(gap)
+    }
+}
+
 /// Check one raw fragment before any curve conversion. The chosen candidate
 /// fixes `translation = index DTS - production DTS` for the entire generation.
 pub fn verify_fitted_fragment(
@@ -188,6 +282,110 @@ mod tests {
         index
     }
 
+    fn cadence_fixture() -> (Init, u32) {
+        let (mut init, _) = fixture();
+        let video_id = init.video().expect("video").id;
+        init.tracks
+            .iter_mut()
+            .find(|track| track.id == video_id)
+            .expect("video track")
+            .timescale = 1_000;
+        (init, video_id)
+    }
+
+    fn cadence_fragment(track_id: u32, base_decode_time: u64, samples: &[(u32, i64)]) -> Fragment {
+        Fragment {
+            bytes: Vec::new(),
+            mdat_payload: 0..0,
+            tracks: vec![fmp4::TrackFragment {
+                track_id,
+                base_decode_time,
+                runs: vec![fmp4::Run {
+                    version: 1,
+                    composition_offsets_present: true,
+                    data_offset: 0,
+                    data_offset_at: None,
+                    samples: samples
+                        .iter()
+                        .map(|&(duration, cto)| fmp4::Sample {
+                            duration,
+                            size: 0,
+                            size_at: None,
+                            flags: 0,
+                            cto,
+                        })
+                        .collect(),
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn fitted_cadence_covers_reordered_and_quantized_pictures_across_fragments() {
+        let (init, video) = cadence_fixture();
+        let mut cadence = FittedCadenceAccumulator::default();
+        // Decode order 0, 83, 41. The presentation gaps are 41 and 42.
+        cadence.observe(
+            &cadence_fragment(video, 0, &[(41, 0), (42, 42), (42, -42)]),
+            &init,
+        );
+        cadence.observe(&cadence_fragment(video, 125, &[(41, 0), (42, 0)]), &init);
+        assert_eq!(
+            cadence.finish(),
+            Some(DvRefitCadence {
+                minimum_interval_ticks: 41,
+                sample_count: 5,
+            })
+        );
+
+        let mut cadence = FittedCadenceAccumulator::default();
+        cadence.observe(&cadence_fragment(video, 100, &[(42, 0), (42, 0)]), &init);
+        cadence.observe(&cadence_fragment(video, 179, &[(42, 0)]), &init);
+        assert_eq!(cadence.finish().unwrap().minimum_interval_ticks, 37);
+
+        let mut cadence = FittedCadenceAccumulator::default();
+        cadence.observe(&cadence_fragment(video, 0, &[(2, -1), (42, 15)]), &init);
+        assert_eq!(cadence.finish().unwrap().minimum_interval_ticks, 2);
+    }
+
+    #[test]
+    fn fitted_cadence_omits_incomplete_or_ambiguous_clock_evidence() {
+        let (init, video) = cadence_fixture();
+        assert_eq!(FittedCadenceAccumulator::default().finish(), None);
+        let mut one = FittedCadenceAccumulator::default();
+        one.observe(&cadence_fragment(video, 0, &[(41, 0)]), &init);
+        assert_eq!(one.finish(), None);
+
+        let first = cadence_fragment(video, 0, &[(41, 0), (42, 0)]);
+        let invalid_fragments = [
+            cadence_fragment(video, 40, &[(42, 0), (41, 0)]),
+            cadence_fragment(video, 41, &[(42, 0)]),
+            cadence_fragment(video, 83, &[(41, 0), (41, -41)]),
+            cadence_fragment(video, 83, &[(0, 0)]),
+            cadence_fragment(video, u64::MAX, &[(1, 0)]),
+            cadence_fragment(video, 83, &[]),
+            cadence_fragment(video.saturating_add(1), 83, &[(41, 0)]),
+        ];
+        for invalid in invalid_fragments {
+            let mut cadence = FittedCadenceAccumulator::default();
+            cadence.observe(&first, &init);
+            cadence.observe(&invalid, &init);
+            cadence.observe(&cadence_fragment(video, 200, &[(41, 0), (42, 0)]), &init);
+            assert_eq!(cadence.finish(), None);
+        }
+        let mut mismatched_init = init.clone();
+        mismatched_init
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == video)
+            .expect("video")
+            .timescale = 24_000;
+        let mut cadence = FittedCadenceAccumulator::default();
+        cadence.observe(&first, &init);
+        cadence.observe(&cadence_fragment(video, 83, &[(41, 0)]), &mismatched_init);
+        assert_eq!(cadence.finish(), None);
+    }
+
     #[test]
     fn fitted_proof_roundtrips_and_legacy_none_stays_absent() {
         let (init, fragment) = fixture();
@@ -206,6 +404,7 @@ mod tests {
         legacy.dv_refit_proofs = None;
         let value = serde_json::to_value(&legacy).expect("legacy JSON");
         assert!(value.get("dv_refit_proofs").is_none());
+        assert!(value.get("dv_refit_cadence").is_none());
         let decoded: FragmentIndex = serde_json::from_value(value).expect("old rows load");
         assert!(decoded.dv_refit_proofs.is_none());
         assert!(verify_fitted_fragment(&decoded, 0, &fragment, &init, 0).is_err());

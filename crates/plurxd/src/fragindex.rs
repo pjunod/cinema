@@ -1044,6 +1044,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     let mut converter: Option<crate::dvpipe::Converter> = None;
     let mut resolved_refit_origin = None;
     let mut refit_proofs = Vec::new();
+    let mut refit_cadence = plurx_core::segplan::refit_proof::FittedCadenceAccumulator::default();
     let mut reader = FragmentReader::new();
     let mut init: Option<Init> = None;
     let mut init_sha = String::new();
@@ -1138,6 +1139,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                     };
                     let mut fragment = fragment;
                     if refit.is_some() {
+                        refit_cadence.observe(&fragment, init);
                         match plurx_core::segplan::refit_proof::FittedFragmentProof::observe(
                             &fragment, init,
                         ) {
@@ -1446,6 +1448,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     if refit.is_some() {
         built.dv_refit_origin = resolved_refit_origin;
         built.dv_refit_proofs = Some(refit_proofs);
+        built.dv_refit_cadence = refit_cadence.finish();
     }
     IndexOutcome::Built(Box::new(built))
 }
@@ -1543,6 +1546,9 @@ fn identity_for_transform(
         recipe.push(format!("--plurx-output-transform={transform}"));
         if let Some(digest) = video.dolby_vision_refit() {
             recipe.push(format!("--plurx-dv-refit-digest={}", hex::encode(digest)));
+            // Cadence is immutable index evidence, not a changed curve method.
+            // Rebuild only fitted indexes that predate this measurement.
+            recipe.push("--plurx-dv-refit-cadence=1".into());
         }
     }
     SourceIdentity::new(

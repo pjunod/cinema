@@ -2063,6 +2063,18 @@ All playlists are `application/vnd.apple.mpegurl` with `Cache-Control:
 no-store`, and relay to the owning cluster node when this node is not the
 owner.
 
+An Android prepared scalar VOD successor can use
+`index.m3u8?native=2`. Its durable route selects a single-variant wrapper
+whose child remains the immutable `index.m3u8` without the query. The wrapper
+has no subtitle group or codec declaration. Its optional `FRAME-RATE` is a
+conservative bound from the exact attachment's verified fitted-index sample
+cadence, rounded upward through the client's Float representation; source
+average FPS is not a substitute. Missing cadence leaves the rate absent.
+Other platforms and ordinary creation retain their existing URLs. Older
+local handlers return the bare media playlist for this query, while older
+relay owners reject the unsupported value; neither is evidence for the new
+timing contract.
+
 `master.m3u8` takes `?subtitle=` (initially selected rendition) and
 `?diagnostic=` (`video-only`, `video-only-codecs`, `video-only-range`,
 `video-only-hdr`). The diagnostic modes only *remove* declarations and never

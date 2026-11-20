@@ -101,6 +101,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -154,6 +155,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -209,6 +211,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -453,6 +456,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -550,6 +554,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -702,6 +707,13 @@
                 .await
                 .expect("staged route read")
                 .expect("the ledger names a successor route");
+            let response: serde_json::Value =
+                serde_json::from_str(&staged_route.response_json).expect("Apple response");
+            assert!(response.get(PREPARED_PLAYLIST_SHAPE_FIELD).is_none());
+            assert_eq!(
+                response["playlist_url"],
+                format!("/api/v1/hls/{}/index.m3u8", staged_route.session_id),
+            );
             let staged: RemoteStartRequest =
                 serde_json::from_str(&staged_route.recipe_json).expect("durable successor recipe");
             let request = staged.request;
@@ -728,7 +740,8 @@
     #[tokio::test]
     async fn an_admitted_preparation_candidate_reaches_the_ledger() {
         let dir = crate::test_tempdir().expect("state dir");
-        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        let playback_id = unique_playback_id("android-prepared");
+        let (fixture, session_id, route) = staging_fixture_for_playback(dir.path(), &playback_id).await;
         // The seam reads the source, and staging refuses without a snapshot.
         // Its 2160 height is also load-bearing: it is what makes the viewer's
         // 1080 ask cross the delivery method as well as the resolution.
@@ -739,6 +752,7 @@
         // together — the one pair with a hardware receipt.
         let mut recipe = staged_candidate_request();
         recipe.file_id = source.id;
+        recipe.playback_id.clone_from(&playback_id);
         recipe.kind = crate::transcode::SessionKind::Copy {
             aac: false,
             preserve_dolby_vision: false,
@@ -750,8 +764,7 @@
         // transcode whenever the asked height is not the source's, and an
         // unprobed source is `None`, so the copy → transcode arm fires either
         // way — which is the delivery-method half of the transition.
-        let delivered =
-            crate::playback_control::EffectiveSelection::from_request(&recipe, 2160, None);
+        let delivered = crate::playback_control::EffectiveSelection::from_request(&recipe, 2160, None);
         assert_eq!(delivered.codec, "source", "the predecessor direct-plays");
         let asked_height = 1080;
 
@@ -771,7 +784,12 @@
                     decoder_caps: None,
                     protocol_version: crate::media_pool::PROTOCOL_VERSION,
                     incarnation_id: route.incarnation_id.clone(),
-                    principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: route.principal.local_user_id().expect("local test principal") },
+                    principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: route
+                            .principal
+                            .local_user_id()
+                            .expect("local test principal"),
+                    },
                     source_size: 0,
                     source_mtime: 0,
                     typeless_playlist: false,
@@ -801,14 +819,14 @@
                 capabilities: Some(crate::playback_control::DynamicCapabilities {
                     presentation_target: None,
                     decoder_caps: None,
-                    platform: crate::playback_control::ClientPlatform::Apple,
+                    platform: crate::playback_control::ClientPlatform::Android,
                     max_height: 2160,
                     codecs: vec![crate::playback_control::CodecPolicy::H264],
                     dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
                     // The retained field, read rather than re-derived.
                     dual_player_preparation: true,
                 }),
-                platform: crate::playback_control::ClientPlatform::Apple,
+                platform: crate::playback_control::ClientPlatform::Android,
                 purpose: PreparationPurpose::SelectionChange,
                 accepted_film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
             },
@@ -838,6 +856,100 @@
             route.incarnation_id,
             "and the viewer's own generation is still the current one",
         );
+
+        let successor = fixture
+            .store
+            .media_session_route_by_incarnation(&staged.staged_incarnation_id)
+            .await
+            .expect("read Android successor")
+            .expect("Android successor route");
+        let response: serde_json::Value =
+            serde_json::from_str(&successor.response_json).expect("Android response");
+        assert_eq!(
+            response[PREPARED_PLAYLIST_SHAPE_FIELD],
+            PREPARED_SINGLE_VARIANT_SHAPE,
+        );
+        let start = control_start_response(&successor).expect("prepared start");
+        assert_eq!(
+            start.playlist_url,
+            format!("/api/v1/hls/{}/index.m3u8?native=2", successor.session_id),
+        );
+        assert_eq!(start.media_origin_ms, Some(0));
+
+        install_vod_http_session(&fixture, dir.path(), &successor.session_id).await;
+        let query = || PlaylistQuery {
+            native: Some(2),
+            subtitle: Some(0),
+            ..Default::default()
+        };
+        assert!(matches!(
+            playlist(
+                State(fixture.state.clone()),
+                AxPath(session_id),
+                Query(query()),
+                HeaderMap::new(),
+            )
+            .await,
+            Err(ApiError::NotFound("prepared playlist"))
+        ));
+        let master = playlist(
+            State(fixture.state.clone()),
+            AxPath(successor.session_id.clone()),
+            Query(query()),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("serve the staged Android master from its durable shape");
+        let master = axum::body::to_bytes(master.into_body(), 4_096)
+            .await
+            .expect("master body");
+        let bandwidth = source.bitrate.unwrap_or(25_000_000).max(128_000);
+        let expected =
+            format!("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH={bandwidth}\nindex.m3u8\n");
+        assert_eq!(
+            master.as_ref(),
+            expected.as_bytes(),
+            "cadence is unavailable"
+        );
+
+        let relay = RelayRequest {
+            session_id: successor.session_id.clone(),
+            resource: RelayResource::Playlist {
+                native: Some(2),
+                subtitle: None,
+                acquisition_start_ms: None,
+            },
+            deadline_unix_ms: unix_ms().saturating_add(30_000),
+            headers: RelayHeaders::default(),
+        };
+        assert!(relay.is_valid());
+        let relayed = relay_local(&fixture.state, relay).await;
+        assert_eq!(relayed.status(), StatusCode::OK);
+        let relayed = axum::body::to_bytes(relayed.into_body(), 4_096)
+            .await
+            .expect("relayed master body");
+        assert_eq!(relayed, master);
+
+        let attached_playlist = fixture
+            .state
+            .transcode
+            .vod_playlist(&successor.session_id)
+            .await
+            .expect("attached VOD playlist")
+            .result
+            .expect("static media playlist");
+        let child = playlist(
+            State(fixture.state.clone()),
+            AxPath(successor.session_id),
+            Query(PlaylistQuery::default()),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("serve the staged Android media playlist");
+        let child = axum::body::to_bytes(child.into_body(), 1_048_576)
+            .await
+            .expect("media playlist body");
+        assert_eq!(child.as_ref(), attached_playlist.as_slice());
     }
 
     /// The complete production seam: an accepted selection change schedules
@@ -1050,6 +1162,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1076,6 +1189,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1115,6 +1229,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1151,6 +1266,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1247,6 +1363,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1507,6 +1624,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1601,6 +1719,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1737,6 +1856,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1828,6 +1948,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1921,6 +2042,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -1980,6 +2102,7 @@
                     &staged_candidate_request(),
                     Some(&staged_source_file()),
                     AcceptedAsk {
+                        platform: None,
                         prepared_proof: None,
                         planning_registration: None,
                         quality_intent: None,
@@ -2119,6 +2242,7 @@
                 &staged_candidate_request(),
                 Some(&staged_source_file()),
                 AcceptedAsk {
+                    platform: None,
                     prepared_proof: None,
                     planning_registration: None,
                     quality_intent: None,
@@ -2272,6 +2396,7 @@ quality_catalog: None,
             &candidate,
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -2432,6 +2557,7 @@ quality_catalog: None,
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -2583,6 +2709,7 @@ quality_catalog: None,
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,
@@ -2705,6 +2832,7 @@ quality_catalog: None,
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                platform: None,
                 prepared_proof: None,
                 planning_registration: None,
                 quality_intent: None,

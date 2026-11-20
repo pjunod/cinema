@@ -2335,6 +2335,9 @@ fn is_zero_i64(value: &i64) -> bool {
     *value == 0
 }
 
+/// Select the prepared scalar VOD envelope on the existing playlist path.
+pub(crate) const PREPARED_VOD_NATIVE_MODE: u8 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "resource", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum RelayResource {
@@ -2471,7 +2474,7 @@ impl RelayResource {
             Self::Playlist {
                 native, subtitle, ..
             } => {
-                native.is_none_or(|value| value <= 1)
+                native.is_none_or(|value| value <= PREPARED_VOD_NATIVE_MODE)
                     && subtitle.is_none_or(|value| (0..=1_024).contains(&value))
             }
             Self::Master {
