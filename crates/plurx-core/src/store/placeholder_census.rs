@@ -40,6 +40,7 @@ pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
         "hiqlite_annotations.rs",
         include_str!("hiqlite_annotations.rs"),
     ),
+    ("hiqlite_curation.rs", include_str!("hiqlite_curation.rs")),
     (
         "hiqlite_background_jobs.rs",
         include_str!("hiqlite_background_jobs.rs"),
@@ -126,6 +127,7 @@ pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
 /// makes adding a module without adding its SQL to the census impossible.
 const SQLITE_SOURCES: &[(&str, &str)] = &[
     ("annotations.rs", include_str!("sqlite/annotations.rs")),
+    ("curation.rs", include_str!("sqlite/curation.rs")),
     ("apikeys.rs", include_str!("sqlite/apikeys.rs")),
     (
         "background_jobs.rs",

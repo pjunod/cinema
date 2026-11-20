@@ -266,6 +266,9 @@ async fn actual_nonowner_forwarding(
         worker.reference.item_id.as_str(),
         worker.reference.file_id.as_str()
     );
+    // Both real voters and the worker's placement are established above.
+    // Keep the worker roster stable through the cold Start and rejoin.
+    worker.keep_fixture_membership_stable().await;
     if clocked {
         // The owner cannot publish while its software capacity is held.
         let hold = worker

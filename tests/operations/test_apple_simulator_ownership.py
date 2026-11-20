@@ -94,9 +94,15 @@ class AppleSimulatorOwnershipTests(unittest.TestCase):
 set -euo pipefail
 printf '%s\\n' "$*" >> "$SIMCTL_CALLS"
 case "$1 $2" in
+  '--sdk iphonesimulator'|'--sdk appletvsimulator')
+    [[ "${3:-}" == "--show-sdk-version" ]]
+    echo 28.1
+    ;;
   'simctl list')
     if [[ "${3:-}" == "devices" && "${4:-}" == "--json" ]]; then
       cat "$SIMCTL_DEVICES"
+    elif [[ "${3:-}" == "runtimes" && "${4:-}" == "--json" ]]; then
+      echo '{"runtimes":[{"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-28-1","version":"28.1","isAvailable":true},{"identifier":"com.apple.CoreSimulator.SimRuntime.tvOS-28-1","version":"28.1","isAvailable":true}]}'
     else
       exit 2
     fi
@@ -150,7 +156,12 @@ esac
         for foreign_id in (foreign_active, own_current, own_future):
             self.assertNotIn(f"simctl shutdown {foreign_id}", calls)
             self.assertNotIn(f"simctl delete {foreign_id}", calls)
-        self.assertEqual(sum(call.startswith("simctl create ") for call in calls), 3)
+        created = [call.rsplit(" ", 1)[-1] for call in calls if call.startswith("simctl create ")]
+        self.assertEqual(created, [
+            "com.apple.CoreSimulator.SimRuntime.iOS-28-1",
+            "com.apple.CoreSimulator.SimRuntime.iOS-28-1",
+            "com.apple.CoreSimulator.SimRuntime.tvOS-28-1",
+        ])
 
     def test_workflow_startup_replay_stops_on_malformed_json_before_mutation(self):
         result, calls = self.run_startup("{")

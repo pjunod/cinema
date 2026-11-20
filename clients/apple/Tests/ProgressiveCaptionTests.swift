@@ -642,12 +642,26 @@ final class ProgressiveCaptionTests: XCTestCase {
             await fulfillment(of:[held],timeout:2);XCTAssertTrue(owner.busy)
             owner.read(publishedAsset)
             XCTAssertFalse(owner.busy,"the read owns presentation, not the cancelled mutation's busy flag")
-            try await eventually { self.owner.window != nil }
-            let replacementStatus=owner.status
+            // The held server mutation changes the fixture before its reply
+            // is released. The replacement may legitimately read that state.
+            let replacementStatus = mutation == "stop"
+                ? "Caption work stopped. Published captions remain available."
+                : "Partial captions available. Playback continues."
+            try await eventually {
+                self.owner.window?.cues.first?.cueId == self.fixture.cueID
+                    && self.owner.status == replacementStatus
+            }
+            var observedStatuses: [String] = []
+            let statusObservation = owner.$status.sink { observedStatuses.append($0) }
             CaptionFixtureProtocol.holdRequest=nil;CaptionFixtureProtocol.releaseHeld?()
             for _ in 0..<20 { await Task.yield() }
-            XCTAssertFalse(owner.busy);XCTAssertEqual(owner.status,replacementStatus)
-            XCTAssertFalse(owner.status.contains("Stop is unconfirmed"))
+            // A refresh can report its operation before the cue read finishes.
+            try await eventually { self.owner.status == replacementStatus }
+            statusObservation.cancel()
+            XCTAssertFalse(owner.busy)
+            XCTAssertTrue(observedStatuses.allSatisfy {
+                $0 == replacementStatus || $0 == "Preparing captions. Playback continues."
+            }, "The replaced mutation published a status after " + mutation + ": " + observedStatuses.joined(separator: " | "))
             XCTAssertTrue(owner.request(.transcribe),"Generate remains usable after replacing "+mutation)
             owner.deselect();CaptionFixtureProtocol.onHeld=nil;CaptionFixtureProtocol.releaseHeld=nil
         }

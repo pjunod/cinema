@@ -6,6 +6,7 @@ from validation import python_unit_receipts as receipts
 
 SOURCE = '65905cc9ae76d428374d5a383246ed1d7d12d5c2'
 JOB_LOG_SHA256 = 'fe34501de8d56b3370b35eecccbcd99a92109444e4a386c280ddbc20d6afdfac'
+# Historical proof from run 6713. Its workflow must match before any reuse.
 FORMAT = 'xctest-full-job-6713'
 SIMULATORS = {
     'iphone': ('iPhone', 'iOS', 'iPhone-17-Pro', 1264, 0),

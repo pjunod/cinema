@@ -1239,6 +1239,9 @@ pub(crate) async fn processed_candidate_link_evidence(
     let Some(network) = network else {
         return ProcessedLinkEvidence::Admissible;
     };
+    if tokio::time::Instant::now() >= deadline {
+        return ProcessedLinkEvidence::Unavailable;
+    }
     let read = async {
         // Qualification may outlive the ordinary request-scoped advisory
         // snapshot. Fence the source again before granting this new recipe.
@@ -1248,12 +1251,16 @@ pub(crate) async fn processed_candidate_link_evidence(
             .candidate_link_prior(&source.candidate(candidate.recipe_digest, candidate.route))
             .await
             .map_err(|_| ())?;
-        Ok(!prior.is_some_and(|prior| prior.negative_active(crate::media_sessions::unix_ms())))
+        Ok::<_, ()>(
+            !prior.is_some_and(|prior| prior.negative_active(crate::media_sessions::unix_ms())),
+        )
     };
-    match tokio::time::timeout_at(deadline, read).await {
-        Ok(Ok(true)) => ProcessedLinkEvidence::Admissible,
-        Ok(Ok(false)) => ProcessedLinkEvidence::Negative,
-        Ok(Err(())) | Err(_) => ProcessedLinkEvidence::Unavailable,
+    let result = tokio::time::timeout_at(deadline, read).await;
+    // Tokio polls the read first, so a ready result can arrive at the deadline.
+    match (result, tokio::time::Instant::now() < deadline) {
+        (Ok(Ok(true)), true) => ProcessedLinkEvidence::Admissible,
+        (Ok(Ok(false)), true) => ProcessedLinkEvidence::Negative,
+        _ => ProcessedLinkEvidence::Unavailable,
     }
 }
 

@@ -733,6 +733,37 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 statement_params,
             ));
         }
+        // Tags and rejected suggestions follow the survivor the same way;
+        // like the list copy, each may affect any number of rows.
+        let curation_copy_index = statements.len();
+        for sql in [
+            "INSERT INTO library_curation_item_tags(tag_id,item_id,added_by,added_at_ms,source) \
+             SELECT tag_id,$1,MIN(added_by),MIN(added_at_ms),MIN(source) FROM library_curation_item_tags \
+             WHERE item_id IN (SELECT value FROM json_each($2)) AND item_id<>$1 AND $3=$4 \
+             AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$5 AND owner_node_id=$6 \
+               AND fence=$7 AND revision=$8 AND expires_at_ms=$9) \
+             GROUP BY tag_id ON CONFLICT(tag_id,item_id) DO NOTHING",
+            "INSERT INTO library_curation_rejections(tag_id,item_id,rejected_by,rejected_at_ms) \
+             SELECT tag_id,$1,MIN(rejected_by),MIN(rejected_at_ms) FROM library_curation_rejections \
+             WHERE item_id IN (SELECT value FROM json_each($2)) AND item_id<>$1 AND $3=$4 \
+             AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$5 AND owner_node_id=$6 \
+               AND fence=$7 AND revision=$8 AND expires_at_ms=$9) \
+             GROUP BY tag_id ON CONFLICT(tag_id,item_id) DO NOTHING",
+        ] {
+            let mut statement_params = params!(
+                survivor,
+                retired_json.as_str(),
+                survivor,
+                survivor,
+                lease.resource.as_str(),
+                lease.owner_node_id.as_str(),
+                lease_i64("fence", lease.fence)?,
+                lease_i64("revision", lease.revision)?,
+                lease.expires_at_unix_ms
+            );
+            statement_params[2] = Param::StmtOutputNamed(1, "id".into());
+            statements.push((sql.to_owned(), statement_params));
+        }
         for kind in ["episode", "season", "show"] {
             for item_id in &plan.retired_item_ids {
                 if snapshot
@@ -877,10 +908,12 @@ impl FencedPublicationStore for HiqliteAuthStore {
         match result {
             Ok(counts)
                 if counts.len() == mutation_count
-                    && counts
-                        .iter()
-                        .enumerate()
-                        .all(|(index, count)| index == annotation_copy_index || *count == 1) =>
+                    && counts.iter().enumerate().all(|(index, count)| {
+                        index == annotation_copy_index
+                            || index == curation_copy_index
+                            || index == curation_copy_index + 1
+                            || *count == 1
+                    }) =>
             {
                 Ok(IdentityRepairOutcome::Applied)
             }

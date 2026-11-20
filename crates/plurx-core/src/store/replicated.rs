@@ -166,6 +166,30 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BatchWrite,
     },
+    // Memberships and rejections move before the merged tag goes.
+    SqliteTransactionSite {
+        module: "curation.rs",
+        method: "merge_tags",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
+    // A bulk tag edit removes and adds in one boundary.
+    SqliteTransactionSite {
+        module: "curation.rs",
+        method: "set_tag_members",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
+    // Rejecting and restoring suggestions land together.
+    SqliteTransactionSite {
+        module: "curation.rs",
+        method: "set_suggestion_rejections",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
     // Receiver and all grants revoke in the same boundary.
     SqliteTransactionSite {
         module: "remote.rs",
@@ -1311,6 +1335,7 @@ mod tests {
 
     const SQLITE_MODULES: &[(&str, &str)] = &[
         ("annotations.rs", include_str!("sqlite/annotations.rs")),
+        ("curation.rs", include_str!("sqlite/curation.rs")),
         ("apikeys.rs", include_str!("sqlite/apikeys.rs")),
         ("cache.rs", include_str!("sqlite/cache.rs")),
         (
@@ -1575,7 +1600,8 @@ mod tests {
         // Playback handoff redemption adds one fixed claim/mint batch.
         // Node removal retires the removed node's analysis requests and their
         // attempts in one batch (`retire_analysis_requests_for_node`).
-        assert_eq!(methods.len(), 117);
+        // Curation adds three: tag merge, bulk membership, suggestion rejections.
+        assert_eq!(methods.len(), 120);
     }
 
     mod source_inventory {
