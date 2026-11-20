@@ -371,14 +371,18 @@ def build_receipt(
 
 
     if binding and binding['schema'] == 2:
+        from validation.python_unit_receipts import ReceiptError
         try:
             paperwork = json.loads(environment['PLURX_SOURCE_GATE_PAPERWORK'])
-            assert set(paperwork) == {'version', 'head', 'base', 'pr', 'passed', 'body_sha256', 'title_sha256'}
-            assert paperwork['version'] == 1 and paperwork['head'] == tested_sha
+            assert set(paperwork) == {'version', 'head', 'base', 'pr', 'passed', 'body_sha256', 'title_sha256', 'unit_coverage'}
+            assert paperwork['version'] == 2 and paperwork['head'] == tested_sha
             assert paperwork['base'] == binding['base_sha'] and paperwork['pr'] == binding['pull_request']
             assert paperwork['passed'] is True
+            from validation.paperwork_continuation import coverage_shape, current_rule_inventory
+            coverage_shape(paperwork['unit_coverage'], binding, int(environment['GITHUB_RUN_ID']),
+                           current_rule_inventory())
             assert all(re.fullmatch(r'[0-9a-f]{64}', paperwork[key]) for key in ('body_sha256', 'title_sha256'))
-        except (KeyError, ValueError, TypeError, AssertionError) as error:
+        except (KeyError, ValueError, TypeError, AssertionError, ReceiptError) as error:
             raise QualificationError('Current source-gate paperwork evidence missing or inconsistent') from error
         record['source_gate_paperwork'] = paperwork
     return record

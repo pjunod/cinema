@@ -381,13 +381,30 @@ def main(argv: list[str] | None = None) -> int:
 
     title = pr_event.title() or ""
 
+    from validation import paperwork_continuation
+    continuation = paperwork_continuation.check(os.environ, body, base, ROOT, hook=args.hook)
+    if continuation is not None:
+        body = continuation['body']
+        if args.hook:
+            # The authenticated publication PR supplies the live title too.
+            api = paperwork_continuation.retention.runner_api(os.environ)
+            title = api.get('/pulls/' + str(paperwork_continuation.enrollment(body)['pr']))['title']
+        if continuation['complete']:
+            unit_results = [Result('paperwork rule methods covered by authenticated actual outcomes', True, 0.0)]
+        else:
+            unit_results = [Result(
+                f"paperwork preliminary: {continuation['retained']} retained; "
+                f"{continuation['deferred']} required methods await current manual preflight", True, 0.0, warn=True)]
+    else:
+        unit_results = None
+
     started = time.monotonic()
     paths = changed_paths(base)
     results: list[Result] = [
         check_catalog(),
         check_regression_fields(base, body, title),
         check_mobile_versions(base, args.counter_target or args.merge_target),
-        *check_tests(base, args.merge_target),
+        *(check_tests(base, args.merge_target) if unit_results is None else unit_results),
     ]
     web = check_web(paths)
     if web is not None:
@@ -407,6 +424,15 @@ def main(argv: list[str] | None = None) -> int:
         f"paperwork: {len(results) - len(failed)}/{len(results)} ok in {elapsed:.1f}s "
         f"(base {base[:10]}, {len(paths)} changed paths)"
     )
+    coverage_output = os.environ.get('PLURX_PAPERWORK_COVERAGE_OUTPUT')
+    if coverage_output:
+        from validation import python_unit_receipts as receipts
+        receipts.require(continuation is not None and continuation['complete'] is True
+                         and os.environ.get('PLURX_PAPERWORK_CONTINUATION') == 'final'
+                         and 'coverage' in continuation,
+                         'Only final authenticated paperwork may publish unit coverage')
+        if not failed:
+            receipts.atomic_json(Path(coverage_output), continuation['coverage'])
     if failed:
         print("paperwork failed — the fix is printed under each FAIL; `scripts/paperwork --list` lists every rule.")
     return 1 if failed else 0

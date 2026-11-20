@@ -20,6 +20,9 @@ COHORTS = {'rust': {'core', 'daemon', 'workspace-contracts'},
            'android_jvm': {'jvm'}, 'android_device': {'device'},
            'web_preflight': {'node-contracts'}}
 PROTOCOL_PATHS = {
+    'scripts/paperwork',
+    'validation/paperwork_continuation.py',
+    'tests/validation/test_paperwork_continuation.py',
     'CHANGELOG.md',
     'tests/playback/rolling-producer-owners.toml',
     'verification/durable-jobs/mapping.json',

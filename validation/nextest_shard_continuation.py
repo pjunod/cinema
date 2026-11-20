@@ -107,6 +107,13 @@ MANUAL_SCOPE_ENV = '        env:\n          GITHUB_TOKEN: ${{ github.token }}\n 
 def projected_main_workflow(raw):
     r.require(isinstance(raw, bytes), 'Missing main-lane workflow source')
     projected = raw.replace(MANUAL_SCOPE_ENV.encode(), MAIN_SCOPE_ENV.encode()) if raw.count(MANUAL_SCOPE_ENV.encode()) == 1 else raw
+    plumbing = b"          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}\n          PLURX_PAPERWORK_CONTINUATION: preliminary\n"
+    if b'PLURX_PAPERWORK_CONTINUATION' in projected:
+        start, end = projected.find(b'  paperwork:\n'), projected.find(b'\n  scope:\n')
+        r.require(0 <= start < end and projected.count(plumbing) == 1
+                  and projected[start:end].count(plumbing) == 1,
+                  'Paperwork continuation plumbing escaped its original job')
+        projected = projected.replace(plumbing, plumbing.splitlines(keepends=True)[0], 1)
     r.require(retention.digest(projected) == HARNESS['.github/workflows/main-fast-lane.yml'],
               'Main-lane compile/test recipe changed beyond exact authenticated-scope credential plumbing')
     return projected

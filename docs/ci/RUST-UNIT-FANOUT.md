@@ -107,6 +107,29 @@ omitting duplicate heavy work. Invalid claims fail scope; absent claims preserve
 default routing. Landing still prints real ci provenance and requires the explicit
 source-gate run; no status alias or untested exemption is created.
 
+Paperwork uses the same authenticated Python method plan. Enroll exactly one
+`Paperwork-Continuation:` JSON line containing `version: 1`, `pr`, `head`,
+`base`, and the `python_unit_evidence` attachment descriptor before publication.
+The draft paperwork job validates retained methods and reports the remaining
+methods as pending; it grants no qualification for those pending methods. All
+catalog, regression-field, release-counter and web syntax checks still run.
+For a local pre-push hook, explicitly set
+`PLURX_PAPERWORK_CONTINUATION=publication` and
+`PLURX_PAPERWORK_PUBLICATION_PR=<number>` with the existing API credentials and a
+compatible Python on `PATH`. That route requires a clean checkout on the PR's
+actual branch, current main, a draft PR, an authenticated writer enrollment and
+proof that the actual remote head is an ancestor of the exact local target.
+It preserves both head identities instead of pretending the target is published.
+
+The final manual paperwork step authenticates its own successful preflight job
+and the original named unittest results between source-bound execution markers.
+Retained methods plus direct current passes must cover every method in the
+complete current paperwork rule inventory. The schema2 paperwork receipt stores
+this method coverage, original preflight job/run and log digest; qualification
+and landing validate it again. Default paperwork still executes its full rule
+set, and readying an enrolled PR requires the completed authenticated manual
+source gate. A preliminary deferral never becomes a passed method.
+
 The source-gate provider uses unchanged `rust_units.Keys` with one closed
 metadata projection: only the scope step's API-token env plumbing is removed.
 Original compile/test recipe bytes must match their reviewed digest. Actual

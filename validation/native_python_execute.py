@@ -84,7 +84,12 @@ def main(kind):
                      'Python selection changed after authentication')
     plan = receipts.bounded_json(raw)
     receipts.require(plan['source_commit'] == candidate, 'Python selection belongs to another source')
+    from validation.paperwork_continuation import marker
+    import json
+    identity = json.dumps(marker(plan, kind), sort_keys=True, separators=(',', ':'))
+    print('SELECTED-PYTHON-BEGIN ' + identity, file=sys.stderr, flush=True)
     run_selection(plan['suites'][kind], receipts.discover(kind))
+    print('SELECTED-PYTHON-END ' + identity, file=sys.stderr, flush=True)
 
 
 if __name__ == '__main__':

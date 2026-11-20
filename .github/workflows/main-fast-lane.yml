@@ -57,6 +57,7 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PLURX_PAPERWORK_CONTINUATION: preliminary
           # The description and title are read from the event payload file
           # (validation/pr_event.py), never the environment: a long
           # description made the runner unable to start this step at all.
