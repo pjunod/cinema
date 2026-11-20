@@ -158,6 +158,10 @@ def android_device_inputs(source, commit):
         r.require(len(matches) == 1, 'Ambiguous Android command recipe')
         values[name] = digest(matches[0][0].encode())
     r.require(workflow.count('\njobs:\n') == 1, 'Ambiguous workflow jobs root')
+    apk_jobs = list(re.finditer(r'^  android_apks:\n.*?(?=^  [A-Za-z_]+:|\Z)', workflow, re.M | re.S))
+    r.require(len(apk_jobs) <= 1, 'Ambiguous Android APK recipe')
+    if apk_jobs:
+        values['workflow-apks'] = digest(apk_jobs[0][0].encode())
     # Pin the complete header and every root-level non-comment line. Quoted
     # or whitespace-spelled duplicate YAML keys cannot shadow the projection.
     values['workflow-header'] = digest((workflow.split('\njobs:\n', 1)[0] + '\n').encode())
