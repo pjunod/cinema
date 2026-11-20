@@ -270,6 +270,35 @@ frozen window and new representation; it does not settle historical NP1
 results or generalize to a full title. Runtime title-qualification
 integration is not implemented by this offline trial.
 
+## Automatic maintenance experiment
+
+The maintenance route records a new experiment only after ordinary pending FEL
+recipes are settled. Its versioned protocol selects two calibration exposures
+and one evaluation exposure at early fitted segment boundaries. An independent
+whole-source census proves each disjoint 48-frame interval. Both a film-origin
+generation and a separate nonzero seek materialize real F+ segments through the
+VOD writer. Readback checks the retained base-layer coded bytes, source clock
+and written RPUs against the census. The new protocol scopes the lattice to the
+coded raster. The previous Michael trial used a separately frozen active ROI.
+
+Before the first candidate, the route scores only the paired source FEL and
+actual F+ baseline in the calibration exposures. It takes the larger of 0.05
+and the largest observed four-model mean spread rounded upward to 0.01.
+The spread reflects representation uncertainty. The rounding is a conservative
+policy and the measurement gives no estimate of encoder repeatability. The
+route freezes this margin, the evaluation census, the source mastering
+declaration and the NP1 recipe before examining a candidate. The authored
+rate sits within a one-percent interval ending at the measured selected video
+rate. These bounded exposure measurements carry no full-title qualification.
+
+The durable experiment identity combines the raw full-source SHA-256 and the
+frozen protocol SHA-256. A terminal outcome remains visible with its original
+bindings across renderer and scorer updates. Exact current bindings alone
+permit compact measurement reuse. The isolated lab imports the sealed
+historical rejection and the two physical repeat proofs without executing the
+encoder or scorer. File publication, authored readback, resource limits and the
+automatic protocol still require integrated qualification.
+
 ## Execution ledger
 
 | Item | State | Next evidence |

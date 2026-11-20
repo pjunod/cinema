@@ -1147,6 +1147,32 @@ pub(super) fn copy_landing_probe(production: &[String]) -> Option<LandingProbe> 
     })
 }
 
+/// Exact landing clock over a job-owned SourceInput bridge. The caller
+/// keeps the bridge and its source holder alive through publication.
+pub(crate) fn m7_copy_landing_clock(
+    args: &[String],
+    program: PathBuf,
+    runtime_cache: PathBuf,
+    timescale: u32,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Option<vodgen::LandingClock> {
+    let probe = copy_landing_probe(args)?;
+    Some(Box::new(move || {
+        Box::pin(async move {
+            measure_landing(
+                &program,
+                &probe,
+                None,
+                &tokio::sync::OnceCell::new(),
+                timescale,
+                &runtime_cache,
+                Some(&cancel),
+            )
+            .await
+        })
+    }))
+}
+
 /// A [`vodgen::LandingClock`] that runs `probe` against this rendition's
 /// source. Cancelled with the generation it measures.
 fn landing_clock(

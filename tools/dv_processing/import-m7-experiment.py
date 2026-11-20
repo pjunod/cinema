@@ -227,7 +227,46 @@ def import_experiment(args):
                             for name, content in files.items()),
                     "an immutable experiment already exists with different evidence")
         sync_directory(parent)
+    for proof_path in args.loop_proof:
+        import_repetition(args.data_dir, proof_path, source, protocol_sha, evidence)
     return manifest
+
+
+def import_repetition(data_dir, proof_path, source, protocol, evidence):
+    raw, proof = json_bytes(proof_path)
+    sha = verify_digest(proof["fixture_sha256"])
+    repeat = proof["repeat_count"]
+    require(proof["source_sha256"] == source and sha != source
+            and proof["packet_bytes_exact"] is True and proof["verdict"] == "pass"
+            and isinstance(repeat, int) and repeat > 1
+            and proof["original_access_units"] > 0
+            and proof["access_units"] == proof["original_access_units"] * repeat
+            and proof["presentation_unique"] == proof["access_units"],
+            "invalid physical repetition custody")
+    evidence.file(proof["destination"], sha, "physical_repetition." + sha)
+    root = data_dir.resolve(strict=True) / "dv-m7" / "repetitions" / sha
+    root.mkdir(parents=True, exist_ok=True)
+    files = {
+        "manifest.json": json.dumps({
+            "schema": 1, "fixture_sha256": sha, "source_sha256": source,
+            "protocol_sha256": protocol, "repeat_count": repeat,
+            "proof_sha256": sha256(raw),
+        }, sort_keys=True, separators=(",", ":")).encode(),
+        "fixture-provenance.json": raw,
+    }
+    for name, data in files.items():
+        dst = root / name
+        with tempfile.NamedTemporaryFile(dir=root) as staging:
+            staging.write(data)
+            staging.flush()
+            os.fsync(staging.fileno())
+            try:
+                os.link(staging.name, dst)
+            except FileExistsError:
+                require(not dst.is_symlink() and dst.read_bytes() == data,
+                        "immutable repetition receipt differs")
+    sync_directory(root)
+    sync_directory(root.parent)
 
 
 def sync_directory(path):
@@ -244,6 +283,7 @@ def main():
         parser.add_argument(f"--{name}", required=True, type=Path)
     for name in ["artifact-root", "calibration-result"]:
         parser.add_argument(f"--{name}", required=True, type=Path, action="append")
+    parser.add_argument("--loop-proof", default=[], type=Path, action="append")
     args = parser.parse_args()
     try:
         manifest = import_experiment(args)

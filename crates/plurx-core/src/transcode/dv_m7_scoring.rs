@@ -200,13 +200,7 @@ impl FrameScorer {
         pinned: &ServableCurves,
         candidate: &[u8],
     ) -> Result<Self, ScoreError> {
-        let color = DmCoefficients::source(source).ok_or(ScoreError::UnsupportedSourceRpu)?;
-        let served_curves = fitted_curves(served_whole, color)
-            .filter(|curves| curves == pinned.curves())
-            .ok_or(ScoreError::UnboundServedCurves)?;
-        if fitted_curves(served_seek, color).as_ref() != Some(&served_curves) {
-            return Err(ScoreError::UnboundServedCurves);
-        }
+        let (scorer, color) = Self::bound_baseline(source, served_whole, served_seek, pinned)?;
         let candidate =
             profile81_rpu(candidate, color).ok_or(ScoreError::UnsupportedCandidateRpu)?;
         if !candidate.rpu_data_mapping.is_some_and(|mapping| {
@@ -225,10 +219,82 @@ impl FrameScorer {
         }) {
             return Err(ScoreError::UnsupportedCandidateRpu);
         }
-        Ok(Self {
-            served_curves,
-            color: ColorTransform::new(color),
-        })
+        Ok(scorer)
+    }
+
+    /// Validate actual F+ readbacks against the source and pinned table.
+    /// Calibration has no authored candidate and cannot emit a paired result.
+    pub fn for_calibration(
+        source: &[u8],
+        served_whole: &[u8],
+        served_seek: &[u8],
+        pinned: &ServableCurves,
+    ) -> Result<Self, ScoreError> {
+        Self::bound_baseline(source, served_whole, served_seek, pinned).map(|(scorer, _)| scorer)
+    }
+
+    fn bound_baseline(
+        source: &[u8],
+        served_whole: &[u8],
+        served_seek: &[u8],
+        pinned: &ServableCurves,
+    ) -> Result<(Self, DmCoefficients), ScoreError> {
+        let color = DmCoefficients::source(source).ok_or(ScoreError::UnsupportedSourceRpu)?;
+        let served_curves = fitted_curves(served_whole, color)
+            .filter(|curves| curves == pinned.curves())
+            .ok_or(ScoreError::UnboundServedCurves)?;
+        if fitted_curves(served_seek, color).as_ref() != Some(&served_curves) {
+            return Err(ScoreError::UnboundServedCurves);
+        }
+        Ok((
+            Self {
+                served_curves,
+                color: ColorTransform::new(color),
+            },
+            color,
+        ))
+    }
+
+    /// Score only the reference and the published F+ BL, in model order.
+    pub fn baseline_errors(
+        &self,
+        source_bl: [u16; 3],
+        source_el: [u16; 3],
+    ) -> Result<[f64; 4], ScoreError> {
+        if source_bl
+            .into_iter()
+            .chain(source_el)
+            .any(|code| code > 1023)
+        {
+            return Err(ScoreError::InvalidSampleCode);
+        }
+        let (reference, served) = self.baseline_inputs(source_bl, source_el);
+        let [a, b, c, d] =
+            Model::ALL.map(|model| self.baseline(model, reference, served).map(|v| v.2));
+        Ok([a?, b?, c?, d?])
+    }
+
+    fn baseline_inputs(
+        &self,
+        source_bl: [u16; 3],
+        source_el: [u16; 3],
+    ) -> (ModelInput, ModelInput) {
+        (
+            ModelInput::from_residual(source_bl, source_el.map(|code| code as i16 - 512)),
+            ModelInput::from_served(source_bl, self.served_curves.reshape(source_bl)),
+        )
+    }
+
+    fn baseline(
+        &self,
+        model: Model,
+        reference: ModelInput,
+        fitted: ModelInput,
+    ) -> Result<([u16; 3], [f64; 3], f64), ScoreError> {
+        let rgb = self.color.rgb(model, reference)?;
+        let reference = rgb48_to_ictcp(rgb);
+        let fitted = rgb48_to_ictcp(self.color.rgb(model, fitted)?);
+        Ok((rgb, reference, delta_e_itp(reference, fitted)))
     }
 
     /// Return each model's paired errors in [`Model::ALL`] order. Each band is
@@ -247,22 +313,19 @@ impl FrameScorer {
         {
             return Err(ScoreError::InvalidSampleCode);
         }
-        let reference =
-            ModelInput::from_residual(source_bl, source_el.map(|code| code as i16 - 512));
-        let fitted = ModelInput::from_served(source_bl, self.served_curves.reshape(source_bl));
+        let (reference, fitted) = self.baseline_inputs(source_bl, source_el);
         let candidate = ModelInput::from_residual(candidate, [0; 3]);
 
         let score = |model| -> Result<ModelSampleScore, ScoreError> {
-            let rgb = self.color.rgb(model, reference)?;
-            let reference = rgb48_to_ictcp(rgb);
-            let fitted = rgb48_to_ictcp(self.color.rgb(model, fitted)?);
+            let (rgb, reference, served_fplus_delta_e_itp) =
+                self.baseline(model, reference, fitted)?;
             let candidate = rgb48_to_ictcp(self.color.rgb(model, candidate)?);
             Ok(ModelSampleScore {
                 reference_luminance_nits: dot(
                     rgb.map(|code| pq_eotf(f64::from(code) / 65535.0)),
                     Y_WEIGHTS,
                 ),
-                served_fplus_delta_e_itp: delta_e_itp(reference, fitted),
+                served_fplus_delta_e_itp,
                 candidate_delta_e_itp: delta_e_itp(reference, candidate),
             })
         };

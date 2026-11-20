@@ -839,8 +839,8 @@ async fn execute(
                         cancel: &cancel,
                         shutdown: &shutdown,
                     };
-                    if let Err(error) = super::m7_title::evaluate_history(&context).await {
-                        tracing::debug!(file_id = file.id, %error, "M7 experiment lookup unavailable");
+                    if let Err(error) = super::m7_title::evaluate(&context, &output.stats).await {
+                        tracing::debug!(file_id = file.id, %error, "maintenance M7 experiment unavailable");
                     }
                     if cancel.is_cancelled() || shutdown.is_cancelled() {
                         Some(JobSettlement::Yield {

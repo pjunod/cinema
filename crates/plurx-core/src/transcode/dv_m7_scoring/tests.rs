@@ -157,7 +157,28 @@ fn frame_requires_both_served_mappings_and_the_authored_candidate_color() {
     let mut served = source.clone();
     apply_to_rpu(&mut served, &pinned).unwrap();
     let served = served.write_hevc_unspec62_nalu().unwrap();
-    assert!(FrameScorer::from_rpus(&source_nal, &served, &served, &pinned, &candidate).is_ok());
+    let paired = FrameScorer::from_rpus(&source_nal, &served, &served, &pinned, &candidate)
+        .expect("verified paired sources");
+    let baseline = FrameScorer::for_calibration(&source_nal, &served, &served, &pinned)
+        .expect("verified baseline sources");
+    let sample = LatticeSample {
+        source_bl: [256, 481, 591],
+        source_el: [520, 510, 512],
+        candidate: [236, 501, 529],
+    };
+    assert_eq!(
+        baseline
+            .baseline_errors(sample.source_bl, sample.source_el)
+            .unwrap(),
+        paired
+            .score_sample(sample)
+            .unwrap()
+            .map(|score| score.served_fplus_delta_e_itp),
+    );
+    assert_eq!(
+        FrameScorer::for_calibration(&source_nal, &served, &candidate, &pinned).err(),
+        Some(ScoreError::UnboundServedCurves),
+    );
     assert_eq!(
         FrameScorer::from_rpus(&source_nal, &served, &candidate, &pinned, &candidate).err(),
         Some(ScoreError::UnboundServedCurves)

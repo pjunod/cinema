@@ -202,6 +202,7 @@ async fn held_title(context: &TitleContext<'_>) -> Result<HeldTitle, String> {
         source,
         content_sha256: hash,
         probe_sha256: probe.sha256(),
+        whole_source_census: None,
     })
 }
 
@@ -233,7 +234,10 @@ async fn raw_sha256(context: &TitleContext<'_>, source: &SourceFence) -> Result<
     Ok(digest.finalize().into())
 }
 
-pub(super) async fn evaluate_history(context: &TitleContext<'_>) -> Result<(), String> {
+pub(super) async fn evaluate(
+    context: &TitleContext<'_>,
+    stats: &plurx_core::scan::dv_title::DvTitleStats,
+) -> Result<(), String> {
     if context.demand.playback_requested
         || context.admission.is_probe_only()
         || !plurx_core::playback::file_can_convert_to_p81(context.file)
@@ -245,7 +249,7 @@ pub(super) async fn evaluate_history(context: &TitleContext<'_>) -> Result<(), S
         return Ok(());
     };
     let title = held_title(context).await?;
-    if let Some(result) = historical(root, title.content_sha256).await? {
+    if let Some(result) = historical(root.clone(), title.content_sha256).await? {
         tracing::info!(
             file_id = context.file.id,
             origin = ?result.origin,
@@ -262,6 +266,740 @@ pub(super) async fn evaluate_history(context: &TitleContext<'_>) -> Result<(), S
             candidate_attempts = result.candidate_attempts,
             "retained historical M7 experiment"
         );
+        return Ok(());
+    }
+    if let Some(alias) = repetition(root.clone(), title.content_sha256).await? {
+        tracing::info!(
+            file_id=context.file.id,
+            fixture_sha256=%alias.fixture_sha256, source_sha256=%alias.source_sha256,
+            protocol_sha256=%alias.protocol_sha256, repeat_count=alias.repeat_count,
+            "physical repeat fixture shares the sealed M7 source experiment"
+        );
+        return Ok(());
+    }
+    use plurx_core::scan::dv_title::{TitleConstant, TitleElKind};
+    if stats.el_kind != TitleConstant::Consistent(TitleElKind::Fel) {
+        return Ok(());
+    }
+    measure_new_title(context, title, &root).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Repetition {
+    schema: u32,
+    fixture_sha256: String,
+    source_sha256: String,
+    protocol_sha256: String,
+    repeat_count: u32,
+    proof_sha256: String,
+}
+
+async fn repetition(root: PathBuf, content: [u8; 32]) -> Result<Option<Repetition>, String> {
+    tokio::task::spawn_blocking(move || {
+        let found = hex::encode(content);
+        let path = root.join("repetitions").join(&found);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let alias: Repetition =
+            serde_json::from_slice(&load_json(&path.join("manifest.json"), None)?)
+                .map_err(string)?;
+        if alias.schema != 1
+            || alias.fixture_sha256 != found
+            || alias.source_sha256 == found
+            || alias.repeat_count < 2
+            || [
+                &alias.source_sha256,
+                &alias.protocol_sha256,
+                &alias.proof_sha256,
+            ]
+            .into_iter()
+            .any(|hash| !digest_text(hash))
+        {
+            return Err("invalid physical repetition experiment receipt".into());
+        }
+        let proof_raw = load_json(
+            &path.join("fixture-provenance.json"),
+            Some(&alias.proof_sha256),
+        )?;
+        let proof: serde_json::Value = serde_json::from_slice(&proof_raw).map_err(string)?;
+        if proof["fixture_sha256"].as_str() != Some(alias.fixture_sha256.as_str())
+            || proof["source_sha256"].as_str() != Some(alias.source_sha256.as_str())
+            || proof["packet_bytes_exact"].as_bool() != Some(true)
+            || proof["repeat_count"].as_u64() != Some(u64::from(alias.repeat_count))
+        {
+            return Err("physical repetition proof differs from its experiment receipt".into());
+        }
+        read_historical(
+            &root
+                .join("experiments")
+                .join(&alias.source_sha256)
+                .join(&alias.protocol_sha256),
+            &alias.source_sha256,
+            &alias.protocol_sha256,
+        )?;
+        Ok(Some(alias))
+    })
+    .await
+    .map_err(string)?
+}
+
+mod publication;
+
+use super::{
+    dv_title::{self, M7WindowRange},
+    m7_candidate::{prepare_authored, FrozenRecipe, RatePlan, StaticHdr},
+    m7_comparison::{
+        self, ComparisonInput, EvaluationWindow, FrozenProtocol, Measurement, PublicationReadback,
+    },
+};
+use plurx_core::transcode::{
+    dv_m7_receipt::{CalibrationWindow, M7Receipt, MODEL_VERSION},
+    dv_m7_scoring::{
+        aggregation::{Aggregator, FrozenMargin, WindowShape},
+        capture::{score_baseline_frame, CaptureLayout, CapturePlan, CaptureRole, FrameEvidence},
+    },
+    Rational,
+};
+use publication::FittedPublication;
+use serde::Serialize;
+use std::{io::Write, sync::Arc};
+use tempfile::{NamedTempFile, TempDir};
+
+const AUTOMATIC_PROTOCOL: &str = "plurx-m7-early-rap-window-calibration-v1";
+const FRAMES: usize = 48;
+const BASELINE_WINDOWS: usize = 2;
+const SOURCE_RATE_BAND_PERCENT: u32 = 1;
+const MIN_AUTOMATIC_MARGIN: f64 = 0.05;
+
+async fn measure_new_title(
+    context: &TitleContext<'_>,
+    mut title: HeldTitle,
+    root: &Path,
+) -> Result<(), String> {
+    // A prior native terminal report survives changes in the current helper
+    // and the catalogue's bounded cache. A routine rescan cannot reopen it.
+    if let Some(result) = native_terminal(root, title.content_sha256).await? {
+        tracing::info!(file_id=context.file.id, disposition=?result.disposition,
+            protocol_sha256=%result.protocol_sha256, report_sha256=%result.report_sha256,
+            binding_key=%result.binding_key, "retained native M7 experiment");
+        return Ok(());
+    }
+    let scratch = tempfile::Builder::new()
+        .prefix("m7-title-")
+        .tempdir_in(&context.state.runtime_cache_dir)
+        .map_err(string)?;
+    let expected_version = title.source.object_version().to_owned();
+    let prepared = super::run_source_admitted_probe(
+        &context.state.transcode,
+        context.admission,
+        context.cancel,
+        context.shutdown,
+        None,
+        context.fence,
+        || async {
+            context.tools.is_current().await
+                && crate::fragment_index_cluster::inspect_source(context.file)
+                    .await.is_ok_and(|version| version == expected_version)
+        },
+        async {
+            let fitted = FittedPublication::load(context).await?;
+            let source = source_plan(context, &title, &fitted)?;
+            let reserve_bytes = scratch_budget(source.layout)?;
+            let reservation = crate::playback_cache::reserve(scratch.path(), reserve_bytes)
+                .await.map_err(string)?;
+            let (_, census) = dv_title::scan_with_m7_census(
+                context.file, &context.demand.probe_json, context.tools,
+                &context.state.runtime_cache_dir, &source.windows,
+            ).await?;
+            title.whole_source_census = Some(census);
+            let verified = title.whole_source_census.as_ref().ok_or("M7 title census disappeared")?;
+            let windows = source.windows.iter().map(|range| {
+                verified.window(
+                    &title.source, context.tools, source.layout, range.first_pts, range.end_pts,
+                )
+                .filter(|frames| frames.len() == FRAMES)
+                .map(<[FrameEvidence]>::to_vec)
+                .ok_or("M7 window does not contain the frozen 48-frame exposure")
+            }).collect::<Result<Vec<_>, _>>()?;
+            let publications = fitted.readbacks(context, &title, &windows, scratch.path()).await?;
+            let mut calibration = Vec::new();
+            let mut evaluation = Vec::new();
+            for (index, (frames, (whole, seek))) in windows.into_iter().zip(publications).enumerate() {
+                if index < BASELINE_WINDOWS {
+                    calibration.push(calibrate(
+                        context, &title, source.layout, &frames, &whole, &seek,
+                        &fitted, &scratch, reserve_bytes,
+                    ).await?);
+                } else {
+                    evaluation.push((frames, whole, seek));
+                }
+            }
+            let margin = frozen_margin(&calibration)?;
+            let table_sha: [u8; 32] = hex::decode(fitted.table().digest())
+                .map_err(string)?.try_into().map_err(|_| "M7 fitted digest length changed")?;
+            let recipe_sha = source.recipe.recipe_sha256();
+            let freeze = serde_json::to_vec(&serde_json::json!({
+                "schema": AUTOMATIC_PROTOCOL,
+                "source_sha256": hex::encode(title.content_sha256),
+                "probe_sha256": hex::encode(title.probe_sha256),
+                "model": MODEL_VERSION,
+                "fitted_table_sha256": hex::encode(table_sha),
+                "margin": margin.value(),
+                "calibration": calibration,
+                "evaluation": evaluation.iter().map(|(frames, whole, seek)| serde_json::json!({
+                    "frames": frames.iter().map(|frame| serde_json::json!({
+                        "ordinal": frame.ordinal, "pts": frame.pts, "duration": frame.duration,
+                        "au": hex::encode(frame.access_unit_sha256),
+                        "rpu": hex::encode(frame.rpu_sha256), "vcl": hex::encode(frame.bl_vcl_sha256),
+                    })).collect::<Vec<_>>(),
+                    "whole": hex::encode(whole.readback_sha256),
+                    "seek": hex::encode(seek.readback_sha256),
+                })).collect::<Vec<_>>(),
+                "layout": {"raster": source.layout.raster, "roi": source.layout.roi,
+                  "time_base": source.layout.time_base, "video_index": source.layout.video_index},
+                "recipe_sha256": hex::encode(recipe_sha),
+                "recipe": &source.recipe,
+            })).map_err(string)?;
+            let protocol_sha: [u8; 32] = Sha256::digest(&freeze).into();
+            let directory = root.join("experiments")
+                .join(hex::encode(title.content_sha256)).join(hex::encode(protocol_sha));
+            immutable_write_owned(directory.clone(), "native-protocol.json", freeze).await?;
+            let frozen = FrozenProtocol {
+                source_sha256: title.content_sha256, probe_sha256: title.probe_sha256,
+                protocol_sha256: protocol_sha, recipe_sha256: recipe_sha,
+                fit_table_sha256: table_sha, margin, encoder_rate: source.cadence,
+                calibration: calibration.into_iter().map(|item| item.window).collect(),
+            };
+            let mut prepared_windows = Vec::with_capacity(evaluation.len());
+            for (frames, whole, seek) in evaluation {
+                let capture = CapturePlan { layout: source.layout, frames: &frames };
+                let planes = m7_comparison::prepare_planes(
+                    context, &title, capture, &scratch, reserve_bytes,
+                ).await.map_err(string)?;
+                let authored = prepare_authored(
+                    context, &title, &frozen, &source.recipe, planes, source.dv_level,
+                    &scratch, context.cancel,
+                ).await.map_err(string)?;
+                prepared_windows.push(EvaluationWindow {
+                    layout: source.layout, source_frames: frames, authored, whole, seek,
+                });
+            }
+            Ok::<_, String>((directory, ComparisonInput {
+                title, frozen, windows: prepared_windows, scratch_bytes: reserve_bytes,
+            }, reservation))
+        },
+    ).await?;
+    let (directory, input, _reservation) = prepared;
+    let result = m7_comparison::execute(context, input)
+        .await
+        .map_err(string)?;
+    match result {
+        m7_comparison::ComparisonRun::Reused(receipt) => {
+            tracing::info!(file_id=context.file.id, disposition=?receipt.disposition(),
+                binding_key=%receipt.binding_key(), "reused exact M7 measurement");
+        }
+        m7_comparison::ComparisonRun::Measured(measurement) => {
+            if context.cancel.is_cancelled() {
+                return Err("M7 was cancelled before receipt publication".into());
+            }
+            let receipt = persist_measurement(directory, measurement).await?;
+            let probe =
+                M7SourceProbe::from_probe_json(&context.demand.probe_json).map_err(string)?;
+            let recorded = context
+                .fence
+                .record_dv_m7_receipt(probe, receipt)
+                .await
+                .map_err(string)?;
+            if !recorded {
+                return Err("M7 receipt publication lost its title authority".into());
+            }
+        }
     }
     Ok(())
+}
+
+struct SourcePlan {
+    layout: CaptureLayout,
+    cadence: Rational,
+    dv_level: u8,
+    windows: Vec<M7WindowRange>,
+    recipe: FrozenRecipe,
+}
+
+fn source_plan(
+    context: &TitleContext<'_>,
+    title: &HeldTitle,
+    fitted: &FittedPublication,
+) -> Result<SourcePlan, String> {
+    let document: serde_json::Value =
+        serde_json::from_str(&context.demand.probe_json).map_err(string)?;
+    let video_index = crate::decode_facts::first_playable_video_index(&document)
+        .ok_or("M7 source has no selected video stream")?;
+    let stream = document["streams"]
+        .as_array()
+        .and_then(|streams| {
+            streams
+                .iter()
+                .find(|stream| stream["index"].as_u64() == Some(u64::from(video_index)))
+        })
+        .ok_or("M7 selected stream is absent")?;
+    let cadence = stream["avg_frame_rate"]
+        .as_str()
+        .and_then(|rate| {
+            let (num, den) = rate.split_once('/')?;
+            Rational::new(num.parse().ok()?, den.parse().ok()?)
+        })
+        .ok_or("M7 requires an observed average frame cadence")?;
+    let raster =
+        ["width", "height"].map(|axis| stream[axis].as_u64().and_then(|n| u16::try_from(n).ok()));
+    let [Some(width), Some(height)] = raster else {
+        return Err("M7 source raster is unspecified".into());
+    };
+    let clock = fitted.clock()?;
+    let time_base = Rational::new(clock.source_time_base.0, clock.source_time_base.1)
+        .ok_or("invalid M7 fitted source time base")?;
+    let layout = CaptureLayout {
+        role: CaptureRole::SourceFel,
+        video_index,
+        time_base,
+        raster: [width, height],
+        // The new automatic protocol explicitly scopes its observation to
+        // the coded raster. Historical active-ROI experiments stay separate.
+        roi: [0, 0, width, height],
+    };
+    layout.sites_per_frame().map_err(string)?;
+    let (primaries_rgbw, max_1e4_nits, min_1e4_nits) =
+        crate::decode_facts::mastering::source_st2086(stream)?
+            .ok_or("M7 selected source has no exact ST 2086 declarations")?;
+    let held_rate = plurx_core::transcode::enhancement_stream_rate(&document, video_index)
+        .ok_or("M7 selected source has no independently bound video rate")?;
+    let high = u32::try_from(held_rate / 1000).map_err(string)?;
+    // New-title rate trials may match but never exceed the measured source
+    // video budget. The one-percent interval is an explicit rate-control
+    // policy of this protocol and carries no delivery claim.
+    let low = high.saturating_sub(high / (100 / SOURCE_RATE_BAND_PERCENT));
+    let recipe = FrozenRecipe::new(
+        cadence,
+        StaticHdr {
+            primaries_rgbw,
+            max_1e4_nits,
+            min_1e4_nits,
+            // FEL reconstruction changes the samples to which the input CLL
+            // applied. Preserve its mastering declaration without CLL claims.
+            max_cll_fall: None,
+            source_observation_sha256: title.probe_sha256,
+        },
+        RatePlan {
+            authored_band_kbps: [low, high],
+            initial_target_kbps: high,
+            maximum_attempts: 4,
+        },
+    )
+    .map_err(string)?;
+    let dv_level = context
+        .file
+        .dolby_vision
+        .level
+        .ok_or("M7 source Dolby Vision level is absent")?;
+    let dv_level = u8::try_from(dv_level).map_err(string)?;
+    let numerator =
+        FRAMES as u128 * u128::from(cadence.denominator()) * u128::from(time_base.denominator());
+    let denominator = u128::from(cadence.numerator()) * u128::from(time_base.numerator());
+    if numerator % denominator != 0 {
+        return Err("M7 exposure is not integral on the fitted source clock".into());
+    }
+    let ticks = i64::try_from(numerator / denominator).map_err(string)?;
+    let index = fitted.index();
+    let proofs = index
+        .dv_refit_proofs
+        .as_ref()
+        .ok_or("canonical M7 fitting proof absent")?;
+    let mut windows: Vec<M7WindowRange> = Vec::new();
+    // Start after the opening two entries so the independent control
+    // generation must really seek. Use the first complete disjoint covered
+    // RAP exposures in plan order. Packet/census validation decides coverage.
+    for entry in fitted.plan().entries.iter().skip(2) {
+        let row =
+            plurx_core::segplan::entry_row(index, entry).ok_or("M7 plan is outside its index")?;
+        let start = clock
+            .source_pts(i128::from(entry.start_ticks) + i128::from(proofs[row].first_cto()))
+            .map_err(string)?;
+        let end = start
+            .checked_add(ticks)
+            .ok_or("M7 exposure clock overflow")?;
+        if windows
+            .last()
+            .is_some_and(|previous| previous.end_pts > start)
+        {
+            continue;
+        }
+        if fitted.table().curves_at(start).is_some() && fitted.table().curves_at(end - 1).is_some()
+        {
+            windows.push(M7WindowRange {
+                first_pts: start,
+                end_pts: end,
+            });
+            if windows.len() == BASELINE_WINDOWS + 1 {
+                break;
+            }
+        }
+    }
+    if windows.len() != BASELINE_WINDOWS + 1 {
+        return Err(
+            "M7 fitted plan lacks two calibration exposures and one evaluation exposure".into(),
+        );
+    }
+    Ok(SourcePlan {
+        layout,
+        cadence,
+        dv_level,
+        windows,
+        recipe,
+    })
+}
+
+#[derive(Serialize)]
+struct CalibrationEvidence {
+    window: CalibrationWindow,
+    samples: u64,
+    model_means: [f64; 4],
+    whole_readback: [u8; 32],
+    seek_readback: [u8; 32],
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each calibration retains both independent publications and the held source"
+)]
+async fn calibrate(
+    context: &TitleContext<'_>,
+    title: &HeldTitle,
+    layout: CaptureLayout,
+    frames: &[FrameEvidence],
+    whole: &PublicationReadback,
+    seek: &PublicationReadback,
+    fitted: &FittedPublication,
+    scratch: &TempDir,
+    scratch_bytes: u64,
+) -> Result<CalibrationEvidence, String> {
+    let plan = CapturePlan { layout, frames };
+    let capture =
+        m7_comparison::capture_source_lattice(context, title, plan, scratch, scratch_bytes)
+            .await
+            .map_err(string)?;
+    let frames = frames.to_vec();
+    let table = Arc::clone(fitted.table());
+    let cancel = context.cancel.clone();
+    let [whole_hash, seek_hash] = [whole.readback_sha256, seek.readback_sha256];
+    let copy_frames = |publication: &PublicationReadback| {
+        publication
+            .frames
+            .iter()
+            .map(|frame| {
+                (
+                    frame.source,
+                    frame.bl_vcl_sha256,
+                    frame.rpu_sha256,
+                    frame.rpu_nal.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let whole = copy_frames(whole);
+    let seek = copy_frames(seek);
+    tokio::task::spawn_blocking(move || {
+        use plurx_core::transcode::dv_m7_scoring::capture::FplusFrameEvidence;
+        let mut reader = capture
+            .reader(CapturePlan {
+                layout,
+                frames: &frames,
+            })
+            .map_err(string)?;
+        let mut samples = 0u64;
+        let mut totals = [0.0; 4];
+        let mut hash = Sha256::new();
+        hash.update(b"plurx/m7/calibration/v1\0");
+        hash.update(whole_hash);
+        hash.update(seek_hash);
+        for ((observed, whole), seek) in frames.iter().zip(whole).zip(seek) {
+            let source = reader
+                .next_frame()
+                .map_err(string)?
+                .ok_or("M7 calibration frame missing")?;
+            let whole = FplusFrameEvidence {
+                source: whole.0,
+                bl_vcl_sha256: whole.1,
+                rpu_sha256: whole.2,
+                rpu_nal: &whole.3,
+            };
+            let seek = FplusFrameEvidence {
+                source: seek.0,
+                bl_vcl_sha256: seek.1,
+                rpu_sha256: seek.2,
+                rpu_nal: &seek.3,
+            };
+            let curves = table
+                .curves_at(observed.pts)
+                .ok_or("M7 calibration frame is not fitted")?;
+            let (sums, count) =
+                score_baseline_frame(&source, &whole, &seek, curves, || cancel.is_cancelled())
+                    .map_err(string)?;
+            samples += count;
+            for (sum, value) in totals.iter_mut().zip(sums) {
+                *sum += value;
+            }
+            hash.update(observed.ordinal.to_be_bytes());
+            hash.update(observed.pts.to_be_bytes());
+            hash.update(observed.duration.to_be_bytes());
+            hash.update(observed.access_unit_sha256);
+            hash.update(observed.rpu_sha256);
+            hash.update(observed.bl_vcl_sha256);
+        }
+        let completion = reader.finish().map_err(string)?;
+        if samples == 0 || completion.samples != samples {
+            return Err("M7 calibration sample census changed".into());
+        }
+        let model_means = totals.map(|total| total / samples as f64);
+        for mean in model_means {
+            hash.update(mean.to_bits().to_be_bytes());
+        }
+        let (first, last) = frames
+            .first()
+            .zip(frames.last())
+            .ok_or("M7 calibration exposure empty")?;
+        Ok(CalibrationEvidence {
+            window: CalibrationWindow {
+                first_ordinal: first.ordinal,
+                last_ordinal: last.ordinal,
+                first_pts: first.pts,
+                end_pts: last
+                    .pts
+                    .checked_add(last.duration)
+                    .ok_or("M7 calibration extent overflow")?,
+                time_base: layout.time_base,
+                receipt_sha256: hash.finalize().into(),
+            },
+            samples,
+            model_means,
+            whole_readback: whole_hash,
+            seek_readback: seek_hash,
+        })
+    })
+    .await
+    .map_err(string)?
+}
+
+fn frozen_margin(evidence: &[CalibrationEvidence]) -> Result<FrozenMargin, String> {
+    if evidence.len() != BASELINE_WINDOWS {
+        return Err("M7 protocol requires both independent calibration exposures".into());
+    }
+    let mut margin = MIN_AUTOMATIC_MARGIN;
+    for item in evidence {
+        let mut means = item.model_means;
+        if means.iter().any(|value| !value.is_finite() || *value < 0.0) {
+            return Err("M7 source calibration produced invalid errors".into());
+        }
+        means.sort_by(f64::total_cmp);
+        // The four-model spread accounts for representation uncertainty.
+        // Rounding up to hundredths is a protocol policy, independent of the
+        // candidate, and does not claim to measure encoder repeatability.
+        margin = margin.max(((means[3] - means[0]) * 100.0).ceil() / 100.0);
+    }
+    FrozenMargin::new(margin).map_err(string)
+}
+
+fn scratch_budget(layout: CaptureLayout) -> Result<u64, String> {
+    let sites = layout.sites_per_frame().map_err(string)?;
+    let spill = Aggregator::required_spill_bytes(&[WindowShape {
+        frames: FRAMES,
+        sites_per_frame: sites,
+    }])
+    .map_err(string)?;
+    let [width, height] = layout.raster.map(u64::from);
+    let full_planes = width * height * 9 * FRAMES as u64;
+    let lattices = sites as u64 * 26 * FRAMES as u64;
+    // Separate bounded video boxes, control/candidate outputs and manifests.
+    Ok(spill + full_planes + lattices + 2 * 1024 * 1024 * 1024)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeTerminal {
+    source_sha256: String,
+    protocol_sha256: String,
+    binding_key: String,
+    binding_sha256: String,
+    report_sha256: String,
+    disposition: plurx_core::transcode::dv_m7_scoring::aggregation::Disposition,
+}
+
+async fn native_terminal(root: &Path, source: [u8; 32]) -> Result<Option<NativeTerminal>, String> {
+    let source = hex::encode(source);
+    let root = root.join("experiments").join(&source);
+    tokio::task::spawn_blocking(move || {
+        let entries = match std::fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(string(error)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(string)?;
+            let path = entry.path();
+            if !entry.file_type().map_err(string)?.is_dir() || !path.join("terminal.json").is_file()
+            {
+                continue;
+            }
+            let result: NativeTerminal =
+                serde_json::from_slice(&load_json(&path.join("terminal.json"), None)?)
+                    .map_err(string)?;
+            if result.source_sha256 != source
+                || entry.file_name().to_str() != Some(result.protocol_sha256.as_str())
+                || !digest_text(&result.protocol_sha256)
+                || !digest_text(&result.binding_key)
+                || !digest_text(&result.binding_sha256)
+                || !digest_text(&result.report_sha256)
+            {
+                return Err("invalid native M7 terminal result".into());
+            }
+            load_json(
+                &path.join("native-protocol.json"),
+                Some(&result.protocol_sha256),
+            )?;
+            load_json(
+                &path.join("comparison-result.json"),
+                Some(&result.report_sha256),
+            )?;
+            load_json(
+                &path.join("measurement-binding.json"),
+                Some(&result.binding_sha256),
+            )?;
+            return Ok(Some(result));
+        }
+        Ok(None)
+    })
+    .await
+    .map_err(string)?
+}
+
+async fn persist_measurement(
+    directory: PathBuf,
+    measurement: Measurement,
+) -> Result<M7Receipt, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut full_report = NamedTempFile::new_in(&directory).map_err(string)?;
+        let receipt = M7Receipt::from_report(
+            measurement.custody,
+            measurement.measured_at_ms,
+            &measurement.report,
+            full_report.as_file_mut(),
+        )
+        .map_err(string)?;
+        full_report.as_file().sync_all().map_err(string)?;
+        let report_sha256 = hex::encode(receipt.report_sha256());
+        let path = directory.join("comparison-result.json");
+        if let Err(error) = full_report.persist_noclobber(&path) {
+            if error.error.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(string(error.error));
+            }
+            load_json(&path, Some(&report_sha256))?;
+        }
+        let binding = serde_json::to_vec(receipt.binding()).map_err(string)?;
+        let binding_sha256 = hex::encode(Sha256::digest(&binding));
+        immutable_write(&directory, "measurement-binding.json", &binding)?;
+        let terminal = NativeTerminal {
+            source_sha256: hex::encode(receipt.binding().source_sha256),
+            protocol_sha256: hex::encode(receipt.binding().protocol_sha256),
+            binding_key: receipt.binding_key().to_owned(),
+            binding_sha256,
+            report_sha256,
+            disposition: receipt.disposition(),
+        };
+        immutable_write(
+            &directory,
+            "terminal.json",
+            &serde_json::to_vec(&terminal).map_err(string)?,
+        )?;
+        Ok(receipt)
+    })
+    .await
+    .map_err(string)?
+}
+
+async fn immutable_write_owned(
+    directory: PathBuf,
+    name: &'static str,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || immutable_write(&directory, name, &data))
+        .await
+        .map_err(string)?
+}
+
+fn immutable_write(directory: &Path, name: &str, data: &[u8]) -> Result<(), String> {
+    std::fs::create_dir_all(directory).map_err(string)?;
+    let mut staging = NamedTempFile::new_in(directory).map_err(string)?;
+    staging.write_all(data).map_err(string)?;
+    staging.as_file().sync_all().map_err(string)?;
+    let path = directory.join(name);
+    if let Err(error) = staging.persist_noclobber(&path) {
+        if error.error.kind() != std::io::ErrorKind::AlreadyExists
+            || load_json(&path, None)? != data
+        {
+            return Err(string(error.error));
+        }
+    }
+    // The data directory itself is the last ancestor that can acquire a
+    // new entry in this protocol's durable registry.
+    for parent in directory.ancestors().take(5) {
+        plurx_core::fs_secure::open_directory_nofollow_blocking(parent)
+            .and_then(|fd| fd.sync_all())
+            .map_err(string)?;
+    }
+    Ok(())
+}
+
+fn string(error: impl std::fmt::Display) -> String {
+    error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exposure(model_means: [f64; 4]) -> CalibrationEvidence {
+        CalibrationEvidence {
+            window: CalibrationWindow {
+                first_ordinal: 0,
+                last_ordinal: 47,
+                first_pts: 0,
+                end_pts: 2_002,
+                time_base: Rational::new(1, 1000).expect("source clock"),
+                receipt_sha256: [1; 32],
+            },
+            samples: 1,
+            model_means,
+            whole_readback: [2; 32],
+            seek_readback: [3; 32],
+        }
+    }
+
+    #[test]
+    fn automatic_margin_uses_only_complete_baseline_model_spreads() {
+        assert_eq!(
+            frozen_margin(&[exposure([1.0, 1.01, 1.02, 1.03]), exposure([1.0; 4])])
+                .expect("both exposures")
+                .value(),
+            0.05,
+        );
+        assert_eq!(
+            frozen_margin(&[exposure([1.0, 1.01, 1.02, 1.056]), exposure([1.0; 4])])
+                .expect("conservative spread")
+                .value(),
+            0.06,
+        );
+        assert!(frozen_margin(&[exposure([1.0; 4])]).is_err());
+        assert!(frozen_margin(&[exposure([f64::NAN; 4]), exposure([1.0; 4])]).is_err());
+    }
 }

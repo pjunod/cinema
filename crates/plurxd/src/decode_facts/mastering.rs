@@ -121,6 +121,22 @@ pub(crate) fn source_mastering_metadata(
     source_mastering_metadata_details(stream).map(|value| value.map(|value| value.mastering))
 }
 
+/// The selected stream's exact ST 2086 primary coordinates and luminance.
+pub(crate) fn source_st2086(
+    stream: &serde_json::Value,
+) -> Result<Option<([u16; 8], u32, u32)>, String> {
+    source_mastering_metadata_details(stream)?
+        .map(|source| {
+            Ok((
+                source.mastering.primaries_rgbw,
+                u32::try_from(source.max_1e4_nits)
+                    .map_err(|_| "source mastering maximum overflow".to_owned())?,
+                source.mastering.min_1e4_nits,
+            ))
+        })
+        .transpose()
+}
+
 /// The frame projection is a separate observation of the same held object.
 /// Require its absolute stream index on every frame and compare complete MDCV,
 /// including maximum luminance, before projecting the fields mapping consumes.

@@ -1762,6 +1762,7 @@ use marker_dispatch::*;
 // split: begin vod-generation
 #[path = "vod/generation.rs"]
 mod generation;
+pub(crate) use generation::m7_copy_landing_clock;
 use generation::*;
 #[path = "vod/stream_format.rs"]
 mod stream_format;
@@ -1783,6 +1784,17 @@ mod retained_manifest;
 // split: begin vod-plan
 #[path = "vod/plan.rs"]
 mod plan;
+
+pub(crate) fn m7_copy_policy(timescale: u32) -> plurx_core::fmp4::CutPolicy {
+    plan::shipped_policy(timescale)
+}
+
+pub(crate) async fn m7_read_muxer_init<R: tokio::io::AsyncRead + Unpin>(
+    source: &mut R,
+    limit: usize,
+) -> std::io::Result<(Vec<u8>, plurx_core::fmp4::Init)> {
+    init::read_muxer_init_bounded(source, limit).await
+}
 use plan::*;
 // split: end vod-plan
 
