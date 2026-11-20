@@ -293,7 +293,10 @@ policy and the measurement gives no estimate of encoder repeatability. The
 route freezes this margin, the evaluation census, the source mastering
 declaration and the NP1 recipe before examining a candidate. The authored
 rate sits within a one-percent interval ending at the measured selected video
-rate. These bounded exposure measurements carry no full-title qualification.
+rate. The whole-title census counts selected coded packet bytes, including FEL
+and RPU. It binds that total to the exact selected-stream presentation extent
+and time base before the recipe is frozen. These bounded exposure measurements
+carry no full-title qualification.
 
 The durable experiment identity combines the raw full-source SHA-256 and the
 frozen protocol SHA-256. A terminal outcome remains visible with its original

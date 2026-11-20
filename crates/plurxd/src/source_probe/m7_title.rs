@@ -419,6 +419,12 @@ async fn measure_new_title(
             ).await?;
             title.whole_source_census = Some(census);
             let verified = title.whole_source_census.as_ref().ok_or("M7 title census disappeared")?;
+            let (coded_bytes, presentation_ticks, rate_clock) = verified.coded_video_extent();
+            if rate_clock != source.layout.time_base {
+                return Err("M7 whole-source rate and window census clocks differ".into());
+            }
+            let rate = measured_source_rate_plan(coded_bytes, presentation_ticks, rate_clock)?;
+            let recipe = FrozenRecipe::new(source.cadence, source.static_hdr, rate).map_err(string)?;
             let windows = source.windows.iter().map(|range| {
                 verified.window(
                     &title.source, context.tools, source.layout, range.first_pts, range.end_pts,
@@ -445,7 +451,7 @@ async fn measure_new_title(
             let margin = frozen_margin(&calibration)?;
             let table_sha: [u8; 32] = hex::decode(fitted.table().digest())
                 .map_err(string)?.try_into().map_err(|_| "M7 fitted digest length changed")?;
-            let recipe_sha = source.recipe.recipe_sha256();
+            let recipe_sha = recipe.recipe_sha256();
             let freeze = serde_json::to_vec(&serde_json::json!({
                 "schema": AUTOMATIC_PROTOCOL,
                 "source_sha256": hex::encode(title.content_sha256),
@@ -465,8 +471,13 @@ async fn measure_new_title(
                 })).collect::<Vec<_>>(),
                 "layout": {"raster": source.layout.raster, "roi": source.layout.roi,
                   "time_base": source.layout.time_base, "video_index": source.layout.video_index},
+                "source_video_rate": {
+                    "coded_packet_bytes": coded_bytes,
+                    "presentation_ticks": presentation_ticks,
+                    "time_base": rate_clock,
+                },
                 "recipe_sha256": hex::encode(recipe_sha),
-                "recipe": &source.recipe,
+                "recipe": &recipe,
             })).map_err(string)?;
             let protocol_sha: [u8; 32] = Sha256::digest(&freeze).into();
             let directory = root.join("experiments")
@@ -492,7 +503,7 @@ async fn measure_new_title(
                     }
                 }
                 let authored = prepare_authored(
-                    context, &title, &frozen, &source.recipe, planes, source.dv_level,
+                    context, &title, &frozen, &recipe, planes, source.dv_level,
                     &scratch, context.cancel,
                 ).await.map_err(string)?;
                 prepared_windows.push(EvaluationWindow {
@@ -538,7 +549,7 @@ struct SourcePlan {
     cadence: Rational,
     dv_level: u8,
     windows: Vec<M7WindowRange>,
-    recipe: FrozenRecipe,
+    static_hdr: StaticHdr,
 }
 
 fn source_plan(
@@ -588,31 +599,15 @@ fn source_plan(
     let (primaries_rgbw, max_1e4_nits, min_1e4_nits) =
         crate::decode_facts::mastering::source_st2086(stream)?
             .ok_or("M7 selected source has no exact ST 2086 declarations")?;
-    let held_rate = plurx_core::transcode::enhancement_stream_rate(&document, video_index)
-        .ok_or("M7 selected source has no independently bound video rate")?;
-    let high = u32::try_from(held_rate / 1000).map_err(string)?;
-    // New-title rate trials may match but never exceed the measured source
-    // video budget. The one-percent interval is an explicit rate-control
-    // policy of this protocol and carries no delivery claim.
-    let low = high.saturating_sub(high / (100 / SOURCE_RATE_BAND_PERCENT));
-    let recipe = FrozenRecipe::new(
-        cadence,
-        StaticHdr {
-            primaries_rgbw,
-            max_1e4_nits,
-            min_1e4_nits,
-            // FEL reconstruction changes the samples to which the input CLL
-            // applied. Preserve its mastering declaration without CLL claims.
-            max_cll_fall: None,
-            source_observation_sha256: title.probe_sha256,
-        },
-        RatePlan {
-            authored_band_kbps: [low, high],
-            initial_target_kbps: high,
-            maximum_attempts: 4,
-        },
-    )
-    .map_err(string)?;
+    let static_hdr = StaticHdr {
+        primaries_rgbw,
+        max_1e4_nits,
+        min_1e4_nits,
+        // FEL reconstruction changes the samples to which the input CLL
+        // applied. Preserve its mastering declaration without CLL claims.
+        max_cll_fall: None,
+        source_observation_sha256: title.probe_sha256,
+    };
     let dv_level = context
         .file
         .dolby_vision
@@ -671,7 +666,29 @@ fn source_plan(
         cadence,
         dv_level,
         windows,
-        recipe,
+        static_hdr,
+    })
+}
+
+fn measured_source_rate_plan(
+    coded_bytes: u64,
+    presentation_ticks: u64,
+    time_base: Rational,
+) -> Result<RatePlan, String> {
+    let bits = u128::from(coded_bytes) * 8 * u128::from(time_base.denominator());
+    let seconds = u128::from(presentation_ticks) * u128::from(time_base.numerator());
+    let high = bits
+        .checked_div(seconds * 1_000)
+        .and_then(|kbps| u32::try_from(kbps).ok())
+        .filter(|&kbps| kbps > 0)
+        .ok_or("M7 selected source has no supported positive coded video rate")?;
+    // Truncate the ceiling in integer space to keep every admitted authored
+    // rate within the independently observed selected video budget.
+    let low = high - high / (100 / SOURCE_RATE_BAND_PERCENT);
+    Ok(RatePlan {
+        authored_band_kbps: [low, high],
+        initial_target_kbps: high,
+        maximum_attempts: 4,
     })
 }
 
@@ -1001,6 +1018,16 @@ mod tests {
             whole_readback: [2; 32],
             seek_readback: [3; 32],
         }
+    }
+
+    #[test]
+    fn automatic_rate_ceiling_floors_the_exact_selected_packet_rate() {
+        let time_base = Rational::new(1, 1_000).unwrap();
+        let plan = measured_source_rate_plan(22_502_252, 2_000, time_base).unwrap();
+        assert_eq!(plan.authored_band_kbps, [89_109, 90_009]);
+        assert_eq!(plan.initial_target_kbps, 90_009);
+        assert!(measured_source_rate_plan(1, 0, time_base).is_err());
+        assert!(measured_source_rate_plan(0, 2_000, time_base).is_err());
     }
 
     #[test]
