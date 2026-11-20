@@ -729,10 +729,12 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "put_dv_fel_verdict",
     "request_dv_fel_requalification",
     "request_dv_fel_variant",
+    "request_dv_fel_head",
     "dv_fel_verdict_counts",
     "dv_fel_stale_titles",
     "dv_title_readiness",
     "dv_title_demands",
+    "dv_title_demands_through",
     "bind_dv_title_demand",
     "publish_dv_title_job",
     "publish_dv_title_from_analysis",
@@ -846,6 +848,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "cancel_unshared_output_job",
     // The verdict alone, for dv_title_scan before it binds (same test file).
     "claim_verdict",
+    "explain_job_claim",
     "claim_artifact_job",
     "resolve_claim",
     "job_labels",
@@ -21811,7 +21814,8 @@ fn contract_inventory_matches_every_store_method() {
     // +2: claim_job_attempt and claim_verdict, the claim local verdict
     // (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md), in BACKGROUND_JOB_METHODS.
     // +1: cancel_unshared_output_job, the fenced retained-output cleanup.
-    assert_eq!(declared.len(), 629, "review the Store method count");
+    // +3: claim diagnostics, targeted FEL head work, and bounded title revisits.
+    assert_eq!(declared.len(), 632, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
