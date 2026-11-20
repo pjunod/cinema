@@ -22,3 +22,22 @@ jobs:
           persist-credentials: false
       - name: Run the operations resource contracts
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.operations.test_voter_isolation
+      - name: Verify BRIX job isolation and Linux PID descriptors
+        run: |
+          test "$RUNNER_NAME" = gha-brix1-ubuntu-general-01
+          test ! -S /var/run/docker.sock
+          test "$(cat /sys/fs/cgroup/memory.max)" = 7516192768
+          test "$(cat /sys/fs/cgroup/cpu.max)" = '200000 100000'
+          python3 - <<'PY'
+          import os
+          import signal
+          import subprocess
+          import sys
+
+          with subprocess.Popen([sys.executable, "-c", "import signal; signal.pause()"]) as child:
+              with os.fdopen(os.pidfd_open(child.pid), "rb") as descriptor:
+                  signal.pidfd_send_signal(descriptor.fileno(), signal.SIGTERM)
+                  result = os.waitid(os.P_PIDFD, descriptor.fileno(), os.WEXITED | os.WNOWAIT)
+                  assert result.si_pid == child.pid
+                  assert child.wait(timeout=5) == -signal.SIGTERM
+          PY
