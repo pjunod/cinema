@@ -61,7 +61,8 @@ class PaperworkContinuationTests(unittest.TestCase):
             def git(root, *args):
                 return 'a' * 40 if args == ('rev-parse', 'HEAD') else (branch if args[0] == 'symbolic-ref' else dirty)
             with self.subTest(dirty=dirty, branch=branch, env=env, ready=ready), \
-                    patch.object(pc, 'git', side_effect=git), patch.object(pc, 'ancestor', return_value=inherited), \
+                    patch.object(pc, 'git', side_effect=git), \
+                    patch.object(pc, 'ancestor', side_effect=lambda root, parent, child: True if parent == 'b' * 40 else inherited), \
                     self.assertRaises(r.ReceiptError):
                 pc.binding(api, self.value(), env, '.', 'publication')
 
