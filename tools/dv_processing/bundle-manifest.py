@@ -15,6 +15,7 @@ INPUTS = (
     'dv_trace.h',
     'fel_renderer.h',
     'hevc-rasl-frame-thread.patch',
+    'm7_sample_v1.h',
     'movie_source_io.h',
     'mux_rgb.c',
     'nlq_clipping.h',

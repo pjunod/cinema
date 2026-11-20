@@ -51,11 +51,11 @@ pub(crate) struct ToolSet {
 pub(crate) const REFIT_MODE_VERSION: &str = "plurx-refit-mode-v2";
 /// sha256 of `refit_mode.h` followed by `refit_compose.h`, as
 /// [`REFIT_MODE_VERSION`] was last reviewed against. The diagnostic-only
-/// TopLeft export addition preserves the v2 statistics, samples and pooling;
-/// its independent representation has its own version in `refit_topleft.h`.
+/// TopLeft export and M7 sample modes preserve the v2 statistics and pooling.
+/// Their representations are versioned in `refit_topleft.h` and `m7_sample_v1.h`.
 #[cfg(test)]
 pub(crate) const REFIT_MODE_SOURCES: &str =
-    "de639eb4bc1d59caaa0c7b05db667f6d7ff6862ac84f2af03ba52592cd6a2019";
+    "8b9fec2bfb8f04a05d460f055fe07d0b69a117d1f0abcd44c372aa77d021ead3";
 
 #[cfg(test)]
 impl ToolSet {
@@ -150,6 +150,10 @@ fn renderer_source_identity() -> String {
         (
             "hevc-rasl-frame-thread.patch",
             include_bytes!("../../../tools/dv_processing/hevc-rasl-frame-thread.patch"),
+        ),
+        (
+            "m7_sample_v1.h",
+            include_bytes!("../../../tools/dv_processing/m7_sample_v1.h"),
         ),
         (
             "movie_source_io.h",

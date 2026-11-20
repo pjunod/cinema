@@ -5,6 +5,8 @@
 //                         [--frames FIRST LAST | --resume FIRST FIRST_PTS]
 //   segment_decode_render --dump-composed SOURCE VIDEO_INDEX FIRST LAST
 //   segment_decode_render --export-composed-topleft SOURCE VIDEO_INDEX FIRST LAST NEW_OUTPUT.yuv
+//   segment_decode_render --m7-sample-fel-v1 SOURCE VIDEO_INDEX FIRST LAST
+//                         FIRST_PTS END_PTS X0 Y0 X1 Y1 NEW_OUTPUT
 //
 // The first two modes take a trailing diagnostic [--area LEFT RIGHT TOP BOTTOM], which
 // replaces every frame's L5 active area with these offsets, to reproduce an
@@ -22,6 +24,11 @@
 // yuv420p10le file and a stdout JSONL sidecar with the versioned color tags,
 // source clocks, RPU and frame hashes. The final export_complete record
 // follows a successful close of the complete raw file.
+//
+// --m7-sample-fel-v1 seeks on exact source ticks, bounds preroll, and writes
+// raw BL/EL lattice samples plus frame and coded AU identities to a new file.
+// FIRST/LAST and FIRST_PTS/END_PTS come from the held source's frame census.
+// The M7 header describes the binary wire format and completion record.
 //
 // --refit-stats writes JSON lines to stdout: one per pooled scene,
 //   {"kind":"refit_scene","first_frame":N,"frames":K,"first_pts":TICKS,
@@ -74,7 +81,7 @@
 
 #define REFIT_EXIT_CONTENT 3
 
-static bool refit_dump, refit_area_override, refit_topleft;
+static bool refit_dump, refit_area_override, refit_topleft, refit_m7;
 static FILE *refit_topleft_output;
 // --resume: the resume point, and the preroll decoded before it.
 static int64_t refit_resume_frame = -1, refit_resume_pts, refit_preroll;
@@ -241,6 +248,9 @@ static void refit_sample(const AVFrame *bl, const AVFrame *el, int x, int y,
   enhancement[2] = refit_code(el, 2, sites.el_chroma[0], sites.el_chroma[1]);
 }
 
+#include "m7_sample_v1.h"
+static struct m7_sample_v1 refit_m7_sample;
+
 static void refit_topleft_frame(const AVFrame *bl, const AVFrame *el,
                               const AVDOVIMetadata *data,
                               const struct refit_mapping *mapping, int64_t ordinal,
@@ -313,6 +323,12 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
            bl->linesize[0] >= 2 * w && bl->linesize[1] >= w && bl->linesize[2] >= w &&
            el->linesize[0] >= 2 * ew && el->linesize[1] >= ew && el->linesize[2] >= ew,
        "software-decoded planar ten-bit layers");
+  if (refit_m7) {
+    m7_sample_v1_frame(&refit_m7_sample, bl, el, data, ordinal, nalu, raw->size + 2);
+    refit_end_pts = bl->pts + bl->duration;
+    refit_composed++;
+    return;
+  }
   if (refit_topleft) {
     refit_topleft_frame(bl, el, data, &mapping, ordinal, nalu, raw->size + 2);
     refit_composed++;
@@ -434,6 +450,8 @@ static void refit_pairs(void) {
     int64_t ordinal = refit_paired++;
     need(refit_paired <= REFIT_MAX_TITLE_FRAMES, "bounded title frame count");
     if (ordinal > refit_last) {
+      need(!refit_m7 || bl->pts >= refit_m7_sample.end_pts,
+           "extra M7 frame within the requested clock interval");
       window_done = true;
       drop_pair();
       return;
@@ -496,13 +514,18 @@ static void refit_drain(void) {
 static int refit_main(int argc, char **argv) {
   refit_dump = !strcmp(argv[1], "--dump-composed");
   refit_topleft = !strcmp(argv[1], "--export-composed-topleft");
+  refit_m7 = !strcmp(argv[1], "--m7-sample-fel-v1");
   refit_area_override = argc >= 5 && !strcmp(argv[argc - 5], "--area");
   if (refit_area_override) {
     for (int i = 0; i < 4; i++)
       refit_area[i] = number(argv[argc - 4 + i], 0, 4095);
     argc -= 5;
   }
-  if (refit_topleft)
+  if (refit_m7)
+    need(argc == 13 && !refit_area_override,
+         "usage: segment_decode_render --m7-sample-fel-v1 SOURCE VIDEO_INDEX FIRST LAST "
+         "FIRST_PTS END_PTS X0 Y0 X1 Y1 NEW_OUTPUT");
+  else if (refit_topleft)
     need(argc == 7 && !refit_area_override,
          "usage: segment_decode_render --export-composed-topleft SOURCE VIDEO_INDEX FIRST LAST NEW_OUTPUT.yuv");
   else if (refit_dump)
@@ -516,11 +539,21 @@ static int refit_main(int argc, char **argv) {
   // Refusals leave without exit-time teardown while decoder threads run.
   dv_threads_live = true;
   int stream_index = number(argv[3], 0, 255);
-  if (refit_dump || refit_topleft) {
+  if (refit_dump || refit_topleft || refit_m7) {
     refit_first = number(argv[4], 0, REFIT_MAX_TITLE_FRAMES - 1);
     refit_last = number(argv[5], 0, REFIT_MAX_TITLE_FRAMES - 1);
     need(refit_first <= refit_last, "ordered frame range");
-    if (refit_topleft) {
+    if (refit_m7) {
+      frame_cap = (int)(refit_last - refit_first + 1);
+      need(frame_cap <= M7_SAMPLE_MAX_FRAMES, "bounded M7 frame count");
+      refit_resume_frame = refit_first;
+      refit_resume_pts = refit_ticks(argv[6]);
+      refit_m7_sample.end_pts = refit_ticks(argv[7]);
+      need(refit_resume_pts < refit_m7_sample.end_pts, "ordered M7 clock interval");
+      for (int i = 0; i < 4; i++)
+        refit_m7_sample.roi[i] = number(argv[8 + i], 0, 4096);
+      refit_threads = 1;
+    } else if (refit_topleft) {
       need(refit_last - refit_first + 1 == REFIT_TOPLEFT_FRAMES,
            "TopLeft export requires exactly 48 frames");
       refit_threads = 1;
@@ -561,15 +594,16 @@ static int refit_main(int argc, char **argv) {
   input->max_analyze_duration = AV_TIME_BASE;
   input->max_probe_packets = 32;
   input->max_streams = 256;
-  // The whole title is read: lift the playback window's read budget for this
-  // source only, as scan_title does.
+  // The bounded M7 window retains the playback read budget. The other
+  // modes can read the whole title, as scan_title does.
   need(movie_source_open(&refit_io, argv[2]) >= 0,
        "held regular title source or private source capability");
   // A demuxer reads a title about once; allow four reads plus room for
   // probing and index seeks, and refuse anything that needs more.
   need(refit_io.length > 0 && (uint64_t)refit_io.length <= (UINT64_C(1) << 56),
        "bounded title length");
-  refit_io.read_limit = 4 * (uint64_t)refit_io.length + (UINT64_C(64) << 20);
+  if (!refit_m7)
+    refit_io.read_limit = 4 * (uint64_t)refit_io.length + (UINT64_C(64) << 20);
   uint8_t *buffer = av_malloc(65536);
   need(buffer != NULL, "bounded title IO buffer");
   refit_avio = avio_alloc_context(buffer, 65536, 0, &refit_io, movie_read, NULL, movie_seek);
@@ -621,12 +655,23 @@ static int refit_main(int argc, char **argv) {
                             AVSEEK_FLAG_BACKWARD) >= 0,
          "keyframe seek before the resume point");
 
-  if (refit_topleft) {
+  if (refit_topleft || refit_m7) {
     const AVCodecParameters *codec = stream->codecpar;
     refit_content(codec->color_primaries == AVCOL_PRI_BT2020 && codec->color_trc == AVCOL_TRC_SMPTE2084 &&
                       codec->color_space == AVCOL_SPC_BT2020_NCL && codec->color_range == AVCOL_RANGE_MPEG &&
                       codec->chroma_location == AVCHROMA_LOC_TOPLEFT,
-                  "TopLeft v1 requires declared BT.2020 PQ video range and TopLeft chroma");
+                  refit_m7 ? "M7 requires declared BT.2020 PQ video range and TopLeft chroma"
+                           : "TopLeft v1 requires declared BT.2020 PQ video range and TopLeft chroma");
+  }
+  if (refit_m7) {
+    const AVCodecParameters *codec = stream->codecpar;
+    refit_content(codec->extradata_size >= 22 && codec->extradata[0] == 1 &&
+                      (codec->extradata[21] & 3) == 3,
+                  "M7 requires four-byte hvcC NAL framing for coded AU binding");
+    m7_sample_v1_open(&refit_m7_sample, argv[12], stream_index, source_time_base,
+                      expected_w[0], expected_h[0], refit_first, refit_last, refit_resume_pts);
+  }
+  if (refit_topleft) {
     int fd = open(argv[6], O_WRONLY | O_CREAT | O_EXCL, 0600);
     need(fd >= 0, "new exclusive TopLeft output");
     refit_topleft_output = fdopen(fd, "wb");
@@ -641,12 +686,14 @@ static int refit_main(int argc, char **argv) {
                 (long long)refit_first, (long long)refit_last, stream_index, expected_w[0], expected_h[0]) > 0,
          "TopLeft export header");
   }
-  refit_raw = calloc(1, sizeof(*refit_raw));
-  refit_pooled = calloc(1, sizeof(*refit_pooled));
-  refit_frame_stats[0] = calloc(1, sizeof(*refit_frame_stats[0]));
-  refit_frame_stats[1] = calloc(1, sizeof(*refit_frame_stats[1]));
-  need(refit_raw && refit_pooled && refit_frame_stats[0] && refit_frame_stats[1],
-       "scene statistics allocation");
+  if (!refit_m7) {
+    refit_raw = calloc(1, sizeof(*refit_raw));
+    refit_pooled = calloc(1, sizeof(*refit_pooled));
+    refit_frame_stats[0] = calloc(1, sizeof(*refit_frame_stats[0]));
+    refit_frame_stats[1] = calloc(1, sizeof(*refit_frame_stats[1]));
+    need(refit_raw && refit_pooled && refit_frame_stats[0] && refit_frame_stats[1],
+         "scene statistics allocation");
+  }
   if (refit_dump)
     need(printf("{\"kind\":\"composed_dump\",\"format\":\"plurx-composed-v1\","
                 "\"time_base\":\"%d/%d\",\"first\":%lld,\"last\":%lld,\"area\":\"%s\","
@@ -663,15 +710,26 @@ static int refit_main(int argc, char **argv) {
   AVPacket *packet = av_packet_alloc();
   need(packet != NULL, "demux packet");
   int result = 0;
+  unsigned m7_packets = 0;
   while (!window_done && (result = av_read_frame(input, packet)) >= 0) {
     need(packet->size <= REFIT_MAX_PACKET_BYTES, "bounded packet size");
+    if (refit_m7)
+      need(++m7_packets <= M7_SAMPLE_MAX_PACKETS, "bounded M7 demux packet count");
     if (packet->stream_index == stream_index) {
+      if (refit_m7) {
+        need(packet->pts != AV_NOPTS_VALUE && packet->duration > 0,
+             "M7 coded access unit requires PTS and positive duration");
+        if (packet->pts >= refit_resume_pts && packet->pts < refit_m7_sample.end_pts)
+          inspect_coded_au(packet, true, false);
+      }
       send_layer(&layers[0], packet);
       if (!window_done)
         send_layer(&layers[1], packet);
     }
     av_packet_unref(packet);
   }
+  if (refit_m7)
+    need(!refit_io.exhausted, "bounded M7 source read budget");
   if (!window_done) {
     need(result == AVERROR_EOF, "complete title read");
     refit_drain();
@@ -682,7 +740,11 @@ static int refit_main(int argc, char **argv) {
     need(refit_paired > refit_last, "requested frame range extends past the title");
   need(refit_composed > 0, "nonempty frame range");
 
-  if (refit_topleft) {
+  if (refit_m7) {
+    need(refit_composed == frame_cap && refit_end_pts == refit_m7_sample.end_pts,
+         "complete M7 frame and clock window");
+    m7_sample_v1_finish(&refit_m7_sample, refit_composed);
+  } else if (refit_topleft) {
     need(refit_composed == REFIT_TOPLEFT_FRAMES && fclose(refit_topleft_output) == 0,
          "complete 48-frame TopLeft output");
     need(printf("{\"kind\":\"export_complete\",\"format\":\"%s\",\"frames\":%lld}\n",

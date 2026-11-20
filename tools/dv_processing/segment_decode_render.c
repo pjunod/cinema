@@ -71,7 +71,7 @@ static int64_t source_origin_ticks;
 static const char *source_origin_provenance;
 struct coded_input {
   int64_t pts, duration;
-  char packet_sha[65], rpu_sha[65];
+  char packet_sha[65], rpu_sha[65], base_vcl_sha[65];
   bool emitted;
 };
 static struct coded_input coded_window[64];
@@ -479,14 +479,7 @@ static void hash_bytes(const uint8_t *bytes, size_t size, char hex[65]) {
 }
 // Four-byte hvcC packet framing, one first slice per BL/EL picture and one
 // fresh RPU. This independent coded-stage trace predates either decoder or GPU.
-static void inspect_coded(AVPacket *packet) {
-  need(packet->pts != AV_NOPTS_VALUE && packet->duration > 0,
-       "coded AU needs original PTS/positive duration");
-  // Decode-order references can follow the requested presentation interval.
-  // Their Dolby metadata does not describe any picture this window emits.
-  if (compare_window(packet->pts, window_end) >= 0)
-    return;
-  const int in_window = compare_window(packet->pts, window_start) >= 0;
+static void inspect_coded_au(const AVPacket *packet, bool in_window, bool trace) {
   struct AVSHA *base_sha = in_window ? av_sha_alloc() : NULL;
   need(!in_window || (base_sha && av_sha_init(base_sha, 256) == 0),
        "base-layer source witness SHA256");
@@ -544,17 +537,26 @@ static void inspect_coded(AVPacket *packet) {
     hash_bytes(packet->data, packet->size, input->packet_sha);
     hash_bytes(rpu_bytes, rpu_len, input->rpu_sha);
     uint8_t base_digest[32];
-    char base_hex[65];
     av_sha_final(base_sha, base_digest);
     av_free(base_sha);
     for (int i = 0; i < 32; i++)
-      snprintf(base_hex + 2 * i, 3, "%02x", base_digest[i]);
+      snprintf(input->base_vcl_sha + 2 * i, 3, "%02x", base_digest[i]);
+    if (!trace)
+      return;
     printf("{\"kind\":\"coded_window_input\",\"pts_ticks\":%lld,\"duration_"
            "ticks\":%lld,\"packet_sha256\":\"%s\",\"rpu_sha256\":\"%s\","
            "\"base_vcl_sha256\":\"%s\"}\n",
            (long long)input->pts, (long long)input->duration, input->packet_sha,
-           input->rpu_sha, base_hex);
+           input->rpu_sha, input->base_vcl_sha);
   }
+}
+static void inspect_coded(const AVPacket *packet) {
+  need(packet->pts != AV_NOPTS_VALUE && packet->duration > 0,
+       "coded AU needs original PTS/positive duration");
+  // Decode-order references can follow the requested presentation interval.
+  // Their Dolby metadata does not describe any picture this window emits.
+  if (compare_window(packet->pts, window_end) < 0)
+    inspect_coded_au(packet, compare_window(packet->pts, window_start) >= 0, true);
 }
 static void render_pairs(void) {
   while (layers[0].count && (base_only || layers[1].count)) {
@@ -850,7 +852,8 @@ static void send_layer(struct layer *layer, AVPacket *packet) {
 #include "refit_mode.h"
 int main(int argc, char **argv) {
   if (argc >= 2 && (!strcmp(argv[1], "--refit-stats") || !strcmp(argv[1], "--dump-composed") ||
-                    !strcmp(argv[1], "--export-composed-topleft")))
+                    !strcmp(argv[1], "--export-composed-topleft") ||
+                    !strcmp(argv[1], "--m7-sample-fel-v1")))
     return refit_main(argc, argv);
   bool held_origin = argc >= 3 && !strcmp(argv[argc - 2], "--held-source-origin");
   struct rational supplied_origin = {0, 1};
