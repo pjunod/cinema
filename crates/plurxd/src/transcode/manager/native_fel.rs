@@ -750,11 +750,19 @@ impl NativeFelHead {
                 {
                     return Err("prepared FEL lost its first-publication owner".into());
                 }
-                split.stage_prepared_head(attempt, std::mem::take(&mut staged));
+                if let Err(rejected) =
+                    split.stage_prepared_head(attempt, std::mem::take(&mut staged))
+                {
+                    staged = rejected;
+                    return Err(
+                        "prepared FEL first-publication decision was already settled".into(),
+                    );
+                }
                 Ok::<_, String>(())
             }
             .await;
             if let Err(reason) = result {
+                split.decline_prepared_head();
                 for entry in staged {
                     let _ = tokio::fs::remove_file(session.dir.join(entry.object)).await;
                 }

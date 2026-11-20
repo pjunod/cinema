@@ -565,7 +565,9 @@ pub(crate) struct NativeSplitInventory {
     #[cfg(target_os = "linux")]
     compare_prepared_head: bool,
     #[cfg(target_os = "linux")]
-    prepared_head: std::sync::Mutex<Option<(u64, Vec<PreparedNativeFelObject>)>>,
+    prepared_head: std::sync::Mutex<PreparedNativeFelHead>,
+    #[cfg(target_os = "linux")]
+    first_snapshot_grace: std::sync::OnceLock<std::time::Instant>,
     #[cfg(target_os = "linux")]
     published_head: std::sync::OnceLock<(u64, u64)>,
     segments: std::sync::Mutex<std::collections::BTreeMap<u64, NativeSplitEntry>>,
@@ -593,6 +595,15 @@ impl NativeSplitInitIds {
             _ => None,
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+enum PreparedNativeFelHead {
+    #[default]
+    Declined,
+    Pending,
+    Ready(u64, Vec<PreparedNativeFelObject>),
 }
 
 #[cfg(target_os = "linux")]
@@ -632,6 +643,7 @@ impl NativeSplitInventory {
     #[cfg(target_os = "linux")]
     pub(crate) fn compare_prepared_head(mut self) -> Self {
         self.compare_prepared_head = true;
+        self.prepared_head = std::sync::Mutex::new(PreparedNativeFelHead::Pending);
         self
     }
 
@@ -648,8 +660,41 @@ impl NativeSplitInventory {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn stage_prepared_head(&self, attempt: u64, objects: Vec<PreparedNativeFelObject>) {
-        *self.prepared_head.lock().expect("prepared FEL head") = Some((attempt, objects));
+    pub(crate) fn defer_first_snapshot_for_prepared_head(&self, now: std::time::Instant) -> bool {
+        if !matches!(
+            *self.prepared_head.lock().expect("prepared FEL head"),
+            PreparedNativeFelHead::Pending,
+        ) {
+            return false;
+        }
+        // Only a cache hit starts this grace, when ordinary media is already
+        // ready. The normal deadline still owns the start and cannot be reset.
+        let deadline = self
+            .first_snapshot_grace
+            .get_or_init(|| now + std::time::Duration::from_millis(600));
+        now < *deadline
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn decline_prepared_head(&self) {
+        *self.prepared_head.lock().expect("prepared FEL head") = PreparedNativeFelHead::Declined;
+        self.changed.notify_waiters();
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn stage_prepared_head(
+        &self,
+        attempt: u64,
+        objects: Vec<PreparedNativeFelObject>,
+    ) -> Result<(), Vec<PreparedNativeFelObject>> {
+        let mut state = self.prepared_head.lock().expect("prepared FEL head");
+        if !matches!(*state, PreparedNativeFelHead::Pending) || objects.is_empty() {
+            return Err(objects);
+        }
+        *state = PreparedNativeFelHead::Ready(attempt, objects);
+        drop(state);
+        self.changed.notify_waiters();
+        Ok(())
     }
 
     /// Called once under the first publication lock after actor acceptance.
@@ -661,9 +706,8 @@ impl NativeSplitInventory {
         last: i64,
         incarnation: Option<&str>,
     ) -> Vec<String> {
-        let Some((staged_attempt, staged)) =
-            self.prepared_head.lock().expect("prepared FEL head").take()
-        else {
+        let prepared = std::mem::take(&mut *self.prepared_head.lock().expect("prepared FEL head"));
+        let PreparedNativeFelHead::Ready(staged_attempt, staged) = prepared else {
             return Vec::new();
         };
         let Some(incarnation) = incarnation.filter(|_| {
@@ -2075,6 +2119,28 @@ async fn blocking_reserved_write<T: Send + 'static>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prepared_fel_defers_first_snapshot_once_and_falls_back() {
+        let now = std::time::Instant::now();
+        let ordinary = super::NativeSplitInventory::with_startup_budget(100);
+        assert!(!ordinary.defer_first_snapshot_for_prepared_head(now));
+
+        let warm = super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+        assert!(warm.defer_first_snapshot_for_prepared_head(now));
+        assert!(warm
+            .defer_first_snapshot_for_prepared_head(now + std::time::Duration::from_millis(599)));
+        assert!(!warm
+            .defer_first_snapshot_for_prepared_head(now + std::time::Duration::from_millis(600)));
+        assert!(warm.publish_prepared_head(1, 0, 12, None).is_empty());
+        assert!(!warm.defer_first_snapshot_for_prepared_head(now));
+        assert!(warm.prepared_head_frontier(1).is_none());
+
+        let warm = super::NativeSplitInventory::with_startup_budget(100).compare_prepared_head();
+        warm.decline_prepared_head();
+        assert!(!warm.defer_first_snapshot_for_prepared_head(now));
+    }
+
     use super::*;
     use plurx_core::fmp4::{CutReason, Track, VideoCodec};
     use plurx_core::testfixtures::pipe;
