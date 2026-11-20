@@ -231,7 +231,7 @@ async fn assert_matches_local(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_direct_start_requires_actual_direct_decision() {
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    let fixture = stable_direct_fixture().await;
     let recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     // The player cannot take this container: A recomputes the decision with
     // the real caps and refuses; B's word that it is direct counts for nothing.
