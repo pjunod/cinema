@@ -829,25 +829,46 @@ async fn execute(
                         checkpoint: Some(serde_json::json!({"fel_title_aggregate":output})),
                     })
                 } else {
-                    match fence.publish_dv_title(output).await {
-                        Ok(true) => {
-                            published = true;
-                            None
-                        }
-                        Ok(false) => Some(JobSettlement::Stop {
-                            error_code: "title_publication_fenced".into(),
-                        }),
-                        Err(error) => {
-                            tracing::warn!(%error,"title publication unavailable");
-                            Some(JobSettlement::Retry {
-                                error_code: "title_publication_failed".into(),
-                                not_before_ms: now_ms().saturating_add(
-                                    crate::background_jobs::retry_delay_ms(
-                                        &job.id,
-                                        job.failed_attempts,
+                    let context = super::m7_comparison::TitleContext {
+                        state: &state,
+                        file: &file,
+                        demand: &demand,
+                        tools: &tools,
+                        admission: &admission,
+                        fence: &fence,
+                        cancel: &cancel,
+                        shutdown: &shutdown,
+                    };
+                    if let Err(error) = super::m7_title::evaluate_history(&context).await {
+                        tracing::debug!(file_id = file.id, %error, "M7 experiment lookup unavailable");
+                    }
+                    if cancel.is_cancelled() || shutdown.is_cancelled() {
+                        Some(JobSettlement::Yield {
+                            error_code: Some("title_interrupted".into()),
+                            not_before_ms: now_ms().saturating_add(5000),
+                            checkpoint: Some(serde_json::json!({"fel_title_aggregate": output})),
+                        })
+                    } else {
+                        match fence.publish_dv_title(output).await {
+                            Ok(true) => {
+                                published = true;
+                                None
+                            }
+                            Ok(false) => Some(JobSettlement::Stop {
+                                error_code: "title_publication_fenced".into(),
+                            }),
+                            Err(error) => {
+                                tracing::warn!(%error,"title publication unavailable");
+                                Some(JobSettlement::Retry {
+                                    error_code: "title_publication_failed".into(),
+                                    not_before_ms: now_ms().saturating_add(
+                                        crate::background_jobs::retry_delay_ms(
+                                            &job.id,
+                                            job.failed_attempts,
+                                        ),
                                     ),
-                                ),
-                            })
+                                })
+                            }
                         }
                     }
                 }
