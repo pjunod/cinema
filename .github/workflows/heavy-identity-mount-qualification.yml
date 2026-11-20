@@ -1,0 +1,32 @@
+name: Qualify read-only heavy runner identity mounts
+on:
+  push:
+    branches: [codex/qualify-heavy-identity-mounts]
+jobs:
+  check:
+    name: Identity mount check ${{ matrix.lane }}
+    runs-on: [ci-nonvoter-store, incus]
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [1, 2]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+    steps:
+      - name: Verify actual mounted identity shape and read-only status
+        shell: bash
+        run: |
+          [[ "$RUNNER_NAME" == gha-lab1-plurx-heavy-01 || "$RUNNER_NAME" == gha-lab2-plurx-heavy-01 ]]
+          printf 'Runner %s\n' "$RUNNER_NAME"
+          for target in /run/plurx-host-machine-id /run/plurx-host-boot-id; do
+            awk -v target="$target" '$5 == target && $6 ~ /(^|,)ro(,|$)/ {read_only=1} END{exit !read_only}' /proc/self/mountinfo
+          done
+          grep -Eq '^[0-9a-f]{32}$' /run/plurx-host-machine-id
+          grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' /run/plurx-host-boot-id
+          echo 'Verified both identity mounts read-only'
+          sleep 20
