@@ -1,4 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE 1
+#endif
 // Bounded timestamped RGB48LE -> NUT using public system libavformat.
 #include <errno.h>
 #include <libavcodec/avcodec.h>
