@@ -5299,6 +5299,22 @@ async fn a_viewer_preparation_is_queued_when_background_work_fills_the_ceiling()
     let dir = crate::test_tempdir().expect("db dir");
     let path = dir.path().join("ceiling.db");
     let store = SqliteStore::open(&path).expect("store");
+    // A full daemon has already observed live engines. Keep that real
+    // inventory here so the ceiling cannot pass only in a cold test process.
+    let engines = crate::background_jobs::analysis_reconcile::engines_in(
+        crate::background_jobs::analysis_reconcile::ReconcileContext {
+            store: &store,
+            node_id: "node-a",
+            jobs: None,
+            peers: None,
+        },
+    )
+    .await
+    .expect("read the real FFmpeg engine inventory");
+    assert!(
+        !engines.is_empty(),
+        "the ceiling regression requires a usable real FFmpeg engine"
+    );
     let library = store
         .create_library(&NewLibrary {
             name: "Movies".to_owned(),
@@ -5334,26 +5350,42 @@ async fn a_viewer_preparation_is_queued_when_background_work_fills_the_ceiling()
         .await
         .expect("file");
     let file = store.get_file(id).await.expect("read").expect("file");
-    rusqlite::Connection::open(&path)
-        .expect("seed connection")
+    // Queued fragment-index work with a retired engine is stranded backlog,
+    // not runnable pressure. Use valid, unbound background marker work so
+    // every filler row still holds the real ceiling with a warm inventory.
+    let connection = rusqlite::Connection::open(&path).expect("seed connection");
+    connection
         .execute_batch(&format!(
             "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {ceiling})
              INSERT INTO analysis_requests (request_id, file_id, source_size, source_mtime,
                  component, pipeline_version, video_identity, requested_generation, priority,
                  trigger, force_rebuild, target_node_id, state, not_before_ms, created_at_ms,
                  updated_at_ms)
-             SELECT 'filler-' || i, {id}, 100, 1, 'fragment_index', 'filler', '',
-                    'filler-' || i, 'normal', 'background', 0, 'node-filler', 'queued', 0, 0, 0
+             SELECT 'filler-' || i, {id}, 100, 1, 'skip_markers', 'filler', '',
+                    'filler-' || i, 'normal', 'background', 0, '', 'queued', 0, 0, 0
                FROM n",
             ceiling = plurx_core::store::MAX_ACTIVE_ANALYSIS_REQUESTS,
         ))
         .expect("fill the active ceiling");
+    let seeded: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM analysis_requests WHERE component = 'skip_markers'
+           AND priority = 'normal' AND trigger = 'background'
+           AND target_node_id = '' AND state = 'queued'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count runnable background requests");
+    assert_eq!(seeded, plurx_core::store::MAX_ACTIVE_ANALYSIS_REQUESTS);
+    drop(connection);
     let video = plurx_core::transcode::CopyVideoOptions::new(false, false);
+    let refusal = enqueue_copy_preparation_for_object(&store, "node-a", &file, video, None)
+        .await
+        .expect_err("background preparation still stops at the ceiling");
     assert!(
-        enqueue_copy_preparation_for_object(&store, "node-a", &file, video, None)
-            .await
-            .is_err(),
-        "background preparation still stops at the ceiling"
+        matches!(&refusal, plurx_core::error::StoreError::Task(message)
+            if message == "analysis source changed or the active request queue is full"),
+        "background preparation must hit the real queue cap, not an unrelated error: {refusal}"
     );
     let viewer = store
         .create_user("ceiling-viewer", "hash", false)
