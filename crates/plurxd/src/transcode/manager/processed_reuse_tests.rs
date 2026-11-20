@@ -962,6 +962,100 @@ async fn fixture_with_audio(
 }
 
 #[tokio::test]
+async fn native_fel_window_requires_reaped_success_and_keeps_verified_evidence() {
+    use crate::vodencode::dv_runtime::{ObservedPicture, ObservedWindow, VerifiedWindow};
+
+    let f = fixture(DvDestination::Profile81).await;
+    let witness = DvDigest::new("a".repeat(64)).expect("source picture digest");
+    let make_window = |registration, has_receipt: bool, has_witness: bool| VerifiedWindow {
+        bytes: b"verified encoded control".to_vec(),
+        observed: ObservedWindow {
+            pictures: (0..3)
+                .map(|ordinal| ObservedPicture {
+                    key: DvFrameKey {
+                        absolute_video_index: 0,
+                        continuity_epoch: 0,
+                        pts: DvTimestamp::new(i64::try_from(ordinal).expect("ordinal"), 24)
+                            .expect("timestamp"),
+                        display_ordinal: ordinal,
+                    },
+                    base_vcl_sha256: has_witness.then(|| witness.clone()),
+                    duration: DvDuration::new(1, 24, DvDurationProvenance::CodedPacketObserved)
+                        .expect("duration"),
+                    rpu: Vec::new(),
+                    bl_shape: (64, 64),
+                    el_shape: (64, 64),
+                    profile: 7,
+                    source_el_kind: DvElKind::Fel,
+                })
+                .collect(),
+            display_target_rows: Vec::new(),
+            source_trace: witness.clone(),
+            source_tick: (1, 24),
+            runtime_device: witness.clone(),
+            decoder: plurx_core::transcode::DecodeBackend::Software,
+            software_frame_workers: true,
+        },
+        encoded_payloads: Vec::new(),
+        registration,
+        receipt: has_receipt.then(|| f.receipt.clone()),
+    };
+    for (program, succeeds) in [("/bin/true", true), ("/bin/false", false)] {
+        let slot = crate::prodrun::ProducerSlot::new();
+        let child = tokio::process::Command::new(program)
+            .kill_on_drop(true)
+            .spawn()
+            .expect("test encoder process");
+        let job = crate::process_control::ChildJob::attach(&child).expect("child job");
+        let (registration, writers) = slot.attach_registered_job_owned(child, job, 0, None).await;
+        slot.request_registered_completion(&registration)
+            .await
+            .expect("natural completion");
+        assert_eq!(registration.wait_child_exit().await.success(), succeeds);
+        assert_eq!(
+            make_window(registration.clone(), true, true)
+                .into_native_fel_window()
+                .err()
+                .as_deref(),
+            Some("FEL splice renderer has not completed"),
+        );
+        writers.settled();
+        registration.wait_confirmed_reap().await;
+        if succeeds {
+            let window = make_window(registration.clone(), true, true)
+                .into_native_fel_window()
+                .expect("confirmed completed FEL window");
+            assert_eq!(
+                window.receipt.counts().el_accepted,
+                f.receipt.counts().emitted
+            );
+            assert_eq!(
+                make_window(registration.clone(), false, true)
+                    .into_native_fel_window()
+                    .err()
+                    .as_deref(),
+                Some("FEL splice has no processing receipt"),
+            );
+            assert_eq!(
+                make_window(registration, true, false)
+                    .into_native_fel_window()
+                    .err()
+                    .as_deref(),
+                Some("FEL source witness unavailable"),
+            );
+        } else {
+            assert_eq!(
+                make_window(registration, true, true)
+                    .into_native_fel_window()
+                    .err()
+                    .as_deref(),
+                Some("FEL splice renderer has not completed"),
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn processed_cache_args_match_the_destination_window_encoder() {
     use plurx_core::transcode::{Pacing, TranscodeExecution, VaapiHdrPolicy};
 

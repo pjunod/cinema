@@ -1767,7 +1767,7 @@ impl TranscodeManager {
         root: &crate::vodserve::PreparedRootAdmission,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<bool, String> {
-        use crate::vodencode::dv_runtime::{VerifiedWindow, WindowOutcome};
+        use crate::vodencode::dv_runtime::{NativeFelWindow, WindowOutcome};
         use plurx_core::fmp4::{segment_name, FragmentReader, Unit};
         let session = self
             .sessions
@@ -1925,7 +1925,7 @@ impl TranscodeManager {
                 }
                 segment.first_source_frame = entry.first_source_frame;
                 let entries = segment.fel_windows(encoding.grid)?;
-                let mut windows: Vec<VerifiedWindow> = Vec::with_capacity(entries.len());
+                let mut windows: Vec<NativeFelWindow> = Vec::with_capacity(entries.len());
                 for entry in &entries {
                     let worker = root
                         .permit
@@ -1962,7 +1962,7 @@ impl TranscodeManager {
                         plurx_core::transcode::dv_processing::DvSelection::Selected(frozen)
                             if decision.semantic_digest() == frozen.semantic_digest() =>
                         {
-                            windows.push(window)
+                            windows.push(window.into_native_fel_window()?)
                         }
                         _ => {
                             return Err(
@@ -1978,10 +1978,7 @@ impl TranscodeManager {
                 let shape = DvDigest::new(hex::encode(sha2::Sha256::digest(&bytes)))
                     .map_err(|err| err.to_string())?;
                 let mut reports = windows.iter().map(|window| {
-                    let mut receipt = window
-                        .receipt
-                        .clone()
-                        .ok_or("native splice has no verified processing receipt")?;
+                    let mut receipt = window.receipt.clone();
                     receipt
                         .bind_publication(incarnation_id, shape.clone())
                         .map_err(|err| err.to_string())?;
