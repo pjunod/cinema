@@ -87,10 +87,27 @@ SOURCE_GATE_UPLOAD = "      - name: Retain the selected Rust source-gate complet
 SOURCE_GATE_PAPERWORK = "      - name: Check current ordinary-PR source-gate paperwork\n        if: github.event_name == 'workflow_dispatch' && inputs.workspace_rust_evidence != ''\n        env:\n          GITHUB_TOKEN: ${{ github.token }}\n          PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}\n        run: python3 -m validation.source_gate_landing paperwork\n"
 
 
+# Main's reviewed ARM64 device route is outside the Rust/Python recipes.
+# These exact blocks remain mandatory native qualification, never retained
+# device test outcomes. Any other workflow byte still fails projection.
+ANDROID_DEVICE_ROUTE_SHA256 = {'e1f5fbed22eeba3b72031a31dbdb4f4eb8aeb00e9ac2679d0bbd4d440c606953', '8a870a911c050bc33281e7986196a5bcad125131dce15cf85ea717f5ababdbd8'}
+
+
+def non_rust_device_projection(raw):
+    matches = list(re.finditer(rb'(?ms)^  android_(?:apks|device):\n.*?(?=^  package_smoke:)', raw))
+    receipts.require(len(matches) == 1 and retention.digest(matches[0].group()) in ANDROID_DEVICE_ROUTE_SHA256,
+                     'Unreviewed native Android device workflow projection')
+    return raw[:matches[0].start()] + b'  <reviewed-native-android-device-jobs>\n' + raw[matches[0].end():]
+
+
 def metadata_only_workflow(before, after):
-    return (all(before.count(block.encode()) == 0 and after.count(block.encode()) == 1
-                for block in (SOURCE_GATE_UPLOAD, SOURCE_GATE_PAPERWORK))
-            and after.replace(SOURCE_GATE_UPLOAD.encode(), b'').replace(SOURCE_GATE_PAPERWORK.encode(), b'') == before)
+    if not all(before.count(block.encode()) == 0 and after.count(block.encode()) == 1
+               for block in (SOURCE_GATE_UPLOAD, SOURCE_GATE_PAPERWORK)):
+        return False
+    stripped = after.replace(SOURCE_GATE_UPLOAD.encode(), b'').replace(SOURCE_GATE_PAPERWORK.encode(), b'')
+    if stripped == before:
+        return True
+    return non_rust_device_projection(stripped) == non_rust_device_projection(before)
 
 
 def check_workflow_environment(workflow, expected):

@@ -319,3 +319,16 @@ class NextestShardContinuationTests(unittest.TestCase):
         self.assertEqual(current,{binary+' green'});self.assertEqual(due,set())
         with self.assertRaises(r.ReceiptError):
             proof.current_census(record,self.listing({'green':False,name:False}),config)
+
+    def test_reviewed_native_device_route_projection_never_relaxes_rust_recipe_bytes(self):
+        from validation import workspace_rust_continuation as native
+        old=b'name: ci\njobs:\n  check:\n    run: cargo test\n  android_device:\n    old native device\n  package_smoke:\n    run: package\n'
+        new=old.replace(b'  android_device:\n    old native device\n',b'  android_apks:\n    compile APKs\n  android_device:\n    native ARM64 device\n')
+        selected=lambda raw: raw.split(b'  android_',1)[1].split(b'  package_smoke:',1)[0]
+        oldblock=b'  android_'+selected(old);newblock=b'  android_'+selected(new)
+        after=new+native.SOURCE_GATE_UPLOAD.encode()+native.SOURCE_GATE_PAPERWORK.encode()
+        with patch.object(native,'ANDROID_DEVICE_ROUTE_SHA256',{proof.retention.digest(oldblock),proof.retention.digest(newblock)}):
+            self.assertTrue(native.metadata_only_workflow(old,after))
+            self.assertFalse(native.metadata_only_workflow(old,after.replace(b'cargo test',b'cargo test --release')))
+            with self.assertRaises(r.ReceiptError):
+                native.metadata_only_workflow(old,after.replace(b'native ARM64 device',b'unreviewed device'))
