@@ -1149,6 +1149,7 @@ pub(super) fn copy_landing_probe(production: &[String]) -> Option<LandingProbe> 
 
 /// Exact landing clock over a job-owned SourceInput bridge. The caller
 /// keeps the bridge and its source holder alive through publication.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn m7_copy_landing_clock(
     args: &[String],
     program: PathBuf,

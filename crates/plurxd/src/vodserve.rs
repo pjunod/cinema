@@ -1762,6 +1762,7 @@ use marker_dispatch::*;
 // split: begin vod-generation
 #[path = "vod/generation.rs"]
 mod generation;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use generation::m7_copy_landing_clock;
 use generation::*;
 #[path = "vod/stream_format.rs"]
@@ -1785,10 +1786,12 @@ mod retained_manifest;
 #[path = "vod/plan.rs"]
 mod plan;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn m7_copy_policy(timescale: u32) -> plurx_core::fmp4::CutPolicy {
     plan::shipped_policy(timescale)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) async fn m7_read_muxer_init<R: tokio::io::AsyncRead + Unpin>(
     source: &mut R,
     limit: usize,

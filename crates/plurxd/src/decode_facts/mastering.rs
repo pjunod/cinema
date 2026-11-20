@@ -122,6 +122,7 @@ pub(crate) fn source_mastering_metadata(
 }
 
 /// The selected stream's exact ST 2086 primary coordinates and luminance.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn source_st2086(
     stream: &serde_json::Value,
 ) -> Result<Option<([u16; 8], u32, u32)>, String> {
