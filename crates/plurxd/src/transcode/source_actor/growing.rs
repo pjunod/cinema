@@ -779,8 +779,8 @@ impl TranscodeManager {
             }
             let members = owner
                 .gate
-                .membership
-                .observe_source_admission_members()
+                .source_members
+                .observe()
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?
                 .ok_or(SourceWorkerError::Unavailable)?;
@@ -838,8 +838,8 @@ impl TranscodeManager {
             }
             let members = owner
                 .gate
-                .membership
-                .observe_source_admission_members()
+                .source_members
+                .observe()
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?
                 .ok_or(SourceWorkerError::Unavailable)?;

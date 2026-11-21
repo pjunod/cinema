@@ -129,8 +129,8 @@ impl JobManager {
         let publisher = lease.publisher(self.store.as_ref());
         let result: Result<(), StoreError> = async {
             let predictions = self.prediction_discoveries().await?;
-            let mut nodes = if let Some(membership) = &self.membership {
-                membership.operations_peers().await.map_err(|error| StoreError::Task(error.to_string()))?
+            let mut nodes = if let Some(jobs) = &self.reconciliation {
+                jobs.artifact_workers().await.map_err(|error| StoreError::Task(error.to_string()))?
                     .into_iter().map(|peer| peer.node_id).collect::<Vec<_>>()
             } else { Vec::new() };
             nodes.push(self.coordinator.node_id().into());
@@ -185,11 +185,11 @@ impl JobManager {
     }
 
     pub(super) async fn prepare_hot_copies(&self) -> Result<(), StoreError> {
-        let Some(membership) = &self.membership else {
+        let Some(jobs) = &self.reconciliation else {
             return Ok(());
         };
-        let mut nodes = membership
-            .operations_peers()
+        let mut nodes = jobs
+            .artifact_workers()
             .await
             .map_err(|error| StoreError::Task(error.to_string()))?
             .into_iter()

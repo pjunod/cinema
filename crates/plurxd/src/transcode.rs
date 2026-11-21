@@ -684,7 +684,8 @@ pub struct TranscodeManager {
     runtime_cache: PathBuf,
     /// Extracted text subtitles shared with the WebVTT endpoint.
     subtitle_cache: PathBuf,
-    subtitle_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    subtitle_calls: Option<crate::cluster::calls::PeerTransport>,
+    subtitle_directory: Option<crate::cluster::Directory>,
     subtitle_jobs: Option<Arc<crate::state::JobManager>>,
     caps: EncoderCaps,
     /// Portable decoder names inventoried from this exact ffmpeg at boot.

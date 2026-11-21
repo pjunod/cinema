@@ -235,6 +235,7 @@ impl Fixture {
         resolve(
             &self.store,
             None,
+            None,
             NODE,
             &self.namespace,
             &self.cache,

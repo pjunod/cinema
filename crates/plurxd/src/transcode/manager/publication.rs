@@ -1987,7 +1987,7 @@ impl TranscodeManager {
             {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    tracing::debug!(target: "plurxd::http::hls", index, %error, "native FEL object declined");
+                    tracing::debug!(target: "plurxd::transcode", index, %error, "native FEL object declined");
                     last_committed = None;
                     continue;
                 }
@@ -2036,7 +2036,7 @@ impl TranscodeManager {
             }
             last_committed = Some(index);
             had_commit = true;
-            tracing::info!(target: "plurxd::http::hls", session = %session_log_id(session_id), index,
+            tracing::info!(target: "plurxd::transcode", session = %session_log_id(session_id), index,
                 "native FEL object sealed for rolling publication");
         }
     }

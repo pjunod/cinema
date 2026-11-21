@@ -774,3 +774,27 @@ reason = """Landing commit of #1588 (fix(reader): repair desktop and mobile eboo
 [[errata]]
 commit = "ad6c43e1e1de64e80da1e7d954aa00ba69fce4a0"
 reason = """Landing commit of #1638 (fix(playback): keep daemon-file registration advisory without reader roots; unhang the FEL handoff test), merged 2026-11-15 12:41 UTC through the API without Regression-Test lines in its message. Corrective commits it brings in: 5241a955 (fix(playback): show unconfigured source-access roots in Developer recovery status); 5579f4b4 (fix(playback): keep daemon-file registration advisory when reader roots are absent); 1204b7e9 (fix(dv): release the FEL handoff command before reading its pipe to the end). #1638's body names 5 line(s), all of which resolve in ad6c43e1e's own tree: crates/plurxd/src/source_probe/fel_qualification.rs::fel_output_handoff_withholds_original_source_and_preserves_outputs, crates/plurxd/src/source_probe/fel_qualification.rs::qualification_broker_pauses_pipe_partners_and_reaps_before_close, crates/plurx-core/src/process/source_lifetime/policy.rs::absent_roots_record_no_daemon_file_and_do_not_fail_its_owner, crates/plurxd/src/source_custody.rs::unconfigured_roots_are_reported_with_their_startup_reason, crates/plurxd/src/http/developer.rs::source_recovery_names_unconfigured_roots_and_their_reason. A landing commit cannot be amended, so this row records the omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[landings]]
+commit = "d19e229d715a17f0085416026716d82a62c489bb"
+tree = "d292ddafea12b36610393bd1eaf1b9fcfb329243"
+parents = ["7829748b91bad793bb2d1e618bf6a9c4849eb20a", "c29c87363045527acd11b3b47e8fa61e17bc391d"]
+title = "perf(cluster): route media rosters and Live TV authority through the facade"
+pull = "1716"
+reason = "Verified Forgejo task PR #1716 merged into effort/cluster-facade. The immutable merge subject omitted the PR number. Its original 4 regression trailers are checked in this exact merge tree."
+
+[[landings]]
+commit = "53d99f6c63f83a6aa59cdc58a96a92aa8c93b453"
+tree = "d9d4026ba7bd3376df5bc7fced5fcd8b3e65cbb1"
+parents = ["d19e229d715a17f0085416026716d82a62c489bb", "5fc4cf4b7a04c8a80c148613a6ffb1e723e3ec7b"]
+title = "perf(cluster): route role and artwork readers through the facade"
+pull = "1747"
+reason = "Verified Forgejo task PR #1747 merged into effort/cluster-facade. The immutable merge subject omitted the PR number. Its original 7 regression trailers are checked in this exact merge tree."
+
+[[landings]]
+commit = "ecfd892f0b10f2ce8a726e758843a302ca256995"
+tree = "f1285b43de6ff8f1a85deead28c46e7309c494b2"
+parents = ["53d99f6c63f83a6aa59cdc58a96a92aa8c93b453", "d43ff50a42be0ee61f78939c82711a5e34633b27"]
+title = "perf(cluster): invalidate peer rosters by applied table revisions"
+pull = "1770"
+reason = "Verified Forgejo task PR #1770 merged into effort/cluster-facade. The immutable merge subject omitted the PR number. Its original 6 regression trailers are checked in this exact merge tree."
