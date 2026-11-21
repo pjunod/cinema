@@ -3391,6 +3391,26 @@ fn sharing_member_guard_with_freshness(
     cutoff_parameter: usize,
     upper_parameter: Option<usize>,
 ) -> String {
+    sharing_member_guard_sql(
+        required,
+        members_parameter,
+        cutoff_parameter,
+        upper_parameter,
+        None,
+    )
+}
+
+/// `fresh_parameter`, when present, binds a JSON array of Raft ids and limits
+/// the heartbeat-freshness term to those members. Only the serving-read floor
+/// passes one (the committed voters plus the serving member). Every write,
+/// admission and transition guard passes `None` and keeps the all-member rule.
+fn sharing_member_guard_sql(
+    required: SharingMemberFloor,
+    members_parameter: usize,
+    cutoff_parameter: usize,
+    upper_parameter: Option<usize>,
+    fresh_parameter: Option<usize>,
+) -> String {
     let committed = format!("${members_parameter}");
     let cutoff = format!("${cutoff_parameter}");
     let stale = match upper_parameter {
@@ -3398,6 +3418,13 @@ fn sharing_member_guard_with_freshness(
             format!("present.last_seen_at < {cutoff} OR present.last_seen_at > ${parameter}")
         }
         None => format!("present.last_seen_at < {cutoff}"),
+    };
+    let stale = match fresh_parameter {
+        Some(parameter) => format!(
+            "({stale}) AND present.raft_id IN \
+             (SELECT CAST(scope.value AS INTEGER) FROM json_each(${parameter}) AS scope)"
+        ),
+        None => stale,
     };
     format!(
         "EXISTS (SELECT 1 FROM json_each({committed})) \
@@ -3462,6 +3489,51 @@ pub async fn sharing_member_floor_ready(
         required,
     )
     .await
+}
+
+/// Quorum observation of the serving-read floor: what a Source may consult
+/// before it answers an authenticated catalogue, scope or content read from
+/// state it already holds. It differs from [`sharing_member_floor_ready`] in
+/// one term only. Heartbeat freshness is required of the committed voters and
+/// of the serving member, not of every registered learner.
+///
+/// The all-member freshness rule exists so that a node that is down cannot
+/// come back on a rolled-back binary into a cluster that has narrowed onto a
+/// protocol (see `no_absent_node_predicate`). That protects replicated
+/// writes and transitions, and those keep it: every admission, custody and
+/// transition guard still embeds the strict predicate. A read narrows nothing.
+/// An offline learner serves nothing, holds no quorum vote, and writes nothing
+/// until it heartbeats again. When it does, it is in scope again. Capability
+/// proofs, the committed roster, joins and removals in flight, a known leader,
+/// and a stable membership log remain required of every member exactly as
+/// before. A lost quorum still fails the consistent read and refuses.
+pub async fn sharing_member_serving_floor_ready(
+    client: &Client,
+    local_raft_id: u64,
+    required: SharingMemberFloor,
+) -> Result<bool, MembershipError> {
+    member_serving_floor_ready(
+        &CountedClient::membership(client.clone()),
+        local_raft_id,
+        required,
+    )
+    .await
+}
+
+async fn member_serving_floor_ready(
+    client: &CountedClient,
+    local_raft_id: u64,
+    required: SharingMemberFloor,
+) -> Result<bool, MembershipError> {
+    Ok(sharing_member_floor_observation_scoped(
+        client,
+        local_raft_id,
+        required,
+        false,
+        FloorFreshness::VotersAndServingMember,
+    )
+    .await?
+    .is_some())
 }
 
 /// The three public observations above, on the manager's counted client.
@@ -3797,12 +3869,44 @@ fn purpose_master_proof_predicate(id: &str) -> Result<String, MembershipError> {
     ))
 }
 
+/// Which members the heartbeat-freshness term covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FloorFreshness {
+    /// Every non-removed member: the rule for writes, admission, custody and
+    /// protocol transitions.
+    AllMembers,
+    /// The committed voters and the serving member: serving reads only.
+    VotersAndServingMember,
+}
+
 async fn sharing_member_floor_observation(
     client: &CountedClient,
     local_raft_id: u64,
     required: SharingMemberFloor,
     require_transition_absence: bool,
 ) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
+    sharing_member_floor_observation_scoped(
+        client,
+        local_raft_id,
+        required,
+        require_transition_absence,
+        FloorFreshness::AllMembers,
+    )
+    .await
+}
+
+async fn sharing_member_floor_observation_scoped(
+    client: &CountedClient,
+    local_raft_id: u64,
+    required: SharingMemberFloor,
+    require_transition_absence: bool,
+    freshness: FloorFreshness,
+) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
+    // A narrowed freshness scope is a read policy. Anything that will feed a
+    // transition or admission write must observe every member.
+    if require_transition_absence && freshness != FloorFreshness::AllMembers {
+        return Err(MembershipError::Incompatible);
+    }
     let before = client.metrics_db().await?;
     let members = before
         .membership_config
@@ -3828,7 +3932,27 @@ async fn sharing_member_floor_observation(
     let members_json = bounded_committed_raft_ids_json(&members)?;
     let now = unix_ms()?;
     let cutoff = now.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
-    let mut guard = sharing_member_guard_with_freshness(required, 1, 2, None);
+    // Binding $3 for the serving-read scope: the committed voters plus the
+    // serving member. Raft's own voter set decides, not the SQL `role` column,
+    // which a node that joined as a voter leaves NULL.
+    let fresh_json = match freshness {
+        FloorFreshness::AllMembers => None,
+        FloorFreshness::VotersAndServingMember => {
+            let mut scope = before
+                .membership_config
+                .voter_ids()
+                .collect::<BTreeSet<_>>();
+            scope.insert(local_raft_id);
+            Some(bounded_committed_raft_ids_json(&scope)?)
+        }
+    };
+    let fresh_parameter = fresh_json.as_ref().map(|_| 3);
+    let fresh_rows = if fresh_parameter.is_some() {
+        " AND node.raft_id IN (SELECT CAST(scope.value AS INTEGER) FROM json_each($3) AS scope)"
+    } else {
+        ""
+    };
+    let mut guard = sharing_member_guard_sql(required, 1, 2, None, fresh_parameter);
     let generation_projection = if require_transition_absence {
         let present = client.query_consistent_map::<CountRow,_>(
             "sharing_member_floor_observation",
@@ -3863,7 +3987,11 @@ async fn sharing_member_floor_observation(
             required.capabilities().iter().map(|capability| capability_ready_predicate(capability)).collect::<Vec<_>>().join(" AND "),
             no_join_in_flight_predicate().to_owned(),
             no_removal_in_flight_predicates(),
-            "NOT EXISTS(SELECT 1 FROM cluster_nodes present WHERE present.removed_at IS NULL AND (present.last_seen_at<$2))".to_owned(),
+            if fresh_parameter.is_some() {
+                "NOT EXISTS(SELECT 1 FROM cluster_nodes present WHERE present.removed_at IS NULL AND (present.last_seen_at<$2) AND present.raft_id IN (SELECT CAST(scope.value AS INTEGER) FROM json_each($3) AS scope))".to_owned()
+            } else {
+                "NOT EXISTS(SELECT 1 FROM cluster_nodes present WHERE present.removed_at IS NULL AND (present.last_seen_at<$2))".to_owned()
+            },
             if require_transition_absence { sharing_member_transition_absence_predicate().to_owned() } else { "1".to_owned() },
             if require_transition_absence { sharing_membership_generation_shape_predicate() } else { "1".to_owned() },
             "EXISTS(SELECT 1 FROM json_each($1)) AND NOT EXISTS(SELECT 1 FROM json_each($1) committed WHERE NOT EXISTS(SELECT 1 FROM cluster_nodes member WHERE member.raft_id=CAST(committed.value AS INTEGER) AND member.removed_at IS NULL))".to_owned(),
@@ -3882,10 +4010,13 @@ async fn sharing_member_floor_observation(
             format!(
                 "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS ready, \
                  MIN(node.last_seen_at) AS oldest_heartbeat, MAX(node.last_seen_at) AS newest_heartbeat, {generation_projection} AS generation{diagnostic_projection} \
-                 FROM cluster_nodes AS node WHERE node.removed_at IS NULL",
+                 FROM cluster_nodes AS node WHERE node.removed_at IS NULL{fresh_rows}",
                 guard,
             ),
-            params!(members_json.as_str(), cutoff),
+            match fresh_json.as_deref() {
+                Some(scope) => params!(members_json.as_str(), cutoff, scope),
+                None => params!(members_json.as_str(), cutoff),
+            },
         )
         .await?;
     let after = client.metrics_db().await?;
@@ -12273,6 +12404,10 @@ impl MembershipManager {
     /// its serving fence is ready, so a published outage discards the answer
     /// at once; `None` (not ready, or a loss still pending) reads fresh and
     /// keeps nothing.
+    ///
+    /// This is the serving-read floor (`sharing_member_serving_floor_ready`):
+    /// a registered learner whose heartbeat went stale does not refuse it.
+    /// No write may admit on this answer. Writes embed the strict guard.
     pub async fn sharing_member_floor_advisory(
         &self,
         required: SharingMemberFloor,
@@ -12280,7 +12415,8 @@ impl MembershipManager {
     ) -> Result<bool, MembershipError> {
         let inner = Arc::clone(self.inner.as_ref().ok_or(MembershipError::Unavailable)?);
         let Some(epoch) = epoch else {
-            return member_floor_ready(&inner.client, inner.identity.raft_id, required).await;
+            return member_serving_floor_ready(&inner.client, inner.identity.raft_id, required)
+                .await;
         };
         let advisory = Arc::clone(&inner.floor_advisories[required.index()]);
         let keyed = Arc::clone(&inner);
@@ -12294,7 +12430,7 @@ impl MembershipManager {
                 async move {
                     tokio::time::timeout(
                         SHARING_FLOOR_ADVISORY_READ_BOUND,
-                        member_floor_ready(&inner.client, inner.identity.raft_id, required),
+                        member_serving_floor_ready(&inner.client, inner.identity.raft_id, required),
                     )
                     .await
                     .map_err(|_| MembershipError::Unavailable)?
