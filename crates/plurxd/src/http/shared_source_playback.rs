@@ -2067,7 +2067,7 @@ async fn own_start(
     // withholds those claims from every receiver that did not. An older
     // receiver round-trips the Start through a `StartResponse` that never
     // deserializes the rows, and would refuse it.
-    let relays_enhancement = (headers.forwarded_ingress().is_none()
+    let relays_enhancement = (!headers.arrived_forwarded()
         && receiver_presentation::authenticated_receiver_dolby_vision(&headers))
         || input
             .session
@@ -2083,7 +2083,7 @@ async fn own_start(
         // receiver that did not affirm relay; a Start taken here with the
         // receiver's own headers can also say so. A forwarded owner cannot
         // tell a withheld recipe from one that never claimed Dolby Vision.
-        headers.forwarded_ingress().is_none()
+        !headers.arrived_forwarded()
             && !receiver_presentation::authenticated_receiver_dolby_vision(&headers),
         relays_enhancement,
     ))

@@ -248,6 +248,14 @@ impl SourceHeaders {
     pub(super) fn forwarded_ingress(&self) -> Option<&ForwardIngress> {
         self.forwarded.as_ref().map(|auth| &auth.ingress)
     }
+    /// Whether this operation reached its owner through a Source ingress: by
+    /// the retained forwarded envelope, or by the fresh preparation that
+    /// precedes it and starts the owned task. Either way the receiver's own
+    /// headers stopped at that ingress, which already applied them to the
+    /// recipe, so their absence here says nothing about the receiver.
+    pub(super) fn arrived_forwarded(&self) -> bool {
+        self.forwarded.is_some() || self.fresh.is_some()
+    }
 }
 pub(crate) trait AuthenticationHeaders {
     fn authenticated_receiver_presentation(&self) -> Option<bool> {
@@ -1886,6 +1894,23 @@ async fn custody_inner(
 mod tests {
     use super::*;
     use axum::http::header;
+    /// The owner's task is started by the fresh preparation, before any
+    /// forwarded envelope exists. It must still know its Start came through
+    /// an ingress, or it reads the receiver's absent headers as a receiver
+    /// that affirmed nothing and marks every Dolby Vision title withheld.
+    #[test]
+    fn fresh_preparation_headers_say_the_start_arrived_forwarded() {
+        let principal =
+            PlaybackPrincipal::sharing(Uuid::new_v4(), &"b".repeat(64)).expect("sharing principal");
+        let fresh = SourceHeaders::verified_fresh(
+            "a".repeat(64),
+            principal,
+            Instant::now() + Duration::from_secs(5),
+        );
+        assert!(fresh.forwarded_ingress().is_none());
+        assert!(fresh.arrived_forwarded());
+        assert!(!SourceHeaders::from(HeaderMap::new()).arrived_forwarded());
+    }
     #[test]
     fn public_headers_cannot_construct_forwarded_authority() {
         let mut raw = HeaderMap::new();
@@ -1898,6 +1923,7 @@ mod tests {
         assert!(headers.authenticated_hash().is_none());
         assert!(headers.authenticated_principal().is_none());
         assert!(headers.forwarded_ingress().is_none());
+        assert!(!headers.arrived_forwarded());
         assert!(!headers.cleanup_only());
     }
     #[test]

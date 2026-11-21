@@ -108,6 +108,25 @@ async fn sharing_source_nonowner_range_native_copy_start_status_playlist_and_end
     .await
     .expect("finite real-member native range forwarding fixture");
 }
+/// A Dolby Vision title started by an affirming receiver through an ingress
+/// that is not the owner. The owner's task starts from the fresh preparation,
+/// which carries none of the receiver's headers: it must not read their
+/// absence as a receiver that withheld Dolby Vision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_nonowner_dolby_vision_start_is_preserved_and_not_marked_withheld() {
+    let fixture_body_budget =
+        crate::transcode::TranscodeManager::source_fixture_body_budget().await;
+    Box::pin(tokio::time::timeout(
+        Duration::from_secs(120),
+        actual_nonowner_forwarding(
+            fixture_body_budget,
+            false,
+            SourceFixtureMode::DolbyVisionPreserved,
+        ),
+    ))
+    .await
+    .expect("finite real-member Dolby Vision forwarding fixture");
+}
 async fn actual_nonowner_forwarding(
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
     clocked: bool,
@@ -436,6 +455,25 @@ async fn actual_nonowner_forwarding(
         .strip_prefix(&format!("/api/v1/hls/{}/", decoded.response().session_id))
         .expect("session playlist")
         .to_owned();
+    if matches!(mode, SourceFixtureMode::DolbyVisionPreserved) {
+        assert_eq!(
+            decoded.response().delivered_dynamic_range.as_deref(),
+            Some("dolby_vision")
+        );
+        assert!(
+            !decoded
+                .response()
+                .plan_notes
+                .iter()
+                .any(|note| note == super::receiver_presentation::DOLBY_VISION_WITHHELD_NOTE),
+            "an affirming receiver's forwarded Start is not marked withheld: {:?}",
+            decoded.response().plan_notes
+        );
+        assert!(
+            decoded.response().enhancement.is_some(),
+            "the affirming receiver is sent the enhancement rows"
+        );
+    }
     if range {
         // The growing copy is a bounded view, presentable only to a client
         // and receiver that both affirmed ranges, as these did.
