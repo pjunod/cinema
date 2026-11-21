@@ -1953,6 +1953,7 @@ async fn bootstrap_purpose_admission_schema(
         local_raft_id,
         SharingMemberFloor::PurposeKeys,
         false,
+        FloorFreshness::AllMembers,
     )
     .await?
     else {
@@ -3402,7 +3403,7 @@ fn sharing_member_guard_with_freshness(
 
 /// `fresh_parameter`, when present, binds a JSON array of Raft ids and limits
 /// the heartbeat-freshness term to those members. Only the serving-read floor
-/// passes one (the committed voters plus the serving member). Every write,
+/// passes one (the applied membership's voters plus the serving member). Every write,
 /// admission and transition guard passes `None` and keeps the all-member rule.
 fn sharing_member_guard_sql(
     required: SharingMemberFloor,
@@ -3494,7 +3495,7 @@ pub async fn sharing_member_floor_ready(
 /// Quorum observation of the serving-read floor: what a Source may consult
 /// before it answers an authenticated catalogue, scope or content read from
 /// state it already holds. It differs from [`sharing_member_floor_ready`] in
-/// one term only. Heartbeat freshness is required of the committed voters and
+/// one term only. Heartbeat freshness is required of the Raft voters and
 /// of the serving member, not of every registered learner.
 ///
 /// The all-member freshness rule exists so that a node that is down cannot
@@ -3525,7 +3526,7 @@ async fn member_serving_floor_ready(
     local_raft_id: u64,
     required: SharingMemberFloor,
 ) -> Result<bool, MembershipError> {
-    Ok(sharing_member_floor_observation_scoped(
+    Ok(sharing_member_floor_observation(
         client,
         local_raft_id,
         required,
@@ -3536,17 +3537,22 @@ async fn member_serving_floor_ready(
     .is_some())
 }
 
-/// The three public observations above, on the manager's counted client.
+/// The strict public observations above (every member fresh), on the
+/// manager's counted client.
 async fn member_floor_ready(
     client: &CountedClient,
     local_raft_id: u64,
     required: SharingMemberFloor,
 ) -> Result<bool, MembershipError> {
-    Ok(
-        sharing_member_floor_observation(client, local_raft_id, required, false)
-            .await?
-            .is_some(),
+    Ok(sharing_member_floor_observation(
+        client,
+        local_raft_id,
+        required,
+        false,
+        FloorFreshness::AllMembers,
     )
+    .await?
+    .is_some())
 }
 
 const SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS: i64 = 5_000;
@@ -3875,27 +3881,13 @@ enum FloorFreshness {
     /// Every non-removed member: the rule for writes, admission, custody and
     /// protocol transitions.
     AllMembers,
-    /// The committed voters and the serving member: serving reads only.
+    /// The voters of the applied membership and the serving member: serving
+    /// reads only. The oldest/newest heartbeat bounds are narrowed with it, so
+    /// a learner's future-dated heartbeat (clock skew) no longer refuses a read.
     VotersAndServingMember,
 }
 
 async fn sharing_member_floor_observation(
-    client: &CountedClient,
-    local_raft_id: u64,
-    required: SharingMemberFloor,
-    require_transition_absence: bool,
-) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
-    sharing_member_floor_observation_scoped(
-        client,
-        local_raft_id,
-        required,
-        require_transition_absence,
-        FloorFreshness::AllMembers,
-    )
-    .await
-}
-
-async fn sharing_member_floor_observation_scoped(
     client: &CountedClient,
     local_raft_id: u64,
     required: SharingMemberFloor,
@@ -3932,7 +3924,7 @@ async fn sharing_member_floor_observation_scoped(
     let members_json = bounded_committed_raft_ids_json(&members)?;
     let now = unix_ms()?;
     let cutoff = now.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
-    // Binding $3 for the serving-read scope: the committed voters plus the
+    // Binding $3 for the serving-read scope: the applied membership's voters plus the
     // serving member. Raft's own voter set decides, not the SQL `role` column,
     // which a node that joined as a voter leaves NULL.
     let fresh_json = match freshness {
@@ -4106,6 +4098,7 @@ async fn purpose_key_member_observation(
         local_raft_id,
         SharingMemberFloor::PurposeKeys,
         true,
+        FloorFreshness::AllMembers,
     )
     .await?
     else {
@@ -4174,8 +4167,14 @@ async fn source_member_observation(
     } else {
         SharingMemberFloor::PrincipalAndCatalogue
     };
-    let Some(mut observation) =
-        sharing_member_floor_observation(client, local_raft_id, required, true).await?
+    let Some(mut observation) = sharing_member_floor_observation(
+        client,
+        local_raft_id,
+        required,
+        true,
+        FloorFreshness::AllMembers,
+    )
+    .await?
     else {
         return Ok(None);
     };
@@ -12452,6 +12451,7 @@ impl MembershipManager {
             inner.identity.raft_id,
             SharingMemberFloor::IngressCustody,
             true,
+            FloorFreshness::AllMembers,
         )
         .await?
         .map(|members| IngressCustodyMembers { members }))
