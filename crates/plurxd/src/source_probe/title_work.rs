@@ -704,6 +704,43 @@ fn m7_settlement(
     })
 }
 
+async fn complete_title<E, P>(
+    demand: &TitleDemand,
+    output: TitleOutput,
+    evaluate: E,
+    interrupted: impl FnOnce() -> bool,
+    publish: impl FnOnce(TitleOutput) -> P,
+    retry_at: impl FnOnce() -> i64,
+) -> Result<(), JobSettlement>
+where
+    E: Future<Output = super::m7_title::EvaluationResult>,
+    P: Future<Output = Result<bool, StoreError>>,
+{
+    // The native_fel_head waiter reopens an already-settled title only to
+    // rebuild that node's local prefix.
+    let evaluation = if demand.fel_head_target.is_some() {
+        Ok(())
+    } else {
+        evaluate.await
+    };
+    if let Some(settlement) = m7_settlement(&output, evaluation, interrupted(), now_ms()) {
+        return Err(settlement);
+    }
+    match publish(output).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(JobSettlement::Stop {
+            error_code: "title_publication_fenced".into(),
+        }),
+        Err(error) => {
+            tracing::warn!(%error, "title publication unavailable");
+            Err(JobSettlement::Retry {
+                error_code: "title_publication_failed".into(),
+                not_before_ms: retry_at(),
+            })
+        }
+    }
+}
+
 /// The aggregate this title's job may settle with instead of reading the
 /// file: one stored under the generation the worker's bind left unchanged.
 /// Only a publisher bound to that generation's scanner stores one (an index
@@ -880,54 +917,32 @@ async fn execute(
                         checkpoint: Some(serde_json::json!({"fel_title_aggregate":output})),
                     })
                 } else {
-                    // The native_fel_head waiter reopens an already-settled
-                    // title only to rebuild that node's local prefix.
-                    let evaluation = if demand.fel_head_target.is_some() {
-                        Ok(())
-                    } else {
-                        let context = super::m7_comparison::TitleContext {
-                            state: &state,
-                            file: &file,
-                            demand: &demand,
-                            tools: &tools,
-                            admission: &admission,
-                            fence: &fence,
-                            cancel: &cancel,
-                            shutdown: &shutdown,
-                        };
-                        super::m7_title::evaluate(&context, &output.stats).await
+                    let context = super::m7_comparison::TitleContext {
+                        state: &state,
+                        file: &file,
+                        demand: &demand,
+                        tools: &tools,
+                        admission: &admission,
+                        fence: &fence,
+                        cancel: &cancel,
+                        shutdown: &shutdown,
                     };
-                    let settlement = m7_settlement(
-                        &output,
-                        evaluation,
-                        cancel.is_cancelled() || shutdown.is_cancelled(),
-                        now_ms(),
-                    );
-                    if settlement.is_some() {
-                        settlement
-                    } else {
-                        match fence.publish_dv_title(output).await {
-                            Ok(true) => {
-                                published = true;
-                                None
-                            }
-                            Ok(false) => Some(JobSettlement::Stop {
-                                error_code: "title_publication_fenced".into(),
-                            }),
-                            Err(error) => {
-                                tracing::warn!(%error,"title publication unavailable");
-                                Some(JobSettlement::Retry {
-                                    error_code: "title_publication_failed".into(),
-                                    not_before_ms: now_ms().saturating_add(
-                                        crate::background_jobs::retry_delay_ms(
-                                            &job.id,
-                                            job.failed_attempts,
-                                        ),
-                                    ),
-                                })
-                            }
-                        }
-                    }
+                    let outcome = complete_title(
+                        &demand,
+                        output,
+                        super::m7_title::evaluate(&context, &stats),
+                        || cancel.is_cancelled() || shutdown.is_cancelled(),
+                        |output| fence.publish_dv_title(output),
+                        || {
+                            now_ms().saturating_add(crate::background_jobs::retry_delay_ms(
+                                &job.id,
+                                job.failed_attempts,
+                            ))
+                        },
+                    )
+                    .await;
+                    published = outcome.is_ok();
+                    outcome.err()
                 }
             }
             Ok(TitleAcquisition::QualificationOnly(_)) => {
