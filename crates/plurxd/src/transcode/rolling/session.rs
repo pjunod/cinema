@@ -2416,7 +2416,9 @@ impl Session {
         spawn: F,
     ) -> Result<tokio::process::ChildStdout, String>
     where
-        F: FnOnce(Option<&str>) -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String>,
+        F: FnOnce(
+            Option<&crate::source_input::SourceInput>,
+        ) -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String>,
     {
         let mut slot = self.child.lock().await;
         if let Some(child) = slot.as_ref() {
@@ -2431,7 +2433,7 @@ impl Session {
             ),
             None => None,
         };
-        let (observed, stdout) = spawn(custody.as_ref().map(|input| input.url()))?;
+        let (observed, stdout) = spawn(custody.as_ref())?;
         let (candidate, child_job, diagnostics) = observed.into_parts();
         *slot = Some(AttemptChild::new_with_source_job(
             producer_attempt,

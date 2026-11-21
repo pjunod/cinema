@@ -1,3 +1,12 @@
+# Native FEL Resume clock. The optional reader drains the rolling producer's
+# bounded picture records and keeps draining discarded data until its inherited
+# descriptor closes. It owns only the read endpoint and observation channel.
+# The existing admitted producer owner still reaps FFmpeg and settles source
+# custody. A 50 ms wait caps startup's demand for complete clock records;
+# expiry declines the layout and neither stops the child nor proves settlement.
+# The shape counter adds one Tokio task, its production and test wrapper calls,
+# and the wrapper declaration. There is no additional FFmpeg launch.
+
 # Main #1833 composes verified FEL prefix staging with the existing legacy
 # copy owner. The staged writer holds its checked scratch grant through the
 # same transition and publication locks. The adaptive prepared parser keeps
@@ -4323,7 +4332,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # The index-reclaim fixture drives the real paced index in one joined test task.
 # The scanner deadline fixture owns a task so it can observe the actual probe child.
 # The relay regression runs a loopback fixture server and cancels it on completion.
-expected_occurrences = 1278
+expected_occurrences = 1281
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4621,7 +4630,7 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # declared_background_spawn calls `spawn()` after recording the escape tick.
 # F+ descriptor integration: +1 call to the existing dv_refit::spawn wrapper in the isolated
 # configured-policy regression, not a new task or process owner.
-expected_occurrences = 32
+expected_occurrences = 33
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6339,7 +6348,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # observes slot release under a bounded wait.
 # Local offer classification and post-Busy peer discovery each use existing
 # request cutoffs. One fixture timer separates BOOTTIME expiry from paused Tokio time.
-expected_occurrences = 2551
+expected_occurrences = 2552
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

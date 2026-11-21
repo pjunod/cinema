@@ -157,6 +157,7 @@ impl TranscodeManager {
             None,
             None,
             None,
+            None,
             Some(cancel),
         )
         .await;
@@ -648,6 +649,29 @@ impl TranscodeManager {
         })
     }
 
+    pub(crate) fn observe_native_fel_backend(&self, identity: Option<String>) {
+        *self
+            .native_fel_backend
+            .lock()
+            .expect("FEL backend observation") = identity;
+    }
+
+    pub(super) fn native_fel_start_verdict(
+        &self,
+        source: &plurx_core::store::PlaybackPlanningSnapshot,
+    ) -> Option<bool> {
+        // The title worker already validated the backend. This observation
+        // selects a layout only; each renderer still validates its own recipe.
+        let probe = source.probe_json.as_deref()?;
+        let identity = self
+            .native_fel_backend
+            .lock()
+            .expect("FEL backend observation")
+            .clone()?;
+        let request = native_fel_request_from_probe(&source.file, probe, identity).ok()?;
+        native_fel_verdict(&source.file, probe, &request)
+    }
+
     pub(super) async fn warm_native_fel_head(
         &self,
         file: &MediaFile,
@@ -887,8 +911,6 @@ impl TranscodeManager {
         scanner: &str,
         now_ms: i64,
     ) -> Result<(), String> {
-        use crate::source_probe::fel_qualification::{default_native_request, Clock};
-        use plurx_core::transcode::dv_fel_qualification::{verdict_state, VerdictState};
         let file_id = {
             let mut target = self
                 .native_fel_target
@@ -934,13 +956,9 @@ impl TranscodeManager {
         {
             return Ok(());
         }
-        let document = serde_json::from_str(probe).map_err(|error| error.to_string())?;
-        let clock = Clock::from_document(&document)?;
-        let backend = self.fel_identity(&tools.backend_digest()).await?;
-        let request = default_native_request(file, &document, clock, backend)?;
-        if !matches!(verdict_state(Some(probe), file.size, file.mtime, &request.identity),
-            VerdictState::Current(verdict) if verdict.admitted)
-        {
+        let identity = self.fel_identity(&tools.backend_digest()).await?;
+        let request = native_fel_request_from_probe(file, probe, identity)?;
+        if native_fel_verdict(file, probe, &request) != Some(true) {
             return Ok(());
         }
         self.store
@@ -955,5 +973,28 @@ impl TranscodeManager {
             .await
             .map_err(|error| error.to_string())?;
         Ok(())
+    }
+}
+
+fn native_fel_request_from_probe(
+    file: &MediaFile,
+    probe: &str,
+    identity: String,
+) -> Result<plurx_core::transcode::dv_fel_qualification::FelRecipeRequest, String> {
+    use crate::source_probe::fel_qualification::{default_native_request, Clock};
+    let document = serde_json::from_str(probe).map_err(|error| error.to_string())?;
+    let clock = Clock::from_document(&document)?;
+    default_native_request(file, &document, clock, identity)
+}
+
+fn native_fel_verdict(
+    file: &MediaFile,
+    probe: &str,
+    request: &plurx_core::transcode::dv_fel_qualification::FelRecipeRequest,
+) -> Option<bool> {
+    use plurx_core::transcode::dv_fel_qualification::{verdict_state, VerdictState};
+    match verdict_state(Some(probe), file.size, file.mtime, &request.identity) {
+        VerdictState::Missing => None,
+        VerdictState::Current(verdict) => Some(verdict.admitted),
     }
 }

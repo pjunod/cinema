@@ -36,7 +36,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [ADAPTIVE-PLAYBACK-RESOURCE-ACCEPTANCE.md](ADAPTIVE-PLAYBACK-RESOURCE-ACCEPTANCE.md) | Required workload, lifecycle, cluster, platform and latency evidence for adaptive resource management. | open |
 | [ADAPTIVE-PLAYBACK-RESOURCE-REVIEW.md](ADAPTIVE-PLAYBACK-RESOURCE-REVIEW.md) | Fable 5.1 findings, dispositions, reviewed hashes and remaining acceptance. | done |
 | [ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) | How every playback pipeline learns per-node capacity, preserves owned resources, and uses eligible cluster workers before quality fallback. | open |
-| [HDR-REFERENCE-SCORING.md](HDR-REFERENCE-SCORING.md) | Independent bounded PQ code-domain metrics/census and explicitly graded BT.709 reference provenance for SDR VMAF; diagnostic evidence does not close genuine corpus, GPU or physical acceptance. | open |
+| [HDR-REFERENCE-SCORING.md](HDR-REFERENCE-SCORING.md) | Bounded PQ metrics/census, shared RGB48 inverse and pinned CPU ColorVideoVDP component evidence, plus BT.709 provenance for SDR VMAF; one-host perceptual CLI/corpus/physical acceptance remains open. | open |
 | [TONEMAP-SEGMENT-CONSISTENCY.md](TONEMAP-SEGMENT-CONSISTENCY.md) | Exact source-frame and rational-PTS comparison of continuous and restarted tone-map filters; separate from seek, encoded-HLS and display acceptance. | open |
 | [Tone-map reset receipt](evidence/tonemap-reset-20261015.json) | Four authored CPU/Metal campaigns, exact raw-frame and rational-PTS results, the preserved fixture failure and metadata-only correction proof. | done |
 | [PERF-PLAN.md](PERF-PLAN.md) | Round one: where the seconds go, and the plan to get them back. | built |

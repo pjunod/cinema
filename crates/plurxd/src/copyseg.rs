@@ -440,6 +440,139 @@ impl NativeSplitAuthor {
 
 /// Split assets are private until the rolling response owner selects the
 /// layout. Each segment is added only after its two immutable objects land.
+#[cfg(target_os = "linux")]
+pub(crate) const COPY_PICTURE_LIMIT: usize = 512;
+
+#[cfg(target_os = "linux")]
+pub(crate) struct CopyPicturePipe {
+    version: String,
+    attempt: u64,
+    absolute_video_index: u32,
+    observations:
+        tokio::sync::mpsc::Receiver<plurx_core::segplan::packet_clock::SourcePictureObservation>,
+}
+
+#[cfg(target_os = "linux")]
+impl CopyPicturePipe {
+    pub(crate) fn spawn(
+        version: String,
+        attempt: u64,
+        absolute_video_index: u32,
+        pipe: tokio::net::UnixStream,
+    ) -> Self {
+        use plurx_core::segplan::packet_clock::PictureClockParser;
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+        let (sender, observations) = tokio::sync::mpsc::channel(COPY_PICTURE_LIMIT);
+        tokio::spawn(async move {
+            let mut pipe = BufReader::new(pipe);
+            let mut parser = PictureClockParser::default();
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                // The FFmpeg output is finite, but its descriptor remains
+                // open while the main mux runs. Cap each record independently.
+                let Ok(size) = (&mut pipe).take(1025).read_until(b'\n', &mut line).await else {
+                    break;
+                };
+                if size == 0 || size > 1024 || line.last() != Some(&b'\n') {
+                    break;
+                }
+                let Some(record) = std::str::from_utf8(&line)
+                    .ok()
+                    .and_then(|line| parser.push_line(line.trim_end()).ok())
+                else {
+                    break;
+                };
+                if let Some(record) = record {
+                    if sender.try_send(record).is_err() {
+                        break;
+                    }
+                }
+            }
+            // A declined splice must never break or block the ordinary mux.
+            drop(sender);
+            let _ = tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await;
+        });
+        Self {
+            version,
+            attempt,
+            absolute_video_index,
+            observations,
+        }
+    }
+
+    async fn observe(
+        &mut self,
+        init: &Init,
+        fragment: &fmp4::Fragment,
+    ) -> Option<RollingCopySourceClock> {
+        let count = fragment.track(init.video()?.id)?.sample_count();
+        if !(2..=COPY_PICTURE_LIMIT).contains(&count)
+            || fragment.len() > plurx_core::transcode::COPY_SEGMENT_MAX_BYTES
+        {
+            return None;
+        }
+        let observations = tokio::time::timeout(std::time::Duration::from_millis(50), async {
+            let mut observations = Vec::with_capacity(count);
+            for _ in 0..count {
+                observations.push(self.observations.recv().await?);
+            }
+            Some(observations)
+        })
+        .await
+        .ok()??;
+        let clock = fmp4::video_splice::observe_copy_picture_clock(fragment, init, &observations)
+            .inspect_err(|error| tracing::debug!(%error, "native splice copy clock declined"))
+            .ok()?;
+        Some(RollingCopySourceClock {
+            version: self.version.clone(),
+            attempt: self.attempt,
+            absolute_video_index: self.absolute_video_index,
+            clock,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) struct RollingCopySourceClock {
+    pub(crate) version: String,
+    pub(crate) attempt: u64,
+    pub(crate) absolute_video_index: u32,
+    pub(crate) clock: fmp4::video_splice::CopiedPictureClock,
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[tokio::test]
+async fn native_copy_picture_clock_binds_before_pipe_eof() {
+    use tokio::io::AsyncWriteExt;
+    let mut reader = FragmentReader::new();
+    reader.push(include_bytes!(
+        "../../plurx-core/tests/fixtures/dv-runtime/authored-with-aac.mp4"
+    ));
+    let Some(Unit::Init(init)) = reader.next_unit().expect("fixture init") else {
+        panic!("missing fixture init");
+    };
+    let Some(Unit::Fragment(fragment)) = reader.next_unit().expect("fixture fragment") else {
+        panic!("missing fixture fragment");
+    };
+    let (read, mut write) = tokio::net::UnixStream::pair().expect("fixture picture pipe");
+    let mut clock = CopyPicturePipe::spawn("fixture-source".into(), 12, 3, read);
+    write
+        .write_all(include_bytes!(
+            "../../plurx-core/tests/fixtures/dv-runtime/authored-with-aac.framehash"
+        ))
+        .await
+        .expect("send first GOP clock");
+
+    // FFmpeg keeps the descriptor open for the ordinary film. Only one
+    // complete record per retained video sample is needed to bind the proof.
+    let witness = clock.observe(&init, &fragment).await.expect("before EOF");
+    assert_eq!(witness.version, "fixture-source");
+    assert_eq!(witness.attempt, 12);
+    assert_eq!(witness.absolute_video_index, 3);
+    drop(write);
+}
+
 #[derive(Default)]
 pub(crate) struct NativeSplitInventory {
     startup_budget: u64,
@@ -450,6 +583,10 @@ pub(crate) struct NativeSplitInventory {
     rendered_fel: std::sync::Mutex<std::collections::BTreeMap<u64, NativeSplitFelReport>>,
     #[cfg(target_os = "linux")]
     compare_prepared_head: bool,
+    #[cfg(target_os = "linux")]
+    resume_clock_required: bool,
+    #[cfg(target_os = "linux")]
+    pub(crate) source_clock: std::sync::OnceLock<RollingCopySourceClock>,
     #[cfg(target_os = "linux")]
     prepared_head: std::sync::Mutex<PreparedNativeFelHead>,
     #[cfg(target_os = "linux")]
@@ -526,6 +663,12 @@ impl NativeSplitInventory {
             startup_budget,
             ..Self::default()
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn require_resume_clock(mut self) -> Self {
+        self.resume_clock_required = true;
+        self
     }
 
     #[cfg(target_os = "linux")]
@@ -678,7 +821,8 @@ impl NativeSplitInventory {
 
     pub(crate) fn owns_fel_processing(&self) -> bool {
         #[cfg(target_os = "linux")]
-        if self.compare_prepared_head {
+        if self.compare_prepared_head || (self.resume_clock_required && self.chosen.get().is_none())
+        {
             // A prepared native start has chosen a single media element.
             // Losing split activation must not start a hidden successor.
             return true;
@@ -796,6 +940,8 @@ struct SessionDir {
     dir: PathBuf,
     split_inventory: Option<std::sync::Arc<NativeSplitInventory>>,
     split_author: Option<NativeSplitAuthor>,
+    #[cfg(target_os = "linux")]
+    picture_clock: Option<CopyPicturePipe>,
     split_staged_bytes: u64,
     /// The `#EXTINF`/URI pairs, without the immutable header.
     entries: String,
@@ -865,6 +1011,8 @@ impl SessionDir {
             dir,
             split_inventory: None,
             split_author: None,
+            #[cfg(target_os = "linux")]
+            picture_clock: None,
             split_staged_bytes: 0,
             entries: String::new(),
             published_secs: 0.0,
@@ -1308,6 +1456,36 @@ async fn session_directory_gone(dir: &Path) -> bool {
 }
 
 impl CopyPublicationSink for SessionDir {
+    #[cfg(target_os = "linux")]
+    async fn observe_first_fragment(&mut self, init: &Init, fragment: &fmp4::Fragment) {
+        let Some(split) = self
+            .split_inventory
+            .as_ref()
+            .filter(|split| split.resume_clock_required)
+        else {
+            return;
+        };
+        let clock = match self.picture_clock.take() {
+            Some(mut pipe) => pipe.observe(init, fragment).await,
+            None => None,
+        };
+        if let Some(clock) = clock {
+            let _ = split.source_clock.set(clock);
+        } else {
+            self.split_inventory = None;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn observe_dv_enhancement_layer(
+        &mut self,
+        layer: plurx_core::transcode::dvconvert::EnhancementLayer,
+    ) {
+        if layer != plurx_core::transcode::dvconvert::EnhancementLayer::Full {
+            self.split_inventory = None;
+        }
+    }
+
     async fn torn_down(&self) -> bool {
         SessionDir::torn_down(self).await
     }
@@ -1389,6 +1567,8 @@ pub(crate) async fn run_observed<R: AsyncRead + Unpin>(
         measurement,
         None,
         None,
+        #[cfg(target_os = "linux")]
+        None,
         None,
     )
     .await
@@ -1408,6 +1588,7 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
     >,
     retained: Option<std::sync::Arc<crate::vodserve::retained::RollingCollection>>,
     split_inventory: Option<std::sync::Arc<NativeSplitInventory>>,
+    #[cfg(target_os = "linux")] picture_clock: Option<CopyPicturePipe>,
     cancellation: Option<&tokio_util::sync::CancellationToken>,
 ) -> Outcome {
     match tokio::fs::metadata(&dir).await {
@@ -1429,6 +1610,10 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
     out.measurement = measurement;
     out.retained = retained;
     out.split_inventory = split_inventory;
+    #[cfg(target_os = "linux")]
+    {
+        out.picture_clock = picture_clock;
+    }
     out.diagnostic_session = Some(crate::transcode::session_log_id(session_id));
     plurx_core::copy_segmenter::run_copy_pipe(
         src,

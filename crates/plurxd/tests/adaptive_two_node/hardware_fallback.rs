@@ -157,6 +157,44 @@ async fn real_hardware_busy_uses_one_signed_peer_start_and_releases_its_slot() {
     assert_eq!(hardware_slots(&cluster, &a).await, (0, 1));
     assert_eq!(hardware_slots(&cluster, &b).await, (0, 1));
 
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let offers = cluster
+            .client
+            .post(format!("{a}/api/v1/cluster/media/offers"))
+            .bearer_auth(&cluster.token)
+            .json(&json!({
+                "file_id":file, "target_height":360, "start_millis":0,
+                "audio_index":AUDIO_INDEX, "subtitle_index":null, "hdr10":false
+            }))
+            .send()
+            .await
+            .expect("signed peer offer round")
+            .error_for_status()
+            .expect("offers status")
+            .json::<Value>()
+            .await
+            .expect("offers JSON");
+        if offers["offers"].as_array().is_some_and(|rows| {
+            rows.iter().any(|offer| {
+                offer["node_id"] == cluster.b_id
+                    && offer["eligible"] == true
+                    && offer["initial_hardware_vod"] == true
+                    && offer["cache_hit"] == false
+                    && offer["encoder"] == "vaapi"
+                    && offer["free_hardware_slots"] == 1
+            })
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "B must offer a real unused VA-API slot for the cold recipe: {offers}{}",
+            cluster.logs(),
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
     let start_calls = cluster.proxy_b.hits(START_PATH);
     let relay_calls = cluster.proxy_b.hits(RELAY_PATH);
     let incumbent = start_hardware(&cluster, file, 480, "hardware-slot-incumbent").await;
@@ -165,37 +203,6 @@ async fn real_hardware_busy_uses_one_signed_peer_start_and_releases_its_slot() {
     assert_eq!(cluster.proxy_b.hits(RELAY_PATH), relay_calls);
     assert_eq!(hardware_slots(&cluster, &a).await, (1, 1));
     assert_eq!(hardware_slots(&cluster, &b).await, (0, 1));
-
-    let offers = cluster
-        .client
-        .post(format!("{a}/api/v1/cluster/media/offers"))
-        .bearer_auth(&cluster.token)
-        .json(&json!({
-            "file_id":file, "target_height":360, "start_millis":0,
-            "audio_index":AUDIO_INDEX, "subtitle_index":null, "hdr10":false
-        }))
-        .send()
-        .await
-        .expect("signed peer offer round")
-        .error_for_status()
-        .expect("offers status")
-        .json::<Value>()
-        .await
-        .expect("offers JSON");
-    assert!(
-        offers["offers"]
-            .as_array()
-            .is_some_and(|rows| rows.iter().any(|offer| {
-                offer["node_id"] == cluster.b_id
-                    && offer["eligible"] == true
-                    && offer["initial_hardware_vod"] == true
-                    && offer["cache_hit"] == false
-                    && offer["encoder"] == "vaapi"
-                    && offer["free_hardware_slots"] == 1
-            })),
-        "B must have a real unused VA-API slot for the cold recipe: {offers}{}",
-        cluster.logs()
-    );
 
     let peer = start_hardware(&cluster, file, 360, "hardware-peer-after-busy").await;
     assert_eq!(cluster.proxy_b.hits(START_PATH), start_calls + 1);

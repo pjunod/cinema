@@ -139,7 +139,7 @@ fn caps() -> Value {
     json!({
         "v": 2,
         "video": [{"codec":"hevc","profiles":["main10"],"present":["sdr","pq"],"dv_profiles":[8],"max_height":2160}],
-        "hls_hevc_sample_entries": ["hvc1"],
+        "transports": ["hls"], "hls_hevc_sample_entries": ["hvc1"],
         "audio": ["aac"], "containers": ["mkv","mp4"], "dv_transport":"hls",
         "display": {"hdr":true,"dolby_vision":true}
     })

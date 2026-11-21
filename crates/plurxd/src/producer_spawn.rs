@@ -128,6 +128,13 @@ impl Descriptors {
         self
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_copy_picture_clock(mut self, clock: &std::fs::File) -> Self {
+        use std::os::fd::AsRawFd as _;
+        self.inherited.push((clock.as_raw_fd(), 7));
+        self
+    }
+
     #[cfg(unix)]
     pub(crate) fn from_mappings(
         mappings: &[(std::os::fd::RawFd, i32)],

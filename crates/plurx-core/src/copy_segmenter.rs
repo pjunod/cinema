@@ -233,6 +233,21 @@ impl From<std::io::Error> for PublishError {
 }
 
 pub trait CopyPublicationSink {
+    /// Observe the original first fragment before any video conversion.
+    fn observe_first_fragment(
+        &mut self,
+        _init: &Init,
+        _fragment: &fmp4::Fragment,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
+
+    fn observe_dv_enhancement_layer(
+        &mut self,
+        _layer: crate::transcode::dvconvert::EnhancementLayer,
+    ) {
+    }
+
     fn torn_down(&self) -> impl std::future::Future<Output = bool> + Send;
     fn write_init(
         &mut self,
@@ -547,6 +562,9 @@ async fn run_copy_pipe_with<R: AsyncRead + Unpin, S: CopyPublicationSink>(
                     pending_init = Some((init, policy));
                 }
                 Unit::Fragment(mut fragment) => {
+                    if let Some((init, _)) = pending_init.as_ref() {
+                        sink.observe_first_fragment(init, &fragment).await;
+                    }
                     if let Some(converter) = converter.as_mut() {
                         let before = converter.report().source_profile;
                         if let Err(refused) = converter.convert(&mut fragment) {
@@ -566,6 +584,7 @@ async fn run_copy_pipe_with<R: AsyncRead + Unpin, S: CopyPublicationSink>(
                             );
                         }
                         if before.is_none() && report.source_profile.is_some() {
+                            sink.observe_dv_enhancement_layer(report.enhancement_layer);
                             tracing::info!(
                                 session = %session_id,
                                 source_profile = report.source_profile,

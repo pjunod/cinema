@@ -685,6 +685,7 @@ pub(super) async fn spawn_copy_reader_owner(
     source: plurx_core::domain::MediaFile,
     video: plurx_core::transcode::CopyVideoOptions,
     grants: Option<crate::copyseg::WriteGrants>,
+    #[cfg(target_os = "linux")] picture_clock: Option<crate::copyseg::CopyPicturePipe>,
 ) -> Result<(), String> {
     let registry_owner = Arc::clone(&session);
     let mut registered = registry_owner.copy_reader_task.lock().await;
@@ -769,6 +770,8 @@ pub(super) async fn spawn_copy_reader_owner(
                 Some(worker_measurement),
                 retained,
                 native_split,
+                #[cfg(target_os = "linux")]
+                picture_clock,
                 None,
             )
             .await
