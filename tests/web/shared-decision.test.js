@@ -94,9 +94,21 @@ test("synthetic B Start carries a burn, an HDR10 ask and a Dolby Vision ask unch
  assert.equal(h.requests.length,before);
 });
 test("synthetic B Start rejects foreign session URLs malformed generation and late login",async()=>{
- for(const mutate of [r=>r.playlist_url='/api/v1/hls/'+ref.import_id+'/master.m3u8',r=>r.control.url='https://source/control',r=>r.control.generation='7',r=>r.control.control_epoch=0,r=>r.vod=false]){
+ for(const mutate of [r=>r.playlist_url='/api/v1/hls/'+ref.import_id+'/master.m3u8',r=>r.control.url='https://source/control',r=>r.control.generation='7',r=>r.control.control_epoch=0,r=>{r.vod=false;delete r.media_origin_ms;},r=>{r.vod=false;r.control.lease_timeout_ms=60000;}]){
   const reply=startReply();mutate(reply);const h=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(reply),u)),c=(await h.details(ref)).files[0].context;await assert.rejects(h.start(c,startBody(h)));assert.equal(c.session_id,null);
  }
+});
+// The Source's growing copy reaches the web player as B's bounded view: it
+// binds for this player's Start, which advertises the bounded-range timeline,
+// and not for a Start that does not.
+test("synthetic B Start binds a bounded view only for a bounded-range Start",async()=>{
+ const reply={...startReply(),vod:false,media_origin_ms:-83};
+ const h=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(reply),u)),c=(await h.details(ref)).files[0].context;
+ const body=startBody(h);assert.ok(body.caps.transports.includes("hls-bounded-range-v1"));
+ assert.equal((await h.start(c,body))._sharedContext.session_id,sid);
+ const plain=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(reply),u)),pc=(await plain.details(ref)).files[0].context;
+ const unadvertised=startBody(plain);unadvertised.caps={...unadvertised.caps,transports:["hls","progressive"]};
+ await assert.rejects(plain.start(pc,unadvertised));assert.equal(pc.session_id,null);
 });
 test("ordered Shared beats retry identical payload then resync409 without replaying old position",async()=>{
  let posts=0,gets=0;const h=harness((u,o)=>{
