@@ -747,9 +747,8 @@ fn every_settings_view_read_and_its_callers_are_pinned_by_function() {
     }
 }
 
-/// The helpers that take the create's plan (D3b, contract §4.2): `plan` is
-/// last except in the two Source VOD helpers, where the final argument holds
-/// processed-work custody. `None` reads the Store exactly as before.
+/// The helpers that take the create's plan (D3b, contract §4.2).
+/// `None` reads the Store exactly as before.
 const PLANNED_HELPERS: &[&str] = &[
     "cluster_playlist_is_typeless",
     "create_cluster_session",
@@ -844,7 +843,7 @@ const PLAN_CALLS: &[(&str, &str, &str, &str)] = &[
 ];
 
 /// The plan argument of the call whose `(` is at `open`, with its whitespace
-/// collapsed. Source VOD helpers retain the plan before processed custody.
+/// collapsed.
 fn plan_argument(text: &str, open: usize, helper: &str) -> String {
     let bytes = text.as_bytes();
     let mut depth = 0_i32;
@@ -873,18 +872,32 @@ fn plan_argument(text: &str, open: usize, helper: &str) -> String {
             _ => {}
         }
     }
-    let offset = usize::from(matches!(
-        helper,
-        "prepare_vod_encoding_with_source" | "prepare_vod_encoding_with_source_scoped"
-    ));
-    arguments
-        .iter()
-        .rev()
-        .nth(offset)
-        .expect("planned helper has a plan argument")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("")
+    let plan = match helper {
+        // The Source VOD helpers append processed-work custody.
+        "prepare_vod_encoding_with_source" | "prepare_vod_encoding_with_source_scoped" => {
+            arguments.iter().rev().nth(1)
+        }
+        // The rolling FEL helpers append a Linux-only preparation permit.
+        "start_live_recovery_session" => {
+            assert_eq!(
+                arguments.len(),
+                9,
+                "{helper} changed its source argument count"
+            );
+            arguments.get(7)
+        }
+        "start_copy_with_audio_offset" => {
+            assert_eq!(
+                arguments.len(),
+                18,
+                "{helper} changed its source argument count"
+            );
+            arguments.get(16)
+        }
+        _ => arguments.last(),
+    }
+    .expect("planned helper has a plan argument");
+    plan.split_whitespace().collect::<Vec<_>>().join("")
 }
 
 #[test]
