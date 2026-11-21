@@ -1140,9 +1140,20 @@ impl VodServe {
             .get()
             .after_segment_wait_registered()
             .await;
+        let waited_from = tokio::time::Instant::now();
         let outcome = wait
             .wait(deadline.saturating_duration_since(tokio::time::Instant::now()))
             .await;
+        // Pairs with `plurxd::source_input` window reads: this is how long the
+        // GET waited for its segment to be published by the producer.
+        tracing::debug!(
+            target: "plurxd::vodserve",
+            rendition = %rendition.key,
+            index,
+            waited_ms = waited_from.elapsed().as_millis() as u64,
+            outcome = ?outcome,
+            "blocked segment wait resolved"
+        );
         match outcome {
             WaitOutcome::Ready => {
                 self.shared.hooks.get().before_segment_ready_open().await;

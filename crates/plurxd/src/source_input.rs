@@ -910,10 +910,12 @@ async fn read_source(
     offset: u64,
     remaining: u64,
 ) -> std::io::Result<Vec<u8>> {
+    let requested_at = std::time::Instant::now();
     let mut budget = tokio::select! {biased;
         ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
         budget=state.budget.lock()=>budget,
     };
+    let budget_locked_at = std::time::Instant::now();
     if state
         .observer
         .as_ref()
@@ -983,6 +985,8 @@ async fn read_source(
     if observer.is_some_and(|observer| !observer.has_authority()) {
         return Err(std::io::Error::other("source authority lost"));
     }
+    let mut paced_to_grant_expiry = false;
+    let allowance_started_at = std::time::Instant::now();
     let allowance = if let Some(allocator) = state.purpose_budget.as_ref() {
         tokio::select! {biased;
             ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
@@ -1001,6 +1005,7 @@ async fn read_source(
             if let Some(grant) = &budget.grant {
                 let now = crate::fragment_index_cluster::unix_ms();
                 if budget.used >= grant.foreground_bytes && now < grant.expires_at_ms {
+                    paced_to_grant_expiry = true;
                     observer.idle().await.map_err(std::io::Error::other)?;
                     tokio::select! {biased;
                         ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
@@ -1043,6 +1048,7 @@ async fn read_source(
             allowance=allocator.allowance(wanted as usize)=>allowance? as u64,
         }
     };
+    let allowance_ready_at = std::time::Instant::now();
     let size = wanted.min(allowance) as usize;
     if size == 0 {
         return Err(std::io::Error::other(
@@ -1099,6 +1105,7 @@ async fn read_source(
     } else {
         None
     };
+    let admitted_at = std::time::Instant::now();
     let job = tokio::task::spawn_blocking(move || {
         let activity = activity;
         let _pause_guard = pause_guard;
@@ -1124,6 +1131,7 @@ async fn read_source(
             return Err(std::io::Error::other("source input changed"));
         }
         window.resize(size, 0);
+        let read_started_at = std::time::Instant::now();
         let mut count = 0;
         while count < size {
             #[cfg(unix)]
@@ -1145,6 +1153,7 @@ async fn read_source(
             }
             count += read;
         }
+        let read_elapsed = read_started_at.elapsed();
         read_state
             .source_bytes
             .fetch_add(count as u64, std::sync::atomic::Ordering::SeqCst);
@@ -1157,9 +1166,9 @@ async fn read_source(
             }
         }
         window.truncate(count);
-        Ok::<_, std::io::Error>((window, read_permit))
+        Ok::<_, std::io::Error>((window, read_permit, read_elapsed))
     });
-    let (bytes, _read_permit) = tokio::select! {biased;
+    let (bytes, _read_permit, read_elapsed) = tokio::select! {biased;
         ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),
         result=job=>result.map_err(std::io::Error::other)??,
     };
@@ -1169,6 +1178,20 @@ async fn read_source(
             "source input truncated",
         ));
     }
+    // One event per issued source window separates the source's own read
+    // time from the budget, grant and admission waits ahead of it.
+    tracing::debug!(
+        target: "plurxd::source_input",
+        offset,
+        bytes = bytes.len(),
+        budget_lock_ms = budget_locked_at.duration_since(requested_at).as_millis() as u64,
+        allowance_ms = allowance_ready_at.duration_since(allowance_started_at).as_millis() as u64,
+        paced_to_grant_expiry,
+        admission_ms = admitted_at.duration_since(allowance_ready_at).as_millis() as u64,
+        read_ms = read_elapsed.as_millis() as u64,
+        total_ms = requested_at.elapsed().as_millis() as u64,
+        "source window read"
+    );
     if let Some(observer) = observer {
         if !observer.rolling_policy() && budget.grant.is_none() {
             budget.grant = Some(
