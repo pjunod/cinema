@@ -91,7 +91,7 @@ def one_job(jobs, name, run, repository, owner):
     return job
 
 
-def uploaded(api, artifacts, name, job, task, members):
+def uploaded_archive(api, artifacts, name, job, task):
     """Bind the exact archive bytes and ID to its actual creator's job log."""
     rows = [row for row in artifacts if row['name'] == name]
     r.require(len(rows) == 1, 'Missing or ambiguous source-gate artifact: ' + name)
@@ -116,6 +116,11 @@ def uploaded(api, artifacts, name, job, task, members):
     raw = api.bytes(path)
     r.require(len(raw) == item['size_in_bytes'] and retention.digest(raw) == hashes[-1],
               'Artifact archive differs from original creator bytes')
+    return raw
+
+
+def uploaded(api, artifacts, name, job, task, members):
+    raw = uploaded_archive(api, artifacts, name, job, task)
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         entries = archive.infolist()
         r.require(len(entries) == len(members) and {entry.filename for entry in entries} == set(members)
@@ -169,6 +174,9 @@ def verify(api, number, head, main, root, run_id):
     repository, owner = r.positive(repo['id']), r.positive(repo['owner']['id'])
     pull = api.get(f'/pulls/{number}')
     run = api.get(f'/actions/runs/{r.positive(run_id)}')
+    if run['workflow_id'] == 'source-gate-repair.yml':
+        from validation import source_gate_repair
+        return source_gate_repair.verify(api, number, head, main, root, run_id)
     event = r.bounded_json(run['event_payload'].encode())
     inputs = event['inputs']
     branch = pull['head']['ref']

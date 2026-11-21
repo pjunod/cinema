@@ -39,10 +39,15 @@ def enrollment(body):
     rows = [line[len(PREFIX):] for line in (body or '').splitlines() if line.startswith(PREFIX)]
     r.require(len(rows) == 1, 'Explicit unique paperwork continuation enrollment required')
     value = r.bounded_json(rows[0].encode())
-    r.require(isinstance(value, dict) and set(value) == {'version', 'pr', 'head', 'base', 'python_unit_evidence'}
-              and value['version'] == 1, 'Unknown paperwork enrollment fields')
+    fields = {'version', 'pr', 'head', 'base'}
+    r.require(isinstance(value, dict) and (
+                  value.get('version') == 1 and set(value) == fields | {'python_unit_evidence'}
+                  or value.get('version') == 2 and set(value) == fields | {'predecessor_run', 'android_snapshot'}),
+              'Unknown paperwork enrollment fields')
     r.positive(value['pr']); r.sha(value['head']); r.sha(value['base'])
-    descriptor = value['python_unit_evidence']
+    if value['version'] == 2:
+        r.positive(value['predecessor_run'])
+    descriptor = value['python_unit_evidence'] if value['version'] == 1 else value['android_snapshot']
     r.require(isinstance(descriptor, dict) and set(descriptor) == {'sha256', 'attachment_id', 'attachment_uuid'}
               and retention.DIGEST.fullmatch(descriptor['sha256']) is not None,
               'Unknown paperwork Python evidence descriptor')
@@ -340,6 +345,9 @@ def check(environment, body, base, root, *, hook=False, merge_target=None):
     r.require(value['base'] == base
               and git(root, 'rev-parse', (merge_target or base) + '^{commit}') == base,
               'Paperwork base or resolved merge target differs from enrollment')
+    if value['version'] == 2:
+        from validation import source_gate_repair
+        return source_gate_repair.paperwork_check(api, value, environment, root, mode)
     if mode == 'final':
         return {'complete': True, 'coverage': final_coverage(api, value, environment, root), 'body': body}
     bind, pull, _, inventory, retained, due = prepare(api, value, environment, root, mode)

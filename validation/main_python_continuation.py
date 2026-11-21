@@ -130,7 +130,7 @@ def origin_impacts(origin, candidate, changes, known):
     return affected
 
 
-def prepare(api, record, binding, candidate, repository):
+def prepare(api, record, binding, candidate, repository, *, inventories=None):
     fields = {'version', 'repository', 'pr', 'branch', 'base_sha', 'source_commit',
               'prior', 'run', 'journal_artifact', 'changes', 'source_impacts'}
     version = record.get('version')
@@ -163,7 +163,8 @@ def prepare(api, record, binding, candidate, repository):
             api, record['main_journals'], binding, candidate, repository)
         r.require(not set(origins).intersection(extra_origins), 'Supplement duplicates original run authority')
         origins.update(extra_origins)
-    inventories = {kind: sorted(test.id() for test in r.discover(kind)) for kind in r.SUITES}
+    if inventories is None:
+        inventories = {kind: sorted(test.id() for test in r.discover(kind)) for kind in r.SUITES}
     universe = {kind + ':' + name for kind, names in inventories.items() for name in names}
     original = set(journal['passes'])
     r.require(all(set(rows) <= universe for rows in supplements),
