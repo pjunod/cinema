@@ -921,7 +921,7 @@ async fn indexed_resume_preparation_reaps_before_releasing_custody_and_play_uses
         .start_ticks as f64
         / f64::from(rendition.timescale);
     let start_ms = (start * 1_000.0).round() as i64;
-    let (first, last) = crate::vodserve::startup_prediction::startup_window(&rendition.plan, start_ms)
+    let (first, last) = super::vod_startup_prediction::startup_window(&rendition.plan, start_ms)
         .expect("startup decode window");
     let next = rendition
         .plan

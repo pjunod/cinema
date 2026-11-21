@@ -2011,7 +2011,10 @@ async fn cluster_discovery_queues_a_census_after_a_historical_ready_request() {
         .expect("persist the census"));
     jobs.discover_cluster_fragment_indexes_with_permit(transcode, &permit)
         .await;
-    let rows = store.analysis_requests(10).await.expect("canonical discovery");
+    let rows = store
+        .analysis_requests(10)
+        .await
+        .expect("canonical discovery");
     assert_eq!(rows.len(), 3);
     let canonical = rows
         .iter()

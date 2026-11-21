@@ -2774,7 +2774,7 @@ async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_back
         .expect("file read")
         .expect("file");
     let pause = pause_next_marker_fallback_for_test(&path);
-    let caps = serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("actual v2 caps");
+    let caps: playback::DeviceCaps = serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("actual v2 caps");
     let decision = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         decision_for_source_file(

@@ -1901,6 +1901,7 @@ struct PlanScope<'a> {
     // The passive compatibility facade offers its own fixed media contract
     // and applies the client's finite bitrate ceiling to that native recipe.
     passive_compatibility: bool,
+    stored_catalogue_only: bool,
 }
 
 /// Internal preparation policy, never a create-body override. Ordinary creates
@@ -2012,7 +2013,11 @@ async fn resolve_plan_for_principal_with_local_evidence(
         auto_bootstrap_ceiling,
         processed_selectable,
         passive_compatibility,
+        stored_catalogue_only,
     } = scope;
+    // A detail preview owns no incumbent. In particular, a replayed link
+    // receipt must not take this stored-only plan into measured qualification.
+    let incumbent_receipt = incumbent_receipt.filter(|_| !stored_catalogue_only);
     if auto_bootstrap_ceiling.is_some_and(|ceiling| ceiling <= 0)
         || (auto_bootstrap_ceiling.is_some()
             && (body.quality_auto != Some(true)
@@ -2155,10 +2160,17 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     .await
             };
             let catalog_request = body.selection_catalog_request(source, caps, original_copy_scope);
-            let catalogue_result = state
-                .media_pool
-                .quality_catalog(state, catalog_request.clone())
-                .await;
+            let catalogue_result = if stored_catalogue_only {
+                state
+                    .media_pool
+                    .stored_quality_catalog(state, &catalog_request)
+                    .await
+            } else {
+                state
+                    .media_pool
+                    .quality_catalog(state, catalog_request.clone())
+                    .await
+            };
             tracing::info!(target: "plurxd::http::hls", file_id, purpose = "selection", complete = catalogue_result.complete,
                 causes = ?catalogue_result.causes, "create catalog accounting");
             if let Some(crate::media_pool::CatalogCause::RequestInvalid(error)) =
@@ -2992,7 +3004,10 @@ pub async fn prepare_startup(
                 },
                 review,
                 body,
-                PlanScope::default(),
+                PlanScope {
+                    stored_catalogue_only: true,
+                    ..PlanScope::default()
+                },
             )
             .await
             .ok()?;

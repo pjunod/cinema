@@ -2742,6 +2742,7 @@ async fn decision_for_file(
     // once the catalogue itself is in hand so its enumeration cannot spend
     // it. Missing evidence is Unknown; it never refuses the decision.
     let mut advisory = None;
+    let stored_local_evidence = matches!(marker_policy, PlanningReadPolicy::StoredLocalEvidence);
     let quality_candidates = if let Some(caps) = q.caps_v2.as_ref() {
         let request = crate::media_pool::QualityCatalogRequest {
             audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(caps)
@@ -2758,49 +2759,59 @@ async fn decision_for_file(
             subtitle_burn: selected_subtitle.filter(|_| selected_subtitle_requires_burn),
             presentation: crate::transcode::Presentation::Vod,
         };
-        let accepted = state
-            .media_pool
-            .quality_candidates(state, request.clone())
-            .await;
+        let accepted = if stored_local_evidence {
+            state
+                .media_pool
+                .stored_quality_catalog(state, &request)
+                .await
+                .candidates
+        } else {
+            state
+                .media_pool
+                .quality_candidates(state, request.clone())
+                .await
+        };
         // Costs are advisory, but their source/settings must be the exact
         // accepted local row. Acquisition and projection share one deadline.
-        let deadline = *advisory.insert(super::hls::link_receipts::advisory_deadline());
-        measured_candidate_outputs = tokio::time::timeout_at(deadline, async {
-            let planning = state
-                .store
-                .playback_planning_snapshot(file.id, &crate::transcode::QUALITY_PLANNING_KEYS)
+        if !stored_local_evidence {
+            let deadline = *advisory.insert(super::hls::link_receipts::advisory_deadline());
+            measured_candidate_outputs = tokio::time::timeout_at(deadline, async {
+                let planning = state
+                    .store
+                    .playback_planning_snapshot(file.id, &crate::transcode::QUALITY_PLANNING_KEYS)
+                    .await
+                    .ok()??;
+                let binding = crate::media_pool::PlanningBinding::from_snapshot(&planning);
+                if planning.file.id != file.id
+                    || planning.file.size != file.size
+                    || planning.file.mtime != file.mtime
+                    || !accepted.iter().any(|entry| {
+                        entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
+                    })
+                {
+                    return None;
+                }
+                let local: Vec<_> = accepted
+                    .iter()
+                    .filter(|entry| {
+                        entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
+                    })
+                    .cloned()
+                    .collect();
+                super::hls::link_receipts::measured_outputs(
+                    state,
+                    &file,
+                    &request,
+                    &local,
+                    Some(&planning),
+                    deadline,
+                )
                 .await
-                .ok()??;
-            let binding = crate::media_pool::PlanningBinding::from_snapshot(&planning);
-            if planning.file.id != file.id
-                || planning.file.size != file.size
-                || planning.file.mtime != file.mtime
-                || !accepted.iter().any(|entry| {
-                    entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
-                })
-            {
-                return None;
-            }
-            let local: Vec<_> = accepted
-                .iter()
-                .filter(|entry| {
-                    entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
-                })
-                .cloned()
-                .collect();
-            super::hls::link_receipts::measured_outputs(
-                state,
-                &file,
-                &request,
-                &local,
-                Some(&planning),
-                deadline,
-            )
+            })
             .await
-        })
-        .await
-        .ok()
-        .flatten();
+            .ok()
+            .flatten();
+        }
 
         Some(
             accepted
@@ -2814,7 +2825,9 @@ async fn decision_for_file(
     };
     // Keep the public menu/explicit choices. This narrows only this warm Auto
     // advisory selection, never the feature switch or a manual request.
-    let selection_candidates = if q.force.as_deref().unwrap_or("auto") == "auto" {
+    let selection_candidates = if stored_local_evidence {
+        quality_candidates.clone()
+    } else if q.force.as_deref().unwrap_or("auto") == "auto" {
         if let Some(catalog) = quality_candidates.as_ref() {
             let advisory = advisory.unwrap_or_else(super::hls::link_receipts::advisory_deadline);
             // One source fence for every advisory read of this Decision, as

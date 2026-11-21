@@ -904,6 +904,39 @@ impl TranscodeManager {
         progress: Option<&std::sync::Mutex<Vec<QualityCandidate>>>,
         selected: Option<&QualityCandidate>,
     ) -> ResolvedQualityCatalog {
+        self.quality_catalog_from_snapshot_with_probe_policy(
+            snapshot,
+            caps,
+            audio,
+            audio_offset_ms,
+            subtitle,
+            presentation,
+            retained_copy,
+            retained_audio,
+            retained_claim,
+            progress,
+            selected,
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn quality_catalog_from_snapshot_with_probe_policy(
+        &self,
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        caps: &plurx_core::playback::DeviceCaps,
+        audio: Option<i64>,
+        audio_offset_ms: i64,
+        subtitle: Option<i64>,
+        presentation: Presentation,
+        retained_copy: Option<(bool, bool, bool)>,
+        retained_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
+        retained_claim: Option<&plurx_core::playback::audio::AudioClaim>,
+        progress: Option<&std::sync::Mutex<Vec<QualityCandidate>>>,
+        selected: Option<&QualityCandidate>,
+        source_probes_allowed: bool,
+    ) -> ResolvedQualityCatalog {
         let scan_deadline = crate::media_pool::create_stage_deadline(
             crate::media_pool::QUALITY_CATALOG_DEADLINE.min(DECODE_PLAN_PROBE_BUDGET),
         );
@@ -1099,7 +1132,7 @@ impl TranscodeManager {
             }
         }
 
-        if !selected_copy {
+        if !selected_copy && source_probes_allowed {
             source_facts = self
                 .quality_catalog_source_facts(
                     file,
@@ -3880,6 +3913,7 @@ mod snapshot_catalog_regression {
                 &probe_path,
                 r#"#!/bin/sh
 if test "$1" = "-version"; then printf '%s\n' 'ffprobe version hevc-catalog'; exit 0; fi
+touch "$PLURX_TEST_PROBE_PATH.invoked"
 test ! -e "$PLURX_TEST_PROBE_PATH.blocked" || exit 71
 test ! -e "$PLURX_TEST_PROBE_PATH.slow" || sleep 5
 case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuration.json";;
@@ -3931,6 +3965,27 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             if case == "slow_copy" {
                 let copy_caps = serde_json::from_value(serde_json::json!({"v":2,"containers":["mp4"],"transports":["hls"],"video":[{"codec":"hevc","present":["pq"]},{"codec":"h264","present":["sdr"]}]})).expect("HDR copy caps");
                 std::fs::write(probe_path.with_extension("slow"), b"").expect("slow collection");
+                let stored = manager
+                    .quality_catalog_from_snapshot_with_probe_policy(
+                        &snapshot,
+                        &copy_caps,
+                        None,
+                        0,
+                        None,
+                        Presentation::Vod,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                    )
+                    .await;
+                assert!(stored
+                    .candidates
+                    .iter()
+                    .any(|row| row.route == CandidateRoute::Remux));
+                assert!(!probe_path.with_extension("invoked").exists());
                 let progress = std::sync::Mutex::new(Vec::new());
                 let timed = tokio::time::timeout(
                     Duration::from_secs(2),
