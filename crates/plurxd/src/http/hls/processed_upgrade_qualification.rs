@@ -20,7 +20,7 @@ pub(super) struct AwaitingQualification {
     selection: Option<ClientSelection>,
     checking: Option<u64>,
     /// When this viewer's live demand on its title's scan was last renewed.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(target_os = "linux")]
     demand_renewed: Option<std::time::Instant>,
 }
 
@@ -128,6 +128,7 @@ pub(super) fn retain(
             presented_at: run.presented_at,
             selection: None,
             checking: None,
+            #[cfg(target_os = "linux")]
             demand_renewed: None,
         })),
     );

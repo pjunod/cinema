@@ -13,6 +13,7 @@ use zip::{CompressionMethod, ZipWriter};
 
 use super::*;
 
+mod activity_routes;
 mod delegation;
 mod playback_handoffs;
 mod public_copy_wire;
@@ -1509,6 +1510,7 @@ fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
         "/api/v1/hls/session/index.m3u8",
         crate::media_pool::SNAPSHOT_PATH,
         internal_clock::PATH,
+        internal_activity::PATH,
     ] {
         assert!(learner_route_eligible(&Method::GET, path), "{path}");
     }
@@ -1593,6 +1595,7 @@ fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
         (Method::POST, crate::media_sessions::RELAY_PATH),
         (Method::POST, crate::shared_cache::CANARY_PATH),
         (Method::POST, internal_auth_revocation::PATH),
+        (Method::POST, internal_activity::SOURCE_STOP_PATH),
         // Peer hydration of a fragment index. `media_peers()` names
         // learners, so refusing this at the route matrix made the
         // directory point at a closed door.
@@ -1651,6 +1654,17 @@ fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
         &Method::POST,
         "/internal/media/subtitle-source/7/2/sup"
     ));
+    for (method, path) in [
+        (Method::POST, internal_activity::PATH),
+        (Method::GET, internal_activity::SOURCE_STOP_PATH),
+        (Method::GET, "/_internal/v1/activity-snapshot/other"),
+        (
+            Method::POST,
+            "/_internal/v1/activity-source-processed-stop/other",
+        ),
+    ] {
+        assert!(!learner_route_eligible(&method, path), "{method} {path}");
+    }
 }
 
 #[test]
@@ -1662,7 +1676,9 @@ fn maintenance_route_matrix_keeps_admin_and_existing_sessions_but_blocks_new_wor
         (Method::GET, "/api/v1/cluster/status"),
         (Method::GET, "/api/v1/cluster/support-bundle"),
         (Method::GET, cluster_operations::INTERNAL_PATH),
+        (Method::GET, internal_activity::PATH),
         (Method::POST, internal_auth_revocation::PATH),
+        (Method::POST, internal_activity::SOURCE_STOP_PATH),
         (Method::POST, "/api/v1/auth/login"),
         (Method::POST, "/api/v1/auth/logout"),
         // Read beside /me so a client signed in to a node under
@@ -1735,6 +1751,13 @@ fn maintenance_route_matrix_keeps_admin_and_existing_sessions_but_blocks_new_wor
         (Method::POST, crate::live_tv::START_PATH),
         (Method::POST, crate::live_tv::ACTIVATE_PATH),
         (Method::POST, crate::live_tv::GUIDE_PATH),
+        (Method::POST, internal_activity::PATH),
+        (Method::GET, internal_activity::SOURCE_STOP_PATH),
+        (Method::GET, "/_internal/v1/activity-snapshot/other"),
+        (
+            Method::POST,
+            "/_internal/v1/activity-source-processed-stop/other",
+        ),
         (Method::POST, "/api/v1/cluster/join-tokens"),
         (Method::DELETE, "/api/v1/cluster/nodes/node-b"),
         (Method::POST, "/api/v1/libraries"),
@@ -10567,10 +10590,12 @@ async fn activity_requires_auth_and_reports_idle() {
             // P-02 §3.2); node-local, so not a clustered-only field.
             "processes",
             "producing",
+            "receiver_processed",
             "retained_output",
             "retained_output_node",
             "scans",
             "sessions",
+            "source_processed",
             "trakt",
             // Local worker observations are useful on SQLite too, with the
             // nodes that were observed (learner workers included).
