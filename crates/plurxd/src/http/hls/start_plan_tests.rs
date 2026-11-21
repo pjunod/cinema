@@ -382,7 +382,7 @@ async fn catalog_node() -> (crate::state::AppState, i64) {
         Default::default(),
         Arc::new(crate::logbuf::LogBuffer::new(64)),
     );
-    state.serving.validation_set_ready(true).await;
+    state.cluster.test_fence().validation_set_ready(true).await;
     (state, file)
 }
 

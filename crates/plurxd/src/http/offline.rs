@@ -3032,7 +3032,9 @@ mod tests {
             "media-a".to_owned(),
             "test-cluster",
             "reader-node".to_owned(),
-            plurx_core::cluster::membership::MembershipManager::unavailable(),
+            crate::cluster::test_calls(
+                plurx_core::cluster::membership::MembershipManager::unavailable(),
+            ),
             crate::cluster::Directory::new(
                 plurx_core::cluster::membership::MembershipManager::unavailable(),
             ),

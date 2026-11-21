@@ -1923,7 +1923,7 @@
                             .expect("test permit"),
                     )
                 } else {
-                    fixture.state.serving.validation_set_ready(false).await;
+                    fixture.state.cluster.test_fence().validation_set_ready(false).await;
                     None
                 };
                 let (status, _) = control_body(
@@ -1946,7 +1946,7 @@
                     .is_some());
                 drop(held);
                 if !saturated {
-                    fixture.state.serving.validation_set_ready(true).await;
+                    fixture.state.cluster.test_fence().validation_set_ready(true).await;
                 }
                 let (status, _) = control_body(
                     control_local_with_settlement_capacity(
@@ -2083,7 +2083,7 @@
             })
             .await
             .expect("actor admitted settlement");
-            let fence = fixture.state.serving.clone();
+            let fence = fixture.state.cluster.test_fence().clone();
             let loss = tokio::spawn(async move { fence.validation_set_ready(false).await });
             tokio::time::sleep(Duration::from_millis(20)).await;
             assert!(

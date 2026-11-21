@@ -459,8 +459,9 @@ async fn authenticate(
     let valid = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         state
-            .membership
-            .authorize_internal_peer_request(&auth, "POST", path, body),
+            .cluster
+            .authentication()
+            .authorize_exact_request(&auth, "POST", path, body),
     )
     .await
     .map_err(|_| unavailable())?
@@ -485,8 +486,9 @@ async fn signed(
         return Err(unavailable());
     }
     let signature = state
-        .membership
-        .sign_internal_peer_response(&auth.node_id, &auth.nonce, path, &payload)
+        .cluster
+        .authentication()
+        .sign_exact_response(&auth.node_id, &auth.nonce, path, &payload)
         .map_err(|_| unavailable())?;
     axum::response::Response::builder()
         .status(StatusCode::OK)

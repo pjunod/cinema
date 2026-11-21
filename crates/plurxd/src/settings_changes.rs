@@ -30,7 +30,7 @@ pub(crate) enum SettingsChangeSource {
     Polled,
     /// This node's in-process Raft watch: a write anywhere in the cluster
     /// moves the applied index once this replica applies it.
-    Applied(hiqlite::LocalDbRaftMetrics),
+    Applied(crate::cluster::AppliedChanges),
     /// An applied index a test moves by hand.
     #[cfg(test)]
     Test(tokio::sync::watch::Receiver<u64>),
@@ -40,7 +40,7 @@ impl SettingsChangeSource {
     pub(crate) fn applied_index(&self) -> Option<u64> {
         match self {
             Self::LocalOnly | Self::Polled => None,
-            Self::Applied(metrics) => metrics.snapshot().last_applied_index,
+            Self::Applied(metrics) => metrics.applied_index(),
             #[cfg(test)]
             Self::Test(applied) => Some(*applied.borrow()),
         }
@@ -53,7 +53,7 @@ impl SettingsChangeSource {
         match self {
             Self::LocalOnly => true,
             Self::Polled => false,
-            Self::Applied(metrics) => metrics.membership_snapshot().running,
+            Self::Applied(metrics) => metrics.live(),
             #[cfg(test)]
             Self::Test(applied) => applied.has_changed().is_ok(),
         }
@@ -63,7 +63,7 @@ impl SettingsChangeSource {
     pub(crate) async fn changed(&mut self) -> bool {
         match self {
             Self::LocalOnly | Self::Polled => std::future::pending().await,
-            Self::Applied(metrics) => metrics.wait_for_change().await,
+            Self::Applied(metrics) => metrics.changed().await,
             #[cfg(test)]
             Self::Test(applied) => applied.changed().await.is_ok(),
         }

@@ -377,10 +377,12 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     ));
     state_mut.node_id = selected.identity.node_id.clone();
     state_mut
-        .membership
+        .cluster
+        .test_membership()
         .set_ingress_custody_boot(Some(state_mut.sharing.accepted_drivers.boot_id()));
     state_mut
-        .membership
+        .cluster
+        .test_membership()
         .publish_ingress_custody_boot()
         .await
         .expect("actual registry boot publication before admission");
@@ -1016,7 +1018,7 @@ async fn source_actual_copy_attachment(
     assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
 ) {
     let store = &state.store;
-    let membership = &state.membership;
+    let membership = &state.cluster.test_membership();
     let master = &state.sharing.key;
     let binding = assignment.binding();
     use plurx_core::{
@@ -1090,7 +1092,7 @@ async fn source_actual_copy_attachment(
     .await;
     let gate = Arc::new(SourceProducerAuthority {
         store: Arc::clone(store),
-        membership: membership.clone(),
+        source_members: state.cluster.source_members(),
         master: Arc::clone(master),
         registry_boot_id: state.sharing.accepted_drivers.boot_id(),
         ingress: ingress_fixture.permission().await,
@@ -1275,7 +1277,8 @@ async fn source_actual_actor(
             .expect("actual insufficient saved CPU budget");
     }
     let members = state
-        .membership
+        .cluster
+        .test_membership()
         .observe_source_admission_members()
         .await
         .expect("actual members")
@@ -1325,7 +1328,7 @@ async fn source_actual_actor(
     if mode == 52 {
         let gate = SourceProducerAuthority {
             store: Arc::clone(&state.store),
-            membership: state.membership.clone(),
+            source_members: state.cluster.source_members(),
             master: Arc::clone(&state.sharing.key),
             registry_boot_id: state.sharing.accepted_drivers.boot_id(),
             ingress: ingress_permission.clone(),
@@ -1355,7 +1358,7 @@ async fn source_actual_actor(
             let mut other = source_fixture_state();
             let owned = Arc::get_mut(&mut other).expect("sole replacement registry fixture");
             owned.store = Arc::clone(&state.store);
-            owned.replace_membership(state.membership.clone());
+            owned.replace_membership(state.cluster.test_membership().clone());
             owned.node_id = state.node_id.clone();
             assert_ne!(
                 owned.sharing.accepted_drivers.boot_id(),
@@ -1530,7 +1533,8 @@ async fn source_actual_actor(
             .expect("actual admitted owner");
         ingress_fixture.close_transport(false, None).await;
         let fresh = state
-            .membership
+            .cluster
+            .test_membership()
             .observe_source_admission_members()
             .await
             .expect("gap members")
@@ -3689,7 +3693,8 @@ impl SourceFactoryIngressFixture {
             closed_confirmation: None,
         };
         let members = state
-            .membership
+            .cluster
+            .test_membership()
             .observe_source_admission_members()
             .await
             .expect("fresh registration members")
@@ -3723,7 +3728,8 @@ impl SourceFactoryIngressFixture {
     async fn permission(&self) -> SourceIngressAdmissionPermission {
         let members = self
             .state
-            .membership
+            .cluster
+            .test_membership()
             .observe_source_admission_members()
             .await
             .expect("actual ingress members")
@@ -4019,7 +4025,8 @@ async fn source_two_owner_generation_fixture(
     .await;
     let initial_a = ingress_a.permission().await;
     let members = state
-        .membership
+        .cluster
+        .test_membership()
         .observe_source_admission_members()
         .await
         .expect("first members")
@@ -4054,7 +4061,8 @@ async fn source_two_owner_generation_fixture(
     .await;
     let initial_b = ingress_b.permission().await;
     let members = state
-        .membership
+        .cluster
+        .test_membership()
         .observe_source_admission_members()
         .await
         .expect("second members")
@@ -4219,7 +4227,8 @@ async fn source_actual_unknown_register_reconciliation(
         SourceCustodyWrite::ReconciledClosed
     );
     let members = state
-        .membership
+        .cluster
+        .test_membership()
         .observe_source_admission_members()
         .await
         .expect("current members")

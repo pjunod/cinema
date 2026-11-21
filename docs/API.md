@@ -385,6 +385,7 @@ families. No `/api/v1/cluster/*` path matches either.
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | GET | `/api/v1/server` | public | Identity, version, and whether first-run setup is required |
+| GET | `/api/v1/server/discovery` | public | Store-free `{ "advertise": bool }`: standalone/voter true, learner/absent false; available through learner, maintenance and fenced admission, with `Cache-Control: no-store` |
 | GET | `/api/v1/server/node` | bearer | The answering node's `hostname` and the `display_name` clients show for this server |
 | POST | `/api/v1/setup` | public, only while zero users exist | Creates the first admin and returns a token |
 | POST | `/api/v1/auth/login` | public | Verifies credentials, mints a token |

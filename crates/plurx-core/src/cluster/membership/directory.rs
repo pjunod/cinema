@@ -29,10 +29,9 @@
 use super::*;
 
 /// The tables the roster reads. When each has a slot in the applied mark the
-/// stamp tracks them table by table; the production mark has no room for
-/// them yet (its sixteen slots hold the applied views and the sharing
-/// watches), so the stamp falls back to the applied index, which moves on
-/// every applied entry.
+/// stamp tracks them table by table. Production registers all four; an
+/// older or custom mark missing a slot falls back to the applied index,
+/// which moves on every applied entry.
 pub const ROSTER_TABLES: [&str; 4] = [
     "cluster_nodes",
     "cluster_node_http",
@@ -224,6 +223,24 @@ impl RosterSnapshot {
         Ok(peers)
     }
 
+    /// Artwork recovery's original local-SQL rule: all reachable, nonremoved
+    /// remote endpoints, including uncommitted nodes, with no media peer cap.
+    /// The shared SQL already excludes removal rows and the local node.
+    #[must_use]
+    pub fn artwork(&self, now: i64) -> Vec<ActivityPeer> {
+        let mut rows = self
+            .rows
+            .iter()
+            .filter(|row| row.http_base.is_some() && row.last_seen_at >= reachable_after(now))
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| {
+            b.last_seen_at
+                .cmp(&a.last_seen_at)
+                .then_with(|| a.raft_id.cmp(&b.raft_id))
+        });
+        rows.into_iter().map(|row| peer(now, row)).collect()
+    }
+
     /// Every other committed member, stale or not (`operations_peers`). A
     /// roster beyond the bounded operations limit fails closed.
     pub fn operations(&self, now: i64) -> Result<Vec<ActivityPeer>, MembershipError> {
@@ -391,6 +408,30 @@ impl RosterDirectory {
             standalone: Arc::new(RosterSnapshot::standalone()),
             reads: Arc::default(),
         }
+    }
+
+    /// Current applied voter endpoints, including unreachable voters. Sample
+    /// time before loading, as the original activity roster did; filtering,
+    /// ordering and bounds remain the snapshot's voter projection.
+    pub async fn voter_observation(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+        if !self.membership.is_replicated() {
+            return Ok(Vec::new());
+        }
+        let now = super::unix_ms()?;
+        Ok(self.snapshot().await?.voters(now))
+    }
+
+    /// Ready media workers for this route's existing learner policy. The
+    /// same snapshot owns filtering, protocol validation and output bounds.
+    pub async fn media_observation(
+        &self,
+        allow_learners: bool,
+    ) -> Result<Vec<ActivityPeer>, MembershipError> {
+        if !self.membership.is_replicated() {
+            return Ok(Vec::new());
+        }
+        let now = super::unix_ms()?;
+        self.snapshot().await?.media_workers(now, allow_learners)
     }
 
     /// The cached snapshot if it is still current. The table revisions are

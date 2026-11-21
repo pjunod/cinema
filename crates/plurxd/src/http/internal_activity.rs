@@ -234,8 +234,8 @@ pub(super) async fn local_worker_capacity(state: &AppState) -> ActivityWorkers {
 
 async fn local_workers_with_details(state: &AppState, detailed: bool) -> ActivityWorkers {
     let runtime = state.transcode.media_node_runtime().await;
-    let accepting_work = state.cluster.authority().state().ready
-        && state.cluster.role().admission != crate::cluster::Admission::Maintenance;
+    let accepting_work =
+        state.cluster.authority().state().ready && !state.cluster.maintenance_active();
     let children = plurx_core::process::priority::running();
     let heavy_in_use = usize::from(state.transcode.background_worker_in_use());
     ActivityWorkers {
@@ -455,12 +455,9 @@ impl std::error::Error for PeerActivityStopError {}
 #[allow(dead_code)]
 impl PeerActivityClient {
     #[must_use]
-    pub(crate) fn new(
-        membership: plurx_core::cluster::membership::MembershipManager,
-        directory: Directory,
-    ) -> Self {
+    pub(crate) fn new(transport: PeerTransport, directory: Directory) -> Self {
         Self {
-            transport: PeerTransport::new(membership),
+            transport,
             directory,
             reads: Arc::new(tokio::sync::Mutex::new(PeerActivityReadGate::default())),
             owner_reads: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -757,7 +754,8 @@ pub async fn snapshot(
         super::peer_transport::exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !state
         .cluster
-        .verify_member_read_request(&auth, "GET", PATH, &[])
+        .authentication()
+        .authorize_read_request(&auth, "GET", PATH, &[])
         .await
         .unwrap_or(false)
     {
@@ -790,7 +788,8 @@ pub async fn stop_source_processed(
         super::peer_transport::exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !state
         .cluster
-        .verify_member_request(&auth, "POST", SOURCE_STOP_PATH, &body)
+        .authentication()
+        .authorize_exact_request(&auth, "POST", SOURCE_STOP_PATH, &body)
         .await
         .unwrap_or(false)
     {
@@ -834,7 +833,8 @@ fn signed_activity_response(
     let payload = super::peer_transport::signed_response_payload(status.as_u16(), &body);
     let signature = state
         .cluster
-        .sign_member_response(&auth.node_id, &auth.nonce, path, &payload)
+        .authentication()
+        .sign_exact_response(&auth.node_id, &auth.nonce, path, &payload)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let mut response = (status, body).into_response();
     response.headers_mut().extend(snapshot_response_headers());
@@ -1579,7 +1579,10 @@ mod tests {
     #[tokio::test]
     async fn reachable_peer_without_activity_origin_is_unsupported_not_unreachable() {
         let membership = plurx_core::cluster::membership::MembershipManager::unavailable();
-        let client = PeerActivityClient::new(membership.clone(), Directory::new(membership));
+        let client = PeerActivityClient::new(
+            crate::cluster::test_calls(membership.clone()),
+            Directory::new(membership),
+        );
         let outcome = fetch_peer_activity(
             client,
             ActivityPeer {

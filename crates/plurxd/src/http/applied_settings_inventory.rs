@@ -842,8 +842,9 @@ const PLAN_CALLS: &[(&str, &str, &str, &str)] = &[
     ("transcode/manager/start.rs", "start_with_audio_offset", "rolling_start_inputs", "plan"),
 ];
 
-/// The plan argument of the call whose `(` is at `open`, with its whitespace
-/// collapsed.
+/// The declared plan argument of the call whose `(` is at `open`, with its
+/// whitespace collapsed. Source custody and native FEL permits follow it in
+/// helpers that declare those trailing arguments.
 fn plan_argument(text: &str, open: usize, helper: &str) -> String {
     let bytes = text.as_bytes();
     let mut depth = 0_i32;

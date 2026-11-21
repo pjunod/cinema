@@ -641,17 +641,6 @@ mod tests {
             .expect("admit quota-pacing probe");
         let cancel = CancellationToken::new();
         let shutdown = CancellationToken::new();
-        let now = crate::state::clock_ms();
-        // A real exhausted finite receipt: the allocator's existing timer
-        // advances to a fresh Store grant while the process is verified held.
-        // Install after fixture setup/admission; their time is not quota time.
-        *budget.grant.lock().await = Some(BackgroundSourceServiceGrant {
-            receipt_id: uuid::Uuid::new_v4().to_string(),
-            epoch_id: now / 5000,
-            expires_at_ms: now + 3000,
-            byte_allowance: Some(0),
-            resource_keys: vec!["source_io".into()],
-        });
         let started = tokio::time::Instant::now();
         let child_finished = Arc::new(Mutex::new(None));
         let finished = Arc::clone(&child_finished);
@@ -725,7 +714,23 @@ mod tests {
                             });
                         result
                     };
-                    let (child, allowance) = tokio::join!(child, budget.allowance(1));
+                    let allowance = async {
+                        // Start the finite hold with the read, after fragment
+                        // admission and the initial source-authority check.
+                        // Their latency must not consume this test receipt.
+                        let mut grant = budget.grant.lock().await;
+                        let now = crate::state::clock_ms();
+                        *grant = Some(BackgroundSourceServiceGrant {
+                            receipt_id: uuid::Uuid::new_v4().to_string(),
+                            epoch_id: now / 5000,
+                            expires_at_ms: now + 3000,
+                            byte_allowance: Some(0),
+                            resource_keys: vec!["source_io".into()],
+                        });
+                        drop(grant);
+                        budget.allowance(1).await
+                    };
+                    let (child, allowance) = tokio::join!(child, allowance);
                     drop(activity);
                     allowance.expect("source allowance resolves after the quota hold");
                     child

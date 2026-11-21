@@ -2616,6 +2616,7 @@
             "node-a".to_owned(),
             base.path().join("indexes"),
             None,
+            None,
         );
         let mut req = request("first-play", 0.0);
         req.file_id = file.id;
