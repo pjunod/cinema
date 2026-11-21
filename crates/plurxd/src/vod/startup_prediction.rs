@@ -3,6 +3,7 @@ use super::*;
 use crate::subtitle_translation::ReadPreparationSlot;
 use plurx_core::domain::{InProgressItem, WatchState};
 use plurx_core::segplan::{PlanCut, PlanEntryKind};
+use std::future::Future;
 use std::sync::Weak;
 use tokio_util::sync::CancellationToken;
 
@@ -484,13 +485,17 @@ async fn run_with_source_custody(
         Some(source) => {
             // A pathname check can wait on storage before the producer
             // exists. It spends the same budget as preparation.
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => false,
-                _ = budget.wait_pressure() => false,
-                _ = &mut deadline_elapsed => false,
-                result = source.reopen(file) => result.is_ok(),
-            }
+            let cancelled = async {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {},
+                    _ = &mut deadline_elapsed => {},
+                    _ = budget.wait_pressure() => {},
+                }
+            };
+            verify_source_until_cancelled(source.reopen(file), cancelled)
+                .await
+                .is_some_and(|result| result.is_ok())
         }
         None => false,
     };
@@ -529,6 +534,29 @@ async fn run_with_source_custody(
     }
 }
 
+/// A cancelled verification cannot authorize production. Once started,
+/// await it before releasing custody because its filesystem syscalls can
+/// still be running on the blocking pool.
+async fn verify_source_until_cancelled<T>(
+    verification: impl Future<Output = T>,
+    cancelled: impl Future<Output = ()>,
+) -> Option<T> {
+    tokio::pin!(verification);
+    let mut started = false;
+    tokio::select! {
+        biased;
+        () = cancelled => {},
+        result = std::future::poll_fn(|context| {
+            started = true;
+            verification.as_mut().poll(context)
+        }) => return Some(result),
+    }
+    if started {
+        let _ = verification.await;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,6 +582,42 @@ mod tests {
             entries,
             target_duration: 6,
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_preparation_drains_a_started_source_verification() {
+        use std::future::{poll_fn, ready};
+        use std::pin::pin;
+        use std::task::Poll;
+
+        let not_dispatched = poll_fn(|_| -> Poll<()> {
+            panic!("cancellation before the first poll must skip verification")
+        });
+        assert!(verify_source_until_cancelled(not_dispatched, ready(()))
+            .await
+            .is_none());
+
+        let cancel = CancellationToken::new();
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        let mut verification = pin!(verify_source_until_cancelled(held, cancel.cancelled()));
+        assert!(
+            poll_fn(|context| Poll::Ready(verification.as_mut().poll(context)))
+                .await
+                .is_pending()
+        );
+        cancel.cancel();
+        assert!(
+            poll_fn(|context| Poll::Ready(verification.as_mut().poll(context)))
+                .await
+                .is_pending()
+        );
+        release
+            .send(())
+            .expect("verification is still waiting for the filesystem");
+        assert!(
+            verification.await.is_none(),
+            "a drained check cannot start a producer"
+        );
     }
 
     #[test]
