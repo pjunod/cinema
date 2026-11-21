@@ -8888,3 +8888,27 @@ source = "clients/linux-player/plurx_player/playback.py"
 source_anchor = '"transport": "mpv"'
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_a_film_seek_outside_the_stream_recreates_the_session_there(self):"
+
+[[fixes]]
+id = "apple.cinema-refused-subtitle-keeps-generated-captions"
+commits = ["5ce3268f688f74a586013c3252ea13a89694e094"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func selectSubtitle(_ index: Int?)"
+test = "clients/apple/Tests/ProgressiveCaptionTests.swift"
+test_anchor = "func testRefusedHDRSubtitlePreservesGeneratedCaptionsUntilOff()"
+
+[[fixes]]
+id = "linux-player.cinema-quality-commit-clock"
+commits = ["3c59c1e184e2a673e39286e2d30a1ef72bcdf713"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def change_quality(self, choice):"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "def test_quality_uses_clock_and_pause_at_commit_after_delayed_admission(self):"
+
+[[fixes]]
+id = "linux-player.cinema-queued-seek-preserves-pause"
+commits = ["cba42fd40de71ffcc46940db1c186d08558342a7"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "self.seek_film(target, preserve_pause=True)"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "def test_quality_admission_preserves_paused_film_seek_on_rolling_success(self):"
