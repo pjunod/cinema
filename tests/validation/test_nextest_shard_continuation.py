@@ -114,6 +114,24 @@ class NextestShardContinuationTests(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(r.ReceiptError):
                 proof.strict_outcomes(raw)
 
+    def test_only_exact_failed_recaps_match_authenticated_invocation_summaries(self):
+        red = b'        FAIL [ 0.01s] (1/2) plurxd::bin/plurxd group::red\n'
+        green = b'        PASS [ 0.02s] (2/2) plurxd::bin/plurxd group::green\n'
+        serial = b'        PASS [ 0.03s] (1/1) plurxd::bin/plurxd group::serial\n'
+        summary = b'     Summary [ 0.030s] 2 tests run: 1 passed, 1 failed, 803 skipped\n'
+        end = b'     Summary [ 0.030s] 1 test run: 1 passed, 804 skipped\n'
+        live = red + green + summary
+        self.assertEqual(proof.strict_outcomes(live + red + serial + end), {
+            'plurxd::bin/plurxd group::red': 'FAIL',
+            'plurxd::bin/plurxd group::green': 'PASS',
+            'plurxd::bin/plurxd group::serial': 'PASS',
+        })
+        for broken in (live, live + green, live + red + red,
+                       live + red.replace(b'0.01s', b'0.09s'),
+                       red + green + summary.replace(b'2 tests run', b'3 tests run') + red):
+            with self.subTest(broken=broken), self.assertRaises(r.ReceiptError):
+                proof.strict_outcomes(broken)
+
     def listing(self, names):
         return {'rust-suites': {'plurxd::bin/plurxd': {'testcases': {
             name: {'ignored': ignored} for name, ignored in names.items()}}}}

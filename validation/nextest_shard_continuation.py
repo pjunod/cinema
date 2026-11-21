@@ -161,17 +161,41 @@ def source_selection(candidate, base, repository='.'):
             'projection': {'policy': 'authenticated-manual-scope-env-only-v1', 'workflow': witness}}
 
 
+NEXTEST_SUMMARY = re.compile(
+    r' +Summary \[ *[0-9]+\.[0-9]+s\] ([0-9]+) tests? run: ([0-9]+) passed'
+    r'(?: \([0-9]+ slow\))?(?:, ([0-9]+) failed)?, [0-9]+ skipped'
+)
+
+
 def strict_outcomes(raw):
     result = {}
+    invocation = {}
+    recap = {}
     for line in raw.decode('utf-8', 'strict').splitlines():
         line = re.sub(r'^\d{4}-\d\d-\d\dT[0-9:.]+Z ', '', line)
+        summary = NEXTEST_SUMMARY.fullmatch(line)
+        if summary:
+            passed = sum(status == 'PASS' for status, _ in invocation.values())
+            failed = len(invocation) - passed
+            r.require(not recap and int(summary[1]) == len(invocation)
+                      and int(summary[2]) == passed and int(summary[3] or 0) == failed,
+                      'Nextest invocation summary contradicts its live outcomes')
+            recap = {identity: row for identity, (status, row) in invocation.items() if status == 'FAIL'}
+            invocation.clear()
+            continue
         match = units.STATUS_LINE.fullmatch(line)
         if match:
             status, binary, name = match.groups()
             identity = binary + ' ' + name
+            if recap:
+                # Nextest prints the exact failed rows again after its Summary.
+                r.require(recap.pop(identity, None) == line, 'Unexpected nextest failure recap')
+                continue
             r.require(identity not in result, 'Duplicate nextest body outcome')
-            result[identity] = 'PASS' if status in {'PASS', 'LEAK'} else 'FAIL'
-    r.require(result, 'No original nextest outcomes')
+            outcome = 'PASS' if status in {'PASS', 'LEAK'} else 'FAIL'
+            result[identity] = outcome
+            invocation[identity] = (outcome, line)
+    r.require(result and not recap, 'No original nextest outcomes or incomplete failure recap')
     return result
 
 
