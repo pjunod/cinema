@@ -4190,9 +4190,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +4 M5b: the JoinSet-owned leased file worker and three bounded subprocess or
 # blocking-I/O owners. Each is awaited, cancellation-bound, or deliberately
 # retains a node-local permit if an operating-system read cannot be stopped.
-# +1: `run_chapter_probe` spawns one bounded ffprobe child. Its caller owns a
-# cancellation token and deadline; the child is kill-on-drop and always reaped
-# on the explicit oversize and ordinary completion paths.
+# +1: `probe_chapters_until` spawns one bounded ffprobe child under the
+# analysis worker. Its caller owns a cancellation token and deadline. After
+# spawn, the probe waits for the child or kills and reaps it on failure.
 # 41 -> 43 with M4: planned-outage and cache-revocation Drop each hand an exact
 # replicated cleanup claim plus its process gate to the node runtime. Retry is
 # shutdown-aware and bounded; the gate remains owned until cleanup is definitive.
@@ -4421,6 +4421,9 @@ expected_occurrences = 27
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Cinema chapter enrichment: two deadline branches bound one worker-owned
+# child before and after spawn. One obsolete state-layer deadline wait was
+# removed, and the affected regression waits have no net change.
 # Four test-only timers wait for the artwork fixture identity and the offline
 # worker result. Each pair uses a bounded timeout around the positive condition.
 # Source-budget audit (8ab61a779 -> bbc5c1664): +11 timer shapes. Group's
@@ -6107,7 +6110,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # sleeps above. It wakes the existing splice task.
 # Main adds bounded artwork, offline worker, voter and heartbeat fixture waits.
 # The scanner deadline fixture bounds cleanup after advancing the test clock.
-expected_occurrences = 2273
+expected_occurrences = 2274
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6164,6 +6167,9 @@ expected_occurrences = 8
 
 [[module_structures]]
 id = "process-command-construction"
+# Cinema regression fixtures add four FFmpeg command shapes for the cover,
+# source media, decoded output frames, and embedded chapter fixture. The
+# synchronous helpers wait for the children to exit.
 # Source-budget audit (8ab61a779 -> bbc5c1664): +4 test-only commands. The
 # manifest generator's synchronous output() joins its Python child. Two shell
 # fixtures are owned by Group/QualificationStage and explicitly reaped; the
@@ -6648,11 +6654,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # The owned voter fixture process is joined before a collision can retry.
 # The Linux FEL evidence test runs one command site with /bin/true or
 # /bin/false. ProducerSlot owns it through exit and writer settlement.
-expected_occurrences = 370
+expected_occurrences = 374
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
 id = "process-capable-launch-method"
+# The Cinema remux regression adds a status() assertion on the Axum response.
 # Source-budget audit (8ab61a779 -> bbc5c1664): +3 broad lexical matches.
 # One output() synchronously joins the manifest-generator fixture child.
 # Two status() matches inspect reqwest HTTP responses; they launch no process.
@@ -7397,7 +7404,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # The owned voter fixture process is joined before a collision can retry.
 # The Linux FEL evidence test runs one command site with /bin/true or
 # /bin/false. ProducerSlot owns it through exit and writer settlement.
-expected_occurrences = 956
+expected_occurrences = 957
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
