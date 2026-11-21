@@ -15561,7 +15561,8 @@ async fn progressive_remux_delivers_first_playable_video_and_selected_audio() {
     fn atoms(mut bytes: &[u8]) -> Vec<&[u8]> {
         let mut atoms = Vec::new();
         while !bytes.is_empty() {
-            let size = u32::from_be_bytes(bytes[..4].try_into().expect("four-byte box size")) as usize;
+            let size =
+                u32::from_be_bytes(bytes[..4].try_into().expect("four-byte box size")) as usize;
             assert!(size >= 8);
             let (atom, rest) = bytes.split_at(size);
             atoms.push(atom);
@@ -15667,7 +15668,9 @@ async fn progressive_remux_delivers_first_playable_video_and_selected_audio() {
             .await
             .expect("scan source");
         if has_cover {
-            let raw: Value = serde_json::from_str(scan.raw_json.as_deref().expect("raw probe JSON")).expect("probe JSON");
+            let raw: Value =
+                serde_json::from_str(scan.raw_json.as_deref().expect("raw probe JSON"))
+                    .expect("probe JSON");
             assert_eq!(
                 raw["streams"][0]["disposition"]["attached_pic"], 1,
                 "{name}"
@@ -15698,14 +15701,21 @@ async fn progressive_remux_delivers_first_playable_video_and_selected_audio() {
             Some(&admin),
         )).await.expect("progressive response");
         assert_eq!(response.status(), StatusCode::OK, "{name}");
-        let body = response.into_body().collect().await.expect("response body").to_bytes();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
         let output = dir.path().join(format!("{name}-progressive.mp4"));
         std::fs::write(&output, body).expect("write");
         let delivered = plurx_core::scan::probe::probe(&output)
             .await
             .expect("scan remux output");
         assert_eq!(delivered.width.zip(delivered.height), dimensions, "{name}");
-        let raw: Value = serde_json::from_str(delivered.raw_json.as_deref().expect("raw probe JSON")).expect("probe JSON");
+        let raw: Value =
+            serde_json::from_str(delivered.raw_json.as_deref().expect("raw probe JSON"))
+                .expect("probe JSON");
         assert_eq!(
             raw["streams"].as_array().expect("JSON array").len(),
             1 + usize::from(dimensions.is_some()),
@@ -17827,7 +17837,12 @@ async fn catalogue_legacy_chapter_fixture(
         )
         .await
         .expect("upsert fixture file");
-    state.store.get_file(file_id).await.expect("get file").expect("fixture file exists")
+    state
+        .store
+        .get_file(file_id)
+        .await
+        .expect("get file")
+        .expect("fixture file exists")
 }
 
 fn chapter_decision(file_id: i64, token: &str) -> Request<Body> {
@@ -17849,7 +17864,11 @@ async fn wait_for_chapter_probe(
     }
     panic!(
         "background chapter probe was never reached: {:?}",
-        state.store.analysis_requests(10).await.expect("analysis requests")
+        state
+            .store
+            .analysis_requests(10)
+            .await
+            .expect("analysis requests")
     );
 }
 
@@ -17869,8 +17888,12 @@ async fn configure_chapter_worker(state: &AppState) {
 
 async fn wait_out_chapter_attempt(state: &AppState, request_id: &str, retry_at_ms: i64) {
     // A failed or superseded claim can keep its source reservation for its lease.
-    let expires =
-        state.store.analysis_attempts(request_id, 1).await.expect("analysis attempts")[0].claim_expires_at_ms;
+    let expires = state
+        .store
+        .analysis_attempts(request_id, 1)
+        .await
+        .expect("analysis attempts")[0]
+        .claim_expires_at_ms;
     let wait = expires
         .max(retry_at_ms)
         .saturating_sub(crate::state::clock_ms())
@@ -17904,7 +17927,12 @@ async fn playback_chapter_timeout_is_unknown_and_retry_preserves_manual_edits() 
     assert_eq!(first["markers"], json!([]));
     assert_eq!(second["markers"], json!([]));
     assert!(
-        state.store.analysis_requests(10).await.expect("analysis requests").is_empty(),
+        state
+            .store
+            .analysis_requests(10)
+            .await
+            .expect("analysis requests")
+            .is_empty(),
         "Play returned while the background owner was unavailable to admit work"
     );
     let mut worker = tokio::spawn(
@@ -17914,7 +17942,11 @@ async fn playback_chapter_timeout_is_unknown_and_retry_preserves_manual_edits() 
             .work_cluster_fragment_index_queue(state.transcode.clone()),
     );
     wait_for_chapter_probe(&state, &pause, &mut worker).await;
-    let queue = state.store.analysis_requests(10).await.expect("analysis requests");
+    let queue = state
+        .store
+        .analysis_requests(10)
+        .await
+        .expect("analysis requests");
     assert_eq!(queue.len(), 1, "one durable request for both decisions");
     assert_eq!(queue[0].trigger, "background");
     let request_id = &queue[0].request_id;
@@ -18011,7 +18043,12 @@ async fn playback_chapter_probe_fences_replacements_and_confirms_chapterless_sou
             .work_cluster_fragment_index_queue(state.transcode.clone()),
     );
     wait_for_chapter_probe(&state, &pause, &mut worker).await;
-    let old_request = state.store.analysis_requests(10).await.expect("analysis requests").remove(0);
+    let old_request = state
+        .store
+        .analysis_requests(10)
+        .await
+        .expect("analysis requests")
+        .remove(0);
     let replacement_path = dir.path().join("new.mp4");
     write_chapter_fixture(&replacement_path, false);
     std::fs::rename(replacement_path, &path).expect("rename");

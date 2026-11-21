@@ -2809,7 +2809,12 @@ async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_back
             .is_none(),
         "decision must not backfill an annotation set"
     );
-    assert!(state.store.analysis_requests(10).await.expect("analysis requests").is_empty());
+    assert!(state
+        .store
+        .analysis_requests(10)
+        .await
+        .expect("analysis requests")
+        .is_empty());
     let ambiguous = annotation_set_from_markers(annotation_source_identity(&file), &[]);
     state
         .store
