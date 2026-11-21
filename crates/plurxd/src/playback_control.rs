@@ -1445,6 +1445,10 @@ pub(crate) struct EffectiveSelection {
     pub quality_auto: bool,
     pub height: i64,
     pub audio_track: Option<i64>,
+    /// A split copy presentation carries every soundtrack of its source as an
+    /// alternate on the one attachment: choosing another is not a new recipe.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub audio_alternates: bool,
     pub subtitle_burn: Option<i64>,
     pub audio_offset_ms: i64,
     pub codec: String,
@@ -1507,6 +1511,8 @@ impl EffectiveSelection {
             quality_auto: request.automatic,
             height: delivered_height,
             audio_track: request.audio_index,
+            audio_alternates: request.split_audio
+                && matches!(request.kind, SessionKind::Copy { .. }),
             subtitle_burn: request.subtitle_burn,
             audio_offset_ms: request.audio_offset_ms,
             codec: codec.to_owned(),
@@ -1839,7 +1845,10 @@ fn decide_preparation_given_client(
     if delivered_grade != candidate_grade {
         cross(PreparationAxis::DynamicRange);
     }
-    if delivered.audio_track != candidate.audio_track
+    // Selecting another alternate of a split copy is served in place on the
+    // same attachment; an offset still changes the soundtracks' bytes.
+    let in_place_audio = delivered.audio_alternates && candidate.audio_alternates;
+    if delivered.audio_track != candidate.audio_track && !in_place_audio
         || delivered.audio_offset_ms != candidate.audio_offset_ms
     {
         cross(PreparationAxis::AudioTrackOrOffset);
@@ -3153,6 +3162,7 @@ pub(crate) fn terminal_response_for_test(result: &LocalControlResult) -> Control
             owner_epoch: 1,
         },
         effective_selection: EffectiveSelection {
+            audio_alternates: false,
             candidate_id: None,
             quality_auto: true,
             height: 720,

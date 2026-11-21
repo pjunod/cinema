@@ -1614,7 +1614,9 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
   try{
     const fileId=PLAYER.fileId, options={copy:true,aac,
       preserve_dolby_vision:!!PLAYER.preserveDolbyVision,start:startSec||0,audio:aidx,
-      audio_offset_ms:PLAYER.aoffset||0};
+      audio_offset_ms:PLAYER.aoffset||0,
+      // hls.js can select soundtracks itself; native HLS keeps the muxed copy.
+      ...(!native&&(PLAYER.audio||[]).length>1?{split_audio:true}:{})};
     // `vod_index_pending` has a better answer than waiting on this path — the
     // progressive remux below — so it is answered locally instead of retried.
     const retry={context:playbackCreateRetryContext(),preparation,

@@ -1338,6 +1338,7 @@ fn terminal_relay_response(
             owner_epoch: 1,
         },
         effective_selection: crate::playback_control::EffectiveSelection {
+            audio_alternates: false,
             candidate_id: None,
             quality_auto: true,
             height: 1080,

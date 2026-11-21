@@ -1411,6 +1411,13 @@ function wireHlsObservers(hls,startup,video,observesCurrent){
     if(observesCurrent()&&startup.manifestState!=='parsed') startup.manifestState='loaded';
   });
   resetPlaybackTransportEvents(video);
+  if(Hls.Events.AUDIO_TRACK_SWITCHED) hls.on(Hls.Events.AUDIO_TRACK_SWITCHED,(_,data)=>{
+    if(observesCurrent()) splitAudioSwitched(attachedPlayer,hls,data&&data.id);
+  });
+  hls.on(Hls.Events.ERROR,(_,data)=>{
+    if(observesCurrent()&&data&&data.details===Hls.ErrorDetails.AUDIO_TRACK_LOAD_ERROR)
+      splitAudioRefused(attachedPlayer,hls,attachedPlayer.requestedAudio&&attachedPlayer.requestedAudio.track);
+  });
   // A subtitle chosen before the rendition list arrived is dropped on the
   // floor: `hls.subtitleTrack = n` with no tracks yet sets nothing, and
   // nothing re-applies it. That is one of the ways a viewer selects a
