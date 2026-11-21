@@ -26,19 +26,24 @@ pub enum PacketClockError {
 /// HEVC as Annex B, so compare a size with a sample only through
 /// [`packet_size_frames_sample`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SourcePacketObservation {
+pub struct ObservedVideoPacket<Digest> {
     pub sequence: u64,
     pub dts: i64,
     pub pts: i64,
     pub duration: u64,
     pub size: u64,
-    pub checksum: u32,
+    pub checksum: Digest,
     /// Framecrc omits F= for a key packet (AV_PKT_FLAG_KEY == 1).
     pub flags: u32,
     pub side_data_count: u32,
     pub time_base_num: u32,
     pub time_base_den: u32,
 }
+
+pub type SourcePacketObservation = ObservedVideoPacket<u32>;
+
+/// A packet from a SHA-256 framehash stream filtered to coded picture units.
+pub type SourcePictureObservation = ObservedVideoPacket<[u8; 32]>;
 
 /// Exact source timing associated with one pre-conversion canonical fragment.
 /// This is an observation, not authority to publish or proof of full coverage.
@@ -185,6 +190,7 @@ pub struct PacketClockParser {
     header_bytes: usize,
     packets: u64,
     last_dts: Option<i64>,
+    declared_sha256: bool,
     failed: bool,
 }
 
@@ -197,20 +203,31 @@ impl PacketClockParser {
         &mut self,
         line: &str,
     ) -> Result<Option<SourcePacketObservation>, PacketClockError> {
+        self.push_line_with(line, false, parse_checksum)
+    }
+
+    fn push_line_with<Digest>(
+        &mut self,
+        line: &str,
+        picture_hash: bool,
+        parse_digest: impl FnOnce(&str) -> Result<Digest, PacketClockError>,
+    ) -> Result<Option<ObservedVideoPacket<Digest>>, PacketClockError> {
         if self.failed {
             return Err(PacketClockError::Failed);
         }
-        let result = self.parse_line(line);
+        let result = self.parse_line(line, picture_hash, parse_digest);
         if result.is_err() {
             self.failed = true;
         }
         result
     }
 
-    fn parse_line(
+    fn parse_line<Digest>(
         &mut self,
         line: &str,
-    ) -> Result<Option<SourcePacketObservation>, PacketClockError> {
+        picture_hash: bool,
+        parse_digest: impl FnOnce(&str) -> Result<Digest, PacketClockError>,
+    ) -> Result<Option<ObservedVideoPacket<Digest>>, PacketClockError> {
         if line.len() > MAX_PACKET_CLOCK_LINE_BYTES {
             return Err(PacketClockError::LineTooLong);
         }
@@ -252,7 +269,29 @@ impl PacketClockParser {
                     return Err(PacketClockError::InvalidHeader);
                 }
                 self.time_base = Some((num, den));
-            } else if line.starts_with("#software:") {
+            } else if let Some(hash) = line.strip_prefix("#hash: ") {
+                if !picture_hash || self.declared_sha256 || hash != "SHA256" {
+                    return Err(PacketClockError::InvalidHeader);
+                }
+                self.declared_sha256 = true;
+            } else if let Some(extra) = line.strip_prefix("#extradata ").filter(|_| picture_hash) {
+                let mut fields = extra.split(',').map(str::trim);
+                check_stream(fields.next().ok_or(PacketClockError::InvalidHeader)?)?;
+                fields
+                    .next()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .filter(|size| *size != 0)
+                    .ok_or(PacketClockError::InvalidHeader)?;
+                decode_picture_sha256(fields.next().ok_or(PacketClockError::InvalidHeader)?)
+                    .map_err(|_| PacketClockError::InvalidHeader)?;
+                if !self.declared_sha256 || fields.next().is_some() {
+                    return Err(PacketClockError::InvalidHeader);
+                }
+            } else if line.starts_with("#software:")
+                || picture_hash
+                    && (matches!(line, "#format: frame checksums" | "#version: 2")
+                        || line.starts_with("#stream#"))
+            {
                 // Bounded provenance text; never trusted as engine identity.
             } else {
                 let (kind, value) = line
@@ -275,6 +314,9 @@ impl PacketClockParser {
             return Ok(None);
         }
         let (num, den) = self.time_base.ok_or(PacketClockError::MissingTimeBase)?;
+        if picture_hash && !self.declared_sha256 {
+            return Err(PacketClockError::InvalidHeader);
+        }
         // A bounded fixed record, no Vec allocation proportional to input.
         let mut fields = line.split(',').map(str::trim);
         check_stream(fields.next().ok_or(PacketClockError::InvalidPacket)?)?;
@@ -298,8 +340,17 @@ impl PacketClockParser {
             .ok_or(PacketClockError::InvalidPacket)?
             .parse::<u64>()
             .map_err(|_| PacketClockError::InvalidPacket)?;
-        let checksum = parse_checksum(fields.next().ok_or(PacketClockError::InvalidPacket)?)?;
-        let (flags, side_data_count) = parse_suffix(fields)?;
+        let checksum = parse_digest(fields.next().ok_or(PacketClockError::InvalidPacket)?)?;
+        let (flags, side_data_count) = if picture_hash {
+            if fields.next().is_some() || size == 0 {
+                return Err(PacketClockError::InvalidPacket);
+            }
+            // This format has no packet flags. The matched media sample
+            // establishes its sync and leading-picture properties.
+            (0, 0)
+        } else {
+            parse_suffix(fields)?
+        };
         if duration == 0 || duration > i64::MAX as u64 || dts == i64::MIN || pts == i64::MIN {
             return Err(PacketClockError::InvalidPacket);
         }
@@ -312,7 +363,7 @@ impl PacketClockParser {
             .packets
             .checked_add(1)
             .ok_or(PacketClockError::Overflow)?;
-        let observation = SourcePacketObservation {
+        let observation = ObservedVideoPacket {
             sequence: self.packets,
             dts,
             pts,
@@ -339,6 +390,30 @@ impl PacketClockParser {
         }
         Ok(())
     }
+}
+
+/// Bounded parser for the same-input SHA-256 picture clock. A malformed
+/// record fences the entire observation, rather than skipping a picture.
+#[derive(Debug, Default)]
+pub struct PictureClockParser(PacketClockParser);
+
+impl PictureClockParser {
+    pub fn push_line(
+        &mut self,
+        line: &str,
+    ) -> Result<Option<SourcePictureObservation>, PacketClockError> {
+        self.0.push_line_with(line, true, decode_picture_sha256)
+    }
+
+    pub fn finish(&self) -> Result<(), PacketClockError> {
+        self.0.finish()
+    }
+}
+
+fn decode_picture_sha256(value: &str) -> Result<[u8; 32], PacketClockError> {
+    let mut digest = [0; 32];
+    hex::decode_to_slice(value, &mut digest).map_err(|_| PacketClockError::InvalidPacket)?;
+    Ok(digest)
 }
 
 fn parse_checksum(value: &str) -> Result<u32, PacketClockError> {
@@ -411,6 +486,43 @@ mod association_tests {
     use super::*;
     use crate::fmp4::{FragmentReader, Unit};
     use crate::segplan::ranges::SourceTimestamp;
+
+    #[test]
+    fn picture_clock_requires_exact_sha256_and_preserves_source_order() {
+        let mut clock = PictureClockParser::default();
+        for header in [
+            "#format: frame checksums",
+            "#version: 2",
+            "#hash: SHA256",
+            "#extradata 0, 2357, abababababababababababababababababababababababababababababababab",
+            "#tb 0: 1/1000",
+            "#stream#, dts, pts, duration, size, hash",
+        ] {
+            assert!(clock.push_line(header).expect("valid header").is_none());
+        }
+        let hash = "ab".repeat(32);
+        let first = clock
+            .push_line(&format!("0, 591216, 591299, 41, 1000, {hash}"))
+            .expect("complete picture observation")
+            .expect("picture packet");
+        assert_eq!(first.sequence, 0);
+        assert_eq!(first.pts, 591299);
+        assert_eq!(first.dts, 591216);
+        assert_eq!(first.checksum, [0xab; 32]);
+        clock.finish().expect("complete observed prefix");
+        assert_eq!(
+            clock.push_line("0, 591257, 591257, 42, 18, 0x0badcafe"),
+            Err(PacketClockError::InvalidPacket)
+        );
+        assert_eq!(clock.finish(), Err(PacketClockError::Failed));
+
+        let mut undeclared = PictureClockParser::default();
+        undeclared.push_line("#tb 0: 1/1000").expect("valid header");
+        assert_eq!(
+            undeclared.push_line(&format!("0, 591216, 591299, 41, 1000, {hash}")),
+            Err(PacketClockError::InvalidHeader)
+        );
+    }
 
     #[test]
     fn every_fragment_sample_requires_its_exact_ordered_source_clock() {

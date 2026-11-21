@@ -466,6 +466,51 @@ pub struct DvFrameGridMapping {
     pub output_duration: DvDuration,
 }
 
+/// Resolve the absolute renderer frame of an already verified, display-ordered
+/// source picture window. The first source PTS proposes the ordinal and every
+/// picture must reproduce the same consecutive grid within one source tick.
+/// A caller still needs to bind the window to its actual emitted copy samples.
+pub fn dv_observed_source_grid_start(
+    source: &[DvFrameKey],
+    source_tick: (u32, u32),
+    source_origin: DvSourceOrigin,
+    grid: super::VodFrameGrid,
+) -> Result<u64, DvContractError> {
+    let first = source
+        .first()
+        .ok_or(DvContractError::Invalid("empty source picture window"))?;
+    if super::VodFrameGrid::new(grid.numerator, grid.denominator) != Some(grid) {
+        return Err(DvContractError::Invalid("source/output clock mapping"));
+    }
+    let elapsed = timestamp_difference(first.pts, source_origin.timestamp())?;
+    if elapsed.numerator < 0 {
+        return Err(DvContractError::Invalid(
+            "source picture precedes title origin",
+        ));
+    }
+    let frames = u128::from(elapsed.numerator.unsigned_abs()) * u128::from(grid.numerator);
+    let scale = u128::from(elapsed.denominator) * u128::from(grid.denominator);
+    let first_frame =
+        u64::try_from((frames + scale / 2) / scale).map_err(|_| DvContractError::Capacity)?;
+    let binding = (first.absolute_video_index, first.continuity_epoch);
+    if source
+        .iter()
+        .any(|key| (key.absolute_video_index, key.continuity_epoch) != binding)
+        || source.windows(2).any(|pair| pair[0].pts >= pair[1].pts)
+    {
+        return Err(DvContractError::DuplicateFrame);
+    }
+
+    let mut frame = first_frame;
+    for chunk in source.chunks(DV_MAX_CONTROL_FRAMES) {
+        dv_map_source_to_output_grid(chunk, source_tick, source_origin, grid, frame, chunk.len())?;
+        frame = frame
+            .checked_add(chunk.len() as u64)
+            .ok_or(DvContractError::Capacity)?;
+    }
+    Ok(first_frame)
+}
+
 /// Bind a complete coded-source trace to consecutive output frames. Container
 /// timestamp quantization may move each picture by at most one stored tick;
 /// a tick must be smaller than half an output frame so equal/ambiguous pictures
@@ -1011,6 +1056,10 @@ pub struct DvProcessingPlan {
     display_target: Option<DvDisplayTarget>,
 }
 impl DvProcessingPlan {
+    pub fn absolute_source_video_index(&self) -> u32 {
+        self.source.absolute_video_index
+    }
+
     pub fn destination(&self) -> DvDestination {
         self.destination
     }
