@@ -28,9 +28,11 @@ def prepare(operations, candidate):
     r.require(ROOT_CASE in records and all(isinstance(row, dict) and set(row) == {'run', 'commit'}
                                           for row in records.values()),
               'Root custody requires authenticated positives for every current method')
-    origins = {row['commit'] for row in records.values()}
-    r.require(all(retention.git_bytes(origin, path) == raw for origin in origins for path, raw in paths.items()),
-              'Root custody helper or case input differs at an actual origin')
+    root_origin = records[ROOT_CASE]
+    r.require(all(row == root_origin for row in records.values()),
+              'Root custody must originate from the one actual root execution domain')
+    r.require(all(retention.git_bytes(root_origin['commit'], path) == raw for path, raw in paths.items()),
+              'Root custody helper or case input differs at its actual origin')
     from validation.nextest_shard_continuation import IMAGE_DIGEST
     return {'image_sha256': IMAGE_DIGEST, 'source_sha256': {path: retention.digest(raw) for path, raw in paths.items()},
             'root_case': ROOT_CASE, 'records': records}
@@ -51,6 +53,8 @@ def coverage_shape(value):
               and all(isinstance(name, str) and name.startswith(MODULE)
                       and isinstance(row, dict) and set(row) == {'run', 'commit'}
                       for name, row in records.items()), 'Missing complete selected root custody outcomes')
-    for row in records.values():
-        r.positive(row['run'])
-        r.sha(row['commit'])
+    root_origin = records[ROOT_CASE]
+    r.require(all(row == root_origin for row in records.values()),
+              'Root custody coverage mixes execution domains')
+    r.positive(root_origin['run'])
+    r.sha(root_origin['commit'])

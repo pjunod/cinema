@@ -90,6 +90,12 @@ class SelectedNodePreflightTests(unittest.TestCase):
             root.prepare(suite, CURRENT)
         with patch.object(root.retention, 'git_bytes', return_value=test_source):
             self.assertEqual(set(root.prepare(suite, CURRENT)['records']), {root.ROOT_CASE, peer})
+            records['operations:' + peer] = {'run': 10, 'commit': SOURCE}
+            with self.assertRaisesRegex(r.ReceiptError, 'one actual root execution domain'):
+                root.prepare(suite, CURRENT)
+            records['operations:' + peer] = {'run': 10, 'commit': SOURCE}
+            with self.assertRaisesRegex(r.ReceiptError, 'one actual root execution domain'):
+                root.prepare(suite, CURRENT)
             del records[root_case]
             with self.assertRaises(r.ReceiptError):
                 root.prepare(suite, CURRENT)
@@ -105,8 +111,12 @@ class SelectedNodePreflightTests(unittest.TestCase):
         self.assertNotIn(b'root_ownership_retained', projected)
         self.assertNotIn(b'NODE_SELECTION', projected)
         self.assertEqual(workspace.selected_preflight_projection(projected), projected)
-        for bad in (raw.replace(b'validation.native_python_execute node',
-                                b'validation.native_python_execute unsupported'),
+        node_env = b'          NODE_SELECTION: ${{ steps.python-continuation.outputs.node_selection }}\n'
+        missing = raw.replace(node_env, b'')
+        moved = missing.replace(b'      - name: Audit corrective-history evidence\n',
+                                b'      - name: Audit corrective-history evidence\n' + node_env)
+        for bad in (moved, raw.replace(b'validation.native_python_execute node',
+                                       b'validation.native_python_execute unsupported'),
                     raw.replace(b"&& needs.preflight.outputs.root_ownership_retained != 'true'",
                                 b'&& false')):
             with self.subTest(bad=bad[-100:]), self.assertRaises(r.ReceiptError):

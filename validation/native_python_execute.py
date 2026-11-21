@@ -104,6 +104,10 @@ def main(kind):
                 print('node_selection=true', file=output)
             if 'root_ownership' in plan:
                 print('root_ownership_retained=true', file=output)
+            if 'formal_preflight' in plan:
+                print('formal_worker_refinement_retained=true', file=output)
+            if 'apple_preflight' in plan:
+                print('apple_native_retained=true', file=output)
         return
     receipts.require(kind in KINDS | {'node'}, 'Unknown selected preflight suite')
     raw = SELECTION.read_bytes()

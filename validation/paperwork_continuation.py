@@ -212,7 +212,7 @@ def marker(plan, kind):
             'comparison': plan.get('comparison'),
             'dependency_profile': plan.get('dependency_profile'),
             'dependency_runtime': plan.get('dependency_runtime'),
-            **({'root_ownership': plan['root_ownership']} if 'root_ownership' in plan else {})}
+            **{key: plan[key] for key in ('root_ownership', 'formal_preflight', 'apple_preflight') if key in plan}}
 
 
 def current_outcomes(raw, plan, *, capture_runtime=False):
@@ -253,7 +253,7 @@ def current_outcomes(raw, plan, *, capture_runtime=False):
 
 def coverage_shape(value, bind, run, inventory=None):
     r.positive(run)
-    selected_fields = COVERAGE_FIELDS | {'node_coverage', 'root_ownership'}
+    selected_fields = COVERAGE_FIELDS | {'node_coverage', 'root_ownership', 'formal_preflight', 'apple_preflight'}
     r.require(isinstance(value, dict) and set(value) in (COVERAGE_FIELDS, selected_fields)
               and value['version'] == 1
               and value['head'] == bind['head_sha'] and value['base'] == bind['base_sha']
@@ -266,6 +266,12 @@ def coverage_shape(value, bind, run, inventory=None):
         selected_node_preflight.coverage_shape(value['node_coverage'])
         from validation import selected_root_custody
         selected_root_custody.coverage_shape(value['root_ownership'])
+        r.require(isinstance(value['formal_preflight'], dict)
+                  and set(value['formal_preflight']) == {'origin', 'receipt_sha256', 'mapping_sha256', 'input_sha256'},
+                  'Missing selected worker-refinement coverage')
+        r.require(isinstance(value['apple_preflight'], dict)
+                  and set(value['apple_preflight']) == {'provider', 'desktop', 'mobile'},
+                  'Missing selected Apple native coverage')
     runtime = value['dependency_runtime']
     dependencies.validate_runtime(runtime, dependencies.PROFILE if runtime is not None else None)
     for field in ('evidence_sha256', 'inventory_sha256', 'preflight_log_sha256'):
@@ -307,7 +313,8 @@ def final_coverage(api, value, environment, root):
     from validation import selected_node_preflight
     node = selected_node_preflight.coverage(raw, plan)
     if node is not None:
-        coverage.update(node_coverage=node, root_ownership=plan['root_ownership'])
+        coverage.update(node_coverage=node, root_ownership=plan['root_ownership'],
+                        formal_preflight=plan['formal_preflight'], apple_preflight=plan['apple_preflight'])
     coverage_shape(coverage, bind, run_id, inventory)
     return coverage
 

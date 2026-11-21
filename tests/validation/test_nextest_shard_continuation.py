@@ -109,8 +109,9 @@ class NextestShardContinuationTests(unittest.TestCase):
 
     def test_duplicate_and_contradictory_original_statuses_are_refused(self):
         green = b'2026-11-20T17:00:00Z         PASS [ 0.01s] (1/2) plurxd::bin/plurxd group::a\n'
-        self.assertEqual(proof.strict_outcomes(green), {'plurxd::bin/plurxd group::a': 'PASS'})
-        for raw in (green + green, green + green.replace(b'PASS', b'FAIL'), b'no actual status'):
+        summary = b'     Summary [ 0.010s] 1 test run: 1 passed, 9 skipped\n'
+        self.assertEqual(proof.strict_outcomes(green + summary), {'plurxd::bin/plurxd group::a': 'PASS'})
+        for raw in (green, green + green, green + green.replace(b'PASS', b'FAIL'), b'no actual status'):
             with self.subTest(raw=raw), self.assertRaises(r.ReceiptError):
                 proof.strict_outcomes(raw)
 
@@ -126,7 +127,8 @@ class NextestShardContinuationTests(unittest.TestCase):
             'plurxd::bin/plurxd group::green': 'PASS',
             'plurxd::bin/plurxd group::serial': 'PASS',
         })
-        for broken in (live, live + green, live + red + red,
+        for broken in (live, live + green, live + red + red, live + red + serial,
+                       live + red + serial + end.replace(b'Summary', b'Broken'),
                        live + red.replace(b'0.01s', b'0.09s'),
                        red + green + summary.replace(b'2 tests run', b'3 tests run') + red):
             with self.subTest(broken=broken), self.assertRaises(r.ReceiptError):

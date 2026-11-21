@@ -195,7 +195,8 @@ def strict_outcomes(raw):
             outcome = 'PASS' if status in {'PASS', 'LEAK'} else 'FAIL'
             result[identity] = outcome
             invocation[identity] = (outcome, line)
-    r.require(result and not recap, 'No original nextest outcomes or incomplete failure recap')
+    r.require(result and not recap and not invocation,
+              'Missing nextest outcomes, terminal summary or complete failure recap')
     return result
 
 

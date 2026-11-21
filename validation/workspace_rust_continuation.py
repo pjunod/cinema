@@ -114,25 +114,148 @@ def metadata_only_workflow(before, after):
 
 
 SELECTED_PREFLIGHT_BLOCKS = (
-    (b"    outputs:\n      root_ownership_retained: ${{ steps.python-continuation.outputs.root_ownership_retained }}\n", b""),
-    (b"          RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}\n"
-     b"        run: python3 -m validation.native_python_execute prepare\n",
-     b"        run: python3 -m validation.native_python_execute prepare\n"),
-    (b"          NODE_SELECTION: ${{ steps.python-continuation.outputs.node_selection }}\n"
-     b"          PYTHON_SELECTION_SHA256: ${{ steps.python-continuation.outputs.selection_sha256 }}\n", b""),
-    (b'          elif [ "$NODE_SELECTION" = true ]; then\n'
-     b"            python3 -m validation.native_python_execute node\n", b""),
-    (b"        if: steps.workspace-continuation.outputs.root_retained != 'true'"
-     b" && needs.preflight.outputs.root_ownership_retained != 'true'\n",
-     b"        if: steps.workspace-continuation.outputs.root_retained != 'true'\n"),
+    (
+        b'    timeout-minutes: 30\n'
+        b'    outputs:\n'
+        b'      root_ownership_retained: ${{ steps.python-continuation.outputs.root_ownership_retained }}\n'
+        b'      apple_native_retained: ${{ steps.python-continuation.outputs.apple_native_retained }}\n',
+        b'    timeout-minutes: 30\n',
+    ),
+    (
+        b'      - name: Prepare authenticated Python test selection\n'
+        b'        id: python-continuation\n'
+        b"        if: inputs.python_unit_evidence != ''\n"
+        b'        env:\n'
+        b'          GITHUB_TOKEN: ${{ github.token }}\n'
+        b'          PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}\n'
+        b'          PYTHON_UNIT_EVIDENCE: ${{ inputs.python_unit_evidence }}\n'
+        b'          RETAIN_VALIDATION_UNITS: ${{ needs.scope.outputs.retain_validation_units }}\n'
+        b'          RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}\n'
+        b'          RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}\n'
+        b'        run: python3 -m validation.native_python_execute prepare\n',
+        b'      - name: Prepare authenticated Python test selection\n'
+        b'        id: python-continuation\n'
+        b"        if: inputs.python_unit_evidence != ''\n"
+        b'        env:\n'
+        b'          GITHUB_TOKEN: ${{ github.token }}\n'
+        b'          PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}\n'
+        b'          PYTHON_UNIT_EVIDENCE: ${{ inputs.python_unit_evidence }}\n'
+        b'          RETAIN_VALIDATION_UNITS: ${{ needs.scope.outputs.retain_validation_units }}\n'
+        b'          RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}\n'
+        b'        run: python3 -m validation.native_python_execute prepare\n',
+    ),
+    (
+        b'      - name: Check the shared player input contract\n'
+        b'        env:\n'
+        b'          RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}\n'
+        b'          NODE_SELECTION: ${{ steps.python-continuation.outputs.node_selection }}\n'
+        b'          PYTHON_SELECTION_SHA256: ${{ steps.python-continuation.outputs.selection_sha256 }}\n'
+        b'        run: |\n'
+        b'          if [ "$RETAIN_WEB_PREFLIGHT" = true ]; then\n'
+        b'            echo "Adopted authenticated complete two-script Node preflight"\n'
+        b'          elif [ "$NODE_SELECTION" = true ]; then\n'
+        b'            python3 -m validation.native_python_execute node\n'
+        b'          else\n'
+        b'            node tests/playback/player-input-contract.test.js\n'
+        b'            node tests/web/player-dom.test.js\n'
+        b'          fi\n',
+        b'      - name: Check the shared player input contract\n'
+        b'        env:\n'
+        b'          RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}\n'
+        b'        run: |\n'
+        b'          if [ "$RETAIN_WEB_PREFLIGHT" = true ]; then\n'
+        b'            echo "Adopted authenticated complete two-script Node preflight"\n'
+        b'          else\n'
+        b'            node tests/playback/player-input-contract.test.js\n'
+        b'            node tests/web/player-dom.test.js\n'
+        b'          fi\n',
+    ),
+    (
+        b'      - name: Complete worker-refinement formal smoke configurations\n'
+        b'        id: formal-worker-refinement-smoke\n'
+        b"        if: steps.formal-inputs.outputs.affected_worker_refinement == 'true' && steps.python-continuation.outputs.formal_worker_refinement_retained != 'true'\n"
+        b'        run: python3 scripts/check-formal smoke --package worker-refinement --cache-dir target/formal-toolchain\n',
+        b'      - name: Complete worker-refinement formal smoke configurations\n'
+        b'        id: formal-worker-refinement-smoke\n'
+        b"        if: steps.formal-inputs.outputs.affected_worker_refinement == 'true'\n"
+        b'        run: python3 scripts/check-formal smoke --package worker-refinement --cache-dir target/formal-toolchain\n',
+    ),
+    (
+        b'      - name: Verify source recovery ownership in the root Linux unit container\n'
+        b"        if: steps.workspace-continuation.outputs.root_retained != 'true' && needs.preflight.outputs.root_ownership_retained != 'true'\n"
+        b'        run: |\n'
+        b'          # This container is already the root-capable pinned Linux unit\n'
+        b'          # surface. Exercise real UID/GID handoff instead of counting the\n'
+        b"          # non-root operations lane's ownership-case skip as coverage.\n"
+        b'          python3 -c \'import os; assert os.geteuid() == 0, "source recovery ownership regression requires the root unit container"\'\n'
+        b'          python3 -m unittest discover -s tests/operations -p test_source_custody_recovery.py -v\n',
+        b'      - name: Verify source recovery ownership in the root Linux unit container\n'
+        b"        if: steps.workspace-continuation.outputs.root_retained != 'true'\n"
+        b'        run: |\n'
+        b'          # This container is already the root-capable pinned Linux unit\n'
+        b'          # surface. Exercise real UID/GID handoff instead of counting the\n'
+        b"          # non-root operations lane's ownership-case skip as coverage.\n"
+        b'          python3 -c \'import os; assert os.geteuid() == 0, "source recovery ownership regression requires the root unit container"\'\n'
+        b'          python3 -m unittest discover -s tests/operations -p test_source_custody_recovery.py -v\n',
+    ),
+    (
+        b'      - name: Build and test native macOS server tray\n'
+        b"        if: needs.scope.outputs.desktop_macos == 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b'      - name: Build and test native macOS server tray\n'
+        b"        if: needs.scope.outputs.desktop_macos == 'true'\n",
+    ),
+    (
+        b'      - name: Preserve native macOS server tray check output\n'
+        b"        if: always() && needs.scope.outputs.desktop_macos == 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b'      - name: Preserve native macOS server tray check output\n'
+        b"        if: always() && needs.scope.outputs.desktop_macos == 'true'\n",
+    ),
+    (
+        b'      - name: Verify the pinned mobile Apple toolchain\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b'      - name: Verify the pinned mobile Apple toolchain\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'\n",
+    ),
+    (
+        b'      - name: Create isolated iPhone, iPad, and Apple TV simulators\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b'      - name: Create isolated iPhone, iPad, and Apple TV simulators\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'\n",
+    ),
+    (
+        b'      - name: Run the shared XCTest suite on iPhone, iPad, and Apple TV\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b'      - name: Run the shared XCTest suite on iPhone, iPad, and Apple TV\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'\n",
+    ),
+    (
+        b'      - name: Require native TV navigation journeys\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b'      - name: Require native TV navigation journeys\n'
+        b"        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'\n",
+    ),
+    (
+        b'      - name: Preserve TV navigation evidence including failures\n'
+        b"        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b'      - name: Preserve TV navigation evidence including failures\n'
+        b"        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'\n",
+    ),
+    (
+        b"      - name: Delete the run's simulators\n"
+        b"        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'\n",
+        b"      - name: Delete the run's simulators\n"
+        b"        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'\n",
+    ),
 )
 
 
 def selected_preflight_projection(raw):
-    if b'root_ownership_retained' not in raw and b'NODE_SELECTION' not in raw:
+    if not any(marker in raw for marker in (
+        b'root_ownership_retained', b'NODE_SELECTION', b'formal_worker_refinement_retained', b'apple_native_retained',
+    )):
         return raw
     receipts.require(all(raw.count(selected) == 1 for selected, _ in SELECTED_PREFLIGHT_BLOCKS),
-                     'Unreviewed selected Node or root custody workflow change')
+                     'Unreviewed selected preflight workflow change')
     for selected, original in SELECTED_PREFLIGHT_BLOCKS:
         raw = raw.replace(selected, original)
     return raw

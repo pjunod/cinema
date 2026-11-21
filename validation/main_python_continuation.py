@@ -137,7 +137,7 @@ def prepare(api, record, binding, candidate, repository):
     if version in TYPED_POLICIES:
         fields.add('main_journals')
     if version == NODE_PREFLIGHT_POLICY:
-        fields.add('node_preflight')
+        fields.update({'node_preflight', 'formal_preflight', 'apple_preflight'})
     r.require(set(record) == fields and version in TYPED_POLICIES | {POLICY}
               and record['source_commit'] == candidate and binding['schema'] == 2,
               'Unknown main-Python continuation contract')
@@ -217,7 +217,11 @@ def prepare(api, record, binding, candidate, repository):
                                                        if key.startswith(kind + ':')}}
         for kind, names in inventories.items()}}
     if version == NODE_PREFLIGHT_POLICY:
-        from validation import selected_node_preflight
+        from validation import selected_apple_preflight, selected_formal_preflight, selected_node_preflight
         result['node_preflight'] = selected_node_preflight.prepare(
             api, record['node_preflight'], record['main_journals'], candidate, repository)
+        result['formal_preflight'] = selected_formal_preflight.prepare(
+            api, record['formal_preflight'], scope, journal, candidate)
+        result['apple_preflight'] = selected_apple_preflight.prepare(
+            api, record['apple_preflight'], scope, binding, candidate)
     return result

@@ -19,7 +19,7 @@ from validation import python_unit_receipts as r
 from validation import qualification
 from validation import nextest_shard_continuation as nextest
 
-WORKFLOW_SHA256 = '3632adb7cab291ba4b7b70b5a430eecd12f1663b7d98edb0b3dfaa069ad49f74'
+WORKFLOW_SHA256 = 'b2f617a6c35dcf311073b7d5288969adc2402e1588ca7abbbead506f540b455f'
 JOB_NAMES = {
     'scope': 'validation scope', 'mobile_version': 'mobile release version',
     'preflight': 'fast policy and contract preflight', 'rust': 'Rust unit and SQLite contracts',

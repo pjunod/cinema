@@ -291,6 +291,7 @@ jobs:
     timeout-minutes: 30
     outputs:
       root_ownership_retained: ${{ steps.python-continuation.outputs.root_ownership_retained }}
+      apple_native_retained: ${{ steps.python-continuation.outputs.apple_native_retained }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -359,7 +360,7 @@ jobs:
         run: python3 scripts/check-formal smoke --package operation-progress --cache-dir target/formal-toolchain
       - name: Complete worker-refinement formal smoke configurations
         id: formal-worker-refinement-smoke
-        if: steps.formal-inputs.outputs.affected_worker_refinement == 'true'
+        if: steps.formal-inputs.outputs.affected_worker_refinement == 'true' && steps.python-continuation.outputs.formal_worker_refinement_retained != 'true'
         run: python3 scripts/check-formal smoke --package worker-refinement --cache-dir target/formal-toolchain
       - name: Preserve formal model receipts and counterexamples
         if: always() && steps.formal-inputs.outcome != 'skipped'
@@ -1875,7 +1876,7 @@ jobs:
           grep -Fxq "Build version 27B52" <<< "$xcode_version"
           xcrun --find swift
       - name: Build and test native macOS server tray
-        if: needs.scope.outputs.desktop_macos == 'true'
+        if: needs.scope.outputs.desktop_macos == 'true' && needs.preflight.outputs.apple_native_retained != 'true'
         # Keep desktop XCTest namespaces out of mobile unit receipt parsing.
         # The complete native output is preserved independently, including failures.
         run: |
@@ -1883,7 +1884,7 @@ jobs:
           make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1
           echo "Native macOS server tray build and unit checks passed."
       - name: Preserve native macOS server tray check output
-        if: always() && needs.scope.outputs.desktop_macos == 'true'
+        if: always() && needs.scope.outputs.desktop_macos == 'true' && needs.preflight.outputs.apple_native_retained != 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: desktop-macos-check-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1891,7 +1892,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Verify the pinned mobile Apple toolchain
-        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
+        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'
         run: |
           test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.2"
           test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.2"
@@ -1899,7 +1900,7 @@ jobs:
       # Keep DerivedData local to this checkout across build/test steps.
       # Its absolute-path build state is not transferred between job roots.
       - name: Create isolated iPhone, iPad, and Apple TV simulators
-        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
+        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'
         run: |
           # A job-level timeout can leave simulators from an earlier attempt
           # of this run. Keep devices with ambiguous or foreign ownership.
@@ -1939,15 +1940,15 @@ jobs:
             xcrun simctl bootstatus "$simulator_id" -b
           done
       - name: Run the shared XCTest suite on iPhone, iPad, and Apple TV
-        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
+        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'
         run: make apple-test
       - name: Require native TV navigation journeys
-        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
+        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'
         env:
           PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
         run: make apple-tv-navigation-test
       - name: Preserve TV navigation evidence including failures
-        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
+        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1955,7 +1956,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Delete the run's simulators
-        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
+        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true' && needs.preflight.outputs.apple_native_retained != 'true'
         run: |
           for destination in "${APPLE_IOS_SIM:-}" "${APPLE_IPAD_SIM:-}" "${APPLE_TVOS_SIM:-}"; do
             udid="${destination##*,id=}"
