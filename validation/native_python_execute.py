@@ -23,18 +23,20 @@ def prepare(api, descriptor, binding, candidate):
     sha, uuid = descriptor['sha256'], descriptor['attachment_uuid']
     raw = retention.attachment_bytes(api, binding['pull_request'], attachment, uuid, sha)
     document, pull, repository, _ = retention.verify_identity(api, raw, sha, binding, candidate, attachment, uuid)
+    from validation import main_python_continuation as main
     from validation import paperwork_continuation as paperwork
     enrolled = paperwork.is_enrolled(pull.get('body'))
     if enrolled:
         value = paperwork.enrollment(pull['body'])
-        receipts.require(document.get('version') == 'main-python-journal-continuation-v2'
+        receipts.require(document.get('version') in main.TYPED_POLICIES
                          and binding['schema'] == 2 and value['python_unit_evidence'] == descriptor
                          and value['head'] == candidate and value['base'] == binding['base_sha']
                          and value['pr'] == binding['pull_request'],
                          'Typed paperwork selection has another evidence or comparison domain')
-    if document.get('version') in {'main-python-journal-continuation-v1', 'main-python-journal-continuation-v2'}:
-        from validation import main_python_continuation
-        proof = main_python_continuation.prepare(api, document, binding, candidate, repository)
+    receipts.require(document.get('version') != main.NODE_PREFLIGHT_POLICY or enrolled,
+                     'Selected Node preflight requires live paperwork enrollment')
+    if document.get('version') in main.TYPED_POLICIES | {main.POLICY}:
+        proof = main.prepare(api, document, binding, candidate, repository)
         result = {**proof, 'evidence_sha256': sha}
         if enrolled:
             paperwork.bind_selection(result, binding['base_sha'], candidate)
@@ -90,16 +92,37 @@ def main(kind):
         dependency = plan.get('dependency_profile')
         if dependency is not None:
             plan['dependency_runtime'] = dependencies.stage(dependency, os.environ)
+        if 'node_preflight' in plan:
+            from validation import selected_node_preflight
+            receipts.require(os.environ.get('RETAIN_WEB_PREFLIGHT') != 'true',
+                             'Conflicting whole and partial Node preflight proof')
+            selected_node_preflight.require_runtime()
         receipts.atomic_json(SELECTION, plan)
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
             print('selection_sha256=' + retention.digest(SELECTION.read_bytes()), file=output)
+            if 'node_preflight' in plan:
+                print('node_selection=true', file=output)
+            if 'root_ownership' in plan:
+                print('root_ownership_retained=true', file=output)
+            if 'formal_preflight' in plan:
+                print('formal_worker_refinement_retained=true', file=output)
+            if 'apple_preflight' in plan:
+                from validation import selected_apple_preflight
+                print('apple_native_retained=true', file=output)
+                if selected_apple_preflight.requires_current_reader(plan):
+                    print('apple_current_reader_required=true', file=output)
         return
-    receipts.require(kind in KINDS, 'Unknown native Python suite')
+    receipts.require(kind in KINDS | {'node'}, 'Unknown selected preflight suite')
     raw = SELECTION.read_bytes()
     receipts.require(retention.digest(raw) == os.environ['PYTHON_SELECTION_SHA256'],
                      'Python selection changed after authentication')
     plan = receipts.bounded_json(raw)
     receipts.require(plan['source_commit'] == candidate, 'Python selection belongs to another source')
+    if kind == 'node':
+        from validation import selected_node_preflight
+        receipts.require('node_preflight' in plan, 'Selected preflight has no authenticated Node plan')
+        selected_node_preflight.execute(plan)
+        return
     comparison = plan.get('comparison')
     if comparison is not None:
         receipts.require(set(comparison) == {'base_sha', 'merge_target'}

@@ -1543,7 +1543,15 @@ checks = ["desktop-macos"]
 id = "apple.client"
 title = "Native iOS and tvOS clients"
 contract = "The Apple clients preserve the shared API, navigation, preferences, and playback policies on both platforms."
-paths = ["clients/apple/**", "scripts/apple-tv-navigation-test", "validation/apple_simulator_runtime.py", "tests/operations/test_apple_tv_navigation_runner.py"]
+paths = [
+  "clients/apple/**",
+  "crates/plurxd/src/web/reader.js",
+  "crates/plurxd/src/web/offline-reader.js",
+  "crates/plurxd/src/web/offline-reader.html",
+  "scripts/apple-tv-navigation-test",
+  "validation/apple_simulator_runtime.py",
+  "tests/operations/test_apple_tv_navigation_runner.py",
+]
 checks = ["apple-simulators", "apple-tv-navigation", "player-input-fence", "playback-surface-fence"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline", "offline.viewing"]
 

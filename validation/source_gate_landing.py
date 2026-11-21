@@ -19,7 +19,7 @@ from validation import python_unit_receipts as r
 from validation import qualification
 from validation import nextest_shard_continuation as nextest
 
-WORKFLOW_SHA256 = 'c54c4c427fa453e96e30b97f013150912ec8e57e4238e0bad91893eef97e060f'
+WORKFLOW_SHA256 = '33f5e34f9805e81fa788178110f0c06dc5bfafcac8b6d506a6c6bf490591dfae'
 JOB_NAMES = {
     'scope': 'validation scope', 'mobile_version': 'mobile release version',
     'preflight': 'fast policy and contract preflight', 'rust': 'Rust unit and SQLite contracts',
@@ -91,14 +91,14 @@ def one_job(jobs, name, run, repository, owner):
     return job
 
 
-def uploaded(api, artifacts, name, job, task, members):
-    """Bind the exact archive bytes and ID to its actual creator's job log."""
+def uploaded_identity(api, artifacts, name, job, task, maximum):
+    """Bind archive metadata and digest to its actual creator's job log."""
     rows = [row for row in artifacts if row['name'] == name]
     r.require(len(rows) == 1, 'Missing or ambiguous source-gate artifact: ' + name)
     item = rows[0]
     path = f"/actions/artifacts/{r.positive(item['id'])}/zip"
     r.require(item['run_id'] == job['run_id'] and item['expired'] is False
-              and 0 < item['size_in_bytes'] <= r.MAX_BYTES and item['archive_download_url'] == api.root + path,
+              and 0 < item['size_in_bytes'] <= maximum and item['archive_download_url'] == api.root + path,
               'Source-gate artifact metadata differs')
     log = api.bytes(f"/actions/jobs/{r.positive(job['id'])}/logs").decode('utf-8', 'strict')
     header = nextest.units.TASK_LINE.search(log[:4096])
@@ -113,9 +113,19 @@ def uploaded(api, artifacts, name, job, task, members):
     hashes = re.findall(r'^SHA256 hash of uploaded artifact zip is ([0-9a-f]{64})$',
                         text[max(0, uploads[0].start() - 4096):uploads[0].start()], re.M)
     r.require(hashes, 'Artifact creator did not record its archive digest')
+    return item, path, hashes[-1]
+
+
+def uploaded_archive(api, artifacts, name, job, task):
+    item, path, expected = uploaded_identity(api, artifacts, name, job, task, r.MAX_BYTES)
     raw = api.bytes(path)
-    r.require(len(raw) == item['size_in_bytes'] and retention.digest(raw) == hashes[-1],
+    r.require(len(raw) == item['size_in_bytes'] and retention.digest(raw) == expected,
               'Artifact archive differs from original creator bytes')
+    return raw
+
+
+def uploaded(api, artifacts, name, job, task, members):
+    raw = uploaded_archive(api, artifacts, name, job, task)
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         entries = archive.infolist()
         r.require(len(entries) == len(members) and {entry.filename for entry in entries} == set(members)
@@ -169,6 +179,9 @@ def verify(api, number, head, main, root, run_id):
     repository, owner = r.positive(repo['id']), r.positive(repo['owner']['id'])
     pull = api.get(f'/pulls/{number}')
     run = api.get(f'/actions/runs/{r.positive(run_id)}')
+    if run['workflow_id'] == 'source-gate-repair.yml':
+        from validation import source_gate_repair
+        return source_gate_repair.verify(api, number, head, main, root, run_id)
     event = r.bounded_json(run['event_payload'].encode())
     inputs = event['inputs']
     branch = pull['head']['ref']

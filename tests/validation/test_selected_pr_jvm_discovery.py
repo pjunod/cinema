@@ -56,10 +56,11 @@ class SelectedPrJvmDiscoveryCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);source=root/discovery.ROBOLECTRIC_SOURCE
             source.parent.mkdir(parents=True);source.write_bytes(b'sealed SDK35 source')
-            catalog=root/'clients/android/gradle/libs.versions.toml';catalog.parent.mkdir(parents=True)
+            catalog=root/discovery.ROBOLECTRIC_CATALOG;catalog.parent.mkdir(parents=True)
             catalog.write_text('[versions]\nrobolectric="4.17"\n')
             jar=root/'robolectric-4.17.jar';jar.write_bytes(b'sealed runner jar')
             with patch.object(discovery,'ROBOLECTRIC_SOURCE_SHA256',hashlib.sha256(source.read_bytes()).hexdigest()), \
+                 patch.object(discovery,'ROBOLECTRIC_CATALOG_SHA256',hashlib.sha256(catalog.read_bytes()).hexdigest()), \
                  patch.object(discovery,'ROBOLECTRIC_JAR_SHA256',hashlib.sha256(jar.read_bytes()).hexdigest()):
                 discovery.selected_pr_discovery_inputs(root,jar)
                 for kind in ('source','version','jar'):

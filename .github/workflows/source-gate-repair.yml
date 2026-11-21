@@ -1,0 +1,246 @@
+name: Main source gate repair
+
+on:
+  workflow_dispatch:
+    inputs:
+      promotion_pr:
+        description: Pull request bound to the earlier manual source gate
+        required: true
+        type: string
+      promotion_head_sha:
+        description: Exact current PR head
+        required: true
+        type: string
+      promotion_base_sha:
+        description: Exact current main commit
+        required: true
+        type: string
+      predecessor_run:
+        description: Earlier manual source gate whose completed commands are retained
+        required: true
+        type: string
+
+jobs:
+  prepare:
+    name: Authenticate source-gate repair evidence
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 20
+    outputs:
+      predecessor_sha: ${{ steps.evidence.outputs.predecessor_sha }}
+      arm64_due: ${{ steps.evidence.outputs.arm64_due }}
+      android_image_digest: ${{ steps.evidence.outputs.android_image_digest }}
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check exact original and current source claims
+        id: evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.source_gate_repair prepare
+      - name: Execute only the exact repair test selection
+        env:
+          SOURCE_GATE_REPAIR_SELECTION_SHA256: ${{ steps.evidence.outputs.selection_sha256 }}
+        run: |
+          unset GITHUB_TOKEN FORGEJO_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL ACTIONS_RESULTS_URL
+          python3 -m validation.source_gate_repair test
+      - name: Preserve the authenticated class snapshot and proof inputs
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: source-gate-repair-inputs-${{ github.run_id }}
+          path: target/validation/source-gate-repair-inputs/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
+
+  android:
+    name: Verify the preserved Android JVM discovery
+    needs: prepare
+    runs-on: [self-hosted, Linux, X64, lab, android-kvm]
+    timeout-minutes: 15
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
+        with:
+          name: source-gate-repair-inputs-${{ github.run_id }}
+          path: .
+      - name: Authenticate the pinned Android toolchain image
+        env:
+          REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+          ANDROID_IMAGE_DIGEST: ${{ needs.prepare.outputs.android_image_digest }}
+        run: |
+          set -eu
+          image="$REGISTRY/noirr/android-build@$ANDROID_IMAGE_DIGEST"
+          printf '%s\n' "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u fleet --password-stdin
+          docker pull "$image"
+          echo "ANDROID_REPAIR_IMAGE=$image" >> "$GITHUB_ENV"
+      - name: Check the source-equivalent class roster with Android's runtime
+        run: |
+          set -eu
+          export PLURX_RETAINED_UNITS="$(cat source-gate-android-units.json)"
+          docker run --rm --platform linux/amd64 \
+            -u "$(id -u):$(id -g)" -e GITHUB_SHA -e PLURX_RETAINED_UNITS \
+            -e GRADLE_USER_HOME=/workspace/target/validation/source-gate-gradle \
+            -v "$GITHUB_WORKSPACE":/workspace:ro -w /workspace "$ANDROID_REPAIR_IMAGE" \
+            sh -ec 'test "$(python3 -c "import sys; print(sys.version_info[:2])")" = "(3, 10)"; python3 -B -m validation.jvm_unit_discovery --verify-adopted --source-commit "$GITHUB_SHA"'
+          echo "Android repair unit binding $(sha256sum source-gate-android-units.json | cut -d' ' -f1)"
+
+  arm64:
+    name: Complete the outstanding arm64 package smoke
+    needs: prepare
+    if: needs.prepare.outputs.arm64_due == 'true'
+    runs-on: [self-hosted, Linux, ARM64, lab, ci-arm64]
+    concurrency:
+      group: plurx-apple-silicon-heavy
+      cancel-in-progress: false
+    timeout-minutes: 90
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.predecessor_sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check the original source and native runner
+        id: binary-build
+        env:
+          PACKAGE_SOURCE: ${{ needs.prepare.outputs.predecessor_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PACKAGE_SOURCE"
+          test "$(uname -s)/$(uname -m)" = Linux/aarch64
+          test "$(docker info --format '{{.OSType}}/{{.Architecture}}')" = linux/aarch64
+          python3 -m validation.release_dockerfile --binary-export Dockerfile Dockerfile.binaries
+          echo "source_date_epoch=$(git log -1 --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+      - id: buildx-cache
+        uses: ./.github/actions/buildx-cache
+        with:
+          lane: package-smoke-arm64
+      - name: Recover the exact original candidate binary export
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          builder: ${{ steps.buildx-cache.outputs.builder-name }}
+          context: .
+          file: Dockerfile.binaries
+          target: release-binaries
+          platforms: linux/arm64
+          outputs: type=local,dest=binary-export
+          build-args: |
+            PLURX_BUILD_REF=${{ needs.prepare.outputs.predecessor_sha }}
+            PLURX_BUILD_SHA=${{ needs.prepare.outputs.predecessor_sha }}
+            SOURCE_DATE_EPOCH=${{ steps.binary-build.outputs.source_date_epoch }}
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,scope=package-compile-arm64' || '' }}
+      - name: Verify the original binary set and Bookworm ABI
+        env:
+          PACKAGE_SOURCE: ${{ needs.prepare.outputs.predecessor_sha }}
+        run: |
+          set -euo pipefail
+          scripts/release-package-candidate . . binary-export release-bin aarch64-unknown-linux-gnu "$PACKAGE_SOURCE" "$PACKAGE_SOURCE"
+          for name in plurxd plurx-cluster-check; do
+            max_glibc=$(readelf --version-info "release-bin/$name" | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' | sort -V | tail -1)
+            test -n "$max_glibc"
+            test "$(printf '%s\n' "$max_glibc" 2.36 | sort -V | tail -1)" = 2.36
+          done
+      - name: Authenticate the private media runtime registry
+        uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          username: fleet
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+      - name: Build the private smoke image from the verified binaries
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          builder: ${{ steps.buildx-cache.outputs.builder-name }}
+          context: .
+          file: Dockerfile.release
+          build-args: |
+            PLURX_MEDIA_RUNTIME_REPOSITORY=${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-media-runtime
+          push: false
+          load: true
+          platforms: linux/arm64
+          tags: plurx/plurxd:ci-arm64
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.predecessor_sha }}
+            tv.plurx.build-ref=${{ needs.prepare.outputs.predecessor_sha }}
+          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,scope=package-runtime-arm64' || '' }}
+      - name: Verify the original binary identity and run the missing smoke
+        env:
+          IMAGE: plurx/plurxd:ci-arm64
+          PACKAGE_SOURCE: ${{ needs.prepare.outputs.predecessor_sha }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")" = linux/arm64
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")" = "$PACKAGE_SOURCE"
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+          test "$(docker run --rm --platform linux/arm64 "$IMAGE" --version)" = "plurxd $version ($PACKAGE_SOURCE)"
+          test "$(docker run --rm --platform linux/arm64 --entrypoint /usr/local/bin/plurx-cluster-check "$IMAGE" build-identity)" = "$PACKAGE_SOURCE"
+          scripts/container-smoke "$IMAGE"
+          scripts/container-restore-smoke "$IMAGE"
+      - name: Preserve the completed arm64 package receipt
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: package-smoke-repair-arm64-${{ github.run_id }}
+          path: |
+            release-bin/build-manifest.json
+            release-bin/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Bound persistent BuildKit state
+        if: always() && steps.buildx-cache.outputs.local == 'true'
+        env:
+          BUILDER_NAME: ${{ steps.buildx-cache.outputs.builder-name }}
+        run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50
+
+  pr_gate:
+    name: Main promotion gate
+    needs: [prepare, android, arm64]
+    if: always() && needs.prepare.result == 'success' && needs.android.result == 'success' && (needs.arm64.result == 'success' || needs.arm64.result == 'skipped')
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 15
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Qualify the repaired source and reauthenticate retained commands
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.source_gate_repair finish
+      - name: Preserve the exact-tree source gate repair receipt
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: source-gate-repair-${{ github.run_id }}
+          path: target/validation/source-gate-repair/receipt.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
