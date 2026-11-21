@@ -20,6 +20,8 @@ COHORTS = {'rust': {'core', 'daemon', 'workspace-contracts'},
            'android_jvm': {'jvm'}, 'android_device': {'device'},
            'web_preflight': {'node-contracts'}}
 PROTOCOL_PATHS = {
+    'validation/ci_scope.py',
+    'tests/validation/test_runner.py',
     'validation/native_receipts.py',
     'validation/selected_apple_preflight.py',
     'validation/selected_formal_preflight.py',
