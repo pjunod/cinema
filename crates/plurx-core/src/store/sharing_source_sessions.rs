@@ -1665,25 +1665,35 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
         intent: &SourceSessionIntent,
         members: &SourceAdmissionMembers,
     ) -> Result<SourceClaimOutcome, StoreError> {
+        // Every "unavailable" below is the same answer to the caller and the
+        // same message to a viewer. Each names its own cause here, once.
+        let refused = |stage: &'static str| -> Result<SourceClaimOutcome, StoreError> {
+            tracing::warn!(target: "plurx::sharing", stage, error_class = "unavailable", operation = "start", request_id = %intent.request.request_id, "Source claim refused");
+            Ok(SourceClaimOutcome::Unavailable)
+        };
         if !present(self).await? {
-            return Ok(SourceClaimOutcome::Unavailable);
+            return refused("source_claim.schema");
         }
         let now = now_ms()?;
         let Ok((floor, roster, cutoff, observed)) = members.write_guard(now, 1, 2, 3) else {
-            return Ok(SourceClaimOutcome::Unavailable);
+            return refused("source_claim.member_observation");
         };
         let guard = authority_guard(&floor);
         let values = claim_values(intent, roster, cutoff, observed);
         let owner = intent.request.principal.owner_key();
         if let Some(row) = binding_row(self, &owner, &intent.request.request_id).await? {
-            return replay(self, row, intent, &guard, values).await;
+            let outcome = replay(self, row, intent, &guard, values).await?;
+            if matches!(outcome, SourceClaimOutcome::Unavailable) {
+                return refused("source_claim.replay");
+            }
+            return Ok(outcome);
         }
         let raft = i64::try_from(members.actual_local_raft_id()).map_err(|_| invalid())?;
         let boot = intent.request.ingress_registry_boot_id;
         let marker = format!("sharing_ingress_boot_v1:{boot}");
         let rows=self.sharing_read("SELECT json_quote(n.node_id) AS payload FROM cluster_nodes n JOIN cluster_node_capabilities c ON c.node_id=n.node_id AND c.last_seen_at=n.last_seen_at WHERE n.raft_id=$1 AND n.removed_at IS NULL AND c.capability=$2 LIMIT 2",vec![raft.into(),marker.clone().into()]).await?;
         let [node] = rows.as_slice() else {
-            return Ok(SourceClaimOutcome::Unavailable);
+            return refused("source_claim.ingress_boot_marker");
         };
         let node: String = serde_json::from_str(node).map_err(|_| invalid())?;
         let mut routing = crate::sharing_ingress_custody::IngressCustodyState::default();
@@ -1757,10 +1767,26 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
             Ok(_) => Err(invalid()),
             Err(error) if lost_proposal(&error) => {
                 if let Some(row) = binding_row(self, &owner, &intent.request.request_id).await? {
-                    return replay(self, row, intent, &guard, values).await;
+                    let outcome = replay(self, row, intent, &guard, values).await?;
+                    if matches!(outcome, SourceClaimOutcome::Unavailable) {
+                        return refused("source_claim.lost_proposal_replay");
+                    }
+                    return Ok(outcome);
                 }
                 if !authorized(self, &guard, values.clone()).await? {
-                    return Ok(SourceClaimOutcome::Unavailable);
+                    // The composed guard is one predicate. Read its member
+                    // floors apart, on this refusal only, to say which part.
+                    let member = authorized(self, &floor, values.clone()).await;
+                    let ingress = authorized(self, &ingress_floor, values.clone()).await;
+                    let stage = match (member, ingress) {
+                        (Ok(false), _) => "source_claim.member_floor",
+                        (Ok(true), Ok(false)) => "source_claim.ingress_custody_floor",
+                        (Ok(true), Ok(true)) => "source_claim.authority_guard",
+                        // The diagnostic read itself failed: say only that
+                        // the composed guard refused.
+                        _ => "source_claim.guard",
+                    };
+                    return refused(stage);
                 }
                 let unassigned=format!("({guard}) AND EXISTS(SELECT 1 FROM copy_source_owner_designations d WHERE d.server_id=$11 AND d.catalogue_epoch=$12 AND d.file_id=$15 AND d.file_revision=$16 AND d.owner_node_id<>{}) AND NOT EXISTS(SELECT 1 FROM sharing_source_session_bindings b WHERE b.incarnation_id=$10 OR (b.owner_key=$4 AND b.request_id=$7)) AND NOT EXISTS(SELECT 1 FROM media_session_requests r WHERE r.incarnation_id=$10 OR (r.owner_key=$4 AND r.request_id=$7)) AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE incarnation_id=$10) AND NOT EXISTS(SELECT 1 FROM sharing_ingress_custody WHERE principal_kind='source' AND incarnation_id=$10) AND NOT EXISTS(SELECT 1 FROM job_leases WHERE resource='session:'||$10) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins WHERE consumer_kind='media_session' AND consumer_id=$10) AND NOT EXISTS(SELECT 1 FROM media_session_preparations WHERE staged_incarnation_id=$10)",quote(&node));
                 if authorized(self, &unassigned, values.clone()).await? {
@@ -1769,10 +1795,12 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
                 let PlaybackPrincipal::Sharing { grant_id, .. } = intent.request.principal else {
                     return Err(invalid());
                 };
-                Ok(capacity(self, grant_id)
-                    .await?
-                    .map(SourceClaimOutcome::Capacity)
-                    .unwrap_or(SourceClaimOutcome::Unavailable))
+                match capacity(self, grant_id).await? {
+                    Some(occupancy) => Ok(SourceClaimOutcome::Capacity(occupancy)),
+                    // The guard holds and no limit is reached: the claim's
+                    // own transaction refused for a reason neither names.
+                    None => refused("source_claim.transaction"),
+                }
             }
             Err(error) => Err(error),
         }

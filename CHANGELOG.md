@@ -72,6 +72,17 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A shared Start whose claim the Source refuses (sharing unavailable, at
+  capacity, or in conflict) no longer leaves a cleanup that can never finish.
+  The refusal wrote nothing, so the receiver's End now settles at once instead
+  of answering 503 on every retry, and the refused Start no longer holds one of
+  the Source's eight start slots until the node restarts. A Dolby Vision title
+  started through a Source node that forwards to another is no longer noted as
+  "receiver does not relay Dolby Vision" when the receiver said it does. Every
+  refusal on the Source's forwarding paths, a growing copy that fails to start,
+  a refused claim, and a receiver about to tell its viewer only "could not
+  confirm playback preparation" now log one line naming the step that refused.
+
 - Source playback Start observes membership at its claim boundary after pure
   preparation. Slow filesystem or planning work no longer consumes the
   five-second authority proof before it is used; claim expiry, file and grant

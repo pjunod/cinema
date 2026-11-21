@@ -390,11 +390,13 @@ impl TranscodeManager {
         prepared: &crate::http::hls::PreparedSourcePlayback,
         session_id: String,
         deadline: Instant,
+        stage: &mut &'static str,
     ) -> Result<Arc<SourceGrowingBacking>, SourceWorkerError> {
         use crate::copyrange::{
             run_source_census, spawn_source_generation, CopyGenerationOwner, CopyRangeFiles,
             ObservedCopyMux,
         };
+        *stage = "growing.copy_kind";
         let SessionKind::Copy {
             aac,
             preserve_dolby_vision,
@@ -404,7 +406,9 @@ impl TranscodeManager {
         else {
             return Err(SourceWorkerError::Unsupported);
         };
+        *stage = "growing.preparation_authority";
         let authority = owner.gate.current_preparation(&owner.assignment).await?;
+        *stage = "growing.probe_evidence";
         let probe = self
             .store
             .source_index_probe_evidence(&authority)
@@ -414,6 +418,7 @@ impl TranscodeManager {
             .as_ref()
             .is_some_and(|probe| probe.len() > 1024 * 1024)
         {
+            *stage = "growing.probe_bound";
             return Err(SourceWorkerError::Unsupported);
         }
         // The master presents the same probe this copy was planned from.
@@ -429,7 +434,9 @@ impl TranscodeManager {
             preserve_dolby_vision,
             convert_dolby_vision,
         );
+        *stage = "growing.copy_admission";
         let permit = self.admit_source_copy(deadline).await?;
+        *stage = "growing.rendition_owner";
         let owners = Arc::new(SourceRenditionOwners::default());
         let source_owner = owners
             .attach(&owner.assignment)
@@ -445,14 +452,17 @@ impl TranscodeManager {
         {
             let mut current = owner.state.lock().expect("Source worker state");
             if current.retirement_requested {
+                *stage = "growing.retirement_requested";
                 return Err(SourceWorkerError::Unavailable);
             }
             current.backing = SourceBacking::PreparingRange(Arc::clone(&preparing));
         }
         let file = Arc::new(prepared.file().clone());
+        *stage = "growing.playback_fence";
         let source = crate::fragment_index_cluster::open_source_playback_fence(&file, None)
             .await
             .map_err(|_| SourceWorkerError::Unavailable)?;
+        *stage = "growing.source_request";
         let request = self
             .foreground_source_request(
                 &file,
@@ -461,6 +471,7 @@ impl TranscodeManager {
                 plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Rolling,
             )
             .ok_or(SourceWorkerError::Unavailable)?;
+        *stage = "growing.head_dispatch";
         let dispatch = owners
             .begin_generation()
             .map_err(|_| SourceWorkerError::Unavailable)?;
@@ -468,6 +479,7 @@ impl TranscodeManager {
             .authorize_preparing_before_spawn()
             .await
             .map_err(|_| SourceWorkerError::Unavailable)?;
+        *stage = "growing.head_input";
         let input = crate::source_input::SourceInput::open_foreground_held(
             request.clone(),
             source
@@ -478,6 +490,7 @@ impl TranscodeManager {
         )
         .await
         .map_err(|_| SourceWorkerError::Unavailable)?;
+        *stage = "growing.copy_head_census";
         let census = Arc::new(
             run_source_census(
                 input,
@@ -500,14 +513,17 @@ impl TranscodeManager {
                 SourceWorkerError::copy_failure(&error)
             })?,
         );
+        *stage = "growing.copy_head_clock";
         if census.format_start.is_none() {
             return Err(SourceWorkerError::CopyClockUnknown);
         }
         // Every later generation reads this same held object; a census of a
         // different witness cannot establish its clock or normalization.
         if census.source_object_version != source.object_version() {
+            *stage = "growing.object_version";
             return Err(SourceWorkerError::RescanRequired);
         }
+        *stage = "growing.normalization_contract";
         let contract = Arc::new(
             crate::copy_normalization::CopyNormalizationContract::from_head(
                 &file,
@@ -517,23 +533,27 @@ impl TranscodeManager {
             )
             .map_err(|_| SourceWorkerError::Unsupported)?,
         );
+        *stage = "growing.copy_head_begin";
         let head = contract
             .begin(
                 census.raw_canonical_init.clone(),
                 census.raw_av_init.clone(),
             )
             .map_err(|_| SourceWorkerError::RescanRequired)?;
+        *stage = "growing.copy_head_caps";
         prepared
             .validate_copy_head(head.canonical_init())
             .map_err(|_| SourceWorkerError::RescanRequired)?;
         // The cluster's shared catalogue identity: file ids are scoped to it,
         // and every member reports the same value.
+        *stage = "growing.catalog_namespace";
         let namespace = state
             .store
             .instance_id()
             .await
             .map_err(|_| SourceWorkerError::Unavailable)?;
         let video_identity = crate::fragindex::identity_for(&file, video).argv_fingerprint;
+        *stage = "growing.observation_source";
         let observation_source = crate::copy_analysis::source_for_copy(
             &namespace,
             &file,
@@ -542,11 +562,13 @@ impl TranscodeManager {
             owner.assignment.owner_node_id(),
         )
         .map_err(|_| SourceWorkerError::Unavailable)?;
+        *stage = "growing.observation_root";
         let observation_root = state
             .copy_observation_dir
             .as_ref()
             .ok_or(SourceWorkerError::Unavailable)?;
         let range_id = uuid::Uuid::new_v4();
+        *stage = "growing.range_files";
         let files = CopyRangeFiles::create(
             &self.work_dir,
             observation_root,
@@ -570,6 +592,7 @@ impl TranscodeManager {
             transcode_audio: aac,
             audio_delivery: prepared.request().audio_delivery.clone(),
         };
+        *stage = "growing.copy_mux";
         let mux = ObservedCopyMux::new(
             Arc::clone(&contract),
             census.first_dts,
@@ -579,9 +602,11 @@ impl TranscodeManager {
             file.video_codec.as_deref() == Some("hevc"),
         )
         .map_err(|_| SourceWorkerError::Unsupported)?;
+        *stage = "growing.copy_args";
         let args = recipe
             .args(&file, prepared.request().start_seconds)
             .map_err(|_| SourceWorkerError::Unsupported)?;
+        *stage = "growing.primary_dispatch";
         let dispatch = owners
             .begin_generation()
             .map_err(|_| SourceWorkerError::Unavailable)?;
@@ -591,6 +616,7 @@ impl TranscodeManager {
             .map_err(|_| SourceWorkerError::Unavailable)?;
         // The census Input and every reader are joined. Reopen independently
         // against the exact object before the primary operation gets a URL.
+        *stage = "growing.primary_input";
         let mut input = crate::source_input::SourceInput::open_foreground_held(
             request,
             source
@@ -609,11 +635,13 @@ impl TranscodeManager {
                     return Err(SourceWorkerError::Unavailable);
                 }
             };
+        *stage = "growing.source_observer";
         let observer = input.observer();
         input
             .publish_source_observer(&owners, 1)
             .await
             .map_err(|_| SourceWorkerError::Unavailable)?;
+        *stage = "growing.primary_spawn";
         let running = spawn_source_generation(
             input,
             &file.path,
@@ -680,10 +708,12 @@ impl TranscodeManager {
         let actor = SourceViewerActor(Arc::clone(&owner));
         let mut unowned_existing = true;
         let mut backing = None;
+        let mut startup_stage = "growing.deadline";
         let start = async {
             if Instant::now() >= deadline {
                 return Err(SourceWorkerError::Deadline);
             }
+            startup_stage = "growing.existing_route";
             if self
                 .store
                 .media_session_route_by_incarnation(
@@ -696,6 +726,7 @@ impl TranscodeManager {
                 return Err(SourceWorkerError::Unresolved);
             }
             unowned_existing = false;
+            startup_stage = "growing.delivery_refusal";
             if source_delivery_refusal(
                 prepared.request(),
                 prepared.file(),
@@ -707,11 +738,13 @@ impl TranscodeManager {
             {
                 return Err(SourceWorkerError::Unsupported);
             }
+            startup_stage = "growing.start_budget";
             let startup_budget = self
                 .source_start_budget_for_request(prepared.request())
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
             let deadline = deadline.min(Instant::now() + startup_budget);
+            startup_stage = "growing.native_tracks";
             if prepared.native_subtitles().0 {
                 let tracks = super::super::source_subtitles::SourceNativeTracks::prepare(
                     prepared.file(),
@@ -724,7 +757,14 @@ impl TranscodeManager {
             }
             let session_id = uuid::Uuid::new_v4().to_string();
             let actual = self
-                .prepare_source_growing(&owner, &state, &prepared, session_id.clone(), deadline)
+                .prepare_source_growing(
+                    &owner,
+                    &state,
+                    &prepared,
+                    session_id.clone(),
+                    deadline,
+                    &mut startup_stage,
+                )
                 .await?;
             backing = Some(Arc::clone(&actual));
             // Existing fresh shared Apple/Android attachment starts at 1x.
@@ -735,6 +775,7 @@ impl TranscodeManager {
             } else {
                 RollingStartupPolicy::NativePresentationWindow
             };
+            startup_stage = "growing.eligible_window";
             let origin = actual
                 .production
                 .wait_eligible(
@@ -746,6 +787,7 @@ impl TranscodeManager {
                 )
                 .await
                 .map_err(|error| SourceWorkerError::copy_failure(&error))?;
+            startup_stage = "growing.source_height";
             let facts = StartInfo {
                 processed_dv_profile: None,
                 processed_fel: None,
@@ -768,12 +810,15 @@ impl TranscodeManager {
                 vod: false,
                 control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
             };
+            startup_stage = "growing.start_response";
             let incarnation = owner.assignment.binding().incarnation_id().to_string();
             let response = prepared
                 .start_response(&state, &facts, &incarnation, 1)
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
+            startup_stage = "growing.physical_fence";
             actual.physical_fence().await?;
+            startup_stage = "growing.deadline_or_retirement";
             if Instant::now() >= deadline
                 || owner
                     .state
@@ -783,6 +828,7 @@ impl TranscodeManager {
             {
                 return Err(SourceWorkerError::Deadline);
             }
+            startup_stage = "growing.activation_authority";
             let members = owner
                 .gate
                 .source_members
@@ -802,6 +848,7 @@ impl TranscodeManager {
             else {
                 return Err(SourceWorkerError::Unavailable);
             };
+            startup_stage = "growing.activation_write";
             let binding = owner.assignment.binding();
             let now = crate::fragment_index_cluster::unix_ms();
             let activation = MediaSessionActivation {
@@ -842,6 +889,7 @@ impl TranscodeManager {
             if outcome.route.session_id != session_id || !actual.is_live() {
                 return Err(SourceWorkerError::Conflict);
             }
+            startup_stage = "growing.publication_authority";
             let members = owner
                 .gate
                 .source_members
@@ -861,7 +909,9 @@ impl TranscodeManager {
             else {
                 return Err(SourceWorkerError::Unavailable);
             };
+            startup_stage = "growing.published_physical_fence";
             actual.physical_fence().await?;
+            startup_stage = "growing.retirement_requested";
             if owner
                 .state
                 .lock()
@@ -870,6 +920,7 @@ impl TranscodeManager {
             {
                 return Err(SourceWorkerError::Unavailable);
             }
+            startup_stage = "growing.publication_write";
             let route = self
                 .store
                 .complete_source_media_session_publication(&proof)
@@ -886,6 +937,13 @@ impl TranscodeManager {
             Ok(response)
         }
         .await;
+        // Every growing start that does not publish ends here with its stage,
+        // once, exactly as the indexed owner's does.
+        if let Err(error) = &start {
+            #[cfg(test)]
+            eprintln!("Source growing startup failed stage={startup_stage} error={error:?}");
+            tracing::warn!(target: "plurxd::transcode", stage = startup_stage, error_class = ?error, retirement_requested = owner.state.lock().expect("Source worker state").retirement_requested, "Source producer startup failed");
+        }
         owner.state.lock().expect("Source worker state").start = Some(start.clone());
         owner.changed.notify_waiters();
         if let (Ok(_), Some(backing)) = (&start, backing.as_ref()) {

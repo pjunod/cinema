@@ -163,6 +163,16 @@ pub(super) fn resource_busy_response(retry_after_secs: u64) -> super::error::Api
     }
 }
 fn log_source_status_peer_failure(stage: &'static str, error: crate::sharing_client::PeerError) {
+    log_source_peer_failure("status", stage, error);
+}
+/// What the Source answered when this receiver is about to tell its viewer
+/// only "unresolved". The viewer's message cannot tell one Source refusal
+/// from another; this line can.
+fn log_source_peer_failure(
+    operation: &'static str,
+    stage: &'static str,
+    error: crate::sharing_client::PeerError,
+) {
     use crate::sharing_client::PeerError;
     let (error_class, http_status) = match error {
         PeerError::Unavailable => ("unavailable", None),
@@ -176,7 +186,7 @@ fn log_source_status_peer_failure(stage: &'static str, error: crate::sharing_cli
         PeerError::StartNotYet { .. } => ("start_not_yet", Some(503)),
         PeerError::StartNotPrepared { .. } => ("source_not_prepared", Some(503)),
     };
-    tracing::warn!(target: "plurx::sharing", stage, error_class, http_status, "receiver Source status refused");
+    tracing::warn!(target: "plurx::sharing", operation, stage, error_class, http_status, "receiver Source exchange refused");
 }
 
 #[derive(Default)]
@@ -2108,7 +2118,10 @@ async fn run_owner(
                 crate::sharing_client::PeerError::StartNotPrepared { .. }
                 | crate::sharing_client::PeerError::StartNotYet { .. }
                 | crate::sharing_client::PeerError::Busy { .. } => ReceiverStartError::Deadline,
-                _ => ReceiverStartError::Unresolved,
+                other => {
+                    log_source_peer_failure("start", "start_exchange", other);
+                    ReceiverStartError::Unresolved
+                }
             })?,
             _ = entry.stop.cancelled(), if pending_authorized => pending_authorized = false,
             _ = tokio::time::sleep_until(rejoin_window.unwrap_or_else(tokio::time::Instant::now)), if rejoin_open => {
