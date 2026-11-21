@@ -5494,9 +5494,9 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// The claim row of `request_id`, read only. A retry waiting on an owner
     /// that is still starting reads this between ticks instead of re-running
     /// [`claim_media_session_request`](Self::claim_media_session_request),
-    /// which maintains the session tables first (a replicated write whenever
-    /// a cleanup is due) and reads the routes; it claims again only once the
-    /// row says the owner let go, resolved, or expired.
+    /// which can maintain the session tables and read the routes on the
+    /// existing-claim path. It claims again once the row says the owner let
+    /// go, resolved, or expired.
     async fn media_session_request_progress(
         &self,
         principal: &crate::playback_principal::PlaybackPrincipal,
