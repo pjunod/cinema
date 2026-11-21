@@ -15561,7 +15561,7 @@ async fn progressive_remux_delivers_first_playable_video_and_selected_audio() {
     fn atoms(mut bytes: &[u8]) -> Vec<&[u8]> {
         let mut atoms = Vec::new();
         while !bytes.is_empty() {
-            let size = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+            let size = u32::from_be_bytes(bytes[..4].try_into().expect("four-byte box size")) as usize;
             assert!(size >= 8);
             let (atom, rest) = bytes.split_at(size);
             atoms.push(atom);
@@ -15648,7 +15648,7 @@ async fn progressive_remux_delivers_first_playable_video_and_selected_audio() {
             // The MOV muxer writes cover art into udta at the end of moov.
             // Move udta before the track atoms so the demuxer sees the cover
             // first. The atoms' sizes and all media chunk offsets stay fixed.
-            let original = std::fs::read(&source).unwrap();
+            let original = std::fs::read(&source).expect("read");
             let mut reordered = Vec::new();
             for atom in atoms(&original) {
                 if &atom[4..8] == b"moov" {
@@ -15660,14 +15660,14 @@ async fn progressive_remux_delivers_first_playable_video_and_selected_audio() {
                     reordered.extend_from_slice(atom);
                 }
             }
-            std::fs::write(&source, reordered).unwrap();
+            std::fs::write(&source, reordered).expect("write");
         }
 
         let scan = plurx_core::scan::probe::probe(&source)
             .await
             .expect("scan source");
         if has_cover {
-            let raw: Value = serde_json::from_str(scan.raw_json.as_deref().unwrap()).unwrap();
+            let raw: Value = serde_json::from_str(scan.raw_json.as_deref().expect("raw probe JSON")).expect("probe JSON");
             assert_eq!(
                 raw["streams"][0]["disposition"]["attached_pic"], 1,
                 "{name}"
@@ -15675,17 +15675,17 @@ async fn progressive_remux_delivers_first_playable_video_and_selected_audio() {
         }
         let dimensions = (playable_streams != 0).then_some((96, 64));
         assert_eq!(scan.width.zip(scan.height), dimensions, "{name}");
-        let metadata = std::fs::metadata(&source).unwrap();
+        let metadata = std::fs::metadata(&source).expect("metadata");
         let mtime = metadata
             .modified()
-            .unwrap()
+            .expect("modified")
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap();
+            .expect("duration since");
         let file_id = state
             .store
             .upsert_file(
                 seed.movie,
-                source.to_str().unwrap(),
+                source.to_str().expect("UTF-8 fixture path"),
                 metadata.len() as i64,
                 mtime.as_secs() as i64,
                 &scan,
@@ -15698,16 +15698,16 @@ async fn progressive_remux_delivers_first_playable_video_and_selected_audio() {
             Some(&admin),
         )).await.expect("progressive response");
         assert_eq!(response.status(), StatusCode::OK, "{name}");
-        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = response.into_body().collect().await.expect("response body").to_bytes();
         let output = dir.path().join(format!("{name}-progressive.mp4"));
-        std::fs::write(&output, body).unwrap();
+        std::fs::write(&output, body).expect("write");
         let delivered = plurx_core::scan::probe::probe(&output)
             .await
             .expect("scan remux output");
         assert_eq!(delivered.width.zip(delivered.height), dimensions, "{name}");
-        let raw: Value = serde_json::from_str(delivered.raw_json.as_deref().unwrap()).unwrap();
+        let raw: Value = serde_json::from_str(delivered.raw_json.as_deref().expect("raw probe JSON")).expect("probe JSON");
         assert_eq!(
-            raw["streams"].as_array().unwrap().len(),
+            raw["streams"].as_array().expect("JSON array").len(),
             1 + usize::from(dimensions.is_some()),
             "{name}"
         );
@@ -17786,7 +17786,7 @@ fn write_chapter_fixture(path: &Path, with_intro: bool) {
             &chapters,
             ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=60000\ntitle=Intro\n",
         )
-        .unwrap();
+        .expect("write chapter metadata fixture");
         command
             .args(["-f", "ffmetadata", "-i"])
             .arg(chapters)
@@ -17802,17 +17802,17 @@ async fn catalogue_legacy_chapter_fixture(
     item_id: i64,
     path: &Path,
 ) -> plurx_core::domain::MediaFile {
-    let metadata = std::fs::metadata(path).unwrap();
+    let metadata = std::fs::metadata(path).expect("metadata");
     let mtime = metadata
         .modified()
-        .unwrap()
+        .expect("modified")
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
+        .expect("duration since");
     let file_id = state
         .store
         .upsert_file(
             item_id,
-            path.to_str().unwrap(),
+            path.to_str().expect("UTF-8 fixture path"),
             metadata.len() as i64,
             mtime.as_secs() as i64,
             &plurx_core::domain::ProbeResult {
@@ -17826,8 +17826,8 @@ async fn catalogue_legacy_chapter_fixture(
             },
         )
         .await
-        .unwrap();
-    state.store.get_file(file_id).await.unwrap().unwrap()
+        .expect("upsert fixture file");
+    state.store.get_file(file_id).await.expect("get file").expect("fixture file exists")
 }
 
 fn chapter_decision(file_id: i64, token: &str) -> Request<Body> {
@@ -17849,7 +17849,7 @@ async fn wait_for_chapter_probe(
     }
     panic!(
         "background chapter probe was never reached: {:?}",
-        state.store.analysis_requests(10).await.unwrap()
+        state.store.analysis_requests(10).await.expect("analysis requests")
     );
 }
 
@@ -17859,18 +17859,18 @@ async fn configure_chapter_worker(state: &AppState) {
         .store
         .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "0")
         .await
-        .unwrap();
+        .expect("put setting");
     state
         .store
         .put_setting(keys::ANALYSIS_LEASE_SECS, "15")
         .await
-        .unwrap();
+        .expect("put setting");
 }
 
 async fn wait_out_chapter_attempt(state: &AppState, request_id: &str, retry_at_ms: i64) {
     // A failed or superseded claim can keep its source reservation for its lease.
     let expires =
-        state.store.analysis_attempts(request_id, 1).await.unwrap()[0].claim_expires_at_ms;
+        state.store.analysis_attempts(request_id, 1).await.expect("analysis attempts")[0].claim_expires_at_ms;
     let wait = expires
         .max(retry_at_ms)
         .saturating_sub(crate::state::clock_ms())
@@ -17884,7 +17884,7 @@ async fn playback_chapter_timeout_is_unknown_and_retry_preserves_manual_edits() 
     configure_chapter_worker(&state).await;
     let admin = setup_admin(&app).await;
     let seed = seed_content(&state).await;
-    let dir = crate::test_tempdir().unwrap();
+    let dir = crate::test_tempdir().expect("test tempdir");
     let path = dir.path().join("legacy.mp4");
     write_chapter_fixture(&path, true);
     let file = catalogue_legacy_chapter_fixture(&state, seed.movie, &path).await;
@@ -17904,7 +17904,7 @@ async fn playback_chapter_timeout_is_unknown_and_retry_preserves_manual_edits() 
     assert_eq!(first["markers"], json!([]));
     assert_eq!(second["markers"], json!([]));
     assert!(
-        state.store.analysis_requests(10).await.unwrap().is_empty(),
+        state.store.analysis_requests(10).await.expect("analysis requests").is_empty(),
         "Play returned while the background owner was unavailable to admit work"
     );
     let mut worker = tokio::spawn(
@@ -17914,18 +17914,18 @@ async fn playback_chapter_timeout_is_unknown_and_retry_preserves_manual_edits() 
             .work_cluster_fragment_index_queue(state.transcode.clone()),
     );
     wait_for_chapter_probe(&state, &pause, &mut worker).await;
-    let queue = state.store.analysis_requests(10).await.unwrap();
+    let queue = state.store.analysis_requests(10).await.expect("analysis requests");
     assert_eq!(queue.len(), 1, "one durable request for both decisions");
     assert_eq!(queue[0].trigger, "background");
     let request_id = &queue[0].request_id;
-    worker.await.unwrap();
+    worker.await.expect("chapter worker task");
 
     let retry = state
         .store
         .analysis_request(request_id)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("analysis request")
+        .expect("retry request exists");
     assert_eq!(retry.state, "queued");
     assert_eq!(retry.last_error_code, "source_probe_timeout");
     let identity = stream::annotation_source_identity(&file);
@@ -17933,7 +17933,7 @@ async fn playback_chapter_timeout_is_unknown_and_retry_preserves_manual_edits() 
         .store
         .timeline_annotation_set(file.id, &identity)
         .await
-        .unwrap()
+        .expect("timeline annotation set")
         .is_none());
 
     wait_out_chapter_attempt(&state, request_id, retry.not_before_ms).await;
@@ -17960,14 +17960,14 @@ async fn playback_chapter_timeout_is_unknown_and_retry_preserves_manual_edits() 
     .await;
     assert_eq!(status, StatusCode::OK, "{manual}");
     let (_, pending) = call(&app, chapter_decision(file.id, &admin)).await;
-    assert_eq!(pending["markers"].as_array().unwrap().len(), 1);
+    assert_eq!(pending["markers"].as_array().expect("JSON array").len(), 1);
     assert_eq!(pending["markers"][0]["provenance"], "manual");
 
     pause.wait().await;
-    worker.await.unwrap();
+    worker.await.expect("chapter worker task");
     let (status, decision) = call(&app, chapter_decision(file.id, &admin)).await;
     assert_eq!(status, StatusCode::OK, "{decision}");
-    let markers = decision["markers"].as_array().unwrap();
+    let markers = decision["markers"].as_array().expect("JSON array");
     assert!(
         markers
             .iter()
@@ -17977,7 +17977,7 @@ async fn playback_chapter_timeout_is_unknown_and_retry_preserves_manual_edits() 
     let credits = markers
         .iter()
         .find(|marker| marker["kind"] == "credits")
-        .unwrap();
+        .expect("credits marker");
     assert_eq!(credits["start_ms"], 8_500_000);
     assert_eq!(credits["provenance"], "manual");
     assert_eq!(credits["confidence"], 1_000);
@@ -17989,7 +17989,7 @@ async fn playback_chapter_probe_fences_replacements_and_confirms_chapterless_sou
     configure_chapter_worker(&state).await;
     let admin = setup_admin(&app).await;
     let seed = seed_content(&state).await;
-    let dir = crate::test_tempdir().unwrap();
+    let dir = crate::test_tempdir().expect("test tempdir");
     let path = dir.path().join("replacement.mp4");
     write_chapter_fixture(&path, true);
     let original = catalogue_legacy_chapter_fixture(&state, seed.movie, &path).await;
@@ -17999,7 +17999,7 @@ async fn playback_chapter_probe_fences_replacements_and_confirms_chapterless_sou
         .store
         .put_timeline_annotation_set(original.id, 9_000_000, &legacy)
         .await
-        .unwrap();
+        .expect("put timeline annotation set");
     let (_, decision) = call(&app, chapter_decision(original.id, &admin)).await;
     assert_eq!(decision["markers"], json!([]));
 
@@ -18011,21 +18011,21 @@ async fn playback_chapter_probe_fences_replacements_and_confirms_chapterless_sou
             .work_cluster_fragment_index_queue(state.transcode.clone()),
     );
     wait_for_chapter_probe(&state, &pause, &mut worker).await;
-    let old_request = state.store.analysis_requests(10).await.unwrap().remove(0);
+    let old_request = state.store.analysis_requests(10).await.expect("analysis requests").remove(0);
     let replacement_path = dir.path().join("new.mp4");
     write_chapter_fixture(&replacement_path, false);
-    std::fs::rename(replacement_path, &path).unwrap();
+    std::fs::rename(replacement_path, &path).expect("rename");
     let replacement = catalogue_legacy_chapter_fixture(&state, seed.movie, &path).await;
     assert_eq!(replacement.id, original.id);
     let identity = stream::annotation_source_identity(&replacement);
     assert_ne!(identity, old_identity);
     pause.wait().await;
-    worker.await.unwrap();
+    worker.await.expect("chapter worker task");
     assert!(state
         .store
         .timeline_annotation_set(replacement.id, &identity)
         .await
-        .unwrap()
+        .expect("timeline annotation set")
         .is_none());
 
     wait_out_chapter_attempt(&state, &old_request.request_id, 0).await;
@@ -18040,14 +18040,14 @@ async fn playback_chapter_probe_fences_replacements_and_confirms_chapterless_sou
         .store
         .timeline_annotation_set(replacement.id, &identity)
         .await
-        .unwrap()
+        .expect("timeline annotation set")
         .expect("chapterless probe published");
     assert_eq!(
         state
             .store
             .get_file_probe_chapters_json(replacement.id, replacement.size, replacement.mtime)
             .await
-            .unwrap()
+            .expect("get file probe chapters json")
             .as_deref(),
         Some("[]"),
         "the confirmed chapterless probe also backfills raw chapter consumers"
@@ -18060,11 +18060,11 @@ async fn playback_chapter_probe_fences_replacements_and_confirms_chapterless_sou
     let (_, decision) = call(&app, chapter_decision(replacement.id, &admin)).await;
     assert!(decision["markers"]
         .as_array()
-        .unwrap()
+        .expect("JSON array")
         .iter()
         .all(|marker| marker["provenance"] == "estimated"));
     assert_eq!(
-        decision["markers"].as_array().unwrap().len(),
+        decision["markers"].as_array().expect("JSON array").len(),
         confirmed.annotations.len()
     );
 }

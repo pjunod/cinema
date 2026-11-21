@@ -2809,7 +2809,7 @@ async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_back
             .is_none(),
         "decision must not backfill an annotation set"
     );
-    assert!(state.store.analysis_requests(10).await.unwrap().is_empty());
+    assert!(state.store.analysis_requests(10).await.expect("analysis requests").is_empty());
     let ambiguous = annotation_set_from_markers(annotation_source_identity(&file), &[]);
     state
         .store
@@ -2909,11 +2909,11 @@ async fn chapters_backfill_into_the_stored_probe() {
     store
         .merge_file_probe_chapters_if_missing(legacy, 1, 2, "[]")
         .await
-        .unwrap();
+        .expect("merge file probe chapters if missing");
     store
         .merge_file_probe_chapters_if_missing(legacy, 1, 1, "[]")
         .await
-        .unwrap();
+        .expect("merge file probe chapters if missing");
 
     let raw = store
         .get_file_probe_json(legacy)
