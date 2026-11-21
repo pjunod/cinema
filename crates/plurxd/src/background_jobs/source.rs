@@ -183,6 +183,15 @@ impl Drop for SourcePauseBinding {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[derive(Clone, Debug)]
+struct SourcePauseAckObservation {
+    revision: u64,
+    phase: plurx_core::process::bounded::SourcePausePhase,
+    quota_waiters: usize,
+    credited_before_ack: Duration,
+}
+
 pub(crate) struct SourceReadBudget {
     store: Arc<dyn Store>,
     owner: BackgroundSourceOwner,
@@ -195,6 +204,8 @@ pub(crate) struct SourceReadBudget {
     pacing_waiters: AtomicUsize,
     pause_controller: Mutex<Option<plurx_core::process::bounded::SourcePauseController>>,
     completion: Option<Arc<completion::Completion>>,
+    #[cfg(all(test, target_os = "linux"))]
+    test_pause_acks: Mutex<Vec<SourcePauseAckObservation>>,
 }
 impl SourceReadBudget {
     pub(crate) fn new(
@@ -232,6 +243,8 @@ impl SourceReadBudget {
             pacing_waiters: AtomicUsize::new(0),
             pause_controller: Mutex::new(None),
             completion: None,
+            #[cfg(all(test, target_os = "linux"))]
+            test_pause_acks: Mutex::new(Vec::new()),
         })
     }
     pub(crate) fn with_completion(
@@ -403,6 +416,25 @@ impl SourceReadBudget {
         *bound = Some(controller);
         SourcePauseBinding(Arc::clone(self))
     }
+    // Called only after the real pause_source RPC acknowledged a verified
+    // aggregate stop, before any subsequent finite-slot credit confirmation.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn record_test_pause_ack(
+        &self,
+        control: &plurx_core::process::bounded::SourcePauseController,
+        revision: u64,
+    ) {
+        self.test_pause_acks
+            .lock()
+            .expect("pause ACK observations")
+            .push(SourcePauseAckObservation {
+                revision,
+                phase: control.observation().phase,
+                quota_waiters: control.quota_waiters(),
+                credited_before_ack: control.paused_duration(),
+            });
+    }
+
     fn pacing_wait(&self) -> PacingWait<'_> {
         self.pacing_waiters.fetch_add(1, Ordering::AcqRel);
         let clock = PACING_CLOCK.try_with(Clone::clone).ok();
@@ -624,7 +656,20 @@ impl super::JobFence {
 mod tests {
     use super::*;
     #[cfg(target_os = "linux")]
-    async fn quota_held_scanner(retain_read_activity: bool) -> (Duration, Duration) {
+    #[derive(Clone, Copy, Debug)]
+    struct QuotaChildTiming {
+        completed: Duration,
+        elapsed: Duration,
+        credited: Duration,
+        active_elapsed: Duration,
+        active_credited: Duration,
+        active_charged: Duration,
+        used_elapsed: Duration,
+        used_credited: Duration,
+        used_charged: Duration,
+    }
+    #[cfg(target_os = "linux")]
+    async fn quota_held_scanner(retain_read_activity: bool) -> (Duration, QuotaChildTiming) {
         use plurx_core::{
             process::bounded,
             transcode::{EncoderCaps, Pipeline},
@@ -675,6 +720,8 @@ mod tests {
                         None
                     };
                     let child = async {
+                        let child_started = tokio::time::Instant::now();
+                        let credited_before = control.paused_duration();
                         let result = bounded::output(
                             "/bin/sh",
                             &["-c", "exec sleep 60"],
@@ -685,8 +732,35 @@ mod tests {
                             ),
                         )
                         .await;
+                        let observations = control.test_child_active_timeouts();
+                        let [timeout] = observations.as_slice() else {
+                            panic!(
+                                "one actual child active deadline before reap: {observations:?}"
+                            );
+                        };
+                        assert_eq!(
+                            timeout.child_id,
+                            u64::from(retain_read_activity),
+                            "exact scoped child: {timeout:?}"
+                        );
+                        assert!(timeout.process_id > 0, "{timeout:?}");
+                        assert_eq!(
+                            timeout.active_budget,
+                            Duration::from_millis(1200),
+                            "{timeout:?}"
+                        );
                         *finished.lock().expect("lock child completion timestamp") =
-                            Some(started.elapsed());
+                            Some(QuotaChildTiming {
+                                completed: started.elapsed(),
+                                elapsed: child_started.elapsed(),
+                                credited: control.paused_duration().saturating_sub(credited_before),
+                                active_elapsed: timeout.elapsed,
+                                active_credited: timeout.credited,
+                                active_charged: timeout.charged,
+                                used_elapsed: timeout.used_elapsed,
+                                used_credited: timeout.used_credited,
+                                used_charged: timeout.used_charged,
+                            });
                         result
                     };
                     let allowance = async {
@@ -726,6 +800,30 @@ mod tests {
             .expect("lock child completion timestamp")
             .expect("child completion is recorded before probe returns");
         assert_eq!(budget.pacing_waiters(), 0);
+        let acks = budget.test_pause_acks.lock().expect("pause ACKs").clone();
+        if !retain_read_activity {
+            let first = acks.first().expect("actual verified-stop Store pause ACK");
+            assert!(first.revision > 0, "{first:?}");
+            assert_eq!(first.phase, bounded::SourcePausePhase::Paused, "{first:?}");
+            // The ACK may precede a finite waiter during a pressure hold;
+            // the real controller still requires a live waiter for credit.
+            assert_eq!(
+                first.credited_before_ack,
+                Duration::ZERO,
+                "credit before first Store ACK: {first:?}; quota_waiters_at_ack={}",
+                first.quota_waiters
+            );
+            assert!(
+                !child_finished.active_credited.is_zero(),
+                "no confirmed finite hold: {child_finished:?}; ACKs={acks:?}"
+            );
+        } else {
+            assert_eq!(
+                child_finished.active_credited,
+                Duration::ZERO,
+                "live daemon read cannot earn aggregate credit: {child_finished:?}; ACKs={acks:?}"
+            );
+        }
         active.finish().await;
         (elapsed, child_finished)
     }
@@ -735,10 +833,35 @@ mod tests {
     async fn finite_quota_held_scanner_preserves_active_budget_after_verified_stop() {
         let (elapsed, child_finished) = quota_held_scanner(false).await;
         assert!(
-            elapsed >= Duration::from_millis(3500),
-            "quota holds must not spend the scanner's 1200ms active budget: probe={elapsed:?}, child={child_finished:?}"
+            child_finished.active_charged >= Duration::from_millis(1200),
+            "actual run_group timeout must retain 1200ms charged active allowance before kill/reap: total={elapsed:?}, child={child_finished:?}"
         );
-        assert!(child_finished >= Duration::from_millis(3500));
+        assert_eq!(
+            child_finished.used_charged,
+            child_finished
+                .used_elapsed
+                .saturating_sub(child_finished.used_credited),
+            "used-decision diagnostic, separate from actual pre-error clock: {child_finished:?}"
+        );
+        assert_eq!(
+            child_finished.active_charged,
+            child_finished
+                .active_elapsed
+                .saturating_sub(child_finished.active_credited),
+            "actual internal timer observation: {child_finished:?}"
+        );
+        assert!(
+            child_finished.elapsed >= child_finished.active_elapsed,
+            "output contains the actual child wait: {child_finished:?}"
+        );
+        assert!(
+            child_finished.credited >= child_finished.active_credited,
+            "output credit contains child credit: {child_finished:?}"
+        );
+        assert!(
+            elapsed >= child_finished.completed,
+            "total={elapsed:?}, child={child_finished:?}"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -746,8 +869,8 @@ mod tests {
     async fn outstanding_daemon_read_still_spends_active_budget_despite_quota_hold() {
         let (_elapsed, child_finished) = quota_held_scanner(true).await;
         assert!(
-            child_finished < Duration::from_millis(2400),
-            "a live daemon read is not aggregate source quiescence"
+            child_finished.completed < Duration::from_millis(2400),
+            "a live daemon read is not aggregate source quiescence: {child_finished:?}"
         );
     }
 

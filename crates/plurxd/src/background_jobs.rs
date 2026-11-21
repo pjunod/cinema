@@ -3750,6 +3750,8 @@ pub(crate) mod tests {
             )
             .await
             .expect("stale fence"));
+        // `settle` samples its own request time after this fixture builds the
+        // yield. Keep the due time safely after that second wall-clock read.
         assert!(fence
             .settle(JobSettlement::Yield {
                 error_code: Some("foreground_preempted".into()),

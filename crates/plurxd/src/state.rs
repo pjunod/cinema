@@ -8,7 +8,7 @@ pub use library_work::ScanAdmission;
 #[path = "subtitle_work.rs"]
 mod subtitle_work;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -108,6 +108,14 @@ pub(crate) fn node_hwaccel_key(node_id: &str) -> String {
     format!("node.{node_id}.transcode.hwaccel")
 }
 
+/// Encoders as their labels, for the settings page.
+fn encoder_labels<S: serde::Serializer>(
+    encoders: &[plurx_core::transcode::Encoder],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(encoders.iter().map(|encoder| encoder.label()))
+}
+
 /// Environment facts collected once at startup, shown on the settings page.
 /// Everything here is admin-facing diagnostics — paths, tool versions,
 /// detected hardware — not runtime state.
@@ -162,6 +170,11 @@ pub struct SystemInfo {
     /// Whether this exact ffmpeg can run the software-decode → tonemapx
     /// Dolby Vision reshape → software-encode graph.
     pub dovi_reshape: bool,
+    /// The hardware encoders boot proved that reshape graph with, by label.
+    /// Every detected hardware encoder is probed once at boot, so a Profile 5
+    /// session never starts a capability probe of its own.
+    #[serde(serialize_with = "encoder_labels")]
+    pub dovi_reshape_hardware: Vec<plurx_core::transcode::Encoder>,
     /// Whether this exact ffmpeg can run the HDR10 rung: the same software
     /// decode into `tonemapx`'s HDR *passthrough* mode at 10 bit, into
     /// libx265 Main10. Separate from `dovi_reshape` because it is a separate
@@ -1311,6 +1324,7 @@ impl AppState {
             .with_dv_strippable(system.dovi_rpu)
             .with_dv_convertible(system.dolby_vision_convert)
             .with_dovi_reshape(system.dovi_reshape)
+            .with_dovi_reshape_hardware(system.dovi_reshape_hardware.clone())
             .with_dovi_passthrough(system.dovi_passthrough)
             .with_dovi_passthrough_qsv(system.dovi_passthrough_qsv)
             .with_hdr10_passthrough(system.hdr10_passthrough)
@@ -1495,6 +1509,10 @@ impl AppState {
             .cluster
             .with_membership(membership, self.applied.applied_mark());
         self.live_tv_peers = self.cluster.calls();
+        self.peer_activity = crate::http::internal_activity::PeerActivityClient::new(
+            self.cluster.calls(),
+            self.cluster.directory(),
+        );
     }
 
     /// Refresh all Store-backed Prometheus gauges as one complete sample.
@@ -1882,6 +1900,7 @@ pub struct JobManager {
     /// minute scheduler ticks from stacking drain loops on the same node.
     cluster_index_working: std::sync::atomic::AtomicBool,
     cluster_analysis_working: std::sync::atomic::AtomicBool,
+    playback_chapter_admissions: std::sync::Mutex<BTreeSet<(i64, i64, i64)>>,
     background_upkeep_running: std::sync::atomic::AtomicBool,
     /// Permanent-media conversion is a bounded queue, but one slow disc may
     /// outlive many scheduler ticks. Keep exactly one local drain loop.
@@ -3881,10 +3900,6 @@ async fn run_subtitle_source_pass_owned(
     ))
 }
 
-pub(crate) async fn wait_analysis_deadline(duration: Duration) {
-    tokio::time::sleep(duration).await;
-}
-
 /// Read the probe once and ask [`crate::fragindex::video_identities`] which
 /// copy pipelines this file has to be indexed for.
 async fn fragment_index_video_identities(
@@ -4139,6 +4154,7 @@ impl JobManager {
             indexing: std::sync::atomic::AtomicBool::new(false),
             cluster_index_working: std::sync::atomic::AtomicBool::new(false),
             cluster_analysis_working: std::sync::atomic::AtomicBool::new(false),
+            playback_chapter_admissions: Default::default(),
             background_upkeep_running: std::sync::atomic::AtomicBool::new(false),
             dv_disk_working: std::sync::atomic::AtomicBool::new(false),
             dv_disk_capabilities: crate::dv_disk::DvDiskCapabilities::default(),
@@ -5654,6 +5670,51 @@ impl JobManager {
             .get_file(file_id)
             .await?
             .ok_or_else(|| StoreError::Task("analysis file does not exist".to_owned()))?;
+        self.enqueue_source_analysis(&file, force_rebuild, component, trigger, video_identity)
+            .await
+    }
+
+    pub(crate) fn request_playback_chapters(&self, file: &MediaFile) {
+        const MAX_PENDING: usize = 8;
+        if let Ok(mut pending) = self.playback_chapter_admissions.try_lock() {
+            if pending.len() < MAX_PENDING && pending.insert((file.id, file.size, file.mtime)) {
+                let _ = fragment_analysis_wake().send(());
+            }
+        }
+    }
+
+    async fn admit_playback_chapters(&self) {
+        let requests = self
+            .playback_chapter_admissions
+            .lock()
+            .map(|mut pending| std::mem::take(&mut *pending))
+            .unwrap_or_default();
+        for (file_id, size, mtime) in requests {
+            match self.store.get_file(file_id).await {
+                Ok(Some(file)) if file.size == size && file.mtime == mtime => {
+                    if let Err(error) = self
+                        .enqueue_source_analysis(&file, false, "skip_markers", "background", "")
+                        .await
+                    {
+                        tracing::debug!(file_id, %error, "could not enqueue legacy chapter analysis");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(file_id, %error, "could not read source for chapter analysis")
+                }
+            }
+        }
+    }
+
+    async fn enqueue_source_analysis(
+        &self,
+        file: &MediaFile,
+        force_rebuild: bool,
+        component: &str,
+        trigger: &str,
+        video_identity: &str,
+    ) -> Result<(AnalysisRequest, bool), StoreError> {
         let now = clock_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
         let pipeline_version = if component == "fragment_index" {
@@ -5662,7 +5723,7 @@ impl JobManager {
             crate::http::stream::CHAPTER_ANNOTATION_VERSION.to_owned()
         };
         let requested_generation = analysis_request_generation(
-            &file,
+            file,
             component,
             &pipeline_version,
             video_identity,
@@ -7138,13 +7199,19 @@ impl JobManager {
                         .await;
                     });
                 }
-                if self
+                let may_build = self
                     .job_authority
                     .may_execute_job(JobKind::FragmentIndexBuild)
-                    .await
-                    && lane_cluster_fragment_index_enabled(&self.applied).await
-                    && (!self.cluster_analysis_working.load(Ordering::Acquire)
-                        || !self.cluster_index_working.load(Ordering::Acquire))
+                    .await;
+                let pending_chapters = self
+                    .playback_chapter_admissions
+                    .lock()
+                    .is_ok_and(|pending| !pending.is_empty());
+                if ((may_build || pending_chapters)
+                    && !self.cluster_analysis_working.load(Ordering::Acquire))
+                    || (may_build
+                        && !self.cluster_index_working.load(Ordering::Acquire)
+                        && lane_cluster_fragment_index_enabled(&self.applied).await)
                 {
                     // Keep listening for viewer wakeups while a source read or
                     // artifact build owns its own fenced pass. The independent
@@ -10086,45 +10153,47 @@ impl JobManager {
         self: Arc<Self>,
         transcode: Arc<TranscodeManager>,
     ) {
-        if !self
+        let may_build = self
             .job_authority
             .may_execute_job(plurx_core::store::background_jobs::JobKind::FragmentIndexBuild)
-            .await
-        {
-            return;
-        }
+            .await;
         // A source attestation can take minutes. It owns its own single-consumer
         // fence, leaving the artifact and delivery pass available to another
         // wake while the analysis reader is active. Store claims retain their
         // durable owner/fence and do not depend on this local pass guard.
         // Settling, pruning and artifact delivery are cluster-wide duties
         // and stay with the voters. Resolving is not: a learner allowed to
-        // execute this job (above) resolves the requests targeted at itself,
+        // execute this job resolves the requests targeted at itself,
         // and, while idle, other nodes' fragment-index requests too.
-        let may_produce = self.may_run_cluster_jobs().await;
         let analysis = if !self.cluster_analysis_working.swap(true, Ordering::AcqRel) {
             let analysis_state = Arc::clone(&self);
             let analysis_transcode = Arc::clone(&transcode);
             Some(tokio::spawn(async move {
                 let _analysis_guard = ClusterAnalysisWorkingGuard(Arc::clone(&analysis_state));
-                analysis_state
-                    .resolve_analysis_requests(analysis_transcode)
-                    .await;
+                analysis_state.admit_playback_chapters().await;
+                if may_build {
+                    analysis_state
+                        .resolve_analysis_requests(analysis_transcode)
+                        .await;
+                }
             }))
         } else {
             None
         };
-        if self.cluster_index_working.swap(true, Ordering::AcqRel) {
+        if !may_build || self.cluster_index_working.swap(true, Ordering::AcqRel) {
             if let Some(analysis) = analysis {
                 let _ = analysis.await;
             }
             return;
         }
         let _guard = ClusterIndexWorkingGuard(Arc::clone(&self));
-        let fragment_engine_current = crate::ffmpeg::fragment_index_engine_is_current().await;
+        let may_produce = self.may_run_cluster_jobs().await;
+        let fragment_index_enabled = self.cluster_fragment_index_enabled().await;
+        let fragment_engine_current =
+            fragment_index_enabled && crate::ffmpeg::fragment_index_engine_is_current().await;
 
         let now = clock_ms();
-        if may_produce {
+        if may_produce && fragment_index_enabled {
             if let Err(error) = self.store.settle_analysis_requests(now).await {
                 tracing::warn!(%error, "settling analysis requests");
             }
@@ -10249,23 +10318,31 @@ impl JobManager {
     /// and only an idle node (`pretranscode_worker_idle`) that may execute
     /// fragment-index work takes another node's fragment-index rows.
     async fn resolve_analysis_requests(self: &Arc<Self>, transcode: Arc<TranscodeManager>) {
-        if !self.cluster_fragment_index_enabled().await {
-            return;
-        }
+        use plurx_core::store::AnalysisClaimMode;
+
         let node_id = self.coordinator.node_id().to_owned();
-        let engine_sha256 = crate::ffmpeg::fragment_index_engine_digest().await;
         loop {
-            if !self.cluster_fragment_index_enabled().await
-                || !crate::ffmpeg::fragment_index_engine_is_current().await
-                || !self
-                    .job_authority
-                    .may_execute_job(
-                        plurx_core::store::background_jobs::JobKind::FragmentIndexBuild,
-                    )
-                    .await
+            if !self
+                .job_authority
+                .may_execute_job(plurx_core::store::background_jobs::JobKind::FragmentIndexBuild)
+                .await
             {
                 break;
             }
+            // Chapter work requires neither the optional index cache nor
+            // compatibility with the fragment-index engine.
+            let engine = if self.cluster_fragment_index_enabled().await
+                && crate::ffmpeg::fragment_index_engine_is_current().await
+            {
+                Some(crate::ffmpeg::fragment_index_engine_digest().await)
+            } else {
+                None
+            };
+            let mode = if engine.is_some() {
+                AnalysisClaimMode::All
+            } else {
+                AnalysisClaimMode::SkipMarkersOnly
+            };
             let retry_policy = self.analysis_retry_policy().await;
             // A learner takes only what names it; untargeted requests any node
             // may take stay with the voters.
@@ -10277,15 +10354,16 @@ impl JobManager {
             let excluded = self.analysis_executor_exclusions(now);
             let request = match self
                 .store
-                .claim_analysis_request_for_capacity(
+                .claim_analysis_request_for_capacity_in_mode(
                     &node_id,
-                    Some(&engine_sha256),
+                    engine.as_deref(),
                     now,
                     now.saturating_add(retry_policy.lease_ms),
                     transcode.admissions().live_is_waiting(),
                     targeted_only,
                     cross_node,
                     &excluded,
+                    mode,
                 )
                 .await
             {
@@ -10299,7 +10377,7 @@ impl JobManager {
             self.work_claimed_analysis_request(
                 &request,
                 &node_id,
-                &engine_sha256,
+                engine.as_deref().unwrap_or_default(),
                 &transcode,
                 retry_policy,
             )
@@ -11113,7 +11191,7 @@ impl JobManager {
             }
             let stored = self
                 .store
-                .get_file_probe_chapters_json(file.id)
+                .get_file_probe_chapters_json(file.id, file.size, file.mtime)
                 .await
                 .map_err(|_| AnalysisResolutionError::Retry {
                     code: "source_catalog_read_failed",
@@ -11126,14 +11204,27 @@ impl JobManager {
                 ),
                 None => None,
             };
-            let chapters = match stored_chapters {
-                Some(chapters) => chapters,
+            let (chapters, probed_live) = match stored_chapters {
+                Some(chapters) => (chapters, false),
                 None => {
                     self.admit_background_source(request, lost).await?;
+                    let unavailable = || AnalysisResolutionError::Retry {
+                        code: "source_unavailable",
+                        charge_attempt: true,
+                    };
+                    let revision = crate::fragment_index_cluster::inspect_source(&file)
+                        .await
+                        .map_err(|_| unavailable())?;
+                    let source =
+                        crate::fragment_index_cluster::open_source_fence(&file, Some(&revision))
+                            .await
+                            .map_err(|_| unavailable())?;
                     let chapters = match crate::http::stream::probe_chapters_until(
+                        #[cfg(test)]
                         &file.path,
+                        &source.handle,
                         lost,
-                        attest_timeout,
+                        Duration::from_secs(30).min(attest_timeout),
                     )
                     .await
                     {
@@ -11154,16 +11245,15 @@ impl JobManager {
                             })
                         }
                     };
-                    if let Ok(json) = serde_json::to_string(&chapters) {
-                        // Lost work: these discovered chapters are otherwise
-                        // discarded when this analysis attempt completes.
-                        crate::store_result::observe(
-                            crate::store_result::Operation::MergeProbeChapters,
-                            crate::store_result::Discard::LostWork,
-                            self.store.merge_file_probe_chapters(file.id, &json).await,
-                        );
+                    if !source.unchanged()
+                        || crate::fragment_index_cluster::inspect_source(&file)
+                            .await
+                            .map_err(|_| unavailable())?
+                            != revision
+                    {
+                        return Err(unavailable());
                     }
-                    chapters
+                    (chapters, true)
                 }
             };
             if lost.is_cancelled() {
@@ -11185,6 +11275,7 @@ impl JobManager {
             );
             let mut set = crate::http::stream::annotation_set_from_markers(source, &markers);
             set.generation_id = request.requested_generation.clone();
+            set.version = crate::http::stream::CHAPTER_EVIDENCE_VERSION;
             if !self
                 .store
                 .record_analysis_request_phase(request, "publishing", None, clock_ms())
@@ -11206,6 +11297,22 @@ impl JobManager {
                 })?;
             if !published {
                 return Err(AnalysisResolutionError::ClaimLost);
+            }
+            if probed_live {
+                if let Ok(json) = serde_json::to_string(&chapters) {
+                    // Raw chapter consumers (including audiobook detail) also
+                    // use the successful reading. A scanner that won after the
+                    // probe retains its own document and chapter array.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::MergeProbeChapters,
+                        crate::store_result::Discard::LostWork,
+                        self.store
+                            .merge_file_probe_chapters_if_missing(
+                                file.id, file.size, file.mtime, &json,
+                            )
+                            .await,
+                    );
+                }
             }
             self.analysis_metrics
                 .publication("skip_markers", request.force_rebuild);

@@ -918,6 +918,59 @@ fn transcode_manager_sites_are_recognised_wherever_the_manager_gates() {
     assert!(sites.iter().any(|(owner, _)| owner == "Other"));
 }
 
+/// Verify that the one remaining manager record observes the actual Source
+/// Activity hook only in a cfg(test) block. The census site pin below would
+/// reject removing that block's attribute; this also rejects an ungated copy
+/// of the hook in the same production method.
+#[derive(Default)]
+struct SourceActivityHookGuard {
+    in_method: bool,
+    test_depth: usize,
+    methods: usize,
+    hook_reads: usize,
+    gated_hook_reads: usize,
+}
+
+impl<'ast> Visit<'ast> for SourceActivityHookGuard {
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if item.sig.ident != "prepare_source_encoded_recipe" {
+            return;
+        }
+        self.methods += 1;
+        self.in_method = true;
+        syn::visit::visit_impl_item_fn(self, item);
+        self.in_method = false;
+    }
+
+    fn visit_block(&mut self, block: &'ast syn::Block) {
+        if !self.in_method {
+            return;
+        }
+        for statement in &block.stmts {
+            let attributes: &[syn::Attribute] = match statement {
+                syn::Stmt::Local(local) => &local.attrs,
+                syn::Stmt::Macro(mac) => &mac.attrs,
+                syn::Stmt::Expr(expression, _) => expression_attributes(expression),
+                syn::Stmt::Item(_) => &[],
+            };
+            let gated = cfg_test(attributes);
+            self.test_depth += usize::from(gated);
+            self.visit_stmt(statement);
+            self.test_depth -= usize::from(gated);
+        }
+    }
+
+    fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
+        if let syn::Member::Named(name) = &field.member {
+            if name == "processed_activity_hook" {
+                self.hook_reads += 1;
+                self.gated_hook_reads += usize::from(self.test_depth > 0);
+            }
+        }
+        syn::visit::visit_expr_field(self, field);
+    }
+}
+
 #[test]
 fn seam_census_of_the_workspace() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -999,18 +1052,53 @@ fn seam_census_of_the_workspace() {
         routes.is_empty(),
         "the HLS route group keeps no test-only site: {routes:?}"
     );
-    // `TranscodeManager` keeps no test-only site at all (§5.9's zero-count
-    // acceptance): no gated field, no initialiser, no gated statement in any
-    // of its methods or its hooks trait. The manager's test-build decoder
-    // fallback was deleted; the one test that needed a decoder names it
-    // through `with_decoders`.
+    // The manager keeps two cfg(test)-gated observation families: six
+    // normalized-catalog omission records and the Source Activity record.
+    // Pin exact files, owners, classes and multiplicity so no other manager
+    // seam passes as either family. All records are absent from production.
+    // The test-build decoder fallback remains deleted; its test names the
+    // decoder through `with_decoders`.
     let manager: Vec<&Site> = sites
         .iter()
         .filter(|site| transcode_manager_site(&site.owner))
         .collect();
-    assert!(
-        manager.is_empty(),
-        "TranscodeManager keeps no test-only site: {manager:?}"
+    let expected_catalog_record = Site {
+        file: "crates/plurxd/src/transcode/manager/candidates.rs".to_owned(),
+        owner: "TranscodeManager::quality_catalog_from_snapshot_progress".to_owned(),
+        seam: Seam::Record,
+    };
+    let expected_record = Site {
+        file: "crates/plurxd/src/transcode/source_actor.rs".to_owned(),
+        owner: "TranscodeManager::prepare_source_encoded_recipe".to_owned(),
+        seam: Seam::Record,
+    };
+    assert_eq!(
+        manager,
+        [
+            &expected_catalog_record,
+            &expected_catalog_record,
+            &expected_catalog_record,
+            &expected_catalog_record,
+            &expected_catalog_record,
+            &expected_catalog_record,
+            &expected_record,
+        ],
+        "manager seams are exactly the test-only catalog and Source Activity records: {manager:?}"
+    );
+    let source_actor =
+        std::fs::read_to_string(workspace.join("crates/plurxd/src/transcode/source_actor.rs"))
+            .expect("Source actor source");
+    let syntax = syn::parse_file(&source_actor).expect("Source actor parses");
+    let mut hook_guard = SourceActivityHookGuard::default();
+    hook_guard.visit_file(&syntax);
+    assert_eq!(
+        (
+            hook_guard.methods,
+            hook_guard.hook_reads,
+            hook_guard.gated_hook_reads,
+        ),
+        (1, 1, 1),
+        "the Source Activity observation must remain in its cfg(test) block"
     );
     // The control actor keeps only the arms that apply the six test-driver
     // commands (`RollingControlCommand`'s test-only variants), which no

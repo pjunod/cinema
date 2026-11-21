@@ -61,6 +61,8 @@ const BORROWED = [
   "activityStreamDetails",
   "activityStreamCell",
   "activityWatchingHtml",
+  "activitySourceProcessedHtml",
+  "activityReceiverProcessedHtml",
   // Live TV rows are drawn by the same painter and name their owner node
   // through the same roster map, so they are borrowed rather than stubbed.
   "liveTvActivityRows",
@@ -400,11 +402,14 @@ test("a live FEL reconstruction names its picture, its GPU work and why, beside 
     fel_composed: true,
     live_rendering: true,
   };
-  const html = paint(streaming({ presentation: "vod", vod_observation: { processing } }, { presentation: "vod", node_id: NODE_A }));
+  const detail = streaming({ presentation: "vod", vod_observation: { processing } }, { presentation: "vod", node_id: NODE_A });
+  detail.retained_output_node = NODE_A;
+  const html = paint(detail);
   assert.match(html, /<div class="stream-processing" data-processing="Reconstructed Dolby Vision Profile 8.1"><b>Reconstructed Dolby Vision Profile 8.1<\/b> <span class="sub">· VA-API decode, base and full enhancement layers composed on the GPU, hevc_vaapi Main10 encode, a rewritten 8.1 RPU per frame<\/span>/);
   assert.match(html, /Why: Dolby Vision client playing a Profile 7 FEL title; FEL re-encode is on in Settings → Developer · live rendering · FEL composed/);
   assert.match(html, /<dt>Serving node<\/dt>/);
   assert.match(html, /stopSession\(&quot;75813686-9927-41d0-97e0-18d152f9efa2&quot;\)|stopSession\("75813686-9927-41d0-97e0-18d152f9efa2"\)/);
+  assert.doesNotMatch(paint({ ...detail, retained_output_node: NODE_B }), /stopSession\(/, "ordinary Stop cannot target another node's retained owner");
   assert.doesNotMatch(paint(streaming()), /stream-processing/);
 });
 

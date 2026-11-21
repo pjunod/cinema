@@ -2908,13 +2908,9 @@ final class PlayerController: ObservableObject {
     }
 
     func selectSubtitle(_ index: Int?) {
-        let wasProgressive = progressiveCaptionOutputSelected
-        retireProgressiveCaptionSelection()
-        progressiveCaptions.deselect()
-        player.allowsExternalPlayback = !pgsOverlayIsActive
         let cold = started && decision == nil
         let requestedIndex = index ?? PrePlaySelection.subtitleOff
-        guard wasProgressive || index != selectedSubtitle
+        guard progressiveCaptionOutputSelected || index != selectedSubtitle
                 || (cold && initialDecisionRequest.selection.subtitleIndex != requestedIndex)
         else { return }
         if Self.subtitleUsesOverlay(index, in: subtitles), player.isExternalPlaybackActive {
@@ -2929,6 +2925,10 @@ final class PlayerController: ObservableObject {
             showPlaybackNotice(Self.hdrSubtitleNotice)
             return
         }
+        // Only an admitted subtitle choice can displace generated captions.
+        retireProgressiveCaptionSelection()
+        progressiveCaptions.deselect()
+        player.allowsExternalPlayback = !pgsOverlayIsActive
         // The refused notice is not cleared here: a retirement reason is a
         // property of the class, and `degraded` retires on its own five-second
         // clock or when the change this selection starts attaches (contract

@@ -3359,6 +3359,7 @@ async fn probe_system(
         pacing: crate::ffmpeg::pacing_caps().await,
         dovi_rpu: crate::ffmpeg::has_dovi_rpu().await,
         dovi_reshape: crate::ffmpeg::has_dovi_reshape().await,
+        dovi_reshape_hardware: crate::ffmpeg::measure_dovi_reshape_hardware(&encoder_caps).await,
         dovi_passthrough: crate::ffmpeg::has_dovi_passthrough().await,
         hdr10_passthrough: crate::ffmpeg::has_hdr10_passthrough().await,
         hdr10_passthrough_qsv: if encoder_caps.qsv {
@@ -3414,6 +3415,7 @@ struct Measured {
     pacing: crate::ffmpeg::PacingCaps,
     dovi_rpu: bool,
     dovi_reshape: bool,
+    dovi_reshape_hardware: Vec<plurx_core::transcode::Encoder>,
     dovi_passthrough: bool,
     dovi_passthrough_qsv: bool,
     hdr10_passthrough: bool,
@@ -3458,6 +3460,7 @@ fn system_info(
         pacing: measured.pacing,
         dovi_rpu: measured.dovi_rpu,
         dovi_reshape: measured.dovi_reshape,
+        dovi_reshape_hardware: measured.dovi_reshape_hardware,
         dovi_passthrough: measured.dovi_passthrough,
         dovi_passthrough_qsv: measured.dovi_passthrough_qsv,
         hdr10_passthrough: measured.hdr10_passthrough,

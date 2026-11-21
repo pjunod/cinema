@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -12,6 +13,7 @@ use zip::{CompressionMethod, ZipWriter};
 
 use super::*;
 
+mod activity_routes;
 mod delegation;
 mod playback_handoffs;
 mod public_copy_wire;
@@ -1508,6 +1510,7 @@ fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
         "/api/v1/hls/session/index.m3u8",
         crate::media_pool::SNAPSHOT_PATH,
         internal_clock::PATH,
+        internal_activity::PATH,
     ] {
         assert!(learner_route_eligible(&Method::GET, path), "{path}");
     }
@@ -1592,6 +1595,7 @@ fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
         (Method::POST, crate::media_sessions::RELAY_PATH),
         (Method::POST, crate::shared_cache::CANARY_PATH),
         (Method::POST, internal_auth_revocation::PATH),
+        (Method::POST, internal_activity::SOURCE_STOP_PATH),
         // Peer hydration of a fragment index. `media_peers()` names
         // learners, so refusing this at the route matrix made the
         // directory point at a closed door.
@@ -1650,6 +1654,17 @@ fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
         &Method::POST,
         "/internal/media/subtitle-source/7/2/sup"
     ));
+    for (method, path) in [
+        (Method::POST, internal_activity::PATH),
+        (Method::GET, internal_activity::SOURCE_STOP_PATH),
+        (Method::GET, "/_internal/v1/activity-snapshot/other"),
+        (
+            Method::POST,
+            "/_internal/v1/activity-source-processed-stop/other",
+        ),
+    ] {
+        assert!(!learner_route_eligible(&method, path), "{method} {path}");
+    }
 }
 
 #[test]
@@ -1661,7 +1676,9 @@ fn maintenance_route_matrix_keeps_admin_and_existing_sessions_but_blocks_new_wor
         (Method::GET, "/api/v1/cluster/status"),
         (Method::GET, "/api/v1/cluster/support-bundle"),
         (Method::GET, cluster_operations::INTERNAL_PATH),
+        (Method::GET, internal_activity::PATH),
         (Method::POST, internal_auth_revocation::PATH),
+        (Method::POST, internal_activity::SOURCE_STOP_PATH),
         (Method::POST, "/api/v1/auth/login"),
         (Method::POST, "/api/v1/auth/logout"),
         // Read beside /me so a client signed in to a node under
@@ -1734,6 +1751,13 @@ fn maintenance_route_matrix_keeps_admin_and_existing_sessions_but_blocks_new_wor
         (Method::POST, crate::live_tv::START_PATH),
         (Method::POST, crate::live_tv::ACTIVATE_PATH),
         (Method::POST, crate::live_tv::GUIDE_PATH),
+        (Method::POST, internal_activity::PATH),
+        (Method::GET, internal_activity::SOURCE_STOP_PATH),
+        (Method::GET, "/_internal/v1/activity-snapshot/other"),
+        (
+            Method::POST,
+            "/_internal/v1/activity-source-processed-stop/other",
+        ),
         (Method::POST, "/api/v1/cluster/join-tokens"),
         (Method::DELETE, "/api/v1/cluster/nodes/node-b"),
         (Method::POST, "/api/v1/libraries"),
@@ -10566,10 +10590,12 @@ async fn activity_requires_auth_and_reports_idle() {
             // P-02 §3.2); node-local, so not a clustered-only field.
             "processes",
             "producing",
+            "receiver_processed",
             "retained_output",
             "retained_output_node",
             "scans",
             "sessions",
+            "source_processed",
             "trakt",
             // Local worker observations are useful on SQLite too, with the
             // nodes that were observed (learner workers included).
@@ -15524,6 +15550,201 @@ async fn a_high_bitrate_remux_is_hinted_toward_segments() {
     assert!(why.contains("69 Mb/s"), "{body}");
 }
 
+/// Exercise the progressive response, including its actual FFmpeg process and
+/// fragmented MP4 body. The old lowercase-v map selects the JPEG in cover-first
+/// inputs even though the scanner has selected the moving film.
+#[tokio::test]
+async fn progressive_remux_delivers_first_playable_video_and_selected_audio() {
+    use plurx_core::testfixtures::{ffmpeg, require_ffmpeg, run};
+    use std::process::Command;
+
+    fn atoms(mut bytes: &[u8]) -> Vec<&[u8]> {
+        let mut atoms = Vec::new();
+        while !bytes.is_empty() {
+            let size =
+                u32::from_be_bytes(bytes[..4].try_into().expect("four-byte box size")) as usize;
+            assert!(size >= 8);
+            let (atom, rest) = bytes.split_at(size);
+            atoms.push(atom);
+            bytes = rest;
+        }
+        atoms
+    }
+
+    fn decoded_video(path: &Path) -> Vec<u8> {
+        run(Command::new(ffmpeg())
+            .args(["-v", "error", "-i"])
+            .arg(path)
+            .args(["-map", "0:V:0", "-threads", "1", "-f", "rawvideo", "pipe:1"]))
+    }
+
+    require_ffmpeg();
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let seed = seed_content(&state).await;
+    let dir = crate::test_tempdir().expect("progressive remux fixtures");
+    let cover = dir.path().join("cover.jpg");
+    run(Command::new(ffmpeg())
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=red:s=32x32",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "mjpeg",
+            "-threads",
+            "1",
+        ])
+        .arg(&cover));
+
+    for (name, has_cover, playable_streams) in [
+        ("ordinary", false, 1),
+        ("cover-first", true, 2),
+        ("audio-with-cover", true, 0),
+    ] {
+        let source = dir.path().join(format!("{name}.mp4"));
+        let mut fixture = Command::new(ffmpeg());
+        fixture.args(["-v", "error", "-i"]).arg(&cover).args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=96x64:r=8:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=blue:s=64x48:r=8:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=f=440:r=44100:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=f=880:r=48000:d=1",
+        ]);
+        for input in 1..=playable_streams {
+            fixture.args(["-map", &format!("{input}:v")]);
+        }
+        fixture.args([
+            "-map", "3:a", "-map", "4:a", "-c:a", "aac", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-threads", "1",
+        ]);
+        if has_cover {
+            fixture.args([
+                "-map",
+                "0:v",
+                &format!("-c:v:{playable_streams}"),
+                "copy",
+                &format!("-disposition:v:{playable_streams}"),
+                "attached_pic",
+            ]);
+        }
+        fixture.arg(&source);
+        run(&mut fixture);
+        if has_cover {
+            // The MOV muxer writes cover art into udta at the end of moov.
+            // Move udta before the track atoms so the demuxer sees the cover
+            // first. The atoms' sizes and all media chunk offsets stay fixed.
+            let original = std::fs::read(&source).expect("read");
+            let mut reordered = Vec::new();
+            for atom in atoms(&original) {
+                if &atom[4..8] == b"moov" {
+                    let mut children = atoms(&atom[8..]);
+                    children.sort_by_key(|child| &child[4..8] != b"udta");
+                    reordered.extend_from_slice(&atom[..8]);
+                    reordered.extend(children.into_iter().flatten());
+                } else {
+                    reordered.extend_from_slice(atom);
+                }
+            }
+            std::fs::write(&source, reordered).expect("write");
+        }
+
+        let scan = plurx_core::scan::probe::probe(&source)
+            .await
+            .expect("scan source");
+        if has_cover {
+            let raw: Value =
+                serde_json::from_str(scan.raw_json.as_deref().expect("raw probe JSON"))
+                    .expect("probe JSON");
+            assert_eq!(
+                raw["streams"][0]["disposition"]["attached_pic"], 1,
+                "{name}"
+            );
+        }
+        let dimensions = (playable_streams != 0).then_some((96, 64));
+        assert_eq!(scan.width.zip(scan.height), dimensions, "{name}");
+        let metadata = std::fs::metadata(&source).expect("metadata");
+        let mtime = metadata
+            .modified()
+            .expect("modified")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("duration since");
+        let file_id = state
+            .store
+            .upsert_file(
+                seed.movie,
+                source.to_str().expect("UTF-8 fixture path"),
+                metadata.len() as i64,
+                mtime.as_secs() as i64,
+                &scan,
+            )
+            .await
+            .expect("catalogue fixture");
+
+        let response = app.clone().oneshot(get(
+            &format!("/api/v1/files/{file_id}/stream.mp4?vcodec=h264&acodec=aac&container=mp4&audio=1"),
+            Some(&admin),
+        )).await.expect("progressive response");
+        assert_eq!(response.status(), StatusCode::OK, "{name}");
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        let output = dir.path().join(format!("{name}-progressive.mp4"));
+        std::fs::write(&output, body).expect("write");
+        let delivered = plurx_core::scan::probe::probe(&output)
+            .await
+            .expect("scan remux output");
+        assert_eq!(delivered.width.zip(delivered.height), dimensions, "{name}");
+        let raw: Value =
+            serde_json::from_str(delivered.raw_json.as_deref().expect("raw probe JSON"))
+                .expect("probe JSON");
+        assert_eq!(
+            raw["streams"].as_array().expect("JSON array").len(),
+            1 + usize::from(dimensions.is_some()),
+            "{name}"
+        );
+        assert_eq!(delivered.audio_streams.len(), 1, "{name}");
+        assert_eq!(
+            delivered.audio_streams[0].sample_rate,
+            Some(48_000),
+            "{name}"
+        );
+        if dimensions.is_some() {
+            let film = decoded_video(&source);
+            let frame_bytes = 96 * 64 * 3 / 2;
+            assert_eq!(film.len(), 8 * frame_bytes, "{name}");
+            assert!(
+                film.chunks_exact(frame_bytes)
+                    .any(|frame| frame != &film[..frame_bytes]),
+                "{name} has motion"
+            );
+            assert_eq!(
+                decoded_video(&output),
+                film,
+                "{name} must carry the scanned film"
+            );
+        }
+    }
+}
+
 /// A caller-selected audio track must replace the policy default before
 /// capability evaluation. This is the retained regression for #265: with
 /// the production selection handling removed, the second request silently
@@ -17556,72 +17777,333 @@ async fn shared_native_api_fixture_uses_the_servers_live_wire_keys() {
     );
 }
 
-#[tokio::test]
-async fn decision_rereads_a_manual_override_that_commits_during_fallback_publication() {
-    let (app, state) = test_state();
-    let admin = setup_admin(&app).await;
-    let seeded = seed_content(&state).await;
-    let file = state
-        .store
-        .get_file(seeded.file)
-        .await
-        .expect("read seeded file")
-        .expect("seeded file");
-    let pause = stream::pause_next_marker_fallback_for_test(&file.path);
+fn write_chapter_fixture(path: &Path, with_intro: bool) {
+    use plurx_core::testfixtures::{ffmpeg, require_ffmpeg, run};
+    require_ffmpeg();
+    let mut command = std::process::Command::new(ffmpeg());
+    command.args([
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=s=96x64:r=8:d=1",
+    ]);
+    if with_intro {
+        let chapters = path.with_extension("ffmetadata");
+        std::fs::write(
+            &chapters,
+            ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=60000\ntitle=Intro\n",
+        )
+        .expect("write chapter metadata fixture");
+        command
+            .args(["-f", "ffmetadata", "-i"])
+            .arg(chapters)
+            .args(["-map_chapters", "1"]);
+    }
+    run(command
+        .args(["-map", "0:v", "-c:v", "libx264", "-threads", "1"])
+        .arg(path));
+}
 
-    let decision_app = app.clone();
-    let decision_admin = admin.clone();
-    let decision = tokio::spawn(async move {
-        call(
-            &decision_app,
-            get(
-                &format!(
-                    "/api/v1/files/{}/decision?vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0",
-                    seeded.file
-                ),
-                Some(&decision_admin),
-            ),
+async fn catalogue_legacy_chapter_fixture(
+    state: &AppState,
+    item_id: i64,
+    path: &Path,
+) -> plurx_core::domain::MediaFile {
+    let metadata = std::fs::metadata(path).expect("metadata");
+    let mtime = metadata
+        .modified()
+        .expect("modified")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("duration since");
+    let file_id = state
+        .store
+        .upsert_file(
+            item_id,
+            path.to_str().expect("UTF-8 fixture path"),
+            metadata.len() as i64,
+            mtime.as_secs() as i64,
+            &plurx_core::domain::ProbeResult {
+                duration_ms: Some(9_000_000),
+                container: Some("mp4".into()),
+                video_codec: Some("h264".into()),
+                width: Some(96),
+                height: Some(64),
+                raw_json: Some(r#"{"format":{"duration":"9000"},"streams":[]}"#.into()),
+                ..Default::default()
+            },
         )
         .await
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(5), pause.wait())
+        .expect("upsert fixture file");
+    state
+        .store
+        .get_file(file_id)
         .await
-        .expect("decision reached its authoritative annotation miss");
+        .expect("get file")
+        .expect("fixture file exists")
+}
 
-    let manual_url = format!("/api/v1/files/{}/timeline-annotations/credits", file.id);
+fn chapter_decision(file_id: i64, token: &str) -> Request<Body> {
+    get(
+        &format!("/api/v1/files/{file_id}/decision?vcodec=h264&acodec=aac&container=mp4"),
+        Some(token),
+    )
+}
+
+async fn wait_for_chapter_probe(
+    state: &AppState,
+    pause: &tokio::sync::Barrier,
+    worker: &mut tokio::task::JoinHandle<()>,
+) {
+    tokio::select! {
+        _ = pause.wait() => return,
+        _ = worker => {},
+        _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+    }
+    panic!(
+        "background chapter probe was never reached: {:?}",
+        state
+            .store
+            .analysis_requests(10)
+            .await
+            .expect("analysis requests")
+    );
+}
+
+async fn configure_chapter_worker(state: &AppState) {
+    use plurx_core::store::keys;
+    state
+        .store
+        .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "0")
+        .await
+        .expect("put setting");
+    state
+        .store
+        .put_setting(keys::ANALYSIS_LEASE_SECS, "15")
+        .await
+        .expect("put setting");
+}
+
+async fn wait_out_chapter_attempt(state: &AppState, request_id: &str, retry_at_ms: i64) {
+    // A failed or superseded claim can keep its source reservation for its lease.
+    let expires = state
+        .store
+        .analysis_attempts(request_id, 1)
+        .await
+        .expect("analysis attempts")[0]
+        .claim_expires_at_ms;
+    let wait = expires
+        .max(retry_at_ms)
+        .saturating_sub(crate::state::clock_ms())
+        .max(0);
+    tokio::time::sleep(Duration::from_millis(wait as u64 + 1)).await;
+}
+
+#[tokio::test]
+async fn playback_chapter_timeout_is_unknown_and_retry_preserves_manual_edits() {
+    let (app, state) = test_state();
+    configure_chapter_worker(&state).await;
+    let admin = setup_admin(&app).await;
+    let seed = seed_content(&state).await;
+    let dir = crate::test_tempdir().expect("test tempdir");
+    let path = dir.path().join("legacy.mp4");
+    write_chapter_fixture(&path, true);
+    let file = catalogue_legacy_chapter_fixture(&state, seed.movie, &path).await;
+
+    let pause = stream::pause_next_chapter_probe_for_test(&file.path, Some(Duration::from_secs(1)));
+    let ((status, first), (other_status, second)) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(
+                call(&app, chapter_decision(file.id, &admin)),
+                call(&app, chapter_decision(file.id, &admin)),
+            )
+        })
+        .await
+        .expect("Play must never await the chapter probe");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(other_status, StatusCode::OK);
+    assert_eq!(first["markers"], json!([]));
+    assert_eq!(second["markers"], json!([]));
+    assert!(
+        state
+            .store
+            .analysis_requests(10)
+            .await
+            .expect("analysis requests")
+            .is_empty(),
+        "Play returned while the background owner was unavailable to admit work"
+    );
+    let mut worker = tokio::spawn(
+        state
+            .jobs
+            .clone()
+            .work_cluster_fragment_index_queue(state.transcode.clone()),
+    );
+    wait_for_chapter_probe(&state, &pause, &mut worker).await;
+    let queue = state
+        .store
+        .analysis_requests(10)
+        .await
+        .expect("analysis requests");
+    assert_eq!(queue.len(), 1, "one durable request for both decisions");
+    assert_eq!(queue[0].trigger, "background");
+    let request_id = &queue[0].request_id;
+    worker.await.expect("chapter worker task");
+
+    let retry = state
+        .store
+        .analysis_request(request_id)
+        .await
+        .expect("analysis request")
+        .expect("retry request exists");
+    assert_eq!(retry.state, "queued");
+    assert_eq!(retry.last_error_code, "source_probe_timeout");
+    let identity = stream::annotation_source_identity(&file);
+    assert!(state
+        .store
+        .timeline_annotation_set(file.id, &identity)
+        .await
+        .expect("timeline annotation set")
+        .is_none());
+
+    wait_out_chapter_attempt(&state, request_id, retry.not_before_ms).await;
+    let pause = stream::pause_next_chapter_probe_for_test(&file.path, None);
+    let mut worker = tokio::spawn(
+        state
+            .jobs
+            .clone()
+            .work_cluster_fragment_index_queue(state.transcode.clone()),
+    );
+    wait_for_chapter_probe(&state, &pause, &mut worker).await;
+
     let (status, manual) = call(
         &app,
         put(
-            &manual_url,
+            &format!("/api/v1/files/{}/timeline-annotations/credits", file.id),
             Some(&admin),
             json!({
-                "start_ticks": 8_500_000,
-                "end_ticks": 9_000_000,
-                "timescale": 1000,
-                "start_ms": 8_500_000,
-                "end_ms": 9_000_000,
+                "start_ticks": 8_500_000, "end_ticks": 9_000_000, "timescale": 1000,
+                "start_ms": 8_500_000, "end_ms": 9_000_000,
             }),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{manual}");
-    assert_eq!(manual["provenance"], "manual");
+    let (_, pending) = call(&app, chapter_decision(file.id, &admin)).await;
+    assert_eq!(pending["markers"].as_array().expect("JSON array").len(), 1);
+    assert_eq!(pending["markers"][0]["provenance"], "manual");
 
     pause.wait().await;
-    let (status, decision) = tokio::time::timeout(std::time::Duration::from_secs(5), decision)
-        .await
-        .expect("decision completed after fallback release")
-        .expect("decision task");
+    worker.await.expect("chapter worker task");
+    let (status, decision) = call(&app, chapter_decision(file.id, &admin)).await;
     assert_eq!(status, StatusCode::OK, "{decision}");
-    let credits = decision["markers"]
-        .as_array()
-        .expect("decision markers")
+    let markers = decision["markers"].as_array().expect("JSON array");
+    assert!(
+        markers
+            .iter()
+            .any(|marker| marker["kind"] == "intro" && marker["provenance"] == "authored"),
+        "{markers:?}"
+    );
+    let credits = markers
         .iter()
         .find(|marker| marker["kind"] == "credits")
         .expect("credits marker");
     assert_eq!(credits["start_ms"], 8_500_000);
     assert_eq!(credits["provenance"], "manual");
     assert_eq!(credits["confidence"], 1_000);
+}
+
+#[tokio::test]
+async fn playback_chapter_probe_fences_replacements_and_confirms_chapterless_sources() {
+    let (app, state) = test_state();
+    configure_chapter_worker(&state).await;
+    let admin = setup_admin(&app).await;
+    let seed = seed_content(&state).await;
+    let dir = crate::test_tempdir().expect("test tempdir");
+    let path = dir.path().join("replacement.mp4");
+    write_chapter_fixture(&path, true);
+    let original = catalogue_legacy_chapter_fixture(&state, seed.movie, &path).await;
+    let old_identity = stream::annotation_source_identity(&original);
+    let legacy = stream::annotation_set_from_markers(old_identity.clone(), &[]);
+    state
+        .store
+        .put_timeline_annotation_set(original.id, 9_000_000, &legacy)
+        .await
+        .expect("put timeline annotation set");
+    let (_, decision) = call(&app, chapter_decision(original.id, &admin)).await;
+    assert_eq!(decision["markers"], json!([]));
+
+    let pause = stream::pause_next_chapter_probe_for_test(&path, None);
+    let mut worker = tokio::spawn(
+        state
+            .jobs
+            .clone()
+            .work_cluster_fragment_index_queue(state.transcode.clone()),
+    );
+    wait_for_chapter_probe(&state, &pause, &mut worker).await;
+    let old_request = state
+        .store
+        .analysis_requests(10)
+        .await
+        .expect("analysis requests")
+        .remove(0);
+    let replacement_path = dir.path().join("new.mp4");
+    write_chapter_fixture(&replacement_path, false);
+    std::fs::rename(replacement_path, &path).expect("rename");
+    let replacement = catalogue_legacy_chapter_fixture(&state, seed.movie, &path).await;
+    assert_eq!(replacement.id, original.id);
+    let identity = stream::annotation_source_identity(&replacement);
+    assert_ne!(identity, old_identity);
+    pause.wait().await;
+    worker.await.expect("chapter worker task");
+    assert!(state
+        .store
+        .timeline_annotation_set(replacement.id, &identity)
+        .await
+        .expect("timeline annotation set")
+        .is_none());
+
+    wait_out_chapter_attempt(&state, &old_request.request_id, 0).await;
+    let (_, unknown) = call(&app, chapter_decision(replacement.id, &admin)).await;
+    assert_eq!(unknown["markers"], json!([]));
+    state
+        .jobs
+        .clone()
+        .work_cluster_fragment_index_queue(state.transcode.clone())
+        .await;
+    let confirmed = state
+        .store
+        .timeline_annotation_set(replacement.id, &identity)
+        .await
+        .expect("timeline annotation set")
+        .expect("chapterless probe published");
+    assert_eq!(
+        state
+            .store
+            .get_file_probe_chapters_json(replacement.id, replacement.size, replacement.mtime)
+            .await
+            .expect("get file probe chapters json")
+            .as_deref(),
+        Some("[]"),
+        "the confirmed chapterless probe also backfills raw chapter consumers"
+    );
+    assert_eq!(confirmed.version, stream::CHAPTER_EVIDENCE_VERSION);
+    assert!(confirmed
+        .annotations
+        .iter()
+        .all(|marker| marker.provenance == plurx_core::segplan::AnnotationProvenance::Estimated));
+    let (_, decision) = call(&app, chapter_decision(replacement.id, &admin)).await;
+    assert!(decision["markers"]
+        .as_array()
+        .expect("JSON array")
+        .iter()
+        .all(|marker| marker["provenance"] == "estimated"));
+    assert_eq!(
+        decision["markers"].as_array().expect("JSON array").len(),
+        confirmed.annotations.len()
+    );
 }
 
 #[tokio::test]

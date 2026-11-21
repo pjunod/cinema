@@ -749,6 +749,7 @@ fn http_route_group(path: &str) -> usize {
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         crate::diagnostics::PEER_PATH
         | internal_activity::PATH
+        | internal_activity::SOURCE_STOP_PATH
         | activity_starts::PEER_PATH
         | internal_clock::PATH
         | cluster_operations::INTERNAL_PATH
@@ -2510,6 +2511,10 @@ pub fn router(state: AppState) -> Router {
         .route("/download/plurx-android.apk", get(web::download_android))
         .route(internal_activity::PATH, get(internal_activity::snapshot))
         .route(
+            internal_activity::SOURCE_STOP_PATH,
+            post(internal_activity::stop_source_processed).layer(DefaultBodyLimit::max(256)),
+        )
+        .route(
             activity_starts::PEER_PATH,
             post(activity_starts::peer).layer(DefaultBodyLimit::max(1_024)),
         )
@@ -2777,6 +2782,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | "/api/v1/cluster/ingress"
                 | cluster_operations::INTERNAL_PATH
                 | internal_clock::PATH
+                | internal_activity::PATH
         )
     {
         return true;
@@ -2785,6 +2791,9 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
         return true;
     }
     if method == Method::POST && path == internal_auth_revocation::PATH {
+        return true;
+    }
+    if method == Method::POST && path == internal_activity::SOURCE_STOP_PATH {
         return true;
     }
     if method == Method::POST && path == "/api/v1/cluster/election" {
@@ -2908,6 +2917,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                 | "/api/v1/cluster/support-bundle"
                 | cluster_operations::INTERNAL_PATH
                 | internal_clock::PATH
+                | internal_activity::PATH
         )
     {
         return true;
@@ -2918,6 +2928,9 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         return true;
     }
     if method == Method::POST && path == internal_auth_revocation::PATH {
+        return true;
+    }
+    if method == Method::POST && path == internal_activity::SOURCE_STOP_PATH {
         return true;
     }
     // The content-addressed fragment-index read. `fragment_index_cluster`

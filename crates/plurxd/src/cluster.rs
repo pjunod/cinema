@@ -1739,7 +1739,8 @@ pub(crate) mod tests {
         );
         assert_eq!(
             ids(&Peers::of(&snapshot, Purpose::Operations, NOW).expect("operations")),
-            ["node-2", "node-3", "node-4", "node-5"]
+            ["node-2", "node-3", "node-4", "node-5"],
+            "operations: every committed member, including stale voters and learners"
         );
         assert_eq!(
             ids(&Peers::of(&snapshot, Purpose::Artwork, NOW).expect("artwork")),
@@ -1847,7 +1848,7 @@ pub(crate) mod calls {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use plurx_core::cluster::membership::{
-        normalize_internal_http_base, ActivityPeerAuth, InternalPeerAuth, MembershipManager,
+        normalize_internal_http_base, InternalPeerAuth, MembershipManager,
     };
 
     pub(crate) const NODE_HEADER: &str = "x-plurx-cluster-node";
@@ -1858,8 +1859,8 @@ pub(crate) mod calls {
     pub(crate) const RESPONSE_SIGNATURE_HEADER: &str = "x-plurx-response-signature";
 
     #[derive(Clone, Copy)]
+    #[allow(clippy::enum_variant_names)] // names distinguish the exact request and response authentication scopes
     pub(crate) enum PeerAuthMode {
-        LegacyActivity,
         ExactRequest,
         /// A voter control response must prove its status and exact body too.
         ExactRequestAndResponse,
@@ -1893,12 +1894,6 @@ pub(crate) mod calls {
     impl PeerAuthentication {
         pub(super) fn new(membership: MembershipManager) -> Self {
             Self { membership }
-        }
-        pub(crate) async fn authorize_activity(
-            &self,
-            auth: &ActivityPeerAuth,
-        ) -> Result<bool, plurx_core::cluster::membership::MembershipError> {
-            self.membership.authorize_activity_request(auth).await
         }
         pub(crate) async fn authorize_read_request(
             &self,
@@ -2093,15 +2088,10 @@ pub(crate) mod calls {
             let timestamp_ms = unix_ms();
             let method_name = method.as_str();
             let auth = match auth_mode {
-                PeerAuthMode::LegacyActivity => self
-                    .membership
-                    .sign_activity_request(expected_node_id, timestamp_ms)
-                    .map(SignedPeerAuth::Activity),
                 PeerAuthMode::ExactRequest
                 | PeerAuthMode::ExactRequestAndResponse
-                | PeerAuthMode::ExactRequestAndMemberResponse => self
-                    .membership
-                    .sign_internal_peer_request(
+                | PeerAuthMode::ExactRequestAndMemberResponse => {
+                    self.membership.sign_internal_peer_request(
                         expected_node_id,
                         timestamp_ms,
                         &uuid::Uuid::new_v4().to_string(),
@@ -2109,26 +2099,19 @@ pub(crate) mod calls {
                         path,
                         &body,
                     )
-                    .map(SignedPeerAuth::Exact),
+                }
             }
             .map_err(|_| PeerTransportError::Unreachable)?;
-            let response_binding = match &auth {
-                SignedPeerAuth::Exact(auth) => match auth_mode {
-                    PeerAuthMode::ExactRequestAndResponse => {
-                        Some((auth.node_id.clone(), auth.nonce.clone(), false))
-                    }
-                    PeerAuthMode::ExactRequestAndMemberResponse => {
-                        Some((auth.node_id.clone(), auth.nonce.clone(), true))
-                    }
-                    _ => None,
-                },
-                _ => None,
+            let response_binding = match auth_mode {
+                PeerAuthMode::ExactRequestAndResponse => {
+                    Some((auth.node_id.clone(), auth.nonce.clone(), false))
+                }
+                PeerAuthMode::ExactRequestAndMemberResponse => {
+                    Some((auth.node_id.clone(), auth.nonce.clone(), true))
+                }
+                PeerAuthMode::ExactRequest => None,
             };
-            let mut request = client.request(method, url);
-            request = match auth {
-                SignedPeerAuth::Activity(auth) => signed_headers(request, &auth),
-                SignedPeerAuth::Exact(auth) => signed_headers(request, &auth),
-            };
+            let mut request = signed_headers(client.request(method, url), &auth);
             if let Some((name, value)) = extra_header {
                 request = request.header(name, value);
             }
@@ -2234,33 +2217,22 @@ pub(crate) mod calls {
             let timestamp_ms = unix_ms();
             let method_name = method.as_str();
             let auth = match auth_mode {
-                PeerAuthMode::LegacyActivity => self
-                    .membership
-                    .sign_activity_request(expected_node_id, timestamp_ms)
-                    .map(SignedPeerAuth::Activity),
                 // A stream has no complete body to authenticate at this layer.
                 PeerAuthMode::ExactRequestAndResponse
                 | PeerAuthMode::ExactRequestAndMemberResponse => {
                     return Err(PeerTransportError::InvalidResponse);
                 }
-                PeerAuthMode::ExactRequest => self
-                    .membership
-                    .sign_internal_peer_request(
-                        expected_node_id,
-                        timestamp_ms,
-                        &uuid::Uuid::new_v4().to_string(),
-                        method_name,
-                        path,
-                        &body,
-                    )
-                    .map(SignedPeerAuth::Exact),
+                PeerAuthMode::ExactRequest => self.membership.sign_internal_peer_request(
+                    expected_node_id,
+                    timestamp_ms,
+                    &uuid::Uuid::new_v4().to_string(),
+                    method_name,
+                    path,
+                    &body,
+                ),
             }
             .map_err(|_| PeerTransportError::Unreachable)?;
-            let mut request = client.request(method, url);
-            request = match auth {
-                SignedPeerAuth::Activity(auth) => signed_headers(request, &auth),
-                SignedPeerAuth::Exact(auth) => signed_headers(request, &auth),
-            };
+            let mut request = signed_headers(client.request(method, url), &auth);
             if !body.is_empty() {
                 request = request
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -2299,74 +2271,16 @@ pub(crate) mod calls {
         payload
     }
 
-    enum SignedPeerAuth {
-        Activity(ActivityPeerAuth),
-        Exact(InternalPeerAuth),
-    }
-
-    trait PeerAuthHeaders {
-        fn node_id(&self) -> &str;
-        fn target_node_id(&self) -> &str;
-        fn timestamp_ms(&self) -> i64;
-        fn nonce(&self) -> Option<&str> {
-            None
-        }
-        fn signature(&self) -> &str;
-    }
-
-    impl PeerAuthHeaders for ActivityPeerAuth {
-        fn node_id(&self) -> &str {
-            &self.node_id
-        }
-
-        fn target_node_id(&self) -> &str {
-            &self.target_node_id
-        }
-
-        fn timestamp_ms(&self) -> i64 {
-            self.timestamp_ms
-        }
-
-        fn signature(&self) -> &str {
-            &self.signature
-        }
-    }
-
-    impl PeerAuthHeaders for InternalPeerAuth {
-        fn node_id(&self) -> &str {
-            &self.node_id
-        }
-
-        fn target_node_id(&self) -> &str {
-            &self.target_node_id
-        }
-
-        fn timestamp_ms(&self) -> i64 {
-            self.timestamp_ms
-        }
-
-        fn nonce(&self) -> Option<&str> {
-            Some(&self.nonce)
-        }
-
-        fn signature(&self) -> &str {
-            &self.signature
-        }
-    }
-
-    fn signed_headers<T: PeerAuthHeaders>(
+    fn signed_headers(
         request: reqwest::RequestBuilder,
-        auth: &T,
+        auth: &InternalPeerAuth,
     ) -> reqwest::RequestBuilder {
-        let request = request
-            .header(NODE_HEADER, auth.node_id())
-            .header(TARGET_HEADER, auth.target_node_id())
-            .header(TIMESTAMP_HEADER, auth.timestamp_ms())
-            .header(SIGNATURE_HEADER, auth.signature());
-        match auth.nonce() {
-            Some(nonce) => request.header(NONCE_HEADER, nonce),
-            None => request,
-        }
+        request
+            .header(NODE_HEADER, &auth.node_id)
+            .header(TARGET_HEADER, &auth.target_node_id)
+            .header(TIMESTAMP_HEADER, auth.timestamp_ms)
+            .header(SIGNATURE_HEADER, &auth.signature)
+            .header(NONCE_HEADER, &auth.nonce)
     }
 
     pub(crate) fn exact_auth_from_headers(

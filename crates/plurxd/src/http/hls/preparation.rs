@@ -1858,6 +1858,7 @@ async fn plan_preparation_with_candidate(
     .then_some(selection.subtitle.track)
     .flatten();
     let body = CreateSession {
+        processed_upgrade: None,
         source_telemetry: Some(crate::transcode::SourceTelemetry::FilmV1),
         playback_id: predecessor.request.playback_id.clone(),
         request_id: None,
@@ -2986,6 +2987,7 @@ pub(super) async fn stage_prepared_successor_with_delivery_as(
         }
     }
     let response = StartResponse {
+        processed_upgrade: None,
         enhancement,
         effective_processing: None,
         measured_candidate_outputs: None,
