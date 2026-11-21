@@ -346,7 +346,13 @@ async fn control(
             "render_state":render_state,
             "selection":{"quality":{"mode":"auto"},"subtitle":{"mode":"off"},
                          "audio_offset_ms":0,"codec":"auto","dynamic_range":"auto"},
-            "acknowledgement":ack, "supported_actions":["prepare"]
+            "capabilities":{
+                "platform":"web", "max_height":2160, "codecs":["hevc"],
+                "dynamic_ranges":["sdr","hdr10","dolby_vision"],
+                "dual_player_preparation":true
+            },
+            "acknowledgement":ack,
+            "supported_actions":["hold","retry_resource","terminal","prepare_replacement"]
         }))
         .send()
         .await
