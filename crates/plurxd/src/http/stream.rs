@@ -4272,11 +4272,11 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     } else {
         0
     };
-    // Optional video + the chosen audio track, no subtitles into the MP4.
-    // Audio-only books share this remux path when their source codec needs AAC.
+    // Match the scanner's first playable video. Uppercase V excludes attached
+    // pictures, and the optional map leaves audio-only books without a video track.
     args.extend([
         "-map".to_owned(),
-        "0:v:0?".to_owned(),
+        "0:V:0?".to_owned(),
         "-map".to_owned(),
         format!("{audio_input}:a:{audio_index}?"),
         "-sn".to_owned(),

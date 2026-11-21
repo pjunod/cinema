@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -15423,6 +15424,191 @@ async fn a_high_bitrate_remux_is_hinted_toward_segments() {
     assert_eq!(body["method"], "remux", "{body}");
     let why = body["prefer_segmented"].as_str().unwrap_or_default();
     assert!(why.contains("69 Mb/s"), "{body}");
+}
+
+/// Exercise the progressive response, including its actual FFmpeg process and
+/// fragmented MP4 body. The old lowercase-v map selects the JPEG in cover-first
+/// inputs even though the scanner has selected the moving film.
+#[tokio::test]
+async fn progressive_remux_delivers_first_playable_video_and_selected_audio() {
+    use plurx_core::testfixtures::{ffmpeg, require_ffmpeg, run};
+    use std::process::Command;
+
+    fn atoms(mut bytes: &[u8]) -> Vec<&[u8]> {
+        let mut atoms = Vec::new();
+        while !bytes.is_empty() {
+            let size = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+            assert!(size >= 8);
+            let (atom, rest) = bytes.split_at(size);
+            atoms.push(atom);
+            bytes = rest;
+        }
+        atoms
+    }
+
+    fn decoded_video(path: &Path) -> Vec<u8> {
+        run(Command::new(ffmpeg())
+            .args(["-v", "error", "-i"])
+            .arg(path)
+            .args(["-map", "0:V:0", "-threads", "1", "-f", "rawvideo", "pipe:1"]))
+    }
+
+    require_ffmpeg();
+    let (app, state) = test_state();
+    let admin = setup_admin(&app).await;
+    let seed = seed_content(&state).await;
+    let dir = crate::test_tempdir().expect("progressive remux fixtures");
+    let cover = dir.path().join("cover.jpg");
+    run(Command::new(ffmpeg())
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=red:s=32x32",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "mjpeg",
+            "-threads",
+            "1",
+        ])
+        .arg(&cover));
+
+    for (name, has_cover, playable_streams) in [
+        ("ordinary", false, 1),
+        ("cover-first", true, 2),
+        ("audio-with-cover", true, 0),
+    ] {
+        let source = dir.path().join(format!("{name}.mp4"));
+        let mut fixture = Command::new(ffmpeg());
+        fixture.args(["-v", "error", "-i"]).arg(&cover).args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=96x64:r=8:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=blue:s=64x48:r=8:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=f=440:r=44100:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=f=880:r=48000:d=1",
+        ]);
+        for input in 1..=playable_streams {
+            fixture.args(["-map", &format!("{input}:v")]);
+        }
+        fixture.args([
+            "-map", "3:a", "-map", "4:a", "-c:a", "aac", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-threads", "1",
+        ]);
+        if has_cover {
+            fixture.args([
+                "-map",
+                "0:v",
+                &format!("-c:v:{playable_streams}"),
+                "copy",
+                &format!("-disposition:v:{playable_streams}"),
+                "attached_pic",
+            ]);
+        }
+        fixture.arg(&source);
+        run(&mut fixture);
+        if has_cover {
+            // The MOV muxer writes cover art into udta at the end of moov.
+            // Move udta before the track atoms so the demuxer sees the cover
+            // first. The atoms' sizes and all media chunk offsets stay fixed.
+            let original = std::fs::read(&source).unwrap();
+            let mut reordered = Vec::new();
+            for atom in atoms(&original) {
+                if &atom[4..8] == b"moov" {
+                    let mut children = atoms(&atom[8..]);
+                    children.sort_by_key(|child| &child[4..8] != b"udta");
+                    reordered.extend_from_slice(&atom[..8]);
+                    reordered.extend(children.into_iter().flatten());
+                } else {
+                    reordered.extend_from_slice(atom);
+                }
+            }
+            std::fs::write(&source, reordered).unwrap();
+        }
+
+        let scan = plurx_core::scan::probe::probe(&source)
+            .await
+            .expect("scan source");
+        if has_cover {
+            let raw: Value = serde_json::from_str(scan.raw_json.as_deref().unwrap()).unwrap();
+            assert_eq!(
+                raw["streams"][0]["disposition"]["attached_pic"], 1,
+                "{name}"
+            );
+        }
+        let dimensions = (playable_streams != 0).then_some((96, 64));
+        assert_eq!(scan.width.zip(scan.height), dimensions, "{name}");
+        let metadata = std::fs::metadata(&source).unwrap();
+        let mtime = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let file_id = state
+            .store
+            .upsert_file(
+                seed.movie,
+                source.to_str().unwrap(),
+                metadata.len() as i64,
+                mtime.as_secs() as i64,
+                &scan,
+            )
+            .await
+            .expect("catalogue fixture");
+
+        let response = app.clone().oneshot(get(
+            &format!("/api/v1/files/{file_id}/stream.mp4?vcodec=h264&acodec=aac&container=mp4&audio=1"),
+            Some(&admin),
+        )).await.expect("progressive response");
+        assert_eq!(response.status(), StatusCode::OK, "{name}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let output = dir.path().join(format!("{name}-progressive.mp4"));
+        std::fs::write(&output, body).unwrap();
+        let delivered = plurx_core::scan::probe::probe(&output)
+            .await
+            .expect("scan remux output");
+        assert_eq!(delivered.width.zip(delivered.height), dimensions, "{name}");
+        let raw: Value = serde_json::from_str(delivered.raw_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            raw["streams"].as_array().unwrap().len(),
+            1 + usize::from(dimensions.is_some()),
+            "{name}"
+        );
+        assert_eq!(delivered.audio_streams.len(), 1, "{name}");
+        assert_eq!(
+            delivered.audio_streams[0].sample_rate,
+            Some(48_000),
+            "{name}"
+        );
+        if dimensions.is_some() {
+            let film = decoded_video(&source);
+            let frame_bytes = 96 * 64 * 3 / 2;
+            assert_eq!(film.len(), 8 * frame_bytes, "{name}");
+            assert!(
+                film.chunks_exact(frame_bytes)
+                    .any(|frame| frame != &film[..frame_bytes]),
+                "{name} has motion"
+            );
+            assert_eq!(
+                decoded_video(&output),
+                film,
+                "{name} must carry the scanned film"
+            );
+        }
+    }
 }
 
 /// A caller-selected audio track must replace the policy default before
