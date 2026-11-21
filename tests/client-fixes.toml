@@ -8902,6 +8902,6 @@ test_anchor = "fun preparedQualityOwnsSeeksOnlyAfterTheSuccessorsProvenFrame()"
 id = "android.prepared-seek-build-counter-applicability"
 commits = ["d48ec8996565093cd97c64583ecdcda0c98a568e"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode = 210"
+source_anchor = "versionCode ="
 test = "tests/validation/test_selected_pr_android_capture.py"
 test_anchor = "def test_counter_projection_preserves_actual_209_provenance_only_for_the_two_210_literals("
