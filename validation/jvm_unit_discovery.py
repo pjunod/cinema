@@ -215,6 +215,8 @@ ROBOLECTRIC_CLASS = 'tv/plurx/app/ui/SharingInvitationFileProviderTest'
 ROBOLECTRIC_CLASS_SHA256 = 'd26850c60159baf95ed0afc67846e5518982f329a09ad574777825552444cf25'
 ROBOLECTRIC_SOURCE = 'clients/android/app/src/test/java/tv/plurx/app/ui/SharingInvitationFileProviderTest.kt'
 ROBOLECTRIC_SOURCE_SHA256 = 'a4cb5b8df8894743c0b875f27f7e96b0fa809f34227e6dbdc0412eee3e874a48'
+ROBOLECTRIC_CATALOG = 'clients/android/gradle/libs.versions.toml'
+ROBOLECTRIC_CATALOG_SHA256 = '8ae430e1f8c2f24eaa467c5a0357dbc53191dacad25aff54effa8f31805210dc'
 ROBOLECTRIC_JAR_SHA256 = '69e5bc128ba8d1fbb09d36bfb8a617018d6a3a418f77d44b36e7aca6747f14ea'
 ROBOLECTRIC_METHODS = {
     'tv.plurx.app.ui.SharingInvitationFileProviderTest.laterSharesCannotReplaceTheInvitationVisibleThroughAnEarlierGrantedUri',
@@ -226,13 +228,15 @@ def selected_pr_discovery_inputs(workspace, jar=None):
     """Seal the one real runner and SDK35 source contract; never a skip."""
     import hashlib
     import os
-    import tomllib
     source = workspace / ROBOLECTRIC_SOURCE
     require(source.is_file() and not source.is_symlink()
             and hashlib.sha256(source.read_bytes()).hexdigest() == ROBOLECTRIC_SOURCE_SHA256,
             'Reviewed Robolectric source or SDK35 configuration differs')
-    catalog = tomllib.loads((workspace / 'clients/android/gradle/libs.versions.toml').read_text())
-    require(catalog['versions']['robolectric'] == '4.17', 'Reviewed Robolectric version differs')
+    # The selected adapter is limited to the reviewed Gradle catalog and its pinned runtime.
+    catalog = workspace / ROBOLECTRIC_CATALOG
+    require(catalog.is_file() and not catalog.is_symlink()
+            and hashlib.sha256(catalog.read_bytes()).hexdigest() == ROBOLECTRIC_CATALOG_SHA256,
+            'Reviewed Robolectric version catalog differs')
     if jar is None:
         from pathlib import Path
         cache = Path(os.environ.get('GRADLE_USER_HOME', str(workspace / 'clients/android/.gradle-validation')))
