@@ -4121,7 +4121,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # reclamation), so main's figure already counts admission.rs +1 and source_probe/title_work_tests.rs +4.
 # Union 1153 + 15 (F+) + 13 (main) = 1181, less those 5 counted twice = 1176.
 # The scanner deadline fixture owns a task so it can observe the actual probe child.
-expected_occurrences = 1183
+# Selected and predicted copy preparation each move a borrowed read-preparation
+# slot into the task. Planning and production honor shutdown and deadlines.
+# A started producer is joined before source custody and the slot are released.
+expected_occurrences = 1185
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -6098,7 +6101,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # sleeps above. It wakes the existing splice task.
 # Main adds bounded artwork, offline worker, voter and heartbeat fixture waits.
 # The scanner deadline fixture bounds cleanup after advancing the test clock.
-expected_occurrences = 2272
+# Selected and predicted copy preparation bound planning, admission, source
+# verification and producer work. Source custody persists through physical
+# reap, and the VOD driver waits between reap attempts. Six fixture timers
+# bound the playback preview and indexed-resume tests.
+expected_occurrences = 2285
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6639,7 +6646,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # The owned voter fixture process is joined before a collision can retry.
 # The Linux FEL evidence test runs one command site with /bin/true or
 # /bin/false. ProducerSlot owns it through exit and writer settlement.
-expected_occurrences = 370
+# Indexed HEVC census sampling uses the cancellable, bounded FFmpeg collector.
+# The indexed-resume fixture synchronously reaps its finite FFmpeg remux.
+expected_occurrences = 372
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
