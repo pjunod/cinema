@@ -1,0 +1,130 @@
+name: Saved failed-case diagnostic
+# Temporary dedicated branch only. Manual dispatch; never a PR/promotion gate.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: saved-jellyfin-44d9-diagnostic
+  cancel-in-progress: false
+env:
+  CARGO_TERM_COLOR: never
+  PYTHONUNBUFFERED: "1"
+  RUST_MIN_STACK: "8388608"
+  NEXTEST_VERSION: "0.9.151"
+  NEXTEST_SHA256: 1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4
+jobs:
+  saved_jellyfin:
+    name: Saved Jellyfin case (44d9)
+    runs-on: [ci-nonvoter-compile-amd64]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 35
+    steps:
+      - name: Read the reviewed diagnostic tool from this dedicated branch
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Preserve only the diagnostic tool outside the original source checkout
+        run: |
+          set -euo pipefail
+          tool_dir="$GITHUB_WORKSPACE-saved-jellyfin-$GITHUB_RUN_ID-${GITHUB_RUN_ATTEMPT:-1}"
+          mkdir -- "$tool_dir"
+          mkdir -- "$tool_dir/tool-scratch"
+          python3 - "$tool_dir" <<'PYOWNER'
+          import json, os, pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          (p / '.owner.json').write_text(json.dumps({'run': str(int(os.environ['GITHUB_RUN_ID'])), 'attempt': str(int(os.environ.get('GITHUB_RUN_ATTEMPT', '1'))), 'workspace': str(pathlib.Path(os.environ['GITHUB_WORKSPACE']).resolve())}))
+          PYOWNER
+          cp .github/diagnostics/saved_jellyfin_44d9.py "$tool_dir/helper.py"
+          printf '%s  %s\n' 'e014c2dfa15ae7ff9de25eecebe308636d0ca22bc26dfb79641e3effe112a03a' "$tool_dir/helper.py" | sha256sum --check --status
+          echo "SAVED_CASE_ROOT=$tool_dir" >> "$GITHUB_ENV"
+          echo "SAVED_CASE_HELPER=$tool_dir/helper.py" >> "$GITHUB_ENV"
+          echo "TMPDIR=$tool_dir/tool-scratch" >> "$GITHUB_ENV"
+      - name: Restore exact original reviewed source in the compiled workspace location
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 44d9e4c0b78eb347070c1ce851af5ca6218c127f
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Provision the original shard private D-Bus runtime
+        run: |
+          set -euo pipefail
+          if ! command -v dbus-run-session >/dev/null 2>&1; then
+            apt-get -o Acquire::Retries=3 update
+            DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends dbus-daemon
+          fi
+          command -v dbus-run-session
+      - uses: ./.github/actions/ffmpeg
+        with:
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
+      - name: Install only the original pinned nextest runtime; never compile
+        run: |
+          set -euo pipefail
+          dir="$SAVED_CASE_ROOT/nextest"
+          mkdir -- "$dir"
+          curl -q --fail --location --proto '=https' --proto-redir '=https' --retry 3 \
+            --connect-timeout 20 --max-time 180 --max-filesize 33554432 \
+            --output "$dir/nextest.tar.gz" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          printf '%s  %s\n' "$NEXTEST_SHA256" "$dir/nextest.tar.gz" | sha256sum --check --status
+          tar -xzf "$dir/nextest.tar.gz" -C "$dir"
+          rm -- "$dir/nextest.tar.gz"
+          "$dir/cargo-nextest" nextest --version | grep -F "cargo-nextest $NEXTEST_VERSION"
+          echo "$dir" >> "$GITHUB_PATH"
+      - name: Authenticate carrier and archived inputs, then observe only the failed Jellyfin case
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DIAGNOSTIC_RUNNER_NAME: ${{ runner.name }}
+        run: python3 "$SAVED_CASE_HELPER"
+      - name: Retain bounded diagnostic evidence only; never publish qualification receipts
+        id: diagnostic_artifact
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
+        with:
+          name: saved-jellyfin-44d9-diagnostic-${{ github.run_id }}
+          path: ${{ env.SAVED_CASE_ROOT }}/evidence
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 3
+      - name: Remove only this owned diagnostic sibling after evidence upload
+        if: always() && steps.diagnostic_artifact.outcome == 'success'
+        run: |
+          python3 - <<'PYCLEAN'
+          import json, os, pathlib, shutil
+          source = pathlib.Path(os.environ['GITHUB_WORKSPACE']).resolve()
+          run = str(int(os.environ['GITHUB_RUN_ID']))
+          attempt = str(int(os.environ.get('GITHUB_RUN_ATTEMPT', '1')))
+          root = pathlib.Path(os.environ['SAVED_CASE_ROOT']).resolve()
+          expected = source.with_name(f'{source.name}-saved-jellyfin-{run}-{attempt}')
+          assert root == expected
+          assert json.loads((root / '.owner.json').read_text()) == {'run': run, 'attempt': attempt, 'workspace': str(source)}
+          target = source / 'target'
+          if target.is_symlink() and target.resolve() == root / 'runtime/target':
+              target.unlink()
+          # Whitelist only this run's disposable runtime/tools. Keep evidence
+          # and owner marker; no recursive sweep of the source or sibling root.
+          for name in ('runtime', 'nextest', 'tool-scratch'):
+              path = root / name
+              assert path.parent == root and not path.is_symlink()
+              if path.exists():
+                  shutil.rmtree(path)
+          helper = root / 'helper.py'
+          if helper.is_file() and not helper.is_symlink():
+              helper.unlink()
+          PYCLEAN
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
