@@ -1,4 +1,5 @@
 //! Bounded, process-local resume predictions for exact ordinary copy renditions.
+use super::resume_preparation::StartupWindow;
 use super::*;
 use crate::subtitle_translation::ReadPreparationSlot;
 use plurx_core::domain::{InProgressItem, WatchState};
@@ -119,7 +120,7 @@ impl ResumePredictions {
     }
 }
 
-pub(super) fn startup_window(plan: &SegmentPlan, saved_ms: i64) -> Option<(u32, u32)> {
+pub(super) fn startup_window(plan: &SegmentPlan, saved_ms: i64) -> Option<StartupWindow> {
     if saved_ms < 0 || plan.timescale == 0 {
         return None;
     }
@@ -153,10 +154,11 @@ pub(super) fn startup_window(plan: &SegmentPlan, saved_ms: i64) -> Option<(u32, 
             break;
         }
     }
-    Some((
-        plan.entries[first].index,
-        last.filter(|last| *last >= entry.index)?,
-    ))
+    Some(StartupWindow {
+        first: plan.entries[first].index,
+        target: entry.index,
+        last: last.filter(|last| *last >= entry.index)?,
+    })
 }
 
 impl VodServe {
@@ -180,9 +182,12 @@ impl VodServe {
             return None;
         }
         let rendition = session.live_rendition()?;
-        let (first, last) = startup_window(&rendition.plan, requested_ms)?;
+        let window = startup_window(&rendition.plan, requested_ms)?;
         let manifest = rendition.manifest.try_lock().ok()?;
-        if manifest.next_gap(first).is_some_and(|gap| gap <= last) {
+        if manifest
+            .next_gap(window.first)
+            .is_some_and(|gap| gap <= window.last)
+        {
             return None;
         }
         let identity = rendition.identity.try_lock().ok()?;
@@ -350,12 +355,12 @@ async fn prepare_startup_window(
         StartupPosition::Predicted(watch) => watch.position_ms,
         StartupPosition::Selected(position_ms) => position_ms,
     };
-    let Some((first, last)) = startup_window(&rendition.plan, position_ms) else {
+    let Some(window) = startup_window(&rendition.plan, position_ms) else {
         tracing::debug!(target: "plurxd::vodserve", file_id = file.id,
             "no bounded video window for predicted VOD resume");
         return;
     };
-    if window_materialized(rendition, first, last).await {
+    if window_materialized(rendition, window).await {
         tracing::debug!(target: "plurxd::vodserve", file_id = file.id,
             "predicted VOD resume is already materialized");
         return;
@@ -387,16 +392,16 @@ async fn prepare_startup_window(
             "predicted VOD resume no longer meets admission");
         return;
     }
-    run_with_source_custody(store, node_id, rendition, first, last, shutdown, slot).await;
+    run_with_source_custody(store, node_id, rendition, window, shutdown, slot).await;
 }
 
-async fn window_materialized(rendition: &Rendition, first: u32, last: u32) -> bool {
+async fn window_materialized(rendition: &Rendition, window: StartupWindow) -> bool {
     if rendition
         .manifest
         .lock()
         .await
-        .next_gap(first)
-        .is_some_and(|gap| gap <= last)
+        .next_gap(window.first)
+        .is_some_and(|gap| gap <= window.last)
     {
         return false;
     }
@@ -407,8 +412,7 @@ async fn run_with_source_custody(
     store: Arc<dyn Store>,
     node_id: &str,
     rendition: &Arc<Rendition>,
-    first: u32,
-    last: u32,
+    window: StartupWindow,
     shutdown: CancellationToken,
     slot: ReadPreparationSlot,
 ) {
@@ -501,7 +505,7 @@ async fn run_with_source_custody(
     };
     let work = source_current
         .then(|| {
-            rendition.queue_resume_preparation(first, last, BYTE_CAP, deadline, Arc::clone(&budget))
+            rendition.queue_resume_preparation(window, BYTE_CAP, deadline, Arc::clone(&budget))
         })
         .flatten();
     if let Some(work) = work.as_ref() {
@@ -519,12 +523,13 @@ async fn run_with_source_custody(
     // or nothing was started. The slot survives through durable settlement.
     settle_read_lease(&store, &owner, Some(custody), true).await;
     if work.is_some() {
-        let materialized = window_materialized(rendition, first, last).await;
+        let materialized = window_materialized(rendition, window).await;
         tracing::debug!(
             target: "plurxd::vodserve",
             file_id = file.id,
-            first_entry = first,
-            last_entry = last,
+            first_entry = window.first,
+            target_entry = window.target,
+            last_entry = window.last,
             materialized,
             "predicted VOD resume preparation settled"
         );
@@ -632,9 +637,23 @@ mod tests {
         media.entries[4].kind = PlanEntryKind::AudioTail;
         media.entries[4].fragments = 0;
 
-        assert_eq!(startup_window(&media, 0), Some((0, 2)));
+        assert_eq!(
+            startup_window(&media, 0),
+            Some(StartupWindow {
+                first: 0,
+                target: 0,
+                last: 2
+            })
+        );
         assert_eq!(startup_window(&media, -1), None);
-        assert_eq!(startup_window(&media, 13_000), Some((1, 3)));
+        assert_eq!(
+            startup_window(&media, 13_000),
+            Some(StartupWindow {
+                first: 1,
+                target: 2,
+                last: 3
+            })
+        );
         assert_eq!(startup_window(&media, 24_000), None);
         assert_eq!(startup_window(&media, 30_000), None);
 

@@ -70,21 +70,20 @@ async fn spawn_generation_with_input(
             record_failure(shared, rendition, decision, cause);
         }
     };
-    let generation_current = || {
-        !rendition.closed.load(Relaxed)
+    let generation_current = || async {
+        let accepts_consumers = match resume_work.as_ref() {
+            Some(work) => work.accepts_consumers(rendition, &shared.pool).await,
+            None => true,
+        };
+        accepts_consumers
+            && !rendition.closed.load(Relaxed)
             && rendition.failure().is_none()
             && rendition.gen_epoch.load(Relaxed) == generation_epoch
-            && resume_work.as_ref().is_none_or(|work| {
-                work.is_live()
-                    && rendition
-                        .readers
-                        .try_lock()
-                        .is_ok_and(|readers| readers.is_empty())
-            })
             && rendition.cancelled_preparation_epoch.load(Acquire)
                 != generation_epoch.saturating_add(1)
+            && resume_work.as_ref().is_none_or(|work| work.is_live())
     };
-    if !generation_current() {
+    if !generation_current().await {
         return;
     }
     let private_operation = match rendition.private_storage.as_ref() {
@@ -97,7 +96,7 @@ async fn spawn_generation_with_input(
     let source_dispatch = match rendition.source_owners.begin_generation() {
         Ok(dispatch) => dispatch,
         Err(cause) => {
-            if !generation_current() {
+            if !generation_current().await {
                 return;
             }
             fail(
@@ -110,7 +109,7 @@ async fn spawn_generation_with_input(
     let source_authority = match source_dispatch.authorize_before_spawn().await {
         Ok(authority) => authority,
         Err(cause) => {
-            if !generation_current() {
+            if !generation_current().await {
                 return;
             }
             fail(
@@ -121,7 +120,7 @@ async fn spawn_generation_with_input(
         }
     };
     if !recipe_engine_is_current(&rendition.recipe).await {
-        if !generation_current() {
+        if !generation_current().await {
             return;
         }
         fail(
@@ -130,7 +129,7 @@ async fn spawn_generation_with_input(
         );
         return;
     }
-    if !generation_current() {
+    if !generation_current().await {
         return;
     }
     // A spawn position must be a VIDEO entry — the scheduler can name an
@@ -182,7 +181,7 @@ async fn spawn_generation_with_input(
                 Some(worker)
             }
             None => {
-                if !generation_current() {
+                if !generation_current().await {
                     return;
                 }
                 fail(
@@ -194,7 +193,7 @@ async fn spawn_generation_with_input(
         },
         None => None,
     };
-    if !generation_current() {
+    if !generation_current().await {
         return;
     }
     #[cfg(target_os = "linux")]
@@ -305,7 +304,7 @@ async fn spawn_generation_with_input(
     }
     #[cfg(target_os = "linux")]
     let source_open = source_needed.then(|| source_open_started.elapsed());
-    if !generation_current() {
+    if !generation_current().await {
         return;
     }
     if let Some(input) = source_custody.as_mut() {
@@ -313,7 +312,7 @@ async fn spawn_generation_with_input(
             .publish_source_observer(&rendition.source_owners, generation_epoch)
             .await
         {
-            if !generation_current() {
+            if !generation_current().await {
                 return;
             }
             fail(
@@ -323,7 +322,7 @@ async fn spawn_generation_with_input(
             return;
         }
     }
-    if !generation_current() {
+    if !generation_current().await {
         return;
     }
     #[cfg(target_os = "linux")]
@@ -338,7 +337,7 @@ async fn spawn_generation_with_input(
         // Explicit seek/replacement/failure revoke its publication allowance.
         if let Some(authority) = &source_authority {
             if let Err(cause) = authority.validate_before_spawn() {
-                if !generation_current() {
+                if !generation_current().await {
                     return;
                 }
                 runtime.refuse_episode();
@@ -382,7 +381,7 @@ async fn spawn_generation_with_input(
             }
         } else {
             let Some(worker) = permit else {
-                if !generation_current() {
+                if !generation_current().await {
                     return;
                 }
                 runtime.refuse_episode();
@@ -445,7 +444,7 @@ async fn spawn_generation_with_input(
             Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(window)) => window,
             Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled) => return,
             Err(cause) => {
-                if !generation_current() {
+                if !generation_current().await {
                     return;
                 }
                 runtime.refuse_episode();
@@ -458,7 +457,7 @@ async fn spawn_generation_with_input(
         };
         if let Some(authority) = &source_authority {
             if let Err(cause) = authority.validate_before_spawn() {
-                if !generation_current() {
+                if !generation_current().await {
                     return;
                 }
                 runtime.refuse_episode();
@@ -469,7 +468,7 @@ async fn spawn_generation_with_input(
                 return;
             }
         }
-        if !recipe_engine_is_current(recipe).await || !generation_current() {
+        if !recipe_engine_is_current(recipe).await || !generation_current().await {
             return;
         }
         shared
@@ -588,7 +587,7 @@ async fn spawn_generation_with_input(
             .as_ref()
             .filter(|source| source.unchanged())
         else {
-            if !generation_current() {
+            if !generation_current().await {
                 return;
             }
             fail(
@@ -605,7 +604,7 @@ async fn spawn_generation_with_input(
         {
             Ok(current) => Some(current),
             Err(cause) => {
-                if !generation_current() {
+                if !generation_current().await {
                     return;
                 }
                 fail(
@@ -629,7 +628,7 @@ async fn spawn_generation_with_input(
     let audio_source = match audio_open {
         Ok(source) => source,
         Err(cause) => {
-            if !generation_current() {
+            if !generation_current().await {
                 return;
             }
             fail(
@@ -643,7 +642,7 @@ async fn spawn_generation_with_input(
     // the muxer now — `dvpipe` rewrites the RPUs inside the fragments this
     // process writes — so the producer is the producer it always was.
     let (child, child_job, stdout, stderr, landing_probe) = {
-        if !generation_current() {
+        if !generation_current().await {
             return;
         }
         let mut args = crate::source_input::source_args(
@@ -692,7 +691,7 @@ async fn spawn_generation_with_input(
         let env = recipe_child_env(recipe);
         if let Some(authority) = &source_authority {
             if let Err(cause) = authority.validate_before_spawn() {
-                if !generation_current() {
+                if !generation_current().await {
                     return;
                 }
                 fail(
@@ -719,7 +718,7 @@ async fn spawn_generation_with_input(
         ) {
             Ok(spawned) => spawned,
             Err(error) => {
-                if !generation_current() {
+                if !generation_current().await {
                     return;
                 }
                 let cause = format!("spawning the producer: {error}");
@@ -787,7 +786,7 @@ async fn spawn_generation_with_input(
         }
     });
     let Ok((registration, writers, stdout, stderr)) = registration_rx.await else {
-        if !generation_current() {
+        if !generation_current().await {
             return;
         }
         fail(
@@ -798,7 +797,7 @@ async fn spawn_generation_with_input(
     };
     // A child launched before a close/failure still belongs to the actual
     // registered reaper. Wait errors retain its permit and descendant job.
-    if !generation_current() {
+    if !generation_current().await {
         drop(stdout);
         drop(stderr);
         writers.settled();
@@ -1571,14 +1570,17 @@ async fn establish_or_verify(
             ))));
         }
     }
+    if let Some(work) = resume_work.as_ref() {
+        if !work.accepts_consumers(rendition, &shared.pool).await || !work.is_live() {
+            work.cancel();
+            return Err(Outcome::Failed(Failure::Sink(
+                io::ErrorKind::NotFound.into(),
+            )));
+        }
+    }
     let charge_init = |bytes: usize| {
         if let Some(work) = resume_work.as_ref() {
-            if !rendition
-                .readers
-                .try_lock()
-                .is_ok_and(|readers| readers.is_empty())
-                || !work.charge(bytes as u64)
-            {
+            if !work.charge(bytes as u64) {
                 work.cancel();
                 return Err(Outcome::Failed(Failure::Sink(
                     io::ErrorKind::NotFound.into(),
@@ -1671,7 +1673,13 @@ async fn establish_or_verify(
     } else {
         None
     };
-    let write = if resume_work.is_some() {
+    let write = if let Some(work) = resume_work.as_ref() {
+        if !work.accepts_consumers(rendition, &shared.pool).await || !work.is_live() {
+            work.cancel();
+            return Err(Outcome::Failed(Failure::Sink(
+                io::ErrorKind::NotFound.into(),
+            )));
+        }
         rendition
             .dir
             .write_init_without_eviction(&served.bytes)
@@ -2352,11 +2360,9 @@ impl RenditionSink {
         let resume_work = self.rendition.resume_preparation_for_epoch(self.epoch);
         if let Some(work) = resume_work.as_ref() {
             if !work.permits_entry(entry)
-                || !self
-                    .rendition
-                    .readers
-                    .try_lock()
-                    .is_ok_and(|readers| readers.is_empty())
+                || !work
+                    .accepts_consumers(&self.rendition, &self.shared.pool)
+                    .await
             {
                 work.cancel();
                 return Err(io::ErrorKind::NotFound.into());
@@ -2391,11 +2397,9 @@ impl RenditionSink {
             // Cache reservation may evict another rendition. Refuse bytes
             // outside this work's cap before asking it to free any space.
             if let Some(work) = resume_work.as_ref() {
-                if !self
-                    .rendition
-                    .readers
-                    .try_lock()
-                    .is_ok_and(|readers| readers.is_empty())
+                if !work
+                    .accepts_consumers(&self.rendition, &self.shared.pool)
+                    .await
                     || self.shared.working_set.load(Relaxed).saturating_add(len)
                         > self.rendition.working_set_budget
                     || !work.charge(len)
@@ -2547,6 +2551,13 @@ impl RenditionSink {
             .identity
             .clone();
         {
+            // The attachment path takes the reader lock before the
+            // manifest. Recheck the exact consumer before publication.
+            let preparation_readers = if resume_work.is_some() {
+                Some(self.publication_lock(self.rendition.readers.lock()).await?)
+            } else {
+                None
+            };
             let mut manifest = self
                 .publication_lock(self.rendition.manifest.lock())
                 .await?;
@@ -2557,19 +2568,21 @@ impl RenditionSink {
             }
             let before = manifest.state(entry).map(|s| s.bytes()).unwrap_or(0);
             if let Some(work) = resume_work.as_ref() {
-                if !self
-                    .rendition
-                    .readers
-                    .try_lock()
-                    .is_ok_and(|readers| readers.is_empty())
-                    || self.shared.working_set.load(Relaxed).saturating_add(len)
-                        > self.rendition.working_set_budget
+                if !work.accepts_current_consumers(
+                    preparation_readers
+                        .as_deref()
+                        .expect("resume reader snapshot"),
+                    &self.rendition,
+                    &self.shared.pool,
+                ) || self.shared.working_set.load(Relaxed).saturating_add(len)
+                    > self.rendition.working_set_budget
                     || !work.is_live()
                 {
                     work.cancel();
                     return Err(io::ErrorKind::NotFound.into());
                 }
             }
+            drop(preparation_readers);
             let preparation = self.rendition.preparation();
             let pending = if let Some(storage) = self.rendition.private_storage.as_ref() {
                 if before != 0 || manifest.is_admitted() {

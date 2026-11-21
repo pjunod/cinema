@@ -869,21 +869,21 @@ fn arm_handoff_expiry(rendition: &Arc<Rendition>) {
 
 /// One pass: demand → decide → step → carry it out.
 /// Run at most one background generation before yielding control back to
-/// ordinary demand. The same driver owns launch and retirement, so an arriving
-/// reader cannot acquire the slot until that generation's reaper joins it.
+/// ordinary demand. A matching live reader can consume the bounded output;
+/// every other arrival yields through the same driver and exact reaper.
 async fn drive_resume_preparation(shared: &Arc<Shared>, rendition: &Arc<Rendition>) -> bool {
     let Some(dispatch) = rendition.resume_preparation() else {
         return false;
     };
+    let accepts_consumers = dispatch
+        .work
+        .accepts_consumers(rendition, &shared.pool)
+        .await;
     let manifest = rendition.manifest.lock().await;
     let must_yield = rendition.closed.load(Acquire)
         || rendition.failure().is_some()
         || rendition.preparation().is_some()
-        || !rendition
-            .readers
-            .try_lock()
-            .is_ok_and(|readers| readers.is_empty())
-        || shared.pool.blocked_on(&rendition.key).is_some()
+        || !accepts_consumers
         || shared.working_set.load(Relaxed) >= rendition.working_set_budget;
     let next = (!must_yield)
         .then(|| dispatch.work.next_gap(&manifest))

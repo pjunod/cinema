@@ -921,8 +921,10 @@ async fn indexed_resume_preparation_reaps_before_releasing_custody_and_play_uses
         .start_ticks as f64
         / f64::from(rendition.timescale);
     let start_ms = (start * 1_000.0).round() as i64;
-    let (first, last) = super::vod_startup_prediction::startup_window(&rendition.plan, start_ms)
+    let window = super::vod_startup_prediction::startup_window(&rendition.plan, start_ms)
         .expect("startup decode window");
+    let first = window.first;
+    let last = window.last;
     let next = rendition
         .plan
         .entry(last + 1)
@@ -966,8 +968,7 @@ async fn indexed_resume_preparation_reaps_before_releasing_custody_and_play_uses
     rendition.slot.set_reap_hooks(reap_fault.clone()).await;
     let work = rendition
         .queue_resume_preparation(
-            first,
-            last,
+            window,
             8 << 20,
             Instant::now() + Duration::from_secs(30),
             budget,

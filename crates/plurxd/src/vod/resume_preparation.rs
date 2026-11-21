@@ -1,18 +1,76 @@
 //! Bounded preparation of an ordinary indexed copy rendition's resume window.
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct StartupWindow {
+    pub(super) first: u32,
+    pub(super) target: u32,
+    pub(super) last: u32,
+}
+
+impl StartupWindow {
+    fn contains(self, entry: u32) -> bool {
+        (self.first..=self.last).contains(&entry)
+    }
+}
+
 /// A dedicated background source budget belongs to this work until settlement.
 /// Buffered output may be read by an ordinary reader as soon as its normal
 /// manifest publishes it, but the background owner must await physical exit.
 pub(crate) struct ResumePreparation {
-    first: u32,
-    last: u32,
+    window: StartupWindow,
     remaining_bytes: AtomicU64,
     deadline: Instant,
     stop: tokio_util::sync::CancellationToken,
     settled: tokio_util::sync::CancellationToken,
     source_budget: Arc<crate::background_jobs::SourceReadBudget>,
     producer: StdMutex<ResumeProducer>,
+    consumer: StdMutex<ResumeConsumer>,
+}
+
+#[derive(Default)]
+struct ResumeConsumer {
+    bound: Option<(String, Arc<()>)>,
+}
+
+impl ResumeConsumer {
+    fn matches(
+        &mut self,
+        window: StartupWindow,
+        started: bool,
+        readers: &HashMap<String, Reader>,
+        demands: &[crate::waitpool::WaitDemand],
+    ) -> bool {
+        let mut attached = readers.iter();
+        let Some((id, reader)) = attached.next() else {
+            return self.bound.is_none() && demands.is_empty();
+        };
+        if !started
+            || attached.next().is_some()
+            || reader.admission_priority != crate::admission::Priority::Live
+            || reader.authority_only
+            || reader.companion_bootstrap
+            || reader.control_required
+            || reader.quality_required
+            || reader.nonpreemptive_trial
+            || reader.draining_after_prepared_commit
+            || reader.preparation_frontier.is_some()
+            || !window.contains(reader.frontier)
+            || demands
+                .iter()
+                .any(|demand| &demand.session != id || !window.contains(demand.index))
+        {
+            return false;
+        }
+        if let Some((bound_id, bound_attachment)) = self.bound.as_ref() {
+            return bound_id == id && Arc::ptr_eq(bound_attachment, &reader.attachment);
+        }
+        if reader.frontier != window.target {
+            return false;
+        }
+        self.bound = Some((id.clone(), Arc::clone(&reader.attachment)));
+        true
+    }
 }
 
 enum ResumeProducer {
@@ -79,15 +137,41 @@ impl ResumePreparation {
         }
     }
 
+    // The existing background source owner remains responsible for this
+    // generation. A matching live local attachment may consume its bounded
+    // output while the original domain pressure and budgets still apply.
+    pub(super) async fn accepts_consumers(&self, rendition: &Rendition, pool: &WaitPool) -> bool {
+        let readers = rendition.readers.lock().await;
+        self.accepts_current_consumers(&readers, rendition, pool)
+    }
+
+    pub(super) fn accepts_current_consumers(
+        &self,
+        readers: &HashMap<String, Reader>,
+        rendition: &Rendition,
+        pool: &WaitPool,
+    ) -> bool {
+        let started = matches!(
+            &*self.producer.lock().expect("resume producer"),
+            ResumeProducer::Registered(_)
+        );
+        self.consumer.lock().expect("resume consumer").matches(
+            self.window,
+            started,
+            readers,
+            &pool.demands(&rendition.key),
+        )
+    }
+
     pub(super) fn next_gap(&self, manifest: &Manifest) -> Option<u32> {
         self.is_live()
-            .then(|| manifest.next_gap(self.first))
+            .then(|| manifest.next_gap(self.window.first))
             .flatten()
-            .filter(|next| *next <= self.last)
+            .filter(|next| *next <= self.window.last)
     }
 
     pub(super) fn permits_entry(&self, entry: u32) -> bool {
-        self.is_live() && (self.first..=self.last).contains(&entry)
+        self.is_live() && self.window.contains(entry)
     }
 
     /// Charge the bytes that this generation publishes, including its init.
@@ -104,8 +188,7 @@ impl ResumePreparation {
 impl Rendition {
     pub(super) fn queue_resume_preparation(
         &self,
-        first: u32,
-        last: u32,
+        window: StartupWindow,
         byte_cap: u64,
         deadline: Instant,
         source_budget: Arc<crate::background_jobs::SourceReadBudget>,
@@ -118,8 +201,8 @@ impl Rendition {
             || self.source.is_none()
             || self.closed.load(Acquire)
             || self.failure().is_some()
-            || first > last
-            || self.plan.entry(last).is_none()
+            || !window.contains(window.target)
+            || self.plan.entry(window.last).is_none()
             || byte_cap == 0
             || deadline <= Instant::now()
             || source_budget.cancellation().is_cancelled()
@@ -136,14 +219,14 @@ impl Rendition {
             return None;
         }
         let work = Arc::new(ResumePreparation {
-            first,
-            last,
+            window,
             remaining_bytes: AtomicU64::new(byte_cap),
             deadline,
             stop: tokio_util::sync::CancellationToken::new(),
             settled: tokio_util::sync::CancellationToken::new(),
             source_budget,
             producer: StdMutex::new(ResumeProducer::Unopened),
+            consumer: StdMutex::new(ResumeConsumer::default()),
         });
         *slot = Some(ResumePreparationDispatch {
             work: Arc::clone(&work),
@@ -204,6 +287,46 @@ impl Rendition {
 mod tests {
     use super::*;
 
+    #[test]
+    fn running_preparation_keeps_only_the_matching_live_attachment() {
+        let mut consumer = ResumeConsumer::default();
+        let window = StartupWindow {
+            first: 131,
+            target: 132,
+            last: 133,
+        };
+        let mut readers = HashMap::new();
+        let mut demand = crate::waitpool::WaitDemand {
+            session: "live".to_owned(),
+            index: 131,
+            arrival_order: 1,
+        };
+
+        assert!(consumer.matches(window, false, &readers, &[]));
+        readers.insert("live".to_owned(), Reader::new(131));
+        assert!(!consumer.matches(window, true, &readers, &[]));
+        readers.insert("live".to_owned(), Reader::new(132));
+        assert!(!consumer.matches(window, false, &readers, &[]));
+        assert!(consumer.matches(window, true, &readers, &[]));
+        assert!(consumer.matches(window, true, &readers, &[demand.clone()]));
+
+        readers.get_mut("live").expect("bound reader").frontier = 133;
+        demand.index = 133;
+        assert!(consumer.matches(window, true, &readers, &[demand.clone()]));
+        demand.index = 134;
+        assert!(!consumer.matches(window, true, &readers, &[demand.clone()]));
+        demand.index = 133;
+        demand.session = "other".to_owned();
+        assert!(!consumer.matches(window, true, &readers, &[demand]));
+        readers.insert("unrelated".to_owned(), Reader::new(132));
+        assert!(!consumer.matches(window, true, &readers, &[]));
+        readers.remove("unrelated");
+        readers.insert("live".to_owned(), Reader::new(132));
+        assert!(!consumer.matches(window, true, &readers, &[]));
+        readers.clear();
+        assert!(!consumer.matches(window, true, &readers, &[]));
+    }
+
     async fn prepared_sink(
         base: &Path,
         byte_cap: u64,
@@ -225,14 +348,18 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
         );
         let work = Arc::new(ResumePreparation {
-            first: 2,
-            last: 3,
+            window: StartupWindow {
+                first: 2,
+                target: 2,
+                last: 3,
+            },
             remaining_bytes: AtomicU64::new(byte_cap),
             deadline: Instant::now() + Duration::from_secs(10),
             stop: tokio_util::sync::CancellationToken::new(),
             settled: tokio_util::sync::CancellationToken::new(),
             source_budget,
             producer: StdMutex::new(ResumeProducer::Unopened),
+            consumer: StdMutex::new(ResumeConsumer::default()),
         });
         *rendition.resume_preparation.lock().expect("test dispatch") =
             Some(ResumePreparationDispatch {
