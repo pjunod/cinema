@@ -735,6 +735,12 @@ impl SourceInput {
     pub(crate) fn url(&self) -> &str {
         &self.url
     }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn source_object_version(&self) -> Option<String> {
+        let state = self.state.source.lock().expect("source input fence");
+        let source = state.as_ref().filter(|source| source.unchanged())?;
+        Some(source.object_version().to_owned())
+    }
     /// Whether any read this input served to its consumer failed.
     pub(crate) fn source_read_failed(&self) -> bool {
         self.state

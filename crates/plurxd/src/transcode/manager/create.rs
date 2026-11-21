@@ -24,13 +24,19 @@ fn native_fel_transport(req: &SessionRequest) -> bool {
 
 #[cfg(target_os = "linux")]
 fn may_prefer_prepared_native_fel(req: &SessionRequest) -> bool {
+    req.start_seconds == 0.0 && may_start_native_fel(req)
+}
+
+#[cfg(target_os = "linux")]
+fn may_start_native_fel(req: &SessionRequest) -> bool {
     use plurx_core::playback::{audio::AudioAction, candidate::CandidateRoute};
 
     native_fel_transport(req)
         && req.presentation == Presentation::Vod
         && !req.vod_only
         && !req.passive_vod
-        && req.start_seconds == 0.0
+        && req.start_seconds.is_finite()
+        && req.start_seconds >= 0.0
         && req.audio_offset_ms == 0
         && req.previous_session_id.is_none()
         && req.reopen_reason.is_none()
@@ -52,6 +58,13 @@ fn may_prefer_prepared_native_fel(req: &SessionRequest) -> bool {
                 && context.selected_candidate.route == CandidateRoute::Remux
                 && !context.selected_candidate.processed_dv
         })
+}
+
+#[cfg(target_os = "linux")]
+fn native_fel_can_try_vod(error: &str, deadline: Option<tokio::time::Instant>) -> bool {
+    vod_refusal(error)
+        .is_some_and(|(code, _)| code == super::manager_start::NATIVE_FEL_START_UNAVAILABLE)
+        && deadline.is_none_or(|deadline| tokio::time::Instant::now() < deadline)
 }
 
 enum VodRecipeAttachment {
@@ -974,10 +987,11 @@ impl TranscodeManager {
             };
             Some((vod_lookup_at, vod_settings, live_recovery_enabled))
         };
+        // Clustered original starts carry a serving deadline too. Use the
+        // original foreground request to authorize its split layout, whether
+        // or not its exact prepared prefix is available.
         #[cfg(target_os = "linux")]
-        // The clustered initial start also carries a serving deadline.
-        // Live priority and the original request identify this startup.
-        let prepared_native_fel = if takeover.is_none()
+        let initial_native_fel = takeover.is_none()
             && matches!(priority, Priority::Live)
             && recovery.is_some_and(|identity| identity.principal.local_user_id().is_some())
             && matches!(
@@ -985,9 +999,22 @@ impl TranscodeManager {
                 crate::vodserve::RetainedOutputCapture::New
             )
             && vod_policy.as_ref().is_some_and(|(_, _, live)| *live)
-            && may_prefer_prepared_native_fel(req)
+            && may_start_native_fel(req)
             && plan.is_some_and(|plan| plan.snapshot.file.id == req.file_id)
-        {
+            && planned_source.is_some_and(|source| {
+                let file = &source.file;
+                let preferences = Self::vod_dv_preferences_from_snapshot(source);
+                file.id == req.file_id
+                    && file.dolby_vision.profile == Some(7)
+                    && file.dolby_vision.el_present == Some(true)
+                    && preferences.fel_reencode
+                    && preferences.conversion_permitted
+                    && self.native_fel_start_verdict(source) != Some(false)
+            });
+        #[cfg(not(target_os = "linux"))]
+        let initial_native_fel = false;
+        #[cfg(target_os = "linux")]
+        let prepared_native_fel = if initial_native_fel {
             if let Some(source) = planned_source {
                 self.admit_prepared_native_fel_start(req, source).await
             } else {
@@ -998,7 +1025,7 @@ impl TranscodeManager {
         };
         #[cfg(target_os = "linux")]
         let prepared_start = if let Some(prepared) = prepared_native_fel {
-            let started = self
+            match self
                 .start_live_recovery_session(
                     req,
                     user_name,
@@ -1008,11 +1035,26 @@ impl TranscodeManager {
                     None,
                     priority,
                     plan,
+                    initial_native_fel,
                     Some(prepared),
                 )
-                .await?;
-            crate::media_pool::mark_create_phase("rolling");
-            Some(started)
+                .await
+            {
+                Ok(started) => {
+                    crate::media_pool::mark_create_phase("rolling");
+                    Some(started)
+                }
+                Err(error) if native_fel_can_try_vod(&error, replacement_deadline) => {
+                    tracing::info!(
+                        target: "plurxd::transcode",
+                        file_id = req.file_id,
+                        %error,
+                        "preferred native FEL start declined; trying ordinary VOD"
+                    );
+                    None
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             None
         };
@@ -1032,6 +1074,7 @@ impl TranscodeManager {
                     takeover,
                     priority,
                     plan,
+                    initial_native_fel,
                     #[cfg(target_os = "linux")]
                     None,
                 )
@@ -1155,6 +1198,7 @@ impl TranscodeManager {
                                     takeover,
                                     priority,
                                     plan,
+                                    initial_native_fel,
                                     #[cfg(target_os = "linux")]
                                     None,
                                 )
@@ -1209,31 +1253,43 @@ impl TranscodeManager {
         source: &plurx_core::store::PlaybackPlanningSnapshot,
     ) -> Option<super::manager_start::PreparedNativeFelStart> {
         let file = &source.file;
-        let preferences = Self::vod_dv_preferences_from_snapshot(source);
-        if file.id != req.file_id
-            || file.dolby_vision.profile != Some(7)
-            || file.dolby_vision.el_present != Some(true)
-            || !preferences.fel_reencode
-            || !preferences.conversion_permitted
+        if may_prefer_prepared_native_fel(req) {
+            self.note_native_fel_head_target(file);
+            if let Some(head) = self
+                .warm_native_fel_head(file, source.generation, source.probe_json.as_deref())
+                .await
+            {
+                let audio_index = Self::select_tracks_with_prefs(
+                    file,
+                    req.audio_index,
+                    None,
+                    &Self::lang_prefs_from(&source.settings),
+                    true,
+                )
+                .audio_index;
+                if audio_index == head.audio_index {
+                    if let Some(start) = self.reserve_prepared_native_fel_start(source, Some(head))
+                    {
+                        return Some(start);
+                    }
+                }
+            }
+        }
+        if req.start_seconds > 0.0
+            && (self.source_identity.is_none()
+                || source
+                    .probe_json
+                    .as_deref()
+                    .and_then(super::manager_start::native_copy_video_index)
+                    .is_none())
         {
             return None;
         }
-        self.note_native_fel_head_target(file);
-        let head = self
-            .warm_native_fel_head(file, source.generation, source.probe_json.as_deref())
-            .await?;
-        let audio_index = Self::select_tracks_with_prefs(
-            file,
-            req.audio_index,
-            None,
-            &Self::lang_prefs_from(&source.settings),
-            true,
-        )
-        .audio_index;
-        if audio_index != head.audio_index {
-            return None;
+        if self.native_fel_start_verdict(source) == Some(true) {
+            self.reserve_prepared_native_fel_start(source, None)
+        } else {
+            None
         }
-        self.reserve_prepared_native_fel_start(source, head)
     }
 
     /// Whether a typed VOD prerequisite refusal may fall back to the retained
@@ -1281,6 +1337,7 @@ impl TranscodeManager {
         takeover: Option<SessionTakeoverStart>,
         priority: Priority,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
+        initial_native_fel: bool,
         #[cfg(target_os = "linux")] prepared_native_fel: Option<
             super::manager_start::PreparedNativeFelStart,
         >,
@@ -1375,7 +1432,9 @@ impl TranscodeManager {
                     req.audio_delivery.as_ref(),
                     req.retain_output,
                     req.source_telemetry == Some(crate::transcode::SourceTelemetry::FilmV1),
-                    native_fel_transport(req),
+                    native_fel_transport(req)
+                        && (initial_native_fel
+                            || (req.start_seconds == 0.0 && replacement_deadline.is_none())),
                     plan,
                     #[cfg(target_os = "linux")]
                     prepared_native_fel,

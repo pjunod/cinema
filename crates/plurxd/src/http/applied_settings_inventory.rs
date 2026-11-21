@@ -881,7 +881,7 @@ fn plan_argument(text: &str, open: usize, helper: &str) -> String {
         "start_live_recovery_session" => {
             assert_eq!(
                 arguments.len(),
-                9,
+                10,
                 "{helper} changed its source argument count"
             );
             arguments.get(7)

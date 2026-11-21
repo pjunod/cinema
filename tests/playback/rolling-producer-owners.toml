@@ -1,4 +1,4 @@
-# PR #1732 and main 214e4fb78 source union: 195 unchanged ownership rules
+# PR #1732 and main f45c8d14e source union: 195 unchanged ownership rules
 # measured over 549 Rust files in their existing scopes.
 # After merging #1727, the inventory contains 1188 namespaced task spawns,
 # 2283 namespaced time constructors and 958 process-capable methods.
@@ -7,6 +7,15 @@
 # lifecycle shapes. Q3 adds one joined request task, two fixture bounds, one
 # HTTP status read and one Source-factory wait; no matcher/scope/zero change.
 # Static inventory only; no runtime/acceptance claim.
+# Native FEL Resume clock. The optional reader drains the rolling producer's
+# bounded picture records and keeps draining discarded data until its inherited
+# descriptor closes. It owns only the read endpoint and observation channel.
+# The existing admitted producer owner still reaps FFmpeg and settles source
+# custody. A 50 ms wait caps startup's demand for complete clock records;
+# expiry declines the layout and neither stops the child nor proves settlement.
+# The shape counter adds one Tokio task, its production and test wrapper calls,
+# and the wrapper declaration. There is no additional FFmpeg launch.
+
 # Prepared native FEL startup. One source-copy command is run and reaped by
 # the existing bounded background child owner under a source job. The one
 # startup staging task holds a scratch writer and may only offer a complete
@@ -4166,7 +4175,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Recovery fixture union: +1 request task held at Source preparation.
 # The fixture awaits this exact task before inspecting its Direct response.
 # Shared-DV + main8630 source union; existing reviewed sites/pattern unchanged.
-expected_occurrences = 1190
+expected_occurrences = 1193
 # F+ (#1565) on main 59022fd2a: main's 1166 plus 10 F+-only task shapes, each awaited
 # or joined by its owner:
 #  +2 dv_disk.rs: spawn_blocking for fitted-RPU authoring and the frame-by-frame readback,
@@ -4466,7 +4475,7 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # declared_background_spawn calls `spawn()` after recording the escape tick.
 # F+ descriptor integration: +1 call to the existing dv_refit::spawn wrapper in the isolated
 # configured-policy regression, not a new task or process owner.
-expected_occurrences = 26
+expected_occurrences = 27
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6183,7 +6192,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 
 
 # The merged source inventories 2286 occurrences.
-expected_occurrences = 2289
+expected_occurrences = 2290
 
 [[module_structures]]
 id = "bare-time-constructor"
