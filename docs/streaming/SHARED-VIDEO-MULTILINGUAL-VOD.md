@@ -1,6 +1,6 @@
 # One video for two VOD soundtracks
 
-**Status** · Planned. Baseline `214e4fb78`. Implementation and device qualification are open. Project effort `E-70D9217053` owns progress and evidence.
+**Status** · Building on `effort/shared-video-vod` (Claude Opus 5.5 owns). Playback-lab baseline instrument committed; implementation and device qualification are open. Project effort `E-70D9217053` owns progress and evidence.
 
 A viewer starts an English-language movie, then selects French. Cinema keeps the same pictures moving while the sound changes. A second viewer can watch the same interval in English while both sessions read the same packaged video from one cache owner. Each viewer still receives the video over their own connection.
 
@@ -21,6 +21,16 @@ The ordinary copy-VOD key includes the selected audio index, audio delivery reci
 | 5. Qualify and promote | Run the picture and storage experiments below on the AAC/AAC fixture. Repeat for DTS→AAC, measuring its extra CPU and switch latency separately. Start with the qualified browser family. Enable other client/codec families only after their own player and output tests. | Both proofs pass on the candidate build. Run mixed clients, cold/warm starts, late French demand, owner loss, concurrent seek/stop, low disk and rollback. Publish the exact route and outstanding gaps with the canary results. |
 
 Relevant daemon entry points are [copy generation](../../crates/plurxd/src/vod/generation.rs), [VOD cache accounting](../../crates/plurxd/src/vod/cache_budget.rs), [master construction](../../crates/plurxd/src/http/hls/playlist.rs), and [session-owned media serving](../../crates/plurxd/src/http/hls/segment.rs). Keep derived objects behind current media authorization. Different session URLs may legitimately resolve to one physical object.
+
+### Implementation design (2026-11-21)
+
+The split copy presentation is a sibling of the continuous-quality family and reuses its parts rather than adding a parallel stack.
+
+* **Request.** The session request carries an optional `split_audio` capability that the hls.js/MSE web player sends. Admission grants it only when indexed copy is selected and every advertised soundtrack prepares. Otherwise the request uses the ordinary muxed copy route, with no error and no setting.
+* **Video.** A copy `Recipe` gains an audio mode (`Muxed` or `Excluded`). An excluded recipe hashes a `video-only-v1` marker in place of the audio index, AAC flag, offset and audio delivery, so every language and viewer resolves one key. Its producer is the ordinary copy pipe with `-an`, cut on the same indexed grid.
+* **Audio.** Each source soundtrack is the existing shared-AAC encoding (`VodSharedAudioRecipe`) for that stream on the source frame grid. It is prepared the same way `prepare_vod_soundtrack` prepares the continuous soundtrack, and attached as a private child reader of the session. The first release converts AAC sources too. This trades encoder CPU for one qualified audio producer, priming and lattice treatment, and avoids adding a new audio-copy segmenter.
+* **Family and master.** `VodSplitCopyFamily` in `plurx-core` binds the verified copy video init and N verified soundtrack inits. Its master advertises one `#EXT-X-STREAM-INF` with `AUDIO="audio"` and one `#EXT-X-MEDIA` per soundtrack with `LANGUAGE`, `NAME` and the source stream index. `DEFAULT` names the requested track. Child playlists and objects use the existing `/{role}/{rendition}/…` routes and session authorization.
+* **Player.** With an audio group present, `switchAudio` selects the matching `hls.audioTrack` on the same attachment. `AUDIO_TRACK_SWITCHED` commits the menu, preference and caption language. A failed alternate keeps the incumbent playing and reports the refusal. Other clients and native HLS keep the muxed route.
 
 ### Identity and timing contract
 

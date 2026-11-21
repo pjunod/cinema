@@ -2972,6 +2972,29 @@ pub fn copy_pipe_args_with_audio_delivery(
     args
 }
 
+/// The shared video of a split copy presentation: the ordinary copy input,
+/// seek, pacing and video bitstream handling, with no audio track at all.
+/// Language, audio offset and audio delivery are not inputs, so every
+/// soundtrack and viewer of one source shares the same packaged video.
+pub fn copy_video_only_pipe_args(
+    source: &MediaFile,
+    start_seconds: f64,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+    args.extend(copy_input_seek_args(start_seconds));
+    pacing.push(&mut args);
+    args.push("-i".into());
+    args.push(source.path.to_string_lossy().into_owned());
+    for arg in ["-map_chapters", "-1", "-map", "0:v:0", "-an", "-sn"] {
+        args.push(arg.into());
+    }
+    args.extend(strip_plurx_markers(&copy_video_args(source, video)));
+    append_copy_mp4_output(&mut args, "pipe:1");
+    args
+}
+
 /// Keep the ordinary muxed playback output and observe only a bounded
 /// prefix of the selected video on a second, inherited pipe. The SHA-256
 /// output removes non-picture NALs so the receiver can identify the same

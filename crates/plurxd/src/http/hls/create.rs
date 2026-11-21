@@ -701,6 +701,7 @@ impl CreateSession {
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
+            split_audio: false,
             dv_processing_destination: None,
             // The player's per-playback choice; `SessionRequest` never
             // serializes it.

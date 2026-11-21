@@ -381,6 +381,7 @@ impl TranscodeManager {
         };
         let file = &resolved_file;
         let mut request = SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -864,6 +865,7 @@ impl TranscodeManager {
             (intent.width, intent.height),
         );
         let mut request = SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,

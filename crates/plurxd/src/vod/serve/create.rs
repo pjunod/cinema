@@ -3263,6 +3263,7 @@ mod principal_demand_tests {
             None,
         );
         let request = SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             quality_catalog: None,
             candidate_context: None,

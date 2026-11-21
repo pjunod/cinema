@@ -1025,6 +1025,7 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                split_audio: false,
                 source_telemetry: None,
                 dv_processing_destination: None,
         retain_output: None,
@@ -2233,6 +2234,7 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                split_audio: false,
                 source_telemetry: None,
                 dv_processing_destination: None,
         retain_output: None,
@@ -2517,6 +2519,7 @@
                 typeless_playlist: true,
                 library_channel: None,
                 request: crate::transcode::SessionRequest {
+                    split_audio: false,
                     source_telemetry: None,
                     dv_processing_destination: None,
         retain_output: None,

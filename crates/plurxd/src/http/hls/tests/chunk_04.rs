@@ -2274,6 +2274,7 @@ fn staged_source_file() -> plurx_core::domain::MediaFile {
 
 fn staged_candidate_request() -> crate::transcode::SessionRequest {
     crate::transcode::SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,

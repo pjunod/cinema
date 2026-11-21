@@ -272,6 +272,7 @@ pub(crate) async fn test_reorder_candidate_cost_isolation(
         .expect("init");
     serve.shared.retained_artifacts.collect(temp.path()).await;
     let mut request = SessionRequest {
+        split_audio: false,
         source_telemetry: None,
         dv_processing_destination: None,
         retain_output: None,
@@ -2267,6 +2268,7 @@ mod tests {
             }];
         }
         let mut request = SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
@@ -3634,6 +3636,7 @@ mod tests {
             sustainable: true,
         };
         let request = SessionRequest {
+            split_audio: false,
             source_telemetry: None,
             dv_processing_destination: None,
             retain_output: None,
