@@ -591,6 +591,7 @@ const MEDIA_METHODS: &[&str] = &[
     "playback_planning_snapshot",
     "get_file_probe_chapters_json",
     "merge_file_probe_chapters",
+    "merge_file_probe_chapters_if_missing",
     "merge_file_probe_hevc_parameter_sets",
     "merge_file_probe_content_encoding",
     "files_missing_probe",
@@ -985,6 +986,7 @@ const TIMELINE_ANNOTATION_METHODS: &[&str] = &[
     "put_timeline_annotation_set",
     "put_timeline_annotation_set_if_missing",
     "timeline_annotation_set",
+    "timeline_annotation_set_with_evidence",
     "forget_timeline_annotation_set",
     "set_manual_timeline_annotation",
     "discard_manual_timeline_annotation",
@@ -6871,7 +6873,7 @@ async fn stored_chapter_projection_does_not_materialize_unrelated_probe_metadata
         assert!(store
             .get_file_probe_chapters_json(file_id, 10_000, 2)
             .await
-            .unwrap()
+            .expect("get file probe chapters json")
             .is_none());
         assert!(chapters.len() < 1_024, "backend {backend}");
         assert_eq!(
@@ -21822,7 +21824,14 @@ fn contract_inventory_matches_every_store_method() {
     // +3: claim diagnostics, targeted FEL head work, and bounded title revisits.
     // FEL head is exercised on both backends by
     // fel_head_rebuild_reopens_exact_settled_title_without_remeasurement.
-    assert_eq!(declared.len(), 632, "review the Store method count");
+    // 632 -> 634 for the Cinema chapter-evidence fix: `MediaStore`'s
+    // `merge_file_probe_chapters_if_missing` backfills a verified chapter array
+    // into the matching probe revision only, and `TimelineAnnotationStore`'s
+    // `timeline_annotation_set_with_evidence` reports whether the base set was
+    // published with chapter evidence (`timeline_annotation_set` is now a
+    // provided method over it). Named in `MEDIA_METHODS` and
+    // `TIMELINE_ANNOTATION_METHODS`; no new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 634, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
