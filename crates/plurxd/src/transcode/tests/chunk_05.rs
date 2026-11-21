@@ -1553,7 +1553,10 @@
             convert_dolby_vision: false, transcode_audio: false, preserve_dolby_vision: false,
             dual_layer_as_copied: false,
         }, "owner", &supersession_user, None, None, None, playback_id, false, None,
-            (!retention).then_some(false), false, false, None).await.expect("ordinary start");
+            (!retention).then_some(false), false, false, None,
+            #[cfg(target_os = "linux")]
+            None,
+        ).await.expect("ordinary start");
         let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("session");
         (info, session)
     }

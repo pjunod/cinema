@@ -1412,7 +1412,11 @@ pub(super) async fn replan_qualified_upgrade(
     // The retained rolling splice keeps the ordinary copy recipe. A completed
     // measurement changes the catalog's snapshot binding, so ask the current
     // catalog to rebind that exact ordinary candidate before using the result.
-    let native_incumbent = if state.transcode.native_split_active(&route.session_id).await {
+    let native_incumbent = if state
+        .transcode
+        .native_split_owns_fel(&route.session_id)
+        .await
+    {
         use plurx_core::playback::candidate::CandidateRoute;
         let ordinary = recipe
             .candidate_catalog

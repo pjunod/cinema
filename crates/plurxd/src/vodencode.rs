@@ -189,6 +189,7 @@ pub(crate) fn try_admit_frozen_bundle(
 /// claim (`crate::vodserve::IncumbentPermitClaim`) to admit with.
 #[derive(Default)]
 pub(crate) struct ProcessedTrialAdmission {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     claim: std::sync::Mutex<Option<Arc<crate::vodserve::TrialClaim>>>,
     needed: std::sync::Mutex<Option<TranscodeResourceEstimate>>,
 }
@@ -210,10 +211,12 @@ impl ProcessedTrialAdmission {
         *self.needed.lock().expect("trial admission")
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn record_needed(&self, resources: TranscodeResourceEstimate) {
         *self.needed.lock().expect("trial admission") = Some(resources);
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn claim(&self) -> Option<Arc<crate::vodserve::TrialClaim>> {
         self.claim.lock().expect("trial admission").clone()
     }

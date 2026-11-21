@@ -843,13 +843,13 @@ const PLAN_CALLS: &[(&str, &str, &str, &str)] = &[
     ("transcode/manager/start.rs", "start_with_audio_offset", "rolling_start_inputs", "plan"),
 ];
 
-/// The last top-level argument of the call whose `(` is at `open`, with its
-/// whitespace collapsed.
-fn last_argument(text: &str, open: usize) -> String {
+/// The declared plan argument of the call whose `(` is at `open`.
+/// Most helpers place it last; native FEL preparation follows it in two helpers.
+fn plan_argument(text: &str, open: usize, helper: &str) -> String {
     let bytes = text.as_bytes();
     let mut depth = 0_i32;
     let mut start = open + 1;
-    let mut last = String::new();
+    let mut arguments = Vec::new();
     for (index, byte) in bytes.iter().enumerate().skip(open) {
         match byte {
             b'(' | b'[' | b'{' => depth += 1,
@@ -858,7 +858,7 @@ fn last_argument(text: &str, open: usize) -> String {
                 if depth == 0 {
                     let arg = text[start..index].trim();
                     if !arg.is_empty() {
-                        last = arg.to_owned();
+                        arguments.push(arg.to_owned());
                     }
                     break;
                 }
@@ -866,14 +866,20 @@ fn last_argument(text: &str, open: usize) -> String {
             b',' if depth == 1 => {
                 let arg = text[start..index].trim();
                 if !arg.is_empty() {
-                    last = arg.to_owned();
+                    arguments.push(arg.to_owned());
                 }
                 start = index + 1;
             }
             _ => {}
         }
     }
-    last.split_whitespace().collect::<Vec<_>>().join("")
+    let argument = match helper {
+        "start_live_recovery_session" => arguments.get(7),
+        "start_copy_with_audio_offset" => arguments.get(16),
+        _ => arguments.last(),
+    }
+    .expect("planned helper must pass its declared plan argument");
+    argument.split_whitespace().collect::<Vec<_>>().join("")
 }
 
 #[test]
@@ -901,7 +907,7 @@ fn every_plan_argument_is_pinned_by_call() {
                     path.clone(),
                     enclosing(&text, pos),
                     (*helper).to_owned(),
-                    last_argument(&text, open),
+                    plan_argument(&text, open, helper),
                 ));
             }
         }

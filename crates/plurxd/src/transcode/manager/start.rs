@@ -1,4 +1,20 @@
+pub(super) const NATIVE_FEL_START_UNAVAILABLE: &str = "native_fel_start_unavailable";
+
+fn copy_start_local_failure(preferred_native: bool, error: String) -> String {
+    if preferred_native {
+        vod_refusal_error(NATIVE_FEL_START_UNAVAILABLE, error)
+    } else {
+        error
+    }
+}
+
 use super::*;
+
+#[cfg(target_os = "linux")]
+pub(super) struct PreparedNativeFelStart {
+    head: Option<Arc<super::manager_native_fel::NativeFelHead>>,
+    scratch: crate::scratch_ledger::ScratchPermit,
+}
 
 /// Everything a rolling start reads from the Store — the file, its stored
 /// probe and every setting on the path — from one statement.
@@ -10,6 +26,8 @@ use super::*;
 pub(super) struct RollingStartInputs {
     pub(super) file: plurx_core::domain::MediaFile,
     pub(super) probe_json: Option<String>,
+    #[cfg(target_os = "linux")]
+    pub(super) generation: i64,
     pub(super) settings: std::collections::BTreeMap<String, String>,
     /// The file's item title from the same statement, for attribution only.
     pub(super) item_title: Option<String>,
@@ -54,6 +72,8 @@ impl TranscodeManager {
             return Ok(RollingStartInputs {
                 file: snapshot.file.clone(),
                 probe_json: snapshot.probe_json.clone(),
+                #[cfg(target_os = "linux")]
+                generation: snapshot.generation,
                 settings: snapshot.settings.clone(),
                 item_title: snapshot.item_title.clone(),
             });
@@ -67,6 +87,8 @@ impl TranscodeManager {
         Ok(RollingStartInputs {
             file: snapshot.file,
             probe_json: snapshot.probe_json,
+            #[cfg(target_os = "linux")]
+            generation: snapshot.generation,
             settings: snapshot.settings,
             item_title: snapshot.item_title,
         })
@@ -666,6 +688,7 @@ impl TranscodeManager {
             probe_json,
             settings,
             item_title,
+            ..
         } = inputs;
         // The server's cache budget governs both reuse of an existing retained
         // copy and new collection. `retain_output: Some(false)` is the
@@ -1776,8 +1799,33 @@ impl TranscodeManager {
             false,
             false,
             None,
+            #[cfg(target_os = "linux")]
+            None,
         )
         .await
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn reserve_prepared_native_fel_start(
+        &self,
+        planning: &plurx_core::store::PlaybackPlanningSnapshot,
+        head: Option<Arc<super::manager_native_fel::NativeFelHead>>,
+    ) -> Option<PreparedNativeFelStart> {
+        if !copyseg::supports(planning.file.video_codec.as_deref()) {
+            return None;
+        }
+        let startup_bytes = rolling_startup_bytes(copy_bitrate(&planning.file), 1.0);
+        let limits = self.ahead_limits_for_start(&planning.settings);
+        let sizing = if head.is_some() {
+            prepared_native_fel_sizing(startup_bytes, limits)?
+        } else {
+            if native_split_startup_budget(startup_bytes, limits) == 0 {
+                return None;
+            }
+            RollingScratchSizing::Startup(startup_bytes.saturating_mul(2))
+        };
+        let scratch = self.reserve_rolling_scratch_with(sizing, limits).ok()?;
+        Some(PreparedNativeFelStart { head, scratch })
     }
 
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
@@ -1800,6 +1848,7 @@ impl TranscodeManager {
         source_telemetry: bool,
         allow_native_split: bool,
         plan: Option<&crate::http::hls::start_plan::StartPlan>,
+        #[cfg(target_os = "linux")] prepared_native_fel: Option<PreparedNativeFelStart>,
     ) -> Result<StartInfo, String> {
         // One Store read for the file, its probe and its settings (D4), or
         // the create's plan (D3b).
@@ -1808,19 +1857,39 @@ impl TranscodeManager {
             probe_json: stored_probe,
             settings,
             item_title,
+            #[cfg(target_os = "linux")]
+                generation: planning_generation,
         } = self.rolling_start_inputs(file_id, None, plan).await?;
-        let native_split = allow_native_split
-            && start_seconds == 0.0
+        #[cfg(target_os = "linux")]
+        let resume_video_index = if start_seconds > 0.0 && self.source_identity.is_some() {
+            stored_probe.as_deref().and_then(native_copy_video_index)
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let can_split_at_requested_offset = start_seconds == 0.0 || resume_video_index.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let can_split_at_requested_offset = start_seconds == 0.0;
+        let native_split_requested = allow_native_split
+            && can_split_at_requested_offset
             && audio_offset_ms == 0
             && options.convert_dolby_vision
-            && takeover.is_none()
-            && replacement_deadline.is_none();
-        // A native split needs a fresh rendition inventory. The ordinary
-        // cache budget applies to both reuse and collection on the muxed path.
-        let retained_budget = if native_split {
-            None
+            && takeover.is_none();
+        #[cfg(target_os = "linux")]
+        let preferred_native = prepared_native_fel.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let preferred_native = false;
+        #[cfg(target_os = "linux")]
+        let (warm_head, prepared_scratch) = if let Some(prepared) = prepared_native_fel {
+            (prepared.head, Some(prepared.scratch))
+        } else if native_split_requested && start_seconds == 0.0 && recovery.is_some() {
+            self.note_native_fel_head_target(&file);
+            let head = self
+                .warm_native_fel_head(&file, planning_generation, stored_probe.as_deref())
+                .await;
+            (head, None)
         } else {
-            Self::rolling_retained_budget_from(&settings)
+            (None, None)
         };
         // The viewer's opt-out only stops collection for this playback.
         let collect_retained = retain_output != Some(false);
@@ -1871,6 +1940,14 @@ impl TranscodeManager {
             copy_delivers_hdr,
         )
         .audio_index;
+        // A reusable prepared video prefix was checked against one specific
+        // soundtrack. Keep other selections on the cold route.
+        #[cfg(target_os = "linux")]
+        let (warm_head, prepared_scratch) = match warm_head {
+            Some(head) if head.audio_index == audio_index => (Some(head), prepared_scratch),
+            None => (None, prepared_scratch),
+            Some(_) => (None, None),
+        };
         let item_title = item_title.unwrap_or_else(|| "(unknown)".to_owned());
         // Every object this session writes passes a Rust grant boundary
         // before it exists, so it may start small and grow. Sizing covers the
@@ -1944,6 +2021,40 @@ impl TranscodeManager {
                     .to_owned(),
             );
         }
+        let limits = self.ahead_limits_for_start(&settings);
+        let copy_bitrate = copy_bitrate(&file);
+        let startup_bytes = rolling_startup_bytes(copy_bitrate, 1.0);
+        // Keep the original mux and both role objects alive through their
+        // ordinary grace. Reserve startup for both copies before exposing the
+        // alternate layout so it cannot spend the incumbent's startup grant.
+        let ordinary_sizing = RollingScratchSizing::Startup(startup_bytes);
+        let split_sizing = RollingScratchSizing::Startup(startup_bytes.saturating_mul(2));
+        let split_startup_budget = native_split_startup_budget(startup_bytes, limits);
+        let split_eligible = native_split_requested && segmenting && split_startup_budget > 0;
+        #[cfg(target_os = "linux")]
+        let split_reservation = prepared_scratch.filter(|_| split_eligible).or_else(|| {
+            warm_head.as_ref().filter(|_| split_eligible).and_then(|_| {
+                let sizing = RollingScratchSizing::Startup(startup_bytes.saturating_mul(3));
+                self.reserve_rolling_scratch_with(sizing, limits).ok()
+            })
+        });
+        #[cfg(target_os = "linux")]
+        let warm_head = warm_head.filter(|_| split_reservation.is_some());
+        #[cfg(not(target_os = "linux"))]
+        let split_reservation = None;
+        let split_reservation = split_reservation.or_else(|| {
+            split_eligible
+                .then(|| self.reserve_rolling_scratch_with(split_sizing, limits))
+                .and_then(Result::ok)
+        });
+        let native_split = split_reservation.is_some();
+        // Only a split with a grant needs a fresh inventory. Keep ordinary
+        // retained output eligible when its extra scratch reservation fails.
+        let retained_budget = if native_split {
+            None
+        } else {
+            Self::rolling_retained_budget_from(&settings)
+        };
         let pacing = Self::pacing_from_settings(&settings, true).await;
         let canonical_args = if segmenting {
             transcode::copy_pipe_args_with_audio_delivery(
@@ -2110,30 +2221,15 @@ impl TranscodeManager {
                 return Ok(attached);
             }
         }
-        let copy_bitrate = file
-            .bitrate
-            .filter(|rate| *rate > 0)
-            .map(|rate| rate as f64);
-        let limits = self.ahead_limits_for_start(&settings);
-        let startup_bytes = rolling_startup_bytes(copy_bitrate, 1.0);
-        // Keep the original mux and both role objects alive through their
-        // ordinary grace. Reserve startup for both copies before exposing the
-        // alternate layout so it cannot spend the incumbent's startup grant.
-        let ordinary_sizing = RollingScratchSizing::Startup(startup_bytes);
-        let split_sizing = RollingScratchSizing::Startup(startup_bytes.saturating_mul(2));
-        let split_startup_budget = split_sizing
-            .grant_bytes(limits)
-            .saturating_sub(ordinary_sizing.grant_bytes(limits));
-        let split_reservation = (native_split && segmenting && split_startup_budget > 0)
-            .then(|| self.reserve_rolling_scratch_with(split_sizing, limits))
-            .and_then(Result::ok);
-        let native_split = split_reservation.is_some();
         let scratch_reservation = match split_reservation {
             Some(reservation) => reservation,
             None => self.reserve_rolling_scratch_with(ordinary_sizing, limits)?,
         };
-        let scratch_envelope = rolling_scratch_envelope(copy_bitrate, 1.0)
-            .saturating_mul(if native_split { 2 } else { 1 });
+        let scratch_factor = if native_split { 2 } else { 1 };
+        #[cfg(target_os = "linux")]
+        let scratch_factor = scratch_factor + i64::from(warm_head.is_some());
+        let scratch_envelope =
+            rolling_scratch_envelope(copy_bitrate, 1.0).saturating_mul(scratch_factor);
 
         let session_id = takeover
             .as_ref()
@@ -2143,9 +2239,9 @@ impl TranscodeManager {
         #[cfg(windows)]
         let dir = std::path::absolute(dir)
             .map_err(|error| format!("resolving Windows session directory: {error}"))?;
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|e| format!("creating session dir: {e}"))?;
+        tokio::fs::create_dir_all(&dir).await.map_err(|error| {
+            copy_start_local_failure(preferred_native, format!("creating session dir: {error}"))
+        })?;
         #[cfg(windows)]
         let output_handle = plurx_core::fs_secure::SecureDirectory::open(&dir)
             .await
@@ -2156,7 +2252,13 @@ impl TranscodeManager {
         // through this endpoint, so its objects are granted before they land
         // exactly as the segmenter's are. Lane 0 is the initial attempt and
         // lane 1 the retry.
-        let upload = self.bind_scratch_upload(&dir, &scratch_reservation, scratch_envelope)?;
+        let upload = self
+            .bind_scratch_upload(&dir, &scratch_reservation, scratch_envelope)
+            .map_err(|reason| copy_start_local_failure(preferred_native, reason))?;
+        #[cfg(target_os = "linux")]
+        let mut picture_clock = None;
+        #[cfg(target_os = "linux")]
+        let resumed_split = native_split && start_seconds > 0.0;
         let initial_args = if segmenting {
             transcode::copy_pipe_args_with_audio_delivery(
                 &execution_file,
@@ -2289,9 +2391,14 @@ impl TranscodeManager {
             control,
             publication: Mutex::new(RollingPublicationClock::default()),
             native_split: native_split.then(|| {
-                Arc::new(crate::copyseg::NativeSplitInventory::with_startup_budget(
+                let split = crate::copyseg::NativeSplitInventory::with_startup_budget(
                     split_startup_budget as u64,
-                ))
+                );
+                #[cfg(target_os = "linux")]
+                let split = if warm_head.is_some() { split.compare_prepared_head() } else { split };
+                #[cfg(target_os = "linux")]
+                let split = if resumed_split { split.require_resume_clock() } else { split };
+                Arc::new(split)
             }),
             publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
@@ -2391,18 +2498,48 @@ impl TranscodeManager {
         let pipe_stdout = if segmenting {
             match session
                 .spawn_and_install_prepublication_pipe_child(generation, |source_input| {
-                    spawn_ffmpeg_pipe_at(
+                    let source_url = source_input.map(|input| input.url());
+                    #[cfg(target_os = "linux")]
+                    let clock_output =
+                        resume_video_index
+                            .filter(|_| resumed_split)
+                            .and_then(|video_index| {
+                                source_input
+                                    .and_then(|input| input.source_object_version())
+                                    .and_then(|version| {
+                                        let (write, read) =
+                                            crate::copyrange::pipes::output_pair().ok()?;
+                                        let args = transcode::copy_pipe_args_with_picture_clock(
+                                            &execution_file,
+                                            start_seconds,
+                                            audio_index,
+                                            options.transcode_audio,
+                                            pacing,
+                                            video_options,
+                                            audio_delivery,
+                                            "pipe:7",
+                                            std::num::NonZeroUsize::new(
+                                                crate::copyseg::COPY_PICTURE_LIMIT,
+                                            )
+                                            .expect("nonzero picture cap"),
+                                        )
+                                        .ok()?;
+                                        Some((version, video_index, write, read, args))
+                                    })
+                            });
+                    #[cfg(target_os = "linux")]
+                    let args = clock_output
+                        .as_ref()
+                        .map_or(initial_args.as_slice(), |(_, _, _, _, args)| args);
+                    #[cfg(not(target_os = "linux"))]
+                    let args = &initial_args;
+                    let output = spawn_ffmpeg_pipe_at(
                         session
                             .rolling_provenance
                             .as_ref()
                             .map(|proof| proof.executable_path())
                             .unwrap_or(std::path::Path::new(&ffmpeg_bin())),
-                        &crate::source_input::source_args(
-                            &initial_args,
-                            &file.path,
-                            &[3],
-                            source_input,
-                        ),
+                        &crate::source_input::source_args(args, &file.path, &[3], source_url),
                         crate::process_control::ChildWork::realtime("playback transcode"),
                         &session_id,
                         FfmpegProgressObserver::rolling(
@@ -2422,12 +2559,29 @@ impl TranscodeManager {
                                 None,
                                 false,
                             );
+                            #[cfg(target_os = "linux")]
+                            let descriptors = if let Some((_, _, write, _, _)) = &clock_output {
+                                descriptors.with_copy_picture_clock(write)
+                            } else {
+                                descriptors
+                            };
                             #[cfg(windows)]
                             let descriptors = windows_session_descriptors(&session)?;
                             descriptors
                         },
                         DiagnosticObservation::copy(&session_id),
                     )
+                    .map_err(|reason| copy_start_local_failure(preferred_native, reason))?;
+                    #[cfg(target_os = "linux")]
+                    if let Some((version, video_index, _, read, _)) = clock_output {
+                        picture_clock = Some(crate::copyseg::CopyPicturePipe::spawn(
+                            version,
+                            generation,
+                            video_index,
+                            read,
+                        ));
+                    }
+                    Ok(output)
                 })
                 .await
             {
@@ -2510,6 +2664,14 @@ impl TranscodeManager {
                 )
                 .with_starved_signal(Arc::clone(&self.scratch_starved))
             });
+            #[cfg(target_os = "linux")]
+            if let Some(head) = warm_head {
+                head.stage_for_start(
+                    Arc::clone(&session),
+                    generation,
+                    Arc::clone(&self.scratch_cap),
+                );
+            }
             spawn_copy_reader_owner(
                 Arc::clone(&session),
                 stdout,
@@ -2519,6 +2681,8 @@ impl TranscodeManager {
                 file.clone(),
                 video_options,
                 grants,
+                #[cfg(target_os = "linux")]
+                picture_clock,
             );
         }
         tracing::info!(
@@ -2590,6 +2754,80 @@ impl TranscodeManager {
             control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
         })
     }
+}
+
+// The rolling FFmpeg command maps v:0. Use the catalogue's selected
+// absolute index only if that stream is the single video in the held plan.
+#[cfg(target_os = "linux")]
+pub(super) fn native_copy_video_index(probe: &str) -> Option<u32> {
+    let document: serde_json::Value = serde_json::from_str(probe).ok()?;
+    let mut videos = document
+        .get("streams")?
+        .as_array()?
+        .iter()
+        .filter(|stream| {
+            stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+        });
+    let video = videos.next()?;
+    if videos.next().is_some() {
+        return None;
+    }
+    if video
+        .get("disposition")
+        .and_then(|value| value.get("attached_pic"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0)
+        != 0
+    {
+        return None;
+    }
+    u32::try_from(video.get("index")?.as_u64()?).ok()
+}
+
+fn copy_bitrate(file: &plurx_core::domain::MediaFile) -> Option<f64> {
+    file.bitrate
+        .filter(|rate| *rate > 0)
+        .map(|rate| rate as f64)
+}
+
+fn native_split_startup_budget(startup_bytes: i64, limits: AheadLimits) -> i64 {
+    RollingScratchSizing::Startup(startup_bytes.saturating_mul(2))
+        .grant_bytes(limits)
+        .saturating_sub(RollingScratchSizing::Startup(startup_bytes).grant_bytes(limits))
+}
+
+#[cfg(target_os = "linux")]
+fn prepared_native_fel_sizing(
+    startup_bytes: i64,
+    limits: AheadLimits,
+) -> Option<RollingScratchSizing> {
+    let required = startup_bytes.saturating_mul(3);
+    let sizing = RollingScratchSizing::Startup(required);
+    // An ordinary split can start with a capped grant. A warm start may
+    // replace a ready VOD only if its additional objects have the full grant.
+    (native_split_startup_budget(startup_bytes, limits) > 0
+        && sizing.grant_bytes(limits) >= required)
+        .then_some(sizing)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn prepared_native_fel_requires_the_full_startup_scratch_grant() {
+    let startup = 512 * 1024 * 1024;
+    let capped = AheadLimits {
+        max_secs: 120,
+        max_bytes: startup * 2,
+        global_max_bytes: startup * 4,
+    };
+    assert!(native_split_startup_budget(startup, capped) > 0);
+    assert!(prepared_native_fel_sizing(startup, capped).is_none());
+
+    let enough = AheadLimits {
+        max_bytes: startup * 3,
+        ..capped
+    };
+    let prepared = prepared_native_fel_sizing(startup, enough).expect("full prepared grant");
+    assert_eq!(prepared.grant_bytes(enough), startup * 3);
 }
 
 /// Rolling copies retain HEVC parameter sets by default, avoiding deletion

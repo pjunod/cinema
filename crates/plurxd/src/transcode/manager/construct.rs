@@ -66,6 +66,14 @@ impl TranscodeManager {
             vod: crate::vodserve::VodServe::new(work_dir.join("renditions"), Arc::clone(&store)),
             store,
             work_dir,
+            #[cfg(target_os = "linux")]
+            native_fel_head: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            native_fel_target: std::sync::Mutex::new(
+                super::manager_native_fel::FelHeadTarget::load(&runtime_cache),
+            ),
+            #[cfg(target_os = "linux")]
+            native_fel_backend: std::sync::Mutex::new(None),
             runtime_cache,
             subtitle_cache,
             subtitle_calls: None,
@@ -1574,6 +1582,7 @@ impl TranscodeManager {
     /// no viewer waits, and it yields only when a viewer waits for capacity
     /// or an offline download does (decision F), or exact playback qualification
     /// needs the lane; an existing playing session alone does not preempt it.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) async fn admit_dv_refit(&self, threads: usize) -> Option<FragmentAdmission> {
         if *self.playback_qualification_waiters.borrow() > 0
             || self.admissions.live_is_waiting()
@@ -1678,7 +1687,7 @@ impl TranscodeManager {
         admission: &FragmentAdmission,
         resources: &TranscodeResourceEstimate,
         software_threads: Option<u32>,
-    ) -> Result<(), String> {
+    ) -> Result<crate::vodencode::EncodePermit, String> {
         if !self.fragment_worker_idle(admission) {
             return Err("foreground work is waiting for this node's capacity".into());
         }
@@ -1696,10 +1705,9 @@ impl TranscodeManager {
             None,
         )
         .map_err(|_| "the GPU slot or CPU this step needs is in use".to_owned())?;
-        if !admission.install_extension(permit) {
-            return Err("this job already holds an extended admission".into());
-        }
-        Ok(())
+        admission
+            .install_extension(permit)
+            .ok_or_else(|| "this job already holds an extended admission".into())
     }
 
     /// Own the existing heavy-worker lane, not an encoder estimate invented
@@ -1841,6 +1849,7 @@ impl TranscodeManager {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn subscribe_playback_qualification_waiters(
         &self,
     ) -> tokio::sync::watch::Receiver<usize> {
