@@ -1492,6 +1492,140 @@ fn playback_recipe(
 }
 
 #[tokio::test]
+async fn fel_head_rebuild_reopens_exact_settled_title_without_remeasurement() {
+    use plurx_core::transcode::dv_fel_qualification as q;
+
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let file = seed_playback(&store, "title-fel-head").await;
+        let (settled, ordinary) = active(&store, file.id, &scanner, 1_000).await;
+        let recipe = playback_recipe(&settled);
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&settled, &ordinary, &scanner, 1_001))
+                .await
+                .expect("settle original title scan"),
+            JobPublishOutcome::Published { .. }
+        ));
+        let request = |now_ms| FelHeadRequest {
+            file_id: file.id,
+            node: "title-node".into(),
+            scanner_digest: scanner.clone(),
+            request: recipe.clone(),
+            now_ms,
+            deadline_ms: now_ms + 120_000,
+        };
+        assert!(
+            !store
+                .request_dv_fel_head(request(1_002))
+                .await
+                .expect("unmeasured title refusal"),
+            "{backend}"
+        );
+        let window = q::WindowScore {
+            start_ms: 1_000,
+            served_mean: 1.0,
+            served_p99: 2.0,
+            dropped_mean: 2.0,
+            dropped_p99: 2.0,
+            samples: 3,
+        };
+        let verdict = q::FelVerdict::from_windows(
+            recipe.identity.clone(),
+            file.size,
+            file.mtime,
+            1_003,
+            vec![window; q::WINDOWS],
+            &mut [1.0; 3],
+            &mut [2.0; 3],
+        )
+        .expect("quality measurement control");
+        assert!(verdict.admitted);
+        assert!(store
+            .put_dv_fel_verdict(
+                file.id,
+                file.size,
+                file.mtime,
+                &serde_json::json!(q::FelRecipeVerdict {
+                    request: recipe.clone(),
+                    verdict
+                }),
+            )
+            .await
+            .expect("existing measured verdict"));
+        let original = store.get_file_probe_json(file.id).await.unwrap().unwrap();
+        let mut stale = request(1_004);
+        stale.request = q::FelRecipeRequest::new(
+            recipe.backend_identity.clone(),
+            file.size,
+            file.mtime + 1,
+            recipe.envelope,
+            recipe.output,
+        );
+        assert!(!store
+            .request_dv_fel_head(stale)
+            .await
+            .expect("stale source"));
+        assert!(store
+            .dv_title_demands(&scanner, 0, 1_004)
+            .await
+            .expect("refusals leave the title settled")
+            .is_empty());
+
+        let (first, duplicate) = tokio::join!(
+            store.request_dv_fel_head(request(1_005)),
+            store.request_dv_fel_head(request(1_006)),
+        );
+        assert_ne!(
+            first.expect("new head job"),
+            duplicate.expect("competing head job"),
+            "{backend}"
+        );
+        let reopened = demand(&store, file.id, &scanner).await;
+        assert_eq!(reopened.probe_revision, settled.probe_revision);
+        assert_eq!(reopened.probe_json, original);
+        assert_eq!(reopened.fel_head_target.as_deref(), Some("title-node"));
+        assert!(!reopened.playback_requested);
+        let id = reopened.active_job_id.expect("single queued episode");
+        let queued = store.background_job(&id).await.unwrap().unwrap();
+        assert_eq!(queued.state, JobState::Queued);
+        let wrong_node = store
+            .claim_job(ClaimJob {
+                job_id: id.clone(),
+                expected_revision: queued.revision,
+                node_id: "other-node".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::DvTitleScan,
+                payload_version: 1,
+                now_ms: 1_007,
+                dispatched_at_ms: 1_007,
+            })
+            .await
+            .expect("authoritative claim");
+        assert!(!matches!(wrong_node, ClaimOutcome::Claimed { .. }));
+        let worker = claim(&store, &id, 1_008).await;
+        assert!(matches!(
+            store
+                .publish_dv_title_job(publication(&settled, &worker, &scanner, 1_009))
+                .await
+                .expect("settle without new measurement"),
+            JobPublishOutcome::Published { .. }
+        ));
+        assert!(store
+            .request_dv_fel_head(request(2_000))
+            .await
+            .expect("rebuild after restart"));
+        let later = demand(&store, file.id, &scanner).await;
+        assert_ne!(later.active_job_id.as_deref(), Some(id.as_str()));
+        assert_eq!(later.probe_revision, settled.probe_revision);
+        assert_eq!(later.probe_json, original);
+        assert!(q::pending_recipes(&later.probe_json, file.size, file.mtime).is_empty());
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn title_consumed_playback_recipe_returns_to_ordinary_paging() {
     use plurx_core::transcode::dv_fel_qualification as q;
     for_each_backend(|store, backend| async move {
