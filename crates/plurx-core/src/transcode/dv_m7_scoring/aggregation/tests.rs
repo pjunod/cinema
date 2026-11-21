@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "test fixtures intentionally stop at the first invalid setup or assertion result"
+)]
+
 use super::*;
 
 fn test_directory() -> tempfile::TempDir {

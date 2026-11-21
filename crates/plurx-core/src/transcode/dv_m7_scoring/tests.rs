@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "test fixtures intentionally stop at the first invalid setup or assertion result"
+)]
+
 use super::*;
 use crate::transcode::dv_refit::{apply_to_rpu, servable, RefitCurves};
 use dolby_vision::rpu::ConversionMode;
