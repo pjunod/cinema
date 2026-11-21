@@ -2391,6 +2391,14 @@ async fn m7_receipts_are_fenced_bounded_and_nonterminal_on_each_backend() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::unwrap_used,
+    reason = "fixture setup and assertions intentionally stop at the first invalid store result"
+)]
+#[expect(
+    clippy::cloned_ref_to_slice_refs,
+    reason = "the assertion compares the owned journal vector against an owned fixture slot"
+)]
 async fn m7_candidate_slots_survive_reprobe_duplicate_catalogue_ids_and_owner_change() {
     use plurx_core::{
         store::dv_m7_attempts::{
