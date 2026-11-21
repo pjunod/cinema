@@ -1011,7 +1011,7 @@
         "anchor": "async fn background_work_loop_with_ready(",
         "scope": "item",
         "item": "impl JobManager > fn background_work_loop_with_ready",
-        "item_sha256": "f722f8950e79d5e6f46c33bd0a21d4322a6ad744065a337c58c7ed468abb53ac"
+        "item_sha256": "a128c5328d98dcc6743d3a02043c3ee84d91f8809a5353917251d2ae5d3b786a"
       },
       {
         "table": "same-file dependency of step: library_lifecycle.rs fn one",
