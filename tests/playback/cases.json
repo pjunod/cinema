@@ -114,6 +114,25 @@
         "subtitle-toggle"
       ],
       "opt_in": true
+    },
+    {
+      "id": "copy-h264-dual-aac-1080",
+      "filename": "copy-h264-dual-aac-1080-clock-v1.mkv",
+      "builder": "h264_dual_aac_mkv_clocked",
+      "frame_clock_version": 1,
+      "duration_seconds": 150,
+      "description": "1080p H.264 MKV with English (440 Hz) and French (660 Hz) AAC-LC 48 kHz stereo soundtracks sharing a 1 kHz once-per-second sync tick; encoded frame clock v1. Copy-VOD shared-video baseline and acceptance (P49)",
+      "tags": [
+        "remux",
+        "h264",
+        "aac",
+        "mkv",
+        "1080p",
+        "sdr",
+        "audio-switch",
+        "shared-video"
+      ],
+      "opt_in": true
     }
   ],
   "suites": {
@@ -210,6 +229,26 @@
             "sustained_seconds": 10,
             "sustained_minimum_clock_rate": 0.9
           }
+        }
+      ]
+    },
+    "shared-video": {
+      "requires_vod": true,
+      "cases": [
+        {
+          "fixture": "copy-h264-dual-aac-1080",
+          "quality": "original",
+          "operation": "steady",
+          "require_vod": true
+        },
+        {
+          "fixture": "copy-h264-dual-aac-1080",
+          "quality": "original",
+          "operation": "audio-alternation",
+          "require_vod": true,
+          "switches": 20,
+          "switch_spacing_ms": 3000,
+          "calibration_ms": 4000
         }
       ]
     },
