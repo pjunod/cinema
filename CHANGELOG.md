@@ -82,7 +82,14 @@ bump may break compatibility and a **patch** bump never does.
   refusal on the Source's forwarding paths, a growing copy that fails to start,
   a refused claim, and a receiver about to tell its viewer only "could not
   confirm playback preparation" now log one line naming the step that refused.
-
+- A shared title's Start, and every other membership-guarded Source write, no
+  longer refuses as "sharing unavailable" when a member's routine heartbeat
+  commits while the write is in flight. The write's guard counted that
+  heartbeat as a future-dated clock because it was stamped after the write
+  sampled its own clock. A heartbeat is now accepted up to the five seconds a
+  write may use its membership observation. A clock further ahead is still
+  refused, and the 120-second staleness rule is unchanged. A viewer saw "The
+  sharing host could not confirm playback preparation".
 - A shared-library Source no longer refuses its catalogue, current-scope and
   content reads with `sharing_member_floor_unavailable` when a registered
   learner is offline. Serving reads require fresh heartbeats from the
