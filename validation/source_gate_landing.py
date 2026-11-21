@@ -40,6 +40,20 @@ def semantic_pr_title(title):
 
 
 
+def expected_paperwork(api, pull, binding, environment, root):
+    from validation import paperwork_continuation as pc
+
+    body = pull.get('body') or ''
+    record = {'version': 1, 'head': binding['head_sha'], 'base': binding['base_sha'],
+              'pr': binding['pull_request'], 'passed': True,
+              'body_sha256': retention.digest(body.encode()),
+              'title_sha256': retention.digest(semantic_pr_title(pull['title']).encode())}
+    if pc.is_enrolled(body):
+        record.update(version=2, unit_coverage=pc.final_coverage(
+            api, pc.enrollment(body), environment, root))
+    return record
+
+
 WORKER_REQUIRED_PATHS = (
     'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/plurxd/Cargo.toml',
     'crates/plurxd/src/library_work.rs', 'crates/plurxd/src/library_work/env.rs',
@@ -217,15 +231,8 @@ def verify(api, number, head, main, root, run_id):
     r.require(worker_task is not None and worker_task[1] == 'worker_control_proof'
               and worker_task[2] == 'pull_request', 'Worker proof execution identity differs')
     paperwork = record['source_gate_paperwork']
-    from validation import paperwork_continuation as pc
-    expected_paperwork = {'version': 1, 'head': head, 'base': main, 'pr': number, 'passed': True,
-              'body_sha256': retention.digest((pull.get('body') or '').encode()),
-              'title_sha256': retention.digest(semantic_pr_title(pull['title']).encode())}
-    if any(line.startswith(pc.PREFIX) for line in (pull.get('body') or '').splitlines()):
-        paperwork_env = {**environment, 'GITHUB_RUN_ID': str(run_id)}
-        expected_paperwork.update(version=2, unit_coverage=pc.final_coverage(
-            api, pc.enrollment(pull['body']), paperwork_env, root))
-    r.require(paperwork == expected_paperwork,
+    paperwork_env = {**environment, 'GITHUB_RUN_ID': str(run_id)}
+    r.require(paperwork == expected_paperwork(api, pull, binding, paperwork_env, root),
               'Current PR paperwork/body/title evidence differs')
     environment.update(GITHUB_RUN_ID=str(run_id),
         GITHUB_WORKFLOW_REF=repo['full_name'] + '/.github/workflows/ci.yml@refs/heads/' + branch,
@@ -255,7 +262,7 @@ def paperwork():
     env.pop('PR_BODY', None)
     env.pop('PR_TITLE', None)
     from validation import paperwork_continuation as pc
-    enrolled = any(line.startswith(pc.PREFIX) for line in (pull.get('body') or '').splitlines())
+    enrolled = pc.is_enrolled(pull.get('body'))
     env.pop('PLURX_PAPERWORK_CONTINUATION', None)
     env.pop('PLURX_PAPERWORK_COVERAGE_OUTPUT', None)
     if enrolled:

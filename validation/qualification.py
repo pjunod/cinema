@@ -121,6 +121,13 @@ def api_document(environment: Mapping[str, str], path: str) -> dict[str, object]
 
 
 def resolve_manual_binding(environment: Mapping[str, str], repository: Path) -> dict[str, object]:
+    binding, _ = _resolve_manual_binding_and_pull(environment, repository)
+    return binding
+
+
+def _resolve_manual_binding_and_pull(
+    environment: Mapping[str, str], repository: Path,
+) -> tuple[dict[str, object], dict[str, object]]:
     """Read live PR/branch facts and prove current main is already in the head."""
     number = environment.get("PLURX_PROMOTION_PR", "")
     if not number.isdecimal() or int(number) <= 0:
@@ -136,8 +143,9 @@ def resolve_manual_binding(environment: Mapping[str, str], repository: Path) -> 
                                   cwd=repository, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
     except (KeyError, TypeError) as exc:
         raise QualificationError("promotion API facts are incomplete") from exc
-    return manual_binding(environment, pr, head_tip, base_tip,
-                          git_object(repository, "HEAD^{commit}"), ancestry.returncode == 0)
+    binding = manual_binding(environment, pr, head_tip, base_tip,
+                             git_object(repository, "HEAD^{commit}"), ancestry.returncode == 0)
+    return binding, pr
 
 
 def _ensure_task_history_tips(environment: Mapping[str, str], repository: Path,
@@ -391,6 +399,20 @@ def build_receipt(
     return record
 
 
+def verify_source_gate_paperwork(environment, binding, pull, root):
+    from validation import promotion_unit_retention as retention
+    from validation import source_gate_landing as landing
+    from validation.python_unit_receipts import ReceiptError
+
+    try:
+        claimed = json.loads(environment['PLURX_SOURCE_GATE_PAPERWORK'])
+        expected = landing.expected_paperwork(retention.runner_api(environment), pull, binding, environment, root)
+    except (KeyError, ValueError, TypeError, ReceiptError) as error:
+        raise QualificationError('Current source-gate paperwork cannot be authenticated') from error
+    if claimed != expected:
+        raise QualificationError('Current source-gate paperwork or live PR enrollment differs')
+
+
 def git_object(repository: Path, revision: str) -> str:
     """Resolve one Git object without accepting ambiguous output."""
 
@@ -426,9 +448,11 @@ def main(argv: list[str] | None = None) -> int:
             raise QualificationError("receipt output is required")
         environment = dict(os.environ)
         if environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
-            live_binding = resolve_manual_binding(environment, args.repository)
+            live_binding, pull = _resolve_manual_binding_and_pull(environment, args.repository)
             if json.loads(environment.get("PLURX_PROMOTION_BINDING", "null")) != live_binding:
                 raise QualificationError("promotion metadata moved after qualification start")
+            if live_binding['schema'] == 2:
+                verify_source_gate_paperwork(environment, live_binding, pull, args.repository)
         if environment.get('PLURX_RETAINED_UNITS'):
             from validation import promotion_unit_retention as retention
             from validation.python_unit_receipts import ReceiptError

@@ -31,6 +31,10 @@ def canonical_digest(value):
     return retention.digest(json.dumps(value, sort_keys=True, separators=(',', ':')).encode())
 
 
+def is_enrolled(body):
+    return any(line.startswith(PREFIX) for line in (body or '').splitlines())
+
+
 def enrollment(body):
     rows = [line[len(PREFIX):] for line in (body or '').splitlines() if line.startswith(PREFIX)]
     r.require(len(rows) == 1, 'Explicit unique paperwork continuation enrollment required')

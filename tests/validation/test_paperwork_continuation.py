@@ -216,6 +216,54 @@ class PaperworkContinuationTests(unittest.TestCase):
             with self.assertRaises(r.ReceiptError):
                 pc.rule_inventory(bad, root)
 
+    def test_enrolled_python_selection_refuses_legacy_descriptors_before_any_provider(self):
+        from validation import main_python_continuation as main, native_python_execute as native
+
+        api, pull = self.facts()
+        bind = self.scope()
+        descriptor = self.value()['python_unit_evidence']
+        for version in (main.POLICY, 'native-python-continuation-v1'):
+            document = {'version': version}
+            with self.subTest(version=version), \
+                    patch.object(pc.retention, 'attachment_bytes', return_value=b'fixture'), \
+                    patch.object(pc.retention, 'verify_identity', return_value=(document, pull, 1, {})), \
+                    patch.object(main, 'prepare') as previous_main, \
+                    patch.object(native.commands, 'expanded_commands') as previous_native:
+                with self.assertRaisesRegex(r.ReceiptError, 'Typed paperwork selection'):
+                    native.prepare(api, descriptor, bind, bind['head_sha'])
+                previous_main.assert_not_called()
+                previous_native.assert_not_called()
+
+    def test_writer_reauthenticates_live_enrollment_body_title_and_direct_coverage(self):
+        from validation import qualification as q, source_gate_landing as landing
+
+        api, pull = self.facts()
+        pull['title'] = 'fix(ci): exact receipt'
+        bind = self.scope()
+        env = {'GITHUB_RUN_ID': '9'}
+        with patch.object(pc.retention, 'runner_api', return_value=api), \
+                patch.object(pc, 'final_coverage', return_value={'direct': True}) as verify:
+            version_two = landing.expected_paperwork(api, pull, bind, env, '.')
+            self.assertEqual(version_two['version'], 2)
+            live = {**env, 'PLURX_SOURCE_GATE_PAPERWORK': json.dumps(version_two)}
+            q.verify_source_gate_paperwork(live, bind, pull, '.')
+            self.assertEqual(verify.call_count, 2)
+            verify.assert_called_with(api, self.value(), live, '.')
+
+            unenrolled = {**pull, 'body': 'ordinary description'}
+            version_one = landing.expected_paperwork(api, unenrolled, bind, env, '.')
+            self.assertEqual(version_one['version'], 1)
+            ordinary = {**env, 'PLURX_SOURCE_GATE_PAPERWORK': json.dumps(version_one)}
+            q.verify_source_gate_paperwork(ordinary, bind, unenrolled, '.')
+            forged = {**live, 'PLURX_SOURCE_GATE_PAPERWORK': json.dumps(
+                {**version_two, 'unit_coverage': {'direct': False}})}
+            cases = ((ordinary, pull), (live, unenrolled), (forged, pull),
+                     (live, {**pull, 'body': pull['body'] + '\nchanged'}),
+                     (live, {**pull, 'title': 'fix(ci): changed title'}))
+            for receipt, current_pull in cases:
+                with self.subTest(receipt=receipt, pull=current_pull), self.assertRaises(q.QualificationError):
+                    q.verify_source_gate_paperwork(receipt, bind, current_pull, '.')
+
     def test_unenrolled_manual_source_gate_preserves_full_paperwork_v1(self):
         from validation import source_gate_landing as landing
         api, pull = self.facts(); pull['head']['sha'] = 'a' * 40; pull['body'] = 'ordinary description'

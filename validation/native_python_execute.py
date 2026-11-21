@@ -24,8 +24,7 @@ def prepare(api, descriptor, binding, candidate):
     raw = retention.attachment_bytes(api, binding['pull_request'], attachment, uuid, sha)
     document, pull, repository, _ = retention.verify_identity(api, raw, sha, binding, candidate, attachment, uuid)
     from validation import paperwork_continuation as paperwork
-    enrolled = document.get('version') == 'main-python-journal-continuation-v2' and any(
-        line.startswith(paperwork.PREFIX) for line in (pull.get('body') or '').splitlines())
+    enrolled = paperwork.is_enrolled(pull.get('body'))
     if enrolled:
         value = paperwork.enrollment(pull['body'])
         receipts.require(document.get('version') == 'main-python-journal-continuation-v2'
