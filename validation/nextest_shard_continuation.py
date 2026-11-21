@@ -515,6 +515,28 @@ def authenticate(api, record, binding, candidate, repository, *, current_run=Non
     selected = {name for name, row in current['crates'].items() if row['due']}
     r.require(all(not current['crates'][name].get('only') for name in selected),
               'Dynamic-only Rust selection needs its own continuation contract')
+    outcomes, logs, plan, universe = authenticate_observed(
+        api, record, repository, prior, run_id, selected, current_run=current_run)
+    # A shard receipt is not an outcome source; authenticated original status
+    # rows remain authoritative, including all failures and abnormal exits.
+    invalidated = reviewed_changes(record, candidate, universe)
+    retired = reviewed_retirements(record, outcomes)
+    retained = sorted(test for test, value in outcomes.items() if value == 'PASS' and test not in invalidated)
+    return {'provider': POLICY, 'scope': 'selected-pr-rust-source-gate', 'candidate': candidate,
+            'prior': prior, 'base': binding['base_sha'], 'run': run_id, 'logs': logs,
+            'selection_projection': current['projection'], 'selected': sorted(selected), 'universe': sorted(universe), 'retained_ids': retained,
+            'must_pass_ids': sorted(universe - set(retained) - set(retired)),
+            'retired_ids': retired,
+            'mandatory_new_ids': sorted(identity for row in record['changes'].values()
+                for identity in row.get('compile_only', {}).get('new_ids', [])),
+            'serial_ids': sorted(test for row in plan['crates'].values() for test in row['serial']),
+            'outcomes': outcomes, 'root_ownership_passed': False,
+            'compile_only_ignored_ids': [IGNORED_COMPILE_ID] if any(
+                row.get('compile_only', {}).get('kind') == 'ignored-test-only' for row in record['changes'].values()) else []}
+
+
+def authenticate_observed(api, record, repository, prior, run_id, selected, *, current_run=None):
+    """Verify the exact selected archive, raw statuses, and shard/target census."""
     artifacts = api.pages(f'/actions/runs/{run_id}/artifacts')
     by_id = {item['id']: item for item in artifacts}
     r.require(len(by_id) == len(artifacts), 'Duplicate nextest artifact metadata')
@@ -607,22 +629,7 @@ def authenticate(api, record, binding, candidate, repository, *, current_run=Non
     r.require(len(planned_list) == len(universe), 'Duplicate body in original selected plan')
     r.require(set(outcomes) == universe and len(logs) == plan['shards'],
               'Original shard outcomes do not cover the complete census')
-    # A shard receipt is not an outcome source; authenticated original status
-    # rows remain authoritative, including all failures and abnormal exits.
-    invalidated = reviewed_changes(record, candidate, universe)
-    retired = reviewed_retirements(record, outcomes)
-    retained = sorted(test for test, value in outcomes.items() if value == 'PASS' and test not in invalidated)
-    return {'provider': POLICY, 'scope': 'selected-pr-rust-source-gate', 'candidate': candidate,
-            'prior': prior, 'base': binding['base_sha'], 'run': run_id, 'logs': logs,
-            'selection_projection': current['projection'], 'selected': sorted(selected), 'universe': sorted(universe), 'retained_ids': retained,
-            'must_pass_ids': sorted(universe - set(retained) - set(retired)),
-            'retired_ids': retired,
-            'mandatory_new_ids': sorted(identity for row in record['changes'].values()
-                for identity in row.get('compile_only', {}).get('new_ids', [])),
-            'serial_ids': sorted(test for row in plan['crates'].values() for test in row['serial']),
-            'outcomes': outcomes, 'root_ownership_passed': False,
-            'compile_only_ignored_ids': [IGNORED_COMPILE_ID] if any(
-                row.get('compile_only', {}).get('kind') == 'ignored-test-only' for row in record['changes'].values()) else []}
+    return outcomes, logs, plan, universe
 
 
 

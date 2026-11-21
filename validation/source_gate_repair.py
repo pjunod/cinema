@@ -305,11 +305,43 @@ FORMAL_SOURCE_REFINEMENTS = {
 }
 
 
-def formal_input_projection(package, document, current):
+CLUSTER_FORMAL_SOURCE = 'a3b158a6c7514e2fdcfd406cc1147c3cdaba4e70'
+CLUSTER_FORMAL_MAIN = '32f30addc4987648b50b2443976164fca6030044'
+CLUSTER_FORMAL_ARCHIVE_SHA256 = '2f7f35a07590b64c2a70981508f35c3645094dea4bf4bc5f64539687555e3f4c'
+# PR1732's reviewed head has the exact tree of merged main 32f30addc. The combined
+# source adds descriptor custody and macOS FEL support. Existing Linux operation
+# progress/fence transitions, the formal models and their mappings are unchanged.
+CLUSTER_FORMAL_REFINEMENTS = {'durable-jobs': {'crates/plurx-core/tests/store_contract.rs': ('21dd32d4770dfaced49b10653fef5a9a306371e1f8e6a9e175246f792de7015f',
+                                                                '8e479af1916c91dcee8c1b7286536aa012206449b560ca162dc6e2671276984c'),
+                  'crates/plurxd/src/background_jobs.rs': ('6e92572cc988a94a20929ddfb77409deace22a7be8d7ffffdc96daa128a5ad69',
+                                                           'e9db0d8ff3d92c80cd6253a8ca53474331f1d9aef75814bea880cf624a204a87'),
+                  'crates/plurxd/src/main.rs': ('bb5d9762fbbbe290b9e1019e9a065d4d6f54b73dd5c919ad9363f4ef5cdfbbd3',
+                                                '4054953f31c6245ee0460a37e74410e2f8302eb687909474f59e3d99d7ac64c6'),
+                  'crates/plurxd/src/source_custody.rs': ('c330d2b9d1fdc071cde44d4d9343dea4ecdfbd8add3d2f89f2582faacb039a8d',
+                                                          '46598edb65395ba28bd9892c65782f01acbe44dbb3b67da53f8023b36b5c9e70'),
+                  'crates/plurxd/src/state.rs': ('4d0b84520092fe1f2ed8f8f6ef6cf3415819a8ad88bbb2698f1ba2e2bf5d6e9b',
+                                                 '523fb8912bd479b035627627a89af53d2e0292a2fd81efc87fb117da44b3745c')},
+ 'operation-progress': {'crates/plurx-core/src/process/bounded.rs': ('7472ba52e7f2487bb0d9016d348a07ab573107fa746d437413aeabfce1a607b6',
+                                                                     '2df515372d2f057498dbcae8dd2454419a2812f511a47f5ec80c3679f5cfa78d'),
+                        'crates/plurxd/src/background_jobs.rs': ('6e92572cc988a94a20929ddfb77409deace22a7be8d7ffffdc96daa128a5ad69',
+                                                                 'e9db0d8ff3d92c80cd6253a8ca53474331f1d9aef75814bea880cf624a204a87'),
+                        'crates/plurxd/src/main.rs': ('bb5d9762fbbbe290b9e1019e9a065d4d6f54b73dd5c919ad9363f4ef5cdfbbd3',
+                                                      '4054953f31c6245ee0460a37e74410e2f8302eb687909474f59e3d99d7ac64c6'),
+                        'crates/plurxd/src/source_custody.rs': ('c330d2b9d1fdc071cde44d4d9343dea4ecdfbd8add3d2f89f2582faacb039a8d',
+                                                                '46598edb65395ba28bd9892c65782f01acbe44dbb3b67da53f8023b36b5c9e70'),
+                        'crates/plurxd/src/state.rs': ('4d0b84520092fe1f2ed8f8f6ef6cf3415819a8ad88bbb2698f1ba2e2bf5d6e9b',
+                                                       '523fb8912bd479b035627627a89af53d2e0292a2fd81efc87fb117da44b3745c'),
+                        'crates/plurxd/src/transcode/manager/construct.rs': ('70b9f483f060bfecd7b308c1652e1bd26a701e844e8acf48b61184800dec1214',
+                                                                             '21d2f5d929f54a9fb6ef765d438b9afd7dad9165b2922fac8120881d6e339a35')},
+ 'worker-refinement': {'crates/plurxd/src/background_jobs.rs': ('6e92572cc988a94a20929ddfb77409deace22a7be8d7ffffdc96daa128a5ad69',
+                                                                'e9db0d8ff3d92c80cd6253a8ca53474331f1d9aef75814bea880cf624a204a87')}}
+
+
+def formal_input_projection(package, document, current, refinements=FORMAL_SOURCE_REFINEMENTS):
     old_inputs = document['input_sha256']
     observed = {path: retention.digest(retention.git_bytes(current, path)) for path in old_inputs}
     changes = {path: (expected, observed[path]) for path, expected in old_inputs.items() if expected != observed[path]}
-    receipts.require(not changes or changes == FORMAL_SOURCE_REFINEMENTS[package],
+    receipts.require(not changes or changes == refinements[package],
                      'Formal concrete source changed beyond the reviewed refinement: ' + package)
     return observed, changes
 
@@ -359,13 +391,58 @@ def current_formal_mapping(package, current, current_inputs, profile):
 def formal_coverage(api, artifacts, job, run, old, current):
     from validation import source_gate_landing as landing
     raw = landing.uploaded_archive(api, artifacts, f'formal-model-{run}-1', job, 'preflight')
+    return formal_archive(raw, old, current, FORMAL_SOURCE_REFINEMENTS)
+
+
+def cluster_formal_coverage(api, repository, base, current):
+    from validation import main_python_continuation as ancestor
+    from validation import main_unit_receipts as main
+    from validation import selected_apple_preflight as native_artifact
+
+    run, pr, artifact_id, job_id = 8849, 1732, 12845, 84657
+    scope = {'repository': repository, 'pr': pr, 'branch': 'effort/shared-dv-hdr', 'base': 'main'}
+    pull = api.get(f'/pulls/{pr}')
+    receipts.require(base == CLUSTER_FORMAL_MAIN and pull['number'] == pr and pull['merged'] is True
+                     and pull['merge_commit_sha'] == base and pull['head']['sha'] == CLUSTER_FORMAL_SOURCE
+                     and pull['head']['repo']['id'] == pull['base']['repo']['id'] == repository
+                     and pull['base']['ref'] == 'main' and ancestor.main_ancestor(CLUSTER_FORMAL_SOURCE, base)
+                     and ancestor.main_ancestor(base, current), 'Formal cohort is outside current merged main')
+    runs = api.pages('/actions/runs', {'workflow_id': main.WORKFLOW, 'ref': f'refs/pull/{pr}/head'},
+                     'workflow_runs')
+    selected = [row for row in runs if row['id'] == run]
+    receipts.require(len(selected) == 1 and selected[0]['commit_sha'] == CLUSTER_FORMAL_SOURCE,
+                     'Unknown actual merged-main formal run')
+    main.authenticate_run(scope, selected[0])
+    job = main.preflight_job(api, scope, run)
+    receipts.require(job['id'] == job_id and job['status'] == 'success',
+                     'Actual formal preflight job did not succeed')
+    name = f'formal-model-{run}-1'
+    matches = [row for row in api.pages(f'/actions/runs/{run}/artifacts') if row['name'] == name]
+    receipts.require(len(matches) == 1 and matches[0]['id'] == artifact_id
+                     and matches[0]['run_id'] == run and matches[0]['expired'] is False,
+                     'Actual merged-main formal archive differs')
+    log = api.bytes(f'/actions/jobs/{job_id}/logs')
+    task = re.search(r'received task ([1-9]\d*) of job preflight, triggered by event: pull_request\b',
+                     log[:4096].decode('utf-8','strict'))
+    receipts.require(task is not None and int(task[1]) == job['task_id'],
+                     'Formal artifact creator task differs')
+    native_artifact.require_archive_creator(log, name, CLUSTER_FORMAL_ARCHIVE_SHA256)
+    raw = api.bytes(f'/actions/artifacts/{artifact_id}/zip')
+    receipts.require(len(raw) == matches[0]['size_in_bytes'] and retention.digest(raw) == CLUSTER_FORMAL_ARCHIVE_SHA256,
+                     'Actual merged-main formal archive digest differs')
+    result = formal_archive(raw, CLUSTER_FORMAL_SOURCE, current, CLUSTER_FORMAL_REFINEMENTS)
+    return {package: {**proof, 'origin_run': run, 'origin_job': job_id, 'origin_artifact': artifact_id}
+            for package, proof in result.items()}
+
+
+def formal_archive(raw, old, current, refinements):
     result = {}
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         entries = archive.infolist()
         receipts.require(len(entries) == len({entry.filename for entry in entries})
                          and sum(entry.file_size for entry in entries) <= receipts.MAX_BYTES,
                          'Unexpected formal evidence archive layout')
-        for package in ('durable-jobs', 'operation-progress'):
+        for package in refinements:
             names = [entry.filename for entry in entries
                      if re.fullmatch(package + r'/[0-9]+T[0-9.]+Z/receipt\.json', entry.filename)]
             receipts.require(len(names) == 1, 'Missing actual formal model receipt: ' + package)
@@ -381,15 +458,14 @@ def formal_coverage(api, artifacts, job, run, old, current):
             for path, digest in document['input_sha256'].items():
                 receipts.require(retention.digest(retention.git_bytes(old, path)) == digest,
                                  'Historical model receipt lists another concrete input: ' + path)
-            current_inputs, changes = formal_input_projection(package, document, current)
+            current_inputs, changes = formal_input_projection(package, document, current, refinements)
             profile = formal_solver_profile(document)
             result[package] = {'artifact_sha256': retention.digest(raw),
                                'receipt_sha256': retention.digest(archive.read(names[0])),
                                'source_commit': old, 'solver_profile': profile,
                                'current_input_sha256': current_inputs,
                                'reviewed_source_refinements': {path: list(pair) for path, pair in changes.items()}}
-            if changes:
-                result[package]['current_mapping'] = current_formal_mapping(package, current, current_inputs, profile)
+            result[package]['current_mapping'] = current_formal_mapping(package, current, current_inputs, profile)
     return result
 
 
@@ -627,7 +703,11 @@ def prior_coverage(api, value, binding, pull, root, current_run=None):
     device = android_device_coverage(api, artifacts, apk_job, device_job,
                                      successful_job(api, apk_job, 'android_apks'),
                                      successful_job(api, device_job, 'android_device'))
-    formal = formal_coverage(api, artifacts, preflight, run, prior, current)
+    if binding['base_sha'] == CLUSTER_FORMAL_MAIN:
+        formal = cluster_formal_coverage(api, repository, binding['base_sha'], current)
+    else:
+        formal = {**formal_coverage(api, artifacts, preflight, run, prior, current),
+                  'worker-refinement': python['formal_retained']}
     current_root = reviewed_inputs(prior, current, (*root_custody.INPUTS, 'validation/selected_root_custody.py'))
     root_custody.coverage_shape(python['root_ownership'])
     retained_lanes = {'apple': {'native': python['apple'], 'current_build': reader, 'inputs': native_inputs},
@@ -645,7 +725,7 @@ def prior_coverage(api, value, binding, pull, root, current_run=None):
             'preflight_log_sha256': retention.digest(preflight_log),
             'retained_lanes': retained_lanes, 'python': tests, 'python_due': python_due,
             'node': {'coverage': python['node'], 'input_digests': node_inputs, 'manifest': manifest},
-            'formal': {**formal, 'worker-refinement': python['formal_retained']},
+            'formal': formal,
             'root_ownership': {'coverage': python['root_ownership'], 'inputs': current_root},
             'android': android, 'hdr': hdr}, jvm, snapshot
 
@@ -771,6 +851,14 @@ def repair_tests(due):
         print('SOURCE-GATE-REPAIR-TESTS-END ' + marker, flush=True)
 
 
+def repair_marker(text):
+    # A truncated or corrupted log is a refused receipt, not an interpreter error.
+    try:
+        return receipts.bounded_json(text.encode())
+    except ValueError as error:
+        raise receipts.ReceiptError('Malformed repair test framing') from error
+
+
 def current_repair_tests(raw, due):
     from validation import nonrust_unit_cohort as cohort
     text = predecessor_python_lines(raw).decode()
@@ -781,8 +869,7 @@ def current_repair_tests(raw, due):
     for kind, begin, end in zip(('validation', 'operations'), begins, ends, strict=True):
         selected = [name.split(':', 1)[1] for name in due if name.startswith(kind + ':')]
         identity = {'kind': kind, 'ids': selected}
-        receipts.require(receipts.bounded_json(begin[1].encode()) == identity
-                         and receipts.bounded_json(end[1].encode()) == identity,
+        receipts.require(repair_marker(begin[1]) == identity and repair_marker(end[1]) == identity,
                          'Current repair test body selection differs')
         block = text[begin.end():end.start()]
         if selected:
