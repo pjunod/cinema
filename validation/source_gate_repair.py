@@ -884,6 +884,31 @@ def cluster_contract_receipt(api, artifacts, job, key, source, root):
     return {'artifact': artifact, 'sha256': retention.digest(raw), 'commands': receipt['commands']}
 
 
+def wal_coverage(raw, recipes):
+    from validation import qualification_unit_continuation as commands
+
+    text = native.clean(raw.decode('utf-8', 'strict'))
+    blocks = list(re.finditer(r'^running (\d+) tests?\n.*?^test result: (?:ok|FAILED)\. [^\n]+$', text, re.M | re.S))
+    receipts.require(len(blocks) == len(recipes)
+                     and len(re.findall(r'^test result:', text, re.M)) == len(blocks)
+                     and len(re.findall(r'^running \d+ tests?$', text, re.M)) == len(blocks),
+                     'Historical WAL harness windows differ from the required ordered recipe')
+    results = []
+    for recipe, block in zip(recipes, blocks, strict=True):
+        profile = commands.rust_identity(recipe)
+        selector = profile['filter']
+        exact = '--exact' in profile['harness']
+        count = 1 if exact else int(profile['environment']['PLURX_EXPECT_TEST_COUNT'])
+        actual = retention.log_outcomes(block[0], 'rust')
+        receipts.require(int(block[1]) == len(actual) == count
+                         and all(outcome == 'pass' for outcome in actual.values())
+                         and (set(actual) == {selector} if exact else all(selector in name for name in actual)),
+                         'Missing or foreign outcome for a historical WAL selector: ' + selector)
+        commands.require_native_terminals(block[0], actual, 0, recipe)
+        results.append({'selector': selector, 'passed': sorted(actual)})
+    return results
+
+
 def independent_command_coverage(api, artifacts, jobs, logs, source, root):
     from validation import qualification_unit_continuation as commands
     from validation import source_gate_landing as landing
@@ -907,12 +932,8 @@ def independent_command_coverage(api, artifacts, jobs, logs, source, root):
                      ['cargo fmt --all --check', 'cargo check --workspace --locked --all-targets'],
                      'Rust compiler job used another command profile')
 
-    wal_recipe = commands.make_commands(retention.git_bytes(source, 'Makefile').decode('utf-8'), 'cluster-wal-check')
-    wal_cases = {match for command in wal_recipe for match in re.findall(r'([A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)+)', command)}
-    wal = native.clean(logs['cluster_wal'].decode('utf-8', 'strict'))
-    receipts.require(wal_cases and all(wal.count(f'test {name} ... ok') == 1 for name in wal_cases),
-                     'Missing an exact named WAL recovery outcome')
-    evidence['cluster_wal'] = {'passed': sorted(wal_cases)}
+    wal = commands.make_commands(retention.git_bytes(source, 'Makefile').decode('utf-8'), 'cluster-wal-check')
+    evidence['cluster_wal'] = {'commands': wal_coverage(logs['cluster_wal'], wal)}
     daemon = native.clean(logs['cluster_daemon'].decode('utf-8', 'strict'))
     receipts.require('--test cluster_activation -- --nocapture' in daemon
                      and '--test cluster_activity -- --nocapture --test-threads=1' in daemon

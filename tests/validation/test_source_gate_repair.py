@@ -143,3 +143,25 @@ class GateRepairCase(unittest.TestCase):
         self.assertEqual(repair.predecessor_python_lines(ambiguous), ambiguous)
         with self.assertRaises(ReceiptError):
             repair.predecessor_python_lines(raw + raw)
+
+    def test_wal_exact_and_grouped_commands_bind_each_actual_count_and_name(self):
+        recipes = [
+            '$(CARGO) test --locked -p fixture --lib sample::tests::exact -- --exact',
+            'PLURX_EXPECT_TEST_COUNT=2 $(CARGO) test --locked -p fixture --lib watch_tests',
+        ]
+        raw = ('running 1 test\n'
+               'test sample::tests::exact ... ok\n'
+               'test result: ok. 1 passed; 0 failed; 0 ignored; 2 filtered out; finished in 0.01s\n'
+               'running 2 tests\n'
+               'test cache::watch_tests::first ... ok\n'
+               'test cache::watch_tests::second ... ok\n'
+               'test result: ok. 2 passed; 0 failed; 0 ignored; 1 filtered out; finished in 0.02s\n').encode()
+        self.assertEqual(repair.wal_coverage(raw, recipes), [
+            {'selector': 'sample::tests::exact', 'passed': ['sample::tests::exact']},
+            {'selector': 'watch_tests', 'passed': ['cache::watch_tests::first', 'cache::watch_tests::second']},
+        ])
+        for modified in (raw.replace(b'watch_tests::second', b'other::second'),
+                         raw.replace(b'2 passed; 0 failed', b'1 passed; 0 failed'),
+                         raw + b'test result: ok. 1 passed; 0 failed; 0 ignored;\n'):
+            with self.subTest(raw=modified), self.assertRaises(ReceiptError):
+                repair.wal_coverage(modified, recipes)
