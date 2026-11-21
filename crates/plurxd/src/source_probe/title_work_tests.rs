@@ -890,7 +890,10 @@ fn title_discovery_waits_for_the_pass_then_reuses_by_generation() {
         .find("demand.probe_revision = revision;")
         .expect("rebind");
     assert!(wait < bind && bind < reuse && reuse < moved);
-    assert!(source.contains("let stats = match reused {\n        Some(stats) => stats,"));
+    // A reusable generation aggregate replaces the title scan in every mode.
+    assert!(source.contains(
+        "match reused {\n            Some(stats) => Ok(stats),\n            None => scan.await,"
+    ));
 }
 
 #[test]
