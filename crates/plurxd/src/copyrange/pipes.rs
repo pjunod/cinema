@@ -126,7 +126,7 @@ fn reader<R: AsyncRead + Unpin + Send + 'static>(
         }
     })
 }
-fn output_pair() -> Result<(std::fs::File, tokio::net::UnixStream), String> {
+pub(crate) fn output_pair() -> Result<(std::fs::File, tokio::net::UnixStream), String> {
     let (read, write) =
         std::os::unix::net::UnixStream::pair().map_err(|_| "copy_output_pair_failed".to_owned())?;
     read.set_nonblocking(true)

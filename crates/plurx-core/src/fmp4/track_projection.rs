@@ -119,7 +119,7 @@ impl CopyTrackProjection {
     }
 }
 
-fn check_media_extents(fragment: &Fragment) -> Result<(), Fmp4Error> {
+pub(super) fn check_media_extents(fragment: &Fragment) -> Result<(), Fmp4Error> {
     let mut extents = Vec::new();
     for track in &fragment.tracks {
         for run in &track.runs {
