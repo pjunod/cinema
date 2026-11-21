@@ -17,6 +17,7 @@ import urllib.parse
 import uuid
 
 GIB = 1024**3
+CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 
 def command(*args):
@@ -24,6 +25,33 @@ def command(*args):
     if result.returncode:
         raise RuntimeError(f"{args[0]} failed ({result.returncode}): {result.stderr.strip()}")
     return result.stdout
+
+
+def firecracker_unrealized(slice_name, execute):
+    """Bytes a reserved Firecracker slice may still grow into.
+
+    Charged at its loaded MemoryMax minus current anonymous memory, which has
+    already left MemAvailable. Page cache stays reclaimable and is never
+    credited back. A slice without an enforced cap cannot be accounted for.
+    """
+    if not isinstance(slice_name, str) or not re.fullmatch(r"[A-Za-z0-9_]+\.slice", slice_name) or slice_name in (
+            "-.slice", "system.slice", "user.slice", "machine.slice"):
+        raise ValueError("invalid reserved Firecracker slice")
+    fields = dict(line.split("=", 1) for line in execute(
+        "systemctl", "show", slice_name, "-p", "LoadState", "-p", "MemoryMax").splitlines() if "=" in line)
+    if fields.get("LoadState") != "loaded" or not fields.get("MemoryMax", "").isdigit():
+        raise RuntimeError("cannot account for the reserved Firecracker slice")
+    anon = 0
+    try:
+        statistics = (CGROUP_ROOT / slice_name / "memory.stat").read_text()
+    except FileNotFoundError:
+        pass  # An inactive slice has no cgroup yet and uses nothing.
+    else:
+        values = dict(line.split(" ", 1) for line in statistics.splitlines() if " " in line)
+        if not values.get("anon", "").strip().isdigit():
+            raise RuntimeError("cannot account for Firecracker slice memory usage")
+        anon = int(values["anon"])
+    return max(0, int(fields["MemoryMax"]) - anon)
 
 
 def available_memory():
@@ -218,6 +246,10 @@ def recover(config, state, *, execute=command, memory=available_memory, now=None
                         raise RuntimeError("cannot account for local VM memory usage")
                     committed = usage
                 unused += max(0, int(allocation[:-3]) * GIB - committed)
+            # Firecracker VMs share this host's admission lock and charge these
+            # guests' unused allocation; charge their reserved slice back.
+            for reserved in config.get("firecracker_slices", []):
+                unused += firecracker_unrealized(reserved, execute)
             admission = memory() - unused
         # A later reading may be lower; never enlarge this pass's budget.
         return min(admission, memory())

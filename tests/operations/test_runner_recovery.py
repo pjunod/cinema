@@ -491,3 +491,81 @@ class GuardedAdmissionCase(unittest.TestCase):
                                   '--describe-owner-contract'],capture_output=True,text=True,timeout=3)
         self.assertEqual(process.returncode,0); value=json.loads(process.stdout)
         self.assertEqual(value['version'],2); self.assertTrue(value['monotonic_authorization'])
+
+
+
+class FirecrackerSliceChargeCase(unittest.TestCase):
+    """A reserved Firecracker slice keeps its unrealized cap out of VM admission."""
+
+    def setUp(self):
+        self.name = "gha-lab6-general-01"
+        self.config = {"runners": [{"vm": self.name, "unit": f"forgejo-runner-{self.name}.service",
+                                    "memory_gib": 8}],
+                       "firecracker_slices": ["cifleetfirecracker.slice"]}
+        self.instance = {"name": self.name, "location": "lab6", "status": "Stopped",
+                         "expanded_config": {"boot.autostart": "true", "limits.memory": "8GiB"}}
+        self.commands = []
+        self.slice_show = f"LoadState=loaded\nMemoryMax={3 * watchdog.GIB}\n"
+        cgroups = tempfile.TemporaryDirectory()
+        self.addCleanup(cgroups.cleanup)
+        self.cgroups = Path(cgroups.name)
+        replacing = patch.object(watchdog, "CGROUP_ROOT", self.cgroups)
+        replacing.start()
+        self.addCleanup(replacing.stop)
+
+    def execute(self, *args):
+        self.commands.append(args)
+        if args[:2] == ("systemctl", "show") and args[2].endswith(".slice"):
+            return self.slice_show
+        if args[1] == "list":
+            return json.dumps([self.instance])
+        if "show" in args:
+            return "active"
+        return ""
+
+    def run_pass(self, available):
+        self.commands.clear()
+        return watchdog.recover(self.config, {}, execute=self.execute,
+                                memory=lambda: available * watchdog.GIB, host="lab6", now=10000)
+
+    def started(self):
+        return any(command[:2] == ("incus", "start") for command in self.commands)
+
+    def test_inactive_slice_is_charged_its_whole_cap(self):
+        # 8 GiB guest + 4 GiB reserve: 14 GiB free minus the 3 GiB slice is short.
+        result = self.run_pass(14)
+        self.assertFalse(self.started())
+        self.assertIn("insufficient host memory", result["deferred"][0])
+        self.run_pass(15)
+        self.assertTrue(self.started())
+
+    def test_used_anonymous_memory_is_credited_but_page_cache_is_not(self):
+        (self.cgroups / "cifleetfirecracker.slice").mkdir()
+        (self.cgroups / "cifleetfirecracker.slice" / "memory.stat").write_text(
+            f"anon {2 * watchdog.GIB}\nfile {8 * watchdog.GIB}\n")
+        # Only 1 GiB of the slice is unrealized now.
+        self.run_pass(13)
+        self.assertTrue(self.started())
+        self.run_pass(12)
+        self.assertFalse(self.started())
+
+    def test_slice_without_an_enforced_cap_blocks_the_start(self):
+        for show in ("LoadState=loaded\nMemoryMax=infinity\n", "LoadState=not-found\nMemoryMax=0\n"):
+            self.slice_show = show
+            result = self.run_pass(40)
+            self.assertFalse(self.started())
+            self.assertEqual(result["errors"],
+                             [f"{self.name}: cannot account for the reserved Firecracker slice"])
+
+    def test_shared_slices_are_not_reservations(self):
+        self.config["firecracker_slices"] = ["system.slice"]
+        result = self.run_pass(40)
+        self.assertFalse(self.started())
+        self.assertEqual(result["errors"], [f"{self.name}: invalid reserved Firecracker slice"])
+
+    def test_hosts_without_firecracker_are_unchanged(self):
+        del self.config["firecracker_slices"]
+        self.run_pass(12)
+        self.assertTrue(self.started())
+        self.assertFalse(any(command[0] == "systemctl" and command[2].endswith(".slice")
+                             for command in self.commands if len(command) > 2))
