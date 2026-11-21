@@ -59,7 +59,8 @@ The cost on a production voter, 2026-11-14: one slow quorum confirmation ends li
 
 ## M2 — one cached advisory answer for the member floor
 
-- A single-flight cached `sharing_member_floor_ready` **advisory bool**, per `SharingMemberFloor`, used only by the monitors and `authority()`.
+- A single-flight cached **advisory bool**, per `SharingMemberFloor`, used only by the monitors and `authority()`.
+- Since 2026-11-21 it is the serving-read floor (`sharing_member_serving_floor_ready`), not `sharing_member_floor_ready`. Heartbeat freshness is required of the Raft voters and the serving member only. A registered learner that is offline no longer makes it not-ready. Its capability proof, joins and removals still count. Every write and admission guard keeps the all-member rule.
 - It is invalidated on a change in the serving-loss generation or the local membership snapshot, and it is never older than `SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS` (5 s). The max age is the real bound, because readiness also depends on replicated heartbeat, capability and join rows that neither invalidator sees (`membership.rs:3157-3190`, `:3727-3736`).
 - Only a ready answer is kept for later callers. A not-ready answer serves only the callers already waiting on its read, so a floor blip ends with the next look rather than spending the monitors' outage grace. A failed read likewise answers only the callers already waiting on it and is never kept; a read runs on its own task with its own 1 s bound, so a caller that gives up does not cancel it for the callers behind it; while the serving fence is not ready the read is fresh and nothing is kept.
 - Its readers are the body monitors and the read-only admission points: `authority()` and `source_content_current` (catalogue, artwork and body start). A ready answer can admit for up to 5 s after a heartbeat, capability or join change; an error, a timeout or not-ready still refuses with the typed 503.
