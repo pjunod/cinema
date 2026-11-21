@@ -478,11 +478,21 @@ async fn run_with_source_custody(
     let cancel = shutdown.child_token();
     let budget =
         SourceReadBudget::from_existing_custody(Arc::clone(&store), &custody, cancel.clone());
+    let deadline_elapsed = tokio::time::sleep_until(deadline.into());
+    tokio::pin!(deadline_elapsed);
     let source_current = match rendition.source.as_ref() {
-        Some(source) if !cancel.is_cancelled() && Instant::now() < deadline => {
-            source.reopen(file).await.is_ok()
+        Some(source) => {
+            // A pathname check can wait on storage before the producer
+            // exists. It spends the same budget as preparation.
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => false,
+                _ = budget.wait_pressure() => false,
+                _ = &mut deadline_elapsed => false,
+                result = source.reopen(file) => result.is_ok(),
+            }
         }
-        _ => false,
+        None => false,
     };
     let work = source_current
         .then(|| {
@@ -493,7 +503,7 @@ async fn run_with_source_custody(
         tokio::select! {
             _ = work.wait_settled() => {},
             _ = budget.wait_pressure() => {},
-            _ = tokio::time::sleep_until(deadline.into()) => {},
+            _ = &mut deadline_elapsed => {},
             _ = shutdown.cancelled() => {},
         }
         cancel.cancel();
